@@ -1,0 +1,549 @@
+//! 模拟 OpenAI Chat Completions + SSE 的 provider，行为对齐 GLM/DeepSeek：
+//! 首请求返回 read_file 工具调用（arguments 分片），含工具结果后返回
+//! reasoning_content + Markdown 文本流。供集成测试、examples 与 GUI 自测复用。
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+pub const MOCK_FILE_NAME: &str = "README.mock.md";
+pub const MOCK_FILE_CONTENT: &str = "# mock 文件\n\n这是 pig-core mock provider 自测用的已知文件。\n";
+pub const MOCK_REASONING: &str = "用户让我读一个文件并总结。先调用 read_file。";
+pub const MOCK_REPLY_MARKER: &str = "MOCK_REPLY_OK";
+
+/// 场景 B：用户消息含此标记时，走 write_file → edit → bash → 文本 的完整修改链。
+pub const SCENARIO_B_TRIGGER: &str = "SCENARIO_B";
+pub const SCENARIO_B_MARKER: &str = "MOCK_SCENARIO_B_OK";
+pub const SCENARIO_B_FILE: &str = "src/hello.txt";
+pub const SCENARIO_B_CONTENT: &str = "hello\nline2\nline3\n";
+pub const SCENARIO_B_BASH_MARKER: &str = "MOCK_BASH_OK";
+
+/// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
+pub fn start_mock_server() -> u16 {
+    start_mock_server_with_log().0
+}
+
+/// 同上，但额外返回请求体日志（测试断言 reasoning_params merge 等用）。
+pub fn start_mock_server_with_log() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let port = start_mock_server_inner(Some(log.clone()));
+    (port, log)
+}
+
+fn start_mock_server_inner(log: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>) -> u16 {
+    let (port_tx, port_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .expect("mock runtime");
+        runtime.block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+            port_tx
+                .send(listener.local_addr().expect("local addr").port())
+                .expect("send port");
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let log = log.clone();
+                tokio::spawn(handle_connection(stream, log));
+            }
+        });
+    });
+    port_rx.recv().expect("mock server port")
+}
+
+fn sse_chunk(delta: serde_json::Value, finish_reason: Option<&str>) -> String {
+    let chunk = serde_json::json!({
+        "id": "chatcmpl-mock",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "mock-model",
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+        }],
+    });
+    format!("data: {chunk}\n\n")
+}
+
+fn tool_call_chunks(call_id: &str, name: &str, arguments: &str) -> Vec<String> {
+    let half = arguments.len() / 2;
+    vec![
+        sse_chunk(
+            serde_json::json!({"tool_calls": [{
+                "index": 0,
+                "id": call_id,
+                "function": {"name": name, "arguments": &arguments[..half]},
+            }]}),
+            None,
+        ),
+        sse_chunk(
+            serde_json::json!({"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": &arguments[half..]},
+            }]}),
+            Some("tool_calls"),
+        ),
+    ]
+}
+
+fn tool_call_response() -> Vec<String> {
+    let reasoning: Vec<String> = MOCK_REASONING
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(6)
+        .map(|c| c.iter().collect::<String>())
+        .map(|delta| sse_chunk(serde_json::json!({"reasoning_content": delta}), None))
+        .collect();
+    let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
+    let mut chunks = reasoning;
+    chunks.extend(tool_call_chunks("call_mock_1", "read_file", &arguments));
+    chunks
+}
+
+/// 回显消息数（测试 resume 后历史重建用）：用户消息含 ECHO_HISTORY 时触发。
+fn echo_history_response(body: &str) -> Vec<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let count = parsed["messages"]
+        .as_array()
+        .map(|msgs| msgs.len())
+        .unwrap_or(0);
+    let text = format!("HISTORY_COUNT:{count}");
+    vec![
+        sse_chunk(serde_json::json!({"content": text}), None),
+        sse_chunk(serde_json::json!({}), Some("stop")),
+    ]
+}
+
+/// 回显 system prompt（测试 AGENTS.md 注入用）：用户消息含 ECHO_SYSTEM 时触发。
+fn echo_system_response(body: &str) -> Vec<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let system = parsed["messages"]
+        .as_array()
+        .and_then(|msgs| {
+            msgs.iter()
+                .find(|m| m["role"].as_str() == Some("system"))
+        })
+        .and_then(|m| m["content"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "(no system message)".to_string());
+    let system: String = system.chars().take(3000).collect();
+    let chars: Vec<char> = system.chars().collect();
+    let mut chunks: Vec<String> = chars
+        .chunks(40)
+        .map(|piece| {
+            let delta: String = piece.iter().collect();
+            sse_chunk(serde_json::json!({"content": delta}), None)
+        })
+        .collect();
+    chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
+    chunks
+}
+
+/// 场景 B 按历史里 tool 结果的数量推进：0→write_file，1→edit，2→bash，≥3→文本。
+/// file 参数化避免多个自测会话改同一文件互相干扰。
+fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_b_write",
+            "write_file",
+            &serde_json::json!({"path": file, "content": SCENARIO_B_CONTENT}).to_string(),
+        ),
+        1 => tool_call_chunks(
+            "call_b_edit",
+            "edit",
+            &serde_json::json!({"path": file, "old_string": "line2", "new_string": "LINE2"}).to_string(),
+        ),
+        2 => tool_call_chunks(
+            "call_b_bash",
+            "bash",
+            &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string(),
+        ),
+        _ => {
+            let markdown = format!(
+                "已完成：创建 `{SCENARIO_B_FILE}`、修改一行、执行 echo。\n\n**结果**: {SCENARIO_B_MARKER}\n"
+            );
+            let chars: Vec<char> = markdown.chars().collect();
+            let mut chunks: Vec<String> = chars
+                .chunks(9)
+                .map(|piece| {
+                    let delta: String = piece.iter().collect();
+                    sse_chunk(serde_json::json!({"content": delta}), None)
+                })
+                .collect();
+            chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
+            chunks
+        }
+    }
+}
+
+fn text_response() -> Vec<String> {
+    let markdown = format!(
+        "## 文件摘要\n\n`{MOCK_FILE_NAME}` 的内容如下：\n\n```text\n这是 pig-core mock provider 自测用的已知文件。\n```\n\n**结论**: {MOCK_REPLY_MARKER}\n"
+    );
+    let mut chunks = vec![sse_chunk(
+        serde_json::json!({"reasoning_content": "工具已返回文件内容，组织回答。"}),
+        None,
+    )];
+    let chars: Vec<char> = markdown.chars().collect();
+    for piece in chars.chunks(9) {
+        let delta: String = piece.iter().collect();
+        chunks.push(sse_chunk(serde_json::json!({"content": delta}), None));
+    }
+    chunks.push(format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "mock-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 42, "total_tokens": 142},
+        })
+    ));
+    chunks
+}
+
+pub const SCENARIO_C_TRIGGER: &str = "SCENARIO_C";
+pub const PLAN_MARKER: &str = "MOCK_PLAN_OK";
+pub const SUMMARY_MARKER: &str = "MOCK_SUMMARY_OK";
+pub const PLAN_CONFIRM_TEXT: &str = "计划已确认";
+
+/// 非流式响应（compact 摘要）。FAIL_COMPACT 触发 500 测试回退路径。
+async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) -> bool {
+    if body.contains("FAIL_COMPACT") {
+        let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}";
+        return stream.write_all(resp.as_bytes()).await.is_ok();
+    }
+    let content = format!(
+        "{SUMMARY_MARKER}：用户目标=mock 自测；已完成=读取/写入文件；待办=无。"
+    );
+    let json = serde_json::json!({
+        "id": "chatcmpl-mock",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "mock-model",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 500, "completion_tokens": 30, "total_tokens": 530},
+    });
+    let payload = json.to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    stream.write_all(resp.as_bytes()).await.is_ok()
+}
+
+/// 场景 C：计划模式，直接输出 markdown 计划（无工具调用）。
+fn scenario_c_response() -> Vec<String> {
+    let plan = format!(
+        "## 执行计划
+
+1. 创建 `src/hello.txt` 写入三行内容
+2. 将第二行改为大写
+3. 运行 echo 验证
+
+**计划就绪**: {PLAN_MARKER}
+"
+    );
+    let chars: Vec<char> = plan.chars().collect();
+    let mut chunks: Vec<String> = chars
+        .chunks(9)
+        .map(|piece| {
+            let delta: String = piece.iter().collect();
+            sse_chunk(serde_json::json!({"content": delta}), None)
+        })
+        .collect();
+    chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
+    chunks
+}
+
+/// ECHO_USAGE <n>：文本回复 + 指定 total_tokens（测试自动 compact 触发）。
+fn echo_usage_response(body: &str) -> Vec<String> {
+    let usage: u64 = {
+        let marker = "ECHO_USAGE";
+        let pos = body.find(marker).map(|p| p + marker.len()).unwrap_or(0);
+        body[pos..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
+    };
+    vec![
+        sse_chunk(serde_json::json!({"content": "usage noted"}), None),
+        format!(
+            "data: {}
+
+",
+            serde_json::json!({
+                "id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 0, "model": "mock-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": usage},
+            })
+        ),
+    ]
+}
+
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    log: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+            return;
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if head.len() > 64 * 1024 {
+            return;
+        }
+    }
+    let head_text = String::from_utf8_lossy(&head);
+    let path = head_text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .to_string();
+    let content_length: usize = head_text
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length: ")
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 && stream.read_exact(&mut body).await.is_err() {
+        return;
+    }
+    let body = String::from_utf8_lossy(&body).to_string();
+    if let Some(log) = &log {
+        log.lock().expect("log lock").push(body.clone());
+    }
+    let anthropic = path.ends_with("/messages");
+    let tool_results = body.matches("\"role\":\"tool\"").count()
+        + body.matches("\"role\": \"tool\"").count()
+        + body.matches("tool_result").count();
+
+    // 非流式 = compact 摘要/连通性测试（必须在 SSE 响应头之前分支）
+    if body.contains("\"stream\":false") {
+        let ok = if anthropic {
+            write_json_response_anthropic(&mut stream, &body).await
+        } else {
+            write_json_response(&mut stream, &body).await
+        };
+        if !ok {
+            return;
+        }
+        let _ = stream.shutdown().await;
+        return;
+    }
+
+    let response_head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+    if stream.write_all(response_head.as_bytes()).await.is_err() {
+        return;
+    }
+    let chunks = if anthropic {
+        anthropic_chunks(&body, tool_results)
+    } else if body.contains("ECHO_SYSTEM") {
+        echo_system_response(&body)
+    } else if body.contains("ECHO_USAGE") {
+        echo_usage_response(&body)
+    } else if body.contains("ECHO_HISTORY") {
+        echo_history_response(&body)
+    } else if body.contains(PLAN_CONFIRM_TEXT) && body.contains(SCENARIO_C_TRIGGER) {
+        scenario_b_response(tool_results, "src/hello_plan.txt")
+    } else if body.contains(SCENARIO_C_TRIGGER) {
+        scenario_c_response()
+    } else if body.contains(SCENARIO_B_TRIGGER) {
+        scenario_b_response(tool_results, SCENARIO_B_FILE)
+    } else if tool_results > 0 {
+        text_response()
+    } else {
+        tool_call_response()
+    };
+    for chunk in chunks {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if stream.write_all(chunk.as_bytes()).await.is_err() {
+            return;
+        }
+    }
+    if !anthropic {
+        let _ = stream.write_all(b"data: [DONE]\n\n").await;
+    }
+    let _ = stream.shutdown().await;
+}
+
+// ---------------- Anthropic 格式 ----------------
+
+fn a_sse(event: &str, data: serde_json::Value) -> String {
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
+fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str, arguments: &str) {
+    out.push(a_sse(
+        "content_block_start",
+        serde_json::json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": id, "name": name}}),
+    ));
+    let half = arguments.len() / 2;
+    out.push(a_sse(
+        "content_block_delta",
+        serde_json::json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": &arguments[..half]}}),
+    ));
+    out.push(a_sse(
+        "content_block_delta",
+        serde_json::json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": &arguments[half..]}}),
+    ));
+    out.push(a_sse(
+        "content_block_stop",
+        serde_json::json!({"type": "content_block_stop", "index": index}),
+    ));
+}
+
+/// Anthropic 版场景分发：无 tool_result → read_file 工具调用；否则文本回复。
+/// 含 SCENARIO_B_TRIGGER 时走 write→edit→bash 链。
+fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
+    if body.contains(SCENARIO_B_TRIGGER) {
+        return anthropic_scenario_b(tool_results);
+    }
+    let mut out = vec![a_sse(
+        "message_start",
+        serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 100}}}),
+    )];
+
+    // 思考块
+    out.push(a_sse(
+        "content_block_start",
+        serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
+    ));
+    for piece in MOCK_REASONING.chars().collect::<Vec<_>>().chunks(8) {
+        let thinking: String = piece.iter().collect();
+        out.push(a_sse(
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": thinking}}),
+        ));
+    }
+    out.push(a_sse(
+        "content_block_stop",
+        serde_json::json!({"type": "content_block_stop", "index": 0}),
+    ));
+
+    if tool_results == 0 {
+        // read_file 工具调用，arguments 分片
+        let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
+        let half = arguments.len() / 2;
+        out.push(a_sse(
+            "content_block_start",
+            serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_mock_1", "name": "read_file"}}),
+        ));
+        out.push(a_sse(
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": &arguments[..half]}}),
+        ));
+        out.push(a_sse(
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": &arguments[half..]}}),
+        ));
+        out.push(a_sse(
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": 1}),
+        ));
+        out.push(a_sse(
+            "message_delta",
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}),
+        ));
+    } else {
+        let markdown = format!(
+            "## 文件摘要\n\n`{MOCK_FILE_NAME}` 的内容如下：\n\n```text\n这是 pig-core mock provider 自测用的已知文件。\n```\n\n**结论**: {MOCK_REPLY_MARKER}\n"
+        );
+        out.push(a_sse(
+            "content_block_start",
+            serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text"}}),
+        ));
+        for piece in markdown.chars().collect::<Vec<_>>().chunks(9) {
+            let text: String = piece.iter().collect();
+            out.push(a_sse(
+                "content_block_delta",
+                serde_json::json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": text}}),
+            ));
+        }
+        out.push(a_sse(
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": 1}),
+        ));
+        out.push(a_sse(
+            "message_delta",
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 42}}),
+        ));
+    }
+    let _ = body;
+    out
+}
+
+fn anthropic_scenario_b(tool_results: usize) -> Vec<String> {
+    let mut out = vec![a_sse(
+        "message_start",
+        serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 100}}}),
+    )];
+    match tool_results {
+        0 => anthropic_tool_call(&mut out, 0, "call_b_write", "write_file",
+            &serde_json::json!({"path": SCENARIO_B_FILE, "content": SCENARIO_B_CONTENT}).to_string()),
+        1 => anthropic_tool_call(&mut out, 0, "call_b_edit", "edit",
+            &serde_json::json!({"path": SCENARIO_B_FILE, "old_string": "line2", "new_string": "LINE2"}).to_string()),
+        2 => anthropic_tool_call(&mut out, 0, "call_b_bash", "bash",
+            &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string()),
+        _ => {
+            let text = format!("场景B完成。**结果**: {SCENARIO_B_MARKER}
+");
+            out.push(a_sse(
+                "content_block_start",
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+            ));
+            out.push(a_sse(
+                "content_block_delta",
+                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+            ));
+            out.push(a_sse(
+                "content_block_stop",
+                serde_json::json!({"type": "content_block_stop", "index": 0}),
+            ));
+        }
+    }
+    out.push(a_sse(
+        "message_delta",
+        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": if tool_results >= 3 { "end_turn" } else { "tool_use" }}, "usage": {"output_tokens": 42}}),
+    ));
+    out
+}
+
+async fn write_json_response_anthropic(stream: &mut tokio::net::TcpStream, body: &str) -> bool {
+    if body.contains("FAIL_COMPACT") {
+        let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}";
+        return stream.write_all(resp.as_bytes()).await.is_ok();
+    }
+    let content = format!("{SUMMARY_MARKER}：用户目标=mock 自测；已完成=读取/写入文件；待办=无。");
+    let json = serde_json::json!({
+        "id": "msg-mock",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": content}],
+        "model": "mock-model",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 500, "output_tokens": 30},
+    });
+    let payload = json.to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    stream.write_all(resp.as_bytes()).await.is_ok()
+}

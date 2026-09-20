@@ -1,0 +1,136 @@
+use std::path::PathBuf;
+
+use pig_protocol::{ApprovalDecision, ExecMode, Op};
+
+/// UI 侧对 agent 线程的薄封装（多会话；所有操作带 session_id）。
+#[derive(Clone)]
+pub struct AgentClient {
+    ops: async_channel::Sender<Op>,
+}
+
+impl AgentClient {
+    pub fn new(ops: async_channel::Sender<Op>) -> Self {
+        Self { ops }
+    }
+
+    fn send(&self, op: Op) {
+        let _ = self.ops.send_blocking(op);
+    }
+
+    pub fn new_session(&self, cwd: PathBuf) {
+        self.send(Op::NewSession { cwd });
+    }
+
+    pub fn open_session(&self, session_id: String) {
+        self.send(Op::OpenSession { session_id });
+    }
+
+    pub fn list_sessions(&self) {
+        self.send(Op::ListSessions);
+    }
+
+    pub fn set_pinned(&self, session_id: &str, pinned: bool) {
+        self.send(Op::UpdateSessionMeta {
+            session_id: session_id.to_string(),
+            pinned: Some(pinned),
+            archived: None,
+            title: None,
+        });
+    }
+
+    pub fn set_archived(&self, session_id: &str, archived: bool) {
+        self.send(Op::UpdateSessionMeta {
+            session_id: session_id.to_string(),
+            pinned: None,
+            archived: Some(archived),
+            title: None,
+        });
+    }
+
+    pub fn send_message(&self, session_id: String, content: String, files: Vec<String>, mode: ExecMode) {
+        self.send(Op::SendMessage {
+            session_id,
+            content,
+            files,
+            mode,
+        });
+    }
+
+    pub fn interrupt(&self, session_id: String) {
+        self.send(Op::Interrupt { session_id });
+    }
+
+    pub fn set_model(
+        &self,
+        session_id: String,
+        provider_id: String,
+        model_id: String,
+        reasoning_level: Option<String>,
+    ) {
+        self.send(Op::SetModel {
+            session_id,
+            provider_id,
+            model_id,
+            reasoning_level,
+        });
+    }
+
+    pub fn get_config(&self) {
+        self.send(Op::GetConfig);
+    }
+
+    pub fn save_config(&self, config: pig_protocol::AppConfig) {
+        self.send(Op::SaveConfig { config });
+    }
+
+    pub fn test_provider(&self, provider_id: String) {
+        self.send(Op::TestProvider { provider_id });
+    }
+
+    pub fn set_exec_mode(&self, session_id: String, mode: ExecMode) {
+        self.send(Op::SetExecMode { session_id, mode });
+    }
+
+    pub fn approval_reply(&self, request_id: String, decision: ApprovalDecision) {
+        self.send(Op::ApprovalReply {
+            request_id,
+            decision,
+        });
+    }
+
+    pub fn revert_file(&self, session_id: String, path: String) {
+        self.send(Op::RevertFile { session_id, path });
+    }
+
+    pub fn search_files(&self, session_id: String, query: String) {
+        self.send(Op::SearchFiles { session_id, query });
+    }
+
+    pub fn compact(&self, session_id: String) {
+        self.send(Op::Compact { session_id });
+    }
+
+    pub fn cancel_queued(&self, session_id: String, text: String) {
+        self.send(Op::CancelQueued { session_id, text });
+    }
+
+    pub fn git_info(&self, cwd: PathBuf) {
+        self.send(Op::GitInfo { cwd });
+    }
+
+    pub fn checkout_branch(&self, cwd: PathBuf, branch: String) {
+        self.send(Op::CheckoutBranch { cwd, branch });
+    }
+
+    pub fn list_projects(&self) {
+        self.send(Op::ListProjects);
+    }
+
+    pub fn add_project(&self, path: PathBuf) {
+        self.send(Op::AddProject { path });
+    }
+
+    pub fn remove_project(&self, path: PathBuf) {
+        self.send(Op::RemoveProject { path });
+    }
+}

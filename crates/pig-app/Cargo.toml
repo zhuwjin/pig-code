@@ -1,0 +1,16 @@
+[package]
+name = "pig-app"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "pig-code"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = "0.6"
+pig-protocol = { path = "../pig-protocol" }
+pig-core = { path = "../pig-core" }
+async-channel = "2"
+time = { version = "0.3", features = ["local-offset"] }
+serde_json = "1"
