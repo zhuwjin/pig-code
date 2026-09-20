@@ -939,6 +939,9 @@ impl SettingsView {
     }
 
     fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+        let follow_system = cx
+            .try_global::<crate::ThemeFollowSystem>()
+            .is_some_and(|flag| flag.0);
         let current_dark = cx.theme().mode.is_dark();
         h_flex()
             .gap_4()
@@ -948,7 +951,7 @@ impl SettingsView {
                     (ThemeMode::Dark, "暗色", IconName::Moon),
                 ]
                 .map(|(mode, label, icon)| {
-                    let selected = mode.is_dark() == current_dark;
+                    let selected = !follow_system && mode.is_dark() == current_dark;
                     v_flex()
                         .id(gpui_kit::SharedString::from(label.to_string()))
                         .gap_2()
@@ -965,11 +968,42 @@ impl SettingsView {
                         .cursor_pointer()
                         .hover(|this| this.bg(cx.theme().accent.opacity(0.4)))
                         .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.set_global(crate::ThemeFollowSystem(false));
                             gpui_kit::component::Theme::change(mode, None, cx);
                         }))
                         .child(Icon::new(icon).size_8())
                         .child(div().text_sm().child(label))
                 }),
+            )
+            .child(
+                v_flex()
+                    .id("跟随系统")
+                    .gap_2()
+                    .w(px(180.))
+                    .p_4()
+                    .items_center()
+                    .rounded(cx.theme().radius_lg)
+                    .border_2()
+                    .border_color(if follow_system {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().border
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().accent.opacity(0.4)))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        cx.set_global(crate::ThemeFollowSystem(true));
+                        gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .h_8()
+                            .items_center()
+                            .gap_1()
+                            .child(Icon::new(IconName::Sun).size_6())
+                            .child(Icon::new(IconName::Moon).size_6()),
+                    )
+                    .child(div().text_sm().child("跟随系统")),
             )
             .into_any_element()
     }

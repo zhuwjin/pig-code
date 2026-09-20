@@ -21,6 +21,11 @@ use pig_protocol::{Event, ExecMode, SessionMeta};
 
 gpui_kit::actions!(pig_app, [NewTask, FocusSearch, CloseSearch, CloseSettings, ToggleSidebar]);
 
+/// 主题是否跟随系统外观：默认跟随；手动切换亮/暗后本次运行内固定为所选模式。
+pub struct ThemeFollowSystem(pub bool);
+
+impl Global for ThemeFollowSystem {}
+
 /// 相对时间显示（刚刚 / N分钟 / N小时 / N天）
 pub trait RelativeTime {
     fn relative(&self) -> String;
@@ -68,7 +73,8 @@ struct AppView {
     config_path: Option<PathBuf>,
     exec_mode: pig_protocol::ExecMode,
     git_branch: Option<String>,
-    hero_cwd: PathBuf,
+    /// hero 页选择的项目目录；None = 未选择（显示"选择项目"，发送时回落到启动目录）
+    hero_cwd: Option<PathBuf>,
     hero_branch: Option<String>,
     hero_branches: Vec<String>,
     hero_is_git: bool,
@@ -109,7 +115,7 @@ impl AppView {
             approval_pending: HashSet::new(),
             stats: HashMap::new(),
             agent,
-            hero_cwd: cwd.clone(),
+            hero_cwd: None,
             cwd,
             config_path,
             exec_mode: pig_protocol::ExecMode::AutoEdit,
@@ -150,12 +156,20 @@ impl AppView {
                     }
                 }
             }),
+            cx.observe_window_appearance(window, |_, window, cx| {
+                if cx.try_global::<ThemeFollowSystem>().is_some_and(|flag| flag.0) {
+                    Theme::sync_system_appearance(Some(window), cx);
+                }
+            }),
         ];
         app.spawn_event_pump(app._agent_handle.events.clone(), cx);
         app.agent.list_sessions();
         app.agent.list_projects();
         app.agent.get_config();
-        app.agent.git_info(app.hero_cwd.clone());
+        if let Some(cwd) = app.hero_cwd.clone() {
+            app.agent.git_info(cwd);
+        }
+        app.push_hero_info(cx);
         app.refresh_git_branch(cx);
         app
     }
@@ -275,6 +289,7 @@ impl AppView {
                         self.agent.open_session(meta.id.clone());
                     }
                 }
+                self.push_hero_info(cx);
             }
             Event::Error { session_id: None, message, .. } => {
                 let message = message.clone();
@@ -298,7 +313,7 @@ impl AppView {
                 current_branch,
                 branches,
             } => {
-                if *cwd == self.hero_cwd {
+                if self.hero_cwd.as_ref() == Some(cwd) {
                     self.hero_branch = current_branch.clone();
                     self.hero_branches = branches.clone();
                     self.hero_is_git = current_branch.is_some();
@@ -309,7 +324,7 @@ impl AppView {
                 }
             }
             Event::BranchChanged { cwd, branch } => {
-                if *cwd == self.hero_cwd {
+                if self.hero_cwd.as_ref() == Some(cwd) {
                     self.hero_branch = Some(branch.clone());
                     self.git_branch = Some(branch.clone());
                     self.agent.git_info(cwd.clone());
@@ -501,17 +516,23 @@ impl AppView {
     fn push_hero_info(&self, cx: &mut Context<Self>) {
         let label = self
             .hero_cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| self.hero_cwd.display().to_string());
+            .as_ref()
+            .map(|cwd| {
+                cwd.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| cwd.display().to_string())
+            })
+            .unwrap_or_else(|| "选择项目".to_string());
         let mut cwds: Vec<String> = self
             .metas
             .iter()
             .map(|m| m.cwd.display().to_string())
             .collect();
-        let current = self.hero_cwd.display().to_string();
-        if !cwds.contains(&current) {
-            cwds.insert(0, current);
+        if let Some(cwd) = &self.hero_cwd {
+            let current = cwd.display().to_string();
+            if !cwds.contains(&current) {
+                cwds.insert(0, current);
+            }
         }
         let mut seen = std::collections::HashSet::new();
         cwds.retain(|c| seen.insert(c.clone()));
@@ -520,15 +541,22 @@ impl AppView {
             self.hero_branches.clone(),
             self.hero_is_git,
         );
+        let cwd = self.hero_cwd.as_ref().map(|c| c.display().to_string());
         self.composer.update(cx, |composer, cx| {
-            composer.set_hero_info(label, cwds, branch, branches, is_git, cx);
+            composer.set_hero_info(cwd, label, cwds, branch, branches, is_git, cx);
         });
     }
 
     fn enter_hero(&mut self, cx: &mut Context<Self>) {
         self.current = None;
         self.hero_error = None;
-        self.agent.git_info(self.hero_cwd.clone());
+        if let Some(cwd) = self.hero_cwd.clone() {
+            self.agent.git_info(cwd);
+        } else {
+            self.hero_branch = None;
+            self.hero_branches = vec![];
+            self.hero_is_git = false;
+        }
         self.composer.update(cx, |composer, cx| {
             composer.set_hero_mode(true, cx);
             composer.set_streaming(false, cx);
@@ -540,7 +568,8 @@ impl AppView {
 
     fn hero_send(&mut self, text: String, files: Vec<String>, mode: ExecMode, cx: &mut Context<Self>) {
         self.pending_first_send = Some((text, files, mode));
-        self.agent.new_session(self.hero_cwd.clone());
+        let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
+        self.agent.new_session(cwd);
         self.composer.update(cx, |composer, cx| {
             composer.set_hero_mode(false, cx);
         });
@@ -563,11 +592,11 @@ impl AppView {
             window
                 .update(|_, cx| {
                     view.update(cx, |this, cx| {
-                        this.hero_cwd = picked;
                         this.hero_error = None;
                         this.hero_branch = None;
                         this.hero_branches = vec![];
-                        this.agent.git_info(this.hero_cwd.clone());
+                        this.agent.git_info(picked.clone());
+                        this.hero_cwd = Some(picked);
                         this.push_hero_info(cx);
                         cx.notify();
                     });
@@ -617,13 +646,25 @@ impl AppView {
             }
             ComposerEvent::PickDirectory => self.pick_directory(window, cx),
             ComposerEvent::SelectCwd(cwd) => {
-                self.hero_cwd = PathBuf::from(cwd);
+                let cwd = PathBuf::from(cwd);
                 self.hero_error = None;
-                self.agent.git_info(self.hero_cwd.clone());
+                self.agent.git_info(cwd.clone());
+                self.hero_cwd = Some(cwd);
                 self.push_hero_info(cx);
             }
+            ComposerEvent::ClearCwd => {
+                self.hero_cwd = None;
+                self.hero_error = None;
+                self.hero_branch = None;
+                self.hero_branches = vec![];
+                self.hero_is_git = false;
+                self.push_hero_info(cx);
+                cx.notify();
+            }
             ComposerEvent::CheckoutBranch(branch) => {
-                self.agent.checkout_branch(self.hero_cwd.clone(), branch.clone());
+                if let Some(cwd) = self.hero_cwd.clone() {
+                    self.agent.checkout_branch(cwd, branch.clone());
+                }
             }
             ComposerEvent::Stop => {
                 if let Some(sid) = &self.current {
@@ -694,11 +735,11 @@ impl AppView {
         match event {
             SidebarEvent::Select(id) => self.switch_session(id.clone(), cx),
             SidebarEvent::NewTask => {
-                self.hero_cwd = self.cwd.clone();
+                self.hero_cwd = None;
                 self.enter_hero(cx);
             }
             SidebarEvent::NewTaskInProject(path) => {
-                self.hero_cwd = PathBuf::from(path);
+                self.hero_cwd = Some(PathBuf::from(path));
                 self.enter_hero(cx);
             }
             SidebarEvent::SetPinned(id, pinned) => self.agent.set_pinned(id, *pinned),
@@ -930,6 +971,7 @@ impl AppView {
                                     None,
                                     cx,
                                 );
+                                cx.set_global(ThemeFollowSystem(false));
                             }),
                     )
                     .child(
@@ -1029,7 +1071,7 @@ impl Render for AppView {
             .id("app-root")
             .key_context("app")
             .on_action(cx.listener(|this, _: &NewTask, _, cx| {
-                this.hero_cwd = this.cwd.clone();
+                this.hero_cwd = None;
                 this.enter_hero(cx);
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
@@ -1155,6 +1197,7 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_global(ThemeFollowSystem(true));
 
             cx.bind_keys([
                 KeyBinding::new("ctrl-n", NewTask, None),
@@ -1174,6 +1217,8 @@ fn main() {
                 };
 
                 cx.open_window(options, |window, cx| {
+                    // gpui-kit init 固定为亮色，开窗时按系统外观覆盖
+                    Theme::sync_system_appearance(Some(window), cx);
                     let view =
                         cx.new(|cx| AppView::new(window, cx, config_path.clone(), cwd.clone()));
                     if selftest {

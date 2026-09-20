@@ -1,7 +1,8 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -43,6 +44,8 @@ pub enum ComposerEvent {
     PickDirectory,
     /// hero：选择最近目录
     SelectCwd(String),
+    /// hero：取消项目选择（不在项目中工作）
+    ClearCwd,
     /// hero：切换 git 分支
     CheckoutBranch(String),
 }
@@ -74,7 +77,9 @@ pub struct Composer {
     context_usage: Option<(u64, u64)>,
     hero_mode: bool,
     hero_cwds: Vec<String>,
+    hero_cwd: Option<String>,
     hero_cwd_label: String,
+    cwd_command: Entity<CommandState>,
     hero_branch: Option<String>,
     hero_branches: Vec<String>,
     hero_is_git: bool,
@@ -115,7 +120,9 @@ impl Composer {
             context_usage: None,
             hero_mode: false,
             hero_cwds: Vec::new(),
+            hero_cwd: None,
             hero_cwd_label: String::new(),
+            cwd_command: cx.new(|cx| CommandState::new(window, cx)),
             hero_branch: None,
             hero_branches: Vec::new(),
             hero_is_git: false,
@@ -137,6 +144,7 @@ impl Composer {
     #[allow(clippy::too_many_arguments)]
     pub fn set_hero_info(
         &mut self,
+        cwd: Option<String>,
         cwd_label: String,
         cwds: Vec<String>,
         branch: Option<String>,
@@ -144,6 +152,7 @@ impl Composer {
         is_git: bool,
         cx: &mut Context<Self>,
     ) {
+        self.hero_cwd = cwd;
         self.hero_cwd_label = cwd_label;
         self.hero_cwds = cwds;
         self.hero_branch = branch;
@@ -458,39 +467,7 @@ impl Composer {
                     )
                 })
                 .collect(),
-            Popup::Cwd => {
-                let mut items: Vec<AnyElement> = self
-                    .hero_cwds
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, cwd)| {
-                        let cwd = cwd.clone();
-                        self.render_list_item(
-                            ("cwd", ix),
-                            IconName::FolderOpen,
-                            cwd.clone(),
-                            None,
-                            cx.listener(move |this, _, _, cx| {
-                                this.popup = None;
-                                cx.emit(ComposerEvent::SelectCwd(cwd.clone()));
-                            }),
-                            cx,
-                        )
-                    })
-                    .collect();
-                items.push(self.render_list_item(
-                    "cwd-browse",
-                    IconName::Ellipsis,
-                    "浏览文件夹…".to_string(),
-                    None,
-                    cx.listener(|this, _, _, cx| {
-                        this.popup = None;
-                        cx.emit(ComposerEvent::PickDirectory);
-                    }),
-                    cx,
-                ));
-                items
-            }
+            Popup::Cwd => unreachable!("Cwd 由 render_cwd_popup 渲染"),
             Popup::Branch => self
                 .hero_branches
                 .iter()
@@ -635,6 +612,102 @@ impl Composer {
         )
     }
 
+    /// 工作区选择面板：Command 面板（搜索框 + 工作区列表 + 操作行），锚定在工作区芯片正上方。
+    fn render_cwd_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on_confirm_composer = cx.entity();
+        let on_cancel_composer = cx.entity();
+
+        // 暗色主题下 popover 与窗口背景同为 #0a0a0a，面板会糊在背景上像透明一样；
+        // 用不透明 neutral-900 作为面板表面，亮色主题保持 popover（白）不变。
+        let surface = if cx.theme().is_dark() {
+            hsla(0., 0., 0.09, 1.)
+        } else {
+            cx.theme().popover
+        };
+
+        let mut command = Command::new(&self.cwd_command)
+            .placeholder("搜索工作区")
+            .items(self.hero_cwds.iter().map(|cwd| {
+                let name = std::path::Path::new(cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| cwd.clone());
+                CommandItem::new()
+                    .label(name)
+                    .keywords([cwd.clone()])
+                    .icon(IconName::Folder)
+                    .checked(self.hero_cwd.as_deref() == Some(cwd.as_str()))
+            }))
+            .separator()
+            .item(
+                CommandItem::new()
+                    .label("打开文件夹")
+                    .icon(IconName::FolderOpen),
+            )
+            .when(self.hero_cwd.is_some(), |this| {
+                this.item(
+                    CommandItem::new()
+                        .label("不在项目中工作")
+                        .icon(IconName::CircleX),
+                )
+            })
+            .empty(|_, _, cx| {
+                div()
+                    .px_2()
+                    .py_1p5()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("没有匹配的工作区")
+            })
+            .on_confirm(move |ix, window, cx| {
+                on_confirm_composer.update(cx, |this, cx| {
+                    this.popup = None;
+                    let len = this.hero_cwds.len();
+                    if let Some(cwd) = this.hero_cwds.get(ix.row) {
+                        cx.emit(ComposerEvent::SelectCwd(cwd.clone()));
+                    } else if ix.row == len {
+                        cx.emit(ComposerEvent::PickDirectory);
+                    } else {
+                        cx.emit(ComposerEvent::ClearCwd);
+                    }
+                    this.input.update(cx, |input, cx| input.focus(window, cx));
+                    cx.notify();
+                });
+            })
+            .on_cancel(move |window, cx| {
+                on_cancel_composer.update(cx, |this, cx| {
+                    this.popup = None;
+                    this.input.update(cx, |input, cx| input.focus(window, cx));
+                    cx.notify();
+                });
+            });
+        command.style().background = Some(surface.into());
+
+        div()
+            .id("composer-cwd-popup")
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .mb_2()
+            .w(px(360.))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.popup = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .relative()
+                    .with_animation(
+                        "popup-enter-cwd",
+                        Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(ease_out_quint()),
+                        |el, delta| el.top(px(6.0 * (1.0 - delta))).opacity(delta),
+                    )
+                    .child(command),
+            )
+            .into_any_element()
+    }
+
     fn render_attachments(&self, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .gap_2()
@@ -684,7 +757,9 @@ impl Render for Composer {
                 input.set_placeholder(desired_placeholder, window, cx);
             });
         }
-        let popup = self.render_popup(cx);
+        let cwd_open = matches!(self.popup, Some((Popup::Cwd, _)));
+        let cwd_popup = cwd_open.then(|| self.render_cwd_popup(cx));
+        let popup = if cwd_open { None } else { self.render_popup(cx) };
 
         div().w_full().p_3().child(
             v_flex()
@@ -708,38 +783,110 @@ impl Render for Composer {
                             .border_b_1()
                             .border_color(cx.theme().border)
                             .child(
-                                Button::new("hero-cwd")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::FolderOpen)
-                                    .label(self.hero_cwd_label.clone())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.popup = match this.popup {
-                                            Some((Popup::Cwd, _)) => None,
-                                            _ => Some((Popup::Cwd, 0)),
-                                        };
-                                        cx.notify();
-                                    })),
+                                div()
+                                    .relative()
+                                    .child(
+                                        h_flex()
+                                            .id("hero-cwd")
+                                            .gap_1()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_full()
+                                            .bg(cx.theme().accent.opacity(0.5))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(cx.theme().accent))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                let open_now =
+                                                    matches!(this.popup, Some((Popup::Cwd, _)));
+                                                // outside-click 在 capture 阶段已先关掉面板时，
+                                                // 同一击不再重开（与渲染时状态一致才翻转）
+                                                if open_now == cwd_open {
+                                                    if open_now {
+                                                        this.popup = None;
+                                                        this.input.update(cx, |input, cx| {
+                                                            input.focus(window, cx)
+                                                        });
+                                                    } else {
+                                                        this.popup = Some((Popup::Cwd, 0));
+                                                        this.cwd_command.update(cx, |state, cx| {
+                                                            state.set_query("", window, cx);
+                                                            state.focus(window, cx);
+                                                        });
+                                                    }
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                Icon::new(IconName::Folder)
+                                                    .size_4()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .when(self.hero_cwd.is_none(), |this| {
+                                                        this.text_color(
+                                                            cx.theme().muted_foreground,
+                                                        )
+                                                    })
+                                                    .child(self.hero_cwd_label.clone()),
+                                            )
+                                            .child(
+                                                Icon::new(IconName::ChevronDown)
+                                                    .size_3()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            ),
+                                    )
+                                    .when_some(cwd_popup, |this, popup| this.child(popup)),
                             )
-                            .child(
-                                Button::new("hero-branch")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::Github)
-                                    .label(if self.hero_is_git {
-                                        self.hero_branch.clone().unwrap_or_else(|| "?".into())
-                                    } else {
-                                        "非 git 仓库".to_string()
-                                    })
-                                    .when(!self.hero_is_git, |this| this.disabled(true))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.popup = match this.popup {
-                                            Some((Popup::Branch, _)) => None,
-                                            _ => Some((Popup::Branch, 0)),
-                                        };
-                                        cx.notify();
-                                    })),
-                            ),
+                            .when(self.hero_cwd.is_some(), |this| {
+                                this.child(
+                                    h_flex()
+                                        .id("hero-branch")
+                                        .gap_1()
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_full()
+                                        .when(self.hero_is_git, |this| {
+                                            this.bg(cx.theme().accent.opacity(0.5))
+                                                .cursor_pointer()
+                                                .hover(|this| this.bg(cx.theme().accent))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.popup = match this.popup {
+                                                        Some((Popup::Branch, _)) => None,
+                                                        _ => Some((Popup::Branch, 0)),
+                                                    };
+                                                    cx.notify();
+                                                }))
+                                        })
+                                        .child(
+                                            Icon::new(IconName::Github)
+                                                .size_4()
+                                                .text_color(cx.theme().muted_foreground),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .when(!self.hero_is_git, |this| {
+                                                    this.text_color(cx.theme().muted_foreground)
+                                                })
+                                                .child(if self.hero_is_git {
+                                                    self.hero_branch
+                                                        .clone()
+                                                        .unwrap_or_else(|| "?".into())
+                                                } else {
+                                                    "非 git 仓库".to_string()
+                                                }),
+                                        )
+                                        .when(self.hero_is_git, |this| {
+                                            this.child(
+                                                Icon::new(IconName::ChevronDown)
+                                                    .size_3()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            )
+                                        }),
+                                )
+                            }),
                     )
                 })
                 .when(!self.attachments.is_empty(), |this| {
