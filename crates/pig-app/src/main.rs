@@ -84,14 +84,18 @@ struct AppView {
     config_path: Option<PathBuf>,
     exec_mode: pig_protocol::ExecMode,
     git_branch: Option<String>,
-    /// hero 页选择的项目目录；None = 未选择（显示"选择项目"，发送时回落到启动目录）
+    /// hero 页选择的工作区目录；None = 未选择（显示"选择工作区"，发送时回落到启动目录）
     hero_cwd: Option<PathBuf>,
     hero_branch: Option<String>,
     hero_branches: Vec<String>,
     hero_is_git: bool,
     hero_error: Option<String>,
     pending_first_send: Option<(String, Vec<String>, ExecMode)>,
-    projects: Vec<String>,
+    workspaces: Vec<String>,
+    /// 已移除（隐藏）的工作区路径：会话 cwd 不再让它们回到列表
+    hidden_workspaces: std::collections::HashSet<String>,
+    /// 工作区路径 → 用户自定义显示名
+    workspace_aliases: std::collections::HashMap<String, String>,
     settings: Entity<SettingsView>,
     settings_open: bool,
     sidebar_collapsed: bool,
@@ -137,7 +141,9 @@ impl AppView {
             hero_is_git: false,
             hero_error: None,
             pending_first_send: None,
-            projects: vec![],
+            workspaces: vec![],
+            hidden_workspaces: std::collections::HashSet::new(),
+            workspace_aliases: std::collections::HashMap::new(),
             settings,
             settings_open: false,
             sidebar_collapsed: false,
@@ -180,7 +186,7 @@ impl AppView {
         ];
         app.spawn_event_pump(app._agent_handle.events.clone(), cx);
         app.agent.list_sessions();
-        app.agent.list_projects();
+        app.agent.list_workspaces();
         app.agent.get_config();
         if let Some(cwd) = app.hero_cwd.clone() {
             app.agent.git_info(cwd);
@@ -302,10 +308,24 @@ impl AppView {
                     settings.set_test_result(provider_id, *ok, message.clone(), cx);
                 });
             }
-            Event::ProjectList { projects } => {
-                self.projects = projects
+            Event::WorkspaceList { workspaces } => {
+                self.workspaces = workspaces
                     .iter()
+                    .filter(|p| !p.hidden)
                     .map(|p| p.path.display().to_string())
+                    .collect();
+                self.hidden_workspaces = workspaces
+                    .iter()
+                    .filter(|p| p.hidden)
+                    .map(|p| p.path.display().to_string())
+                    .collect();
+                self.workspace_aliases = workspaces
+                    .iter()
+                    .filter_map(|p| {
+                        p.alias
+                            .clone()
+                            .map(|alias| (p.path.display().to_string(), alias))
+                    })
                     .collect();
             }
             Event::SessionList { sessions } => {
@@ -500,21 +520,24 @@ impl AppView {
         });
     }
 
-    /// 项目列表 = 手动项目 ∪ 会话 cwd；按最近活跃/添加时间倒序。
-    fn compute_projects(&self) -> (Vec<String>, Vec<String>) {
-        let manual: Vec<String> = self.projects.clone();
+    /// 工作区列表 = 可见手动工作区 ∪ 会话 cwd（排除已移除/隐藏的工作区）；
+    /// 按最近活跃/添加时间倒序。
+    fn compute_workspaces(&self) -> Vec<String> {
         let mut latest: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for meta in &self.metas {
             let key = meta.cwd.display().to_string();
+            if self.hidden_workspaces.contains(&key) {
+                continue;
+            }
             let entry = latest.entry(key).or_insert(0);
             *entry = (*entry).max(meta.updated_at);
         }
-        for path in &manual {
+        for path in &self.workspaces {
             latest.entry(path.clone()).or_insert(0);
         }
         let mut all: Vec<(String, u64)> = latest.into_iter().collect();
         all.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
-        (all.into_iter().map(|(path, _)| path).collect(), manual)
+        all.into_iter().map(|(path, _)| path).collect()
     }
 
     fn refresh_sidebar(&self, cx: &mut Context<Self>) {
@@ -537,10 +560,11 @@ impl AppView {
                 }
             })
             .collect();
-        let (projects, manual_projects) = self.compute_projects();
+        let workspaces = self.compute_workspaces();
+        let aliases = self.workspace_aliases.clone();
         let active = self.current.clone();
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_state(sessions, projects, manual_projects, active, cx);
+            sidebar.set_state(sessions, workspaces, aliases, active, cx);
         });
     }
 
@@ -576,7 +600,7 @@ impl AppView {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| cwd.display().to_string())
             })
-            .unwrap_or_else(|| "选择项目".to_string());
+            .unwrap_or_else(|| "选择工作区".to_string());
         let mut cwds: Vec<String> = self
             .metas
             .iter()
@@ -799,7 +823,7 @@ impl AppView {
     fn on_sidebar_event(
         &mut self,
         event: &SidebarEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -808,38 +832,17 @@ impl AppView {
                 self.hero_cwd = None;
                 self.enter_hero(cx);
             }
-            SidebarEvent::NewTaskInProject(path) => {
+            SidebarEvent::NewTaskInWorkspace(path) => {
                 self.hero_cwd = Some(PathBuf::from(path));
                 self.enter_hero(cx);
             }
             SidebarEvent::SetPinned(id, pinned) => self.agent.set_pinned(id, *pinned),
             SidebarEvent::SetArchived(id, archived) => self.agent.set_archived(id, *archived),
-            SidebarEvent::AddProject => {
-                let rx = cx.prompt_for_paths(PathPromptOptions {
-                    files: false,
-                    directories: true,
-                    multiple: false,
-                    prompt: Some("添加项目目录".into()),
-                });
-                let view = cx.entity();
-                cx.spawn_in(window, async move |_, window| {
-                    let picked = rx.await.ok()?.ok()??.into_iter().next()?;
-                    if !picked.is_dir() {
-                        return None;
-                    }
-                    window
-                        .update(|_, cx| {
-                            view.update(cx, |this, _| {
-                                this.agent.add_project(picked);
-                            });
-                        })
-                        .ok()?;
-                    Some(())
-                })
-                .detach();
+            SidebarEvent::RemoveWorkspace(path) => {
+                self.agent.remove_workspace(PathBuf::from(path));
             }
-            SidebarEvent::RemoveProject(path) => {
-                self.agent.remove_project(PathBuf::from(path));
+            SidebarEvent::RenameWorkspace(path, alias) => {
+                self.agent.rename_workspace(PathBuf::from(path), alias.clone());
             }
             SidebarEvent::OpenSettings => self.open_settings(cx),
         }
@@ -938,8 +941,8 @@ impl AppView {
 
         let chips: Vec<(&'static str, &'static str)> = vec![
             (
-                "总结这个项目",
-                "请阅读 README 并总结这个项目的结构和主要模块。",
+                "总结这个工作区",
+                "请阅读 README 并总结这个工作区的结构和主要模块。",
             ),
             ("修复一个报错", "我遇到了一个报错："),
             ("写单元测试", "请为主要模块写单元测试。"),
@@ -1090,7 +1093,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::BranchChanged { .. }
         | Event::ConfigSnapshot { .. }
         | Event::TestResult { .. }
-        | Event::ProjectList { .. } => None,
+        | Event::WorkspaceList { .. } => None,
         Event::Error { session_id, .. } => session_id.clone(),
     }
 }
@@ -1420,51 +1423,51 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     assert!(!is_hero, "发送后应进入会话态");
     println!("[selftest] 会话 A 场景 B 完成（审批×3），输入框已沉底");
 
-    // 项目视图：会话 cwd 应出现在项目列表，且按项目分组正确
+    // 工作区视图：会话 cwd 应出现在工作区列表，且按工作区分组正确
     let cwd_str = app!(|app: &mut AppView, _| app.cwd.display().to_string());
     let (has_cwd, grouped) = app!(|app: &mut AppView, cx| {
         let sidebar = app.sidebar.read(cx);
         (
-            sidebar.debug_projects().contains(&cwd_str),
+            sidebar.debug_workspaces().contains(&cwd_str),
             sidebar
-                .debug_project_sessions(&cwd_str)
+                .debug_workspace_sessions(&cwd_str)
                 .contains(&session_a),
         )
     });
-    assert!(has_cwd, "项目列表应包含会话 cwd");
-    assert!(grouped, "项目视图应按 cwd 分组会话");
+    assert!(has_cwd, "工作区列表应包含会话 cwd");
+    assert!(grouped, "工作区视图应按 cwd 分组会话");
 
-    // 添加/移除项目
-    let extra = std::env::temp_dir().join(format!("pig-app-proj-{}", std::process::id()));
+    // 添加/移除工作区
+    let extra = std::env::temp_dir().join(format!("pig-app-ws-{}", std::process::id()));
     std::fs::create_dir_all(&extra).unwrap();
     let extra_str = extra.display().to_string();
-    app!(|app: &mut AppView, _| app.agent.add_project(extra.clone()));
+    app!(|app: &mut AppView, _| app.agent.add_workspace(extra.clone()));
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "添加项目超时");
+        assert!(waited < 10_000, "添加工作区超时");
         let has = app!(|app: &mut AppView, cx| {
-            app.sidebar.read(cx).debug_projects().contains(&extra_str)
+            app.sidebar.read(cx).debug_workspaces().contains(&extra_str)
         });
         if has {
             break;
         }
     }
-    app!(|app: &mut AppView, _| app.agent.remove_project(extra.clone()));
+    app!(|app: &mut AppView, _| app.agent.remove_workspace(extra.clone()));
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "移除项目超时");
+        assert!(waited < 10_000, "移除工作区超时");
         let has = app!(|app: &mut AppView, cx| {
-            app.sidebar.read(cx).debug_projects().contains(&extra_str)
+            app.sidebar.read(cx).debug_workspaces().contains(&extra_str)
         });
         if !has {
             break;
         }
     }
-    println!("[selftest] 项目列表 OK（会话 cwd 自动出现 + 手动增删）");
+    println!("[selftest] 工作区列表 OK（会话 cwd 自动出现 + 手动增删）");
 
     // 会话 B：新建 + 场景 A
     app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone()));

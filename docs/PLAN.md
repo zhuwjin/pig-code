@@ -2,7 +2,7 @@
 
 > 目标：用 Rust + [gpui-kit](https://gpui-kit.com/)（0.6）从零开发一个图形化 AI Code Agent 桌面应用，
 > 界面对标 [ZCode](https://zcode.z.ai/cn/docs/agents)（Z.ai 的 Agentic Development Environment），
-> 架构参考本地 `agent-projects/` 下的 codex / kimi-code / opencode 等成熟开源实现。
+> 架构参考本地 `agent-workspaces/` 下的 codex / kimi-code / opencode 等成熟开源实现。
 >
 > 调研日期：2026-09-20。
 
@@ -38,7 +38,7 @@ gpui-kit 0.6 明显针对 chat/agent 场景补齐了专用组件，ZCode 式界�
 
 ### 1.2 参考架构（来自 codex-rs / opencode / kimi-code）
 
-三个项目殊途同归的架构共识：
+三套实现殊途同归的架构共识：
 
 1. **契约先行**：把「UI 可见的一切」收敛为独立的 protocol/schema 包。
    - codex-rs：`codex-protocol`（`Op`/`EventMsg` 信封 + ~90 个事件变体），UI 与 core 之间还有一层稳定的 app-server JSON-RPC v2 投影。
@@ -52,7 +52,7 @@ gpui-kit 0.6 明显针对 chat/agent 场景补齐了专用组件，ZCode 式界�
 **为什么不直接复用 codex-rs core**：虽然 Apache-2.0 且有 `InProcessAppServerClient` 嵌入路径，但
 (a) 该版本 `WireApi` 只剩 Responses 协议，**不支持 Chat Completions**，对接 GLM/DeepSeek/Kimi 等 OpenAI 兼容端点不便；
 (b) ~100 个未发布到 crates.io 的 path 依赖 crate，只能整个仓库做 git 依赖，跟随成本极高；
-(c) 自研 core 本身是本项目的主要学习目标。结论：**借鉴设计，自研引擎**。
+(c) 自研 core 本身是首要学习目标。结论：**借鉴设计，自研引擎**。
 
 ### 1.3 ZCode 界面规格（对标目标）
 
@@ -64,7 +64,7 @@ gpui-kit 0.6 明显针对 chat/agent 场景补齐了专用组件，ZCode 式界�
 │ ┌────────┐ │  用户消息(含@文件/附件chip)            │ ┌─────────────┐ │
 │ │新建任务 │ │  助手回复(流式Markdown)               │ │ 文件变更列表 │ │
 │ ├────────┤ │  ▶ 思考轨迹(可折叠)                   │ │ +12/-3 diff │ │
-│ │ 项目   +│ │  ┌工具调用卡片──────┐                │ │ 打开/撤销   │ │
+│ │ 工作区   +│ │  ┌工具调用卡片──────┐                │ │ 打开/撤销   │ │
 │ ├────────┤ │  │ $ 命令 / 读写文件  │                │ ├─────────────┤ │
 │ │ 任务   +│ │  │ 输出(过长截断)    │                │ │ 终端(后置)   │ │
 │ │ 视图:  │ │  └──────────────────┘                │ └─────────────┘ │
@@ -83,9 +83,9 @@ gpui-kit 0.6 明显针对 chat/agent 场景补齐了专用组件，ZCode 式界�
 
 P0 骨架（1:1 对标）：任务制侧栏（置顶/分组/归档/状态点/+−变更数）、四档执行模式（变更前确认/自动编辑/计划模式/完全访问，`Shift+Tab` 切换）、审批卡（允许/始终允许/拒绝）、输入框符号体系（`+`附件 `@`文件 `#`会话 `/`命令 `$`技能）、消息流（用户消息/流式 Markdown/折叠思考/工具卡片/回合作结）、Diff Review 面板、模型选择器（供应商+Base URL+API Key+手填模型 ID）、上下文水位显示。
 
-P1 差异化：计划模式、AGENTS.md 双层注入（`~/.pigcode/AGENTS.md` + 工作区根）、子智能体、Skill/Command（`~/.pigcode/skills|commands/`）、MCP、"不在项目中工作"模式。
+P1 差异化：计划模式、AGENTS.md 双层注入（`~/.pigcode/AGENTS.md` + 工作区根）、子智能体、Skill/Command（`~/.pigcode/skills|commands/`）、MCP、"不在工作区中工作"模式。
 
-P2 后置：内置终端、内置浏览器、远程开发(SSH/WSL)、Hooks、插件市场、项目记忆、使用统计。
+P2 后置：内置终端、内置浏览器、远程开发(SSH/WSL)、Hooks、插件市场、工作区记忆、使用统计。
 
 > 警示：ZCode 2026-09 因「仓库 Wiki 默认上传工作区」发生舆情事件。我们所有索引/上传类功能**默认关闭 + 明示开关**。
 
@@ -217,7 +217,7 @@ pig-code/
 - 工具补齐：`write_file`、`edit`(search/replace)、`glob`、`grep`；统一 `Tool` trait（schema 自动生成 JSON Schema 给模型）。
 - 四档执行模式 + 审批闸门：core 发 `ApprovalRequested` 阻塞 → UI 审批卡（允许/始终允许/拒绝）→ `ApprovalReply` 解除；「始终允许」按规则缓存。
 - diff 视图 V1：`PatchEnd` 携带 unified diff → 右侧 Review 面板用只读 `Editor` + `tree-sitter-diff` 渲染；文件变更列表（+x/−y）。
-- **验收**：让 agent 改一个真实项目文件，审批卡弹出、diff 正确渲染、可拒绝。
+- **验收**：让 agent 改一个真实工作区文件，审批卡弹出、diff 正确渲染、可拒绝。
 
 ### M4 — 任务管理与持久化
 - JSONL rollout（meta + item 每行一条）+ 会话列表从磁盘加载；resume（重建历史继续对话）。
@@ -233,7 +233,7 @@ pig-code/
 - **验收**：连续 30+ 轮长任务不炸上下文；计划模式全流程。
 
 ### M6+ — 差异化（按兴趣择取）
-子智能体（spawn_agent）、Skill/Command 目录（`~/.pigcode/skills/`）、MCP（`rmcp` crate）、项目记忆、"不在项目中工作"模式、webview 终端、使用统计。
+子智能体（spawn_agent）、Skill/Command 目录（`~/.pigcode/skills/`）、MCP（`rmcp` crate）、工作区记忆、"不在工作区中工作"模式、webview 终端、使用统计。
 
 ### 建议节奏
 M0→M2 是最陡的学习曲线（gpui 心智模型 + tokio/smol 桥接 + SSE 解析），建议**先各做一个 spike**：
@@ -258,5 +258,5 @@ M0→M2 是最陡的学习曲线（gpui 心智模型 + tokio/smol 桥接 + SSE �
 
 - gpui-kit：https://gpui-kit.com/docs/getting-started 、组件目录 https://gpui-kit.com/component 、仓库 https://github.com/longbridge/gpui-kit （重点看 `crates/story`、`examples/stream-markdown`、`examples/ai_recipes`）
 - ZCode 文档：https://zcode.z.ai/cn/docs （agents / ADE-tools / safety-confirm / configuration 四页最重要）
-- 本地参考实现：`agent-projects/codex/codex-rs`（protocol、turn 循环、rollout、apply-patch）、`agent-projects/opencode`（schema/事件模型/权限）、`agent-projects/kimi-code`（transcript 渲染契约、工具组织）
+- 本地参考实现：`agent-workspaces/codex/codex-rs`（protocol、turn 循环、rollout、apply-patch）、`agent-workspaces/opencode`（schema/事件模型/权限）、`agent-workspaces/kimi-code`（transcript 渲染契约、工具组织）
 - Zed agent UI（设计参考，GPL 勿抄）：https://github.com/zed-industries/zed/tree/main/crates/agent_ui

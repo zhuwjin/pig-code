@@ -199,7 +199,14 @@ pub enum ProviderEvent {
     Reasoning(String),
     Text(String),
     ToolCalls(Vec<ToolCall>),
-    Usage { used: u64, total: u64 },
+    /// 单次请求的 token 用量：input/output 用于记账聚合，
+    /// used 为模型上报的本请求总消耗（水位判断用），total 为模型上下文窗口
+    Usage {
+        input: u64,
+        output: u64,
+        used: u64,
+        total: u64,
+    },
     Finished,
     Failed(String),
 }
@@ -312,9 +319,14 @@ async fn stream_openai(
                 continue;
             };
             if let Some(usage) = chunk.usage {
-                if let Some(total) = usage.total_tokens {
+                let input = usage.prompt_tokens.unwrap_or(0);
+                let output = usage.completion_tokens.unwrap_or(0);
+                let used = usage.total_tokens.unwrap_or(input + output);
+                if used > 0 {
                     let _ = tx.send(ProviderEvent::Usage {
-                        used: total,
+                        input,
+                        output,
+                        used,
                         total: config.context_window,
                     });
                 }
@@ -398,6 +410,8 @@ struct OpenAiFunctionChunk {
 
 #[derive(Deserialize)]
 struct OpenAiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
 }
 
@@ -659,6 +673,8 @@ async fn stream_anthropic(
                     if json["delta"]["stop_reason"].is_string() {
                         if total_input + total_output > 0 {
                             let _ = tx.send(ProviderEvent::Usage {
+                                input: total_input,
+                                output: total_output,
                                 used: total_input + total_output,
                                 total: config.context_window,
                             });

@@ -1,5 +1,8 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{
+    ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem,
+};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -23,19 +26,20 @@ pub struct SidebarSession {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SidebarView {
     Group,
-    Project,
+    Workspace,
 }
 
 #[derive(Clone)]
 pub enum SidebarEvent {
     Select(String),
     NewTask,
-    /// 在指定项目目录下新建任务（hero 预设 cwd）
-    NewTaskInProject(String),
+    /// 在指定工作区目录下新建任务（hero 预设 cwd）
+    NewTaskInWorkspace(String),
     SetPinned(String, bool),
     SetArchived(String, bool),
-    AddProject,
-    RemoveProject(String),
+    RemoveWorkspace(String),
+    /// 重命名工作区显示名；None 恢复默认目录名
+    RenameWorkspace(String, Option<String>),
     OpenSettings,
 }
 
@@ -44,10 +48,13 @@ impl EventEmitter<SidebarEvent> for Sidebar {}
 pub struct Sidebar {
     view: SidebarView,
     sessions: Vec<SidebarSession>,
-    /// 项目列表 = 手动项目 ∪ 会话 cwd（AppView 已排序）
-    projects: Vec<String>,
-    /// 手动添加的项目（无会话的项目才可移除）
-    manual_projects: Vec<String>,
+    /// 工作区列表 = 可见手动工作区 ∪ 会话 cwd（AppView 已排序、已排除隐藏工作区）
+    workspaces: Vec<String>,
+    /// 工作区路径 → 用户自定义显示名
+    aliases: std::collections::HashMap<String, String>,
+    /// 正在重命名的工作区路径
+    renaming: Option<String>,
+    rename_input: Entity<InputState>,
     active: Option<String>,
     search_open: bool,
     search_input: Entity<InputState>,
@@ -58,21 +65,35 @@ pub struct Sidebar {
 
 impl Sidebar {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话或项目…"));
-        let _subscriptions = vec![cx.subscribe_in(
-            &search_input,
-            window,
-            |_this: &mut Self, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            },
-        )];
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话或工作区…"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx));
+        let _subscriptions = vec![
+            cx.subscribe_in(
+                &search_input,
+                window,
+                |_this: &mut Self, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &rename_input,
+                window,
+                |this: &mut Self, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.commit_rename(cx);
+                    }
+                },
+            ),
+        ];
         Self {
             view: SidebarView::Group,
             sessions: vec![],
-            projects: vec![],
-            manual_projects: vec![],
+            workspaces: vec![],
+            aliases: std::collections::HashMap::new(),
+            renaming: None,
+            rename_input,
             active: None,
             search_open: false,
             search_input,
@@ -85,14 +106,14 @@ impl Sidebar {
     pub fn set_state(
         &mut self,
         sessions: Vec<SidebarSession>,
-        projects: Vec<String>,
-        manual_projects: Vec<String>,
+        workspaces: Vec<String>,
+        aliases: std::collections::HashMap<String, String>,
         active: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.sessions = sessions;
-        self.projects = projects;
-        self.manual_projects = manual_projects;
+        self.workspaces = workspaces;
+        self.aliases = aliases;
         self.active = active;
         cx.notify();
     }
@@ -113,13 +134,80 @@ impl Sidebar {
         query.is_empty() || text.to_lowercase().contains(query)
     }
 
-    /// 自测用：项目列表。
-    pub fn debug_projects(&self) -> &[String] {
-        &self.projects
+    /// 工作区显示名：优先用户别名，否则取目录名。
+    fn workspace_name(&self, path: &str) -> String {
+        self.aliases.get(path).cloned().unwrap_or_else(|| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string())
+        })
     }
 
-    /// 自测用：某项目下的会话 id。
-    pub fn debug_project_sessions(&self, path: &str) -> Vec<String> {
+    fn start_rename(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.workspace_name(&path);
+        self.renaming = Some(path);
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.renaming.take() else { return };
+        let value = self.rename_input.read(cx).value().trim().to_string();
+        let default = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let alias = if value.is_empty() || value == default {
+            None
+        } else {
+            Some(value)
+        };
+        cx.emit(SidebarEvent::RenameWorkspace(path, alias));
+        cx.notify();
+    }
+
+    /// 工作区行的选项菜单（行尾 “...” 按钮与右键共用）：
+    /// 复制路径 / 重命名 / 移除工作区（从侧栏隐藏，会话数据保留）。
+    fn workspace_menu(
+        view: &WeakEntity<Self>,
+        path: &str,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + Clone + 'static {
+        let view = view.clone();
+        let path = path.to_string();
+        move |menu, _, _| {
+            let copy_path = path.clone();
+            let rename_view = view.clone();
+            let rename_path = path.clone();
+            let remove_view = view.clone();
+            let remove_path = path.clone();
+            menu.item(PopupMenuItem::new("复制路径").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+            }))
+            .item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
+                let _ = rename_view.update(cx, |this, cx| {
+                    this.start_rename(rename_path.clone(), window, cx);
+                });
+            }))
+            .separator()
+            .item(PopupMenuItem::new("移除工作区").on_click(move |_, _, cx| {
+                let _ = remove_view.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::RemoveWorkspace(remove_path.clone()));
+                });
+            }))
+        }
+    }
+
+    /// 自测用：工作区列表。
+    pub fn debug_workspaces(&self) -> &[String] {
+        &self.workspaces
+    }
+
+    /// 自测用：某工作区下的会话 id。
+    pub fn debug_workspace_sessions(&self, path: &str) -> Vec<String> {
         self.sessions
             .iter()
             .filter(|s| s.cwd.display().to_string() == path)
@@ -188,7 +276,7 @@ impl Sidebar {
                 )
             })
             .child(
-                // 分段控件：分组 | 项目
+                // 分段控件：分组 | 工作区
                 h_flex()
                     .w_full()
                     .gap_1()
@@ -196,12 +284,12 @@ impl Sidebar {
                     .p_0p5()
                     .rounded(cx.theme().radius)
                     .bg(cx.theme().accent.opacity(0.4))
-                    .children([SidebarView::Group, SidebarView::Project].map(|view| {
+                    .children([SidebarView::Group, SidebarView::Workspace].map(|view| {
                         let selected = self.view == view;
                         div()
                             .id(match view {
                                 SidebarView::Group => "tab-group",
-                                SidebarView::Project => "tab-project",
+                                SidebarView::Workspace => "tab-workspace",
                             })
                             .flex_1()
                             .text_center()
@@ -216,7 +304,7 @@ impl Sidebar {
                             }))
                             .child(match view {
                                 SidebarView::Group => "分组",
-                                SidebarView::Project => "项目",
+                                SidebarView::Workspace => "工作区",
                             })
                     })),
             )
@@ -406,48 +494,33 @@ impl Sidebar {
         out
     }
 
-    fn render_project_view(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_workspace_view(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.query(cx);
         let mut out: Vec<AnyElement> = vec![
-            h_flex()
+            div()
                 .px_3()
                 .py_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .flex_1()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("项目"),
-                )
-                .child(
-                    Button::new("add-project")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Plus)
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(SidebarEvent::AddProject);
-                        })),
-                )
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("工作区")
                 .into_any_element(),
         ];
 
-        for (p_ix, project) in self.projects.iter().enumerate() {
-            let name = std::path::Path::new(project)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| project.clone());
-            if !self.matches(&query, &name) && !self.matches(&query, project) {
+        for (p_ix, workspace) in self.workspaces.iter().enumerate() {
+            let name = self.workspace_name(workspace);
+            if !self.matches(&query, &name) && !self.matches(&query, workspace) {
                 continue;
             }
-            let expanded = self.expanded.contains(project);
-            let project_path = project.clone();
+            let expanded = self.expanded.contains(workspace);
+            let renaming = self.renaming.as_deref() == Some(workspace.as_str());
+            let workspace_path = workspace.clone();
 
-            // 该项目下的会话：未归档在前按 updated 倒序，归档的灰色垫底
+            // 该工作区下的会话：未归档在前按 updated 倒序，归档的灰色垫底
             let mut sessions: Vec<usize> = self
                 .sessions
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.cwd.display().to_string() == *project)
+                .filter(|(_, s)| s.cwd.display().to_string() == *workspace)
                 .map(|(ix, _)| ix)
                 .collect();
             sessions.sort_by_key(|ix| {
@@ -455,11 +528,12 @@ impl Sidebar {
                 (s.archived, std::cmp::Reverse(s.updated_at))
             });
 
-            let removable = sessions.is_empty() && self.manual_projects.contains(project);
             let has_sessions = !sessions.is_empty();
 
+            let group_name: SharedString = format!("workspace-row-{p_ix}").into();
             let mut row = h_flex()
-                .id(("project", p_ix))
+                .id(("workspace", p_ix))
+                .group(group_name.clone())
                 .mx_2()
                 .px_2()
                 .py_1()
@@ -467,15 +541,22 @@ impl Sidebar {
                 .rounded(cx.theme().radius)
                 .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                 .child(
-                    Icon::new(if has_sessions || self.manual_projects.contains(project) {
-                        IconName::Folder
+                    Icon::new(if expanded {
+                        IconName::FolderOpen
                     } else {
                         IconName::FolderClosed
                     })
                     .size_4()
                     .text_color(cx.theme().muted_foreground),
-                )
-                .child(
+                );
+            if renaming {
+                row = row.child(
+                    div()
+                        .flex_1()
+                        .child(Input::new(&self.rename_input).small()),
+                );
+            } else {
+                row = row.child(
                     div()
                         .text_sm()
                         .flex_1()
@@ -483,35 +564,51 @@ impl Sidebar {
                         .whitespace_nowrap()
                         .child(name),
                 );
-            if removable {
-                row = row.child({
-                    let path = project.clone();
-                    Button::new(("remove-project", p_ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(SidebarEvent::RemoveProject(path.clone()));
-                        }))
-                });
             }
-            row = row
-                .child(
-                    Icon::new(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size_4()
-                    .text_color(cx.theme().muted_foreground),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.expanded.remove(&project_path) {
-                        this.expanded.insert(project_path.clone());
-                    }
-                    cx.notify();
-                }));
-            out.push(row.into_any_element());
+            if renaming {
+                out.push(row.into_any_element());
+            } else {
+                let menu = Self::workspace_menu(&cx.entity().downgrade(), workspace);
+                let new_task_path = workspace.clone();
+                // 悬停显示：选项（...）与该工作区下新建任务（+）
+                let row = row
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(group_name.clone(), |this| this.visible())
+                            .child(
+                                Button::new(("workspace-menu", p_ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Ellipsis)
+                                    .dropdown_menu(menu.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(group_name.clone(), |this| this.visible())
+                            .child(
+                                Button::new(("workspace-add", p_ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Plus)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(SidebarEvent::NewTaskInWorkspace(
+                                            new_task_path.clone(),
+                                        ));
+                                    })),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(&workspace_path) {
+                            this.expanded.insert(workspace_path.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .context_menu(menu);
+                out.push(row.into_any_element());
+            }
 
             if expanded {
                 for ix in sessions {
@@ -523,10 +620,10 @@ impl Sidebar {
                     );
                 }
                 if has_sessions {
-                    let path = project.clone();
+                    let path = workspace.clone();
                     out.push(
                         div()
-                            .id(("project-new-task", p_ix))
+                            .id(("workspace-new-task", p_ix))
                             .pl_8()
                             .pr_2()
                             .py_0p5()
@@ -534,9 +631,9 @@ impl Sidebar {
                             .text_color(cx.theme().muted_foreground)
                             .cursor_pointer()
                             .hover(|this| this.text_color(cx.theme().foreground))
-                            .child("+ 该项目下新建任务")
+                            .child("+ 该工作区下新建任务")
                             .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(SidebarEvent::NewTaskInProject(path.clone()));
+                                cx.emit(SidebarEvent::NewTaskInWorkspace(path.clone()));
                             }))
                             .into_any_element(),
                     );
@@ -551,7 +648,7 @@ impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.view {
             SidebarView::Group => self.render_group_view(cx),
-            SidebarView::Project => self.render_project_view(cx),
+            SidebarView::Workspace => self.render_workspace_view(cx),
         };
 
         v_flex()

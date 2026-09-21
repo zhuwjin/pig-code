@@ -505,7 +505,7 @@ impl ThreadView {
             | Event::BranchChanged { .. }
             | Event::ConfigSnapshot { .. }
             | Event::TestResult { .. }
-            | Event::ProjectList { .. } => {}
+            | Event::WorkspaceList { .. } => {}
             Event::Error { message, .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;
@@ -587,6 +587,7 @@ impl ThreadView {
                     .py_2()
                     .rounded_2xl()
                     .bg(cx.theme().accent)
+                    .text_sm()
                     .with_animation(
                         "user-msg-enter",
                         Animation::new(std::time::Duration::from_millis(150))
@@ -816,6 +817,7 @@ impl ThreadView {
                         Segment::Markdown { state, .. } => TextView::new(state)
                             .selectable(true)
                             .stream_fade(self.streaming)
+                            .text_sm()
                             .into_any_element(),
                         Segment::ToolCall {
                             tool,

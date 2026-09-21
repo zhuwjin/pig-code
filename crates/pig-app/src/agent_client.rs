@@ -128,15 +128,19 @@ impl AgentClient {
         self.send(Op::CheckoutBranch { cwd, branch });
     }
 
-    pub fn list_projects(&self) {
-        self.send(Op::ListProjects);
+    pub fn list_workspaces(&self) {
+        self.send(Op::ListWorkspaces);
     }
 
-    pub fn add_project(&self, path: PathBuf) {
-        self.send(Op::AddProject { path });
+    pub fn add_workspace(&self, path: PathBuf) {
+        self.send(Op::AddWorkspace { path });
     }
 
-    pub fn remove_project(&self, path: PathBuf) {
-        self.send(Op::RemoveProject { path });
+    pub fn remove_workspace(&self, path: PathBuf) {
+        self.send(Op::RemoveWorkspace { path });
+    }
+
+    pub fn rename_workspace(&self, path: PathBuf, alias: Option<String>) {
+        self.send(Op::RenameWorkspace { path, alias });
     }
 }

@@ -101,7 +101,7 @@ async fn resume_rebuilds_history() {
     agent2.shutdown();
 }
 
-/// index.json 的 pin/archive。
+/// sessions 表的 pin/archive。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pin_and_archive_update_index() {
     let (config_path, cwd, data_dir) = setup("m4-meta");
@@ -149,9 +149,10 @@ async fn pin_and_archive_update_index() {
     let meta = sessions.iter().find(|s| s.id == session_id).unwrap();
     assert!(!meta.pinned && meta.archived);
 
-    // 落盘验证
-    let raw = std::fs::read_to_string(data_dir.join("sessions").join("index.json")).unwrap();
-    assert!(raw.contains("\"archived\": true"), "{raw}");
+    // 落盘验证：重开 store 读出归档标记
+    let store = pig_core::store::Store::open(&data_dir).unwrap();
+    let meta = store.get_session(&session_id).unwrap();
+    assert!(meta.archived && !meta.pinned, "{meta:?}");
     agent.shutdown();
 }
 
@@ -223,7 +224,7 @@ async fn agents_md_injected() {
     let (config_path, cwd, data_dir) = setup("m4-agents");
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::write(data_dir.join("AGENTS.md"), "GLOBAL_RULE_X1: 全局规则").unwrap();
-    std::fs::write(cwd.join("AGENTS.md"), "PROJECT_RULE_Y2: 项目规则").unwrap();
+    std::fs::write(cwd.join("AGENTS.md"), "WORKSPACE_RULE_Y2: 工作区规则").unwrap();
 
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let events = agent.events.clone();
@@ -249,7 +250,7 @@ async fn agents_md_injected() {
     });
     let text = text.expect("应有文本回复");
     assert!(text.contains("GLOBAL_RULE_X1"), "应含全局 AGENTS.md: {text}");
-    assert!(text.contains("PROJECT_RULE_Y2"), "应含项目 AGENTS.md: {text}");
+    assert!(text.contains("WORKSPACE_RULE_Y2"), "应含工作区 AGENTS.md: {text}");
     agent.shutdown();
 }
 

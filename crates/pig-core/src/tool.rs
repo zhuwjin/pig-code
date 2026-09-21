@@ -586,7 +586,7 @@ impl Tool for Bash {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为项目根。禁止破坏性命令。",
+                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。禁止破坏性命令。",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -4,11 +4,12 @@
 pub mod config;
 pub mod git;
 pub mod mock;
-pub mod project;
+pub mod paths;
 pub mod rollout;
 mod prompt;
 pub mod provider;
 pub mod session;
+pub mod store;
 pub mod tool;
 
 use std::path::PathBuf;

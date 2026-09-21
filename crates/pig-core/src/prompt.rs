@@ -1,11 +1,11 @@
 use pig_protocol::ExecMode;
 
-/// 读取全局（{data_dir}/AGENTS.md）+ 项目（{cwd}/AGENTS.md）指令，总量 32KB 截断。
+/// 读取全局（{data_dir}/AGENTS.md）+ 工作区（{cwd}/AGENTS.md）指令，总量 32KB 截断。
 pub fn agents_md(data_dir: &std::path::Path, cwd: &std::path::Path) -> String {
     let mut out = String::new();
     for (label, path) in [
         ("全局", data_dir.join("AGENTS.md")),
-        ("项目", cwd.join("AGENTS.md")),
+        ("工作区", cwd.join("AGENTS.md")),
     ] {
         if let Ok(content) = std::fs::read_to_string(&path) {
             out.push_str(&format!("

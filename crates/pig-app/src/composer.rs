@@ -73,7 +73,7 @@ pub enum ComposerEvent {
     PickDirectory,
     /// hero：选择最近目录
     SelectCwd(String),
-    /// hero：取消项目选择（不在项目中工作）
+    /// hero：取消工作区选择（不在工作区中工作）
     ClearCwd,
     /// hero：切换 git 分支
     CheckoutBranch(String),
@@ -785,7 +785,7 @@ impl Composer {
             .when(self.hero_cwd.is_some(), |this| {
                 this.item(
                     CommandItem::new()
-                        .label("不在项目中工作")
+                        .label("不在工作区中工作")
                         .icon(IconName::CircleX),
                 )
             })

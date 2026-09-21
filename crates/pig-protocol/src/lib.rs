@@ -18,12 +18,19 @@ pub enum Op {
         session_id: String,
     },
     ListSessions,
-    ListProjects,
-    AddProject {
+    ListWorkspaces,
+    AddWorkspace {
         path: PathBuf,
     },
-    RemoveProject {
+    /// 从侧栏移除工作区：置为隐藏，条目与会话数据保留；
+    /// 该工作区下新建会话时自动恢复
+    RemoveWorkspace {
         path: PathBuf,
+    },
+    /// 重命名工作区显示名；alias 为 None 表示恢复默认目录名
+    RenameWorkspace {
+        path: PathBuf,
+        alias: Option<String>,
     },
     UpdateSessionMeta {
         session_id: String,
@@ -181,14 +188,20 @@ pub struct AppConfig {
     pub default_model: String,
 }
 
-/// 手动添加的项目（projects.json 持久化）
+/// 工作区条目（store.sqlite workspaces 表持久化）
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ProjectMeta {
+pub struct WorkspaceMeta {
     pub path: PathBuf,
     pub added_at: u64,
+    /// 用户自定义显示名（重命名）；None 使用目录名
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// 已从侧栏移除（隐藏）；该工作区下新建会话时自动恢复
+    #[serde(default)]
+    pub hidden: bool,
 }
 
-/// 会话列表元数据（index.json 持久化）
+/// 会话列表元数据（store.sqlite sessions 表持久化）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
@@ -212,8 +225,8 @@ pub enum Event {
     SessionList {
         sessions: Vec<SessionMeta>,
     },
-    ProjectList {
-        projects: Vec<ProjectMeta>,
+    WorkspaceList {
+        workspaces: Vec<WorkspaceMeta>,
     },
     ConfigSnapshot {
         config: AppConfig,

@@ -1,6 +1,6 @@
 //! JSONL 会话持久化（codex rollout 式）：`{data_dir}/sessions/{session_id}.jsonl`
 //! 首行 meta，之后每个 durable 单元一行；live delta 不落盘。
-//! 索引 `{data_dir}/sessions/index.json` 存会话元数据（pin/archive/title 改这里）。
+//! 会话索引在 store.sqlite（见 store.rs）。
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -157,55 +157,6 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
         }
     }
     history
-}
-
-pub struct SessionIndex {
-    dir: PathBuf,
-    pub entries: Vec<SessionMeta>,
-}
-
-impl SessionIndex {
-    pub fn load(dir: PathBuf) -> Self {
-        let path = dir.join("index.json");
-        let entries = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
-        Self { dir, entries }
-    }
-
-    pub fn save(&self) {
-        let _ = std::fs::create_dir_all(&self.dir);
-        if let Ok(raw) = serde_json::to_string_pretty(&self.entries) {
-            let _ = std::fs::write(self.dir.join("index.json"), raw);
-        }
-    }
-
-    pub fn upsert(&mut self, meta: SessionMeta) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == meta.id) {
-            *entry = meta;
-        } else {
-            self.entries.push(meta);
-        }
-        self.save();
-    }
-
-    pub fn update(
-        &mut self,
-        id: &str,
-        f: impl FnOnce(&mut SessionMeta),
-    ) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
-            f(entry);
-            self.save();
-        }
-    }
-
-    pub fn sorted(&self) -> Vec<SessionMeta> {
-        let mut entries = self.entries.clone();
-        entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        entries
-    }
 }
 
 pub fn now_secs() -> u64 {

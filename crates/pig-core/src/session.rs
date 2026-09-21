@@ -10,11 +10,12 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::config;
+use crate::paths::normalize_workspace_path;
 use crate::provider::ResolvedModel;
 use pig_protocol::AppConfig;
-use crate::project::ProjectStore;
 use crate::provider::{ChatMsg, ProviderEvent, ToolCall};
-use crate::rollout::{Rollout, RolloutRecord, SessionIndex, now_secs, rebuild_history};
+use crate::rollout::{Rollout, RolloutRecord, now_secs, rebuild_history};
+use crate::store::Store;
 use crate::tool::{ChangeTracker, ToolContext};
 use crate::{prompt, provider, tool};
 
@@ -84,9 +85,12 @@ pub struct Session {
     mode: ExecMode,
     model_override: Option<ModelSelection>,
     rollout: Option<Rollout>,
-    index: Arc<Mutex<SessionIndex>>,
+    store: Arc<Mutex<Store>>,
     data_dir: PathBuf,
     last_total_tokens: Option<u64>,
+    /// 当前回合累计的 token 用量（回合结束写入 turn_usage 表）
+    turn_input: u64,
+    turn_output: u64,
 }
 
 enum StepOutcome {
@@ -99,7 +103,7 @@ impl Session {
     pub fn create(
         meta: SessionMeta,
         pending: PendingApprovals,
-        index: Arc<Mutex<SessionIndex>>,
+        store: Arc<Mutex<Store>>,
         sessions_dir: &Path,
         data_dir: PathBuf,
     ) -> Result<Self, String> {
@@ -116,9 +120,11 @@ impl Session {
             mode: ExecMode::ConfirmBeforeEdit,
             model_override: None,
             rollout: Some(rollout),
-            index,
+            store,
             data_dir,
             last_total_tokens: None,
+            turn_input: 0,
+            turn_output: 0,
         })
     }
 
@@ -128,7 +134,7 @@ impl Session {
         id: &str,
         sessions_dir: &Path,
         pending: PendingApprovals,
-        index: Arc<Mutex<SessionIndex>>,
+        store: Arc<Mutex<Store>>,
         data_dir: PathBuf,
     ) -> Result<(Self, Vec<RolloutRecord>), String> {
         let records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
@@ -151,9 +157,11 @@ impl Session {
             mode: ExecMode::ConfirmBeforeEdit,
             model_override: None,
             rollout: None,
-            index,
+            store,
             data_dir,
             last_total_tokens: None,
+            turn_input: 0,
+            turn_output: 0,
         };
         Ok((session, records))
     }
@@ -171,10 +179,10 @@ impl Session {
 
     fn touch_index(&mut self) {
         let id = self.id.clone();
-        self.index
+        self.store
             .lock()
-            .expect("index lock")
-            .update(&id, |meta| meta.updated_at = now_secs());
+            .expect("store lock")
+            .update_session(&id, |meta| meta.updated_at = now_secs());
     }
 
     /// resume 重放：按序发 durable 事件，UI 用同一 reduce 逻辑重建视图。
@@ -472,6 +480,8 @@ impl Session {
         cancel: CancellationToken,
     ) {
         self.turn_counter += 1;
+        self.turn_input = 0;
+        self.turn_output = 0;
         let turn_id = format!("turn-{}", self.turn_counter);
         let started = Instant::now();
         self.emit(
@@ -498,7 +508,7 @@ impl Session {
         if self.history.len() == 1 {
             let title: String = content.chars().take(30).collect();
             let id = self.id.clone();
-            self.index.lock().expect("index lock").update(&id, |meta| {
+            self.store.lock().expect("store lock").update_session(&id, |meta| {
                 meta.title = title;
                 meta.updated_at = now_secs();
             });
@@ -530,6 +540,15 @@ impl Session {
             step += 1;
             match self.run_step(turn_id.clone(), step, config, tx, &cancel).await {
                 StepOutcome::TextOnly => {
+                    if self.turn_input + self.turn_output > 0 {
+                        self.store.lock().expect("store lock").record_usage(
+                            &self.id,
+                            &config.provider_name,
+                            &config.model,
+                            self.turn_input,
+                            self.turn_output,
+                        );
+                    }
                     self.emit(
                         |session_id, seq| Event::TurnComplete {
                             session_id,
@@ -614,7 +633,14 @@ impl Session {
                     );
                 }
                 Some(ProviderEvent::ToolCalls(calls)) => tool_calls = calls,
-                Some(ProviderEvent::Usage { used, total }) => {
+                Some(ProviderEvent::Usage {
+                    input,
+                    output,
+                    used,
+                    total,
+                }) => {
+                    self.turn_input += input;
+                    self.turn_output += output;
                     self.last_total_tokens = Some(used);
                     self.emit(
                         |session_id, seq| Event::ContextUsage {
@@ -982,8 +1008,9 @@ pub async fn agent_loop(
         }
     };
     let sessions_dir = data_dir.join("sessions");
-    let index = Arc::new(Mutex::new(SessionIndex::load(sessions_dir.clone())));
-    let mut projects = ProjectStore::load(&data_dir);
+    let store = Arc::new(Mutex::new(
+        Store::open(&data_dir).unwrap_or_else(|e| panic!("store 初始化失败: {e}")),
+    ));
     let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
 
     let mut seq = 0u64;
@@ -1024,6 +1051,7 @@ pub async fn agent_loop(
                 let Ok(op) = op else { break };
                 match op {
                     Op::NewSession { cwd } => {
+                        let cwd = normalize_workspace_path(&cwd);
                         id_counter += 1;
                         let id = format!("s{}-{}", now_secs(), id_counter);
                         let meta = SessionMeta {
@@ -1035,10 +1063,10 @@ pub async fn agent_loop(
                             pinned: false,
                             archived: false,
                         };
-                        match Session::create(meta.clone(), pending.clone(), index.clone(), &sessions_dir, data_dir.clone()) {
+                        match Session::create(meta.clone(), pending.clone(), store.clone(), &sessions_dir, data_dir.clone()) {
                             Ok(session) => {
                                 sessions.insert(id.clone(), SessionEntry { session: Some(session), cancel: None, model_override: None, queue: Default::default() });
-                                index.lock().expect("index lock").upsert(meta.clone());
+                                store.lock().expect("store lock").upsert_session(&meta);
                                 let (model, provider_name) = model_label!(None);
                                 emit_global!(Event::SessionConfigured {
                                     session_id: id.clone(),
@@ -1047,8 +1075,14 @@ pub async fn agent_loop(
                                     provider_name,
                                 });
                                 emit_global!(Event::SessionList {
-                                    sessions: index.lock().expect("index lock").sorted(),
+                                    sessions: store.lock().expect("store lock").sorted_sessions(),
                                 });
+                                // 已移除（隐藏）的工作区下新建会话：自动恢复显示
+                                if store.lock().expect("store lock").unhide_workspace(&meta.cwd) {
+                                    emit_global!(Event::WorkspaceList {
+                                        workspaces: store.lock().expect("store lock").workspaces(),
+                                    });
+                                }
                             }
                             Err(error) => emit_global!(Event::Error {
                                 session_id: None,
@@ -1059,8 +1093,7 @@ pub async fn agent_loop(
                     }
                     Op::OpenSession { session_id } => {
                         if sessions.contains_key(&session_id) {
-                            let meta = index.lock().expect("index lock")
-                                .entries.iter().find(|e| e.id == session_id).cloned();
+                            let meta = store.lock().expect("store lock").get_session(&session_id);
                             if let Some(meta) = meta {
                                 let (model, provider_name) = model_label!(None);
                                 emit_global!(Event::SessionConfigured {
@@ -1072,7 +1105,7 @@ pub async fn agent_loop(
                             }
                             continue;
                         }
-                        match Session::load(&session_id, &sessions_dir, pending.clone(), index.clone(), data_dir.clone()) {
+                        match Session::load(&session_id, &sessions_dir, pending.clone(), store.clone(), data_dir.clone()) {
                             Ok((session, records)) => {
                                 let cwd = session.cwd.clone();
                                 sessions.insert(session_id.clone(), SessionEntry {
@@ -1101,37 +1134,46 @@ pub async fn agent_loop(
                             }),
                         }
                     }
-                    Op::ListProjects => {
-                        emit_global!(Event::ProjectList {
-                            projects: projects.projects.clone(),
+                    Op::ListWorkspaces => {
+                        emit_global!(Event::WorkspaceList {
+                            workspaces: store.lock().expect("store lock").workspaces(),
                         });
                     }
-                    Op::AddProject { path } => {
-                        projects.add(path);
-                        emit_global!(Event::ProjectList {
-                            projects: projects.projects.clone(),
+                    Op::AddWorkspace { path } => {
+                        let path = normalize_workspace_path(&path);
+                        store.lock().expect("store lock").add_workspace(&path);
+                        emit_global!(Event::WorkspaceList {
+                            workspaces: store.lock().expect("store lock").workspaces(),
                         });
                     }
-                    Op::RemoveProject { path } => {
-                        projects.remove(&path);
-                        emit_global!(Event::ProjectList {
-                            projects: projects.projects.clone(),
+                    Op::RemoveWorkspace { path } => {
+                        let path = normalize_workspace_path(&path);
+                        store.lock().expect("store lock").hide_workspace(&path);
+                        emit_global!(Event::WorkspaceList {
+                            workspaces: store.lock().expect("store lock").workspaces(),
+                        });
+                    }
+                    Op::RenameWorkspace { path, alias } => {
+                        let path = normalize_workspace_path(&path);
+                        store.lock().expect("store lock").rename_workspace(&path, alias);
+                        emit_global!(Event::WorkspaceList {
+                            workspaces: store.lock().expect("store lock").workspaces(),
                         });
                     }
                     Op::ListSessions => {
                         emit_global!(Event::SessionList {
-                            sessions: index.lock().expect("index lock").sorted(),
+                            sessions: store.lock().expect("store lock").sorted_sessions(),
                         });
                     }
                     Op::UpdateSessionMeta { session_id, pinned, archived, title } => {
-                        index.lock().expect("index lock").update(&session_id, |meta| {
+                        store.lock().expect("store lock").update_session(&session_id, |meta| {
                             if let Some(pinned) = pinned { meta.pinned = pinned; }
                             if let Some(archived) = archived { meta.archived = archived; }
                             if let Some(title) = &title { meta.title = title.clone(); }
                             meta.updated_at = now_secs();
                         });
                         emit_global!(Event::SessionList {
-                            sessions: index.lock().expect("index lock").sorted(),
+                            sessions: store.lock().expect("store lock").sorted_sessions(),
                         });
                     }
                     Op::SendMessage { session_id, content, files, mode } => {
