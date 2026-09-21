@@ -93,13 +93,17 @@ impl Rollout {
 }
 
 /// 从 rollout 记录重建可继续对话的历史。
-/// 结构还原：text → assistant 消息；tool_call 依次挂到最近的 assistant 消息并追加 tool 结果。
+/// 结构还原：text → assistant 消息；tool_call 依次挂到最近的 assistant 消息并追加 tool 结果；
+/// reasoning 挂到紧随其后的 assistant 消息上（Anthropic thinking 模式要求回传）。
 pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg> {
     let mut history = vec![ChatMsg::system(system)];
+    let mut pending_reasoning: Option<String> = None;
     for record in records {
         match record {
             RolloutRecord::Meta { .. } => {}
             RolloutRecord::User { text, files } => {
+                // 新用户消息前缓冲的思考不应跨轮误挂
+                pending_reasoning = None;
                 let mut text = text.clone();
                 if !files.is_empty() {
                     text.push_str("\n\n引用文件: ");
@@ -107,9 +111,15 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
                 }
                 history.push(ChatMsg::user(text));
             }
-            RolloutRecord::Reasoning { .. } => {}
+            RolloutRecord::Reasoning { text } => {
+                pending_reasoning = Some(text.clone());
+            }
             RolloutRecord::Text { text } => {
-                history.push(ChatMsg::assistant(text.clone(), vec![]));
+                history.push(ChatMsg::assistant(
+                    text.clone(),
+                    vec![],
+                    pending_reasoning.take(),
+                ));
             }
             RolloutRecord::ToolCall {
                 tool,
@@ -132,7 +142,11 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
                 {
                     calls.push(wire_call.to_wire());
                 } else {
-                    history.push(ChatMsg::assistant(String::new(), vec![wire_call]));
+                    history.push(ChatMsg::assistant(
+                        String::new(),
+                        vec![wire_call],
+                        pending_reasoning.take(),
+                    ));
                 }
                 history.push(ChatMsg::tool_result(&call_id, output.clone()));
             }

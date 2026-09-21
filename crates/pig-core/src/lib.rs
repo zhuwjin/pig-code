@@ -96,6 +96,19 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                 Event::ToolCallEnd { is_error, .. } => {
                     format!("ToolCallEnd(is_error={is_error})")
                 }
+                Event::ApprovalRequested { request_id, tool, .. } => {
+                    // 探针自动批准，让续轮请求（带 thinking 回传）真实发生
+                    let request_id = request_id.clone();
+                    agent
+                        .ops
+                        .send(Op::ApprovalReply {
+                            request_id,
+                            decision: pig_protocol::ApprovalDecision::Allow,
+                        })
+                        .await
+                        .expect("send ApprovalReply");
+                    format!("ApprovalRequested({tool}) → 自动批准")
+                }
                 Event::ContextUsage { used, total, .. } => format!("ContextUsage({used}/{total})"),
                 Event::TurnComplete { duration_ms, .. } => {
                     format!("TurnComplete({duration_ms}ms)")
@@ -111,7 +124,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                     .ops
                     .send(Op::SendMessage {
                         session_id: session_id.clone(),
-                        content: "ping".to_string(),
+                        content: "用 read_file 读取 Cargo.toml，然后一句话总结".to_string(),
                         files: vec![],
                         mode: pig_protocol::ExecMode::AutoEdit,
                     })

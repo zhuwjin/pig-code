@@ -318,3 +318,57 @@ async fn retry_on_server_error() {
     );
     agent.shutdown();
 }
+
+/// Anthropic thinking 模式：续轮请求的 assistant 历史必须回传 thinking 块
+///（DeepSeek /anthropic 端点缺了会 400：content[].thinking must be passed back）
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_thinking_echoed() {
+    let (port, log) = mock::start_mock_server_with_log();
+    let dir = std::env::temp_dir().join(format!("pig-core-thinking-echo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, v2_config(port, ApiFormat::AnthropicMessages)).unwrap();
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
+    let events = agent.events.clone();
+    let sid = new_session(&agent, dir).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid,
+            content: "读一下 mock 文件并总结".into(),
+            files: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+
+    let bodies = log.lock().expect("log");
+    // 带工具结果的续轮请求：assistant 历史里必须有 thinking 块，且在 tool_use 之前
+    let continuation = bodies
+        .iter()
+        .find(|body| body.contains("tool_result"))
+        .unwrap_or_else(|| panic!("应有带 tool_result 的续轮请求: {bodies:?}"));
+    let thinking_pos = continuation.find("\"type\":\"thinking\"");
+    let tool_use_pos = continuation.find("\"type\":\"tool_use\"");
+    assert!(
+        thinking_pos.is_some(),
+        "续轮请求缺少 thinking 块: {continuation}"
+    );
+    assert!(
+        continuation.contains(mock::MOCK_REASONING),
+        "thinking 块应包含思考原文: {continuation}"
+    );
+    assert!(
+        thinking_pos < tool_use_pos,
+        "thinking 必须在 tool_use 之前: {continuation}"
+    );
+    agent.shutdown();
+}

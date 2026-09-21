@@ -109,6 +109,11 @@ pub struct ChatMsg {
     pub tool_calls: Option<Vec<ToolCallWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// assistant 的思考内容：仅供 Anthropic 端点回传（thinking 模式要求带
+    /// content[].thinking，否则第二轮 400），不参与序列化——OpenAI 兼容端点
+    ///（DeepSeek 原生）要求不回传 reasoning_content。
+    #[serde(skip_serializing)]
+    pub reasoning: Option<String>,
 }
 
 impl ChatMsg {
@@ -118,6 +123,7 @@ impl ChatMsg {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
@@ -127,16 +133,18 @@ impl ChatMsg {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
-    pub fn assistant(content: String, tool_calls: Vec<ToolCall>) -> Self {
+    pub fn assistant(content: String, tool_calls: Vec<ToolCall>, reasoning: Option<String>) -> Self {
         Self {
             role: "assistant".into(),
             content: (!content.is_empty()).then_some(content),
             tool_calls: (!tool_calls.is_empty())
                 .then(|| tool_calls.iter().map(ToolCall::to_wire).collect()),
             tool_call_id: None,
+            reasoning: reasoning.filter(|r| !r.is_empty()),
         }
     }
 
@@ -146,6 +154,7 @@ impl ChatMsg {
             content: Some(output),
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
+            reasoning: None,
         }
     }
 }
@@ -396,7 +405,12 @@ fn finish(
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     tool_calls: &mut Vec<ToolCall>,
 ) {
-    let calls = std::mem::take(tool_calls);
+    // 模型偶尔发出无名 tool_use（name: null）：过滤掉，避免产生「未知工具」空调用；
+    // 不进入历史也就不需要为它补 tool_result
+    let calls: Vec<ToolCall> = std::mem::take(tool_calls)
+        .into_iter()
+        .filter(|call| !call.name.trim().is_empty())
+        .collect();
     if !calls.is_empty() {
         let _ = tx.send(ProviderEvent::ToolCalls(calls));
     }
@@ -445,6 +459,14 @@ fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_json::Value
             })),
             "assistant" => {
                 let mut blocks: Vec<serde_json::Value> = vec![];
+                // thinking 模式下 Anthropic 兼容端点（DeepSeek/Kimi）要求回传思考块，
+                // 且 thinking 必须在 text/tool_use 之前；这类端点不发 signature，
+                // 按非 Claude 端点惯例省略 signature 字段（参考 kimi-code）
+                if let Some(reasoning) = &msg.reasoning
+                    && !reasoning.is_empty()
+                {
+                    blocks.push(serde_json::json!({"type": "thinking", "thinking": reasoning}));
+                }
                 if let Some(content) = &msg.content {
                     blocks.push(serde_json::json!({"type": "text", "text": content}));
                 }
@@ -873,5 +895,79 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
     }
     if tested == 0 {
         println!("[net-test] 没有已启用的供应商模型");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finish_filters_nameless_tool_calls() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut calls = vec![
+            ToolCall {
+                id: "a".into(),
+                name: String::new(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "b".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        finish(&tx, &mut calls);
+        match rx.try_recv() {
+            Ok(ProviderEvent::ToolCalls(calls)) => {
+                assert_eq!(calls.len(), 1, "无名调用应被过滤");
+                assert_eq!(calls[0].name, "bash");
+            }
+            other => panic!("应滤出剩余的命名调用: {other:?}"),
+        }
+        assert!(matches!(rx.try_recv(), Ok(ProviderEvent::Finished)));
+    }
+
+    #[test]
+    fn finish_all_nameless_emits_no_tool_calls() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut calls = vec![ToolCall::default()];
+        finish(&tx, &mut calls);
+        assert!(matches!(rx.try_recv(), Ok(ProviderEvent::Finished)));
+        assert!(rx.try_recv().is_err(), "全是无名调用时不应发 ToolCalls");
+    }
+
+    #[test]
+    fn anthropic_messages_echo_thinking_first() {
+        let messages = vec![
+            ChatMsg::system("s".into()),
+            ChatMsg::user("u".into()),
+            ChatMsg::assistant(
+                "回答".into(),
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }],
+                Some("想了想".into()),
+            ),
+            ChatMsg::tool_result("c1", "ok".into()),
+        ];
+        let (_system, out) = to_anthropic_messages(&messages);
+        let assistant = &out[1];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"][0]["type"], "thinking");
+        assert_eq!(assistant["content"][0]["thinking"], "想了想");
+        assert_eq!(assistant["content"][1]["type"], "text");
+        assert_eq!(assistant["content"][2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn anthropic_messages_skip_empty_thinking() {
+        let messages = vec![ChatMsg::assistant("回答".into(), vec![], None)];
+        let (_system, out) = to_anthropic_messages(&messages);
+        let content = out[0]["content"].as_array().expect("blocks");
+        assert_eq!(content.len(), 1, "无思考内容时不应有 thinking 块");
+        assert_eq!(content[0]["type"], "text");
     }
 }

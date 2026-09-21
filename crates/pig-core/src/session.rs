@@ -654,7 +654,9 @@ impl Session {
         let _ = provider_task.await;
 
         if !reasoning.is_empty() {
-            self.record(&RolloutRecord::Reasoning { text: reasoning });
+            self.record(&RolloutRecord::Reasoning {
+                text: reasoning.clone(),
+            });
         }
         if !text.is_empty() {
             self.emit(
@@ -668,7 +670,12 @@ impl Session {
             );
             self.record(&RolloutRecord::Text { text: text.clone() });
         }
-        self.history.push(ChatMsg::assistant(text, tool_calls.clone()));
+        // 思考内容随 assistant 消息进历史：Anthropic thinking 模式要求回传
+        self.history.push(ChatMsg::assistant(
+            text,
+            tool_calls.clone(),
+            Some(reasoning).filter(|r| !r.is_empty()),
+        ));
         if tool_calls.is_empty() {
             return StepOutcome::TextOnly;
         }
