@@ -57,7 +57,7 @@ impl RelativeTime for u64 {
 }
 
 use crate::agent_client::AgentClient;
-use crate::composer::{Composer, ComposerEvent};
+use crate::composer::{Composer, ComposerEvent, PendingApproval};
 use crate::review_panel::{ReviewEvent, ReviewPanel};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
@@ -76,6 +76,8 @@ struct AppView {
     metas: Vec<SessionMeta>,
     running: HashSet<String>,
     approval_pending: HashSet<String>,
+    /// 待审批详情（审批条内容）：决议/回合结束时清除
+    pending_approvals: HashMap<String, PendingApproval>,
     stats: HashMap<String, (u32, u32)>,
     agent: AgentClient,
     cwd: PathBuf,
@@ -122,6 +124,7 @@ impl AppView {
             metas: vec![],
             running: HashSet::new(),
             approval_pending: HashSet::new(),
+            pending_approvals: HashMap::new(),
             stats: HashMap::new(),
             agent,
             hero_cwd: None,
@@ -211,6 +214,7 @@ impl AppView {
         self.current = None;
         self.running.clear();
         self.approval_pending.clear();
+        self.pending_approvals.clear();
         self.stats.clear();
         self._agent_handle = handle;
         self.spawn_event_pump(self._agent_handle.events.clone(), cx);
@@ -224,13 +228,18 @@ impl AppView {
         }
         let thread = cx.new(|cx| ThreadView::new(cx));
         let review = cx.new(|cx| ReviewPanel::new(cx));
-        self._subscriptions
-            .push(cx.subscribe(&thread, |this, _, event, cx| match event {
+        let sid = session_id.to_string();
+        self._subscriptions.push(
+            cx.subscribe(&thread, move |this, _, event, cx| match event {
                 ThreadEvent::ApprovalReply {
                     request_id,
                     decision,
                 } => {
                     this.agent.approval_reply(request_id.clone(), *decision);
+                    // 决议后立即撤掉审批条（不等回合结束），恢复输入框
+                    this.approval_pending.remove(&sid);
+                    this.pending_approvals.remove(&sid);
+                    this.sync_composer_state(cx);
                 }
                 ThreadEvent::ExecutePlan => {
                     this.on_execute_plan(cx);
@@ -240,7 +249,8 @@ impl AppView {
                         this.agent.cancel_queued(sid, text.clone());
                     }
                 }
-            }));
+            }),
+        );
         self._subscriptions
             .push(cx.subscribe(&review, |this, _, event: &ReviewEvent, _| {
                 let ReviewEvent::Revert(path) = event;
@@ -402,13 +412,29 @@ impl AppView {
                 Event::TurnComplete { .. } | Event::TurnAborted { .. } => {
                     self.running.remove(sid);
                     self.approval_pending.remove(sid);
+                    self.pending_approvals.remove(sid);
                 }
-                Event::ApprovalRequested { .. } => {
+                Event::ApprovalRequested { tool, detail, .. } => {
                     self.approval_pending.insert(sid.clone());
+                    let cwd = self
+                        .metas
+                        .iter()
+                        .find(|m| &m.id == sid)
+                        .map(|m| m.cwd.display().to_string())
+                        .unwrap_or_default();
+                    self.pending_approvals.insert(
+                        sid.clone(),
+                        PendingApproval {
+                            tool: tool.clone(),
+                            detail: detail.clone(),
+                            cwd,
+                        },
+                    );
                 }
                 Event::Error { .. } => {
                     self.running.remove(sid);
                     self.approval_pending.remove(sid);
+                    self.pending_approvals.remove(sid);
                 }
                 _ => {}
             }
@@ -467,10 +493,10 @@ impl AppView {
     fn sync_composer_state(&self, cx: &mut Context<Self>) {
         let Some(sid) = &self.current else { return };
         let streaming = self.running.contains(sid);
-        let pending = self.approval_pending.contains(sid);
+        let approval = self.pending_approvals.get(sid).cloned();
         self.composer.update(cx, |composer, cx| {
             composer.set_streaming(streaming, cx);
-            composer.set_approval_pending(pending, cx);
+            composer.set_approval(approval, cx);
         });
     }
 
@@ -750,6 +776,18 @@ impl AppView {
                 }
             }
             ComposerEvent::OpenSettings => self.open_settings(cx),
+            ComposerEvent::DecideApproval(decision) => {
+                // 走 ThreadView::decide_pending 单一路径：更新线程内审批卡状态并
+                // 经 ThreadEvent::ApprovalReply 回复 core（那里同时清掉待审批态）
+                if let Some(sid) = &self.current
+                    && let Some(views) = self.views.get(sid)
+                {
+                    let decision = *decision;
+                    views.thread.update(cx, |thread, cx| {
+                        thread.decide_pending(decision, cx);
+                    });
+                }
+            }
             ComposerEvent::SearchFiles(query) => {
                 if let Some(sid) = &self.current {
                     self.agent.search_files(sid.clone(), query.clone());

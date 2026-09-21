@@ -9,7 +9,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use pig_protocol::ExecMode;
+use pig_protocol::{ApprovalDecision, ExecMode};
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "清空当前会话消息"),
@@ -42,6 +42,15 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
 /// (供应商名, provider_id, model_id, 推理等级列表)
 pub type ModelOption = (String, String, String, Vec<String>);
 
+/// 待审批的操作：审批期间输入框隐藏，显示审批条。
+#[derive(Clone)]
+pub struct PendingApproval {
+    pub tool: String,
+    /// bash 是命令原文；write_file/edit 是 diff 预览
+    pub detail: String,
+    pub cwd: String,
+}
+
 #[derive(Clone)]
 pub enum ComposerEvent {
     Send {
@@ -68,6 +77,8 @@ pub enum ComposerEvent {
     ClearCwd,
     /// hero：切换 git 分支
     CheckoutBranch(String),
+    /// 审批条：批准 / 本会话内批准 / 拒绝
+    DecideApproval(ApprovalDecision),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,6 +95,15 @@ enum Popup {
 
 impl EventEmitter<ComposerEvent> for Composer {}
 
+/// 弹层相对触发芯片的水平锚点。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PopupAnchor {
+    Left,
+    Right,
+    /// 弹层水平中线对齐芯片中线（上下文容量面板用）。
+    Center,
+}
+
 pub struct Composer {
     input: Entity<TextareaState>,
     attachments: Vec<&'static str>,
@@ -92,8 +112,17 @@ pub struct Composer {
     models: Vec<ModelOption>,
     reasoning_level: Option<String>,
     popup: Option<(Popup, usize)>,
+    /// 最近一次被 on_mouse_down_out 关掉的弹层及按下位置：弹层打开时点击芯片，
+    /// outside-close 先把它关掉，同一次按压的 click 紧跟着到达——按按下位置吞掉它，
+    /// 避免「收起又马上弹开」。
+    outside_closed: Option<(Popup, Point<Pixels>)>,
     streaming: bool,
-    approval_pending: bool,
+    /// 待审批：Some 时输入区隐藏，显示审批条
+    approval: Option<PendingApproval>,
+    /// 审批条的焦点（承接 ⏎ / Ctrl+⏎ / Esc 快捷键）
+    approval_focus: FocusHandle,
+    /// 是否已为当前审批条抢过焦点（每次出现只抢一次）
+    approval_focused: bool,
     mention_results: Vec<String>,
     context_usage: Option<(u64, u64)>,
     hero_mode: bool,
@@ -139,8 +168,11 @@ impl Composer {
             models: vec![],
             reasoning_level: None,
             popup: None,
+            outside_closed: None,
             streaming: false,
-            approval_pending: false,
+            approval: None,
+            approval_focus: cx.focus_handle(),
+            approval_focused: false,
             mention_results: Vec::new(),
             context_usage: None,
             hero_mode: false,
@@ -219,9 +251,24 @@ impl Composer {
         self.reasoning_level.clone()
     }
 
-    pub fn set_approval_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
-        self.approval_pending = pending;
+    /// 待审批操作：Some 时输入区隐藏，显示审批条；None 恢复输入。
+    pub fn set_approval(&mut self, approval: Option<PendingApproval>, cx: &mut Context<Self>) {
+        self.approval = approval;
         cx.notify();
+    }
+
+    /// 审批条决议：清空审批态、发事件、焦点还回输入框。
+    fn decide_approval(
+        &mut self,
+        decision: ApprovalDecision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.approval.take().is_some() {
+            cx.emit(ComposerEvent::DecideApproval(decision));
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+        }
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -318,7 +365,7 @@ impl Composer {
         }
     }
 
-    /// 上下文容量面板：标题 + 用量/占比 + 进度条，锚定在指示器芯片正上方。
+    /// 上下文容量面板：标题 + 用量/占比 + 进度条，居中锚定在指示器芯片正上方（悬停展示）。
     fn render_context_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let (used, total) = self.context_usage.unwrap_or((0, 1));
         let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
@@ -334,7 +381,7 @@ impl Composer {
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
-            .bg(Self::command_surface(cx))
+            .bg(cx.theme().popover)
             .p_3()
             .child(
                 h_flex()
@@ -358,17 +405,27 @@ impl Composer {
                     .w_full()
                     .h(px(6.))
                     .rounded_full()
-                    .bg(cx.theme().border)
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(ratio))
-                            .rounded_full()
-                            .bg(bar_color),
-                    ),
+                    .bg(cx.theme().muted_foreground.opacity(0.15))
+                    .when(used > 0, |this| {
+                        this.child(
+                            div()
+                                .h_full()
+                                .w(relative(ratio))
+                                // 极小占比也保留可见的一截（0.1% 仅 0.3px，会被圆整掉）
+                                .min_w(px(3.))
+                                .rounded_full()
+                                .bg(bar_color),
+                        )
+                    }),
             )
             .into_any_element();
-        self.popup_shell("composer-context-popup", content, true, cx)
+        self.popup_shell(
+            "composer-context-popup",
+            content,
+            PopupAnchor::Center,
+            None,
+            cx,
+        )
     }
 
     fn popup_query(&self, cx: &App) -> Option<(Popup, usize, String)> {
@@ -546,41 +603,55 @@ impl Composer {
         )
     }
 
-    /// Command 面板的表面色：暗色主题下 popover 与窗口背景同为 #0a0a0a，
-    /// 面板会糊在背景上像透明一样，覆盖为不透明 neutral-800（比输入框容器亮一档）；
-    /// 亮色主题保持 popover。
-    fn command_surface(cx: &App) -> Hsla {
-        if cx.theme().is_dark() {
-            hsla(0., 0., 0.15, 1.)
-        } else {
-            cx.theme().popover
-        }
-    }
-
     /// 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
-    /// `anchor_right` 时右对齐触发芯片（底部右侧芯片的弹层避免超出输入框右缘）。
+    /// `anchor` 为 Center 时弹层水平中线对齐芯片中线（定宽 360）；
+    /// 其余弹层宽度按内容伸缩（160 ~ 360）。
+    /// `hover_clear`：Command 面板是「悬停即选中」，鼠标移出面板后选中行的高亮
+    /// 会残留，传对应 CommandState 时在移出面板时清掉选中。
     fn popup_shell(
         &self,
         id: &'static str,
         content: AnyElement,
-        anchor_right: bool,
+        anchor: PopupAnchor,
+        hover_clear: Option<Entity<CommandState>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
             .id(id)
             .absolute()
             .bottom_full()
-            .when(!anchor_right, |this| this.left_0())
-            .when(anchor_right, |this| this.right_0())
             .mb_2()
-            .w(px(360.))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            .map(|this| match anchor {
+                PopupAnchor::Left => this.left_0(),
+                PopupAnchor::Right => this.right_0(),
+                // 外层拉伸到芯片宽度，再由 flex 把固定宽的面板居中到芯片中线
+                PopupAnchor::Center => this.left_0().right_0().flex().flex_row().justify_center(),
+            })
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if let Some((kind, _)) = this.popup {
+                    this.outside_closed = Some((kind, event.position));
+                }
                 this.popup = None;
                 cx.notify();
             }))
+            .when_some(hover_clear, |this, command| {
+                this.on_hover(cx.listener(move |_, hovered: &bool, window, cx| {
+                    if !*hovered {
+                        command.update(cx, |state, cx| {
+                            state.set_selected_index(None, window, cx);
+                        });
+                    }
+                }))
+            })
             .child(
                 div()
                     .relative()
+                    .map(|this| match anchor {
+                        // 上下文容量面板内容固定（标题行 + 进度条），定宽居中
+                        PopupAnchor::Center => this.w(px(360.)),
+                        // 其余面板按内容伸缩：思考等级这类短列表不用撑满 360
+                        _ => this.min_w(px(160.)).max_w(px(360.)),
+                    })
                     .with_animation(
                         format!("{id}-enter"),
                         Animation::new(std::time::Duration::from_millis(150))
@@ -596,11 +667,18 @@ impl Composer {
     fn command_popup_shell(
         &self,
         id: &'static str,
+        state: &Entity<CommandState>,
         command: Command,
-        anchor_right: bool,
+        anchor: PopupAnchor,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.popup_shell(id, command.into_any_element(), anchor_right, cx)
+        self.popup_shell(
+            id,
+            command.into_any_element(),
+            anchor,
+            Some(state.clone()),
+            cx,
+        )
     }
 
     /// 面板确认/取消的通用收尾：关闭弹层并回焦输入框。
@@ -610,22 +688,28 @@ impl Composer {
         cx.notify();
     }
 
-    /// 芯片点击开合弹层：outside-click 在 capture 阶段已先关掉面板时，
-    /// 同一击不再重开（与渲染时状态一致才翻转）；打开时重置并聚焦对应 Command 面板。
+    /// 芯片点击开合弹层：弹层打开时点击芯片会先触发弹层的 on_mouse_down_out 把它
+    /// 关掉（中间隔着一次重渲染，渲染时捕获的开合状态不可靠），这里按「同一次按压
+    /// 的按下位置」吞掉紧随其后的 click，避免收起又马上弹开。
     fn toggle_popup(
         &mut self,
         kind: Popup,
-        render_open: bool,
+        click: &ClickEvent,
         command: Option<Entity<CommandState>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let open_now = matches!(self.popup, Some((k, _)) if k == kind);
-        if open_now != render_open {
-            cx.notify();
+        let down_pos = match click {
+            ClickEvent::Mouse(event) => Some(event.down.position),
+            _ => None,
+        };
+        if let Some((closed, pos)) = self.outside_closed.take()
+            && closed == kind
+            && Some(pos) == down_pos
+        {
             return;
         }
-        if open_now {
+        if matches!(self.popup, Some((k, _)) if k == kind) {
             self.close_command_popup(window, cx);
         } else {
             self.popup = Some((kind, 0));
@@ -679,7 +763,7 @@ impl Composer {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
-        let mut command = Command::new(&self.cwd_command)
+        let command = Command::new(&self.cwd_command)
             .placeholder("搜索工作区")
             .items(self.hero_cwds.iter().map(|cwd| {
                 let name = std::path::Path::new(cwd)
@@ -731,9 +815,13 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             });
-        command.style().background = Some(Self::command_surface(cx).into());
-
-        self.command_popup_shell("composer-cwd-popup", command, false, cx)
+        self.command_popup_shell(
+            "composer-cwd-popup",
+            &self.cwd_command,
+            command,
+            PopupAnchor::Left,
+            cx,
+        )
     }
 
     /// 分支选择面板：Command 面板（搜索框 + 分支列表），锚定在分支芯片正上方。
@@ -741,7 +829,7 @@ impl Composer {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
-        let mut command = Command::new(&self.branch_command)
+        let command = Command::new(&self.branch_command)
             .placeholder("搜索分支")
             .items(self.hero_branches.iter().map(|branch| {
                 CommandItem::new()
@@ -771,9 +859,13 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             });
-        command.style().background = Some(Self::command_surface(cx).into());
-
-        self.command_popup_shell("composer-branch-popup", command, false, cx)
+        self.command_popup_shell(
+            "composer-branch-popup",
+            &self.branch_command,
+            command,
+            PopupAnchor::Left,
+            cx,
+        )
     }
 
     /// 执行模式面板：无搜索框，每项带图标 + 描述，当前模式勾选。
@@ -781,7 +873,7 @@ impl Composer {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
-        let mut command = Command::new(&self.exec_command)
+        let command = Command::new(&self.exec_command)
             .searchable(false)
             .items(
                 EXEC_MODES
@@ -827,9 +919,13 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             });
-        command.style().background = Some(Self::command_surface(cx).into());
-
-        self.command_popup_shell("composer-exec-popup", command, false, cx)
+        self.command_popup_shell(
+            "composer-exec-popup",
+            &self.exec_command,
+            command,
+            PopupAnchor::Left,
+            cx,
+        )
     }
 
     /// 模型面板：搜索框 + 按供应商分组的模型列表 + 「管理模型」操作行。
@@ -871,7 +967,7 @@ impl Composer {
                 .label("管理模型")
                 .icon(AssetIconName::Settings),
         );
-        let mut command = command
+        let command = command
             .empty(|_, _, cx| {
                 div()
                     .px_2()
@@ -901,9 +997,13 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             });
-        command.style().background = Some(Self::command_surface(cx).into());
-
-        self.command_popup_shell("composer-model-popup", command, true, cx)
+        self.command_popup_shell(
+            "composer-model-popup",
+            &self.model_command,
+            command,
+            PopupAnchor::Right,
+            cx,
+        )
     }
 
     /// 思考等级面板：无搜索框，「关闭」+ 等级列表，当前等级勾选。
@@ -912,7 +1012,7 @@ impl Composer {
         let on_cancel_composer = cx.entity();
         let levels = levels.to_vec();
 
-        let mut command = Command::new(&self.reasoning_command)
+        let command = Command::new(&self.reasoning_command)
             .searchable(false)
             .item(
                 CommandItem::new()
@@ -941,9 +1041,13 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             });
-        command.style().background = Some(Self::command_surface(cx).into());
-
-        self.command_popup_shell("composer-reasoning-popup", command, true, cx)
+        self.command_popup_shell(
+            "composer-reasoning-popup",
+            &self.reasoning_command,
+            command,
+            PopupAnchor::Right,
+            cx,
+        )
     }
 
     fn render_attachments(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -980,6 +1084,103 @@ impl Composer {
             }))
             .into_any_element()
     }
+
+    /// 审批条（kimi 同款）：审批期间替换输入区。橙色圆点 + 标题，深色内嵌块
+    /// 展示命令/diff，底部 本会话内批准(Ctrl+⏎) / 拒绝(Esc) / 批准(⏎)。
+    fn render_approval_bar(
+        &self,
+        approval: &PendingApproval,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = match approval.tool.as_str() {
+            "bash" => "运行命令？".to_string(),
+            "write_file" => "写入文件？".to_string(),
+            "edit" => "修改文件？".to_string(),
+            tool => format!("执行 {tool}？"),
+        };
+        let detail = if approval.tool == "bash" {
+            format!("$ {}", approval.detail)
+        } else {
+            approval.detail.clone()
+        };
+        let cwd = approval.cwd.clone();
+
+        v_flex()
+            .id("approval-bar")
+            .w_full()
+            .gap_3()
+            .p_2()
+            .track_focus(&self.approval_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let decision = match event.keystroke.key.as_str() {
+                    "enter" if event.keystroke.modifiers.control => {
+                        Some(ApprovalDecision::AlwaysAllow)
+                    }
+                    "enter" => Some(ApprovalDecision::Allow),
+                    "escape" => Some(ApprovalDecision::Reject),
+                    _ => None,
+                };
+                if let Some(decision) = decision {
+                    this.decide_approval(decision, window, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().size(px(8.)).rounded_full().bg(cx.theme().warning))
+                    .child(div().text_sm().font_medium().child(title)),
+            )
+            .child(
+                div()
+                    .id("approval-detail")
+                    .w_full()
+                    .rounded(px(10.))
+                    .bg(cx.theme().background)
+                    .p_3()
+                    .max_h(px(200.))
+                    .overflow_y_scroll()
+                    .text_sm()
+                    .font_family("monospace")
+                    .child(detail),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("工作目录： {cwd}")),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("approval-always")
+                            .secondary()
+                            .label("本会话内批准  Ctrl+⏎")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.decide_approval(ApprovalDecision::AlwaysAllow, window, cx);
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("approval-reject")
+                            .secondary()
+                            .label("拒绝  Esc")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.decide_approval(ApprovalDecision::Reject, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("approval-allow")
+                            .primary()
+                            .label("批准  ⏎")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.decide_approval(ApprovalDecision::Allow, window, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for Composer {
@@ -994,6 +1195,20 @@ impl Render for Composer {
             self.input.update(cx, |input, cx| {
                 input.set_placeholder(desired_placeholder, window, cx);
             });
+        }
+        let approval = self.approval.clone();
+        // 审批条出现/消失时做一次焦点交接：出现时抢焦点承接 ⏎/Esc 快捷键，
+        // 消失（决议或回合结束）后焦点还回输入框
+        match (&approval, self.approval_focused) {
+            (Some(_), false) => {
+                self.approval_focused = true;
+                self.approval_focus.focus(window, cx);
+            }
+            (None, true) => {
+                self.approval_focused = false;
+                self.input.update(cx, |input, cx| input.focus(window, cx));
+            }
+            _ => {}
         }
         let cwd_open = matches!(self.popup, Some((Popup::Cwd, _)));
         let cwd_popup = cwd_open.then(|| self.render_cwd_popup(cx));
@@ -1025,7 +1240,7 @@ impl Render for Composer {
         };
 
         // 输入框容器表面色：暗色下提亮到 neutral-850 左右从窗口背景浮起（参考官网
-        // message-scroller 的输入框），比 Command 面板暗一档保持 窗口 < 输入框 < 面板 的层次。
+        // message-scroller 的输入框）；弹层面板用主题 popover 深色 + 边框分界。
         let composer_surface = if cx.theme().is_dark() {
             hsla(0., 0., 0.11, 1.)
         } else {
@@ -1082,11 +1297,11 @@ impl Render for Composer {
                                                     .cursor_pointer()
                                                     .hover(|this| this.bg(cx.theme().accent))
                                                     .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
+                                                        move |this, event: &ClickEvent, window, cx| {
                                                             let command = this.cwd_command.clone();
                                                             this.toggle_popup(
                                                                 Popup::Cwd,
-                                                                cwd_open,
+                                                                event,
                                                                 Some(command),
                                                                 window,
                                                                 cx,
@@ -1138,13 +1353,13 @@ impl Render for Composer {
                                                                     this.bg(cx.theme().accent)
                                                                 })
                                                                 .on_click(cx.listener(
-                                                                    move |this, _, window, cx| {
+                                                                    move |this, event: &ClickEvent, window, cx| {
                                                                         let command = this
                                                                             .branch_command
                                                                             .clone();
                                                                         this.toggle_popup(
                                                                             Popup::Branch,
-                                                                            branch_open,
+                                                                            event,
                                                                             Some(command),
                                                                             window,
                                                                             cx,
@@ -1197,25 +1412,22 @@ impl Render for Composer {
                         .when(!self.attachments.is_empty(), |this| {
                             this.child(self.render_attachments(cx))
                         })
-                        .when(self.approval_pending, |this| {
+                        .when_some(approval.clone(), |this, approval| {
+                            this.child(self.render_approval_bar(&approval, cx))
+                        })
+                        .when(approval.is_none(), |this| {
                             this.child(
-                                h_flex()
-                                    .gap_2()
-                                    .text_xs()
-                                    .text_color(cx.theme().warning)
+                                div()
+                                    .relative()
+                                    .w_full()
                                     .child(
-                                        "⏳ 等待审批：请在上方审批卡中选择 允许 / 始终允许 / 拒绝",
-                                    ),
+                                        Textarea::new(&self.input).appearance(false).bordered(false),
+                                    )
+                                    .children(popup),
                             )
                         })
-                        .child(
-                            div()
-                                .relative()
-                                .w_full()
-                                .child(Textarea::new(&self.input).appearance(false).bordered(false))
-                                .children(popup),
-                        )
-                        .child(
+                        .when(approval.is_none(), |this| {
+                            this.child(
                             h_flex()
                                 .w_full()
                                 .gap_2()
@@ -1226,12 +1438,12 @@ impl Render for Composer {
                                             "exec-mode",
                                             Some(exec_mode_icon(EXEC_MODES[self.exec_mode].2)),
                                             EXEC_MODES[self.exec_mode].0.to_string(),
-                                            true,
-                                            cx.listener(move |this, _, window, cx| {
+                                            exec_open,
+                                            cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                 let command = this.exec_command.clone();
                                                 this.toggle_popup(
                                                     Popup::ExecMode,
-                                                    exec_open,
+                                                    event,
                                                     Some(command),
                                                     window,
                                                     cx,
@@ -1243,7 +1455,7 @@ impl Render for Composer {
                                 )
                                 .child(div().flex_1())
                                 .when_some(self.context_usage, |this, (used, total)| {
-                                    // 上下文水位环形指示器（ZCode 同款）：点开是容量面板
+                                    // 上下文水位环形指示器（ZCode 同款）：悬停展示容量面板
                                     let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
                                     let ring_color = if ratio > 0.8 {
                                         cx.theme().warning
@@ -1259,20 +1471,22 @@ impl Render for Composer {
                                                     .px_2()
                                                     .py_1()
                                                     .rounded_full()
-                                                    .cursor_pointer()
                                                     .when(context_open, |this| {
                                                         this.bg(cx.theme().accent)
                                                     })
                                                     .hover(|this| this.bg(cx.theme().accent))
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.toggle_popup(
-                                                                Popup::Context,
-                                                                context_open,
-                                                                None,
-                                                                window,
-                                                                cx,
-                                                            );
+                                                    .on_hover(cx.listener(
+                                                        |this, hovered: &bool, _, cx| {
+                                                            if *hovered {
+                                                                this.popup =
+                                                                    Some((Popup::Context, 0));
+                                                            } else if matches!(
+                                                                this.popup,
+                                                                Some((Popup::Context, _))
+                                                            ) {
+                                                                this.popup = None;
+                                                            }
+                                                            cx.notify();
                                                         },
                                                     ))
                                                     .child(
@@ -1295,11 +1509,11 @@ impl Render for Composer {
                                             None,
                                             self.model.clone(),
                                             model_open,
-                                            cx.listener(move |this, _, window, cx| {
+                                            cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                 let command = this.model_command.clone();
                                                 this.toggle_popup(
                                                     Popup::Model,
-                                                    model_open,
+                                                    event,
                                                     Some(command),
                                                     window,
                                                     cx,
@@ -1321,12 +1535,12 @@ impl Render for Composer {
                                                         .clone()
                                                         .unwrap_or_else(|| "关".into()),
                                                     reasoning_open,
-                                                    cx.listener(move |this, _, window, cx| {
+                                                    cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                         let command =
                                                             this.reasoning_command.clone();
                                                         this.toggle_popup(
                                                             Popup::Reasoning,
-                                                            reasoning_open,
+                                                            event,
                                                             Some(command),
                                                             window,
                                                             cx,
@@ -1367,7 +1581,8 @@ impl Render for Composer {
                                             )),
                                     )
                                 }),
-                        ),
+                            )
+                        }),
                 ),
         )
     }

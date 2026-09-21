@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
-use gpui_kit::component::{Sizable as _, StyledExt as _};
+use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::{ApprovalDecision, Event};
@@ -21,6 +22,10 @@ pub enum Segment {
         open: bool,
         /// 用户手动展开/收过后为 true，自动折叠不再覆盖
         pinned: bool,
+        /// 秒表起点（首个 delta 到达时刻）
+        started: std::time::Instant,
+        /// 思考结束定格的用时；回放重建的历史段没有真实时钟，保持 None（显示「持续了几秒」）
+        duration: Option<std::time::Duration>,
     },
     Markdown {
         state: Entity<TextViewState>,
@@ -36,10 +41,7 @@ pub enum Segment {
     },
     Approval {
         request_id: String,
-        tool: String,
-        detail: String,
         decision: Option<ApprovalDecision>,
-        detail_open: bool,
     },
 }
 
@@ -104,6 +106,8 @@ pub struct ThreadView {
     /// 计划模式回合完成，等待用户确认执行
     plan_pending: bool,
     turn_started: Option<std::time::Instant>,
+    /// 当前回合由回放重建（turn_id 以 replay- 开头）：思考段不打真实用时
+    replay_turn: bool,
     /// 本会话变更统计（来自 AppView 汇总）
     changes: (u32, u32),
     /// 排队中的消息（FIFO）
@@ -141,6 +145,7 @@ impl ThreadView {
             context_usage: None,
             plan_pending: false,
             turn_started: None,
+            replay_turn: false,
             changes: (0, 0),
             queued: Vec::new(),
             _ticker: ticker,
@@ -313,17 +318,24 @@ impl ThreadView {
     pub fn reduce_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::SessionConfigured { .. } => {}
-            Event::TurnStarted { .. } => {
+            Event::TurnStarted { turn_id, .. } => {
                 self.plan_pending = false;
+                self.replay_turn = turn_id.starts_with("replay-");
                 self.messages.push(ChatMessage::assistant());
                 self.item_index.clear();
                 self.set_streaming(true, cx);
             }
             Event::ReasoningDelta { item_id, delta, .. } => {
+                if !self.item_index.contains_key(&item_id) {
+                    // 新一段思考开始 = 上一段思考结束
+                    self.finish_thinking();
+                }
                 let six = self.find_or_create(&item_id, || Segment::Thinking {
                     text: String::new(),
-                    open: true,
+                    open: false,
                     pinned: false,
+                    started: std::time::Instant::now(),
+                    duration: None,
                 });
                 if let Some(Segment::Thinking { text, .. }) = self.current_segment(six) {
                     text.push_str(&delta);
@@ -331,6 +343,7 @@ impl ThreadView {
                 self.scroll_handle.scroll_to_bottom();
             }
             Event::TextDelta { item_id, delta, .. } => {
+                self.finish_thinking();
                 let state_holder = cx.new(|cx| TextViewState::markdown("", cx));
                 let six = self.find_or_create(&item_id, || Segment::Markdown {
                     state: state_holder,
@@ -346,6 +359,7 @@ impl ThreadView {
             Event::TextDone {
                 item_id, full_text, ..
             } => {
+                self.finish_thinking();
                 let state_holder = cx.new(|cx| TextViewState::markdown("", cx));
                 let six = self.find_or_create(&item_id, || Segment::Markdown {
                     state: state_holder,
@@ -362,6 +376,7 @@ impl ThreadView {
                 input_summary,
                 ..
             } => {
+                self.finish_thinking();
                 let six = self.find_or_create(&item_id, || Segment::ToolCall {
                     tool: tool.clone(),
                     summary: input_summary.clone(),
@@ -394,21 +409,22 @@ impl ThreadView {
                     output: out,
                     is_error: err,
                     done,
+                    expanded,
                     ..
                 }) = self.current_segment(six)
                 {
                     *out = output;
                     *err = is_error;
                     *done = true;
+                    // 失败的调用直接展开输出，省去用户多点一下
+                    if is_error {
+                        *expanded = true;
+                    }
                 }
                 self.scroll_handle.scroll_to_bottom();
             }
-            Event::ApprovalRequested {
-                request_id,
-                tool,
-                detail,
-                ..
-            } => {
+            Event::ApprovalRequested { request_id, .. } => {
+                self.finish_thinking();
                 if self
                     .messages
                     .last()
@@ -422,10 +438,7 @@ impl ThreadView {
                     .segments
                     .push(Segment::Approval {
                         request_id,
-                        tool,
-                        detail,
                         decision: None,
-                        detail_open: false,
                     });
                 self.scroll_handle.scroll_to_bottom();
             }
@@ -433,6 +446,8 @@ impl ThreadView {
                 self.context_usage = Some((used, total));
             }
             Event::TurnComplete { duration_ms, .. } => {
+                self.finish_thinking();
+                self.replay_turn = false;
                 if let Some(message) = self.messages.last_mut() {
                     for segment in &mut message.segments {
                         if let Segment::Thinking { open, pinned, .. } = segment {
@@ -460,6 +475,8 @@ impl ThreadView {
                 self.set_streaming(false, cx);
             }
             Event::TurnAborted { .. } => {
+                self.finish_thinking();
+                self.replay_turn = false;
                 if let Some(message) = self.messages.last_mut() {
                     message.footer = Some("已停止".to_string());
                 }
@@ -490,12 +507,33 @@ impl ThreadView {
             | Event::TestResult { .. }
             | Event::ProjectList { .. } => {}
             Event::Error { message, .. } => {
+                self.finish_thinking();
+                self.replay_turn = false;
                 self.set_streaming(false, cx);
                 self.messages
                     .push(ChatMessage::system(format!("⚠ {message}")));
             }
         }
         cx.notify();
+    }
+
+    /// 收尾当前消息里还在计时的思考段，定格用时。
+    /// 回放重建的回合没有真实时钟（事件在一瞬间到达），保持 None 显示「持续了几秒」。
+    fn finish_thinking(&mut self) {
+        if self.replay_turn {
+            return;
+        }
+        let Some(message) = self.messages.last_mut() else {
+            return;
+        };
+        for segment in &mut message.segments {
+            if let Segment::Thinking {
+                started, duration, ..
+            } = segment
+            {
+                duration.get_or_insert_with(|| started.elapsed());
+            }
+        }
     }
 
     /// 在当前助手消息里按 item_id 找 segment，找不到则用 `create` 追加。
@@ -560,28 +598,39 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// 思考折叠块（ZCode 同款）：无边框的一行 header（大脑图标 + 文案 + 箭头），
+    /// 展开后正文以左侧竖线缩进展示，超高内部滚动。
+    #[allow(clippy::too_many_arguments)]
     fn render_thinking(
         &self,
         message_ix: usize,
         segment_ix: usize,
         text: &str,
         open: bool,
+        started: std::time::Instant,
+        duration: Option<std::time::Duration>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let secs = |d: std::time::Duration| (d.as_secs_f64().ceil() as u64).max(1);
+        let label = match duration {
+            Some(d) => format!("思考 · 持续了 {} 秒", secs(d)),
+            // 思考仍在进行：流式中且不是回放（回放的 TurnComplete 前 streaming 也为 true）
+            None if self.streaming && !self.replay_turn => {
+                format!("正在思考 · {} 秒", secs(started.elapsed()))
+            }
+            // 回放重建的历史段没有真实时钟
+            None => "思考 · 持续了几秒".to_string(),
+        };
+        let muted = cx.theme().muted_foreground;
         v_flex()
             .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .id(("thinking", message_ix * 1024 + segment_ix))
                     .w_full()
                     .gap_2()
-                    .px_3()
                     .py_1()
-                    .rounded(cx.theme().radius)
-                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                    .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::Thinking { open, pinned, .. }) = this
                             .messages
@@ -593,6 +642,8 @@ impl ThreadView {
                         }
                         cx.notify();
                     }))
+                    .child(Icon::new(AssetIconName::Brain).size_4().text_color(muted))
+                    .child(div().text_sm().text_color(muted).child(label))
                     .child(
                         Icon::new(if open {
                             IconName::ChevronDown
@@ -600,182 +651,32 @@ impl ThreadView {
                             IconName::ChevronRight
                         })
                         .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("思考过程（{} 字）", text.chars().count())),
+                        .text_color(muted),
                     ),
             )
             .when(open, |this| {
                 this.child(
                     div()
-                        .relative()
-                        .px_3()
-                        .py_2()
-                        .border_t_1()
+                        .id(("thinking-body", message_ix * 1024 + segment_ix))
+                        .mt_1()
+                        .ml(px(8.))
+                        .border_l_1()
                         .border_color(cx.theme().border)
+                        .pl(px(14.))
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
                         .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .with_animation(
-                            ("thinking-open", message_ix * 1024 + segment_ix),
-                            Animation::new(std::time::Duration::from_millis(120))
-                                .with_easing(ease_out_quint()),
-                            |el, delta| el.top(px(4.0 * (1.0 - delta))).opacity(delta),
-                        )
+                        .text_color(muted)
                         .child(text.to_string()),
                 )
             })
             .into_any_element()
     }
 
-    fn render_approval(
-        &self,
-        message_ix: usize,
-        segment_ix: usize,
-        tool: &str,
-        detail: &str,
-        decision: Option<ApprovalDecision>,
-        detail_open: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let detail_lines: Vec<&str> = detail.lines().collect();
-        let overflow = detail_lines.len() > 10 && !detail_open;
-        let visible: &[&str] = if overflow {
-            &detail_lines[..10]
-        } else {
-            &detail_lines
-        };
-
-        v_flex()
-            .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().warning)
-            .bg(cx.theme().popover)
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .child(
-                        Icon::new(IconName::TriangleAlert)
-                            .size_4()
-                            .text_color(cx.theme().warning),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(format!("请求执行 {tool}")),
-                    )
-                    .child(div().flex_1())
-                    .when_some(decision, |this, decision| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(match decision {
-                                    ApprovalDecision::Allow => "已允许",
-                                    ApprovalDecision::AlwaysAllow => "已始终允许",
-                                    ApprovalDecision::Reject => "已拒绝",
-                                }),
-                        )
-                    }),
-            )
-            .child(
-                v_flex()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .font_family("monospace")
-                    .text_color(cx.theme().muted_foreground)
-                    .children(
-                        visible
-                            .iter()
-                            .map(|line| div().whitespace_nowrap().child(line.to_string())),
-                    ),
-            )
-            .when(overflow, |this| {
-                this.child(
-                    div()
-                        .id(("approval-expand", message_ix * 1024 + segment_ix))
-                        .px_3()
-                        .pb_2()
-                        .text_xs()
-                        .text_color(cx.theme().link)
-                        .cursor_pointer()
-                        .hover(|this| this.text_color(cx.theme().link_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(Segment::Approval { detail_open, .. }) = this
-                                .messages
-                                .get_mut(message_ix)
-                                .and_then(|m| m.segments.get_mut(segment_ix))
-                            {
-                                *detail_open = true;
-                            }
-                            cx.notify();
-                        }))
-                        .child(format!("展开全部（共 {} 行）", detail_lines.len())),
-                )
-            })
-            .when(decision.is_none(), |this| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .px_3()
-                        .pb_2()
-                        .child(
-                            Button::new(("approval-allow", message_ix * 1024 + segment_ix))
-                                .primary()
-                                .small()
-                                .label("允许")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.decide_approval(
-                                        message_ix,
-                                        segment_ix,
-                                        ApprovalDecision::Allow,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new(("approval-always", message_ix * 1024 + segment_ix))
-                                .outline()
-                                .small()
-                                .label("始终允许")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.decide_approval(
-                                        message_ix,
-                                        segment_ix,
-                                        ApprovalDecision::AlwaysAllow,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new(("approval-reject", message_ix * 1024 + segment_ix))
-                                .danger()
-                                .small()
-                                .label("拒绝")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.decide_approval(
-                                        message_ix,
-                                        segment_ix,
-                                        ApprovalDecision::Reject,
-                                        cx,
-                                    );
-                                })),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-
+    /// 工具调用折叠行（与思考块同族）：无边框 header（工具图标 + 名称 · 摘要 +
+    /// 状态 + 箭头），展开后输出以左侧竖线缩进展示，超高内部滚动。
+    /// `approval_pending`：该工具正在等待批准（状态位显示黄色 ✋ 等待批准）。
+    #[allow(clippy::too_many_arguments)]
     fn render_tool_card(
         &self,
         message_ix: usize,
@@ -786,92 +687,100 @@ impl ThreadView {
         is_error: bool,
         done: bool,
         expanded: bool,
+        approval_pending: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lines: Vec<&str> = output.lines().collect();
-        let overflow = lines.len() > 6 && !expanded;
-        let visible: &[&str] = if overflow { &lines[..6] } else { &lines };
-
-        let (status_icon, status_color) = if !done {
-            (IconName::LoaderCircle, cx.theme().muted_foreground)
+        let muted = cx.theme().muted_foreground;
+        let tool_icon = match tool {
+            "bash" => AssetIconName::Terminal,
+            "read_file" => AssetIconName::Eye,
+            "write_file" => AssetIconName::FilePlus,
+            "edit" => AssetIconName::FilePen,
+            "glob" => AssetIconName::FolderSearch,
+            "grep" => AssetIconName::TextSearch,
+            _ => AssetIconName::Wrench,
+        };
+        let (status_icon, status_color) = if approval_pending {
+            (AssetIconName::Hand, cx.theme().warning)
+        } else if !done {
+            (AssetIconName::LoaderCircle, muted)
         } else if is_error {
-            (IconName::TriangleAlert, cx.theme().danger)
+            (AssetIconName::TriangleAlert, cx.theme().danger)
         } else {
-            (IconName::CircleCheck, cx.theme().success)
+            (AssetIconName::CircleCheck, cx.theme().success)
         };
 
         v_flex()
             .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
             .child(
                 h_flex()
+                    .id(("tool", message_ix * 1024 + segment_ix))
                     .w_full()
                     .gap_2()
-                    .px_3()
                     .py_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Icon::new(if tool == "bash" {
-                            IconName::SquareTerminal
-                        } else {
-                            IconName::FileText
-                        })
-                        .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Segment::ToolCall { expanded, .. }) = this
+                            .messages
+                            .get_mut(message_ix)
+                            .and_then(|m| m.segments.get_mut(segment_ix))
+                        {
+                            *expanded = !*expanded;
+                        }
+                        cx.notify();
+                    }))
+                    .child(Icon::new(tool_icon).size_4().text_color(muted))
+                    .child(div().text_sm().text_color(muted).child(tool.to_string()))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_sm()
                             .font_family("monospace")
-                            .child(format!("{tool} {summary}")),
+                            .text_color(muted)
+                            .child(summary.to_string()),
                     )
-                    .child(div().flex_1())
-                    .child(Icon::new(status_icon).size_4().text_color(status_color)),
-            )
-            .when(!output.is_empty(), |this| {
-                this.child(
-                    v_flex()
-                        .px_3()
-                        .py_2()
-                        .text_xs()
-                        .text_color(if is_error {
-                            cx.theme().danger
+                    .when(approval_pending, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().warning)
+                                .child("等待批准"),
+                        )
+                    })
+                    .child(Icon::new(status_icon).size_4().text_color(status_color))
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
                         } else {
-                            cx.theme().muted_foreground
+                            IconName::ChevronRight
                         })
-                        .font_family("monospace")
-                        .children(
-                            visible
-                                .iter()
-                                .map(|line| div().whitespace_nowrap().child(line.to_string())),
-                        ),
-                )
-            })
-            .when(overflow, |this| {
+                        .size_4()
+                        .text_color(muted),
+                    ),
+            )
+            .when(expanded, |this| {
                 this.child(
                     div()
-                        .id(("tool-expand", message_ix * 1024 + segment_ix))
-                        .px_3()
-                        .pb_2()
+                        .id(("tool-body", message_ix * 1024 + segment_ix))
+                        .mt_1()
+                        .ml(px(8.))
+                        .border_l_1()
+                        .border_color(cx.theme().border)
+                        .pl(px(14.))
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
                         .text_xs()
-                        .text_color(cx.theme().link)
-                        .cursor_pointer()
-                        .hover(|this| this.text_color(cx.theme().link_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(Segment::ToolCall { expanded, .. }) = this
-                                .messages
-                                .get_mut(message_ix)
-                                .and_then(|m| m.segments.get_mut(segment_ix))
-                            {
-                                *expanded = true;
-                            }
-                            cx.notify();
-                        }))
-                        .child(format!("展开全部（共 {} 行）", lines.len())),
+                        .font_family("monospace")
+                        .text_color(if is_error { cx.theme().danger } else { muted })
+                        .child(if output.is_empty() {
+                            "（暂无输出）".to_string()
+                        } else {
+                            output.to_string()
+                        }),
                 )
             })
             .into_any_element()
@@ -891,10 +800,19 @@ impl ThreadView {
             Role::Assistant => {
                 let mut segments = Vec::with_capacity(message.segments.len() + 1);
                 for (six, segment) in message.segments.iter().enumerate() {
+                    // 审批不占独立行：待批准状态显示在对应的工具调用行上
+                    //（ApprovalRequested 紧跟在该工具的 ToolCallBegin 之后发出）
+                    if matches!(segment, Segment::Approval { .. }) {
+                        continue;
+                    }
                     segments.push(match segment {
-                        Segment::Thinking { text, open, .. } => {
-                            self.render_thinking(ix, six, text, *open, cx)
-                        }
+                        Segment::Thinking {
+                            text,
+                            open,
+                            started,
+                            duration,
+                            ..
+                        } => self.render_thinking(ix, six, text, *open, *started, *duration, cx),
                         Segment::Markdown { state, .. } => TextView::new(state)
                             .selectable(true)
                             .stream_fade(self.streaming)
@@ -907,18 +825,25 @@ impl ThreadView {
                             done,
                             expanded,
                             ..
-                        } => self.render_tool_card(
-                            ix, six, tool, summary, output, *is_error, *done, *expanded, cx,
-                        ),
-                        Segment::Approval {
-                            tool,
-                            detail,
-                            decision,
-                            detail_open,
-                            ..
                         } => {
-                            self.render_approval(ix, six, tool, detail, *decision, *detail_open, cx)
+                            let approval_pending = matches!(
+                                message.segments.get(six + 1),
+                                Some(Segment::Approval { decision: None, .. })
+                            );
+                            self.render_tool_card(
+                                ix,
+                                six,
+                                tool,
+                                summary,
+                                output,
+                                *is_error,
+                                *done,
+                                *expanded,
+                                approval_pending,
+                                cx,
+                            )
                         }
+                        Segment::Approval { .. } => unreachable!(),
                     });
                 }
                 if let Some(footer) = &message.footer {
