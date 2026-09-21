@@ -182,7 +182,7 @@ pig-code/
 | 模型协议 | **OpenAI Chat Completions + SSE**（自建 `ModelProvider` trait，预留 Anthropic 实现） | GLM/DeepSeek/Kimi/Qwen 全部兼容；codex 的 Responses-only 是反面教材 |
 | core↔UI 传输 | 进程内 `async-channel`（非 HTTP） | 桌面单进程零开销；契约已由 pig-protocol 保证，将来可换 WS |
 | 流式 Markdown | `TextViewState::push_str` + `stream_fade` | 官方现成，不用自己修未闭合语法 |
-| 文件编辑工具 | **search/replace 式 `edit`（old_string/new_string）起步**，后期可选 codex 的 `apply_patch` 格式 | Claude Code 系模型对 edit 格式适应最好；apply_patch 解析器可后抄 codex（Apache-2.0） |
+| 文件编辑工具 | **search/replace 式 `Edit`（old_string/new_string）起步**，后期可选 codex 的 `apply_patch` 格式 | Claude Code 系模型对 Edit 格式适应最好；apply_patch 解析器可后抄 codex（Apache-2.0） |
 | diff 视图 | 只读 `Editor` + `tree-sitter-diff` 高亮 unified diff → 后期 decorations 行级背景 | gpui-kit 无 diff 组件，这是最大自研件 |
 | 终端 | 不做真终端；命令执行=工具卡片（命令+输出+退出码） | ZCode 类产品的 agent 面板本质如此；后期再评估 webview+xterm.js |
 | 会话持久化 | JSONL（codex rollout 式：首行 meta + 每行一 item） | 简单、可追加、天然支持 resume |
@@ -208,13 +208,15 @@ pig-code/
 
 ### M2 — Agent core MVP（端到端打通）
 - `pig-protocol` 第一版（§2.2）。
-- `pig-core`：Session + turn 循环（采样→工具调用→回写→再采样，直到无工具调用）；OpenAI 兼容 provider（reqwest + SSE，流式 delta → `TextDelta` 事件）；工具先只实现 `read_file` / `bash`；tokio 线程 + channel 桥接。
+- `pig-core`：Session + turn 循环（采样→工具调用→回写→再采样，直到无工具调用）；OpenAI 兼容 provider（reqwest + SSE，流式 delta → `TextDelta` 事件）；工具先只实现 `Read` / `Bash`；tokio 线程 + channel 桥接。
 - `pig-app` 接真 core：发送 → 流式渲染 → 工具卡片实时状态；停止按钮 → `Op::Interrupt`。
 - 设置页最小版：Base URL / API Key / 模型 ID（配置文件 `~/.pigcode/config.toml`）。
 - **验收**：配上 GLM/DeepSeek 任意 OpenAI 兼容端点，能完成「读个文件并总结」的真实多轮工具调用，流式渲染、可打断。
 
 ### M3 — 写能力与权限
-- 工具补齐：`write_file`、`edit`(search/replace)、`glob`、`grep`；统一 `Tool` trait（schema 自动生成 JSON Schema 给模型）。
+- 工具补齐：`Write`、`Edit`(search/replace)、`Glob`、`Grep`；统一 `Tool` trait（schema 自动生成 JSON Schema 给模型）。
+- 内置工具补充：`TodoList`（会话级待办，整体替换语义，状态挂 `ToolContext`）、`FetchURL`（scraper 提取正文，SSRF 私网字面量拦截）；`cap_web_search` 开启时按端点注入原生搜索——Anthropic 缺省 `web_search_20250305`，OpenAI 兼容端点用 TOML `web_search_tool` 自定义（如智谱 `web_search_tool = {"type":"web_search","web_search":{"enable":true,"search_result":true}}`）。
+- 后台 Bash 任务：`Bash` 加 `run_in_background`（会话级注册表 + watcher 收输出 + 完成经 channel 推 `TaskListChanged`），配套 `TaskList`/`TaskOutput`/`TaskStop` 三工具；composer 上方「当前进度（TodoList）+ 后台 Bash」只读面板（chip 切换、任务输出尾部展开、状态过滤 tab）。
 - 四档执行模式 + 审批闸门：core 发 `ApprovalRequested` 阻塞 → UI 审批卡（允许/始终允许/拒绝）→ `ApprovalReply` 解除；「始终允许」按规则缓存。
 - diff 视图 V1：`PatchEnd` 携带 unified diff → 右侧 Review 面板用只读 `Editor` + `tree-sitter-diff` 渲染；文件变更列表（+x/−y）。
 - **验收**：让 agent 改一个真实工作区文件，审批卡弹出、diff 正确渲染、可拒绝。

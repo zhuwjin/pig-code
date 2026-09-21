@@ -114,7 +114,7 @@ async fn scenario_b_allow_all_then_revert() {
 
     assert_eq!(
         approvals(&events),
-        ["write_file", "edit", "bash"],
+        ["Write", "Edit", "Bash"],
         "三处审批按序出现"
     );
     assert!(
@@ -134,11 +134,11 @@ async fn scenario_b_allow_all_then_revert() {
         ends.iter().any(|(id, out, err)| id.contains("call_b_bash")
             && out.contains(mock::SCENARIO_B_BASH_MARKER)
             && !err),
-        "bash 输出含标记: {ends:?}"
+        "Bash 输出含标记: {ends:?}"
     );
 
     let changes = file_changes(&events);
-    assert_eq!(changes.len(), 2, "write+edit 各一次 FileChanged: {changes:?}");
+    assert_eq!(changes.len(), 2, "Write+Edit 各一次 FileChanged: {changes:?}");
     let (path, diff, adds, dels) = changes[0];
     assert_eq!(path, mock::SCENARIO_B_FILE);
     assert_eq!((adds, dels), (3, 0), "新建文件全是新增行: {diff}");
@@ -151,7 +151,7 @@ async fn scenario_b_allow_all_then_revert() {
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "hello\nLINE2\nline3\n",
-        "文件内容被 write+edit 正确修改"
+        "文件内容被 Write+Edit 正确修改"
     );
 
     agent
@@ -182,7 +182,7 @@ async fn scenario_b_deny_all() {
     let (events, dir, agent, _) =
         run_scenario_b(ExecMode::ConfirmBeforeEdit, Some(ApprovalDecision::Reject), "deny").await;
 
-    assert_eq!(approvals(&events), ["write_file", "edit", "bash"]);
+    assert_eq!(approvals(&events), ["Write", "Edit", "Bash"]);
     assert!(
         events.iter().any(|e| matches!(e, Event::TurnComplete { .. })),
         "拒绝后回合仍继续到结束"
@@ -202,7 +202,7 @@ async fn auto_edit_only_bash_needs_approval() {
     let (events, dir, agent, _) =
         run_scenario_b(ExecMode::AutoEdit, Some(ApprovalDecision::Allow), "auto").await;
 
-    assert_eq!(approvals(&events), ["bash"], "AutoEdit 只有 bash 需审批");
+    assert_eq!(approvals(&events), ["Bash"], "AutoEdit 只有 Bash 需审批");
     assert!(dir.join(mock::SCENARIO_B_FILE).exists());
     agent.shutdown();
 }

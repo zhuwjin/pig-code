@@ -1,5 +1,5 @@
 //! 模拟 OpenAI Chat Completions + SSE 的 provider，行为对齐 GLM/DeepSeek：
-//! 首请求返回 read_file 工具调用（arguments 分片），含工具结果后返回
+//! 首请求返回 Read 工具调用（arguments 分片），含工具结果后返回
 //! reasoning_content + Markdown 文本流。供集成测试、examples 与 GUI 自测复用。
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const MOCK_FILE_NAME: &str = "README.mock.md";
 pub const MOCK_FILE_CONTENT: &str = "# mock 文件\n\n这是 pig-core mock provider 自测用的已知文件。\n";
-pub const MOCK_REASONING: &str = "用户让我读一个文件并总结。先调用 read_file。";
+pub const MOCK_REASONING: &str = "用户让我读一个文件并总结。先调用 Read。";
 pub const MOCK_REPLY_MARKER: &str = "MOCK_REPLY_OK";
 
-/// 场景 B：用户消息含此标记时，走 write_file → edit → bash → 文本 的完整修改链。
+/// 场景 B：用户消息含此标记时，走 Write → Edit → Bash → 文本 的完整修改链。
 pub const SCENARIO_B_TRIGGER: &str = "SCENARIO_B";
 pub const SCENARIO_B_MARKER: &str = "MOCK_SCENARIO_B_OK";
 pub const SCENARIO_B_FILE: &str = "src/hello.txt";
@@ -100,7 +100,7 @@ fn tool_call_response() -> Vec<String> {
         .collect();
     let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
     let mut chunks = reasoning;
-    chunks.extend(tool_call_chunks("call_mock_1", "read_file", &arguments));
+    chunks.extend(tool_call_chunks("call_mock_1", "Read", &arguments));
     chunks
 }
 
@@ -142,23 +142,23 @@ fn echo_system_response(body: &str) -> Vec<String> {
     chunks
 }
 
-/// 场景 B 按历史里 tool 结果的数量推进：0→write_file，1→edit，2→bash，≥3→文本。
+/// 场景 B 按历史里 tool 结果的数量推进：0→Write，1→Edit，2→Bash，≥3→文本。
 /// file 参数化避免多个自测会话改同一文件互相干扰。
 fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
             "call_b_write",
-            "write_file",
+            "Write",
             &serde_json::json!({"path": file, "content": SCENARIO_B_CONTENT}).to_string(),
         ),
         1 => tool_call_chunks(
             "call_b_edit",
-            "edit",
+            "Edit",
             &serde_json::json!({"path": file, "old_string": "line2", "new_string": "LINE2"}).to_string(),
         ),
         2 => tool_call_chunks(
             "call_b_bash",
-            "bash",
+            "Bash",
             &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string(),
         ),
         _ => {
@@ -424,8 +424,8 @@ fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str
     ));
 }
 
-/// Anthropic 版场景分发：无 tool_result → read_file 工具调用；否则文本回复。
-/// 含 SCENARIO_B_TRIGGER 时走 write→edit→bash 链。
+/// Anthropic 版场景分发：无 tool_result → Read 工具调用；否则文本回复。
+/// 含 SCENARIO_B_TRIGGER 时走 Write→Edit→Bash 链。
 fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     if body.contains(SCENARIO_B_TRIGGER) {
         return anthropic_scenario_b(tool_results);
@@ -453,12 +453,12 @@ fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     ));
 
     if tool_results == 0 {
-        // read_file 工具调用，arguments 分片
+        // Read 工具调用，arguments 分片
         let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
         let half = arguments.len() / 2;
         out.push(a_sse(
             "content_block_start",
-            serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_mock_1", "name": "read_file"}}),
+            serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_mock_1", "name": "Read"}}),
         ));
         out.push(a_sse(
             "content_block_delta",
@@ -510,11 +510,11 @@ fn anthropic_scenario_b(tool_results: usize) -> Vec<String> {
         serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 100}}}),
     )];
     match tool_results {
-        0 => anthropic_tool_call(&mut out, 0, "call_b_write", "write_file",
+        0 => anthropic_tool_call(&mut out, 0, "call_b_write", "Write",
             &serde_json::json!({"path": SCENARIO_B_FILE, "content": SCENARIO_B_CONTENT}).to_string()),
-        1 => anthropic_tool_call(&mut out, 0, "call_b_edit", "edit",
+        1 => anthropic_tool_call(&mut out, 0, "call_b_edit", "Edit",
             &serde_json::json!({"path": SCENARIO_B_FILE, "old_string": "line2", "new_string": "LINE2"}).to_string()),
-        2 => anthropic_tool_call(&mut out, 0, "call_b_bash", "bash",
+        2 => anthropic_tool_call(&mut out, 0, "call_b_bash", "Bash",
             &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string()),
         _ => {
             let text = format!("场景B完成。**结果**: {SCENARIO_B_MARKER}

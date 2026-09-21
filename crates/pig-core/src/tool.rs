@@ -123,9 +123,16 @@ impl ChangeTracker {
     }
 }
 
+/// TodoList 工具的待办项：定义在 protocol（UI 面板共享），core 侧 re-export 兼容。
+pub use pig_protocol::{TodoItem, TodoStatus};
+
+/// 会话共享的待办清单（Arc 句柄，Session 与 ToolContext 共用）。
+pub type TodoHandle = std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>;
+
 pub struct ToolContext<'a> {
     pub cwd: &'a Path,
     pub tracker: &'a mut ChangeTracker,
+    pub state: &'a crate::task::SessionToolState,
 }
 
 pub trait Tool: Send + Sync {
@@ -153,6 +160,11 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(Glob),
         Box::new(Grep),
         Box::new(Bash),
+        Box::new(TodoListTool),
+        Box::new(FetchUrl),
+        Box::new(TaskList),
+        Box::new(TaskOutput),
+        Box::new(TaskStop),
     ]
 }
 
@@ -173,10 +185,17 @@ pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
 pub fn summarize(call: &ToolCall) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     let raw = match call.name.as_str() {
-        "read_file" | "write_file" | "edit" => args["path"].as_str().unwrap_or("?").to_string(),
-        "bash" => args["command"].as_str().unwrap_or("?").to_string(),
-        "glob" => args["pattern"].as_str().unwrap_or("?").to_string(),
-        "grep" => args["pattern"].as_str().unwrap_or("?").to_string(),
+        "Read" | "Write" | "Edit" => args["path"].as_str().unwrap_or("?").to_string(),
+        "Bash" => args["command"].as_str().unwrap_or("?").to_string(),
+        "Glob" => args["pattern"].as_str().unwrap_or("?").to_string(),
+        "Grep" => args["pattern"].as_str().unwrap_or("?").to_string(),
+        "TodoList" => args["todos"]
+            .as_array()
+            .map(|items| format!("更新待办（{} 项）", items.len()))
+            .unwrap_or_else(|| "查看待办".to_string()),
+        "FetchURL" => args["url"].as_str().unwrap_or("?").to_string(),
+        "TaskList" => "列出后台任务".to_string(),
+        "TaskOutput" | "TaskStop" => args["task_id"].as_str().unwrap_or("?").to_string(),
         _ => args.to_string(),
     };
     if raw.chars().count() <= 80 {
@@ -235,7 +254,7 @@ struct Bash;
 
 impl Tool for ReadFile {
     fn name(&self) -> &'static str {
-        "read_file"
+        "Read"
     }
 
     fn read_only(&self) -> bool {
@@ -246,7 +265,7 @@ impl Tool for ReadFile {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "read_file",
+                "name": "Read",
                 "description": "读取工作区内文件内容。path 相对工作目录；文件过长时用 offset/limit 分页。",
                 "parameters": {
                     "type": "object",
@@ -291,15 +310,15 @@ impl Tool for ReadFile {
 
 impl Tool for WriteFile {
     fn name(&self) -> &'static str {
-        "write_file"
+        "Write"
     }
 
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "write_file",
-                "description": "写入整个文件（自动创建父目录）。大文件优先用 edit 做局部修改。",
+                "name": "Write",
+                "description": "写入整个文件（自动创建父目录）。大文件优先用 Edit 做局部修改。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -335,15 +354,15 @@ impl Tool for WriteFile {
 
 impl Tool for EditFile {
     fn name(&self) -> &'static str {
-        "edit"
+        "Edit"
     }
 
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "edit",
-                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现；先 read_file 确认内容再改。",
+                "name": "Edit",
+                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现；先 Read 确认内容再改。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -375,7 +394,7 @@ impl Tool for EditFile {
             let count = content.matches(old).count();
             if count == 0 {
                 return Err(format!(
-                    "old_string 在 {path} 中未找到。请先用 read_file 确认文件当前内容（注意缩进与换行需完全一致）。"
+                    "old_string 在 {path} 中未找到。请先用 Read 确认文件当前内容（注意缩进与换行需完全一致）。"
                 ));
             }
             if count > 1 {
@@ -397,7 +416,7 @@ impl Tool for EditFile {
 
 impl Tool for Glob {
     fn name(&self) -> &'static str {
-        "glob"
+        "Glob"
     }
 
     fn read_only(&self) -> bool {
@@ -408,7 +427,7 @@ impl Tool for Glob {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "glob",
+                "name": "Glob",
                 "description": "按文件名模式匹配工作区文件（如 **/*.rs）。",
                 "parameters": {
                     "type": "object",
@@ -463,7 +482,7 @@ impl Tool for Glob {
 
 impl Tool for Grep {
     fn name(&self) -> &'static str {
-        "grep"
+        "Grep"
     }
 
     fn read_only(&self) -> bool {
@@ -474,7 +493,7 @@ impl Tool for Grep {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "grep",
+                "name": "Grep",
                 "description": "用正则搜索工作区文件内容，输出 文件:行号: 内容。",
                 "parameters": {
                     "type": "object",
@@ -574,7 +593,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 
 impl Tool for Bash {
     fn name(&self) -> &'static str {
-        "bash"
+        "Bash"
     }
 
     fn is_shell(&self) -> bool {
@@ -585,12 +604,13 @@ impl Tool for Bash {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。禁止破坏性命令。",
+                "name": "Bash",
+                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。禁止破坏性命令。长时命令（dev server/watch/长构建）用 run_in_background 后台运行。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "要执行的命令" }
+                        "command": { "type": "string", "description": "要执行的命令" },
+                        "run_in_background": { "type": "boolean", "description": "true 时后台运行，立即返回 task_id（默认 false）" }
                     },
                     "required": ["command"]
                 }
@@ -605,6 +625,12 @@ impl Tool for Bash {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let command = args["command"].as_str().ok_or("缺少参数 command")?;
+            if args["run_in_background"].as_bool().unwrap_or(false) {
+                let task_id = crate::task::spawn_background(ctx.state, ctx.cwd, command);
+                return Ok(ToolEffect::plain(format!(
+                    "已在后台启动，task_id: {task_id}。用 TaskOutput 查看输出，TaskStop 停止。"
+                )));
+            }
             let child = if cfg!(target_os = "windows") {
                 tokio::process::Command::new("cmd")
                     .args(["/C", command])
@@ -636,6 +662,464 @@ impl Tool for Bash {
             }
             text.push_str(&format!("\n[exit code: {}]", output.status.code().unwrap_or(-1)));
             Ok(ToolEffect::plain(text))
+        })
+    }
+}
+
+struct TodoListTool;
+
+impl TodoListTool {
+    fn render(todos: &[TodoItem]) -> String {
+        if todos.is_empty() {
+            return "当前没有待办事项".to_string();
+        }
+        todos
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let status = match item.status {
+                    TodoStatus::Pending => "pending",
+                    TodoStatus::InProgress => "in_progress",
+                    TodoStatus::Done => "done",
+                };
+                format!("{}. [{}] {}", i + 1, status, item.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl Tool for TodoListTool {
+    fn name(&self) -> &'static str {
+        "TodoList"
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "TodoList",
+                "description": "管理会话级待办清单。多步任务开始时拆分为清单写入，执行中随时更新进度；省略 todos 参数读取当前清单，提供则整体替换（非增量）。同一时间至多一项 in_progress。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "完整的新待办清单（整体替换）",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": { "type": "string", "description": "待办内容" },
+                                    "status": { "type": "string", "enum": ["pending", "in_progress", "done"] }
+                                },
+                                "required": ["content", "status"]
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            match args.get("todos") {
+                None => {
+                    let todos = ctx.state.todos.lock().map_err(|e| e.to_string())?;
+                    Ok(ToolEffect::plain(Self::render(&todos)))
+                }
+                Some(value) => {
+                    let new: Vec<TodoItem> = serde_json::from_value(value.clone())
+                        .map_err(|e| format!("todos 格式非法: {e}（status 须为 pending/in_progress/done）"))?;
+                    let mut todos = ctx.state.todos.lock().map_err(|e| e.to_string())?;
+                    *todos = new;
+                    Ok(ToolEffect::plain(Self::render(&todos)))
+                }
+            }
+        })
+    }
+}
+
+const MAX_FETCH_BODY: usize = 2 * 1024 * 1024;
+const MAX_FETCH_OUTPUT: usize = 50000;
+
+/// SSRF 防护：拒绝本机/私网地址字面量（localhost、127/8、::1、0.0.0.0、
+/// 10/8、192.168/16、172.16-31/12、169.254/16）。DNS 解析出的私网地址不在此列。
+pub fn is_private_host(host: &str) -> bool {
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host == "localhost" || host == "::1" || host == "0.0.0.0" {
+        return true;
+    }
+    if host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+    {
+        return true;
+    }
+    if let Some(rest) = host.strip_prefix("172.") {
+        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
+            if (16..=31).contains(&second) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 从 HTML 提取正文：剔除 script/style/noscript/svg/template，优先 main/article
+/// 否则 body；块级元素之间换行，行内空白压缩，连续空行折叠。
+pub fn extract_text(html: &str) -> String {
+    use scraper::{Html, Selector};
+    const SKIP: &[&str] = &["script", "style", "noscript", "svg", "template"];
+    const BLOCK: &[&str] = &[
+        "address", "article", "aside", "blockquote", "br", "dd", "details", "div", "dl", "dt",
+        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+        "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "td", "th",
+        "tr", "ul",
+    ];
+    let document = Html::parse_document(html);
+    let mut root = None;
+    for name in ["main", "article", "body"] {
+        let selector = Selector::parse(name).expect("合法选择器");
+        if let Some(el) = document.select(&selector).next() {
+            root = Some(el);
+            break;
+        }
+    }
+    let Some(root) = root else {
+        return String::new();
+    };
+    // 栈遍历（None = 块级元素闭合，补换行）；(*root) 解引用到 NodeRef 以遍历文本节点
+    let mut out = String::new();
+    let mut stack: Vec<Option<_>> = (*root).children().map(Some).collect::<Vec<_>>().into_iter().rev().collect();
+    while let Some(item) = stack.pop() {
+        let Some(node) = item else {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            continue;
+        };
+        match node.value() {
+            scraper::Node::Text(text) => {
+                // 标签之间的纯空白是排版噪音，丢弃（行内空白后续统一压缩）
+                if !text.text.trim().is_empty() {
+                    out.push_str(&text.text);
+                }
+            }
+            scraper::Node::Element(el) => {
+                let name = el.name();
+                if SKIP.contains(&name) {
+                    continue;
+                }
+                let block = BLOCK.contains(&name);
+                if block && !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if block {
+                    stack.push(None);
+                }
+                stack.extend(node.children().map(Some).collect::<Vec<_>>().into_iter().rev());
+            }
+            _ => {}
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for line in out.lines() {
+        let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() && lines.last().is_none_or(|l| l.is_empty()) {
+            continue;
+        }
+        lines.push(collapsed);
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+struct FetchUrl;
+
+impl Tool for FetchUrl {
+    fn name(&self) -> &'static str {
+        "FetchURL"
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "FetchURL",
+                "description": "抓取公开网页并提取正文（HTML 自动清洗为纯文本，JSON/纯文本原样返回）。不支持需要登录的页面。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "要抓取的 http/https URL" }
+                    },
+                    "required": ["url"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        args: serde_json::Value,
+        _ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let url = args["url"].as_str().ok_or("缺少参数 url")?;
+            let parsed = reqwest::Url::parse(url).map_err(|e| format!("URL 无效: {e}"))?;
+            match parsed.scheme() {
+                "http" | "https" => {}
+                scheme => return Err(format!("仅支持 http/https URL（收到 {scheme}:）")),
+            }
+            let host = parsed.host_str().ok_or("URL 缺少主机名")?;
+            if is_private_host(host) {
+                return Err(format!("不允许访问本机/私网地址: {host}"));
+            }
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .user_agent("pig-code FetchURL/0.1 (coding agent)")
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    let private = attempt.url().host_str().map(is_private_host).unwrap_or(false);
+                    if private || attempt.previous().len() >= 5 {
+                        attempt.stop()
+                    } else {
+                        attempt.follow()
+                    }
+                }))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut response = client
+                .get(parsed)
+                .send()
+                .await
+                .map_err(|e| format!("请求失败: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("HTTP {status}"));
+            }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            // 流式读体，上限 2MB
+            let mut body: Vec<u8> = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| format!("读取响应失败: {e}"))?
+            {
+                let remaining = MAX_FETCH_BODY.saturating_sub(body.len());
+                if chunk.len() > remaining {
+                    body.extend_from_slice(&chunk[..remaining]);
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let text = String::from_utf8_lossy(&body).to_string();
+            let mut out = match content_type.as_str() {
+                "text/html" => extract_text(&text),
+                "text/plain" | "text/markdown" | "application/json" => text,
+                "" => return Err("响应缺少 Content-Type，无法判定内容类型".to_string()),
+                other => return Err(format!("不支持的内容类型: {other}")),
+            };
+            if out.is_empty() {
+                out = "（页面无可提取文本）".to_string();
+            }
+            if out.chars().count() > MAX_FETCH_OUTPUT {
+                out = out.chars().take(MAX_FETCH_OUTPUT).collect();
+                out.push_str("\n\n（已截断，仅显示前 50000 字符）");
+            }
+            Ok(ToolEffect::plain(out))
+        })
+    }
+}
+
+fn task_status_label(status: pig_protocol::TaskStatus) -> String {
+    match status {
+        pig_protocol::TaskStatus::Running => "运行中".to_string(),
+        pig_protocol::TaskStatus::Exited(code) => format!("已退出({code})"),
+        pig_protocol::TaskStatus::Killed => "已停止".to_string(),
+    }
+}
+
+fn task_duration_label(started_at: u64, ended_at: Option<u64>) -> String {
+    let secs = ended_at
+        .unwrap_or_else(crate::rollout::now_secs)
+        .saturating_sub(started_at);
+    if secs < 60 {
+        format!("{secs} 秒")
+    } else {
+        format!("{} 分", secs / 60)
+    }
+}
+
+struct TaskList;
+
+impl Tool for TaskList {
+    fn name(&self) -> &'static str {
+        "TaskList"
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "TaskList",
+                "description": "列出当前会话的后台 Bash 任务（id、状态、命令、耗时）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _args: serde_json::Value,
+        ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let tasks = ctx.state.tasks.lock().map_err(|e| e.to_string())?;
+            if tasks.is_empty() {
+                return Ok(ToolEffect::plain("没有后台任务".to_string()));
+            }
+            let out = tasks
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} [{}] {}（{}）",
+                        entry.id,
+                        task_status_label(entry.status),
+                        entry.command,
+                        task_duration_label(entry.started_at, entry.ended_at)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(ToolEffect::plain(out))
+        })
+    }
+}
+
+struct TaskOutput;
+
+impl Tool for TaskOutput {
+    fn name(&self) -> &'static str {
+        "TaskOutput"
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "TaskOutput",
+                "description": "查看后台 Bash 任务的输出（尾部节选）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "后台任务 id（b1、b2…）" }
+                    },
+                    "required": ["task_id"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let task_id = args["task_id"].as_str().ok_or("缺少参数 task_id")?;
+            let tasks = ctx.state.tasks.lock().map_err(|e| e.to_string())?;
+            let Some(entry) = tasks.iter().find(|t| t.id == task_id) else {
+                return Err(format!("任务不存在: {task_id}"));
+            };
+            let tail = crate::task::tail_chars(&entry.output, 16000);
+            let tail = if tail.is_empty() {
+                "（暂无输出）".to_string()
+            } else {
+                tail
+            };
+            Ok(ToolEffect::plain(format!(
+                "任务 {}（{}，{}）输出：\n{tail}",
+                entry.id,
+                task_status_label(entry.status),
+                task_duration_label(entry.started_at, entry.ended_at)
+            )))
+        })
+    }
+}
+
+struct TaskStop;
+
+impl Tool for TaskStop {
+    fn name(&self) -> &'static str {
+        "TaskStop"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "TaskStop",
+                "description": "停止（kill）一个仍在运行的后台 Bash 任务。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "后台任务 id（b1、b2…）" }
+                    },
+                    "required": ["task_id"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let task_id = args["task_id"].as_str().ok_or("缺少参数 task_id")?;
+            let result = crate::task::stop_task(
+                &ctx.state.tasks,
+                task_id,
+                &ctx.state.task_notify,
+                &ctx.state.session_id,
+            )?;
+            Ok(ToolEffect::plain(result))
         })
     }
 }

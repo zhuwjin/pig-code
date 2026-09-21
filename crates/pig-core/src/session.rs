@@ -69,6 +69,8 @@ pub fn resolve_model(
         max_output_tokens: model.max_output_tokens,
         api_format: provider.api_format,
         reasoning_params,
+        cap_web_search: model.cap_web_search,
+        web_search_tool: model.web_search_tool.clone(),
         provider_name: provider.name.clone(),
     })
 }
@@ -80,6 +82,7 @@ pub struct Session {
     seq: u64,
     turn_counter: u64,
     tracker: ChangeTracker,
+    state: crate::task::SessionToolState,
     always_allowed: HashSet<String>,
     pending: PendingApprovals,
     mode: ExecMode,
@@ -106,15 +109,17 @@ impl Session {
         store: Arc<Mutex<Store>>,
         sessions_dir: &Path,
         data_dir: PathBuf,
+        task_notify: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<Self, String> {
         let rollout = Rollout::create(sessions_dir, &meta)?;
         Ok(Self {
-            id: meta.id,
-            cwd: meta.cwd,
+            id: meta.id.clone(),
+            cwd: meta.cwd.clone(),
             history: Vec::new(),
             seq: 0,
             turn_counter: 0,
             tracker: ChangeTracker::default(),
+            state: crate::task::SessionToolState::new(meta.id, task_notify),
             always_allowed: HashSet::new(),
             pending,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -136,6 +141,7 @@ impl Session {
         pending: PendingApprovals,
         store: Arc<Mutex<Store>>,
         data_dir: PathBuf,
+        task_notify: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Result<(Self, Vec<RolloutRecord>), String> {
         let records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
         let Some(RolloutRecord::Meta { cwd, .. }) = records.first() else {
@@ -152,6 +158,7 @@ impl Session {
             seq: 0,
             turn_counter: 0,
             tracker: ChangeTracker::default(),
+            state: crate::task::SessionToolState::new(id.to_string(), task_notify),
             always_allowed: HashSet::new(),
             pending,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -816,6 +823,7 @@ impl Session {
                 let ctx = ToolContext {
                     cwd: &cwd,
                     tracker: &mut self.tracker,
+                    state: &self.state,
                 };
                 tokio::select! {
                     result = tool::execute(call, ctx) => Some(result),
@@ -844,6 +852,18 @@ impl Session {
                 },
                 tx,
             );
+            // TodoList 写入成功后向 UI 推待办快照（读操作输出即列表，无需重复推）
+            if call.name == "TodoList" && !is_error {
+                let items = self.state.todos.lock().expect("todos lock").clone();
+                self.emit(
+                    |session_id, seq| Event::TodoListChanged {
+                        session_id,
+                        seq,
+                        items,
+                    },
+                    tx,
+                );
+            }
             if let Some(change) = file_change {
                 self.record(&RolloutRecord::FileChange {
                     path: change.path.clone(),
@@ -926,14 +946,14 @@ fn compaction_prompt(history: &[ChatMsg]) -> String {
 fn approval_detail(call: &ToolCall, cwd: &std::path::Path) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     match call.name.as_str() {
-        "bash" => args["command"].as_str().unwrap_or("?").to_string(),
-        "write_file" => {
+        "Bash" => args["command"].as_str().unwrap_or("?").to_string(),
+        "Write" => {
             let path = args["path"].as_str().unwrap_or("?");
             let content = args["content"].as_str().unwrap_or("");
             let old = std::fs::read_to_string(cwd.join(path)).unwrap_or_default();
             diff_preview(path, &old, content)
         }
-        "edit" => {
+        "Edit" => {
             let path = args["path"].as_str().unwrap_or("?");
             let old_string = args["old_string"].as_str().unwrap_or("");
             let new_string = args["new_string"].as_str().unwrap_or("");
@@ -957,6 +977,9 @@ fn diff_preview(path: &str, old: &str, new: &str) -> String {
 
 struct SessionEntry {
     session: Option<Session>,
+    /// 与 Session 共享 Arc 的工具状态：session 进入 turn future（session=None）时
+    /// 仍可取待办/任务快照
+    state: crate::task::SessionToolState,
     cancel: Option<CancellationToken>,
     model_override: Option<ModelSelection>,
     /// 回合进行中到达的消息在此排队（FIFO），回合结束自动接续
@@ -1031,6 +1054,8 @@ pub async fn agent_loop(
     let mut sessions: HashMap<String, SessionEntry> = HashMap::new();
     let mut turns: FuturesUnordered<TurnFuture> = FuturesUnordered::new();
     let mut id_counter = 0u64;
+    // 后台任务完成通知：watcher 发 session_id → select 分支推 TaskListChanged
+    let (task_notify_tx, mut task_notify_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     macro_rules! resolve {
         ($override:expr) => {
@@ -1063,9 +1088,10 @@ pub async fn agent_loop(
                             pinned: false,
                             archived: false,
                         };
-                        match Session::create(meta.clone(), pending.clone(), store.clone(), &sessions_dir, data_dir.clone()) {
+                        match Session::create(meta.clone(), pending.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
                             Ok(session) => {
-                                sessions.insert(id.clone(), SessionEntry { session: Some(session), cancel: None, model_override: None, queue: Default::default() });
+                                let state = session.state.clone();
+                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: None, queue: Default::default() });
                                 store.lock().expect("store lock").upsert_session(&meta);
                                 let (model, provider_name) = model_label!(None);
                                 emit_global!(Event::SessionConfigured {
@@ -1074,6 +1100,9 @@ pub async fn agent_loop(
                                     model,
                                     provider_name,
                                 });
+                                // 新会话面板初始化为空快照
+                                emit_global!(Event::TodoListChanged { session_id: id.clone(), seq, items: vec![] });
+                                emit_global!(Event::TaskListChanged { session_id: id.clone(), seq, tasks: vec![] });
                                 emit_global!(Event::SessionList {
                                     sessions: store.lock().expect("store lock").sorted_sessions(),
                                 });
@@ -1097,19 +1126,28 @@ pub async fn agent_loop(
                             if let Some(meta) = meta {
                                 let (model, provider_name) = model_label!(None);
                                 emit_global!(Event::SessionConfigured {
-                                    session_id,
+                                    session_id: session_id.clone(),
                                     cwd: meta.cwd,
                                     model,
                                     provider_name,
                                 });
+                                // 切回已打开会话：补发面板快照，UI 重置面板
+                                if let Some(entry) = sessions.get(&session_id) {
+                                    let items = entry.state.todos.lock().expect("todos lock").clone();
+                                    let tasks = crate::task::snapshot(&entry.state.tasks);
+                                    emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items });
+                                    emit_global!(Event::TaskListChanged { session_id: session_id.clone(), seq, tasks });
+                                }
                             }
                             continue;
                         }
-                        match Session::load(&session_id, &sessions_dir, pending.clone(), store.clone(), data_dir.clone()) {
+                        match Session::load(&session_id, &sessions_dir, pending.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone()) {
                             Ok((session, records)) => {
                                 let cwd = session.cwd.clone();
+                                let state = session.state.clone();
                                 sessions.insert(session_id.clone(), SessionEntry {
                                     session: Some(session),
+                                    state,
                                     cancel: None,
                                     model_override: None,
                                     queue: Default::default(),
@@ -1121,6 +1159,9 @@ pub async fn agent_loop(
                                     model,
                                     provider_name,
                                 });
+                                // 重新打开的会话无持久化面板状态：空快照重置
+                                emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items: vec![] });
+                                emit_global!(Event::TaskListChanged { session_id: session_id.clone(), seq, tasks: vec![] });
                                 if let Some(entry) = sessions.get_mut(&session_id) {
                                     if let Some(session) = entry.session.as_mut() {
                                         session.replay(&records, &event_tx);
@@ -1395,6 +1436,14 @@ pub async fn agent_loop(
                         });
                     }
                     Op::Shutdown => break,
+                }
+            }
+            Some(session_id) = task_notify_rx.recv() => {
+                // 后台任务状态变化：推面板快照（entry.state 与 Session 共享 Arc，
+                // session 在 turn future 中也能取到注册表）
+                if let Some(entry) = sessions.get(&session_id) {
+                    let tasks = crate::task::snapshot(&entry.state.tasks);
+                    emit_global!(Event::TaskListChanged { session_id, seq, tasks });
                 }
             }
             Some((session_id, session)) = turns.next(), if !turns.is_empty() => {

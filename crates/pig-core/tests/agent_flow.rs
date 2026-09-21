@@ -40,9 +40,9 @@ async fn full_turn_with_tool_call() {
         events.iter().any(|e| matches!(
             e,
             Event::ToolCallBegin { tool, input_summary, .. }
-                if tool == "read_file" && input_summary.contains(mock::MOCK_FILE_NAME)
+                if tool == "Read" && input_summary.contains(mock::MOCK_FILE_NAME)
         )),
-        "应有 read_file 工具调用: {events:#?}"
+        "应有 Read 工具调用: {events:#?}"
     );
     assert!(
         events.iter().any(|e| matches!(

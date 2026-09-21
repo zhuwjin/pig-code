@@ -368,6 +368,11 @@ impl SettingsView {
             input_pdf: dialog.input_pdf,
             cap_structured: dialog.cap_structured,
             cap_web_search: dialog.cap_web_search,
+            // 无设置 UI：编辑时保留手配的原值，新建为 None
+            web_search_tool: dialog
+                .snapshot
+                .as_ref()
+                .and_then(|m| m.web_search_tool.clone()),
             cap_system_msg: dialog.cap_system_msg,
             reasoning_levels: dialog.reasoning_levels.clone(),
             reasoning_params: params.unwrap(),

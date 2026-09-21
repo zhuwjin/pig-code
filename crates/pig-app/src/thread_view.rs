@@ -501,6 +501,8 @@ impl ThreadView {
             Event::SessionList { .. }
             | Event::FileSearchResults { .. }
             | Event::ContextCompacted { .. }
+            | Event::TodoListChanged { .. }
+            | Event::TaskListChanged { .. }
             | Event::GitInfo { .. }
             | Event::BranchChanged { .. }
             | Event::ConfigSnapshot { .. }
@@ -693,12 +695,14 @@ impl ThreadView {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let tool_icon = match tool {
-            "bash" => AssetIconName::Terminal,
-            "read_file" => AssetIconName::Eye,
-            "write_file" => AssetIconName::FilePlus,
-            "edit" => AssetIconName::FilePen,
-            "glob" => AssetIconName::FolderSearch,
-            "grep" => AssetIconName::TextSearch,
+            "Bash" => AssetIconName::Terminal,
+            "Read" => AssetIconName::Eye,
+            "Write" => AssetIconName::FilePlus,
+            "Edit" => AssetIconName::FilePen,
+            "Glob" => AssetIconName::FolderSearch,
+            "Grep" => AssetIconName::TextSearch,
+            "TodoList" => AssetIconName::ListTodo,
+            "FetchURL" => AssetIconName::Globe,
             _ => AssetIconName::Wrench,
         };
         let (status_icon, status_color) = if approval_pending {

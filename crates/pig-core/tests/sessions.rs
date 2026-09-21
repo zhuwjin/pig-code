@@ -66,7 +66,7 @@ async fn resume_rebuilds_history() {
         "重放应含用户消息"
     );
     assert!(
-        replay.iter().any(|e| matches!(e, Event::ToolCallBegin { tool, .. } if tool == "read_file")),
+        replay.iter().any(|e| matches!(e, Event::ToolCallBegin { tool, .. } if tool == "Read")),
         "重放应含工具调用"
     );
 
@@ -209,7 +209,7 @@ async fn parallel_sessions() {
             Event::TextDelta { session_id, delta, .. } if delta.contains("HISTORY_COUNT") => {
                 assert_eq!(session_id, &session_a, "A 的文本不应串到 B")
             }
-            Event::ToolCallBegin { session_id, tool, .. } if tool == "read_file" => {
+            Event::ToolCallBegin { session_id, tool, .. } if tool == "Read" => {
                 assert_eq!(session_id, &session_b, "B 的工具调用不应串到 A")
             }
             _ => {}

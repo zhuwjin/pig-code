@@ -136,6 +136,10 @@ pub struct ModelConfig {
     pub cap_structured: bool,
     #[serde(default)]
     pub cap_web_search: bool,
+    /// 原生联网搜索工具定义：Anthropic 缺省 web_search_20250305；OpenAI 兼容
+    /// 端点需显式配置（如智谱 {"type":"web_search","web_search":{...}}）
+    #[serde(default)]
+    pub web_search_tool: Option<serde_json::Value>,
     #[serde(default)]
     pub cap_system_msg: bool,
     /// 可选推理等级，如 ["low","high","max"]
@@ -162,6 +166,7 @@ impl ModelConfig {
             input_pdf: false,
             cap_structured: false,
             cap_web_search: false,
+            web_search_tool: None,
             cap_system_msg: false,
             reasoning_levels: vec![],
             reasoning_params: Default::default(),
@@ -211,6 +216,40 @@ pub struct SessionMeta {
     pub updated_at: u64,
     pub pinned: bool,
     pub archived: bool,
+}
+
+/// TodoList 工具的待办项：会话级状态，写入时整体替换。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+/// 后台 Bash 任务状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskStatus {
+    Running,
+    Exited(i32),
+    Killed,
+}
+
+/// 后台任务面板快照（output_tail 为输出尾部节选）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub command: String,
+    pub status: TaskStatus,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    pub output_tail: String,
 }
 
 /// core → UI 事件
@@ -324,7 +363,7 @@ pub enum Event {
         seq: u64,
         request_id: String,
         tool: String,
-        /// bash: 完整命令；write_file/edit: 路径 + diff 预览
+        /// Bash: 完整命令；Write/Edit: 路径 + diff 预览
         detail: String,
     },
     FileChanged {
@@ -339,6 +378,18 @@ pub enum Event {
         session_id: String,
         seq: u64,
         path: String,
+    },
+    /// TodoList 工具写入成功后的待办快照（含新建/切换会话时的初始空快照）
+    TodoListChanged {
+        session_id: String,
+        seq: u64,
+        items: Vec<TodoItem>,
+    },
+    /// 后台任务状态变化后的面板快照（启动/退出/停止）
+    TaskListChanged {
+        session_id: String,
+        seq: u64,
+        tasks: Vec<TaskSummary>,
     },
     TurnComplete {
         session_id: String,

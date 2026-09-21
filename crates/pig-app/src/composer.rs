@@ -9,7 +9,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use pig_protocol::{ApprovalDecision, ExecMode};
+use pig_protocol::{ApprovalDecision, ExecMode, TaskStatus, TaskSummary, TodoItem, TodoStatus};
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "清空当前会话消息"),
@@ -39,6 +39,16 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
         ExecMode::FullAccess => AssetIconName::ShieldAlert,
     }
 }
+
+/// 任务耗时：started→ended（或至今），"N 秒 / N 分"。
+fn format_task_duration(started_at: u64, end: u64) -> String {
+    let secs = end.saturating_sub(started_at);
+    if secs < 60 {
+        format!("{secs} 秒")
+    } else {
+        format!("{} 分", secs / 60)
+    }
+}
 /// (供应商名, provider_id, model_id, 推理等级列表)
 pub type ModelOption = (String, String, String, Vec<String>);
 
@@ -46,9 +56,40 @@ pub type ModelOption = (String, String, String, Vec<String>);
 #[derive(Clone)]
 pub struct PendingApproval {
     pub tool: String,
-    /// bash 是命令原文；write_file/edit 是 diff 预览
+    /// Bash 是命令原文；Write/Edit 是 diff 预览
     pub detail: String,
     pub cwd: String,
+}
+
+/// 输入区上方的辅助面板（当前进度 / 后台 Bash 任务）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuxPanel {
+    Todos,
+    Tasks,
+}
+
+/// 任务面板过滤 tab。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskFilter {
+    Running,
+    Finished,
+    All,
+}
+
+impl TaskFilter {
+    const TABS: &[(TaskFilter, &str)] = &[
+        (TaskFilter::Running, "进行中"),
+        (TaskFilter::Finished, "已完成"),
+        (TaskFilter::All, "全部"),
+    ];
+
+    fn matches(self, status: TaskStatus) -> bool {
+        match self {
+            TaskFilter::Running => matches!(status, TaskStatus::Running),
+            TaskFilter::Finished => !matches!(status, TaskStatus::Running),
+            TaskFilter::All => true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -125,6 +166,13 @@ pub struct Composer {
     approval_focused: bool,
     mention_results: Vec<String>,
     context_usage: Option<(u64, u64)>,
+    /// 输入区上方面板：TodoList 进度 / 后台 Bash 任务快照（core 推送）
+    todos: Vec<TodoItem>,
+    tasks: Vec<TaskSummary>,
+    active_panel: Option<AuxPanel>,
+    task_filter: TaskFilter,
+    /// 展开输出尾部的任务行 id
+    expanded_task: Option<String>,
     hero_mode: bool,
     hero_cwds: Vec<String>,
     hero_cwd: Option<String>,
@@ -175,6 +223,11 @@ impl Composer {
             approval_focused: false,
             mention_results: Vec::new(),
             context_usage: None,
+            todos: Vec::new(),
+            tasks: Vec::new(),
+            active_panel: None,
+            task_filter: TaskFilter::Running,
+            expanded_task: None,
             hero_mode: false,
             hero_cwds: Vec::new(),
             hero_cwd: None,
@@ -331,6 +384,16 @@ impl Composer {
 
     pub fn set_context_usage(&mut self, used: u64, total: u64, cx: &mut Context<Self>) {
         self.context_usage = Some((used, total));
+        cx.notify();
+    }
+
+    pub fn set_todos(&mut self, todos: Vec<TodoItem>, cx: &mut Context<Self>) {
+        self.todos = todos;
+        cx.notify();
+    }
+
+    pub fn set_tasks(&mut self, tasks: Vec<TaskSummary>, cx: &mut Context<Self>) {
+        self.tasks = tasks;
         cx.notify();
     }
 
@@ -1085,6 +1148,291 @@ impl Composer {
             .into_any_element()
     }
 
+    /// 当前进度（TodoList）+ 后台 Bash 任务：chip 行 + 可切换的只读面板（v1 无停止按钮）。
+    fn render_aux(&self, cx: &mut Context<Self>) -> AnyElement {
+        let running = self
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, TaskStatus::Running))
+            .count();
+        let done = self
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Done)
+            .count();
+
+        let mut chips = h_flex().w_full().gap_2();
+        if !self.tasks.is_empty() {
+            let label = if running > 0 {
+                format!("后台 Bash {running} 运行中")
+            } else {
+                "后台 Bash".to_string()
+            };
+            chips = chips.child(self.render_aux_chip(
+                "aux-tasks",
+                AssetIconName::Terminal,
+                label,
+                self.active_panel == Some(AuxPanel::Tasks),
+                AuxPanel::Tasks,
+                cx,
+            ));
+        }
+        if !self.todos.is_empty() {
+            chips = chips.child(self.render_aux_chip(
+                "aux-todos",
+                AssetIconName::ListTodo,
+                format!("当前进度 {done}/{}", self.todos.len()),
+                self.active_panel == Some(AuxPanel::Todos),
+                AuxPanel::Todos,
+                cx,
+            ));
+        }
+
+        let mut root = v_flex().w_full().gap_2().child(chips);
+        match self.active_panel {
+            Some(AuxPanel::Todos) if !self.todos.is_empty() => {
+                root = root.child(self.render_todos_panel(cx))
+            }
+            Some(AuxPanel::Tasks) if !self.tasks.is_empty() => {
+                root = root.child(self.render_tasks_panel(cx))
+            }
+            _ => {}
+        }
+        root.into_any_element()
+    }
+
+    fn render_aux_chip(
+        &self,
+        id: &'static str,
+        icon: AssetIconName,
+        label: String,
+        active: bool,
+        panel: AuxPanel,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        h_flex()
+            .id(id)
+            .gap_1()
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .cursor_pointer()
+            .when(active, |this| this.bg(cx.theme().accent.opacity(0.5)))
+            .hover(|this| this.bg(cx.theme().accent))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                // 再点同一个 chip 收起面板
+                this.active_panel = if this.active_panel == Some(panel) {
+                    None
+                } else {
+                    Some(panel)
+                };
+                cx.notify();
+            }))
+            .child(
+                Icon::new(icon)
+                    .size_4()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(div().text_sm().child(label))
+    }
+
+    /// 面板外壳：与现有弹层观感一致（rounded_xl + popover 背景 + 边框）。
+    fn aux_panel_shell(&self, content: Div, cx: &mut Context<Self>) -> Div {
+        content
+            .w_full()
+            .gap_2()
+            .p_3()
+            .rounded_xl()
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+    }
+
+    fn render_todos_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let done = self
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Done)
+            .count();
+        let mut list = v_flex().w_full().gap_1();
+        for item in &self.todos {
+            let (icon, color) = match item.status {
+                TodoStatus::Done => (AssetIconName::CircleCheck, cx.theme().success),
+                TodoStatus::InProgress => (AssetIconName::LoaderCircle, cx.theme().progress_bar),
+                TodoStatus::Pending => (AssetIconName::Circle, cx.theme().muted_foreground),
+            };
+            list = list.child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(Icon::new(icon).size_4().text_color(color))
+                    .child(
+                        div()
+                            .text_sm()
+                            .when(item.status == TodoStatus::Done, |this| {
+                                this.text_color(cx.theme().muted_foreground)
+                            })
+                            .child(item.content.clone()),
+                    ),
+            );
+        }
+        self.aux_panel_shell(
+            v_flex()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("当前进度 {done}/{}", self.todos.len())),
+                )
+                .child(list),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    fn render_tasks_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let running = self
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, TaskStatus::Running))
+            .count();
+        let title = if running > 0 {
+            format!("后台 Bash {running} 运行中")
+        } else {
+            "后台 Bash".to_string()
+        };
+
+        // 过滤 tab：进行中 / 已完成 / 全部
+        let mut tabs = h_flex().gap_1();
+        for (ix, (filter, label)) in TaskFilter::TABS.iter().enumerate() {
+            let active = self.task_filter == *filter;
+            let filter = *filter;
+            tabs = tabs.child(
+                div()
+                    .id(("aux-task-filter", ix))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .when(active, |this| this.bg(cx.theme().accent))
+                    .when(!active, |this| this.text_color(cx.theme().muted_foreground))
+                    .hover(|this| this.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.task_filter = filter;
+                        cx.notify();
+                    }))
+                    .child(*label),
+            );
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let visible: Vec<&TaskSummary> = self
+            .tasks
+            .iter()
+            .filter(|t| self.task_filter.matches(t.status))
+            .collect();
+        let mut list = v_flex().w_full().gap_1();
+        if visible.is_empty() {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("无任务"),
+            );
+        }
+        for (ix, task) in visible.iter().enumerate() {
+            let (icon, color) = match task.status {
+                TaskStatus::Running => (AssetIconName::LoaderCircle, cx.theme().progress_bar),
+                TaskStatus::Exited(0) => (AssetIconName::CircleCheck, cx.theme().success),
+                TaskStatus::Exited(_) => (AssetIconName::TriangleAlert, cx.theme().warning),
+                TaskStatus::Killed => (AssetIconName::TriangleAlert, cx.theme().muted_foreground),
+            };
+            let duration = format_task_duration(task.started_at, task.ended_at.unwrap_or(now));
+            let expanded = self.expanded_task.as_deref() == Some(task.id.as_str());
+            let task_id = task.id.clone();
+            let mut row = v_flex().w_full().child(
+                h_flex()
+                    .id(("aux-task-row", ix))
+                    .w_full()
+                    .gap_2()
+                    .px_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.expanded_task = if this.expanded_task.as_deref() == Some(task_id.as_str()) {
+                            None
+                        } else {
+                            Some(task_id.clone())
+                        };
+                        cx.notify();
+                    }))
+                    .child(Icon::new(icon).size_4().text_color(color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .font_family("monospace")
+                            .child(task.command.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(duration),
+                    )
+                    .child(
+                        Icon::new(AssetIconName::ChevronRight)
+                            .size_3()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            );
+            if expanded {
+                row = row.child(
+                    div()
+                        .id(("aux-task-output", ix))
+                        .w_full()
+                        .mt_1()
+                        .p_2()
+                        .rounded_md()
+                        .bg(cx.theme().accent.opacity(0.3))
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if task.output_tail.is_empty() {
+                            "（暂无输出）".to_string()
+                        } else {
+                            task.output_tail.clone()
+                        }),
+                );
+            }
+            list = list.child(row);
+        }
+
+        self.aux_panel_shell(
+            v_flex()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .child(div().text_sm().child(title))
+                        .child(div().flex_1())
+                        .child(tabs),
+                )
+                .child(list),
+            cx,
+        )
+        .into_any_element()
+    }
+
     /// 审批条（kimi 同款）：审批期间替换输入区。橙色圆点 + 标题，深色内嵌块
     /// 展示命令/diff，底部 本会话内批准(Ctrl+⏎) / 拒绝(Esc) / 批准(⏎)。
     fn render_approval_bar(
@@ -1093,12 +1441,12 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = match approval.tool.as_str() {
-            "bash" => "运行命令？".to_string(),
-            "write_file" => "写入文件？".to_string(),
-            "edit" => "修改文件？".to_string(),
+            "Bash" => "运行命令？".to_string(),
+            "Write" => "写入文件？".to_string(),
+            "Edit" => "修改文件？".to_string(),
             tool => format!("执行 {tool}？"),
         };
-        let detail = if approval.tool == "bash" {
+        let detail = if approval.tool == "Bash" {
             format!("$ {}", approval.detail)
         } else {
             approval.detail.clone()
@@ -1408,6 +1756,9 @@ impl Render for Composer {
                                         )
                                     }),
                             )
+                        })
+                        .when(!self.todos.is_empty() || !self.tasks.is_empty(), |this| {
+                            this.child(self.render_aux(cx))
                         })
                         .when(!self.attachments.is_empty(), |this| {
                             this.child(self.render_attachments(cx))

@@ -5,7 +5,7 @@
 fn main() {
     let port = pig_core::mock::start_mock_server();
     println!("mock provider 已启动: base_url = \"http://127.0.0.1:{port}/v1\"");
-    println!("行为: 首轮请求返回 read_file 工具调用（读取 {}），含工具结果后返回流式 Markdown（带 reasoning_content）。", pig_core::mock::MOCK_FILE_NAME);
+    println!("行为: 首轮请求返回 Read 工具调用（读取 {}），含工具结果后返回流式 Markdown（带 reasoning_content）。", pig_core::mock::MOCK_FILE_NAME);
     println!("agent 的工作目录里需要有 {} 文件。", pig_core::mock::MOCK_FILE_NAME);
     loop {
         std::thread::park();

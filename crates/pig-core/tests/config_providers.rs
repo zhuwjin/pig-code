@@ -110,7 +110,7 @@ async fn config_v2_snapshot_and_save() {
     agent.shutdown();
 }
 
-/// Anthropic 格式完整 turn：read_file 工具调用 → 结果 → 文本（走 /v1/messages + Anthropic SSE）
+/// Anthropic 格式完整 turn：Read 工具调用 → 结果 → 文本（走 /v1/messages + Anthropic SSE）
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_full_turn() {
     let port = mock::start_mock_server();

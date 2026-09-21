@@ -79,6 +79,9 @@ struct AppView {
     /// 待审批详情（审批条内容）：决议/回合结束时清除
     pending_approvals: HashMap<String, PendingApproval>,
     stats: HashMap<String, (u32, u32)>,
+    /// 各会话的 TodoList/后台任务快照（core 推送缓存，切会话时同步给 composer）
+    todos_by_session: HashMap<String, Vec<pig_protocol::TodoItem>>,
+    tasks_by_session: HashMap<String, Vec<pig_protocol::TaskSummary>>,
     agent: AgentClient,
     cwd: PathBuf,
     config_path: Option<PathBuf>,
@@ -130,6 +133,8 @@ impl AppView {
             approval_pending: HashSet::new(),
             pending_approvals: HashMap::new(),
             stats: HashMap::new(),
+            todos_by_session: HashMap::new(),
+            tasks_by_session: HashMap::new(),
             agent,
             hero_cwd: None,
             cwd,
@@ -288,6 +293,21 @@ impl AppView {
                     composer.set_model_name(label, cx);
                     composer.set_hero_mode(false, cx);
                 });
+                // 切换/新建会话：用缓存快照同步进度/任务面板（无快照则清空）
+                let todos = self
+                    .todos_by_session
+                    .get(&session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let tasks = self
+                    .tasks_by_session
+                    .get(&session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_todos(todos, cx);
+                    composer.set_tasks(tasks, cx);
+                });
                 if let Some((text, files, mode)) = self.pending_first_send.take() {
                     self.agent.send_message(session_id, text, files, mode);
                 }
@@ -391,6 +411,28 @@ impl AppView {
                     self.composer.update(cx, |composer, cx| {
                         composer.set_context_usage(used, total, cx);
                     });
+                }
+            }
+            Event::TodoListChanged {
+                session_id, items, ..
+            } => {
+                self.todos_by_session
+                    .insert(session_id.clone(), items.clone());
+                if self.current.as_deref() == Some(session_id.as_str()) {
+                    let items = items.clone();
+                    self.composer
+                        .update(cx, |composer, cx| composer.set_todos(items, cx));
+                }
+            }
+            Event::TaskListChanged {
+                session_id, tasks, ..
+            } => {
+                self.tasks_by_session
+                    .insert(session_id.clone(), tasks.clone());
+                if self.current.as_deref() == Some(session_id.as_str()) {
+                    let tasks = tasks.clone();
+                    self.composer
+                        .update(cx, |composer, cx| composer.set_tasks(tasks, cx));
                 }
             }
             Event::TurnComplete {
@@ -1087,6 +1129,8 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::TurnComplete { session_id, .. }
         | Event::TurnAborted { session_id, .. }
         | Event::MessageQueued { session_id, .. }
+        | Event::TodoListChanged { session_id, .. }
+        | Event::TaskListChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
         | Event::GitInfo { .. }
@@ -1779,7 +1823,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             break;
         }
     }
-    assert_eq!(approvals, 1, "AutoEdit 下仅 bash 审批");
+    assert_eq!(approvals, 1, "AutoEdit 下仅 Bash 审批");
     println!("[selftest] Anthropic 供应商端到端 OK");
 
     println!("SELFTEST PASS");

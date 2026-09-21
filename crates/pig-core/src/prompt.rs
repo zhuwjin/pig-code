@@ -42,7 +42,9 @@ pub fn system_prompt(
          - 回答使用与用户相同的语言（默认中文）。\n\
          - 修改代码前先读文件确认现状，不要臆测文件内容。\n\
          - 不执行有破坏性的命令（删除、格式化、强制推送等）。\n\
-         - 读文件/搜索优先用 read_file、glob、grep 专用工具，而非 bash。\n\
+         - 读文件/搜索优先用 Read、Glob、Grep 专用工具，而非 Bash。\n\
+         - 多步任务先用 TodoList 拆分并随时更新进度。\n\
+         - 长时命令（dev server/watch/长构建）用 Bash 的 run_in_background，配合 TaskOutput 查输出。\n\
          - 回答简洁，代码用 Markdown 代码块给出。\n",
         cwd.display(),
         std::env::consts::OS,
@@ -58,8 +60,8 @@ pub fn system_prompt(
             "\n当前执行模式: 自动编辑。可以直接修改文件；执行命令前会先请用户审批。\n"
         }
         ExecMode::Plan => {
-            "\n当前执行模式: 计划模式。你是只读的：不要调用 write_file/edit/bash 等修改类工具，\
-             只能用 read_file/glob/grep 调研，最终输出一份可执行的计划文本。\n"
+            "\n当前执行模式: 计划模式。你是只读的：不要调用 Write/Edit/Bash 等修改类工具，\
+             只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。\n"
         }
         ExecMode::FullAccess => {
             "\n当前执行模式: 完全访问。所有工具直接执行，无需审批；仍禁止破坏性命令。\n"
@@ -72,12 +74,17 @@ pub fn system_prompt(
     if has_tools {
         prompt.push_str(
             "\n可用工具:\n\
-             - read_file: 读取工作区文件内容（path 相对工作目录，支持 offset/limit 分页）。\n\
-             - write_file: 写入整个文件（自动创建父目录）。\n\
-             - edit: 精确替换文件文本（old_string 必须唯一出现）。\n\
-             - glob: 按模式匹配文件名（如 **/*.rs）。\n\
-             - grep: 正则搜索文件内容，输出 文件:行号: 内容。\n\
-             - bash: 执行 shell 命令（Windows 下为 cmd /C），返回 stdout/stderr 与退出码。\n\n\
+             - Read: 读取工作区文件内容（path 相对工作目录，支持 offset/limit 分页）。\n\
+             - Write: 写入整个文件（自动创建父目录）。\n\
+             - Edit: 精确替换文件文本（old_string 必须唯一出现）。\n\
+             - Glob: 按模式匹配文件名（如 **/*.rs）。\n\
+             - Grep: 正则搜索文件内容，输出 文件:行号: 内容。\n\
+             - Bash: 执行 shell 命令（Windows 下为 cmd /C），返回 stdout/stderr 与退出码。\n\
+             - TodoList: 管理会话级待办清单（省略参数读取，提供 todos 整体替换）。\n\
+             - FetchURL: 抓取公开网页并提取正文（不支持需登录页面）。\n\
+             - TaskList: 列出后台 Bash 任务（id、状态、耗时）。\n\
+             - TaskOutput: 查看后台任务输出（尾部节选）。\n\
+             - TaskStop: 停止仍在运行的后台任务。\n\n\
              需要了解文件内容或验证改动时主动调用工具，拿到结果后再回答。\n",
         );
     }

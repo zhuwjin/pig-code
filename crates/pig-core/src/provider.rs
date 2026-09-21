@@ -96,6 +96,8 @@ pub struct ResolvedModel {
     pub max_output_tokens: u64,
     pub api_format: ApiFormat,
     pub reasoning_params: Option<serde_json::Value>,
+    pub cap_web_search: bool,
+    pub web_search_tool: Option<serde_json::Value>,
     /// 展示用
     pub provider_name: String,
 }
@@ -253,6 +255,10 @@ async fn stream_openai(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     let client = http_client();
+    let mut tools = tools;
+    if let Some(tool) = openai_web_search_tool(config) {
+        tools.push(tool);
+    }
     let mut body = serde_json::to_value(ChatRequest {
         model: &config.model,
         messages: &messages,
@@ -542,6 +548,30 @@ fn to_anthropic_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Anthropic 端点：能力开启时注入服务端搜索工具（web_search_tool 可自定义，
+/// 缺省 web_search_20250305）。服务端产出的 web_search_tool_result block 由
+/// SSE 解析器 fallthrough 忽略。
+pub fn anthropic_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Value> {
+    if !config.cap_web_search {
+        return None;
+    }
+    Some(
+        config
+            .web_search_tool
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"type": "web_search_20250305", "name": "web_search"})),
+    )
+}
+
+/// OpenAI 兼容端点：无服务端搜索标准，只有显式配置 web_search_tool 才注入
+///（如智谱 {"type":"web_search","web_search":{"enable":true,"search_result":true}}）。
+pub fn openai_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Value> {
+    if !config.cap_web_search {
+        return None;
+    }
+    config.web_search_tool.clone()
+}
+
 async fn stream_anthropic(
     config: &ResolvedModel,
     messages: Vec<ChatMsg>,
@@ -550,7 +580,10 @@ async fn stream_anthropic(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     let (system, messages) = to_anthropic_messages(&messages);
-    let anthropic_tools = to_anthropic_tools(&tools);
+    let mut anthropic_tools = to_anthropic_tools(&tools);
+    if let Some(tool) = anthropic_web_search_tool(config) {
+        anthropic_tools.push(tool);
+    }
     let mut body = serde_json::json!({
         "model": config.model,
         "max_tokens": config.max_output_tokens,
@@ -887,6 +920,8 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
                 max_output_tokens: model.max_output_tokens,
                 api_format: provider.api_format,
                 reasoning_params: None,
+                cap_web_search: model.cap_web_search,
+                web_search_tool: model.web_search_tool.clone(),
                 provider_name: provider.name.clone(),
             };
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -929,7 +964,7 @@ mod tests {
             },
             ToolCall {
                 id: "b".into(),
-                name: "bash".into(),
+                name: "Bash".into(),
                 arguments: "{}".into(),
             },
         ];
@@ -937,7 +972,7 @@ mod tests {
         match rx.try_recv() {
             Ok(ProviderEvent::ToolCalls(calls)) => {
                 assert_eq!(calls.len(), 1, "无名调用应被过滤");
-                assert_eq!(calls[0].name, "bash");
+                assert_eq!(calls[0].name, "Bash");
             }
             other => panic!("应滤出剩余的命名调用: {other:?}"),
         }
@@ -962,7 +997,7 @@ mod tests {
                 "回答".into(),
                 vec![ToolCall {
                     id: "c1".into(),
-                    name: "bash".into(),
+                    name: "Bash".into(),
                     arguments: "{}".into(),
                 }],
                 Some("想了想".into()),
@@ -985,5 +1020,56 @@ mod tests {
         let content = out[0]["content"].as_array().expect("blocks");
         assert_eq!(content.len(), 1, "无思考内容时不应有 thinking 块");
         assert_eq!(content[0]["type"], "text");
+    }
+
+    fn search_model(cap: bool, tool: Option<serde_json::Value>) -> ResolvedModel {
+        ResolvedModel {
+            base_url: "http://localhost".into(),
+            api_key: String::new(),
+            model: "m".into(),
+            context_window: 0,
+            max_output_tokens: 0,
+            api_format: ApiFormat::AnthropicMessages,
+            reasoning_params: None,
+            cap_web_search: cap,
+            web_search_tool: tool,
+            provider_name: "p".into(),
+        }
+    }
+
+    #[test]
+    fn anthropic_web_search_tool_injection() {
+        // cap 关 → 不注入
+        assert!(anthropic_web_search_tool(&search_model(false, None)).is_none());
+        // cap 开、无自定义 → 默认 web_search_20250305
+        let tool = anthropic_web_search_tool(&search_model(true, None)).expect("cap 开应注入");
+        assert_eq!(
+            tool,
+            serde_json::json!({"type": "web_search_20250305", "name": "web_search"})
+        );
+        // cap 开、有自定义 → 用自定义 JSON
+        let custom =
+            serde_json::json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 3});
+        assert_eq!(
+            anthropic_web_search_tool(&search_model(true, Some(custom.clone()))).unwrap(),
+            custom
+        );
+    }
+
+    #[test]
+    fn openai_web_search_tool_injection() {
+        // cap 关 → 不注入
+        assert!(openai_web_search_tool(&search_model(false, None)).is_none());
+        // cap 开但无自定义 → 不注入（OpenAI 兼容端点无服务端搜索标准）
+        assert!(openai_web_search_tool(&search_model(true, None)).is_none());
+        // cap 开且有自定义（如智谱）→ 注入
+        let custom = serde_json::json!({
+            "type": "web_search",
+            "web_search": {"enable": true, "search_result": true}
+        });
+        assert_eq!(
+            openai_web_search_tool(&search_model(true, Some(custom.clone()))).unwrap(),
+            custom
+        );
     }
 }
