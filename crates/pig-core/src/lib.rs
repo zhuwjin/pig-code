@@ -53,6 +53,82 @@ pub fn spawn_agent(config_path: Option<PathBuf>, cwd: PathBuf) -> AgentHandle {
     spawn_agent_with_data_dir(config_path, cwd, data_dir())
 }
 
+/// 完整链路网络探针（pig-app 的 PIG_NET_TEST=full 触发）：
+/// spawn_agent + 真实发送一条消息（含系统提示词与工具），
+/// 打印带时间戳的事件流直到回合结束，用于定位「回合不完成」类问题。
+pub fn net_test_full_turn(config_path: Option<PathBuf>) {
+    let cwd = std::env::current_dir().expect("cwd");
+    let agent = spawn_agent(config_path, cwd);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        agent
+            .ops
+            .send(Op::NewSession { cwd: std::env::current_dir().expect("cwd") })
+            .await
+            .expect("send NewSession");
+        let start = std::time::Instant::now();
+        let mut session_id = String::new();
+        let mut sent = false;
+        loop {
+            let event = match tokio::time::timeout(std::time::Duration::from_secs(90), agent.events.recv()).await {
+                Ok(Ok(event)) => event,
+                _ => {
+                    println!("[net-test] 超时：90s 内回合未结束");
+                    break;
+                }
+            };
+            let elapsed = start.elapsed().as_millis();
+            let label = match &event {
+                Event::SessionConfigured { session_id: sid, .. } => {
+                    session_id = sid.clone();
+                    format!("SessionConfigured({sid})")
+                }
+                Event::TurnStarted { .. } => "TurnStarted".to_string(),
+                Event::TextDelta { delta, .. } => format!("TextDelta({}字)", delta.chars().count()),
+                Event::TextDone { .. } => "TextDone".to_string(),
+                Event::ReasoningDelta { delta, .. } => {
+                    format!("ReasoningDelta({}字)", delta.chars().count())
+                }
+                Event::ToolCallBegin { tool, .. } => format!("ToolCallBegin({tool})"),
+                Event::ToolCallEnd { is_error, .. } => {
+                    format!("ToolCallEnd(is_error={is_error})")
+                }
+                Event::ContextUsage { used, total, .. } => format!("ContextUsage({used}/{total})"),
+                Event::TurnComplete { duration_ms, .. } => {
+                    format!("TurnComplete({duration_ms}ms)")
+                }
+                Event::TurnAborted { .. } => "TurnAborted".to_string(),
+                Event::Error { message, .. } => format!("Error({message})"),
+                other => format!("{other:?}"),
+            };
+            println!("[net-test] +{elapsed}ms {label}");
+            if matches!(event, Event::SessionConfigured { .. }) && !sent {
+                sent = true;
+                agent
+                    .ops
+                    .send(Op::SendMessage {
+                        session_id: session_id.clone(),
+                        content: "ping".to_string(),
+                        files: vec![],
+                        mode: pig_protocol::ExecMode::AutoEdit,
+                    })
+                    .await
+                    .expect("send SendMessage");
+            }
+            if matches!(
+                event,
+                Event::TurnComplete { .. } | Event::TurnAborted { .. } | Event::Error { .. }
+            ) {
+                break;
+            }
+        }
+    });
+    agent.shutdown();
+}
+
 /// 同 `spawn_agent`，但显式指定数据目录（测试/自测隔离用）。
 pub fn spawn_agent_with_data_dir(
     config_path: Option<PathBuf>,

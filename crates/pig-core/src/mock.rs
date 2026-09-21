@@ -5,6 +5,8 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 pub const MOCK_FILE_NAME: &str = "README.mock.md";
 pub const MOCK_FILE_CONTENT: &str = "# mock 文件\n\n这是 pig-core mock provider 自测用的已知文件。\n";
 pub const MOCK_REASONING: &str = "用户让我读一个文件并总结。先调用 read_file。";
@@ -328,6 +330,20 @@ async fn handle_connection(
     if let Some(log) = &log {
         log.lock().expect("log lock").push(body.clone());
     }
+
+    // 重试测试：首个含 FAIL_ONCE_500 的请求返回 500（计数耗尽后正常）
+    static FAIL_ONCE_500: AtomicUsize = AtomicUsize::new(1);
+    if body.contains("FAIL_ONCE_500")
+        && FAIL_ONCE_500
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+    {
+        let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}";
+        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        return;
+    }
+
     let anthropic = path.ends_with("/messages");
     let tool_results = body.matches("\"role\":\"tool\"").count()
         + body.matches("\"role\": \"tool\"").count()

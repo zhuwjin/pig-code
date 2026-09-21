@@ -1,9 +1,9 @@
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::command::{Command, CommandItem, CommandState};
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex,
-};
+use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::ExecMode;
@@ -16,12 +16,26 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 pub const PLACEHOLDER_IDLE: &str = "向 pig-code 提问，使用 @ 添加上下文，使用 / 选择命令";
 pub const PLACEHOLDER_STREAMING: &str = "继续输入以排队后续修改";
 
-const EXEC_MODES: &[(&str, ExecMode)] = &[
-    ("变更前确认", ExecMode::ConfirmBeforeEdit),
-    ("自动编辑", ExecMode::AutoEdit),
-    ("计划模式", ExecMode::Plan),
-    ("完全访问", ExecMode::FullAccess),
+/// (名称, 描述, 模式)
+const EXEC_MODES: &[(&str, &str, ExecMode)] = &[
+    (
+        "变更前确认",
+        "改文件前先问我。",
+        ExecMode::ConfirmBeforeEdit,
+    ),
+    ("自动编辑", "自动编辑文件。", ExecMode::AutoEdit),
+    ("计划模式", "编辑前先出计划。", ExecMode::Plan),
+    ("完全访问", "减少确认次数。", ExecMode::FullAccess),
 ];
+
+fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
+    match mode {
+        ExecMode::ConfirmBeforeEdit => AssetIconName::Hand,
+        ExecMode::AutoEdit => AssetIconName::ShieldCheck,
+        ExecMode::Plan => AssetIconName::Lightbulb,
+        ExecMode::FullAccess => AssetIconName::ShieldAlert,
+    }
+}
 /// (供应商名, provider_id, model_id, 推理等级列表)
 pub type ModelOption = (String, String, String, Vec<String>);
 
@@ -35,7 +49,10 @@ pub enum ComposerEvent {
     Stop,
     Clear,
     Compact,
-    SetModel { provider_id: String, model_id: String },
+    SetModel {
+        provider_id: String,
+        model_id: String,
+    },
     SetReasoning(Option<String>),
     OpenSettings,
     SetExecMode(ExecMode),
@@ -59,6 +76,7 @@ enum Popup {
     Reasoning,
     Cwd,
     Branch,
+    Context,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -83,6 +101,10 @@ pub struct Composer {
     hero_branch: Option<String>,
     hero_branches: Vec<String>,
     hero_is_git: bool,
+    branch_command: Entity<CommandState>,
+    exec_command: Entity<CommandState>,
+    model_command: Entity<CommandState>,
+    reasoning_command: Entity<CommandState>,
     placeholder_applied: &'static str,
     _subscriptions: Vec<Subscription>,
 }
@@ -126,6 +148,10 @@ impl Composer {
             hero_branch: None,
             hero_branches: Vec::new(),
             hero_is_git: false,
+            branch_command: cx.new(|cx| CommandState::new(window, cx)),
+            exec_command: cx.new(|cx| CommandState::new(window, cx)),
+            model_command: cx.new(|cx| CommandState::new(window, cx)),
+            reasoning_command: cx.new(|cx| CommandState::new(window, cx)),
             placeholder_applied: PLACEHOLDER_IDLE,
             _subscriptions,
         }
@@ -213,7 +239,7 @@ impl Composer {
         cx.emit(ComposerEvent::Send {
             text,
             files,
-            mode: EXEC_MODES[self.exec_mode].1,
+            mode: EXEC_MODES[self.exec_mode].2,
         });
         cx.notify();
     }
@@ -264,7 +290,7 @@ impl Composer {
     }
 
     pub fn set_exec_mode(&mut self, mode: ExecMode, cx: &mut Context<Self>) {
-        if let Some(ix) = EXEC_MODES.iter().position(|(_, m)| *m == mode) {
+        if let Some(ix) = EXEC_MODES.iter().position(|(_, _, m)| *m == mode) {
             self.exec_mode = ix;
         }
         cx.notify();
@@ -272,54 +298,74 @@ impl Composer {
 
     /// 自测用。
     pub fn debug_exec_mode(&self) -> ExecMode {
-        EXEC_MODES[self.exec_mode].1
+        EXEC_MODES[self.exec_mode].2
     }
 
-    fn render_water_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (used, total) = self.context_usage?;
+    /// 紧凑 token 数：1 万以下原样，以上用「万」（10.5万 / 100万）
+    fn format_tokens_compact(n: u64) -> String {
+        if n >= 10_000 {
+            let wan = n as f64 / 10_000.0;
+            if wan.fract().abs() < 0.05 {
+                format!("{}万", wan.round() as u64)
+            } else {
+                format!("{wan:.1}万")
+            }
+        } else {
+            n.to_string()
+        }
+    }
+
+    /// 上下文容量面板：标题 + 用量/占比 + 进度条，锚定在指示器芯片正上方。
+    fn render_context_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (used, total) = self.context_usage.unwrap_or((0, 1));
         let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
-        let warn = ratio > 0.8;
-        let bar_color = if warn {
+        let bar_color = if ratio > 0.8 {
             cx.theme().warning
         } else {
-            cx.theme().success
+            cx.theme().progress_bar
         };
-        Some(
-            h_flex()
-                .w_full()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .h(px(4.))
-                        .rounded_full()
-                        .bg(cx.theme().border)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(ratio))
-                                .rounded_full()
-                                .bg(bar_color),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(if warn {
-                            cx.theme().warning
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .child(format!(
-                            "上下文 {:.1}k / {}k（{}%）",
-                            used as f64 / 1000.0,
-                            total / 1000,
-                            (ratio * 100.0) as u32
-                        )),
-                )
-                .into_any_element(),
-        )
+
+        let content = v_flex()
+            .w_full()
+            .gap_2()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(Self::command_surface(cx))
+            .p_3()
+            .child(
+                h_flex()
+                    .w_full()
+                    .child(div().text_sm().font_medium().child("上下文容量"))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{}/{} ({:.1}%)",
+                                Self::format_tokens_compact(used),
+                                Self::format_tokens_compact(total),
+                                ratio * 100.0
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(cx.theme().border)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(ratio))
+                            .rounded_full()
+                            .bg(bar_color),
+                    ),
+            )
+            .into_any_element();
+        self.popup_shell("composer-context-popup", content, true, cx)
     }
 
     fn popup_query(&self, cx: &App) -> Option<(Popup, usize, String)> {
@@ -444,129 +490,13 @@ impl Composer {
                     )
                 })
                 .collect(),
-            Popup::ExecMode => EXEC_MODES
-                .iter()
-                .enumerate()
-                .map(|(ix, (label, _))| {
-                    self.render_list_item(
-                        ("exec-mode", ix),
-                        if ix == self.exec_mode {
-                            IconName::Check
-                        } else {
-                            IconName::Dash
-                        },
-                        label.to_string(),
-                        None,
-                        cx.listener(move |this, _, _, cx| {
-                            this.exec_mode = ix;
-                            this.popup = None;
-                            cx.emit(ComposerEvent::SetExecMode(EXEC_MODES[ix].1));
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                })
-                .collect(),
-            Popup::Cwd => unreachable!("Cwd 由 render_cwd_popup 渲染"),
-            Popup::Branch => self
-                .hero_branches
-                .iter()
-                .enumerate()
-                .map(|(ix, branch)| {
-                    let branch = branch.clone();
-                    let current = Some(&branch) == self.hero_branch.as_ref();
-                    self.render_list_item(
-                        ("branch", ix),
-                        if current { IconName::Check } else { IconName::Dash },
-                        branch.clone(),
-                        None,
-                        cx.listener(move |this, _, _, cx| {
-                            this.popup = None;
-                            cx.emit(ComposerEvent::CheckoutBranch(branch.clone()));
-                        }),
-                        cx,
-                    )
-                })
-                .collect(),
-            Popup::Model if self.models.is_empty() => vec![self.render_list_item(
-                "model-empty",
-                IconName::Info,
-                "还没有配置模型，去设置页添加 →".to_string(),
-                None,
-                cx.listener(|_, _, _, cx| {
-                    cx.emit(ComposerEvent::OpenSettings);
-                }),
-                cx,
-            )],
-            Popup::Model => self
-                .models
-                .iter()
-                .enumerate()
-                .map(|(ix, (provider_name, provider_id, model_id, _))| {
-                    let selected = self.model == format!("{provider_name}/{model_id}");
-                    let label = format!("{provider_name}/{model_id}");
-                    let (provider_id, model_id) = (provider_id.clone(), model_id.clone());
-                    let detail = provider_name.clone();
-                    self.render_list_item(
-                        ("model", ix),
-                        if selected { IconName::Check } else { IconName::Dash },
-                        model_id.clone(),
-                        Some(detail),
-                        cx.listener(move |this, _, _, cx| {
-                            this.model = label.clone();
-                            this.popup = None;
-                            cx.emit(ComposerEvent::SetModel {
-                                provider_id: provider_id.clone(),
-                                model_id: model_id.clone(),
-                            });
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                })
-                .collect(),
-            Popup::Reasoning => {
-                let levels: Vec<String> = self
-                    .models
-                    .iter()
-                    .find(|(_, _, model_id, _)| self.model.ends_with(&format!("/{model_id}")))
-                    .map(|(_, _, _, levels)| levels.clone())
-                    .unwrap_or_default();
-                let mut items: Vec<AnyElement> = vec![self.render_list_item(
-                    "reasoning-off",
-                    if self.reasoning_level.is_none() {
-                        IconName::Check
-                    } else {
-                        IconName::Dash
-                    },
-                    "关闭".to_string(),
-                    None,
-                    cx.listener(|this, _, _, cx| {
-                        this.reasoning_level = None;
-                        this.popup = None;
-                        cx.emit(ComposerEvent::SetReasoning(None));
-                        cx.notify();
-                    }),
-                    cx,
-                )];
-                items.extend(levels.iter().enumerate().map(|(ix, level)| {
-                    let level = level.clone();
-                    let selected = self.reasoning_level.as_deref() == Some(level.as_str());
-                    self.render_list_item(
-                        ("reasoning", ix),
-                        if selected { IconName::Check } else { IconName::Dash },
-                        level.clone(),
-                        None,
-                        cx.listener(move |this, _, _, cx| {
-                            this.reasoning_level = Some(level.clone());
-                            this.popup = None;
-                            cx.emit(ComposerEvent::SetReasoning(Some(level.clone())));
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                }));
-                items
+            Popup::ExecMode
+            | Popup::Cwd
+            | Popup::Branch
+            | Popup::Model
+            | Popup::Reasoning
+            | Popup::Context => {
+                unreachable!("Cwd/Branch/ExecMode/Model/Reasoning/Context 由各自的专用面板渲染")
             }
         };
         if items.is_empty() {
@@ -581,6 +511,7 @@ impl Composer {
             Popup::Reasoning => "reasoning",
             Popup::Cwd => "cwd",
             Popup::Branch => "branch",
+            Popup::Context => "context",
         };
         Some(
             div()
@@ -612,18 +543,138 @@ impl Composer {
         )
     }
 
+    /// Command 面板的表面色：暗色主题下 popover 与窗口背景同为 #0a0a0a，
+    /// 面板会糊在背景上像透明一样，覆盖为不透明 neutral-800（比输入框容器亮一档）；
+    /// 亮色主题保持 popover。
+    fn command_surface(cx: &App) -> Hsla {
+        if cx.theme().is_dark() {
+            hsla(0., 0., 0.15, 1.)
+        } else {
+            cx.theme().popover
+        }
+    }
+
+    /// 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
+    /// `anchor_right` 时右对齐触发芯片（底部右侧芯片的弹层避免超出输入框右缘）。
+    fn popup_shell(
+        &self,
+        id: &'static str,
+        content: AnyElement,
+        anchor_right: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .absolute()
+            .bottom_full()
+            .when(!anchor_right, |this| this.left_0())
+            .when(anchor_right, |this| this.right_0())
+            .mb_2()
+            .w(px(360.))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.popup = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .relative()
+                    .with_animation(
+                        format!("{id}-enter"),
+                        Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(ease_out_quint()),
+                        |el, delta| el.top(px(6.0 * (1.0 - delta))).opacity(delta),
+                    )
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
+    /// Command 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
+    fn command_popup_shell(
+        &self,
+        id: &'static str,
+        command: Command,
+        anchor_right: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.popup_shell(id, command.into_any_element(), anchor_right, cx)
+    }
+
+    /// 面板确认/取消的通用收尾：关闭弹层并回焦输入框。
+    fn close_command_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.popup = None;
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// 芯片点击开合弹层：outside-click 在 capture 阶段已先关掉面板时，
+    /// 同一击不再重开（与渲染时状态一致才翻转）；打开时重置并聚焦对应 Command 面板。
+    fn toggle_popup(
+        &mut self,
+        kind: Popup,
+        render_open: bool,
+        command: Option<Entity<CommandState>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open_now = matches!(self.popup, Some((k, _)) if k == kind);
+        if open_now != render_open {
+            cx.notify();
+            return;
+        }
+        if open_now {
+            self.close_command_popup(window, cx);
+        } else {
+            self.popup = Some((kind, 0));
+            if let Some(command) = command {
+                command.update(cx, |state, cx| {
+                    state.set_query("", window, cx);
+                    state.focus(window, cx);
+                });
+            }
+            cx.notify();
+        }
+    }
+
+    /// 底部工具栏芯片：图标 + 文本 + 下拉箭头，样式与 hero 区工作区/分支芯片一致。
+    fn render_bar_chip(
+        &self,
+        id: &'static str,
+        icon: Option<AssetIconName>,
+        label: String,
+        filled: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        h_flex()
+            .id(id)
+            .gap_1()
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .cursor_pointer()
+            .when(filled, |this| this.bg(cx.theme().accent.opacity(0.5)))
+            .hover(|this| this.bg(cx.theme().accent))
+            .on_click(on_click)
+            .when_some(icon, |this, icon| {
+                this.child(
+                    Icon::new(icon)
+                        .size_4()
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
+            .child(div().text_sm().child(label))
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size_3()
+                    .text_color(cx.theme().muted_foreground),
+            )
+    }
+
     /// 工作区选择面板：Command 面板（搜索框 + 工作区列表 + 操作行），锚定在工作区芯片正上方。
     fn render_cwd_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
-
-        // 暗色主题下 popover 与窗口背景同为 #0a0a0a，面板会糊在背景上像透明一样；
-        // 用不透明 neutral-900 作为面板表面，亮色主题保持 popover（白）不变。
-        let surface = if cx.theme().is_dark() {
-            hsla(0., 0., 0.09, 1.)
-        } else {
-            cx.theme().popover
-        };
 
         let mut command = Command::new(&self.cwd_command)
             .placeholder("搜索工作区")
@@ -661,7 +712,6 @@ impl Composer {
             })
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
-                    this.popup = None;
                     let len = this.hero_cwds.len();
                     if let Some(cwd) = this.hero_cwds.get(ix.row) {
                         cx.emit(ComposerEvent::SelectCwd(cwd.clone()));
@@ -670,42 +720,227 @@ impl Composer {
                     } else {
                         cx.emit(ComposerEvent::ClearCwd);
                     }
-                    this.input.update(cx, |input, cx| input.focus(window, cx));
-                    cx.notify();
+                    this.close_command_popup(window, cx);
                 });
             })
             .on_cancel(move |window, cx| {
                 on_cancel_composer.update(cx, |this, cx| {
-                    this.popup = None;
-                    this.input.update(cx, |input, cx| input.focus(window, cx));
-                    cx.notify();
+                    this.close_command_popup(window, cx);
                 });
             });
-        command.style().background = Some(surface.into());
+        command.style().background = Some(Self::command_surface(cx).into());
 
-        div()
-            .id("composer-cwd-popup")
-            .absolute()
-            .bottom_full()
-            .left_0()
-            .mb_2()
-            .w(px(360.))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.popup = None;
-                cx.notify();
+        self.command_popup_shell("composer-cwd-popup", command, false, cx)
+    }
+
+    /// 分支选择面板：Command 面板（搜索框 + 分支列表），锚定在分支芯片正上方。
+    fn render_branch_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on_confirm_composer = cx.entity();
+        let on_cancel_composer = cx.entity();
+
+        let mut command = Command::new(&self.branch_command)
+            .placeholder("搜索分支")
+            .items(self.hero_branches.iter().map(|branch| {
+                CommandItem::new()
+                    .label(branch.clone())
+                    .keywords([branch.clone()])
+                    .icon(IconName::Github)
+                    .checked(self.hero_branch.as_deref() == Some(branch.as_str()))
             }))
-            .child(
+            .empty(|_, _, cx| {
                 div()
-                    .relative()
-                    .with_animation(
-                        "popup-enter-cwd",
-                        Animation::new(std::time::Duration::from_millis(150))
-                            .with_easing(ease_out_quint()),
-                        |el, delta| el.top(px(6.0 * (1.0 - delta))).opacity(delta),
-                    )
-                    .child(command),
+                    .px_2()
+                    .py_1p5()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("没有匹配的分支")
+            })
+            .on_confirm(move |ix, window, cx| {
+                on_confirm_composer.update(cx, |this, cx| {
+                    if let Some(branch) = this.hero_branches.get(ix.row) {
+                        cx.emit(ComposerEvent::CheckoutBranch(branch.clone()));
+                    }
+                    this.close_command_popup(window, cx);
+                });
+            })
+            .on_cancel(move |window, cx| {
+                on_cancel_composer.update(cx, |this, cx| {
+                    this.close_command_popup(window, cx);
+                });
+            });
+        command.style().background = Some(Self::command_surface(cx).into());
+
+        self.command_popup_shell("composer-branch-popup", command, false, cx)
+    }
+
+    /// 执行模式面板：无搜索框，每项带图标 + 描述，当前模式勾选。
+    fn render_exec_mode_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on_confirm_composer = cx.entity();
+        let on_cancel_composer = cx.entity();
+
+        let mut command = Command::new(&self.exec_command)
+            .searchable(false)
+            .items(
+                EXEC_MODES
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, (label, desc, mode))| {
+                        let icon = exec_mode_icon(*mode);
+                        CommandItem::new()
+                            .label(*label)
+                            .checked(ix == self.exec_mode)
+                            .child(move |_, cx| {
+                                h_flex()
+                                    .flex_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(icon)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        v_flex().child(div().child(*label)).child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(*desc),
+                                        ),
+                                    )
+                            })
+                    }),
             )
-            .into_any_element()
+            .on_confirm(move |ix, window, cx| {
+                on_confirm_composer.update(cx, |this, cx| {
+                    if let Some((_, _, mode)) = EXEC_MODES.get(ix.row) {
+                        this.exec_mode = ix.row;
+                        cx.emit(ComposerEvent::SetExecMode(*mode));
+                    }
+                    this.close_command_popup(window, cx);
+                });
+            })
+            .on_cancel(move |window, cx| {
+                on_cancel_composer.update(cx, |this, cx| {
+                    this.close_command_popup(window, cx);
+                });
+            });
+        command.style().background = Some(Self::command_surface(cx).into());
+
+        self.command_popup_shell("composer-exec-popup", command, false, cx)
+    }
+
+    /// 模型面板：搜索框 + 按供应商分组的模型列表 + 「管理模型」操作行。
+    fn render_model_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on_confirm_composer = cx.entity();
+        let on_cancel_composer = cx.entity();
+
+        // 按供应商分组，保持配置中的出现顺序
+        let mut groups: Vec<(String, Vec<ModelOption>)> = Vec::new();
+        for model in &self.models {
+            match groups.iter_mut().find(|(name, _)| *name == model.0) {
+                Some((_, items)) => items.push(model.clone()),
+                None => groups.push((model.0.clone(), vec![model.clone()])),
+            }
+        }
+
+        let mut command = Command::new(&self.model_command).placeholder("搜索模型");
+        if groups.is_empty() {
+            command = command.item(
+                CommandItem::new()
+                    .label("还没有配置模型，去设置页添加")
+                    .icon(IconName::Info),
+            );
+        } else {
+            for (provider_name, items) in &groups {
+                command = command.group(CommandGroup::new().label(provider_name.clone()).items(
+                    items.iter().map(|(provider_name, _, model_id, _)| {
+                        CommandItem::new()
+                            .label(model_id.clone())
+                            .keywords([provider_name.clone()])
+                            .checked(self.model == format!("{provider_name}/{model_id}"))
+                    }),
+                ));
+            }
+        }
+        // 未分组项固定为 section 0，分组从 section 1 起（与 entries 书写顺序无关）
+        command = command.separator().item(
+            CommandItem::new()
+                .label("管理模型")
+                .icon(AssetIconName::Settings),
+        );
+        let mut command = command
+            .empty(|_, _, cx| {
+                div()
+                    .px_2()
+                    .py_1p5()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("没有匹配的模型")
+            })
+            .on_confirm(move |ix, window, cx| {
+                on_confirm_composer.update(cx, |this, cx| {
+                    if ix.section == 0 {
+                        cx.emit(ComposerEvent::OpenSettings);
+                    } else if let Some((_, items)) = groups.get(ix.section - 1)
+                        && let Some((provider_name, provider_id, model_id, _)) = items.get(ix.row)
+                    {
+                        this.model = format!("{provider_name}/{model_id}");
+                        cx.emit(ComposerEvent::SetModel {
+                            provider_id: provider_id.clone(),
+                            model_id: model_id.clone(),
+                        });
+                    }
+                    this.close_command_popup(window, cx);
+                });
+            })
+            .on_cancel(move |window, cx| {
+                on_cancel_composer.update(cx, |this, cx| {
+                    this.close_command_popup(window, cx);
+                });
+            });
+        command.style().background = Some(Self::command_surface(cx).into());
+
+        self.command_popup_shell("composer-model-popup", command, true, cx)
+    }
+
+    /// 思考等级面板：无搜索框，「关闭」+ 等级列表，当前等级勾选。
+    fn render_reasoning_popup(&self, levels: &[String], cx: &mut Context<Self>) -> AnyElement {
+        let on_confirm_composer = cx.entity();
+        let on_cancel_composer = cx.entity();
+        let levels = levels.to_vec();
+
+        let mut command = Command::new(&self.reasoning_command)
+            .searchable(false)
+            .item(
+                CommandItem::new()
+                    .label("关闭")
+                    .checked(self.reasoning_level.is_none()),
+            )
+            .items(levels.iter().map(|level| {
+                CommandItem::new()
+                    .label(level.clone())
+                    .checked(self.reasoning_level.as_deref() == Some(level.as_str()))
+            }))
+            .on_confirm(move |ix, window, cx| {
+                on_confirm_composer.update(cx, |this, cx| {
+                    let level = if ix.row == 0 {
+                        None
+                    } else {
+                        levels.get(ix.row - 1).cloned()
+                    };
+                    this.reasoning_level = level.clone();
+                    cx.emit(ComposerEvent::SetReasoning(level));
+                    this.close_command_popup(window, cx);
+                });
+            })
+            .on_cancel(move |window, cx| {
+                on_cancel_composer.update(cx, |this, cx| {
+                    this.close_command_popup(window, cx);
+                });
+            });
+        command.style().background = Some(Self::command_surface(cx).into());
+
+        self.command_popup_shell("composer-reasoning-popup", command, true, cx)
     }
 
     fn render_attachments(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -759,240 +994,377 @@ impl Render for Composer {
         }
         let cwd_open = matches!(self.popup, Some((Popup::Cwd, _)));
         let cwd_popup = cwd_open.then(|| self.render_cwd_popup(cx));
-        let popup = if cwd_open { None } else { self.render_popup(cx) };
+        let branch_open = matches!(self.popup, Some((Popup::Branch, _)));
+        let branch_popup = branch_open.then(|| self.render_branch_popup(cx));
+        let exec_open = matches!(self.popup, Some((Popup::ExecMode, _)));
+        let exec_popup = exec_open.then(|| self.render_exec_mode_popup(cx));
+        let model_open = matches!(self.popup, Some((Popup::Model, _)));
+        let model_popup = model_open.then(|| self.render_model_popup(cx));
+        let reasoning_levels: Vec<String> = self
+            .models
+            .iter()
+            .find(|(_, _, model_id, _)| self.model.ends_with(&format!("/{model_id}")))
+            .map(|(_, _, _, levels)| levels.clone())
+            .unwrap_or_default();
+        let reasoning_open = matches!(self.popup, Some((Popup::Reasoning, _)));
+        let can_send = !self.input.read(cx).value().trim().is_empty();
+        let reasoning_popup =
+            reasoning_open.then(|| self.render_reasoning_popup(&reasoning_levels, cx));
+        let context_open = matches!(self.popup, Some((Popup::Context, _)));
+        let context_popup =
+            (context_open && self.context_usage.is_some()).then(|| self.render_context_popup(cx));
+        let palette_open =
+            cwd_open || branch_open || exec_open || model_open || reasoning_open || context_open;
+        let popup = if palette_open {
+            None
+        } else {
+            self.render_popup(cx)
+        };
 
+        // 输入框容器表面色：暗色下提亮到 neutral-850 左右从窗口背景浮起（参考官网
+        // message-scroller 的输入框），比 Command 面板暗一档保持 窗口 < 输入框 < 面板 的层次。
+        let composer_surface = if cx.theme().is_dark() {
+            hsla(0., 0., 0.11, 1.)
+        } else {
+            cx.theme().popover
+        };
+        let dark = cx.theme().is_dark();
+
+        // 外框与内容分层：GPUI 会把元素的边框画在所有子孙之后（style.paint 先画背景，
+        // 画完子元素才画边框），边框留在内容容器上的话，上方弹层会被容器顶边穿线；
+        // 边框/背景拆成独立的底层兄弟元素先画，弹层就能正常盖住它。
         div().w_full().p_3().child(
-            v_flex()
+            div()
+                .relative()
                 .w_full()
                 .max_w(px(860.))
                 .mx_auto()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().popover)
-                .children(self.render_water_bar(cx))
-                .when(self.hero_mode, |this| {
-                    this.child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .pb_1()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(
-                                div()
-                                    .relative()
-                                    .child(
-                                        h_flex()
-                                            .id("hero-cwd")
-                                            .gap_1()
-                                            .px_3()
-                                            .py_1()
-                                            .rounded_full()
-                                            .bg(cx.theme().accent.opacity(0.5))
-                                            .cursor_pointer()
-                                            .hover(|this| this.bg(cx.theme().accent))
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                let open_now =
-                                                    matches!(this.popup, Some((Popup::Cwd, _)));
-                                                // outside-click 在 capture 阶段已先关掉面板时，
-                                                // 同一击不再重开（与渲染时状态一致才翻转）
-                                                if open_now == cwd_open {
-                                                    if open_now {
-                                                        this.popup = None;
-                                                        this.input.update(cx, |input, cx| {
-                                                            input.focus(window, cx)
-                                                        });
-                                                    } else {
-                                                        this.popup = Some((Popup::Cwd, 0));
-                                                        this.cwd_command.update(cx, |state, cx| {
-                                                            state.set_query("", window, cx);
-                                                            state.focus(window, cx);
-                                                        });
-                                                    }
-                                                }
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                Icon::new(IconName::Folder)
-                                                    .size_4()
-                                                    .text_color(cx.theme().muted_foreground),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .when(self.hero_cwd.is_none(), |this| {
-                                                        this.text_color(
-                                                            cx.theme().muted_foreground,
-                                                        )
-                                                    })
-                                                    .child(self.hero_cwd_label.clone()),
-                                            )
-                                            .child(
-                                                Icon::new(IconName::ChevronDown)
-                                                    .size_3()
-                                                    .text_color(cx.theme().muted_foreground),
-                                            ),
-                                    )
-                                    .when_some(cwd_popup, |this, popup| this.child(popup)),
-                            )
-                            .when(self.hero_cwd.is_some(), |this| {
-                                this.child(
-                                    h_flex()
-                                        .id("hero-branch")
-                                        .gap_1()
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_full()
-                                        .when(self.hero_is_git, |this| {
-                                            this.bg(cx.theme().accent.opacity(0.5))
-                                                .cursor_pointer()
-                                                .hover(|this| this.bg(cx.theme().accent))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.popup = match this.popup {
-                                                        Some((Popup::Branch, _)) => None,
-                                                        _ => Some((Popup::Branch, 0)),
-                                                    };
-                                                    cx.notify();
-                                                }))
-                                        })
-                                        .child(
-                                            Icon::new(IconName::Github)
-                                                .size_4()
-                                                .text_color(cx.theme().muted_foreground),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .when(!self.hero_is_git, |this| {
-                                                    this.text_color(cx.theme().muted_foreground)
-                                                })
-                                                .child(if self.hero_is_git {
-                                                    self.hero_branch
-                                                        .clone()
-                                                        .unwrap_or_else(|| "?".into())
-                                                } else {
-                                                    "非 git 仓库".to_string()
-                                                }),
-                                        )
-                                        .when(self.hero_is_git, |this| {
-                                            this.child(
-                                                Icon::new(IconName::ChevronDown)
-                                                    .size_3()
-                                                    .text_color(cx.theme().muted_foreground),
-                                            )
-                                        }),
-                                )
-                            }),
-                    )
-                })
-                .when(!self.attachments.is_empty(), |this| {
-                    this.child(self.render_attachments(cx))
-                })
-                .when(self.approval_pending, |this| {
-                    this.child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(cx.theme().warning)
-                            .child("⏳ 等待审批：请在上方审批卡中选择 允许 / 始终允许 / 拒绝"),
-                    )
-                })
                 .child(
                     div()
-                        .relative()
-                        .w_full()
-                        .child(
-                            Textarea::new(&self.input)
-                                .appearance(false)
-                                .bordered(false),
-                        )
-                        .children(popup),
+                        .absolute()
+                        .inset_0()
+                        .rounded_2xl()
+                        // 暗色下靠表面色分界（官网样式无描边）；亮色下背景与窗口同为白色，
+                        // 仍需描边分界
+                        .when(!dark, |this| {
+                            this.border_1().border_color(cx.theme().border)
+                        })
+                        .bg(composer_surface),
                 )
                 .child(
-                    h_flex()
+                    v_flex()
                         .w_full()
                         .gap_2()
-                        .child(
-                            Button::new("exec-mode")
-                                .outline()
-                                .small()
-                                .label(format!("执行模式: {}", EXEC_MODES[self.exec_mode].0))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.popup = match this.popup {
-                                        Some((Popup::ExecMode, _)) => None,
-                                        _ => Some((Popup::ExecMode, 0)),
-                                    };
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("model-picker")
-                                .outline()
-                                .small()
-                                .label(format!("模型: {}", self.model))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.popup = match this.popup {
-                                        Some((Popup::Model, _)) => None,
-                                        _ => Some((Popup::Model, 0)),
-                                    };
-                                    cx.notify();
-                                })),
-                        )
-                        .when(
-                            self.models
-                                .iter()
-                                .find(|(_, _, model_id, _)| {
-                                    self.model.ends_with(&format!("/{model_id}"))
-                                })
-                                .is_some_and(|(_, _, _, levels)| !levels.is_empty()),
-                            |this| {
-                                this.child(
-                                    Button::new("reasoning-picker")
-                                        .outline()
-                                        .small()
-                                        .label(format!(
-                                            "思考: {}",
-                                            self.reasoning_level.as_deref().unwrap_or("关")
-                                        ))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.popup = match this.popup {
-                                                Some((Popup::Reasoning, _)) => None,
-                                                _ => Some((Popup::Reasoning, 0)),
-                                            };
-                                            cx.notify();
-                                        })),
-                                )
-                            },
-                        )
-                        .child(div().flex_1())
-                        .when(self.streaming, |this| {
+                        .px_3()
+                        .py_2()
+                        .when(self.hero_mode, |this| {
                             this.child(
-                                Button::new("stop")
-                                    .danger()
-                                    .small()
-                                    .label("停止 ■")
-                                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                                        cx.emit(ComposerEvent::Stop);
-                                    })),
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .pb_1()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .child(
+                                                h_flex()
+                                                    .id("hero-cwd")
+                                                    .gap_1()
+                                                    .px_3()
+                                                    .py_1()
+                                                    .rounded_full()
+                                                    .bg(cx.theme().accent.opacity(0.5))
+                                                    .cursor_pointer()
+                                                    .hover(|this| this.bg(cx.theme().accent))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            let command = this.cwd_command.clone();
+                                                            this.toggle_popup(
+                                                                Popup::Cwd,
+                                                                cwd_open,
+                                                                Some(command),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        Icon::new(IconName::Folder)
+                                                            .size_4()
+                                                            .text_color(
+                                                                cx.theme().muted_foreground,
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .when(self.hero_cwd.is_none(), |this| {
+                                                                this.text_color(
+                                                                    cx.theme().muted_foreground,
+                                                                )
+                                                            })
+                                                            .child(self.hero_cwd_label.clone()),
+                                                    )
+                                                    .child(
+                                                        Icon::new(IconName::ChevronDown)
+                                                            .size_3()
+                                                            .text_color(
+                                                                cx.theme().muted_foreground,
+                                                            ),
+                                                    ),
+                                            )
+                                            .when_some(cwd_popup, |this, popup| this.child(popup)),
+                                    )
+                                    .when(self.hero_cwd.is_some(), |this| {
+                                        this.child(
+                                            div()
+                                                .relative()
+                                                .child(
+                                                    h_flex()
+                                                        .id("hero-branch")
+                                                        .gap_1()
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_full()
+                                                        .when(self.hero_is_git, |this| {
+                                                            this.bg(cx.theme().accent.opacity(0.5))
+                                                                .cursor_pointer()
+                                                                .hover(|this| {
+                                                                    this.bg(cx.theme().accent)
+                                                                })
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        let command = this
+                                                                            .branch_command
+                                                                            .clone();
+                                                                        this.toggle_popup(
+                                                                            Popup::Branch,
+                                                                            branch_open,
+                                                                            Some(command),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ))
+                                                        })
+                                                        .child(
+                                                            Icon::new(IconName::Github)
+                                                                .size_4()
+                                                                .text_color(
+                                                                    cx.theme().muted_foreground,
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .when(!self.hero_is_git, |this| {
+                                                                    this.text_color(
+                                                                        cx.theme().muted_foreground,
+                                                                    )
+                                                                })
+                                                                .child(if self.hero_is_git {
+                                                                    self.hero_branch
+                                                                        .clone()
+                                                                        .unwrap_or_else(|| {
+                                                                            "?".into()
+                                                                        })
+                                                                } else {
+                                                                    "非 git 仓库".to_string()
+                                                                }),
+                                                        )
+                                                        .when(self.hero_is_git, |this| {
+                                                            this.child(
+                                                                Icon::new(IconName::ChevronDown)
+                                                                    .size_3()
+                                                                    .text_color(
+                                                                        cx.theme().muted_foreground,
+                                                                    ),
+                                                            )
+                                                        }),
+                                                )
+                                                .when_some(branch_popup, |this, popup| {
+                                                    this.child(popup)
+                                                }),
+                                        )
+                                    }),
                             )
                         })
-                        .when(!self.streaming, |this| {
+                        .when(!self.attachments.is_empty(), |this| {
+                            this.child(self.render_attachments(cx))
+                        })
+                        .when(self.approval_pending, |this| {
                             this.child(
-                                Button::new("send")
-                                    .primary()
-                                    .small()
-                                    .label("发送 ▶")
-                                    .on_click(cx.listener(
-                                        |this, _: &ClickEvent, window, cx| {
-                                            this.send(window, cx);
-                                        },
-                                    )),
+                                h_flex()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().warning)
+                                    .child(
+                                        "⏳ 等待审批：请在上方审批卡中选择 允许 / 始终允许 / 拒绝",
+                                    ),
                             )
-                        }),
+                        })
+                        .child(
+                            div()
+                                .relative()
+                                .w_full()
+                                .child(Textarea::new(&self.input).appearance(false).bordered(false))
+                                .children(popup),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .relative()
+                                        .child(self.render_bar_chip(
+                                            "exec-mode",
+                                            Some(exec_mode_icon(EXEC_MODES[self.exec_mode].2)),
+                                            EXEC_MODES[self.exec_mode].0.to_string(),
+                                            true,
+                                            cx.listener(move |this, _, window, cx| {
+                                                let command = this.exec_command.clone();
+                                                this.toggle_popup(
+                                                    Popup::ExecMode,
+                                                    exec_open,
+                                                    Some(command),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                            cx,
+                                        ))
+                                        .when_some(exec_popup, |this, popup| this.child(popup)),
+                                )
+                                .child(div().flex_1())
+                                .when_some(self.context_usage, |this, (used, total)| {
+                                    // 上下文水位环形指示器（ZCode 同款）：点开是容量面板
+                                    let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
+                                    let ring_color = if ratio > 0.8 {
+                                        cx.theme().warning
+                                    } else {
+                                        cx.theme().progress_bar
+                                    };
+                                    this.child(
+                                        div()
+                                            .relative()
+                                            .child(
+                                                h_flex()
+                                                    .id("context-usage")
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_full()
+                                                    .cursor_pointer()
+                                                    .when(context_open, |this| {
+                                                        this.bg(cx.theme().accent)
+                                                    })
+                                                    .hover(|this| this.bg(cx.theme().accent))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.toggle_popup(
+                                                                Popup::Context,
+                                                                context_open,
+                                                                None,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        ProgressCircle::new("context-usage-ring")
+                                                            .value(ratio * 100.)
+                                                            .color(ring_color)
+                                                            .small(),
+                                                    ),
+                                            )
+                                            .when_some(context_popup, |this, popup| {
+                                                this.child(popup)
+                                            }),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .relative()
+                                        .child(self.render_bar_chip(
+                                            "model-picker",
+                                            None,
+                                            self.model.clone(),
+                                            model_open,
+                                            cx.listener(move |this, _, window, cx| {
+                                                let command = this.model_command.clone();
+                                                this.toggle_popup(
+                                                    Popup::Model,
+                                                    model_open,
+                                                    Some(command),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                            cx,
+                                        ))
+                                        .when_some(model_popup, |this, popup| this.child(popup)),
+                                )
+                                .when(!reasoning_levels.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .relative()
+                                            .child(
+                                                self.render_bar_chip(
+                                                    "reasoning-picker",
+                                                    Some(AssetIconName::Brain),
+                                                    self.reasoning_level
+                                                        .clone()
+                                                        .unwrap_or_else(|| "关".into()),
+                                                    reasoning_open,
+                                                    cx.listener(move |this, _, window, cx| {
+                                                        let command =
+                                                            this.reasoning_command.clone();
+                                                        this.toggle_popup(
+                                                            Popup::Reasoning,
+                                                            reasoning_open,
+                                                            Some(command),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }),
+                                                    cx,
+                                                ),
+                                            )
+                                            .when_some(reasoning_popup, |this, popup| {
+                                                this.child(popup)
+                                            }),
+                                    )
+                                })
+                                .when(self.streaming, |this| {
+                                    this.child(
+                                        Button::new("stop")
+                                            .danger()
+                                            .icon(AssetIconName::Square)
+                                            .rounded(px(999.))
+                                            .tooltip("停止")
+                                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                                cx.emit(ComposerEvent::Stop);
+                                            })),
+                                    )
+                                })
+                                .when(!self.streaming, |this| {
+                                    this.child(
+                                        Button::new("send")
+                                            .primary()
+                                            .icon(AssetIconName::ArrowUp)
+                                            .rounded(px(999.))
+                                            .tooltip("发送")
+                                            .when(!can_send, |this| this.disabled(true))
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, window, cx| {
+                                                    this.send(window, cx);
+                                                },
+                                            )),
+                                    )
+                                }),
+                        ),
                 ),
         )
     }

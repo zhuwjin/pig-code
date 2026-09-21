@@ -340,8 +340,13 @@ impl AppView {
                     });
                 }
             }
-            Event::TurnComplete { session_id, .. } => {
-                if self.exec_mode == pig_protocol::ExecMode::Plan {
+            Event::TurnComplete {
+                session_id,
+                duration_ms,
+                ..
+            } => {
+                // duration_ms=0 是会话回放，不触发计划模式待执行标记
+                if *duration_ms > 0 && self.exec_mode == pig_protocol::ExecMode::Plan {
                     let session_id = session_id.clone();
                     if let Some(views) = self.views.get(&session_id) {
                         views.thread.update(cx, |thread, cx| {
@@ -1185,6 +1190,17 @@ max_output_tokens = 8192
 }
 
 fn main() {
+    // PIG_NET_TEST=1：不开窗口，用真实配置逐个测试供应商连通性（网络排障用）
+    // PIG_NET_TEST=full：再走一遍完整发消息链路（含系统提示词与工具），打印事件流
+    if let Some(mode) = std::env::var_os("PIG_NET_TEST") {
+        if mode == "full" {
+            pig_core::net_test_full_turn(None);
+        } else {
+            pig_core::provider::net_test_blocking(&pig_core::config::default_path());
+        }
+        return;
+    }
+
     let selftest = std::env::var_os("PIG_SELFTEST").is_some();
     let setup = selftest.then(setup_selftest);
     let cwd = setup
@@ -1194,7 +1210,7 @@ fn main() {
     let config_path = setup.map(|s| s.config_path);
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.set_global(ThemeFollowSystem(true));
@@ -1207,7 +1223,17 @@ fn main() {
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
             ]);
 
-            let window_bounds = WindowBounds::centered(size(px(1280.), px(800.)), cx);
+            // 初始窗口不超出显示器可用区域：GPUI 的尺寸是逻辑像素，缩放下
+            // 1280x800 可能比实际屏幕还大，底部会被任务栏挡住；给边框和任务栏留余量。
+            let mut window_size = size(px(1280.), px(800.));
+            if let Some(display) = cx.primary_display() {
+                let bounds = display.bounds();
+                window_size = size(
+                    window_size.width.min(bounds.size.width - px(32.)),
+                    window_size.height.min(bounds.size.height - px(96.)),
+                );
+            }
+            let window_bounds = WindowBounds::centered(window_size, cx);
 
             cx.spawn(async move |cx| {
                 let options = WindowOptions {

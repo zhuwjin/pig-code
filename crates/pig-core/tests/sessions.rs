@@ -70,6 +70,12 @@ async fn resume_rebuilds_history() {
         "重放应含工具调用"
     );
 
+    // 回放以 duration_ms=0 的 TurnComplete 收尾；先排空回放事件，避免干扰下面的 recv_until
+    while tokio::time::timeout(Duration::from_millis(200), events2.recv())
+        .await
+        .is_ok()
+    {}
+
     // 继续对话：模型应收到重建后的历史（system+user+assistant+tool_call+tool_result+新user = 6 条）
     agent2
         .ops

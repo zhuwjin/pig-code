@@ -276,3 +276,45 @@ async fn test_provider_ok_and_fail() {
     .await;
     assert!(fail.is_err());
 }
+
+/// 指数退避重试：首个请求被 mock 返回 500 → 自动重试 → 正常完成，不冒 Error 事件
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_on_server_error() {
+    let port = mock::start_mock_server();
+    let dir = std::env::temp_dir().join(format!("pig-core-m8-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, v2_config(port, ApiFormat::AnthropicMessages)).unwrap();
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
+    let events = agent.events.clone();
+    let sid = new_session(&agent, dir).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid,
+            content: "FAIL_ONCE_500 读一下 mock 文件".into(),
+            files: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::TextDone { .. })),
+        "500 后应自动重试并完成: {collected:#?}"
+    );
+    assert!(
+        !collected.iter().any(|e| matches!(e, Event::Error { .. })),
+        "可重试的错误不应冒出 Error 事件: {collected:#?}"
+    );
+    agent.shutdown();
+}

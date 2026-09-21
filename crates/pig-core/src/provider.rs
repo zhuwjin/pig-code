@@ -2,6 +2,90 @@ use futures_util::StreamExt as _;
 use pig_protocol::ApiFormat;
 use serde::{Deserialize, Serialize};
 
+/// reqwest 的 Display 只到 "error sending request"，真实原因（DNS/证书/代理/连接拒绝）
+/// 在 source 链上，取最底层原因拼出来便于定位。
+fn net_err(e: reqwest::Error) -> String {
+    let mut root: Option<String> = None;
+    let mut source = std::error::Error::source(&e);
+    while let Some(s) = source {
+        root = Some(s.to_string());
+        source = s.source();
+    }
+    match root {
+        Some(root) if root != e.to_string() => format!("网络错误: {e}（{root}）"),
+        _ => format!("网络错误: {e}"),
+    }
+}
+
+/// 流式请求不能设整体超时（响应体长期不结束），只限制建连时间。
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+}
+
+/// 重试策略：指数退避，最多重试 10 次；1s 起步翻倍、封顶 30s。
+/// 只在「响应建立之前」重试（建连/TLS/发送失败、429/5xx）——
+/// 响应流一旦建立就不再重试，避免已流出的内容重复输出。
+const MAX_RETRIES: u32 = 10;
+const RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+const RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+enum SendOutcome {
+    Response(reqwest::Response),
+    Cancelled,
+}
+
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn backoff_delay(retry: u32, response: Option<&reqwest::Response>) -> std::time::Duration {
+    // 429/5xx 带 Retry-After 时优先尊重服务端节奏（封顶 120s）
+    if let Some(secs) = response
+        .and_then(|r| r.headers().get(reqwest::header::RETRY_AFTER))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return std::time::Duration::from_secs(secs.min(120));
+    }
+    RETRY_BASE
+        .saturating_mul(2u32.saturating_pow(retry))
+        .min(RETRY_CAP)
+}
+
+async fn send_with_retry(
+    build: impl Fn() -> reqwest::RequestBuilder,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<SendOutcome, String> {
+    let mut retry = 0;
+    loop {
+        let result = tokio::select! {
+            result = build().send() => result,
+            _ = cancel.cancelled() => return Ok(SendOutcome::Cancelled),
+        };
+        // 发送阶段的错误只可能是网络类错误（请求构造错误在 builder 阶段就报掉了）
+        let retryable = match &result {
+            Ok(response) => retryable_status(response.status()),
+            Err(_) => true,
+        };
+        if !retryable || retry >= MAX_RETRIES {
+            return match result {
+                // 状态码错误重试耗尽后，响应体留给调用方格式化（HTTP xxx: ...）
+                Ok(response) => Ok(SendOutcome::Response(response)),
+                Err(e) => Err(net_err(e)),
+            };
+        }
+        let delay = backoff_delay(retry, result.as_ref().ok());
+        retry += 1;
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = cancel.cancelled() => return Ok(SendOutcome::Cancelled),
+        }
+    }
+}
+
 /// 解析后的模型端点配置（provider + model + 推理等级合并产物）
 #[derive(Clone, Debug)]
 pub struct ResolvedModel {
@@ -152,7 +236,7 @@ async fn stream_openai(
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut body = serde_json::to_value(ChatRequest {
         model: &config.model,
         messages: &messages,
@@ -166,13 +250,19 @@ async fn stream_openai(
     .map_err(|e| e.to_string())?;
     merge_reasoning_params(&mut body, config);
 
-    let response = tokio::select! {
-        result = client
-            .post(format!("{}/chat/completions", config.base_url))
-            .bearer_auth(&config.api_key)
-            .json(&body)
-            .send() => result.map_err(|e| format!("网络错误: {e}"))?,
-        _ = cancel.cancelled() => return Ok(()),
+    let response = match send_with_retry(
+        || {
+            client
+                .post(format!("{}/chat/completions", config.base_url))
+                .bearer_auth(&config.api_key)
+                .json(&body)
+        },
+        cancel,
+    )
+    .await?
+    {
+        SendOutcome::Response(response) => response,
+        SendOutcome::Cancelled => return Ok(()),
     };
 
     let status = response.status();
@@ -439,15 +529,21 @@ async fn stream_anthropic(
     }
     merge_reasoning_params(&mut body, config);
 
-    let client = reqwest::Client::new();
-    let response = tokio::select! {
-        result = client
-            .post(anthropic_url(&config.base_url))
-            .header("x-api-key", &config.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send() => result.map_err(|e| format!("网络错误: {e}"))?,
-        _ = cancel.cancelled() => return Ok(()),
+    let client = http_client();
+    let response = match send_with_retry(
+        || {
+            client
+                .post(anthropic_url(&config.base_url))
+                .header("x-api-key", &config.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+        },
+        cancel,
+    )
+    .await?
+    {
+        SendOutcome::Response(response) => response,
+        SendOutcome::Cancelled => return Ok(()),
     };
 
     let status = response.status();
@@ -590,7 +686,7 @@ pub async fn complete_text(
     user_content: String,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     match config.api_format {
         ApiFormat::OpenAiChat => {
             let body = serde_json::json!({
@@ -604,7 +700,7 @@ pub async fn complete_text(
                     .post(format!("{}/chat/completions", config.base_url))
                     .bearer_auth(&config.api_key)
                     .json(&body)
-                    .send() => result.map_err(|e| format!("网络错误: {e}"))?,
+                    .send() => result.map_err(|e| net_err(e))?,
                 _ = cancel.cancelled() => return Err("已取消".to_string()),
             };
             let status = response.status();
@@ -638,7 +734,7 @@ pub async fn complete_text(
                     .header("x-api-key", &config.api_key)
                     .header("anthropic-version", "2023-06-01")
                     .json(&body)
-                    .send() => result.map_err(|e| format!("网络错误: {e}"))?,
+                    .send() => result.map_err(|e| net_err(e))?,
                 _ = cancel.cancelled() => return Err("已取消".to_string()),
             };
             let status = response.status();
@@ -667,7 +763,7 @@ pub async fn test_provider(
     format: ApiFormat,
     model: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let send = async {
         match format {
             ApiFormat::OpenAiChat => {
@@ -702,7 +798,7 @@ pub async fn test_provider(
     let response = tokio::time::timeout(std::time::Duration::from_secs(10), send)
         .await
         .map_err(|_| "连接超时（10s）".to_string())?
-        .map_err(|e| format!("网络错误: {e}"))?;
+        .map_err(|e| net_err(e))?;
     let status = response.status();
     if status.is_success() {
         Ok(format!("连接成功（HTTP {status}）"))
@@ -710,5 +806,72 @@ pub async fn test_provider(
         let detail = response.text().await.unwrap_or_default();
         let detail: String = detail.chars().take(200).collect();
         Err(format!("HTTP {status}: {detail}"))
+    }
+}
+
+/// 命令行网络探针（pig-app 的 PIG_NET_TEST=1 触发，不开窗口）：
+/// 读取应用真实配置，逐个测试已启用供应商的模型连通性（ping + 真实流式请求），
+/// 打印结果，用于网络排障。
+pub fn net_test_blocking(config_path: &std::path::Path) {
+    let config = match crate::config::load(config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            println!("[net-test] 读取配置失败（{}）: {e}", config_path.display());
+            return;
+        }
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let mut tested = 0;
+    for provider in config.providers.iter().filter(|p| p.enabled) {
+        for model in &provider.models {
+            tested += 1;
+            let api_key = crate::config::expand_env(&provider.api_key);
+            let result = rt.block_on(test_provider(
+                &provider.base_url,
+                &api_key,
+                provider.api_format,
+                &model.id,
+            ));
+            println!(
+                "[net-test] ping {}/{} ({}) → {result:?}",
+                provider.name, model.id, provider.base_url
+            );
+
+            // 与发送消息完全相同的流式路径
+            let resolved = ResolvedModel {
+                base_url: provider.base_url.clone(),
+                api_key,
+                model: model.id.clone(),
+                context_window: model.context_window,
+                max_output_tokens: model.max_output_tokens,
+                api_format: provider.api_format,
+                reasoning_params: None,
+                provider_name: provider.name.clone(),
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            rt.block_on(stream_chat(
+                resolved,
+                vec![ChatMsg::user("ping".to_string())],
+                Vec::new(),
+                tx,
+                cancel,
+            ));
+            let mut outcome = "Finished".to_string();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    ProviderEvent::Failed(e) => outcome = format!("Failed: {e}"),
+                    ProviderEvent::ToolCalls(_) => outcome = "ToolCalls".to_string(),
+                    _ => {}
+                }
+            }
+            println!("[net-test] stream {}/{} → {outcome}", provider.name, model.id);
+        }
+    }
+    if tested == 0 {
+        println!("[net-test] 没有已启用的供应商模型");
     }
 }

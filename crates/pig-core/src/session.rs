@@ -321,6 +321,19 @@ impl Session {
                 RolloutRecord::Compact { .. } => {}
             }
         }
+        // 回放的历史回合以 TurnStarted 开头但记录里没有结尾事件；
+        // 用 duration_ms=0 的 TurnComplete 收尾，让 UI 退出流式状态
+        //（UI 据此跳过「回合结束·用时」脚注与计划模式待执行标记）
+        if in_assistant {
+            self.emit(
+                |session_id, seq| Event::TurnComplete {
+                    session_id,
+                    seq,
+                    duration_ms: 0,
+                },
+                tx,
+            );
+        }
     }
 
     pub fn set_mode(&mut self, mode: ExecMode) {

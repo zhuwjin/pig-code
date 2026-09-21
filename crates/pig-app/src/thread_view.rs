@@ -436,13 +436,16 @@ impl ThreadView {
                         }
                     }
                 }
-                let usage = self
-                    .context_usage
-                    .map(|(used, total)| format!(" · 上下文 {:.1}k / {}k", used as f64 / 1000.0, total / 1000))
-                    .unwrap_or_default();
-                if let Some(message) = self.messages.last_mut() {
-                    message.footer =
-                        Some(format!("回合结束 · 用时 {:.1}s{usage}", duration_ms as f64 / 1000.0));
+                // duration_ms=0 是会话回放的收尾事件：只退出流式状态，不写用时脚注
+                if duration_ms > 0 {
+                    let usage = self
+                        .context_usage
+                        .map(|(used, total)| format!(" · 上下文 {:.1}k / {}k", used as f64 / 1000.0, total / 1000))
+                        .unwrap_or_default();
+                    if let Some(message) = self.messages.last_mut() {
+                        message.footer =
+                            Some(format!("回合结束 · 用时 {:.1}s{usage}", duration_ms as f64 / 1000.0));
+                    }
                 }
                 self.set_streaming(false, cx);
             }
@@ -531,9 +534,8 @@ impl ThreadView {
                     .max_w(relative(0.8))
                     .px_3()
                     .py_2()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().primary)
-                    .text_color(cx.theme().primary_foreground)
+                    .rounded_2xl()
+                    .bg(cx.theme().accent)
                     .with_animation(
                         "user-msg-enter",
                         Animation::new(std::time::Duration::from_millis(150))
