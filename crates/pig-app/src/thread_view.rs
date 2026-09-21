@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Sizable as _, StyledExt as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::{ApprovalDecision, Event};
-
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -193,7 +191,12 @@ impl ThreadView {
         self.messages.len()
     }
 
-    pub fn append_user_message(&mut self, text: String, files: Vec<String>, cx: &mut Context<Self>) {
+    pub fn append_user_message(
+        &mut self,
+        text: String,
+        files: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.messages.push(ChatMessage::user(text, files));
         self.scroll_handle.scroll_to_bottom();
         cx.notify();
@@ -222,7 +225,11 @@ impl ThreadView {
 
     /// 供自测断言用。
     pub fn debug_last_assistant(&self) -> (bool, String, String, String) {
-        let Some(message) = self.messages.iter().rev().find(|m| m.role == Role::Assistant)
+        let Some(message) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
         else {
             return (false, String::new(), String::new(), String::new());
         };
@@ -267,13 +274,13 @@ impl ThreadView {
     pub fn decide_pending(&mut self, decision: ApprovalDecision, cx: &mut Context<Self>) -> bool {
         let found = self.messages.iter().enumerate().rev().find_map(|(mix, m)| {
             m.segments.iter().enumerate().find_map(|(six, s)| match s {
-                Segment::Approval {
-                    decision: None, ..
-                } => Some((mix, six)),
+                Segment::Approval { decision: None, .. } => Some((mix, six)),
                 _ => None,
             })
         });
-        let Some((mix, six)) = found else { return false };
+        let Some((mix, six)) = found else {
+            return false;
+        };
         self.decide_approval(mix, six, decision, cx);
         true
     }
@@ -337,9 +344,7 @@ impl ThreadView {
                 self.scroll_handle.scroll_to_bottom();
             }
             Event::TextDone {
-                item_id,
-                full_text,
-                ..
+                item_id, full_text, ..
             } => {
                 let state_holder = cx.new(|cx| TextViewState::markdown("", cx));
                 let six = self.find_or_create(&item_id, || Segment::Markdown {
@@ -365,10 +370,7 @@ impl ThreadView {
                     done: false,
                     expanded: false,
                 });
-                if let Some(Segment::ToolCall {
-                    tool, summary, ..
-                }) = self.current_segment(six)
-                {
+                if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
                     *tool = tool.clone();
                     *summary = input_summary;
                 }
@@ -407,7 +409,11 @@ impl ThreadView {
                 detail,
                 ..
             } => {
-                if self.messages.last().is_none_or(|m| m.role != Role::Assistant) {
+                if self
+                    .messages
+                    .last()
+                    .is_none_or(|m| m.role != Role::Assistant)
+                {
                     self.messages.push(ChatMessage::assistant());
                 }
                 self.messages
@@ -440,11 +446,15 @@ impl ThreadView {
                 if duration_ms > 0 {
                     let usage = self
                         .context_usage
-                        .map(|(used, total)| format!(" · 上下文 {:.1}k / {}k", used as f64 / 1000.0, total / 1000))
+                        .map(|(used, total)| {
+                            format!(" · 上下文 {:.1}k / {}k", used as f64 / 1000.0, total / 1000)
+                        })
                         .unwrap_or_default();
                     if let Some(message) = self.messages.last_mut() {
-                        message.footer =
-                            Some(format!("回合结束 · 用时 {:.1}s{usage}", duration_ms as f64 / 1000.0));
+                        message.footer = Some(format!(
+                            "回合结束 · 用时 {:.1}s{usage}",
+                            duration_ms as f64 / 1000.0
+                        ));
                     }
                 }
                 self.set_streaming(false, cx);
@@ -481,7 +491,8 @@ impl ThreadView {
             | Event::ProjectList { .. } => {}
             Event::Error { message, .. } => {
                 self.set_streaming(false, cx);
-                self.messages.push(ChatMessage::system(format!("⚠ {message}")));
+                self.messages
+                    .push(ChatMessage::system(format!("⚠ {message}")));
             }
         }
         cx.notify();
@@ -492,7 +503,11 @@ impl ThreadView {
         if let Some(&six) = self.item_index.get(item_id) {
             return six;
         }
-        if self.messages.last().is_none_or(|m| m.role != Role::Assistant) {
+        if self
+            .messages
+            .last()
+            .is_none_or(|m| m.role != Role::Assistant)
+        {
             self.messages.push(ChatMessage::assistant());
         }
         let message = self.messages.last_mut().expect("assistant message");
@@ -512,22 +527,20 @@ impl ThreadView {
             .items_end()
             .gap_1()
             .when(!message.files.is_empty(), |this| {
-                this.child(
-                    h_flex().gap_1().children(message.files.iter().map(|file| {
-                        h_flex()
-                            .gap_1()
-                            .px_2()
-                            .py_0p5()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().accent)
-                            .child(
-                                Icon::new(IconName::FileText)
-                                    .size_3()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(div().text_xs().child(file.clone()))
-                    })),
-                )
+                this.child(h_flex().gap_1().children(message.files.iter().map(|file| {
+                    h_flex()
+                        .gap_1()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().accent)
+                        .child(
+                            Icon::new(IconName::FileText)
+                                .size_3()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().text_xs().child(file.clone()))
+                })))
             })
             .child(
                 div()
@@ -903,7 +916,9 @@ impl ThreadView {
                             decision,
                             detail_open,
                             ..
-                        } => self.render_approval(ix, six, tool, detail, *decision, *detail_open, cx),
+                        } => {
+                            self.render_approval(ix, six, tool, detail, *decision, *detail_open, cx)
+                        }
                     });
                 }
                 if let Some(footer) = &message.footer {
@@ -985,21 +1000,19 @@ impl Render for ThreadView {
                     .px_4()
                     .py_2()
                     .min_h(px(28.))
-                    .child(
-                        h_flex().gap_2().when(self.streaming, |this| {
-                            this.child(
-                                Icon::new(IconName::LoaderCircle)
-                                    .size_4()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("工作中 {working_secs} 秒")),
-                            )
-                        }),
-                    )
+                    .child(h_flex().gap_2().when(self.streaming, |this| {
+                        this.child(
+                            Icon::new(IconName::LoaderCircle)
+                                .size_4()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("工作中 {working_secs} 秒")),
+                        )
+                    }))
                     .child(div().flex_1())
                     .when(added + removed > 0, |this| {
                         this.child(
@@ -1038,25 +1051,27 @@ impl Render for ThreadView {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
                     .child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(860.))
-                    .mx_auto()
-                    .p_4()
-                    .gap_4()
-                    .children(items)
-                    .when(self.messages.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .w_full()
-                                .py_8()
-                                .text_center()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("空会话。输入消息开始对话，/ 查看命令，@ 引用文件。"),
-                        )
-                    }),
-                ),
+                        v_flex()
+                            .w_full()
+                            .max_w(px(860.))
+                            .mx_auto()
+                            .p_4()
+                            .gap_4()
+                            .children(items)
+                            .when(self.messages.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .w_full()
+                                        .py_8()
+                                        .text_center()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            "空会话。输入消息开始对话，/ 查看命令，@ 引用文件。",
+                                        ),
+                                )
+                            }),
+                    ),
             )
             .when(!self.queued.is_empty(), |this| {
                 this.child(

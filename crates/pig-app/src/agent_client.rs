@@ -47,7 +47,13 @@ impl AgentClient {
         });
     }
 
-    pub fn send_message(&self, session_id: String, content: String, files: Vec<String>, mode: ExecMode) {
+    pub fn send_message(
+        &self,
+        session_id: String,
+        content: String,
+        files: Vec<String>,
+        mode: ExecMode,
+    ) {
         self.send(Op::SendMessage {
             session_id,
             content,

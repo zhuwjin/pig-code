@@ -1,3 +1,4 @@
+use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
@@ -8,7 +9,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use gpui_kit::component::ThemeMode;
 use pig_protocol::{ApiFormat, AppConfig, ModelConfig, ProviderConfig};
 
 #[derive(Clone)]
@@ -163,7 +163,13 @@ impl SettingsView {
         cx.notify();
     }
 
-    pub fn set_test_result(&mut self, provider_id: &str, ok: bool, message: String, cx: &mut Context<Self>) {
+    pub fn set_test_result(
+        &mut self,
+        provider_id: &str,
+        ok: bool,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
         self.test_results
             .insert(provider_id.to_string(), (ok, message));
         cx.notify();
@@ -277,7 +283,9 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let model = editing.and_then(|ix| {
-            self.selected_provider().and_then(|p| p.models.get(ix)).cloned()
+            self.selected_provider()
+                .and_then(|p| p.models.get(ix))
+                .cloned()
         });
         let snapshot = model.clone();
         let model = model.unwrap_or_else(|| ModelConfig::new("", 128_000, 8_192));
@@ -301,13 +309,13 @@ impl SettingsView {
             reasoning_levels: model.reasoning_levels.clone(),
             new_level: cx.new(|cx| InputState::new(window, cx).placeholder("等级名，如 high")),
             params_json: cx.new(|cx| {
-                TextareaState::new(window, cx).auto_grow(3, 8).default_value(
-                    if model.reasoning_params.is_empty() {
+                TextareaState::new(window, cx)
+                    .auto_grow(3, 8)
+                    .default_value(if model.reasoning_params.is_empty() {
                         "{}".to_string()
                     } else {
                         serde_json::to_string_pretty(&model.reasoning_params).unwrap_or_default()
-                    },
-                )
+                    })
             }),
             params_error: None,
             snapshot,
@@ -317,7 +325,9 @@ impl SettingsView {
     }
 
     fn save_model_dialog(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.model_dialog.take() else { return };
+        let Some(dialog) = self.model_dialog.take() else {
+            return;
+        };
         let Some(p_ix) = self.selected else { return };
 
         let id = dialog.id.read(cx).value().trim().to_string();
@@ -403,7 +413,10 @@ impl SettingsView {
 
     fn render_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(p_ix) = self.selected else {
-            return div().flex_1().child("选择或添加一个供应商").into_any_element();
+            return div()
+                .flex_1()
+                .child("选择或添加一个供应商")
+                .into_any_element();
         };
         let provider = self.config.providers[p_ix].clone();
         let provider_id = provider.id.clone();
@@ -1062,13 +1075,10 @@ impl Render for SettingsView {
                         .items_start()
                         .gap_4()
                         .child(
-                            v_flex()
-                                .w(px(280.))
-                                .gap_2()
-                                .children(
-                                    (0..self.config.providers.len())
-                                        .map(|ix| self.render_provider_row(ix, cx)),
-                                ),
+                            v_flex().w(px(280.)).gap_2().children(
+                                (0..self.config.providers.len())
+                                    .map(|ix| self.render_provider_row(ix, cx)),
+                            ),
                         )
                         .child(div().flex_1().child(self.render_detail(cx))),
                 )
@@ -1095,17 +1105,14 @@ impl Render for SettingsView {
                 cx.emit(SettingsEvent::Close);
             }))
             .child(
-                h_flex()
-                    .size_full()
-                    .child(self.render_nav(cx))
-                    .child(
-                        div()
-                            .id("settings-content")
-                            .flex_1()
-                            .h_full()
-                            .overflow_y_scroll()
-                            .child(div().w_full().p_6().child(content)),
-                    ),
+                h_flex().size_full().child(self.render_nav(cx)).child(
+                    div()
+                        .id("settings-content")
+                        .flex_1()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .child(div().w_full().p_6().child(content)),
+                ),
             )
             .when(self.model_dialog.is_some(), |this| {
                 this.child(

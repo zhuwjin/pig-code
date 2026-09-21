@@ -58,9 +58,7 @@ pub struct Sidebar {
 
 impl Sidebar {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("搜索会话或项目…")
-        });
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话或项目…"));
         let _subscriptions = vec![cx.subscribe_in(
             &search_input,
             window,
@@ -211,9 +209,7 @@ impl Sidebar {
                             .py_0p5()
                             .rounded_sm()
                             .cursor_pointer()
-                            .when(selected, |this| {
-                                this.bg(cx.theme().background)
-                            })
+                            .when(selected, |this| this.bg(cx.theme().background))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.view = view;
                                 cx.notify();
@@ -335,29 +331,30 @@ impl Sidebar {
             .collect();
 
         let mut out: Vec<AnyElement> = vec![];
-        let mut section = |pinned: bool, archived: bool, title: &'static str, out: &mut Vec<AnyElement>| {
-            let rows: Vec<AnyElement> = filtered
-                .iter()
-                .copied()
-                .filter(|ix| {
+        let mut section =
+            |pinned: bool, archived: bool, title: &'static str, out: &mut Vec<AnyElement>| {
+                let rows: Vec<AnyElement> = filtered
+                    .iter()
+                    .copied()
+                    .filter(|ix| {
                         let s = &self.sessions[*ix];
                         s.pinned == pinned && s.archived == archived
                     })
                     .map(|ix| self.render_session_row(ix, false, cx))
                     .collect();
-            if !rows.is_empty() {
-                out.push(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(title)
-                        .into_any_element(),
-                );
-                out.extend(rows);
-            }
-        };
+                if !rows.is_empty() {
+                    out.push(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(title)
+                            .into_any_element(),
+                    );
+                    out.extend(rows);
+                }
+            };
         section(true, false, "置顶", &mut out);
         section(false, false, "任务", &mut out);
 
@@ -519,7 +516,10 @@ impl Sidebar {
             if expanded {
                 for ix in sessions {
                     out.push(
-                        div().pl_4().child(self.render_session_row(ix, true, cx)).into_any_element(),
+                        div()
+                            .pl_4()
+                            .child(self.render_session_row(ix, true, cx))
+                            .into_any_element(),
                     );
                 }
                 if has_sessions {
@@ -568,20 +568,24 @@ impl Render for Sidebar {
                     .child(v_flex().gap_1().py_1().children(content)),
             )
             .child(
-                div().border_t_1().border_color(cx.theme().border).p_2().child(
-                    h_flex()
-                        .id("settings-entry")
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded(cx.theme().radius)
-                        .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(SidebarEvent::OpenSettings);
-                        }))
-                        .child(Icon::new(IconName::Settings).size_4())
-                        .child(div().text_sm().child("设置")),
-                ),
+                div()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .p_2()
+                    .child(
+                        h_flex()
+                            .id("settings-entry")
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(cx.theme().radius)
+                            .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(SidebarEvent::OpenSettings);
+                            }))
+                            .child(Icon::new(IconName::Settings).size_4())
+                            .child(div().text_sm().child("设置")),
+                    ),
             )
     }
 }

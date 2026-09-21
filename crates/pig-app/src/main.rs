@@ -1,13 +1,14 @@
 mod agent_client;
-mod settings;
 mod composer;
 mod review_panel;
+mod settings;
 mod sidebar;
 mod thread_view;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use gpui_kit::InteractiveElement as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{
@@ -15,11 +16,19 @@ use gpui_kit::component::{
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::InteractiveElement as _;
 use gpui_kit::*;
 use pig_protocol::{Event, ExecMode, SessionMeta};
 
-gpui_kit::actions!(pig_app, [NewTask, FocusSearch, CloseSearch, CloseSettings, ToggleSidebar]);
+gpui_kit::actions!(
+    pig_app,
+    [
+        NewTask,
+        FocusSearch,
+        CloseSearch,
+        CloseSettings,
+        ToggleSidebar
+    ]
+);
 
 /// 主题是否跟随系统外观：默认跟随；手动切换亮/暗后本次运行内固定为所选模式。
 pub struct ThemeFollowSystem(pub bool);
@@ -142,8 +151,9 @@ impl AppView {
             cx.subscribe_in(&app.sidebar, window, |this, _, event, window, cx| {
                 this.on_sidebar_event(event, window, cx);
             }),
-            cx.subscribe(&app.settings, |this, _, event: &SettingsEvent, cx| {
-                match event {
+            cx.subscribe(
+                &app.settings,
+                |this, _, event: &SettingsEvent, cx| match event {
                     SettingsEvent::Save(config) => {
                         this.config = Some(config.clone());
                         this.agent.save_config(config.clone());
@@ -154,10 +164,13 @@ impl AppView {
                         this.settings_open = false;
                         cx.notify();
                     }
-                }
-            }),
+                },
+            ),
             cx.observe_window_appearance(window, |_, window, cx| {
-                if cx.try_global::<ThemeFollowSystem>().is_some_and(|flag| flag.0) {
+                if cx
+                    .try_global::<ThemeFollowSystem>()
+                    .is_some_and(|flag| flag.0)
+                {
                     Theme::sync_system_appearance(Some(window), cx);
                 }
             }),
@@ -211,38 +224,41 @@ impl AppView {
         }
         let thread = cx.new(|cx| ThreadView::new(cx));
         let review = cx.new(|cx| ReviewPanel::new(cx));
-        self._subscriptions.push(cx.subscribe(&thread, |this, _, event, cx| match event {
-            ThreadEvent::ApprovalReply {
-                request_id,
-                decision,
-            } => {
-                this.agent.approval_reply(request_id.clone(), *decision);
-            }
-            ThreadEvent::ExecutePlan => {
-                this.on_execute_plan(cx);
-            }
-            ThreadEvent::CancelQueued(text) => {
-                if let Some(sid) = this.current.clone() {
-                    this.agent.cancel_queued(sid, text.clone());
+        self._subscriptions
+            .push(cx.subscribe(&thread, |this, _, event, cx| match event {
+                ThreadEvent::ApprovalReply {
+                    request_id,
+                    decision,
+                } => {
+                    this.agent.approval_reply(request_id.clone(), *decision);
                 }
-            }
-        }));
-        self._subscriptions.push(cx.subscribe(&review, |this, _, event: &ReviewEvent, _| {
-            let ReviewEvent::Revert(path) = event;
-            if let Some(sid) = this.current.clone() {
-                this.agent.revert_file(sid, path.clone());
-            }
-        }));
-        self.views.insert(
-            session_id.to_string(),
-            SessionViews { thread, review },
-        );
+                ThreadEvent::ExecutePlan => {
+                    this.on_execute_plan(cx);
+                }
+                ThreadEvent::CancelQueued(text) => {
+                    if let Some(sid) = this.current.clone() {
+                        this.agent.cancel_queued(sid, text.clone());
+                    }
+                }
+            }));
+        self._subscriptions
+            .push(cx.subscribe(&review, |this, _, event: &ReviewEvent, _| {
+                let ReviewEvent::Revert(path) = event;
+                if let Some(sid) = this.current.clone() {
+                    this.agent.revert_file(sid, path.clone());
+                }
+            }));
+        self.views
+            .insert(session_id.to_string(), SessionViews { thread, review });
     }
 
     fn route_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match &event {
             Event::SessionConfigured {
-                session_id, model, provider_name, ..
+                session_id,
+                model,
+                provider_name,
+                ..
             } => {
                 let session_id = session_id.clone();
                 self.ensure_views(&session_id, cx);
@@ -291,7 +307,11 @@ impl AppView {
                 }
                 self.push_hero_info(cx);
             }
-            Event::Error { session_id: None, message, .. } => {
+            Event::Error {
+                session_id: None,
+                message,
+                ..
+            } => {
                 let message = message.clone();
                 if self.is_hero(cx) {
                     self.hero_error = Some(message);
@@ -331,7 +351,10 @@ impl AppView {
                 }
             }
             Event::ContextUsage {
-                session_id, used, total, ..
+                session_id,
+                used,
+                total,
+                ..
             } => {
                 if self.current.as_deref() == Some(session_id.as_str()) {
                     let (used, total) = (*used, *total);
@@ -571,7 +594,13 @@ impl AppView {
         cx.notify();
     }
 
-    fn hero_send(&mut self, text: String, files: Vec<String>, mode: ExecMode, cx: &mut Context<Self>) {
+    fn hero_send(
+        &mut self,
+        text: String,
+        files: Vec<String>,
+        mode: ExecMode,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_first_send = Some((text, files, mode));
         let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
         self.agent.new_session(cwd);
@@ -613,7 +642,9 @@ impl AppView {
     }
 
     fn on_execute_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(sid) = self.current.clone() else { return };
+        let Some(sid) = self.current.clone() else {
+            return;
+        };
         self.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
         self.composer.update(cx, |composer, cx| {
             composer.set_exec_mode(pig_protocol::ExecMode::ConfirmBeforeEdit, cx);
@@ -707,12 +738,8 @@ impl AppView {
                 // 已选模型时立即带推理等级重发
                 if let Some(sid) = &self.current {
                     if let Some((provider_id, model_id)) = self.current_model.clone() {
-                        self.agent.set_model(
-                            sid.clone(),
-                            provider_id,
-                            model_id,
-                            level.clone(),
-                        );
+                        self.agent
+                            .set_model(sid.clone(), provider_id, model_id, level.clone());
                     }
                 }
             }
@@ -815,7 +842,14 @@ impl AppView {
                 p.models
                     .iter()
                     .filter(|m| m.enabled)
-                    .map(|m| (p.name.clone(), p.id.clone(), m.id.clone(), m.reasoning_levels.clone()))
+                    .map(|m| {
+                        (
+                            p.name.clone(),
+                            p.id.clone(),
+                            m.id.clone(),
+                            m.reasoning_levels.clone(),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -865,7 +899,10 @@ impl AppView {
         };
 
         let chips: Vec<(&'static str, &'static str)> = vec![
-            ("总结这个项目", "请阅读 README 并总结这个项目的结构和主要模块。"),
+            (
+                "总结这个项目",
+                "请阅读 README 并总结这个项目的结构和主要模块。",
+            ),
             ("修复一个报错", "我遇到了一个报错："),
             ("写单元测试", "请为主要模块写单元测试。"),
         ];
@@ -913,12 +950,7 @@ impl AppView {
                     })),
             )
             .when_some(self.hero_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
+                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
             })
             .into_any_element()
     }
@@ -947,18 +979,13 @@ impl AppView {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .child(format!(
+                    .child(div().text_sm().font_semibold().child(format!(
                             "pig-code · {title}{}",
                             self.git_branch
                                 .as_ref()
                                 .map(|b| format!(" · ⎇ {b}"))
                                 .unwrap_or_default()
-                        )),
-                ),
+                        ))),
             )
             .child(
                 h_flex()
@@ -969,10 +996,18 @@ impl AppView {
                             .ghost()
                             .small()
                             .occlude()
-                            .icon(if is_dark { IconName::Sun } else { IconName::Moon })
+                            .icon(if is_dark {
+                                IconName::Sun
+                            } else {
+                                IconName::Moon
+                            })
                             .on_click(move |_, _, cx| {
                                 Theme::change(
-                                    if is_dark { ThemeMode::Light } else { ThemeMode::Dark },
+                                    if is_dark {
+                                        ThemeMode::Light
+                                    } else {
+                                        ThemeMode::Dark
+                                    },
                                     None,
                                     cx,
                                 );
@@ -1089,41 +1124,39 @@ impl Render for AppView {
             }))
             .size_full()
             .child(self.render_title_bar(cx))
-            .child(
-                div().flex_1().min_h_0().child(if self.settings_open {
-                    self.settings.clone().into_any_element()
-                } else {
-                    h_resizable("main-columns")
-                        .when(!self.sidebar_collapsed, |this| {
-                            this.child(
-                                resizable_panel()
-                                    .size(px(220.))
-                                    .size_range(px(180.)..px(360.))
-                                    .child(
-                                        div()
-                                            .size_full()
-                                            .with_animation(
-                                                "sidebar-enter",
-                                                Animation::new(std::time::Duration::from_millis(150))
-                                                    .with_easing(ease_out_quint()),
-                                                |el, delta| {
-                                                    el.left(px(-8.0 * (1.0 - delta))).opacity(delta)
-                                                },
-                                            )
-                                            .child(self.sidebar.clone()),
-                                    ),
-                            )
-                        })
-                        .child(center)
-                        .child(
+            .child(div().flex_1().min_h_0().child(if self.settings_open {
+                self.settings.clone().into_any_element()
+            } else {
+                h_resizable("main-columns")
+                    .when(!self.sidebar_collapsed, |this| {
+                        this.child(
                             resizable_panel()
-                                .size(px(300.))
-                                .size_range(px(220.)..px(520.))
-                                .child(right),
+                                .size(px(220.))
+                                .size_range(px(180.)..px(360.))
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .with_animation(
+                                            "sidebar-enter",
+                                            Animation::new(std::time::Duration::from_millis(150))
+                                                .with_easing(ease_out_quint()),
+                                            |el, delta| {
+                                                el.left(px(-8.0 * (1.0 - delta))).opacity(delta)
+                                            },
+                                        )
+                                        .child(self.sidebar.clone()),
+                                ),
                         )
-                        .into_any_element()
-                }),
-            )
+                    })
+                    .child(center)
+                    .child(
+                        resizable_panel()
+                            .size(px(300.))
+                            .size_range(px(220.)..px(520.))
+                            .child(right),
+                    )
+                    .into_any_element()
+            }))
     }
 }
 
@@ -1287,7 +1320,10 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     app!(|app: &mut AppView, cx| {
         app.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
         app.hero_send(
-            format!("{} 创建并修改文件，然后跑个命令", pig_core::mock::SCENARIO_B_TRIGGER),
+            format!(
+                "{} 创建并修改文件，然后跑个命令",
+                pig_core::mock::SCENARIO_B_TRIGGER
+            ),
             vec![],
             pig_protocol::ExecMode::ConfirmBeforeEdit,
             cx,
@@ -1327,7 +1363,10 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             let streaming = views.thread.read(cx).is_streaming();
             let (tool_done, text, _, tool_output) = views.thread.read(cx).debug_last_assistant();
             if !streaming && waited > 1000 && tool_done {
-                assert!(text.contains(pig_core::mock::SCENARIO_B_MARKER), "A 文本标记: {text}");
+                assert!(
+                    text.contains(pig_core::mock::SCENARIO_B_MARKER),
+                    "A 文本标记: {text}"
+                );
                 assert!(tool_output.contains(pig_core::mock::SCENARIO_B_BASH_MARKER));
                 return Some(());
             }
@@ -1349,7 +1388,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         let sidebar = app.sidebar.read(cx);
         (
             sidebar.debug_projects().contains(&cwd_str),
-            sidebar.debug_project_sessions(&cwd_str).contains(&session_a),
+            sidebar
+                .debug_project_sessions(&cwd_str)
+                .contains(&session_a),
         )
     });
     assert!(has_cwd, "项目列表应包含会话 cwd");
@@ -1386,7 +1427,6 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         }
     }
     println!("[selftest] 项目列表 OK（会话 cwd 自动出现 + 手动增删）");
-
 
     // 会话 B：新建 + 场景 A
     app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone()));
@@ -1478,7 +1518,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 && text.contains(pig_core::mock::SCENARIO_B_MARKER)
                 && review_state.0 == 1
                 && review_state.1 == 3)
-            .then_some(())
+                .then_some(())
         });
         if done == Some(()) {
             break;
@@ -1488,7 +1528,8 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
 
     // @搜索：真实文件
     app!(|app: &mut AppView, _| {
-        app.agent.search_files(session_a.clone(), "hello".to_string());
+        app.agent
+            .search_files(session_a.clone(), "hello".to_string());
     });
     let mut waited = 0u64;
     loop {
@@ -1496,7 +1537,11 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         waited += 200;
         assert!(waited < 10_000, "@搜索超时");
         let found = app!(|app: &mut AppView, cx| {
-            app.composer.read(cx).debug_mention_results().iter().any(|r| r.contains("hello.txt"))
+            app.composer
+                .read(cx)
+                .debug_mention_results()
+                .iter()
+                .any(|r| r.contains("hello.txt"))
         });
         if found {
             break;
@@ -1517,7 +1562,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 .map(|views| views.thread.read(cx).debug_system_notes())
                 .unwrap_or_default()
                 .iter()
-                .any(|note| note.contains("模型摘要") && note.contains(pig_core::mock::SUMMARY_MARKER))
+                .any(|note| {
+                    note.contains("模型摘要") && note.contains(pig_core::mock::SUMMARY_MARKER)
+                })
         });
         if compacted {
             break;
@@ -1538,7 +1585,8 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     };
     app!(|app: &mut AppView, _| {
         app.exec_mode = pig_protocol::ExecMode::Plan;
-        app.agent.set_exec_mode(session_c.clone(), pig_protocol::ExecMode::Plan);
+        app.agent
+            .set_exec_mode(session_c.clone(), pig_protocol::ExecMode::Plan);
         app.agent.send_message(
             session_c.clone(),
             format!("{} 给我一个改造计划", pig_core::mock::SCENARIO_C_TRIGGER),
@@ -1566,10 +1614,16 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     // 点「执行计划」（走与按钮相同路径）
     app!(|app: &mut AppView, cx| {
         let views = app.views.get(&session_c).expect("C 视图");
-        views.thread.update(cx, |thread, cx| thread.trigger_execute_plan(cx));
+        views
+            .thread
+            .update(cx, |thread, cx| thread.trigger_execute_plan(cx));
     });
     let mode = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_exec_mode());
-    assert_eq!(mode, pig_protocol::ExecMode::ConfirmBeforeEdit, "模式应切到变更前确认");
+    assert_eq!(
+        mode,
+        pig_protocol::ExecMode::ConfirmBeforeEdit,
+        "模式应切到变更前确认"
+    );
 
     // 场景 B 工具链执行（ConfirmBeforeEdit → 3 次审批）
     let mut approvals = 0u32;
@@ -1594,7 +1648,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             let views = app.views.get(&session_c)?;
             let thread = views.thread.read(cx);
             let (tool_done, text, _, _) = thread.debug_last_assistant();
-            (!thread.is_streaming() && waited > 1000 && tool_done
+            (!thread.is_streaming()
+                && waited > 1000
+                && tool_done
                 && text.contains(pig_core::mock::SCENARIO_B_MARKER))
             .then_some(())
         });
@@ -1641,7 +1697,10 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         );
         app.agent.send_message(
             session_d.clone(),
-            format!("{} 创建并修改文件，然后跑个命令", pig_core::mock::SCENARIO_B_TRIGGER),
+            format!(
+                "{} 创建并修改文件，然后跑个命令",
+                pig_core::mock::SCENARIO_B_TRIGGER
+            ),
             vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
@@ -1669,7 +1728,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             let thread = views.thread.read(cx);
             let (tool_done, text, thinking, _) = thread.debug_last_assistant();
             let _ = thinking;
-            (!thread.is_streaming() && waited > 1000 && tool_done
+            (!thread.is_streaming()
+                && waited > 1000
+                && tool_done
                 && text.contains(pig_core::mock::SCENARIO_B_MARKER))
             .then_some(())
         });
