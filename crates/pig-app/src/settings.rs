@@ -35,7 +35,10 @@ pub struct ModelDialog {
     cap_system_msg: bool,
     enabled: bool,
     reasoning_levels: Vec<String>,
+    /// 等级 id → 显示名（仅展示；随 chip 增删联动）
+    reasoning_labels: std::collections::HashMap<String, String>,
     new_level: Entity<InputState>,
+    new_label: Entity<InputState>,
     params_json: Entity<TextareaState>,
     params_error: Option<String>,
     snapshot: Option<ModelConfig>,
@@ -307,7 +310,9 @@ impl SettingsView {
             cap_system_msg: model.cap_system_msg,
             enabled: model.enabled,
             reasoning_levels: model.reasoning_levels.clone(),
+            reasoning_labels: model.reasoning_labels.clone(),
             new_level: cx.new(|cx| InputState::new(window, cx).placeholder("等级名，如 high")),
+            new_label: cx.new(|cx| InputState::new(window, cx).placeholder("显示名（可选），如 最高")),
             params_json: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 8)
@@ -375,6 +380,15 @@ impl SettingsView {
                 .and_then(|m| m.web_search_tool.clone()),
             cap_system_msg: dialog.cap_system_msg,
             reasoning_levels: dialog.reasoning_levels.clone(),
+            // 显示名只保留仍存在的等级 id（防御chip外路径改列表）
+            reasoning_labels: dialog
+                .reasoning_labels
+                .iter()
+                .filter(|(id, label)| {
+                    dialog.reasoning_levels.contains(*id) && !label.is_empty()
+                })
+                .map(|(id, label)| (id.clone(), label.clone()))
+                .collect(),
             reasoning_params: params.unwrap(),
         };
         let provider = &mut self.config.providers[p_ix];
@@ -791,20 +805,50 @@ impl SettingsView {
                                                     h_flex()
                                                         .gap_1()
                                                         .children(dialog.reasoning_levels.iter().enumerate().map(|(ix, level)| {
+                                                            let label = dialog.reasoning_labels.get(level).cloned();
+                                                            let level_owned = level.clone();
                                                             h_flex()
                                                                 .gap_1()
                                                                 .px_2()
                                                                 .py_0p5()
                                                                 .rounded_full()
                                                                 .bg(cx.theme().accent)
-                                                                .child(div().text_xs().child(level.clone()))
+                                                                // 点 chip 文本：回填到输入行编辑（从列表移除，点 + 重新加入）
+                                                                .child(
+                                                                    div()
+                                                                        .id(("edit-level", ix))
+                                                                        .cursor_pointer()
+                                                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                                                            if let Some(d) = &mut this.model_dialog {
+                                                                                let label = d.reasoning_labels.remove(&level_owned).unwrap_or_default();
+                                                                                d.reasoning_levels.remove(ix);
+                                                                                d.new_level.update(cx, |i, cx| i.set_value(level_owned.clone(), window, cx));
+                                                                                d.new_label.update(cx, |i, cx| i.set_value(label, window, cx));
+                                                                            }
+                                                                            cx.notify();
+                                                                        }))
+                                                                        .child(
+                                                                            h_flex()
+                                                                                .gap_1()
+                                                                                .child(div().text_xs().child(level.clone()))
+                                                                                .when_some(label, |this, label| {
+                                                                                    this.child(
+                                                                                        div()
+                                                                                            .text_xs()
+                                                                                            .text_color(cx.theme().muted_foreground)
+                                                                                            .child(format!("· {label}")),
+                                                                                    )
+                                                                                }),
+                                                                        ),
+                                                                )
                                                                 .child(
                                                                     div()
                                                                         .id(("del-level", ix))
                                                                         .cursor_pointer()
                                                                         .on_click(cx.listener(move |this, _, _, cx| {
                                                                             if let Some(d) = &mut this.model_dialog {
-                                                                                d.reasoning_levels.remove(ix);
+                                                                                let level = d.reasoning_levels.remove(ix);
+                                                                                d.reasoning_labels.remove(&level);
                                                                             }
                                                                             cx.notify();
                                                                         }))
@@ -814,20 +858,32 @@ impl SettingsView {
                                                         .child(
                                                             h_flex()
                                                                 .gap_1()
-                                                                .child(div().w(px(100.)).child(Input::new(&dialog.new_level).small()))
+                                                                .child(div().w(px(90.)).child(Input::new(&dialog.new_level).small()))
+                                                                .child(div().w(px(110.)).child(Input::new(&dialog.new_label).small()))
                                                                 .child(
                                                                     Button::new("add-level")
                                                                         .ghost()
                                                                         .xsmall()
                                                                         .icon(IconName::Plus)
                                                                         .on_click(cx.listener(|this, _, window, cx| {
-                                                                            let level = this.model_dialog.as_ref().map(|d| d.new_level.read(cx).value().trim().to_string()).unwrap_or_default();
+                                                                            let (level, label) = this.model_dialog.as_ref().map(|d| {
+                                                                                (
+                                                                                    d.new_level.read(cx).value().trim().to_string(),
+                                                                                    d.new_label.read(cx).value().trim().to_string(),
+                                                                                )
+                                                                            }).unwrap_or_default();
                                                                             if level.is_empty() { return; }
                                                                             if let Some(d) = &mut this.model_dialog {
                                                                                 if !d.reasoning_levels.contains(&level) {
-                                                                                    d.reasoning_levels.push(level);
+                                                                                    d.reasoning_levels.push(level.clone());
+                                                                                }
+                                                                                if label.is_empty() {
+                                                                                    d.reasoning_labels.remove(&level);
+                                                                                } else {
+                                                                                    d.reasoning_labels.insert(level, label);
                                                                                 }
                                                                                 d.new_level.update(cx, |i, cx| i.set_value("", window, cx));
+                                                                                d.new_label.update(cx, |i, cx| i.set_value("", window, cx));
                                                                             }
                                                                             cx.notify();
                                                                         })),

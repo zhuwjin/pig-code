@@ -17,8 +17,21 @@ impl AgentClient {
         let _ = self.ops.send_blocking(op);
     }
 
-    pub fn new_session(&self, cwd: PathBuf) {
-        self.send(Op::NewSession { cwd });
+    pub fn new_session(
+        &self,
+        cwd: PathBuf,
+        provider_id: Option<String>,
+        model_id: Option<String>,
+        reasoning_level: Option<String>,
+        exec_mode: Option<ExecMode>,
+    ) {
+        self.send(Op::NewSession {
+            cwd,
+            provider_id,
+            model_id,
+            reasoning_level,
+            exec_mode,
+        });
     }
 
     pub fn open_session(&self, session_id: String) {
@@ -77,6 +90,13 @@ impl AgentClient {
             session_id,
             provider_id,
             model_id,
+            reasoning_level,
+        });
+    }
+
+    pub fn set_reasoning(&self, session_id: String, reasoning_level: Option<String>) {
+        self.send(Op::SetReasoning {
+            session_id,
             reasoning_level,
         });
     }

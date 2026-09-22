@@ -279,6 +279,10 @@ impl AppView {
                 session_id,
                 model,
                 provider_name,
+                provider_id,
+                model_id,
+                reasoning_level,
+                exec_mode,
                 ..
             } => {
                 let session_id = session_id.clone();
@@ -289,9 +293,18 @@ impl AppView {
                 } else {
                     format!("{provider_name}/{model}")
                 };
+                // 恢复会话的模型/模式/思考等级（core 持久化在 sessions 表）
+                self.exec_mode = *exec_mode;
+                self.reasoning_level = reasoning_level.clone();
+                self.current_model = match (provider_id, model_id) {
+                    (Some(p), Some(m)) => Some((p.clone(), m.clone())),
+                    _ => None,
+                };
                 self.composer.update(cx, |composer, cx| {
                     composer.set_model_name(label, cx);
                     composer.set_hero_mode(false, cx);
+                    composer.set_exec_mode(*exec_mode, cx);
+                    composer.set_reasoning_level(reasoning_level.clone(), cx);
                 });
                 // 切换/新建会话：用缓存快照同步进度/任务面板（无快照则清空）
                 let todos = self
@@ -304,9 +317,20 @@ impl AppView {
                     .get(&session_id)
                     .cloned()
                     .unwrap_or_default();
+                // 改动 chip：从该会话的 ReviewPanel 取快照（新会话为空）
+                let (added, removed, change_files) = self
+                    .views
+                    .get(&session_id)
+                    .map(|views| {
+                        let review = views.review.read(cx);
+                        let (a, r) = review.totals();
+                        (a, r, review.file_summaries())
+                    })
+                    .unwrap_or((0, 0, vec![]));
                 self.composer.update(cx, |composer, cx| {
                     composer.set_todos(todos, cx);
                     composer.set_tasks(tasks, cx);
+                    composer.set_changes(added, removed, change_files, cx);
                 });
                 if let Some((text, files, mode)) = self.pending_first_send.take() {
                     self.agent.send_message(session_id, text, files, mode);
@@ -516,25 +540,30 @@ impl AppView {
                     } => {
                         let (path, diff, adds, dels) =
                             (path.clone(), unified_diff.clone(), *additions, *deletions);
-                        let totals = views.review.update(cx, |review, cx| {
+                        let (totals, files) = views.review.update(cx, |review, cx| {
                             review.upsert(path, diff, adds, dels, cx);
-                            review.totals()
+                            (review.totals(), review.file_summaries())
                         });
                         self.stats.insert(sid.clone(), totals);
-                        views.thread.update(cx, |thread, cx| {
-                            thread.set_changes(totals.0, totals.1, cx);
-                        });
+                        // 改动 chip 挂在共享的 composer 上，只推当前会话的快照
+                        if self.current.as_deref() == Some(sid.as_str()) {
+                            self.composer.update(cx, |composer, cx| {
+                                composer.set_changes(totals.0, totals.1, files, cx);
+                            });
+                        }
                     }
                     Event::FileReverted { path, .. } => {
                         let path = path.clone();
-                        let totals = views.review.update(cx, |review, cx| {
+                        let (totals, files) = views.review.update(cx, |review, cx| {
                             review.remove(&path, cx);
-                            review.totals()
+                            (review.totals(), review.file_summaries())
                         });
                         self.stats.insert(sid.clone(), totals);
-                        views.thread.update(cx, |thread, cx| {
-                            thread.set_changes(totals.0, totals.1, cx);
-                        });
+                        if self.current.as_deref() == Some(sid.as_str()) {
+                            self.composer.update(cx, |composer, cx| {
+                                composer.set_changes(totals.0, totals.1, files, cx);
+                            });
+                        }
                     }
                     _ => {
                         views.thread.update(cx, |thread, cx| {
@@ -610,9 +639,48 @@ impl AppView {
         });
     }
 
+    /// 模型 chip 显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id
+    fn model_display_label(&self, provider_id: &str, model_id: &str) -> String {
+        let pname = self
+            .config
+            .as_ref()
+            .and_then(|c| c.providers.iter().find(|pr| pr.id == provider_id))
+            .map(|pr| pr.name.clone())
+            .unwrap_or_default();
+        if pname.is_empty() {
+            model_id.to_string()
+        } else {
+            format!("{pname}/{model_id}")
+        }
+    }
+
     fn switch_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         if self.views.contains_key(&session_id) {
-            self.current = Some(session_id);
+            self.current = Some(session_id.clone());
+            // 已打开过的会话走这条快速路径，core 不会再发 SessionConfigured——
+            // 必须按 meta 恢复会话级的模型/模式/思考等级，否则会带着上一个会话的值
+            if let Some(meta) = self.metas.iter().find(|m| m.id == session_id).cloned()
+            {
+                self.exec_mode = meta.exec_mode;
+                self.reasoning_level = meta.reasoning_level.clone();
+                let label = match (&meta.provider_id, &meta.model_id) {
+                    (Some(p), Some(m)) => {
+                        self.current_model = Some((p.clone(), m.clone()));
+                        Some(self.model_display_label(p, m))
+                    }
+                    _ => {
+                        self.current_model = None;
+                        None
+                    }
+                };
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_exec_mode(meta.exec_mode, cx);
+                    composer.set_reasoning_level(meta.reasoning_level.clone(), cx);
+                    if let Some(label) = label {
+                        composer.set_model_name(label, cx);
+                    }
+                });
+            }
             self.sync_composer_state(cx);
             self.refresh_sidebar(cx);
             cx.notify();
@@ -667,6 +735,41 @@ impl AppView {
         });
     }
 
+    /// hero 默认值：把「工作区最近活跃会话」的模型/模式/思考等级铺到 composer，
+    /// 作为下次新建会话的默认值（用户可再改；hero_send 时按当前选择创建）。
+    /// 无种子（新工作区）则不动，保留 app 默认/上次选择。
+    fn apply_hero_defaults(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
+        let Some(seed) = self
+            .metas
+            .iter()
+            .filter(|m| !m.archived && m.cwd == cwd)
+            .max_by_key(|m| m.updated_at)
+            .cloned()
+        else {
+            return;
+        };
+        self.exec_mode = seed.exec_mode;
+        self.reasoning_level = seed.reasoning_level.clone();
+        // 模型显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id
+        let label = match (&seed.provider_id, &seed.model_id) {
+            (Some(p), Some(m)) => {
+                self.current_model = Some((p.clone(), m.clone()));
+                self.model_display_label(p, m)
+            }
+            // 种子没有模型选择：模型展示不动，只铺模式/思考等级
+            _ => String::new(),
+        };
+        self.composer.update(cx, |composer, cx| {
+            composer.set_exec_mode(seed.exec_mode, cx);
+            composer.set_reasoning_level(seed.reasoning_level.clone(), cx);
+            if !label.is_empty() {
+                composer.set_model_name(label, cx);
+            }
+        });
+        cx.notify();
+    }
+
     fn enter_hero(&mut self, cx: &mut Context<Self>) {
         self.current = None;
         self.hero_error = None;
@@ -683,6 +786,7 @@ impl AppView {
         });
         self.push_hero_info(cx);
         self.refresh_sidebar(cx);
+        self.apply_hero_defaults(cx);
         cx.notify();
     }
 
@@ -695,7 +799,19 @@ impl AppView {
     ) {
         self.pending_first_send = Some((text, files, mode));
         let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
-        self.agent.new_session(cwd);
+        // 带上 UI 当前选择：新建会话用它们（而不是工作区种子）初始化，
+        // 避免 SessionConfigured 回来把用户刚选的模式/思考等级覆盖掉
+        let (provider_id, model_id) = match self.current_model.clone() {
+            Some((p, m)) => (Some(p), Some(m)),
+            None => (None, None),
+        };
+        self.agent.new_session(
+            cwd,
+            provider_id,
+            model_id,
+            self.reasoning_level.clone(),
+            Some(mode),
+        );
         self.composer.update(cx, |composer, cx| {
             composer.set_hero_mode(false, cx);
         });
@@ -724,6 +840,8 @@ impl AppView {
                         this.agent.git_info(picked.clone());
                         this.hero_cwd = Some(picked);
                         this.push_hero_info(cx);
+                        // 换了工作区：按新工作区最近活跃会话重铺默认值
+                        this.apply_hero_defaults(cx);
                         cx.notify();
                     });
                 })
@@ -738,6 +856,9 @@ impl AppView {
             return;
         };
         self.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
+        self.update_current_meta(|m| {
+            m.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
+        });
         self.composer.update(cx, |composer, cx| {
             composer.set_exec_mode(pig_protocol::ExecMode::ConfirmBeforeEdit, cx);
         });
@@ -751,6 +872,16 @@ impl AppView {
         }
         self.agent
             .send_message(sid, text, vec![], pig_protocol::ExecMode::ConfirmBeforeEdit);
+    }
+
+    /// 同步更新 metas 缓存中当前会话的条目（与 core 写穿保持一致；
+    /// core 的 Set* 写穿不再发 SessionList，缓存不更新会导致切会话读到旧值）
+    fn update_current_meta(&mut self, f: impl FnOnce(&mut SessionMeta)) {
+        if let Some(sid) = &self.current
+            && let Some(meta) = self.metas.iter_mut().find(|m| &m.id == sid)
+        {
+            f(meta);
+        }
     }
 
     fn on_composer_event(
@@ -779,6 +910,8 @@ impl AppView {
                 self.agent.git_info(cwd.clone());
                 self.hero_cwd = Some(cwd);
                 self.push_hero_info(cx);
+                // 换了工作区：按新工作区最近活跃会话重铺默认值
+                self.apply_hero_defaults(cx);
             }
             ComposerEvent::ClearCwd => {
                 self.hero_cwd = None;
@@ -816,6 +949,12 @@ impl AppView {
                 model_id,
             } => {
                 self.current_model = Some((provider_id.clone(), model_id.clone()));
+                let reasoning = self.reasoning_level.clone();
+                self.update_current_meta(|m| {
+                    m.provider_id = Some(provider_id.clone());
+                    m.model_id = Some(model_id.clone());
+                    m.reasoning_level = reasoning.clone();
+                });
                 if let Some(sid) = &self.current {
                     self.agent.set_model(
                         sid.clone(),
@@ -827,16 +966,17 @@ impl AppView {
             }
             ComposerEvent::SetReasoning(level) => {
                 self.reasoning_level = level.clone();
-                // 已选模型时立即带推理等级重发
+                // 思考等级独立于模型选择：未显式选模型时同样写穿并生效（作用于默认模型）
+                self.update_current_meta(|m| {
+                    m.reasoning_level = level.clone();
+                });
                 if let Some(sid) = &self.current {
-                    if let Some((provider_id, model_id)) = self.current_model.clone() {
-                        self.agent
-                            .set_model(sid.clone(), provider_id, model_id, level.clone());
-                    }
+                    self.agent.set_reasoning(sid.clone(), level.clone());
                 }
             }
             ComposerEvent::SetExecMode(mode) => {
                 self.exec_mode = *mode;
+                self.update_current_meta(|m| m.exec_mode = *mode);
                 if let Some(sid) = &self.current {
                     self.agent.set_exec_mode(sid.clone(), *mode);
                 }
@@ -930,7 +1070,18 @@ impl AppView {
                             p.name.clone(),
                             p.id.clone(),
                             m.id.clone(),
-                            m.reasoning_levels.clone(),
+                            // (等级 id, 显示名)——显示名缺省回退 id 本身
+                            m.reasoning_levels
+                                .iter()
+                                .map(|lv| {
+                                    let label = m
+                                        .reasoning_labels
+                                        .get(lv)
+                                        .cloned()
+                                        .unwrap_or_else(|| lv.clone());
+                                    (lv.clone(), label)
+                                })
+                                .collect::<Vec<_>>(),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1514,7 +1665,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] 工作区列表 OK（会话 cwd 自动出现 + 手动增删）");
 
     // 会话 B：新建 + 场景 A
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone()));
+    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
     let session_b = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -1658,7 +1809,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] 模型摘要 compact OK");
 
     // 场景 C：计划模式闭环
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone()));
+    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
     let session_c = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -1763,7 +1914,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] ConfigSnapshot + 模型列表 OK");
 
     // Anthropic 供应商端到端：会话 D 切到 anthropic 模型跑场景 B
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone()));
+    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
     let session_d = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());

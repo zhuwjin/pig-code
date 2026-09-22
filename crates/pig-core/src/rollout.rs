@@ -1,6 +1,6 @@
 //! JSONL 会话持久化（codex rollout 式）：`{data_dir}/sessions/{session_id}.jsonl`
 //! 首行 meta，之后每个 durable 单元一行；live delta 不落盘。
-//! 会话索引在 store.sqlite（见 store.rs）。
+//! 会话索引与面板当前态（待办/文件改动/原始快照）在 store.sqlite（见 store.rs）。
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -36,12 +36,6 @@ pub enum RolloutRecord {
         arguments: String,
         output: String,
         is_error: bool,
-    },
-    FileChange {
-        path: String,
-        unified_diff: String,
-        additions: u32,
-        deletions: u32,
     },
     Compact {
         note: String,
@@ -150,7 +144,6 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
                 }
                 history.push(ChatMsg::tool_result(&call_id, output.clone()));
             }
-            RolloutRecord::FileChange { .. } => {}
             RolloutRecord::Compact { note, .. } => {
                 history.push(ChatMsg::system(note.clone()));
             }

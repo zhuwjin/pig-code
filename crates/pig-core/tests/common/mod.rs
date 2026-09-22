@@ -29,7 +29,17 @@ model = \"mock-model\"
 
 #[allow(dead_code)]
 pub async fn new_session(agent: &pig_core::AgentHandle, cwd: PathBuf) -> String {
-    agent.ops.send(Op::NewSession { cwd }).await.unwrap();
+    agent
+        .ops
+        .send(Op::NewSession {
+            cwd,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            exec_mode: None,
+        })
+        .await
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), agent.events.recv()).await

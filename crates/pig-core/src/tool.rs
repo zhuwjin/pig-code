@@ -34,10 +34,13 @@ impl ToolEffect {
 }
 
 /// 会话级变更追踪：首次修改前快照原始内容，diff 始终是「原始 → 当前」。
+/// 快照经 dirty 标记由 session 侧落盘（file_originals 表），重启后 restore 恢复基线。
 #[derive(Default)]
 pub struct ChangeTracker {
     originals: HashMap<PathBuf, Option<String>>,
     stats: HashMap<PathBuf, (u32, u32)>,
+    /// 本次进程内新增、尚未落盘的快照路径（session 侧 drain 后写库）
+    dirty: Vec<PathBuf>,
 }
 
 impl ChangeTracker {
@@ -50,8 +53,26 @@ impl ChangeTracker {
                 Err(e) => return Err(format!("读取失败 {}: {e}", path.display())),
             };
             entry.insert(original);
+            self.dirty.push(path.to_path_buf());
         }
         Ok(self.originals[path].clone())
+    }
+
+    /// 取出新增快照路径（落盘后清空）
+    pub fn take_dirty(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// 读取某路径的原始快照（None 值 = 文件原本不存在；None 返回 = 未追踪）
+    pub fn original(&self, path: &Path) -> Option<Option<String>> {
+        self.originals.get(path).cloned()
+    }
+
+    /// 重启后恢复基线（来自 file_originals 表；恢复的不标 dirty，避免回写）
+    pub fn restore(&mut self, entries: Vec<(PathBuf, Option<String>)>) {
+        for (path, original) in entries {
+            self.originals.insert(path, original);
+        }
     }
 
     /// 生成「原始 → 当前」的 unified diff 与增删行数。

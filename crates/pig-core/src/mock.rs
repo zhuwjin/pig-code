@@ -19,6 +19,11 @@ pub const SCENARIO_B_FILE: &str = "src/hello.txt";
 pub const SCENARIO_B_CONTENT: &str = "hello\nline2\nline3\n";
 pub const SCENARIO_B_BASH_MARKER: &str = "MOCK_BASH_OK";
 
+/// TodoList 场景：含此标记时走 TodoList 写入 → 文本（测待办持久化用）。
+pub const TODO_SCENARIO_TRIGGER: &str = "TODO_SCENARIO";
+pub const TODO_SCENARIO_MARKER: &str = "MOCK_TODO_OK";
+pub const TODO_SCENARIO_ITEM: &str = "持久化待办项";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -176,6 +181,38 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
             chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
             chunks
         }
+    }
+}
+
+/// TodoList 场景：历史里还没有 TodoList 调用 → 写入；已执行 → 文本收尾。
+/// 不能按全局 tool 结果计数：请求体的 tools 声明与历史消息都会干扰，
+/// 直接解析 messages 里是否出现过 TodoList 调用。
+fn todo_scenario_response(body: &str) -> Vec<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let called = parsed["messages"].as_array().is_some_and(|msgs| {
+        msgs.iter().any(|m| {
+            m["tool_calls"].as_array().is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|c| c["function"]["name"].as_str() == Some("TodoList"))
+            })
+        })
+    });
+    if called {
+        vec![
+            sse_chunk(serde_json::json!({"content": TODO_SCENARIO_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ]
+    } else {
+        tool_call_chunks(
+            "call_todo_1",
+            "TodoList",
+            &serde_json::json!({"todos": [
+                {"content": format!("{TODO_SCENARIO_ITEM}一"), "status": "done"},
+                {"content": format!("{TODO_SCENARIO_ITEM}二"), "status": "in_progress"}
+            ]})
+            .to_string(),
+        )
     }
 }
 
@@ -379,6 +416,8 @@ async fn handle_connection(
         scenario_b_response(tool_results, "src/hello_plan.txt")
     } else if body.contains(SCENARIO_C_TRIGGER) {
         scenario_c_response()
+    } else if body.contains(TODO_SCENARIO_TRIGGER) {
+        todo_scenario_response(&body)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {

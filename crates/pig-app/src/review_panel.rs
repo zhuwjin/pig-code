@@ -38,6 +38,11 @@ impl ReviewPanel {
         deletions: u32,
         cx: &mut Context<Self>,
     ) {
+        // 净额归零（改回到原始内容）：从列表移除，与 ZCode/kimi-code 口径一致
+        if additions == 0 && deletions == 0 {
+            self.remove(&path, cx);
+            return;
+        }
         if let Some(entry) = self.files.iter_mut().find(|e| e.path == path) {
             entry.diff = diff;
             entry.additions = additions;
@@ -68,6 +73,14 @@ impl ReviewPanel {
         self.files
             .iter()
             .fold((0, 0), |(a, d), e| (a + e.additions, d + e.deletions))
+    }
+
+    /// 文件列表快照（composer 改动弹窗用）：(path, additions, deletions)
+    pub fn file_summaries(&self) -> Vec<(String, u32, u32)> {
+        self.files
+            .iter()
+            .map(|e| (e.path.clone(), e.additions, e.deletions))
+            .collect()
     }
 
     /// 自测用：(文件数, 总新增, 总删除, 任一 diff 非空)

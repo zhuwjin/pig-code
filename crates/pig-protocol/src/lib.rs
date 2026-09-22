@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 pub enum Op {
     NewSession {
         cwd: PathBuf,
+        /// UI 当前模型选择；None → 工作区最近活跃会话 / 配置默认
+        provider_id: Option<String>,
+        model_id: Option<String>,
+        /// UI 当前思考等级（原样采用，None = 关；种子的等级经 UI hero 默认值下达）
+        reasoning_level: Option<String>,
+        /// UI 当前执行模式；None → 工作区最近活跃会话 / 默认
+        exec_mode: Option<ExecMode>,
     },
     OpenSession {
         session_id: String,
@@ -58,6 +65,11 @@ pub enum Op {
         /// None = 不启用推理参数
         reasoning_level: Option<String>,
     },
+    /// 单独设置思考等级：无模型覆盖时同样生效（作用于配置默认模型）并持久化
+    SetReasoning {
+        session_id: String,
+        reasoning_level: Option<String>,
+    },
     GetConfig,
     SaveConfig {
         config: AppConfig,
@@ -96,8 +108,9 @@ pub enum Op {
     Shutdown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecMode {
+    #[default]
     ConfirmBeforeEdit,
     AutoEdit,
     Plan,
@@ -145,6 +158,9 @@ pub struct ModelConfig {
     /// 可选推理等级，如 ["low","high","max"]
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
+    /// 等级 id → 界面显示名（如 max → "最高"）；纯展示层，请求仍按 id 合并参数
+    #[serde(default)]
+    pub reasoning_labels: std::collections::HashMap<String, String>,
     /// 等级 → 合并进请求体的 JSON
     #[serde(default)]
     pub reasoning_params: std::collections::HashMap<String, serde_json::Value>,
@@ -169,6 +185,7 @@ impl ModelConfig {
             web_search_tool: None,
             cap_system_msg: false,
             reasoning_levels: vec![],
+            reasoning_labels: Default::default(),
             reasoning_params: Default::default(),
         }
     }
@@ -216,6 +233,15 @@ pub struct SessionMeta {
     pub updated_at: u64,
     pub pinned: bool,
     pub archived: bool,
+    /// 会话最近使用的模型/思考等级/执行模式（重开恢复；新会话继承工作区最近活跃值）
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
+    #[serde(default)]
+    pub exec_mode: ExecMode,
 }
 
 /// TodoList 工具的待办项：会话级状态，写入时整体替换。
@@ -260,6 +286,11 @@ pub enum Event {
         cwd: PathBuf,
         model: String,
         provider_name: String,
+        /// 会话当前的模型/思考等级/执行模式（重开恢复、新建继承的值）
+        provider_id: Option<String>,
+        model_id: Option<String>,
+        reasoning_level: Option<String>,
+        exec_mode: ExecMode,
     },
     SessionList {
         sessions: Vec<SessionMeta>,

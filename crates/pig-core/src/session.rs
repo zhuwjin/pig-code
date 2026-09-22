@@ -31,10 +31,24 @@ pub struct ModelSelection {
     pub reasoning_level: Option<String>,
 }
 
-/// provider+model(+推理等级) → 端点解析
+/// SessionMeta 里持久化的模型选择 → ModelSelection（缺 provider/model 则无覆盖）
+fn meta_to_selection(meta: &SessionMeta) -> Option<ModelSelection> {
+    match (&meta.provider_id, &meta.model_id) {
+        (Some(provider_id), Some(model_id)) => Some(ModelSelection {
+            provider_id: provider_id.clone(),
+            model_id: model_id.clone(),
+            reasoning_level: meta.reasoning_level.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// provider+model(+推理等级) → 端点解析。
+/// `default_level`：无模型覆盖时使用的思考等级（作用于配置默认模型）。
 pub fn resolve_model(
     config: &AppConfig,
     selection: Option<&ModelSelection>,
+    default_level: Option<&str>,
 ) -> Option<ResolvedModel> {
     let (provider_id, model_id, level) = match selection {
         Some(sel) => (
@@ -45,7 +59,7 @@ pub fn resolve_model(
         None => (
             config.default_provider.clone(),
             config.default_model.clone(),
-            None,
+            default_level.map(str::to_string),
         ),
     };
     let provider = config
@@ -133,8 +147,8 @@ impl Session {
         })
     }
 
-    /// 从 rollout 重建。注意：ChangeTracker 快照为空——resume 后 revert 只能回退
-    /// 本次进程内的变更，历史变更的基线是当前磁盘内容（已知限制，M5+ 再议）。
+    /// 从 rollout 重建。diff 基线从 file_originals 表恢复到 ChangeTracker：
+    /// resume 后改动仍以「会话首次快照 → 当前」计算，revert 跨重启可用。
     pub fn load(
         id: &str,
         sessions_dir: &Path,
@@ -151,13 +165,22 @@ impl Session {
             &records,
             prompt::system_prompt(cwd, true, ExecMode::ConfirmBeforeEdit, &data_dir),
         );
+        let originals = store
+            .lock()
+            .expect("store lock")
+            .file_originals(id)
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content))
+            .collect();
+        let mut tracker = ChangeTracker::default();
+        tracker.restore(originals);
         let session = Self {
             id: id.to_string(),
             cwd: cwd.clone(),
             history,
             seq: 0,
             turn_counter: 0,
-            tracker: ChangeTracker::default(),
+            tracker,
             state: crate::task::SessionToolState::new(id.to_string(), task_notify),
             always_allowed: HashSet::new(),
             pending,
@@ -313,28 +336,41 @@ impl Session {
                         tx,
                     );
                 }
-                RolloutRecord::FileChange {
+                RolloutRecord::Compact { .. } => {}
+            }
+        }
+        // SQLite 里的面板当前态在 JSONL 事件流之后补发：
+        // - todos 表 → 恢复待办并推快照
+        // - file_changes 表 → 按路径逐条补 FileChanged（UI upsert 重建改动列表）
+        let (todos_json, db_changes) = {
+            let store = self.store.lock().expect("store lock");
+            (store.get_todos(&self.id), store.file_changes(&self.id))
+        };
+        if let Some(json) = todos_json
+            && let Ok(items) = serde_json::from_str::<Vec<pig_protocol::TodoItem>>(&json)
+        {
+            *self.state.todos.lock().expect("todos lock") = items.clone();
+            self.emit(
+                |session_id, seq| Event::TodoListChanged {
+                    session_id,
+                    seq,
+                    items,
+                },
+                tx,
+            );
+        }
+        for (path, unified_diff, additions, deletions) in db_changes {
+            self.emit(
+                |session_id, seq| Event::FileChanged {
+                    session_id,
+                    seq,
                     path,
                     unified_diff,
                     additions,
                     deletions,
-                } => {
-                    let (path, diff) = (path.clone(), unified_diff.clone());
-                    let (additions, deletions) = (*additions, *deletions);
-                    self.emit(
-                        |session_id, seq| Event::FileChanged {
-                            session_id,
-                            seq,
-                            path,
-                            unified_diff: diff,
-                            additions,
-                            deletions,
-                        },
-                        tx,
-                    );
-                }
-                RolloutRecord::Compact { .. } => {}
-            }
+                },
+                tx,
+            );
         }
         // 回放的历史回合以 TurnStarted 开头但记录里没有结尾事件；
         // 用 duration_ms=0 的 TurnComplete 收尾，让 UI 退出流式状态
@@ -454,10 +490,16 @@ impl Session {
     }
 
     pub fn revert_file(&mut self, path: &str, tx: &async_channel::Sender<Event>) {
-        let result =
-            tool::resolve_checked(&self.cwd, path, false).and_then(|full| self.tracker.revert(&full));
+        let result = tool::resolve_checked(&self.cwd, path, false)
+            .and_then(|full| self.tracker.revert(&full).map(|()| full));
         match result {
-            Ok(()) => {
+            Ok(full) => {
+                // 撤销后改动与基线都不再有意义：清库（改动行 + 原始快照行）
+                {
+                    let store = self.store.lock().expect("store lock");
+                    store.delete_file_change(&self.id, path);
+                    store.delete_file_original(&self.id, &full.to_string_lossy());
+                }
                 self.emit(
                     |session_id, seq| Event::FileReverted {
                         session_id,
@@ -855,6 +897,18 @@ impl Session {
             // TodoList 写入成功后向 UI 推待办快照（读操作输出即列表，无需重复推）
             if call.name == "TodoList" && !is_error {
                 let items = self.state.todos.lock().expect("todos lock").clone();
+                // 写操作（带 todos 参数）落 SQLite todos 表（当前态 upsert）；
+                // 读操作不落盘。事件流 JSONL 不再记状态快照
+                let is_write = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .ok()
+                    .is_some_and(|v| v.get("todos").is_some());
+                if is_write {
+                    let json = serde_json::to_string(&items).unwrap_or_default();
+                    self.store
+                        .lock()
+                        .expect("store lock")
+                        .set_todos(&self.id, &json);
+                }
                 self.emit(
                     |session_id, seq| Event::TodoListChanged {
                         session_id,
@@ -865,12 +919,22 @@ impl Session {
                 );
             }
             if let Some(change) = file_change {
-                self.record(&RolloutRecord::FileChange {
-                    path: change.path.clone(),
-                    unified_diff: change.unified_diff.clone(),
-                    additions: change.additions,
-                    deletions: change.deletions,
-                });
+                // 改动当前态落 SQLite file_changes 表（按路径 upsert；净额归零删行），
+                // JSONL 只留消息/工具事件流
+                {
+                    let store = self.store.lock().expect("store lock");
+                    if change.additions == 0 && change.deletions == 0 {
+                        store.delete_file_change(&self.id, &change.path);
+                    } else {
+                        store.upsert_file_change(
+                            &self.id,
+                            &change.path,
+                            &change.unified_diff,
+                            change.additions,
+                            change.deletions,
+                        );
+                    }
+                }
                 self.emit(
                     |session_id, seq| Event::FileChanged {
                         session_id,
@@ -882,6 +946,27 @@ impl Session {
                     },
                     tx,
                 );
+            }
+            // 本工具新增的原始快照落 file_originals 表（跨重启 diff 基线 / revert）；
+            // 超过 4MB 的大文件不持久化（基线退回进程内存，与 kimi-code 口径一致）
+            let dirty = self.tracker.take_dirty();
+            if !dirty.is_empty() {
+                const MAX_ORIGINAL_BYTES: usize = 4 * 1024 * 1024;
+                let store = self.store.lock().expect("store lock");
+                for path in dirty {
+                    if let Some(original) = self.tracker.original(&path) {
+                        let oversized = original
+                            .as_ref()
+                            .is_some_and(|content| content.len() > MAX_ORIGINAL_BYTES);
+                        if !oversized {
+                            store.upsert_file_original(
+                                &self.id,
+                                &path.to_string_lossy(),
+                                original.as_deref(),
+                            );
+                        }
+                    }
+                }
             }
         }
         StepOutcome::ToolsExecuted
@@ -982,6 +1067,8 @@ struct SessionEntry {
     state: crate::task::SessionToolState,
     cancel: Option<CancellationToken>,
     model_override: Option<ModelSelection>,
+    /// 会话级思考等级：独立于模型覆盖存在（无覆盖时作用于配置默认模型）
+    reasoning_level: Option<String>,
     /// 回合进行中到达的消息在此排队（FIFO），回合结束自动接续
     queue: std::collections::VecDeque<(String, Vec<String>, ExecMode)>,
 }
@@ -1058,13 +1145,13 @@ pub async fn agent_loop(
     let (task_notify_tx, mut task_notify_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     macro_rules! resolve {
-        ($override:expr) => {
-            config.as_ref().and_then(|c| resolve_model(c, $override))
+        ($override:expr, $level:expr) => {
+            config.as_ref().and_then(|c| resolve_model(c, $override, $level))
         };
     }
     macro_rules! model_label {
         ($override:expr) => {
-            resolve!($override)
+            resolve!($override, None)
                 .map(|r| (r.model.clone(), r.provider_name.clone()))
                 .unwrap_or_else(|| ("未配置模型".to_string(), String::new()))
         };
@@ -1075,10 +1162,15 @@ pub async fn agent_loop(
             op = op_rx.recv() => {
                 let Ok(op) = op else { break };
                 match op {
-                    Op::NewSession { cwd } => {
+                    Op::NewSession { cwd, provider_id, model_id, reasoning_level, exec_mode } => {
                         let cwd = normalize_workspace_path(&cwd);
                         id_counter += 1;
                         let id = format!("s{}-{}", now_secs(), id_counter);
+                        // 新会话默认值 = 工作区最近活跃会话；UI 显式传入的字段优先于种子
+                        let seed = store
+                            .lock()
+                            .expect("store lock")
+                            .latest_active_in_workspace(&cwd);
                         let meta = SessionMeta {
                             id: id.clone(),
                             title: "新任务".to_string(),
@@ -1087,18 +1179,31 @@ pub async fn agent_loop(
                             updated_at: now_secs(),
                             pinned: false,
                             archived: false,
+                            provider_id: provider_id.or_else(|| seed.as_ref().and_then(|m| m.provider_id.clone())),
+                            model_id: model_id.or_else(|| seed.as_ref().and_then(|m| m.model_id.clone())),
+                            // 思考等级按 UI 原样（hero 默认值已把种子下达到 UI；None = 关）
+                            reasoning_level,
+                            exec_mode: exec_mode.unwrap_or_else(|| {
+                                seed.as_ref().map(|m| m.exec_mode).unwrap_or_default()
+                            }),
                         };
                         match Session::create(meta.clone(), pending.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
-                            Ok(session) => {
+                            Ok(mut session) => {
+                                session.set_mode(meta.exec_mode);
+                                let selection = meta_to_selection(&meta);
                                 let state = session.state.clone();
-                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: None, queue: Default::default() });
+                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: selection.clone(), reasoning_level: meta.reasoning_level.clone(), queue: Default::default() });
                                 store.lock().expect("store lock").upsert_session(&meta);
-                                let (model, provider_name) = model_label!(None);
+                                let (model, provider_name) = model_label!(selection.as_ref());
                                 emit_global!(Event::SessionConfigured {
                                     session_id: id.clone(),
                                     cwd: meta.cwd.clone(),
                                     model,
                                     provider_name,
+                                    provider_id: meta.provider_id.clone(),
+                                    model_id: meta.model_id.clone(),
+                                    reasoning_level: meta.reasoning_level.clone(),
+                                    exec_mode: meta.exec_mode,
                                 });
                                 // 新会话面板初始化为空快照
                                 emit_global!(Event::TodoListChanged { session_id: id.clone(), seq, items: vec![] });
@@ -1124,12 +1229,17 @@ pub async fn agent_loop(
                         if sessions.contains_key(&session_id) {
                             let meta = store.lock().expect("store lock").get_session(&session_id);
                             if let Some(meta) = meta {
-                                let (model, provider_name) = model_label!(None);
+                                let selection = meta_to_selection(&meta);
+                                let (model, provider_name) = model_label!(selection.as_ref());
                                 emit_global!(Event::SessionConfigured {
                                     session_id: session_id.clone(),
                                     cwd: meta.cwd,
                                     model,
                                     provider_name,
+                                    provider_id: meta.provider_id.clone(),
+                                    model_id: meta.model_id.clone(),
+                                    reasoning_level: meta.reasoning_level.clone(),
+                                    exec_mode: meta.exec_mode,
                                 });
                                 // 切回已打开会话：补发面板快照，UI 重置面板
                                 if let Some(entry) = sessions.get(&session_id) {
@@ -1142,22 +1252,33 @@ pub async fn agent_loop(
                             continue;
                         }
                         match Session::load(&session_id, &sessions_dir, pending.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone()) {
-                            Ok((session, records)) => {
+                            Ok((mut session, records)) => {
+                                // 恢复持久化的模式/模型覆盖（meta 由 Set* 写穿保持最新）
+                                let meta = store.lock().expect("store lock").get_session(&session_id);
+                                let selection = meta.as_ref().and_then(meta_to_selection);
+                                if let Some(meta) = &meta {
+                                    session.set_mode(meta.exec_mode);
+                                }
                                 let cwd = session.cwd.clone();
                                 let state = session.state.clone();
                                 sessions.insert(session_id.clone(), SessionEntry {
                                     session: Some(session),
                                     state,
                                     cancel: None,
-                                    model_override: None,
+                                    model_override: selection.clone(),
+                                    reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
                                     queue: Default::default(),
                                 });
-                                let (model, provider_name) = model_label!(None);
+                                let (model, provider_name) = model_label!(selection.as_ref());
                                 emit_global!(Event::SessionConfigured {
                                     session_id: session_id.clone(),
                                     cwd,
                                     model,
                                     provider_name,
+                                    provider_id: meta.as_ref().and_then(|m| m.provider_id.clone()),
+                                    model_id: meta.as_ref().and_then(|m| m.model_id.clone()),
+                                    reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
+                                    exec_mode: meta.as_ref().map(|m| m.exec_mode).unwrap_or_default(),
                                 });
                                 // 重新打开的会话无持久化面板状态：空快照重置
                                 emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items: vec![] });
@@ -1236,7 +1357,7 @@ pub async fn agent_loop(
                             });
                             continue;
                         }
-                        let Some(resolved) = resolve!(entry.model_override.as_ref()) else {
+                        let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) else {
                             emit_global!(Event::Error {
                                 session_id: Some(session_id),
                                 seq,
@@ -1314,6 +1435,9 @@ pub async fn agent_loop(
                             if let Some(session) = entry.session.as_mut() {
                                 session.set_mode(mode);
                             }
+                            store.lock().expect("store lock").update_session(&session_id, |m| {
+                                m.exec_mode = mode;
+                            });
                         }
                     }
                     Op::RevertFile { session_id, path } => {
@@ -1358,7 +1482,7 @@ pub async fn agent_loop(
                                 let mut session = entry.session.take().expect("session present");
                                 let tx = event_tx.clone();
                                 let sid = session_id.clone();
-                                let resolved = resolve!(entry.model_override.as_ref());
+                                let resolved = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref());
                                 entry.cancel = Some(CancellationToken::new());
                                 let cancel = entry.cancel.clone().expect("cancel");
                                 turns.push(Box::pin(async move {
@@ -1376,9 +1500,28 @@ pub async fn agent_loop(
                     Op::SetModel { session_id, provider_id, model_id, reasoning_level } => {
                         if let Some(entry) = sessions.get_mut(&session_id) {
                             entry.model_override = Some(ModelSelection {
-                                provider_id,
-                                model_id,
-                                reasoning_level,
+                                provider_id: provider_id.clone(),
+                                model_id: model_id.clone(),
+                                reasoning_level: reasoning_level.clone(),
+                            });
+                            entry.reasoning_level = reasoning_level.clone();
+                            // 写穿 sessions 表：重开/新建继承都从这里取
+                            store.lock().expect("store lock").update_session(&session_id, |m| {
+                                m.provider_id = Some(provider_id.clone());
+                                m.model_id = Some(model_id.clone());
+                                m.reasoning_level = reasoning_level.clone();
+                            });
+                        }
+                    }
+                    Op::SetReasoning { session_id, reasoning_level } => {
+                        if let Some(entry) = sessions.get_mut(&session_id) {
+                            // 独立于模型覆盖保存：无覆盖时作用于配置默认模型（resolve 的 default_level）
+                            entry.reasoning_level = reasoning_level.clone();
+                            if let Some(sel) = &mut entry.model_override {
+                                sel.reasoning_level = reasoning_level.clone();
+                            }
+                            store.lock().expect("store lock").update_session(&session_id, |m| {
+                                m.reasoning_level = reasoning_level.clone();
                             });
                         }
                     }
@@ -1452,7 +1595,7 @@ pub async fn agent_loop(
                     entry.cancel = None;
                     // 回合结束（含中止/出错）后自动取出队首继续
                     if let Some((content, files, mode)) = entry.queue.pop_front() {
-                        if let Some(resolved) = resolve!(entry.model_override.as_ref()) {
+                        if let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) {
                             start_turn(entry, session_id.clone(), content, files, mode, &resolved, &event_tx, &turns);
                         }
                     }

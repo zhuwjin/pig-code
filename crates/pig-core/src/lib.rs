@@ -68,7 +68,13 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
     rt.block_on(async {
         agent
             .ops
-            .send(Op::NewSession { cwd: std::env::current_dir().expect("cwd") })
+            .send(Op::NewSession {
+                cwd: std::env::current_dir().expect("cwd"),
+                provider_id: None,
+                model_id: None,
+                reasoning_level: None,
+                exec_mode: None,
+            })
             .await
             .expect("send NewSession");
         let start = std::time::Instant::now();

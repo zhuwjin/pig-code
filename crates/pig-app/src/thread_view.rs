@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::{SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::shimmer::ShimmerText;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::component::Sizable as _;
@@ -48,6 +51,8 @@ pub enum Segment {
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
+    /// 用户消息的选择 handle + 刷新订阅（拖动选择时驱动实时高亮），仅 User 角色有
+    pub selection: Option<(TextSelectionHandle, Subscription)>,
     pub files: Vec<String>,
     pub segments: Vec<Segment>,
     pub footer: Option<String>,
@@ -58,6 +63,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             text,
+            selection: None,
             files,
             segments: vec![],
             footer: None,
@@ -68,6 +74,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             text,
+            selection: None,
             files: vec![],
             segments: vec![],
             footer: None,
@@ -78,6 +85,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             text: String::new(),
+            selection: None,
             files: vec![],
             segments: vec![],
             footer: None,
@@ -108,8 +116,6 @@ pub struct ThreadView {
     turn_started: Option<std::time::Instant>,
     /// 当前回合由回放重建（turn_id 以 replay- 开头）：思考段不打真实用时
     replay_turn: bool,
-    /// 本会话变更统计（来自 AppView 汇总）
-    changes: (u32, u32),
     /// 排队中的消息（FIFO）
     queued: Vec<String>,
     _ticker: Task<()>,
@@ -146,7 +152,6 @@ impl ThreadView {
             plan_pending: false,
             turn_started: None,
             replay_turn: false,
-            changes: (0, 0),
             queued: Vec::new(),
             _ticker: ticker,
         }
@@ -155,11 +160,6 @@ impl ThreadView {
     fn set_streaming(&mut self, streaming: bool, _cx: &mut Context<Self>) {
         self.streaming = streaming;
         self.turn_started = streaming.then(std::time::Instant::now);
-    }
-
-    pub fn set_changes(&mut self, added: u32, removed: u32, cx: &mut Context<Self>) {
-        self.changes = (added, removed);
-        cx.notify();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -561,7 +561,12 @@ impl ThreadView {
         self.messages.last_mut()?.segments.get_mut(six)
     }
 
-    fn render_user_message(&self, message: &ChatMessage, cx: &mut Context<Self>) -> AnyElement {
+    fn render_user_message(
+        &self,
+        ix: usize,
+        message: &ChatMessage,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         v_flex()
             .w_full()
             .items_end()
@@ -596,7 +601,21 @@ impl ThreadView {
                             .with_easing(ease_out_quint()),
                         |el, delta| el.top(px(4.0 * (1.0 - delta))).opacity(delta),
                     )
-                    .child(message.text.clone()),
+                    // 纯文本原文渲染 + 窗口级选择（拖拽/双击选词/Ctrl+C 复制）；
+                    // 显式 handle + refresh_window_on_change 让拖动过程实时高亮
+                    .child(
+                        SelectableText::with_handle(
+                            ("user-msg-text", ix),
+                            message
+                                .selection
+                                .as_ref()
+                                .expect("render 时已惰性创建选择 handle")
+                                .0
+                                .clone(),
+                            message.text.clone(),
+                        )
+                        .document_order(ix as u64),
+                    ),
             )
             .into_any_element()
     }
@@ -615,6 +634,7 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let secs = |d: std::time::Duration| (d.as_secs_f64().ceil() as u64).max(1);
+        let in_progress = duration.is_none() && self.streaming && !self.replay_turn;
         let label = match duration {
             Some(d) => format!("思考 · 持续了 {} 秒", secs(d)),
             // 思考仍在进行：流式中且不是回放（回放的 TurnComplete 前 streaming 也为 true）
@@ -646,7 +666,17 @@ impl ThreadView {
                         cx.notify();
                     }))
                     .child(Icon::new(AssetIconName::Brain).size_4().text_color(muted))
-                    .child(div().text_sm().text_color(muted).child(label))
+                    // 思考进行中：shimmer 扫过高亮；id 必须稳定（文案每秒变，默认动画
+                    // id 取文案会导致扫光每秒重启）
+                    .child(if in_progress {
+                        ShimmerText::new(label)
+                            .id(("thinking-shimmer", message_ix * 1024 + segment_ix))
+                            .text_sm()
+                            .text_color(muted)
+                            .into_any_element()
+                    } else {
+                        div().text_sm().text_color(muted).child(label).into_any_element()
+                    })
                     .child(
                         Icon::new(if open {
                             IconName::ChevronDown
@@ -705,14 +735,27 @@ impl ThreadView {
             "FetchURL" => AssetIconName::Globe,
             _ => AssetIconName::Wrench,
         };
-        let (status_icon, status_color) = if approval_pending {
-            (AssetIconName::Hand, cx.theme().warning)
+        let status_icon = if approval_pending {
+            Icon::new(AssetIconName::Hand)
+                .size_4()
+                .text_color(cx.theme().warning)
+                .into_any_element()
         } else if !done {
-            (AssetIconName::LoaderCircle, muted)
+            // 进行中：Spinner 旋转动画
+            Spinner::new()
+                .icon(AssetIconName::LoaderCircle)
+                .color(muted)
+                .into_any_element()
         } else if is_error {
-            (AssetIconName::TriangleAlert, cx.theme().danger)
+            Icon::new(AssetIconName::TriangleAlert)
+                .size_4()
+                .text_color(cx.theme().danger)
+                .into_any_element()
         } else {
-            (AssetIconName::CircleCheck, cx.theme().success)
+            Icon::new(AssetIconName::CircleCheck)
+                .size_4()
+                .text_color(cx.theme().success)
+                .into_any_element()
         };
 
         v_flex()
@@ -746,7 +789,14 @@ impl ThreadView {
                             .text_sm()
                             .font_family("monospace")
                             .text_color(muted)
-                            .child(summary.to_string()),
+                            // 工具运行中：摘要 shimmer 扫光（等批准/已结束回静态文本）
+                            .child(if !done && !approval_pending {
+                                ShimmerText::new(summary.to_string())
+                                    .id(("tool-shimmer", message_ix * 1024 + segment_ix))
+                                    .into_any_element()
+                            } else {
+                                div().child(summary.to_string()).into_any_element()
+                            }),
                     )
                     .when(approval_pending, |this| {
                         this.child(
@@ -756,7 +806,7 @@ impl ThreadView {
                                 .child("等待批准"),
                         )
                     })
-                    .child(Icon::new(status_icon).size_4().text_color(status_color))
+                    .child(status_icon)
                     .child(
                         Icon::new(if expanded {
                             IconName::ChevronDown
@@ -794,7 +844,7 @@ impl ThreadView {
     fn render_message(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let message = &self.messages[ix];
         match message.role {
-            Role::User => self.render_user_message(message, cx),
+            Role::User => self.render_user_message(ix, message, cx),
             Role::System => div()
                 .w_full()
                 .text_center()
@@ -911,7 +961,16 @@ impl ThreadView {
 }
 
 impl Render for ThreadView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 用户消息的选择 handle 惰性创建：订阅选择变化驱动拖动过程中的实时高亮，
+        // 订阅随 ChatMessage 存放，clear() 时一并释放
+        for message in &mut self.messages {
+            if message.role == Role::User && message.selection.is_none() {
+                let handle = TextSelectionHandle::new(message.text.clone(), cx);
+                let subscription = handle.refresh_window_on_change(window, cx);
+                message.selection = Some((handle, subscription));
+            }
+        }
         let mut items = Vec::with_capacity(self.messages.len());
         for ix in 0..self.messages.len() {
             items.push(self.render_message(ix, cx));
@@ -921,59 +980,9 @@ impl Render for ThreadView {
             .turn_started
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
-        let (added, removed) = self.changes;
 
         v_flex()
             .size_full()
-            .child(
-                h_flex()
-                    .w_full()
-                    .px_4()
-                    .py_2()
-                    .min_h(px(28.))
-                    .child(h_flex().gap_2().when(self.streaming, |this| {
-                        this.child(
-                            Icon::new(IconName::LoaderCircle)
-                                .size_4()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("工作中 {working_secs} 秒")),
-                        )
-                    }))
-                    .child(div().flex_1())
-                    .when(added + removed > 0, |this| {
-                        this.child(
-                            h_flex()
-                                .gap_1()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(cx.theme().accent)
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("更改"),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().success)
-                                        .child(format!("+{added}")),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().danger)
-                                        .child(format!("-{removed}")),
-                                ),
-                        )
-                    }),
-            )
             .child(
                 div()
                     .id("message-list")
@@ -989,6 +998,24 @@ impl Render for ThreadView {
                             .p_4()
                             .gap_4()
                             .children(items)
+                            // 工作中指示：跟在最后一条消息之后，随对话一起滚动
+                            .when(self.streaming, |this| {
+                                this.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Spinner::new()
+                                                .icon(AssetIconName::LoaderCircle)
+                                                .color(cx.theme().muted_foreground),
+                                        )
+                                        .child(
+                                            ShimmerText::new(format!("工作中 {working_secs} 秒"))
+                                                .id("working-shimmer")
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground),
+                                        ),
+                                )
+                            })
                             .when(self.messages.is_empty(), |this| {
                                 this.child(
                                     div()

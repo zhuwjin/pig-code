@@ -3,6 +3,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
     v_flex,
@@ -49,8 +50,8 @@ fn format_task_duration(started_at: u64, end: u64) -> String {
         format!("{} 分", secs / 60)
     }
 }
-/// (供应商名, provider_id, model_id, 推理等级列表)
-pub type ModelOption = (String, String, String, Vec<String>);
+/// (供应商名, provider_id, model_id, 推理等级列表[(id, 显示名)])
+pub type ModelOption = (String, String, String, Vec<(String, String)>);
 
 /// 待审批的操作：审批期间输入框隐藏，显示审批条。
 #[derive(Clone)]
@@ -59,13 +60,6 @@ pub struct PendingApproval {
     /// Bash 是命令原文；Write/Edit 是 diff 预览
     pub detail: String,
     pub cwd: String,
-}
-
-/// 输入区上方的辅助面板（当前进度 / 后台 Bash 任务）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AuxPanel {
-    Todos,
-    Tasks,
 }
 
 /// 任务面板过滤 tab。
@@ -132,6 +126,9 @@ enum Popup {
     Cwd,
     Branch,
     Context,
+    Todos,
+    Tasks,
+    Changes,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -166,11 +163,13 @@ pub struct Composer {
     approval_focused: bool,
     mention_results: Vec<String>,
     context_usage: Option<(u64, u64)>,
-    /// 输入区上方面板：TodoList 进度 / 后台 Bash 任务快照（core 推送）
+    /// 输入区上方芯片：TodoList 进度 / 后台 Bash 任务快照（core 推送），点击弹出只读面板
     todos: Vec<TodoItem>,
     tasks: Vec<TaskSummary>,
-    active_panel: Option<AuxPanel>,
     task_filter: TaskFilter,
+    /// 本会话改动统计与文件列表（ReviewPanel 快照推送）
+    changes: (u32, u32),
+    change_files: Vec<(String, u32, u32)>,
     /// 展开输出尾部的任务行 id
     expanded_task: Option<String>,
     hero_mode: bool,
@@ -225,8 +224,9 @@ impl Composer {
             context_usage: None,
             todos: Vec::new(),
             tasks: Vec::new(),
-            active_panel: None,
             task_filter: TaskFilter::Running,
+            changes: (0, 0),
+            change_files: Vec::new(),
             expanded_task: None,
             hero_mode: false,
             hero_cwds: Vec::new(),
@@ -388,12 +388,35 @@ impl Composer {
     }
 
     pub fn set_todos(&mut self, todos: Vec<TodoItem>, cx: &mut Context<Self>) {
+        // 清单清空时收起对应弹层，避免 popup 状态悬置
+        if todos.is_empty() && matches!(self.popup, Some((Popup::Todos, _))) {
+            self.popup = None;
+        }
         self.todos = todos;
         cx.notify();
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<TaskSummary>, cx: &mut Context<Self>) {
+        if tasks.is_empty() && matches!(self.popup, Some((Popup::Tasks, _))) {
+            self.popup = None;
+        }
         self.tasks = tasks;
+        cx.notify();
+    }
+
+    /// 改动统计 + 文件列表（ReviewPanel 快照）；清空时收起对应弹层
+    pub fn set_changes(
+        &mut self,
+        added: u32,
+        removed: u32,
+        files: Vec<(String, u32, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() && matches!(self.popup, Some((Popup::Changes, _))) {
+            self.popup = None;
+        }
+        self.changes = (added, removed);
+        self.change_files = files;
         cx.notify();
     }
 
@@ -406,6 +429,12 @@ impl Composer {
         if let Some(ix) = EXEC_MODES.iter().position(|(_, _, m)| *m == mode) {
             self.exec_mode = ix;
         }
+        cx.notify();
+    }
+
+    /// 恢复会话持久化的思考等级（会话切换时由 SessionConfigured 同步）
+    pub fn set_reasoning_level(&mut self, level: Option<String>, cx: &mut Context<Self>) {
+        self.reasoning_level = level;
         cx.notify();
     }
 
@@ -618,8 +647,13 @@ impl Composer {
             | Popup::Branch
             | Popup::Model
             | Popup::Reasoning
-            | Popup::Context => {
-                unreachable!("Cwd/Branch/ExecMode/Model/Reasoning/Context 由各自的专用面板渲染")
+            | Popup::Context
+            | Popup::Todos
+            | Popup::Tasks
+            | Popup::Changes => {
+                unreachable!(
+                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks/Changes 由各自的专用面板渲染"
+                )
             }
         };
         if items.is_empty() {
@@ -635,6 +669,9 @@ impl Composer {
             Popup::Cwd => "cwd",
             Popup::Branch => "branch",
             Popup::Context => "context",
+            Popup::Todos => "todos",
+            Popup::Tasks => "tasks",
+            Popup::Changes => "changes",
         };
         Some(
             div()
@@ -1070,7 +1107,8 @@ impl Composer {
     }
 
     /// 思考等级面板：无搜索框，「关闭」+ 等级列表，当前等级勾选。
-    fn render_reasoning_popup(&self, levels: &[String], cx: &mut Context<Self>) -> AnyElement {
+    /// levels 为 (id, 显示名)；界面展示显示名，确认回传 id。
+    fn render_reasoning_popup(&self, levels: &[(String, String)], cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
         let levels = levels.to_vec();
@@ -1082,17 +1120,23 @@ impl Composer {
                     .label("关闭")
                     .checked(self.reasoning_level.is_none()),
             )
-            .items(levels.iter().map(|level| {
+            .items(levels.iter().map(|(id, label)| {
+                // 显示名与 id 不同则括号附上 id，避免歧义
+                let text = if label == id {
+                    id.clone()
+                } else {
+                    format!("{label}（{id}）")
+                };
                 CommandItem::new()
-                    .label(level.clone())
-                    .checked(self.reasoning_level.as_deref() == Some(level.as_str()))
+                    .label(text)
+                    .checked(self.reasoning_level.as_deref() == Some(id.as_str()))
             }))
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     let level = if ix.row == 0 {
                         None
                     } else {
-                        levels.get(ix.row - 1).cloned()
+                        levels.get(ix.row - 1).map(|(id, _)| id.clone())
                     };
                     this.reasoning_level = level.clone();
                     cx.emit(ComposerEvent::SetReasoning(level));
@@ -1148,7 +1192,7 @@ impl Composer {
             .into_any_element()
     }
 
-    /// 当前进度（TodoList）+ 后台 Bash 任务：chip 行 + 可切换的只读面板（v1 无停止按钮）。
+    /// 当前进度（TodoList）+ 后台 Bash 任务 + 会话改动：chip 行，点击在芯片上方弹出只读面板（v1 无停止按钮）。
     fn render_aux(&self, cx: &mut Context<Self>) -> AnyElement {
         let running = self
             .tasks
@@ -1168,37 +1212,81 @@ impl Composer {
             } else {
                 "后台 Bash".to_string()
             };
-            chips = chips.child(self.render_aux_chip(
-                "aux-tasks",
-                AssetIconName::Terminal,
-                label,
-                self.active_panel == Some(AuxPanel::Tasks),
-                AuxPanel::Tasks,
-                cx,
-            ));
+            let open = matches!(self.popup, Some((Popup::Tasks, _)));
+            chips = chips.child(
+                div()
+                    .relative()
+                    .child(self.render_aux_chip(
+                        "aux-tasks",
+                        AssetIconName::Terminal,
+                        label,
+                        open,
+                        Popup::Tasks,
+                        cx,
+                    ))
+                    .when(open, |this| this.child(self.render_tasks_panel(cx))),
+            );
+        }
+        if !self.change_files.is_empty() {
+            let open = matches!(self.popup, Some((Popup::Changes, _)));
+            let (added, removed) = self.changes;
+            chips = chips.child(
+                div()
+                    .relative()
+                    .child(
+                        h_flex()
+                            .id("aux-changes")
+                            .gap_1()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .when(open, |this| this.bg(cx.theme().accent.opacity(0.5)))
+                            .hover(|this| this.bg(cx.theme().accent))
+                            .on_click(cx.listener(
+                                |this, event: &ClickEvent, window, cx| {
+                                    this.toggle_popup(Popup::Changes, event, None, window, cx);
+                                },
+                            ))
+                            .child(
+                                Icon::new(AssetIconName::Diff)
+                                    .size_4()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(div().text_sm().child("改动"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().success)
+                                    .child(format!("+{added}")),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(format!("-{removed}")),
+                            ),
+                    )
+                    .when(open, |this| this.child(self.render_changes_panel(cx))),
+            );
         }
         if !self.todos.is_empty() {
-            chips = chips.child(self.render_aux_chip(
-                "aux-todos",
-                AssetIconName::ListTodo,
-                format!("当前进度 {done}/{}", self.todos.len()),
-                self.active_panel == Some(AuxPanel::Todos),
-                AuxPanel::Todos,
-                cx,
-            ));
+            let open = matches!(self.popup, Some((Popup::Todos, _)));
+            chips = chips.child(
+                div()
+                    .relative()
+                    .child(self.render_aux_chip(
+                        "aux-todos",
+                        AssetIconName::ListTodo,
+                        format!("当前进度 {done}/{}", self.todos.len()),
+                        open,
+                        Popup::Todos,
+                        cx,
+                    ))
+                    .when(open, |this| this.child(self.render_todos_panel(cx))),
+            );
         }
-
-        let mut root = v_flex().w_full().gap_2().child(chips);
-        match self.active_panel {
-            Some(AuxPanel::Todos) if !self.todos.is_empty() => {
-                root = root.child(self.render_todos_panel(cx))
-            }
-            Some(AuxPanel::Tasks) if !self.tasks.is_empty() => {
-                root = root.child(self.render_tasks_panel(cx))
-            }
-            _ => {}
-        }
-        root.into_any_element()
+        chips.into_any_element()
     }
 
     fn render_aux_chip(
@@ -1207,7 +1295,7 @@ impl Composer {
         icon: AssetIconName,
         label: String,
         active: bool,
-        panel: AuxPanel,
+        kind: Popup,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         h_flex()
@@ -1219,14 +1307,8 @@ impl Composer {
             .cursor_pointer()
             .when(active, |this| this.bg(cx.theme().accent.opacity(0.5)))
             .hover(|this| this.bg(cx.theme().accent))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                // 再点同一个 chip 收起面板
-                this.active_panel = if this.active_panel == Some(panel) {
-                    None
-                } else {
-                    Some(panel)
-                };
-                cx.notify();
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.toggle_popup(kind, event, None, window, cx);
             }))
             .child(
                 Icon::new(icon)
@@ -1236,7 +1318,7 @@ impl Composer {
             .child(div().text_sm().child(label))
     }
 
-    /// 面板外壳：与现有弹层观感一致（rounded_xl + popover 背景 + 边框）。
+    /// 面板内容外壳：弹层内衬（rounded_xl + popover 背景 + 边框），观感与其他弹层一致。
     fn aux_panel_shell(&self, content: Div, cx: &mut Context<Self>) -> Div {
         content
             .w_full()
@@ -1254,18 +1336,33 @@ impl Composer {
             .iter()
             .filter(|t| t.status == TodoStatus::Done)
             .count();
-        let mut list = v_flex().w_full().gap_1();
+        let mut list = v_flex()
+            .id("aux-todos-list")
+            .w_full()
+            .gap_1()
+            .max_h(px(280.))
+            .overflow_y_scroll();
         for item in &self.todos {
-            let (icon, color) = match item.status {
-                TodoStatus::Done => (AssetIconName::CircleCheck, cx.theme().success),
-                TodoStatus::InProgress => (AssetIconName::LoaderCircle, cx.theme().progress_bar),
-                TodoStatus::Pending => (AssetIconName::Circle, cx.theme().muted_foreground),
+            // 进行中用 Spinner（旋转动画），其余状态静态图标
+            let icon = match item.status {
+                TodoStatus::Done => Icon::new(AssetIconName::CircleCheck)
+                    .size_4()
+                    .text_color(cx.theme().success)
+                    .into_any_element(),
+                TodoStatus::InProgress => Spinner::new()
+                    .icon(AssetIconName::LoaderCircle)
+                    .color(cx.theme().progress_bar)
+                    .into_any_element(),
+                TodoStatus::Pending => Icon::new(AssetIconName::Circle)
+                    .size_4()
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element(),
             };
             list = list.child(
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .child(Icon::new(icon).size_4().text_color(color))
+                    .child(icon)
                     .child(
                         div()
                             .text_sm()
@@ -1276,7 +1373,7 @@ impl Composer {
                     ),
             );
         }
-        self.aux_panel_shell(
+        let content = self.aux_panel_shell(
             v_flex()
                 .child(
                     div()
@@ -1286,8 +1383,14 @@ impl Composer {
                 )
                 .child(list),
             cx,
+        );
+        self.popup_shell(
+            "composer-todos-popup",
+            content.into_any_element(),
+            PopupAnchor::Left,
+            None,
+            cx,
         )
-        .into_any_element()
     }
 
     fn render_tasks_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1335,7 +1438,12 @@ impl Composer {
             .iter()
             .filter(|t| self.task_filter.matches(t.status))
             .collect();
-        let mut list = v_flex().w_full().gap_1();
+        let mut list = v_flex()
+            .id("aux-tasks-list")
+            .w_full()
+            .gap_1()
+            .max_h(px(280.))
+            .overflow_y_scroll();
         if visible.is_empty() {
             list = list.child(
                 div()
@@ -1345,11 +1453,23 @@ impl Composer {
             );
         }
         for (ix, task) in visible.iter().enumerate() {
-            let (icon, color) = match task.status {
-                TaskStatus::Running => (AssetIconName::LoaderCircle, cx.theme().progress_bar),
-                TaskStatus::Exited(0) => (AssetIconName::CircleCheck, cx.theme().success),
-                TaskStatus::Exited(_) => (AssetIconName::TriangleAlert, cx.theme().warning),
-                TaskStatus::Killed => (AssetIconName::TriangleAlert, cx.theme().muted_foreground),
+            let icon = match task.status {
+                TaskStatus::Running => Spinner::new()
+                    .icon(AssetIconName::LoaderCircle)
+                    .color(cx.theme().progress_bar)
+                    .into_any_element(),
+                TaskStatus::Exited(0) => Icon::new(AssetIconName::CircleCheck)
+                    .size_4()
+                    .text_color(cx.theme().success)
+                    .into_any_element(),
+                TaskStatus::Exited(_) => Icon::new(AssetIconName::TriangleAlert)
+                    .size_4()
+                    .text_color(cx.theme().warning)
+                    .into_any_element(),
+                TaskStatus::Killed => Icon::new(AssetIconName::TriangleAlert)
+                    .size_4()
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element(),
             };
             let duration = format_task_duration(task.started_at, task.ended_at.unwrap_or(now));
             let expanded = self.expanded_task.as_deref() == Some(task.id.as_str());
@@ -1371,7 +1491,7 @@ impl Composer {
                         };
                         cx.notify();
                     }))
-                    .child(Icon::new(icon).size_4().text_color(color))
+                    .child(icon)
                     .child(
                         div()
                             .flex_1()
@@ -1418,7 +1538,7 @@ impl Composer {
             list = list.child(row);
         }
 
-        self.aux_panel_shell(
+        let content = self.aux_panel_shell(
             v_flex()
                 .child(
                     h_flex()
@@ -1429,8 +1549,88 @@ impl Composer {
                 )
                 .child(list),
             cx,
+        );
+        self.popup_shell(
+            "composer-tasks-popup",
+            content.into_any_element(),
+            PopupAnchor::Left,
+            None,
+            cx,
         )
-        .into_any_element()
+    }
+
+    /// 改动弹窗：头部「改动 +x -y」+ 文件列表（M 徽章 + 路径，截图同款只读列表）。
+    fn render_changes_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (added, removed) = self.changes;
+        let mut list = v_flex()
+            .id("aux-changes-list")
+            .w_full()
+            .gap_1()
+            .max_h(px(280.))
+            .overflow_y_scroll();
+        for (path, _, _) in &self.change_files {
+            list = list.child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(cx.theme().warning.opacity(0.5))
+                            .text_xs()
+                            .text_color(cx.theme().warning)
+                            .child("M"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .font_family("monospace")
+                            .child(path.clone()),
+                    ),
+            );
+        }
+
+        let content = self.aux_panel_shell(
+            v_flex()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("改动"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().success)
+                                .child(format!("+{added}")),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .child(format!("-{removed}")),
+                        ),
+                )
+                .child(list),
+            cx,
+        );
+        self.popup_shell(
+            "composer-changes-popup",
+            content.into_any_element(),
+            PopupAnchor::Left,
+            None,
+            cx,
+        )
     }
 
     /// 审批条（kimi 同款）：审批期间替换输入区。橙色圆点 + 标题，深色内嵌块
@@ -1566,12 +1766,20 @@ impl Render for Composer {
         let exec_popup = exec_open.then(|| self.render_exec_mode_popup(cx));
         let model_open = matches!(self.popup, Some((Popup::Model, _)));
         let model_popup = model_open.then(|| self.render_model_popup(cx));
-        let reasoning_levels: Vec<String> = self
+        let reasoning_levels: Vec<(String, String)> = self
             .models
             .iter()
             .find(|(_, _, model_id, _)| self.model.ends_with(&format!("/{model_id}")))
             .map(|(_, _, _, levels)| levels.clone())
             .unwrap_or_default();
+        // 当前选中等级的显示名（缺省回退 id 本身）
+        let reasoning_label = self.reasoning_level.as_ref().map(|id| {
+            reasoning_levels
+                .iter()
+                .find(|(level_id, _)| level_id == id)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| id.clone())
+        });
         let reasoning_open = matches!(self.popup, Some((Popup::Reasoning, _)));
         let can_send = !self.input.read(cx).value().trim().is_empty();
         let reasoning_popup =
@@ -1579,8 +1787,17 @@ impl Render for Composer {
         let context_open = matches!(self.popup, Some((Popup::Context, _)));
         let context_popup =
             (context_open && self.context_usage.is_some()).then(|| self.render_context_popup(cx));
-        let palette_open =
-            cwd_open || branch_open || exec_open || model_open || reasoning_open || context_open;
+        let aux_open = matches!(
+            self.popup,
+            Some((Popup::Todos | Popup::Tasks | Popup::Changes, _))
+        );
+        let palette_open = cwd_open
+            || branch_open
+            || exec_open
+            || model_open
+            || reasoning_open
+            || context_open
+            || aux_open;
         let popup = if palette_open {
             None
         } else {
@@ -1757,9 +1974,12 @@ impl Render for Composer {
                                     }),
                             )
                         })
-                        .when(!self.todos.is_empty() || !self.tasks.is_empty(), |this| {
-                            this.child(self.render_aux(cx))
-                        })
+                        .when(
+                            !self.todos.is_empty()
+                                || !self.tasks.is_empty()
+                                || !self.change_files.is_empty(),
+                            |this| this.child(self.render_aux(cx)),
+                        )
                         .when(!self.attachments.is_empty(), |this| {
                             this.child(self.render_attachments(cx))
                         })
@@ -1882,7 +2102,7 @@ impl Render for Composer {
                                                 self.render_bar_chip(
                                                     "reasoning-picker",
                                                     Some(AssetIconName::Brain),
-                                                    self.reasoning_level
+                                                    reasoning_label
                                                         .clone()
                                                         .unwrap_or_else(|| "关".into()),
                                                     reasoning_open,
