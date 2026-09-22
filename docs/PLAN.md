@@ -194,6 +194,8 @@ pig-code/
 ## 三、里程碑路线
 
 > 进度（2026-09-20）：**M0–M5 已全部完成**（`cargo test -p pig-core` 25/25 全绿，GUI 自测 `PIG_SELFTEST=1` 全通过）。实施偏差记录：输入框芯片为纯文本 `@path` 降级方案（`InlineToken` 未包含在 gpui-kit crates.io 0.6.4 中，仅 git HEAD 有）；diff 渲染为等宽逐行着色+行号双列（Editor+tree-sitter-diff 方案未采用）；逐 hunk 接受/拒绝移至 M6+。
+>
+> 打磨（2026-09-22）：消息流工具调用块 1:1 对齐 ZCode —— 摘要行中文化 + 悬停才显示箭头 + 成功小勾/失败状态词、终端类展开为圆角描边卡片（`$` 命令 + 限高输出）；Write/Edit 经 `ToolCallEnd.edit`（协议可选字段，rollout 同步持久化）携带**本次编辑** diff（与 review 面板的会话累计口径分离），展开为 ZCode LightweightDiffPreview 同款代码卡（行号 gutter + 增删行淡底色/左缘色条，限 400 行截断）。
 
 ### M0 — 应用骨架（GUI 先行，mock 数据）
 - workspace 化（`pig-protocol`/`pig-core`/`pig-app`），`pig-app` 引入 `gpui-kit = "0.6"`，`gpui_kit::init` + 无边框窗口 + `TitleBar` + 亮暗主题。

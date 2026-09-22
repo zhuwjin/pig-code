@@ -36,6 +36,9 @@ pub enum RolloutRecord {
         arguments: String,
         output: String,
         is_error: bool,
+        /// 本次编辑的 diff（回放时恢复工具卡片的内联 diff 视图）
+        #[serde(default)]
+        edit: Option<pig_protocol::EditDiff>,
     },
     Compact {
         note: String,

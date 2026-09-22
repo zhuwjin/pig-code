@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::{SelectableText, TextSelectionHandle};
+use gpui_kit::base::{Scrollbar, SelectableText, TextSelectionHandle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
@@ -10,7 +10,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use pig_protocol::{ApprovalDecision, Event};
+use pig_protocol::{ApprovalDecision, EditDiff, Event};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -29,6 +29,8 @@ pub enum Segment {
         started: std::time::Instant,
         /// 思考结束定格的用时；回放重建的历史段没有真实时钟，保持 None（显示「持续了几秒」）
         duration: Option<std::time::Duration>,
+        /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
+        body_scroll: ScrollHandle,
     },
     Markdown {
         state: Entity<TextViewState>,
@@ -41,6 +43,10 @@ pub enum Segment {
         is_error: bool,
         done: bool,
         expanded: bool,
+        /// 写/改类工具的本次编辑 diff（内联 diff 卡片）
+        edit: Option<EditDiff>,
+        /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
+        body_scroll: ScrollHandle,
     },
     Approval {
         request_id: String,
@@ -336,6 +342,7 @@ impl ThreadView {
                     pinned: false,
                     started: std::time::Instant::now(),
                     duration: None,
+                    body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::Thinking { text, .. }) = self.current_segment(six) {
                     text.push_str(&delta);
@@ -384,6 +391,8 @@ impl ThreadView {
                     is_error: false,
                     done: false,
                     expanded: false,
+                    edit: None,
+                    body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
                     *tool = tool.clone();
@@ -395,6 +404,7 @@ impl ThreadView {
                 item_id,
                 output,
                 is_error,
+                edit,
                 ..
             } => {
                 let six = self.find_or_create(&item_id, || Segment::ToolCall {
@@ -404,18 +414,22 @@ impl ThreadView {
                     is_error: false,
                     done: false,
                     expanded: false,
+                    edit: None,
+                    body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall {
                     output: out,
                     is_error: err,
                     done,
                     expanded,
+                    edit: slot,
                     ..
                 }) = self.current_segment(six)
                 {
                     *out = output;
                     *err = is_error;
                     *done = true;
+                    *slot = edit;
                     // 失败的调用直接展开输出，省去用户多点一下
                     if is_error {
                         *expanded = true;
@@ -620,8 +634,8 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 思考折叠块（ZCode 同款）：无边框的一行 header（大脑图标 + 文案 + 箭头），
-    /// 展开后正文以左侧竖线缩进展示，超高内部滚动。
+    /// 思考折叠块（ZCode 同款）：无边框的一行 header（大脑图标 + 文案），箭头悬停/
+    /// 展开时才显示；展开后正文以左侧竖线缩进展示，超高内部滚动。
     #[allow(clippy::too_many_arguments)]
     fn render_thinking(
         &self,
@@ -631,6 +645,7 @@ impl ThreadView {
         open: bool,
         started: std::time::Instant,
         duration: Option<std::time::Duration>,
+        body_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let secs = |d: std::time::Duration| (d.as_secs_f64().ceil() as u64).max(1);
@@ -645,11 +660,14 @@ impl ThreadView {
             None => "思考 · 持续了几秒".to_string(),
         };
         let muted = cx.theme().muted_foreground;
+        let subtlest = muted.opacity(0.6);
+        let group_id = format!("thinking-row-{message_ix}-{segment_ix}");
         v_flex()
             .w_full()
             .child(
                 h_flex()
                     .id(("thinking", message_ix * 1024 + segment_ix))
+                    .group(group_id.clone())
                     .w_full()
                     .gap_2()
                     .py_1()
@@ -665,50 +683,70 @@ impl ThreadView {
                         }
                         cx.notify();
                     }))
-                    .child(Icon::new(AssetIconName::Brain).size_4().text_color(muted))
+                    .child(Icon::new(AssetIconName::Brain).size_4().text_color(subtlest))
                     // 思考进行中：shimmer 扫过高亮；id 必须稳定（文案每秒变，默认动画
                     // id 取文案会导致扫光每秒重启）
                     .child(if in_progress {
                         ShimmerText::new(label)
                             .id(("thinking-shimmer", message_ix * 1024 + segment_ix))
                             .text_sm()
-                            .text_color(muted)
+                            .text_color(subtlest)
                             .into_any_element()
                     } else {
-                        div().text_sm().text_color(muted).child(label).into_any_element()
+                        div()
+                            .text_sm()
+                            .text_color(subtlest)
+                            .child(label)
+                            .into_any_element()
                     })
+                    // 箭头默认隐藏，行悬停或展开时显示
                     .child(
-                        Icon::new(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_4()
-                        .text_color(muted),
+                        div()
+                            .invisible()
+                            .group_hover(group_id, |this| this.visible())
+                            .when(open, |this| this.visible())
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size_4()
+                                .text_color(subtlest),
+                            ),
                     ),
             )
             .when(open, |this| {
                 this.child(
+                    // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
                     div()
-                        .id(("thinking-body", message_ix * 1024 + segment_ix))
-                        .mt_1()
-                        .ml(px(8.))
-                        .border_l_1()
-                        .border_color(cx.theme().border)
-                        .pl(px(14.))
-                        .max_h(px(240.))
-                        .overflow_y_scroll()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(text.to_string()),
+                        .relative()
+                        .on_scroll_wheel(scroll_chain(body_scroll))
+                        .child(
+                            div()
+                                .id(("thinking-body", message_ix * 1024 + segment_ix))
+                                .mt_1()
+                                .ml(px(8.))
+                                .border_l_1()
+                                .border_color(cx.theme().border)
+                                .pl(px(14.))
+                                .max_h(px(240.))
+                                .overflow_y_scroll()
+                                .track_scroll(body_scroll)
+                                .text_sm()
+                                .text_color(subtlest)
+                                .child(text.to_string()),
+                        ),
                 )
             })
             .into_any_element()
     }
 
-    /// 工具调用折叠行（与思考块同族）：无边框 header（工具图标 + 名称 · 摘要 +
-    /// 状态 + 箭头），展开后输出以左侧竖线缩进展示，超高内部滚动。
-    /// `approval_pending`：该工具正在等待批准（状态位显示黄色 ✋ 等待批准）。
+    /// 工具调用（ZCode 同款）：无边框摘要行（图标 + 中文工具名 + 单行摘要 + 状态词），
+    /// 箭头仅悬停/展开时显示；展开后是圆角描边卡片：完整输入（终端类带 `$` 前缀）+
+    /// 等宽输出，输出限高内部滚动。运行中不用 spinner，工具名扫光（ZCode 的取舍：
+    /// 流式期间工具多，持续动画耗渲染资源）。
+    /// `approval_pending`：该工具正在等待批准（行尾显示黄色「等待批准」）。
     #[allow(clippy::too_many_arguments)]
     fn render_tool_card(
         &self,
@@ -721,9 +759,15 @@ impl ThreadView {
         done: bool,
         expanded: bool,
         approval_pending: bool,
+        edit: Option<&EditDiff>,
+        body_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        // ZCode 三级文字层级：正文 > subtle(60%) > subtlest(30~40%)，靠层级而非边框/色彩造信息密度
+        let subtle = cx.theme().muted_foreground;
+        let subtlest = subtle.opacity(0.6);
+        let group_id = format!("tool-row-{message_ix}-{segment_ix}");
+        let running = !done && !approval_pending;
         let tool_icon = match tool {
             "Bash" => AssetIconName::Terminal,
             "Read" => AssetIconName::Eye,
@@ -735,34 +779,27 @@ impl ThreadView {
             "FetchURL" => AssetIconName::Globe,
             _ => AssetIconName::Wrench,
         };
-        let status_icon = if approval_pending {
-            Icon::new(AssetIconName::Hand)
-                .size_4()
-                .text_color(cx.theme().warning)
-                .into_any_element()
-        } else if !done {
-            // 进行中：Spinner 旋转动画
-            Spinner::new()
-                .icon(AssetIconName::LoaderCircle)
-                .color(muted)
-                .into_any_element()
-        } else if is_error {
-            Icon::new(AssetIconName::TriangleAlert)
-                .size_4()
-                .text_color(cx.theme().danger)
-                .into_any_element()
-        } else {
-            Icon::new(AssetIconName::CircleCheck)
-                .size_4()
-                .text_color(cx.theme().success)
-                .into_any_element()
+        let kind_label = match tool {
+            "Bash" => "终端",
+            "Read" => "读取",
+            "Write" => "写入",
+            "Edit" => "编辑",
+            "Glob" => "查找文件",
+            "Grep" => "搜索",
+            "TodoList" => "待办",
+            "FetchURL" => "抓取网页",
+            "TaskList" | "TaskOutput" | "TaskStop" => "后台任务",
+            _ => tool,
         };
+        // 摘要压成单行：多行命令的换行折叠为空格（否则折叠行会被撑成多行）
+        let summary_line = summary.split_whitespace().collect::<Vec<_>>().join(" ");
 
         v_flex()
             .w_full()
             .child(
                 h_flex()
                     .id(("tool", message_ix * 1024 + segment_ix))
+                    .group(group_id.clone())
                     .w_full()
                     .gap_2()
                     .py_1()
@@ -777,9 +814,59 @@ impl ThreadView {
                         }
                         cx.notify();
                     }))
-                    .child(Icon::new(tool_icon).size_4().text_color(muted))
-                    .child(div().text_sm().text_color(muted).child(tool.to_string()))
-                    .child(
+                    .child(Icon::new(tool_icon).size_4().text_color(subtlest))
+                    // 工具运行中：工具名 shimmer 扫光（等批准/已结束回静态文本）
+                    .child(if running {
+                        ShimmerText::new(kind_label)
+                            .id(("tool-label-shimmer", message_ix * 1024 + segment_ix))
+                            .text_sm()
+                            .text_color(subtlest)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(subtlest)
+                            .child(kind_label.to_string())
+                            .into_any_element()
+                    })
+                    // 成功只在工具名后给一枚小勾，失败在右侧给状态词（ZCode 同款）
+                    .when(done && !is_error, |this| {
+                        this.child(
+                            Icon::new(IconName::Check)
+                                .size_3()
+                                .text_color(cx.theme().success),
+                        )
+                    })
+                    // 编辑类：文件名（亮一档）+ 目录路径（最暗，优先截断）；其余工具单行摘要
+                    .child(if edit.is_some() {
+                        let (dir, name) = split_path(summary);
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(subtle)
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_sm()
+                                    .text_color(subtlest)
+                                    .child(dir),
+                            )
+                            .into_any_element()
+                    } else {
                         div()
                             .flex_1()
                             .min_w_0()
@@ -787,17 +874,34 @@ impl ThreadView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_sm()
-                            .font_family("monospace")
-                            .text_color(muted)
-                            // 工具运行中：摘要 shimmer 扫光（等批准/已结束回静态文本）
-                            .child(if !done && !approval_pending {
-                                ShimmerText::new(summary.to_string())
-                                    .id(("tool-shimmer", message_ix * 1024 + segment_ix))
-                                    .into_any_element()
-                            } else {
-                                div().child(summary.to_string()).into_any_element()
-                            }),
-                    )
+                            .text_color(subtle)
+                            .child(summary_line)
+                            .into_any_element()
+                    })
+                    // 增删计数（等宽，为零的一侧不显示）
+                    .when_some(edit, |this, edit| {
+                        this.child(
+                            h_flex()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .text_sm()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .when(edit.additions > 0, |this| {
+                                    this.child(
+                                        div()
+                                            .text_color(cx.theme().success)
+                                            .child(format!("+{}", edit.additions)),
+                                    )
+                                })
+                                .when(edit.deletions > 0, |this| {
+                                    this.child(
+                                        div()
+                                            .text_color(cx.theme().danger)
+                                            .child(format!("-{}", edit.deletions)),
+                                    )
+                                }),
+                        )
+                    })
                     .when(approval_pending, |this| {
                         this.child(
                             div()
@@ -806,38 +910,236 @@ impl ThreadView {
                                 .child("等待批准"),
                         )
                     })
-                    .child(status_icon)
+                    .when(done && is_error, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().danger)
+                                .child("失败"),
+                        )
+                    })
+                    // 箭头默认隐藏，行悬停或展开时显示（保持行内干净）
                     .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_4()
-                        .text_color(muted),
+                        div()
+                            .invisible()
+                            .group_hover(group_id, |this| this.visible())
+                            .when(expanded, |this| this.visible())
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size_4()
+                                .text_color(subtlest),
+                            ),
                     ),
             )
             .when(expanded, |this| {
+                // 展开正文统一放进带滚动条的视口（track_scroll 持久滚动位置 + 可见滚动条）
                 this.child(
                     div()
-                        .id(("tool-body", message_ix * 1024 + segment_ix))
-                        .mt_1()
-                        .ml(px(8.))
-                        .border_l_1()
-                        .border_color(cx.theme().border)
-                        .pl(px(14.))
-                        .max_h(px(240.))
-                        .overflow_y_scroll()
-                        .text_xs()
-                        .font_family("monospace")
-                        .text_color(if is_error { cx.theme().danger } else { muted })
-                        .child(if output.is_empty() {
-                            "（暂无输出）".to_string()
+                        .relative()
+                        .mt_2()
+                        .w_full()
+                        // 滚动链：正文能滚时吞掉滚轮，避免外层消息列表联动
+                        .on_scroll_wheel(scroll_chain(body_scroll))
+                        // 编辑类工具展开为内联 diff 代码卡；其余工具是通用输入+输出卡
+                        .child(if let Some(edit) = edit {
+                            Self::render_edit_diff(
+                                ("tool-body", message_ix * 1024 + segment_ix),
+                                edit,
+                                body_scroll,
+                                cx,
+                            )
                         } else {
-                            output.to_string()
-                        }),
+                            v_flex()
+                                .w_full()
+                                .gap_3()
+                                .rounded_xl()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().group_box)
+                                .px_4()
+                                .py_3()
+                                // 完整输入：终端类带 `$` 前缀，其余工具直接全文（折叠行里被截断的部分）
+                                .when(!summary.is_empty(), |this| {
+                                    this.child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .when(tool == "Bash", |this| {
+                                                this.child(
+                                                    div().text_sm().text_color(subtle).child("$"),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().foreground)
+                                                    .child(summary.to_string()),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id(("tool-body", message_ix * 1024 + segment_ix))
+                                        .max_h(px(120.))
+                                        .overflow_y_scroll()
+                                        .track_scroll(body_scroll)
+                                        .text_sm()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(if is_error {
+                                            cx.theme().danger
+                                        } else {
+                                            subtle
+                                        })
+                                        .child(if output.is_empty() && done {
+                                            "没有输出。".to_string()
+                                        } else {
+                                            output.to_string()
+                                        }),
+                                )
+                                .into_any_element()
+                        })
+                        .child(Scrollbar::vertical(body_scroll)),
                 )
             })
+            .into_any_element()
+    }
+
+    /// 编辑工具的展开卡片（ZCode LightweightDiffPreview 同款）：圆角描边代码卡，
+    /// 无 padding；行号 gutter（新增绿/删除红/其余最暗）+ 增删行淡底色与左缘色条，
+    /// 行号是预览行连续序号（非文件行号），限高内部滚动，超 400 行截断。
+    fn render_edit_diff(
+        id: impl Into<ElementId>,
+        edit: &EditDiff,
+        body_scroll: &ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const MAX_ROWS: usize = 400;
+        enum Kind {
+            Hunk,
+            Add,
+            Del,
+            Context,
+        }
+        let border = cx.theme().border;
+        let code_color = cx.theme().foreground;
+        let gutter_muted = cx.theme().muted_foreground.opacity(0.6);
+        let added = cx.theme().success;
+        let removed = cx.theme().danger;
+        let transparent = cx.theme().transparent;
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut line_no = 0u32;
+        let mut omitted = 0usize;
+        for line in edit.unified_diff.lines() {
+            if rows.len() >= MAX_ROWS {
+                omitted += 1;
+                continue;
+            }
+            let (kind, text) = if line.starts_with("+++") || line.starts_with("---") {
+                continue;
+            } else if line.starts_with("@@") {
+                (Kind::Hunk, line)
+            } else if let Some(rest) = line.strip_prefix('+') {
+                (Kind::Add, rest)
+            } else if let Some(rest) = line.strip_prefix('-') {
+                (Kind::Del, rest)
+            } else if line.starts_with('\\') {
+                // "\ No newline at end of file"
+                continue;
+            } else {
+                (Kind::Context, line.strip_prefix(' ').unwrap_or(line))
+            };
+            if matches!(kind, Kind::Hunk) {
+                rows.push(
+                    h_flex()
+                        .w_full()
+                        .items_stretch()
+                        .child(div().w(px(3.)))
+                        .child(
+                            div()
+                                .w(px(45.))
+                                .flex_shrink_0()
+                                .border_r_1()
+                                .border_color(border),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .whitespace_nowrap()
+                                .text_color(gutter_muted)
+                                .child(text.to_string()),
+                        )
+                        .into_any_element(),
+                );
+                continue;
+            }
+            line_no += 1;
+            let (bar, number_color, bg) = match kind {
+                Kind::Add => (added, added, Some(added.opacity(0.14))),
+                Kind::Del => (removed, removed, Some(removed.opacity(0.14))),
+                Kind::Context => (transparent, gutter_muted, None),
+                Kind::Hunk => unreachable!(),
+            };
+            rows.push(
+                h_flex()
+                    .w_full()
+                    .items_stretch()
+                    .when_some(bg, |this, bg| this.bg(bg))
+                    // 左缘色条（对应 ZCode 的 inset 3px box-shadow）
+                    .child(div().w(px(3.)).flex_shrink_0().bg(bar))
+                    .child(
+                        div()
+                            .w(px(45.))
+                            .pr_2()
+                            .text_right()
+                            .flex_shrink_0()
+                            .border_r_1()
+                            .border_color(border)
+                            .text_color(number_color)
+                            .child(line_no.to_string()),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .whitespace_nowrap()
+                            .text_color(code_color)
+                            .child(text.to_string()),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if omitted > 0 {
+            rows.push(
+                div()
+                    .w_full()
+                    .py_1()
+                    .text_center()
+                    .text_color(gutter_muted)
+                    .child(format!("… 省略 {omitted} 行 …"))
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .id(id)
+            .w_full()
+            .rounded_xl()
+            .border_1()
+            .border_color(border)
+            .bg(cx.theme().secondary)
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .track_scroll(body_scroll)
+            .text_xs()
+            .line_height(px(19.))
+            .font_family(cx.theme().mono_font_family.clone())
+            .children(rows)
             .into_any_element()
     }
 
@@ -866,8 +1168,11 @@ impl ThreadView {
                             open,
                             started,
                             duration,
+                            body_scroll,
                             ..
-                        } => self.render_thinking(ix, six, text, *open, *started, *duration, cx),
+                        } => self.render_thinking(
+                            ix, six, text, *open, *started, *duration, body_scroll, cx,
+                        ),
                         Segment::Markdown { state, .. } => TextView::new(state)
                             .selectable(true)
                             .stream_fade(self.streaming)
@@ -880,7 +1185,8 @@ impl ThreadView {
                             is_error,
                             done,
                             expanded,
-                            ..
+                            edit,
+                            body_scroll,
                         } => {
                             let approval_pending = matches!(
                                 message.segments.get(six + 1),
@@ -896,6 +1202,8 @@ impl ThreadView {
                                 *done,
                                 *expanded,
                                 approval_pending,
+                                edit.as_ref(),
+                                body_scroll,
                                 cx,
                             )
                         }
@@ -980,6 +1288,11 @@ impl Render for ThreadView {
             .turn_started
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
+        let working_label = if working_secs >= 60 {
+            format!("工作中 {} 分 {} 秒", working_secs / 60, working_secs % 60)
+        } else {
+            format!("工作中 {working_secs} 秒")
+        };
 
         v_flex()
             .size_full()
@@ -1009,7 +1322,7 @@ impl Render for ThreadView {
                                                 .color(cx.theme().muted_foreground),
                                         )
                                         .child(
-                                            ShimmerText::new(format!("工作中 {working_secs} 秒"))
+                                            ShimmerText::new(working_label)
                                                 .id("working-shimmer")
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground),
@@ -1077,5 +1390,31 @@ impl Render for ThreadView {
                         })),
                 )
             })
+    }
+}
+
+/// 拆成 (目录部分含结尾分隔符, 文件名)；无分隔符时目录为空
+fn split_path(path: &str) -> (String, String) {
+    match path.rfind(['/', '\\']) {
+        Some(ix) => (path[..=ix].to_string(), path[ix + 1..].to_string()),
+        None => (String::new(), path.to_string()),
+    }
+}
+
+/// 滚动链（浏览器式 scroll chaining）：滚轮落在展开正文上时，正文在本方向还能滚
+/// 就吞掉事件（这版 gpui 的内置滚动监听不阻断冒泡，不吞的话外层消息列表会联动）；
+/// 正文到顶/到底后放行，外层列表接管。
+fn scroll_chain(handle: &ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    let handle = handle.clone();
+    move |event, window, cx| {
+        let delta = event.delta.pixel_delta(window.line_height());
+        let offset = handle.offset();
+        let max = handle.max_offset();
+        // 向下滚 delta.y<0（offset 趋向 -max）；向上滚 delta.y>0（offset 趋向 0）
+        let can_scroll = (delta.y < px(0.) && offset.y > -max.y)
+            || (delta.y > px(0.) && offset.y < px(0.));
+        if can_scroll {
+            cx.stop_propagation();
+        }
     }
 }

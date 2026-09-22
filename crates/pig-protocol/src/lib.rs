@@ -117,6 +117,15 @@ pub enum ExecMode {
     FullAccess,
 }
 
+/// 单次编辑（Write/Edit）产生的文件 diff：UI 工具卡片内联渲染用。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EditDiff {
+    pub path: String,
+    pub unified_diff: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApprovalDecision {
     Allow,
@@ -373,6 +382,9 @@ pub enum Event {
         item_id: String,
         output: String,
         is_error: bool,
+        /// 写/改类工具的本次编辑 diff（卡片内联渲染用；会话累计 diff 走 FileChanged）
+        #[serde(default)]
+        edit: Option<EditDiff>,
     },
     ContextUsage {
         session_id: String,

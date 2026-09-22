@@ -1499,7 +1499,7 @@ impl Composer {
                             .overflow_x_hidden()
                             .whitespace_nowrap()
                             .text_sm()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .child(task.command.clone()),
                     )
                     .child(
@@ -1526,7 +1526,7 @@ impl Composer {
                         .max_h(px(240.))
                         .overflow_y_scroll()
                         .text_xs()
-                        .font_family("monospace")
+                        .font_family(cx.theme().mono_font_family.clone())
                         .text_color(cx.theme().muted_foreground)
                         .child(if task.output_tail.is_empty() {
                             "（暂无输出）".to_string()
@@ -1590,7 +1590,7 @@ impl Composer {
                             .overflow_x_hidden()
                             .whitespace_nowrap()
                             .text_sm()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .child(path.clone()),
                     ),
             );
@@ -1688,7 +1688,7 @@ impl Composer {
                     .max_h(px(200.))
                     .overflow_y_scroll()
                     .text_sm()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .child(detail),
             )
             .child(

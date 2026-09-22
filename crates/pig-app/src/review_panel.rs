@@ -20,6 +20,7 @@ impl EventEmitter<ReviewEvent> for ReviewPanel {}
 pub struct ReviewPanel {
     files: Vec<FileChangeEntry>,
     selected: Option<String>,
+    diff_scroll: ScrollHandle,
 }
 
 impl ReviewPanel {
@@ -27,6 +28,7 @@ impl ReviewPanel {
         Self {
             files: vec![],
             selected: None,
+            diff_scroll: ScrollHandle::new(),
         }
     }
 
@@ -208,7 +210,7 @@ impl ReviewPanel {
                     .flex_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .child(label_path),
             )
             .child(
@@ -290,12 +292,13 @@ impl Render for ReviewPanel {
                     .m_2()
                     .p_2()
                     .overflow_y_scroll()
+                    .track_scroll(&self.diff_scroll)
                     .rounded(cx.theme().radius)
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
                     .text_xs()
-                    .font_family("monospace")
+                    .font_family(cx.theme().mono_font_family.clone())
                     .children(
                         selected_diff
                             .map(|diff| Self::render_diff(&diff, cx))

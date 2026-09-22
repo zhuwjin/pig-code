@@ -294,6 +294,7 @@ impl Session {
                     arguments,
                     output,
                     is_error,
+                    edit,
                 } => {
                     if !in_assistant {
                         replay_turns += 1;
@@ -314,6 +315,15 @@ impl Session {
                         .unwrap_or_else(|_| arguments.clone());
                     let (tool, summary, output) = (tool.clone(), summary.clone(), output.clone());
                     let is_error = *is_error;
+                    // 旧记录没有 edit 字段：成功的 Write/Edit 从参数兜底重建 diff
+                    //（失败/被拒绝的记录不能兜底——会把未发生的修改画成 diff 卡）
+                    let edit = edit.clone().or_else(|| {
+                        if is_error {
+                            None
+                        } else {
+                            tool::fallback_edit_diff(&self.cwd, &tool, arguments)
+                        }
+                    });
                     self.emit(
                         |session_id, seq| Event::ToolCallBegin {
                             session_id,
@@ -332,6 +342,7 @@ impl Session {
                             item_id: item,
                             output,
                             is_error,
+                            edit,
                         },
                         tx,
                     );
@@ -787,6 +798,7 @@ impl Session {
                     arguments: call.arguments.clone(),
                     output: note.clone(),
                     is_error: true,
+                    edit: None,
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -795,6 +807,7 @@ impl Session {
                         item_id,
                         output: note,
                         is_error: true,
+                        edit: None,
                     },
                     tx,
                 );
@@ -844,6 +857,7 @@ impl Session {
                             arguments: call.arguments.clone(),
                             output: note.clone(),
                             is_error: true,
+                            edit: None,
                         });
                         self.emit(
                             |session_id, seq| Event::ToolCallEnd {
@@ -852,6 +866,7 @@ impl Session {
                                 item_id,
                                 output: note,
                                 is_error: true,
+                                edit: None,
                             },
                             tx,
                         );
@@ -872,7 +887,7 @@ impl Session {
                     _ = cancel.cancelled() => None,
                 }
             };
-            let Some((output, is_error, file_change)) = result else {
+            let Some((output, is_error, file_change, edit)) = result else {
                 self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                 return StepOutcome::Ended;
             };
@@ -883,6 +898,7 @@ impl Session {
                 arguments: call.arguments.clone(),
                 output: output.clone(),
                 is_error,
+                edit: edit.clone(),
             });
             self.emit(
                 |session_id, seq| Event::ToolCallEnd {
@@ -891,6 +907,7 @@ impl Session {
                     item_id,
                     output,
                     is_error,
+                    edit,
                 },
                 tx,
             );

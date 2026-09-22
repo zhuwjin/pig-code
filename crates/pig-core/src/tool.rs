@@ -22,6 +22,9 @@ pub struct FileChange {
 pub struct ToolEffect {
     pub output: String,
     pub file_change: Option<FileChange>,
+    /// 本次编辑自身的 diff（「编辑前 → 编辑后」），UI 工具卡片内联渲染用；
+    /// `file_change` 是会话累计口径（review 面板用），两者粒度不同
+    pub edit_diff: Option<FileChange>,
 }
 
 impl ToolEffect {
@@ -29,7 +32,72 @@ impl ToolEffect {
         Self {
             output,
             file_change: None,
+            edit_diff: None,
         }
+    }
+}
+
+impl From<FileChange> for pig_protocol::EditDiff {
+    fn from(change: FileChange) -> Self {
+        Self {
+            path: change.path,
+            unified_diff: change.unified_diff,
+            additions: change.additions,
+            deletions: change.deletions,
+        }
+    }
+}
+
+/// 回放没有 edit 字段的旧 rollout 记录时，从参数兜底重建本次编辑 diff
+///（ZCode 前端兜底同款思路）：Edit 用 old_string/new_string 现算；
+/// Write 按新建文件处理（before 为空 → 全量新增）。其余工具返回 None。
+pub fn fallback_edit_diff(
+    cwd: &Path,
+    tool: &str,
+    arguments: &str,
+) -> Option<pig_protocol::EditDiff> {
+    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let path = args["path"].as_str()?;
+    let (before, after) = match tool {
+        "Edit" => (
+            args["old_string"].as_str()?.to_string(),
+            args["new_string"].as_str()?.to_string(),
+        ),
+        "Write" => (String::new(), args["content"].as_str()?.to_string()),
+        _ => return None,
+    };
+    Some(per_edit_diff(cwd, &cwd.join(path), &before, &after).into())
+}
+
+/// 计算单次编辑的 unified diff（编辑前 → 编辑后），相对路径归一化为 `/`。
+fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) -> FileChange {
+    let diff = similar::TextDiff::from_lines(before, after);
+    let mut additions = 0;
+    let mut deletions = 0;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            similar::ChangeTag::Insert => additions += 1,
+            similar::ChangeTag::Delete => deletions += 1,
+            _ => {}
+        }
+    }
+    let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let relative = full
+        .strip_prefix(&cwd_canonical)
+        .or_else(|_| full.strip_prefix(cwd))
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| full.to_path_buf());
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    let unified = diff
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{relative}"), &format!("b/{relative}"))
+        .to_string();
+    FileChange {
+        path: relative,
+        unified_diff: unified,
+        additions,
+        deletions,
     }
 }
 
@@ -226,15 +294,28 @@ pub fn summarize(call: &ToolCall) -> String {
     }
 }
 
-pub async fn execute(call: &ToolCall, ctx: ToolContext<'_>) -> (String, bool, Option<FileChange>) {
+pub async fn execute(
+    call: &ToolCall,
+    ctx: ToolContext<'_>,
+) -> (
+    String,
+    bool,
+    Option<FileChange>,
+    Option<pig_protocol::EditDiff>,
+) {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     let tools = all();
     let Some(tool) = tools.iter().find(|tool| tool.name() == call.name) else {
-        return (format!("未知工具: {}", call.name), true, None);
+        return (format!("未知工具: {}", call.name), true, None, None);
     };
     match tool.execute(args, ctx).await {
-        Ok(effect) => (effect.output, false, effect.file_change),
-        Err(error) => (error, true, None),
+        Ok(effect) => (
+            effect.output,
+            false,
+            effect.file_change,
+            effect.edit_diff.map(Into::into),
+        ),
+        Err(error) => (error, true, None, None),
     }
 }
 
@@ -361,13 +442,16 @@ impl Tool for WriteFile {
             let path = args["path"].as_str().ok_or("缺少参数 path")?;
             let content = args["content"].as_str().ok_or("缺少参数 content")?;
             let full = resolve_checked(ctx.cwd, path, true)?;
+            let before = std::fs::read_to_string(&full).unwrap_or_default();
             ctx.tracker.snapshot(&full)?;
             std::fs::write(&full, content)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
+            let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, content));
             Ok(ToolEffect {
                 output: format!("已写入 {}（{} 字节）", path, content.len()),
                 file_change,
+                edit_diff,
             })
         })
     }
@@ -424,12 +508,15 @@ impl Tool for EditFile {
                 ));
             }
             ctx.tracker.snapshot(&full)?;
-            std::fs::write(&full, content.replacen(old, new, 1))
+            let after = content.replacen(old, new, 1);
+            std::fs::write(&full, &after)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
+            let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             Ok(ToolEffect {
                 output: format!("已修改 {path}"),
                 file_change,
+                edit_diff,
             })
         })
     }
