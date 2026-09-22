@@ -40,6 +40,10 @@ pub enum RolloutRecord {
         #[serde(default)]
         edit: Option<pig_protocol::EditDiff>,
     },
+    /// 一轮的文件改动（回放恢复消息流里的每轮改动面板）
+    TurnChanges {
+        files: Vec<pig_protocol::EditDiff>,
+    },
     Compact {
         note: String,
         omitted: usize,
@@ -150,6 +154,8 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
             RolloutRecord::Compact { note, .. } => {
                 history.push(ChatMsg::system(note.clone()));
             }
+            // 每轮改动面板是纯 UI 展示数据，不进模型历史
+            RolloutRecord::TurnChanges { .. } => {}
         }
     }
     history

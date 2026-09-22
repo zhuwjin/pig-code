@@ -233,11 +233,19 @@ impl AppView {
         cx.notify();
     }
 
+    /// 当前会话的工作目录（SessionMeta.cwd）
+    fn current_cwd(&self) -> Option<PathBuf> {
+        let sid = self.current.as_ref()?;
+        self.metas
+            .iter()
+            .find(|m| &m.id == sid)
+            .map(|m| m.cwd.clone())
+    }
+
     fn ensure_views(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self.views.contains_key(session_id) {
             return;
-        }
-        let thread = cx.new(|cx| ThreadView::new(cx));
+        }        let thread = cx.new(|cx| ThreadView::new(cx));
         let review = cx.new(|cx| ReviewPanel::new(cx));
         let sid = session_id.to_string();
         self._subscriptions.push(
@@ -264,9 +272,17 @@ impl AppView {
         );
         self._subscriptions
             .push(cx.subscribe(&review, |this, _, event: &ReviewEvent, _| {
-                let ReviewEvent::Revert(path) = event;
-                if let Some(sid) = this.current.clone() {
-                    this.agent.revert_file(sid, path.clone());
+                match event {
+                    ReviewEvent::RefreshGit => {
+                        if let Some(cwd) = this.current_cwd() {
+                            this.agent.git_status(cwd);
+                        }
+                    }
+                    ReviewEvent::OpenGitDiff { path, staged } => {
+                        if let Some(cwd) = this.current_cwd() {
+                            this.agent.git_diff(cwd, path.clone(), *staged);
+                        }
+                    }
                 }
             }));
         self.views
@@ -277,6 +293,7 @@ impl AppView {
         match &event {
             Event::SessionConfigured {
                 session_id,
+                cwd,
                 model,
                 provider_name,
                 provider_id,
@@ -317,24 +334,15 @@ impl AppView {
                     .get(&session_id)
                     .cloned()
                     .unwrap_or_default();
-                // 改动 chip：从该会话的 ReviewPanel 取快照（新会话为空）
-                let (added, removed, change_files) = self
-                    .views
-                    .get(&session_id)
-                    .map(|views| {
-                        let review = views.review.read(cx);
-                        let (a, r) = review.totals();
-                        (a, r, review.file_summaries())
-                    })
-                    .unwrap_or((0, 0, vec![]));
                 self.composer.update(cx, |composer, cx| {
                     composer.set_todos(todos, cx);
                     composer.set_tasks(tasks, cx);
-                    composer.set_changes(added, removed, change_files, cx);
                 });
                 if let Some((text, files, mode)) = self.pending_first_send.take() {
                     self.agent.send_message(session_id, text, files, mode);
                 }
+                // 切换/新建会话：拉工作区 git 状态（Review 面板的未暂存/已暂存 tab）
+                self.agent.git_status(cwd.clone());
             }
             Event::ConfigSnapshot { config } => {
                 self.config = Some(config.clone());
@@ -424,6 +432,61 @@ impl AppView {
                     self.agent.git_info(cwd.clone());
                 }
             }
+            Event::GitStatus {
+                cwd,
+                is_git,
+                unstaged,
+                staged,
+            } => {
+                // 工作区口径：同 cwd 的所有会话面板都更新
+                let (is_git, unstaged, staged) = (*is_git, unstaged.clone(), staged.clone());
+                let sids: Vec<String> = self
+                    .metas
+                    .iter()
+                    .filter(|m| m.cwd == *cwd)
+                    .map(|m| m.id.clone())
+                    .collect();
+                for sid in &sids {
+                    if let Some(views) = self.views.get(sid) {
+                        let (unstaged, staged) = (unstaged.clone(), staged.clone());
+                        views.review.update(cx, |review, cx| {
+                            review.set_git_status(is_git, unstaged, staged, cx);
+                        });
+                    }
+                }
+                // 输入框上方的改动 chip：git 口径（未暂存 + 已暂存合并统计）
+                if self.current.as_ref().is_some_and(|cur| sids.contains(cur)) {
+                    let (adds, dels) = unstaged.iter().chain(staged.iter()).fold(
+                        (0u32, 0u32),
+                        |(a, d), e| (a + e.additions, d + e.deletions),
+                    );
+                    let files: Vec<(String, u32, u32)> = unstaged
+                        .iter()
+                        .chain(staged.iter())
+                        .map(|e| (e.path.clone(), e.additions, e.deletions))
+                        .collect();
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_changes(adds, dels, files, cx);
+                    });
+                }
+            }
+            Event::GitDiff { cwd, path, diff, .. } => {
+                let (path, diff) = (path.clone(), diff.clone());
+                let sids: Vec<String> = self
+                    .metas
+                    .iter()
+                    .filter(|m| m.cwd == *cwd)
+                    .map(|m| m.id.clone())
+                    .collect();
+                for sid in sids {
+                    if let Some(views) = self.views.get(&sid) {
+                        let (path, diff) = (path.clone(), diff.clone());
+                        views.review.update(cx, |review, cx| {
+                            review.set_git_diff(path, diff, cx);
+                        });
+                    }
+                }
+            }
             Event::ContextUsage {
                 session_id,
                 used,
@@ -474,6 +537,10 @@ impl AppView {
                     }
                 }
                 self.refresh_git_branch(cx);
+                // 回合结束（agent 写文件已落定）：刷新工作区 git 状态
+                if let Some(meta) = self.metas.iter().find(|m| &m.id == session_id) {
+                    self.agent.git_status(meta.cwd.clone());
+                }
             }
             Event::ContextCompacted {
                 session_id, note, ..
@@ -540,29 +607,22 @@ impl AppView {
                     } => {
                         let (path, diff, adds, dels) =
                             (path.clone(), unified_diff.clone(), *additions, *deletions);
-                        let (totals, files) = views.review.update(cx, |review, cx| {
+                        let totals = views.review.update(cx, |review, cx| {
                             review.upsert(path, diff, adds, dels, cx);
-                            (review.totals(), review.file_summaries())
+                            review.totals()
                         });
                         self.stats.insert(sid.clone(), totals);
-                        // 改动 chip 挂在共享的 composer 上，只推当前会话的快照
-                        if self.current.as_deref() == Some(sid.as_str()) {
-                            self.composer.update(cx, |composer, cx| {
-                                composer.set_changes(totals.0, totals.1, files, cx);
-                            });
-                        }
                     }
                     Event::FileReverted { path, .. } => {
                         let path = path.clone();
-                        let (totals, files) = views.review.update(cx, |review, cx| {
+                        let totals = views.review.update(cx, |review, cx| {
                             review.remove(&path, cx);
-                            (review.totals(), review.file_summaries())
+                            review.totals()
                         });
                         self.stats.insert(sid.clone(), totals);
-                        if self.current.as_deref() == Some(sid.as_str()) {
-                            self.composer.update(cx, |composer, cx| {
-                                composer.set_changes(totals.0, totals.1, files, cx);
-                            });
+                        // 撤销改变了工作区内容：刷新 git 状态
+                        if let Some(meta) = self.metas.iter().find(|m| &m.id == sid) {
+                            self.agent.git_status(meta.cwd.clone());
                         }
                     }
                     _ => {
@@ -1279,6 +1339,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::FileReverted { session_id, .. }
         | Event::TurnComplete { session_id, .. }
         | Event::TurnAborted { session_id, .. }
+        | Event::TurnFileChanges { session_id, .. }
         | Event::MessageQueued { session_id, .. }
         | Event::TodoListChanged { session_id, .. }
         | Event::TaskListChanged { session_id, .. }
@@ -1286,6 +1347,8 @@ fn event_session_id(event: &Event) -> Option<String> {
         Event::SessionList { .. }
         | Event::GitInfo { .. }
         | Event::BranchChanged { .. }
+        | Event::GitStatus { .. }
+        | Event::GitDiff { .. }
         | Event::ConfigSnapshot { .. }
         | Event::TestResult { .. }
         | Event::WorkspaceList { .. } => None,

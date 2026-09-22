@@ -1,7 +1,8 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use pig_protocol::GitFileChange;
 
 pub struct FileChangeEntry {
     pub path: String,
@@ -10,25 +11,59 @@ pub struct FileChangeEntry {
     pub deletions: u32,
 }
 
+/// 面板数据源：git 工作区口径（未暂存 / 已暂存）。
+/// 会话改动面板已移到消息流每轮 turn 末尾（thread_view 的 TurnChanges 段）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReviewSource {
+    Unstaged,
+    Staged,
+}
+
+impl ReviewSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unstaged => "未暂存",
+            Self::Staged => "已暂存",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum ReviewEvent {
-    Revert(String),
+    /// 请求刷新工作区 git 状态（面板切源或点刷新时发出，AppView 转发 Op::GitStatus）
+    RefreshGit,
+    /// 打开某 git 文件的 diff（AppView 转发 Op::GitDiff）
+    OpenGitDiff { path: String, staged: bool },
 }
 
 impl EventEmitter<ReviewEvent> for ReviewPanel {}
 
 pub struct ReviewPanel {
+    /// 会话改动快照（隐藏状态：侧栏会话 +N/-N 徽章与自测用，UI 不展示）
     files: Vec<FileChangeEntry>,
-    selected: Option<String>,
     diff_scroll: ScrollHandle,
+    source: ReviewSource,
+    is_git: bool,
+    git_unstaged: Vec<GitFileChange>,
+    git_staged: Vec<GitFileChange>,
+    git_selected: Option<String>,
+    /// 当前打开的 git diff (path, 原文)
+    git_diff: Option<(String, String)>,
+    git_diff_loading: bool,
 }
 
 impl ReviewPanel {
     pub fn new(_: &mut Context<Self>) -> Self {
         Self {
             files: vec![],
-            selected: None,
             diff_scroll: ScrollHandle::new(),
+            source: ReviewSource::Unstaged,
+            is_git: true,
+            git_unstaged: vec![],
+            git_staged: vec![],
+            git_selected: None,
+            git_diff: None,
+            git_diff_loading: false,
         }
     }
 
@@ -51,23 +86,17 @@ impl ReviewPanel {
             entry.deletions = deletions;
         } else {
             self.files.push(FileChangeEntry {
-                path: path.clone(),
+                path,
                 diff,
                 additions,
                 deletions,
             });
-        }
-        if self.selected.is_none() {
-            self.selected = Some(path);
         }
         cx.notify();
     }
 
     pub fn remove(&mut self, path: &str, cx: &mut Context<Self>) {
         self.files.retain(|e| e.path != path);
-        if self.selected.as_deref() == Some(path) {
-            self.selected = self.files.first().map(|e| e.path.clone());
-        }
         cx.notify();
     }
 
@@ -75,14 +104,6 @@ impl ReviewPanel {
         self.files
             .iter()
             .fold((0, 0), |(a, d), e| (a + e.additions, d + e.deletions))
-    }
-
-    /// 文件列表快照（composer 改动弹窗用）：(path, additions, deletions)
-    pub fn file_summaries(&self) -> Vec<(String, u32, u32)> {
-        self.files
-            .iter()
-            .map(|e| (e.path.clone(), e.additions, e.deletions))
-            .collect()
     }
 
     /// 自测用：(文件数, 总新增, 总删除, 任一 diff 非空)
@@ -94,6 +115,54 @@ impl ReviewPanel {
             dels,
             self.files.iter().any(|e| !e.diff.is_empty()),
         )
+    }
+
+    /// 工作区 git 状态到达（Op::GitStatus 的回应）
+    pub fn set_git_status(
+        &mut self,
+        is_git: bool,
+        unstaged: Vec<GitFileChange>,
+        staged: Vec<GitFileChange>,
+        cx: &mut Context<Self>,
+    ) {
+        self.is_git = is_git;
+        self.git_unstaged = unstaged;
+        self.git_staged = staged;
+        // 选中项消失时清空 diff 视图
+        let list = self.git_list();
+        if self
+            .git_selected
+            .as_ref()
+            .is_some_and(|sel| !list.iter().any(|e| &e.path == sel))
+        {
+            self.git_selected = None;
+            self.git_diff = None;
+        }
+        cx.notify();
+    }
+
+    /// 单文件 git diff 到达
+    pub fn set_git_diff(&mut self, path: String, diff: String, cx: &mut Context<Self>) {
+        if self.git_selected.as_deref() == Some(path.as_str()) {
+            self.git_diff = Some((path, diff));
+            self.git_diff_loading = false;
+            cx.notify();
+        }
+    }
+
+    fn git_list(&self) -> &Vec<GitFileChange> {
+        match self.source {
+            ReviewSource::Unstaged => &self.git_unstaged,
+            ReviewSource::Staged => &self.git_staged,
+        }
+    }
+
+    fn git_totals(&self) -> (usize, u32, u32) {
+        let list = self.git_list();
+        let (a, d) = list
+            .iter()
+            .fold((0, 0), |(a, d), e| (a + e.additions, d + e.deletions));
+        (list.len(), a, d)
     }
 
     /// 逐行渲染 unified diff：旧/新行号两列 + 增删行淡底色 + hunk 头底色。
@@ -182,17 +251,54 @@ impl ReviewPanel {
         rows
     }
 
-    fn render_file_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let entry = &self.files[ix];
-        let path = entry.path.clone();
-        let revert_path = entry.path.clone();
-        let label_path = entry.path.clone();
-        let additions = entry.additions;
-        let deletions = entry.deletions;
-        let active = self.selected.as_deref() == Some(path.as_str());
+    /// 数据源切换 chip（未暂存 / 已暂存）
+    fn render_source_tab(&self, source: ReviewSource, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.source == source;
+        let label = match source {
+            ReviewSource::Unstaged => format!("{} {}", source.label(), self.git_unstaged.len()),
+            ReviewSource::Staged => format!("{} {}", source.label(), self.git_staged.len()),
+        };
+        div()
+            .id(("review-source", source as usize))
+            .px_2()
+            .py_0p5()
+            .rounded_full()
+            .cursor_pointer()
+            .text_xs()
+            .when(active, |this| {
+                this.bg(cx.theme().accent)
+                    .text_color(cx.theme().foreground)
+            })
+            .when(!active, |this| {
+                this.text_color(cx.theme().muted_foreground)
+                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.source != source {
+                    this.source = source;
+                    cx.emit(ReviewEvent::RefreshGit);
+                    cx.notify();
+                }
+            }))
+            .child(label)
+            .into_any_element()
+    }
+
+    /// git 改动行：状态字母 + 相对路径 + +N/-N（点击拉取 git diff）
+    fn render_git_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let staged = self.source == ReviewSource::Staged;
+        let entry = self.git_list()[ix].clone();
+        let active = self.git_selected.as_deref() == Some(entry.path.as_str());
+        let status_color = match entry.status.as_str() {
+            "A" | "?" => cx.theme().success,
+            "D" => cx.theme().danger,
+            "C" => cx.theme().warning,
+            _ => cx.theme().muted_foreground,
+        };
+        let row_path = entry.path.clone();
 
         h_flex()
-            .id(("review-file", ix))
+            .id(("review-git-file", ix))
             .mx_2()
             .px_2()
             .py_1()
@@ -201,9 +307,23 @@ impl ReviewPanel {
             .when(active, |this| this.bg(cx.theme().accent))
             .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected = Some(path.clone());
+                this.git_selected = Some(row_path.clone());
+                this.git_diff = None;
+                this.git_diff_loading = true;
+                cx.emit(ReviewEvent::OpenGitDiff {
+                    path: row_path.clone(),
+                    staged,
+                });
                 cx.notify();
             }))
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(status_color)
+                    .child(entry.status.clone()),
+            )
             .child(
                 div()
                     .text_sm()
@@ -211,28 +331,19 @@ impl ReviewPanel {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .font_family(cx.theme().mono_font_family.clone())
-                    .child(label_path),
+                    .child(entry.path.clone()),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().success)
-                    .child(format!("+{additions}")),
+                    .child(format!("+{}", entry.additions)),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().danger)
-                    .child(format!("-{deletions}")),
-            )
-            .child(
-                Button::new(("revert", ix))
-                    .ghost()
-                    .xsmall()
-                    .label("撤销")
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(ReviewEvent::Revert(revert_path.clone()));
-                    })),
+                    .child(format!("-{}", entry.deletions)),
             )
             .into_any_element()
     }
@@ -240,16 +351,32 @@ impl ReviewPanel {
 
 impl Render for ReviewPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (adds, dels) = self.totals();
-        let selected_diff = self
-            .selected
-            .as_ref()
-            .and_then(|path| self.files.iter().find(|e| &e.path == path))
-            .map(|e| e.diff.clone());
+        let summary = if !self.is_git {
+            "非 git 仓库".to_string()
+        } else {
+            let (n, adds, dels) = self.git_totals();
+            format!("{n} 个文件 · +{adds} -{dels}")
+        };
 
-        let mut rows = Vec::with_capacity(self.files.len());
-        for ix in 0..self.files.len() {
-            rows.push(self.render_file_row(ix, cx));
+        let diff_rows: Vec<AnyElement> = if self.git_diff_loading {
+            vec![
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("加载 diff 中…")
+                    .into_any_element(),
+            ]
+        } else {
+            self.git_diff
+                .as_ref()
+                .map(|(_, diff)| Self::render_diff(diff, cx))
+                .unwrap_or_default()
+        };
+
+        let mut rows = Vec::new();
+        if self.is_git {
+            for ix in 0..self.git_list().len() {
+                rows.push(self.render_git_row(ix, cx));
+            }
         }
 
         v_flex()
@@ -257,31 +384,56 @@ impl Render for ReviewPanel {
             .border_l_1()
             .border_color(cx.theme().border)
             .child(
-                div()
+                h_flex()
                     .px_3()
                     .py_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_sm().font_semibold().child("文件变更"))
+                    .gap_1()
+                    .children(
+                        [ReviewSource::Unstaged, ReviewSource::Staged]
+                            .into_iter()
+                            .map(|source| self.render_source_tab(source, cx)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("git-refresh")
+                            .ghost()
+                            .xsmall()
+                            .label("刷新")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ReviewEvent::RefreshGit);
+                            })),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} 个文件 · +{adds} -{dels}", self.files.len())),
+                            .child(summary),
                     ),
             )
             .child(
                 v_flex()
                     .py_1()
                     .children(rows)
-                    .when(self.files.is_empty(), |this| {
+                    .when(!self.is_git, |this| {
                         this.child(
                             div()
                                 .px_3()
                                 .py_2()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("暂无变更。agent 修改文件后会出现在这里。"),
+                                .child("当前工作区不是 git 仓库，git 改动不可用。"),
+                        )
+                    })
+                    .when(self.is_git && self.git_list().is_empty(), |this| {
+                        this.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("工作区干净，没有改动。"),
                         )
                     }),
             )
@@ -299,11 +451,7 @@ impl Render for ReviewPanel {
                     .bg(cx.theme().background)
                     .text_xs()
                     .font_family(cx.theme().mono_font_family.clone())
-                    .children(
-                        selected_diff
-                            .map(|diff| Self::render_diff(&diff, cx))
-                            .unwrap_or_default(),
-                    ),
+                    .children(diff_rows),
             )
     }
 }

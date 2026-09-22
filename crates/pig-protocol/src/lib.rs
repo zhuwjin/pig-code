@@ -97,6 +97,16 @@ pub enum Op {
         cwd: PathBuf,
         branch: String,
     },
+    /// 非会话态：工作区 git 改动列表（未暂存 + 已暂存，含 untracked 行数统计）
+    GitStatus {
+        cwd: PathBuf,
+    },
+    /// 非会话态：单文件 git diff 原文（staged=false 未暂存 / true 已暂存）
+    GitDiff {
+        cwd: PathBuf,
+        path: String,
+        staged: bool,
+    },
     /// 取消该会话队首的排队消息（FIFO）
     CancelQueued {
         session_id: String,
@@ -124,6 +134,16 @@ pub struct EditDiff {
     pub unified_diff: String,
     pub additions: u32,
     pub deletions: u32,
+}
+
+/// git 工作区单文件改动（未暂存/已暂存列表项）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GitFileChange {
+    pub path: String,
+    pub additions: u32,
+    pub deletions: u32,
+    /// porcelain 状态：M/A/D/R/C（冲突）/?（未跟踪）
+    pub status: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,6 +349,19 @@ pub enum Event {
         cwd: PathBuf,
         branch: String,
     },
+    GitStatus {
+        cwd: PathBuf,
+        /// false = 非 git 仓库（两列表为空）
+        is_git: bool,
+        unstaged: Vec<GitFileChange>,
+        staged: Vec<GitFileChange>,
+    },
+    GitDiff {
+        cwd: PathBuf,
+        path: String,
+        staged: bool,
+        diff: String,
+    },
     /// 会话回合进行中到达的消息已排队；回合结束后自动接续
     MessageQueued {
         session_id: String,
@@ -442,6 +475,12 @@ pub enum Event {
     TurnAborted {
         session_id: String,
         seq: u64,
+    },
+    /// 一轮结束：本轮 agent 的文件改动（每文件 本轮首次写前 → 当前 的净 diff，ZCode turn 头部面板口径）
+    TurnFileChanges {
+        session_id: String,
+        seq: u64,
+        files: Vec<EditDiff>,
     },
     Error {
         session_id: Option<String>,

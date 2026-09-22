@@ -207,6 +207,24 @@ impl Session {
         }
     }
 
+    /// 回合收尾：产出「本轮改动」（落 rollout + 推 UI 消息流面板）；无改动不发。
+    fn flush_turn_changes(&mut self, tx: &async_channel::Sender<Event>) {
+        let changes = self.tracker.take_turn_changes(&self.cwd);
+        if changes.is_empty() {
+            return;
+        }
+        let files: Vec<pig_protocol::EditDiff> = changes.into_iter().map(Into::into).collect();
+        self.record(&RolloutRecord::TurnChanges { files: files.clone() });
+        self.emit(
+            |session_id, seq| Event::TurnFileChanges {
+                session_id,
+                seq,
+                files,
+            },
+            tx,
+        );
+    }
+
     fn touch_index(&mut self) {
         let id = self.id.clone();
         self.store
@@ -290,7 +308,7 @@ impl Session {
                 }
                 RolloutRecord::ToolCall {
                     tool,
-                    summary,
+                    summary: _,
                     arguments,
                     output,
                     is_error,
@@ -313,8 +331,14 @@ impl Session {
                     let detail = serde_json::from_str::<serde_json::Value>(arguments)
                         .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
                         .unwrap_or_else(|_| arguments.clone());
-                    let (tool, summary, output) = (tool.clone(), summary.clone(), output.clone());
+                    let (tool, output) = (tool.clone(), output.clone());
                     let is_error = *is_error;
+                    // 旧记录的 summary 可能是早期 80 字符截断版：回放时从完整参数重算
+                    let summary = tool::summarize(&crate::provider::ToolCall {
+                        id: String::new(),
+                        name: tool.clone(),
+                        arguments: arguments.clone(),
+                    });
                     // 旧记录没有 edit 字段：成功的 Write/Edit 从参数兜底重建 diff
                     //（失败/被拒绝的记录不能兜底——会把未发生的修改画成 diff 卡）
                     let edit = edit.clone().or_else(|| {
@@ -348,6 +372,17 @@ impl Session {
                     );
                 }
                 RolloutRecord::Compact { .. } => {}
+                RolloutRecord::TurnChanges { files } => {
+                    let files = files.clone();
+                    self.emit(
+                        |session_id, seq| Event::TurnFileChanges {
+                            session_id,
+                            seq,
+                            files,
+                        },
+                        tx,
+                    );
+                }
             }
         }
         // SQLite 里的面板当前态在 JSONL 事件流之后补发：
@@ -609,6 +644,8 @@ impl Session {
                             self.turn_output,
                         );
                     }
+                    // 本轮改动面板先于回合结束事件发出（durable 数据先于边界事件）
+                    self.flush_turn_changes(tx);
                     self.emit(
                         |session_id, seq| Event::TurnComplete {
                             session_id,
@@ -621,7 +658,11 @@ impl Session {
                     return;
                 }
                 StepOutcome::ToolsExecuted => continue,
-                StepOutcome::Ended => return,
+                StepOutcome::Ended => {
+                    // 中断/失败收尾：本轮已发生的修改也要产出面板
+                    self.flush_turn_changes(tx);
+                    return;
+                }
             }
         }
     }
@@ -1432,6 +1473,50 @@ pub async fn agent_loop(
                                         message: format!("git 任务失败: {e}"),
                                     }).await;
                                 }
+                            }
+                        });
+                    }
+                    Op::GitStatus { cwd } => {
+                        let tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            let cwd2 = cwd.clone();
+                            let result =
+                                tokio::task::spawn_blocking(move || crate::git::git_status(&cwd2))
+                                    .await;
+                            if let Ok(result) = result {
+                                let (is_git, unstaged, staged) = match result {
+                                    Some((unstaged, staged)) => (true, unstaged, staged),
+                                    None => (false, vec![], vec![]),
+                                };
+                                let _ = tx
+                                    .send(Event::GitStatus {
+                                        cwd,
+                                        is_git,
+                                        unstaged,
+                                        staged,
+                                    })
+                                    .await;
+                            }
+                        });
+                    }
+                    Op::GitDiff { cwd, path, staged } => {
+                        let tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            let cwd2 = cwd.clone();
+                            let path2 = path.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::git::git_diff(&cwd2, &path2, staged)
+                            })
+                            .await;
+                            if let Ok(diff) = result {
+                                let _ = tx
+                                    .send(Event::GitDiff {
+                                        cwd,
+                                        path,
+                                        staged,
+                                        diff,
+                                    })
+                                    .await;
                             }
                         });
                     }

@@ -171,6 +171,51 @@ async fn fallback_edit_diff_from_arguments() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_changes_are_per_turn_not_cumulative() {
+    let dir = temp_dir("turn-changes");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    // 「第一轮」Write 3 行：本轮净额 = 全量新增
+    let (_, is_error, _, _) = tool::execute(
+        &call("Write", serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error);
+    let changes = tracker.take_turn_changes(&dir);
+    assert_eq!(changes.len(), 1);
+    assert_eq!((changes[0].additions, changes[0].deletions), (3, 0));
+    assert!(tracker.take_turn_changes(&dir).is_empty(), "take 后应清空");
+
+    // 「第二轮」Edit 1 行：只算本轮（1 增 1 删），不是会话累计口径
+    let (_, is_error, _, _) = tool::execute(
+        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error);
+    let changes = tracker.take_turn_changes(&dir);
+    assert_eq!(changes.len(), 1);
+    assert_eq!((changes[0].additions, changes[0].deletions), (1, 1));
+
+    // 「第三轮」同一轮内改回原文：turn 首末内容一致，净额归零不产出
+    let (_, is_error, _, _) = tool::execute(
+        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "B", "new_string": "b"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error);
+    let (_, is_error, _, _) = tool::execute(
+        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error);
+    assert!(tracker.take_turn_changes(&dir).is_empty(), "轮内改回原文净额应为零");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revert_modified_file_restores_content() {
     let dir = temp_dir("revert");
     std::fs::write(dir.join("m.txt"), "original\n").unwrap();

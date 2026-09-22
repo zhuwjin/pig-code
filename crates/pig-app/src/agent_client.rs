@@ -124,10 +124,6 @@ impl AgentClient {
         });
     }
 
-    pub fn revert_file(&self, session_id: String, path: String) {
-        self.send(Op::RevertFile { session_id, path });
-    }
-
     pub fn search_files(&self, session_id: String, query: String) {
         self.send(Op::SearchFiles { session_id, query });
     }
@@ -142,6 +138,14 @@ impl AgentClient {
 
     pub fn git_info(&self, cwd: PathBuf) {
         self.send(Op::GitInfo { cwd });
+    }
+
+    pub fn git_status(&self, cwd: PathBuf) {
+        self.send(Op::GitStatus { cwd });
+    }
+
+    pub fn git_diff(&self, cwd: PathBuf, path: String, staged: bool) {
+        self.send(Op::GitDiff { cwd, path, staged });
     }
 
     pub fn checkout_branch(&self, cwd: PathBuf, branch: String) {

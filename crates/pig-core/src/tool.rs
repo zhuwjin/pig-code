@@ -70,7 +70,7 @@ pub fn fallback_edit_diff(
 }
 
 /// 计算单次编辑的 unified diff（编辑前 → 编辑后），相对路径归一化为 `/`。
-fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) -> FileChange {
+pub(crate) fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) -> FileChange {
     let diff = similar::TextDiff::from_lines(before, after);
     let mut additions = 0;
     let mut deletions = 0;
@@ -103,12 +103,17 @@ fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) -> FileChan
 
 /// 会话级变更追踪：首次修改前快照原始内容，diff 始终是「原始 → 当前」。
 /// 快照经 dirty 标记由 session 侧落盘（file_originals 表），重启后 restore 恢复基线。
+///
+/// 另有一层**每轮**追踪（ZCode turn-file-changes 同款口径）：turn 内首次写前
+/// 记录 turn_originals，回合结束 take_turn_changes 算「本轮首次写前 → 当前」净额并清空。
 #[derive(Default)]
 pub struct ChangeTracker {
     originals: HashMap<PathBuf, Option<String>>,
     stats: HashMap<PathBuf, (u32, u32)>,
     /// 本次进程内新增、尚未落盘的快照路径（session 侧 drain 后写库）
     dirty: Vec<PathBuf>,
+    /// 本轮内各文件首次写前的内容（None = 本轮新建）；回合结束 take 清空
+    turn_originals: HashMap<PathBuf, Option<String>>,
 }
 
 impl ChangeTracker {
@@ -122,6 +127,17 @@ impl ChangeTracker {
             };
             entry.insert(original);
             self.dirty.push(path.to_path_buf());
+        }
+        // 每轮口径：本轮首次写前同样记一笔（独立于会话级基线）
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.turn_originals.entry(path.to_path_buf())
+        {
+            let original = match std::fs::read_to_string(path) {
+                Ok(content) => Some(content),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("读取失败 {}: {e}", path.display())),
+            };
+            entry.insert(original);
         }
         Ok(self.originals[path].clone())
     }
@@ -182,6 +198,26 @@ impl ChangeTracker {
             additions,
             deletions,
         })
+    }
+
+    /// 计算并清空「本轮改动」：每文件 本轮首次写前 → 当前磁盘 的净 diff。
+    /// 净额为零（本轮内改回原文）不产出；文件被删除的暂不产出。
+    pub fn take_turn_changes(&mut self, cwd: &Path) -> Vec<FileChange> {
+        let entries = std::mem::take(&mut self.turn_originals);
+        let mut changes = Vec::new();
+        for (path, before) in entries {
+            let before = before.unwrap_or_default();
+            let Ok(current) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let change = per_edit_diff(cwd, &path, &before, &current);
+            if change.additions == 0 && change.deletions == 0 {
+                continue;
+            }
+            changes.push(change);
+        }
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        changes
     }
 
     pub fn revert(&mut self, path: &Path) -> Result<(), String> {
@@ -287,11 +323,9 @@ pub fn summarize(call: &ToolCall) -> String {
         "TaskOutput" | "TaskStop" => args["task_id"].as_str().unwrap_or("?").to_string(),
         _ => args.to_string(),
     };
-    if raw.chars().count() <= 80 {
-        raw
-    } else {
-        format!("{}…", raw.chars().take(80).collect::<String>())
-    }
+    // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
+    // 全文本就在 arguments 里随 rollout 持久化，摘要不再额外截短
+    raw
 }
 
 pub async fn execute(

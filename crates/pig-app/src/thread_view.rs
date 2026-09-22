@@ -48,10 +48,23 @@ pub enum Segment {
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
     },
+    /// 一轮结束时的本轮文件改动面板（ZCode turn 头部文件更改同款）
+    TurnChanges {
+        rows: Vec<TurnFileRow>,
+        open: bool,
+    },
     Approval {
         request_id: String,
         decision: Option<ApprovalDecision>,
     },
+}
+
+/// 每轮改动面板里的单文件行
+pub struct TurnFileRow {
+    edit: EditDiff,
+    expanded: bool,
+    /// 内联 diff 卡的滚动句柄
+    scroll: ScrollHandle,
 }
 
 pub struct ChatMessage {
@@ -261,7 +274,7 @@ impl ThreadView {
                     tool_done |= *done && !*is_error;
                     tool_output.push_str(output);
                 }
-                Segment::Approval { .. } => {}
+                Segment::TurnChanges { .. } | Segment::Approval { .. } => {}
             }
         }
         (tool_done, text, thinking, tool_output)
@@ -496,6 +509,34 @@ impl ThreadView {
                 }
                 self.set_streaming(false, cx);
             }
+            Event::TurnFileChanges { files, .. } => {
+                self.finish_thinking();
+                if !files.is_empty() {
+                    if self
+                        .messages
+                        .last()
+                        .is_none_or(|m| m.role != Role::Assistant)
+                    {
+                        self.messages.push(ChatMessage::assistant());
+                    }
+                    self.messages
+                        .last_mut()
+                        .expect("assistant message")
+                        .segments
+                        .push(Segment::TurnChanges {
+                            rows: files
+                                .into_iter()
+                                .map(|edit| TurnFileRow {
+                                    edit,
+                                    expanded: false,
+                                    scroll: ScrollHandle::new(),
+                                })
+                                .collect(),
+                            open: false,
+                        });
+                }
+                self.scroll_handle.scroll_to_bottom();
+            }
             Event::FileChanged { .. } | Event::FileReverted { .. } => {}
             Event::UserMessage { text, files, .. } => {
                 let trimmed = text.trim().to_string();
@@ -519,6 +560,8 @@ impl ThreadView {
             | Event::TaskListChanged { .. }
             | Event::GitInfo { .. }
             | Event::BranchChanged { .. }
+            | Event::GitStatus { .. }
+            | Event::GitDiff { .. }
             | Event::ConfigSnapshot { .. }
             | Event::TestResult { .. }
             | Event::WorkspaceList { .. } => {}
@@ -968,6 +1011,7 @@ impl ThreadView {
                                         h_flex()
                                             .w_full()
                                             .gap_2()
+                                            .items_start()
                                             .when(tool == "Bash", |this| {
                                                 this.child(
                                                     div().text_sm().text_color(subtle).child("$"),
@@ -1143,6 +1187,200 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// 每轮改动面板（ZCode turn 头部「文件更改」同款）：一行汇总
+    /// 「N 个文件已更改 +A -D」（箭头悬停显示），展开后逐文件行（路径 + +N/-N），
+    /// 文件行再展开为内联 diff 卡（复用编辑卡的渲染）。
+    fn render_turn_changes(
+        &self,
+        message_ix: usize,
+        segment_ix: usize,
+        rows: &[TurnFileRow],
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subtle = cx.theme().muted_foreground;
+        let subtlest = subtle.opacity(0.6);
+        let group_id = format!("turn-changes-{message_ix}-{segment_ix}");
+        let (adds, dels) = rows
+            .iter()
+            .fold((0u32, 0u32), |(a, d), r| {
+                (a + r.edit.additions, d + r.edit.deletions)
+            });
+
+        let mut file_rows: Vec<AnyElement> = Vec::new();
+        for (rix, row) in rows.iter().enumerate() {
+            let (dir, name) = split_path(&row.edit.path);
+            let row_group = format!("{group_id}-file-{rix}");
+            file_rows.push(
+                v_flex()
+                    .w_full()
+                    .child(
+                        h_flex()
+                            .id(("turn-file", (message_ix * 1024 + segment_ix) * 512 + rix))
+                            .group(row_group.clone())
+                            .w_full()
+                            .gap_2()
+                            .py_1()
+                            .pl(px(26.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(Segment::TurnChanges { rows, .. }) = this
+                                    .messages
+                                    .get_mut(message_ix)
+                                    .and_then(|m| m.segments.get_mut(segment_ix))
+                                    && let Some(row) = rows.get_mut(rix)
+                                {
+                                    row.expanded = !row.expanded;
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(IconName::FileText)
+                                    .size_4()
+                                    .text_color(subtlest),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(subtle)
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_sm()
+                                    .text_color(subtlest)
+                                    .child(dir),
+                            )
+                            .when(row.edit.additions > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(cx.theme().success)
+                                        .child(format!("+{}", row.edit.additions)),
+                                )
+                            })
+                            .when(row.edit.deletions > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(cx.theme().danger)
+                                        .child(format!("-{}", row.edit.deletions)),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .invisible()
+                                    .group_hover(row_group, |this| this.visible())
+                                    .when(row.expanded, |this| this.visible())
+                                    .child(
+                                        Icon::new(if row.expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size_4()
+                                        .text_color(subtlest),
+                                    ),
+                            ),
+                    )
+                    .when(row.expanded, |this| {
+                        this.child(
+                            div()
+                                .relative()
+                                .on_scroll_wheel(scroll_chain(&row.scroll))
+                                .child(Self::render_edit_diff(
+                                    ("turn-diff", (message_ix * 1024 + segment_ix) * 512 + rix),
+                                    &row.edit,
+                                    &row.scroll,
+                                    cx,
+                                )),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        v_flex()
+            .w_full()
+            .child(
+                h_flex()
+                    .id(("turn-changes", message_ix * 1024 + segment_ix))
+                    .group(group_id.clone())
+                    .w_full()
+                    .gap_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Segment::TurnChanges { open, .. }) = this
+                            .messages
+                            .get_mut(message_ix)
+                            .and_then(|m| m.segments.get_mut(segment_ix))
+                        {
+                            *open = !*open;
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        Icon::new(AssetIconName::ListTodo)
+                            .size_4()
+                            .text_color(subtlest),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(subtlest)
+                            .child(format!("{} 个文件已更改", rows.len())),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_sm()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .when(adds > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_color(cx.theme().success)
+                                        .child(format!("+{adds}")),
+                                )
+                            })
+                            .when(dels > 0, |this| {
+                                this.child(
+                                    div()
+                                        .text_color(cx.theme().danger)
+                                        .child(format!("-{dels}")),
+                                )
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(group_id, |this| this.visible())
+                            .when(open, |this| this.visible())
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size_4()
+                                .text_color(subtlest),
+                            ),
+                    ),
+            )
+            .when(open, |this| this.children(file_rows))
+            .into_any_element()
+    }
+
     fn render_message(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let message = &self.messages[ix];
         match message.role {
@@ -1208,6 +1446,9 @@ impl ThreadView {
                             )
                         }
                         Segment::Approval { .. } => unreachable!(),
+                        Segment::TurnChanges { rows, open } => {
+                            self.render_turn_changes(ix, six, rows, *open, cx)
+                        }
                     });
                 }
                 if let Some(footer) = &message.footer {
