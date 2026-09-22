@@ -58,6 +58,12 @@ pub enum Op {
         request_id: String,
         decision: ApprovalDecision,
     },
+    /// 结构化提问的回复：None = 用户跳过；外层按题、内层为该题选中标签
+    ///（"其他"自由文本作为标签原样放入）
+    QuestionReply {
+        request_id: String,
+        answers: Option<Vec<Vec<String>>>,
+    },
     SetModel {
         session_id: String,
         provider_id: String,
@@ -307,6 +313,25 @@ pub struct TaskSummary {
     pub output_tail: String,
 }
 
+/// AskUserQuestion 的选项。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// AskUserQuestion 的单题。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuestionItem {
+    pub question: String,
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+    pub options: Vec<QuestionOption>,
+}
+
 /// core → UI 事件
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
@@ -441,6 +466,13 @@ pub enum Event {
         tool: String,
         /// Bash: 完整命令；Write/Edit: 路径 + diff 预览
         detail: String,
+    },
+    /// AskUserQuestion：core 阻塞等待 Op::QuestionReply（同 request_id）
+    QuestionRequested {
+        session_id: String,
+        seq: u64,
+        request_id: String,
+        questions: Vec<QuestionItem>,
     },
     FileChanged {
         session_id: String,

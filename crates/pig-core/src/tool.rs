@@ -290,6 +290,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(TaskList),
         Box::new(TaskOutput),
         Box::new(TaskStop),
+        Box::new(AskUserQuestionTool),
     ]
 }
 
@@ -321,6 +322,10 @@ pub fn summarize(call: &ToolCall) -> String {
         "FetchURL" => args["url"].as_str().unwrap_or("?").to_string(),
         "TaskList" => "列出后台任务".to_string(),
         "TaskOutput" | "TaskStop" => args["task_id"].as_str().unwrap_or("?").to_string(),
+        "AskUserQuestion" => args["questions"][0]["question"]
+            .as_str()
+            .unwrap_or("?")
+            .to_string(),
         _ => args.to_string(),
     };
     // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
@@ -1263,6 +1268,121 @@ impl Tool for TaskStop {
             )?;
             Ok(ToolEffect::plain(result))
         })
+    }
+}
+
+struct AskUserQuestionTool;
+
+/// 解析并校验 AskUserQuestion 参数：1-4 题；每题 question 非空、options 2-4 项、
+/// label 非空。纯函数以便单测；真正的请求/等待在 session.rs 工具循环拦截。
+pub fn parse_questions(args: &serde_json::Value) -> Result<Vec<pig_protocol::QuestionItem>, String> {
+    let items = args["questions"]
+        .as_array()
+        .ok_or("缺少参数 questions（数组）")?;
+    if items.is_empty() || items.len() > 4 {
+        return Err(format!("questions 数量须在 1-4 之间（收到 {}）", items.len()));
+    }
+    let mut questions = Vec::new();
+    for (ix, item) in items.iter().enumerate() {
+        let n = ix + 1;
+        let question = item["question"].as_str().unwrap_or("").trim().to_string();
+        if question.is_empty() {
+            return Err(format!("第 {n} 题 question 不能为空"));
+        }
+        let header = item["header"]
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let multi_select = item["multi_select"].as_bool().unwrap_or(false);
+        let options = item["options"]
+            .as_array()
+            .ok_or_else(|| format!("第 {n} 题缺少 options（数组）"))?;
+        if options.len() < 2 || options.len() > 4 {
+            return Err(format!(
+                "第 {n} 题 options 数量须在 2-4 之间（收到 {}）",
+                options.len()
+            ));
+        }
+        let mut parsed_options = Vec::new();
+        for option in options {
+            let label = option["label"].as_str().unwrap_or("").trim().to_string();
+            if label.is_empty() {
+                return Err(format!("第 {n} 题存在空 label 的选项"));
+            }
+            let description = option["description"].as_str().map(str::to_string);
+            parsed_options.push(pig_protocol::QuestionOption { label, description });
+        }
+        questions.push(pig_protocol::QuestionItem {
+            question,
+            header,
+            multi_select,
+            options: parsed_options,
+        });
+    }
+    Ok(questions)
+}
+
+impl Tool for AskUserQuestionTool {
+    fn name(&self) -> &'static str {
+        "AskUserQuestion"
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "AskUserQuestion",
+                "description": "需要用户决策时，给出 1-4 个结构化问题（每题 2-4 个选项）让用户选择，而不是用纯文本提问。每题可用 multi_select 允许多选；UI 会自动追加「其他」自由输入项。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "1-4 个问题",
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": { "type": "string", "description": "完整问题文本" },
+                                    "header": { "type": "string", "description": "可选短标签（≤12 字）" },
+                                    "multi_select": { "type": "boolean", "description": "可选，true 允许多选（默认 false）" },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "2-4 个选项",
+                                        "minItems": 2,
+                                        "maxItems": 4,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string", "description": "选项标签" },
+                                                "description": { "type": "string", "description": "可选补充说明" }
+                                            },
+                                            "required": ["label"]
+                                        }
+                                    }
+                                },
+                                "required": ["question", "options"]
+                            }
+                        }
+                    },
+                    "required": ["questions"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _args: serde_json::Value,
+        _ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
+        Box::pin(async move { Err("AskUserQuestion 由会话层处理".to_string()) })
     }
 }
 

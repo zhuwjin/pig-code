@@ -109,7 +109,7 @@ impl Store {
     pub fn upsert_session(&self, meta: &SessionMeta) {
         // exec_mode 存变体名（"AutoEdit" 等），读出时按 serde 变体名解析
         let mode_raw = format!("{:?}", meta.exec_mode);
-        let _ = self.conn.execute(
+        let result = self.conn.execute(
             "INSERT INTO sessions (id, title, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
@@ -137,6 +137,10 @@ impl Store {
                 mode_raw,
             ],
         );
+        // 写失败不能静默（列缺失曾导致新会话整批丢失）：至少打到控制台
+        if let Err(error) = result {
+            eprintln!("[store] upsert_session 写入失败 {}: {error}", meta.id);
+        }
     }
 
     /// 读出-修改-写回；会话不存在则不动。

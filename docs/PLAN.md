@@ -221,6 +221,7 @@ pig-code/
 - 工具补齐：`Write`、`Edit`(search/replace)、`Glob`、`Grep`；统一 `Tool` trait（schema 自动生成 JSON Schema 给模型）。
 - 内置工具补充：`TodoList`（会话级待办，整体替换语义，状态挂 `ToolContext`）、`FetchURL`（scraper 提取正文，SSRF 私网字面量拦截）；`cap_web_search` 开启时按端点注入原生搜索——Anthropic 缺省 `web_search_20250305`，OpenAI 兼容端点用 TOML `web_search_tool` 自定义（如智谱 `web_search_tool = {"type":"web_search","web_search":{"enable":true,"search_result":true}}`）。
 - 后台 Bash 任务：`Bash` 加 `run_in_background`（会话级注册表 + watcher 收输出 + 完成经 channel 推 `TaskListChanged`），配套 `TaskList`/`TaskOutput`/`TaskStop` 三工具；composer 上方「当前进度（TodoList）+ 后台 Bash」chip，点击在芯片上方弹出只读面板（点外部/再点 chip 收起、任务输出尾部展开、状态过滤 tab）。
+- `AskUserQuestion` 结构化提问：工具注册 schema（1-4 题 × 2-4 选项，read_only），会话层拦截执行走 `QuestionRequested`/`QuestionReply`（独立 pending map，oneshot 阻塞；Esc 跳过回复 None，非错误）；composer 问题条复用审批条槽位（与审批互斥、问题优先），选项按钮 + 每题「其他」自由输入。
 - 四档执行模式 + 审批闸门：core 发 `ApprovalRequested` 阻塞 → UI 审批卡（允许/始终允许/拒绝）→ `ApprovalReply` 解除；「始终允许」按规则缓存。
 - diff 视图 V1：`PatchEnd` 携带 unified diff → 右侧 Review 面板用只读 `Editor` + `tree-sitter-diff` 渲染；文件变更列表（+x/−y）。
 - **验收**：让 agent 改一个真实工作区文件，审批卡弹出、diff 正确渲染、可拒绝。

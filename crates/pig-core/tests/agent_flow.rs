@@ -182,3 +182,113 @@ async fn missing_config_is_empty_not_error() {
     );
     agent.shutdown();
 }
+
+/// 发 SCENARIO_Q 并等待 QuestionRequested，返回 request_id（同时断言问题内容）。
+async fn wait_question(
+    agent: &pig_core::AgentHandle,
+    events: &async_channel::Receiver<Event>,
+    session_id: &str,
+) -> String {
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.to_string(),
+            content: format!("{} 帮我决定实现方案", mock::SCENARIO_Q_TRIGGER),
+            files: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(events, Duration::from_secs(20), |e| {
+        matches!(e, Event::QuestionRequested { .. })
+    })
+    .await;
+    collected
+        .iter()
+        .find_map(|e| match e {
+            Event::QuestionRequested {
+                request_id,
+                questions,
+                ..
+            } => {
+                assert_eq!(questions.len(), 2);
+                assert_eq!(questions[0].question, "选择实现方案");
+                assert_eq!(questions[0].options.len(), 2);
+                assert_eq!(questions[1].question, "需要跑测试吗");
+                assert_eq!(questions[1].options.len(), 2);
+                Some(request_id.clone())
+            }
+            _ => None,
+        })
+        .expect("应收到 QuestionRequested")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_user_question_answer() {
+    let (config_path, cwd, data_dir) = setup("question-answer");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd).await;
+
+    let request_id = wait_question(&agent, &events, &session_id).await;
+    agent
+        .ops
+        .send(Op::QuestionReply {
+            request_id,
+            answers: Some(vec![vec!["方案 A".to_string()], vec!["要".to_string()]]),
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    assert!(
+        collected.iter().any(|e| matches!(
+            e,
+            Event::ToolCallEnd { output, is_error: false, .. }
+                if output.contains("用户已回答")
+                    && output.contains("方案 A")
+                    && output.contains("需要跑测试吗：要")
+        )),
+        "工具输出应含两题答案: {collected:#?}"
+    );
+    assert!(
+        collected.iter().any(|e| matches!(
+            e,
+            Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_Q_MARKER)
+        )),
+        "最终文本应含 marker: {collected:#?}"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_user_question_skip() {
+    let (config_path, cwd, data_dir) = setup("question-skip");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd).await;
+
+    let request_id = wait_question(&agent, &events, &session_id).await;
+    agent
+        .ops
+        .send(Op::QuestionReply {
+            request_id,
+            answers: None,
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    assert!(
+        collected.iter().any(|e| matches!(
+            e,
+            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("自行决定")
+        )),
+        "跳过应提示自行决定: {collected:#?}"
+    );
+    agent.shutdown();
+}

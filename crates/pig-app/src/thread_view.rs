@@ -128,6 +128,9 @@ pub struct ThreadView {
     messages: Vec<ChatMessage>,
     item_index: HashMap<String, usize>,
     scroll_handle: ScrollHandle,
+    /// 跟随模式：输出时自动贴底。用户上翻暂停跟随（浮出「最新消息」按钮），
+    /// 回到底部（任意方式）或点击浮钮后恢复
+    follow_bottom: bool,
     streaming: bool,
     context_usage: Option<(u64, u64)>,
     /// 计划模式回合完成，等待用户确认执行
@@ -166,6 +169,7 @@ impl ThreadView {
             messages: vec![],
             item_index: HashMap::new(),
             scroll_handle: ScrollHandle::new(),
+            follow_bottom: true,
             streaming: false,
             context_usage: None,
             plan_pending: false,
@@ -179,6 +183,18 @@ impl ThreadView {
     fn set_streaming(&mut self, streaming: bool, _cx: &mut Context<Self>) {
         self.streaming = streaming;
         self.turn_started = streaming.then(std::time::Instant::now);
+    }
+
+    /// 当前是否已在底部（offset.y ∈ [-max.y, 0]，距底 = offset.y + max.y）
+    fn at_bottom(&self) -> bool {
+        self.scroll_handle.offset().y + self.scroll_handle.max_offset().y <= px(2.)
+    }
+
+    /// 输出期自动滚动：仅跟随模式贴底；用户上翻后不打扰
+    fn auto_scroll(&mut self) {
+        if self.follow_bottom {
+            self.scroll_handle.scroll_to_bottom();
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -222,19 +238,22 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         self.messages.push(ChatMessage::user(text, files));
-        self.scroll_handle.scroll_to_bottom();
+        // 用户自己发消息：强制回到底部并恢复跟随
+        self.follow_bottom = true;
+        self.auto_scroll();
         cx.notify();
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         self.item_index.clear();
+        self.follow_bottom = true;
         cx.notify();
     }
 
     pub fn add_system_note(&mut self, text: &str, cx: &mut Context<Self>) {
         self.messages.push(ChatMessage::system(text.to_string()));
-        self.scroll_handle.scroll_to_bottom();
+        self.auto_scroll();
         cx.notify();
     }
 
@@ -278,6 +297,16 @@ impl ThreadView {
             }
         }
         (tool_done, text, thinking, tool_output)
+    }
+
+    /// 任意消息中是否出现过某工具的工具卡（自测用）。
+    pub fn debug_has_tool_call(&self, tool: &str) -> bool {
+        self.messages.iter().any(|m| {
+            m.segments.iter().any(|s| match s {
+                Segment::ToolCall { tool: name, .. } => name == tool,
+                _ => false,
+            })
+        })
     }
 
     /// 当前待审批的 request_id（自测用）。
@@ -360,7 +389,7 @@ impl ThreadView {
                 if let Some(Segment::Thinking { text, .. }) = self.current_segment(six) {
                     text.push_str(&delta);
                 }
-                self.scroll_handle.scroll_to_bottom();
+                self.auto_scroll();
             }
             Event::TextDelta { item_id, delta, .. } => {
                 self.finish_thinking();
@@ -374,7 +403,7 @@ impl ThreadView {
                     let delta = delta.clone();
                     state.update(cx, |state, cx| state.push_str(&delta, cx));
                 }
-                self.scroll_handle.scroll_to_bottom();
+                self.auto_scroll();
             }
             Event::TextDone {
                 item_id, full_text, ..
@@ -411,7 +440,7 @@ impl ThreadView {
                     *tool = tool.clone();
                     *summary = input_summary;
                 }
-                self.scroll_handle.scroll_to_bottom();
+                self.auto_scroll();
             }
             Event::ToolCallEnd {
                 item_id,
@@ -448,7 +477,7 @@ impl ThreadView {
                         *expanded = true;
                     }
                 }
-                self.scroll_handle.scroll_to_bottom();
+                self.auto_scroll();
             }
             Event::ApprovalRequested { request_id, .. } => {
                 self.finish_thinking();
@@ -467,7 +496,7 @@ impl ThreadView {
                         request_id,
                         decision: None,
                     });
-                self.scroll_handle.scroll_to_bottom();
+                self.auto_scroll();
             }
             Event::ContextUsage { used, total, .. } => {
                 self.context_usage = Some((used, total));
@@ -535,7 +564,7 @@ impl ThreadView {
                             open: false,
                         });
                 }
-                self.scroll_handle.scroll_to_bottom();
+                self.auto_scroll();
             }
             Event::FileChanged { .. } | Event::FileReverted { .. } => {}
             Event::UserMessage { text, files, .. } => {
@@ -558,6 +587,7 @@ impl ThreadView {
             | Event::ContextCompacted { .. }
             | Event::TodoListChanged { .. }
             | Event::TaskListChanged { .. }
+            | Event::QuestionRequested { .. }
             | Event::GitInfo { .. }
             | Event::BranchChanged { .. }
             | Event::GitStatus { .. }
@@ -764,7 +794,7 @@ impl ThreadView {
                     // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
                     div()
                         .relative()
-                        .on_scroll_wheel(scroll_chain(body_scroll))
+                        .on_scroll_wheel(consume_scroll(body_scroll))
                         .child(
                             div()
                                 .id(("thinking-body", message_ix * 1024 + segment_ix))
@@ -820,6 +850,7 @@ impl ThreadView {
             "Grep" => AssetIconName::TextSearch,
             "TodoList" => AssetIconName::ListTodo,
             "FetchURL" => AssetIconName::Globe,
+            "AskUserQuestion" => AssetIconName::MessageCircleQuestionMark,
             _ => AssetIconName::Wrench,
         };
         let kind_label = match tool {
@@ -832,6 +863,7 @@ impl ThreadView {
             "TodoList" => "待办",
             "FetchURL" => "抓取网页",
             "TaskList" | "TaskOutput" | "TaskStop" => "后台任务",
+            "AskUserQuestion" => "提问",
             _ => tool,
         };
         // 摘要压成单行：多行命令的换行折叠为空格（否则折叠行会被撑成多行）
@@ -986,7 +1018,7 @@ impl ThreadView {
                         .mt_2()
                         .w_full()
                         // 滚动链：正文能滚时吞掉滚轮，避免外层消息列表联动
-                        .on_scroll_wheel(scroll_chain(body_scroll))
+                        .on_scroll_wheel(consume_scroll(body_scroll))
                         // 编辑类工具展开为内联 diff 代码卡；其余工具是通用输入+输出卡
                         .child(if let Some(edit) = edit {
                             Self::render_edit_diff(
@@ -1295,7 +1327,7 @@ impl ThreadView {
                         this.child(
                             div()
                                 .relative()
-                                .on_scroll_wheel(scroll_chain(&row.scroll))
+                                .on_scroll_wheel(consume_scroll(&row.scroll))
                                 .child(Self::render_edit_diff(
                                     ("turn-diff", (message_ix * 1024 + segment_ix) * 512 + rix),
                                     &row.edit,
@@ -1535,16 +1567,35 @@ impl Render for ThreadView {
             format!("工作中 {working_secs} 秒")
         };
 
+        // 回到底部（滚轮/拖滚动条/键盘任意方式）自动恢复跟随
+        if !self.follow_bottom && self.at_bottom() {
+            self.follow_bottom = true;
+        }
+
         v_flex()
             .size_full()
             .child(
                 div()
-                    .id("message-list")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
                     .child(
+                        div()
+                            .id("message-list")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll_handle)
+                            // 用户上翻：暂停跟随并浮出「最新消息」按钮（不吞事件，列表照常滚动）
+                            .on_scroll_wheel(cx.listener(
+                                |this, event: &ScrollWheelEvent, window, cx| {
+                                    let delta = event.delta.pixel_delta(window.line_height());
+                                    if delta.y > px(0.) && this.follow_bottom {
+                                        this.follow_bottom = false;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .child(
                         v_flex()
                             .w_full()
                             .max_w(px(860.))
@@ -1583,7 +1634,43 @@ impl Render for ThreadView {
                                         ),
                                 )
                             }),
-                    ),
+                        ),
+                    )
+                    // 未跟随时浮出「最新消息」按钮：点击回到底部并恢复跟随
+                    .when(!self.follow_bottom, |this| {
+                        this.child(
+                            h_flex()
+                                .absolute()
+                                .bottom_4()
+                                .left_0()
+                                .right_0()
+                                .justify_center()
+                                .child(
+                                    h_flex()
+                                        .id("latest-fab")
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_full()
+                                        .bg(cx.theme().popover)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .shadow_md()
+                                        .child(
+                                            Icon::new(AssetIconName::ArrowDown)
+                                                .size_4()
+                                                .text_color(cx.theme().foreground),
+                                        )
+                                        .child(div().text_sm().child("最新消息"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.follow_bottom = true;
+                                            this.scroll_handle.scroll_to_bottom();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    }),
             )
             .when(!self.queued.is_empty(), |this| {
                 this.child(
@@ -1642,20 +1729,10 @@ fn split_path(path: &str) -> (String, String) {
     }
 }
 
-/// 滚动链（浏览器式 scroll chaining）：滚轮落在展开正文上时，正文在本方向还能滚
-/// 就吞掉事件（这版 gpui 的内置滚动监听不阻断冒泡，不吞的话外层消息列表会联动）；
-/// 正文到顶/到底后放行，外层列表接管。
-fn scroll_chain(handle: &ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
-    let handle = handle.clone();
-    move |event, window, cx| {
-        let delta = event.delta.pixel_delta(window.line_height());
-        let offset = handle.offset();
-        let max = handle.max_offset();
-        // 向下滚 delta.y<0（offset 趋向 -max）；向上滚 delta.y>0（offset 趋向 0）
-        let can_scroll = (delta.y < px(0.) && offset.y > -max.y)
-            || (delta.y > px(0.) && offset.y < px(0.));
-        if can_scroll {
-            cx.stop_propagation();
-        }
+/// 不滚动穿透：滚轮落在展开正文上一律吞掉（这版 gpui 的内置滚动监听不阻断冒泡，
+/// 不吞的话外层消息列表会联动）；到顶/到底也不放行给外层。
+fn consume_scroll(_handle: &ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    move |_, _, cx| {
+        cx.stop_propagation();
     }
 }

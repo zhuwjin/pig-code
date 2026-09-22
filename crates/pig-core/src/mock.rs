@@ -24,6 +24,11 @@ pub const TODO_SCENARIO_TRIGGER: &str = "TODO_SCENARIO";
 pub const TODO_SCENARIO_MARKER: &str = "MOCK_TODO_OK";
 pub const TODO_SCENARIO_ITEM: &str = "持久化待办项";
 
+/// AskUserQuestion 场景：含此标记且无工具结果 → AskUserQuestion 调用（1 题 2 选项）；
+/// 有工具结果 → 文本含 marker。
+pub const SCENARIO_Q_TRIGGER: &str = "SCENARIO_Q";
+pub const MOCK_Q_MARKER: &str = "MOCK_QUESTION_OK";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -75,7 +80,11 @@ fn sse_chunk(delta: serde_json::Value, finish_reason: Option<&str>) -> String {
 }
 
 fn tool_call_chunks(call_id: &str, name: &str, arguments: &str) -> Vec<String> {
-    let half = arguments.len() / 2;
+    // 分片点在字符边界上取（中文参数被切到多字节字符中间会 panic）
+    let mut half = arguments.len() / 2;
+    while !arguments.is_char_boundary(half) {
+        half += 1;
+    }
     vec![
         sse_chunk(
             serde_json::json!({"tool_calls": [{
@@ -210,6 +219,51 @@ fn todo_scenario_response(body: &str) -> Vec<String> {
             &serde_json::json!({"todos": [
                 {"content": format!("{TODO_SCENARIO_ITEM}一"), "status": "done"},
                 {"content": format!("{TODO_SCENARIO_ITEM}二"), "status": "in_progress"}
+            ]})
+            .to_string(),
+        )
+    }
+}
+
+/// AskUserQuestion 场景：历史里还没有 AskUserQuestion 调用 → 提问；已执行 → 文本收尾。
+///（同 TodoList 场景：直接扫 messages，不能按全局 tool 结果计数）
+fn question_scenario_response(body: &str) -> Vec<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let called = parsed["messages"].as_array().is_some_and(|msgs| {
+        msgs.iter().any(|m| {
+            m["tool_calls"].as_array().is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|c| c["function"]["name"].as_str() == Some("AskUserQuestion"))
+            })
+        })
+    });
+    if called {
+        vec![
+            sse_chunk(serde_json::json!({"content": MOCK_Q_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ]
+    } else {
+        tool_call_chunks(
+            "call_q_1",
+            "AskUserQuestion",
+            &serde_json::json!({"questions": [
+                {
+                    "question": "选择实现方案",
+                    "header": "方案",
+                    "options": [
+                        {"label": "方案 A", "description": "简单直接"},
+                        {"label": "方案 B", "description": "更完善但复杂"}
+                    ]
+                },
+                {
+                    "question": "需要跑测试吗",
+                    "header": "测试",
+                    "options": [
+                        {"label": "要", "description": "改完跑一遍"},
+                        {"label": "不要", "description": "先不跑"}
+                    ]
+                }
             ]})
             .to_string(),
         )
@@ -418,6 +472,8 @@ async fn handle_connection(
         scenario_c_response()
     } else if body.contains(TODO_SCENARIO_TRIGGER) {
         todo_scenario_response(&body)
+    } else if body.contains(SCENARIO_Q_TRIGGER) {
+        question_scenario_response(&body)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {
@@ -448,7 +504,11 @@ fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str
         "content_block_start",
         serde_json::json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": id, "name": name}}),
     ));
-    let half = arguments.len() / 2;
+    // 分片点在字符边界上取（中文参数被切到多字节字符中间会 panic）
+    let mut half = arguments.len() / 2;
+    while !arguments.is_char_boundary(half) {
+        half += 1;
+    }
     out.push(a_sse(
         "content_block_delta",
         serde_json::json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": &arguments[..half]}}),
@@ -468,6 +528,9 @@ fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str
 fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     if body.contains(SCENARIO_B_TRIGGER) {
         return anthropic_scenario_b(tool_results);
+    }
+    if body.contains(SCENARIO_Q_TRIGGER) {
+        return anthropic_question_scenario(tool_results);
     }
     let mut out = vec![a_sse(
         "message_start",
@@ -492,9 +555,12 @@ fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     ));
 
     if tool_results == 0 {
-        // Read 工具调用，arguments 分片
+        // Read 工具调用，arguments 分片（分片点取字符边界）
         let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
-        let half = arguments.len() / 2;
+        let mut half = arguments.len() / 2;
+        while !arguments.is_char_boundary(half) {
+            half += 1;
+        }
         out.push(a_sse(
             "content_block_start",
             serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_mock_1", "name": "Read"}}),
@@ -575,6 +641,54 @@ fn anthropic_scenario_b(tool_results: usize) -> Vec<String> {
     out.push(a_sse(
         "message_delta",
         serde_json::json!({"type": "message_delta", "delta": {"stop_reason": if tool_results >= 3 { "end_turn" } else { "tool_use" }}, "usage": {"output_tokens": 42}}),
+    ));
+    out
+}
+
+/// Anthropic 版 AskUserQuestion 场景：无 tool_result → 提问工具调用；否则文本含 marker。
+fn anthropic_question_scenario(tool_results: usize) -> Vec<String> {
+    let mut out = vec![a_sse(
+        "message_start",
+        serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 100}}}),
+    )];
+    if tool_results == 0 {
+        let arguments = serde_json::json!({"questions": [
+            {
+                "question": "选择实现方案",
+                "header": "方案",
+                "options": [
+                    {"label": "方案 A", "description": "简单直接"},
+                    {"label": "方案 B", "description": "更完善但复杂"}
+                ]
+            },
+            {
+                "question": "需要跑测试吗",
+                "header": "测试",
+                "options": [
+                    {"label": "要", "description": "改完跑一遍"},
+                    {"label": "不要", "description": "先不跑"}
+                ]
+            }
+        ]})
+        .to_string();
+        anthropic_tool_call(&mut out, 0, "call_q_1", "AskUserQuestion", &arguments);
+    } else {
+        out.push(a_sse(
+            "content_block_start",
+            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+        ));
+        out.push(a_sse(
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": MOCK_Q_MARKER}}),
+        ));
+        out.push(a_sse(
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+        ));
+    }
+    out.push(a_sse(
+        "message_delta",
+        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": if tool_results == 0 { "tool_use" } else { "end_turn" }}, "usage": {"output_tokens": 20}}),
     ));
     out
 }

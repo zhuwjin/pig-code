@@ -124,6 +124,13 @@ impl AgentClient {
         });
     }
 
+    pub fn question_reply(&self, request_id: String, answers: Option<Vec<Vec<String>>>) {
+        self.send(Op::QuestionReply {
+            request_id,
+            answers,
+        });
+    }
+
     pub fn search_files(&self, session_id: String, query: String) {
         self.send(Op::SearchFiles { session_id, query });
     }

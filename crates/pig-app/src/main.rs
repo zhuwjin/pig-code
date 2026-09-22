@@ -57,7 +57,7 @@ impl RelativeTime for u64 {
 }
 
 use crate::agent_client::AgentClient;
-use crate::composer::{Composer, ComposerEvent, PendingApproval};
+use crate::composer::{Composer, ComposerEvent, PendingApproval, PendingQuestion};
 use crate::review_panel::{ReviewEvent, ReviewPanel};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
@@ -78,6 +78,8 @@ struct AppView {
     approval_pending: HashSet<String>,
     /// 待审批详情（审批条内容）：决议/回合结束时清除
     pending_approvals: HashMap<String, PendingApproval>,
+    /// 待回答的结构化提问（问题条内容）：提交/跳过/回合结束时清除
+    pending_questions: HashMap<String, PendingQuestion>,
     stats: HashMap<String, (u32, u32)>,
     /// 各会话的 TodoList/后台任务快照（core 推送缓存，切会话时同步给 composer）
     todos_by_session: HashMap<String, Vec<pig_protocol::TodoItem>>,
@@ -132,6 +134,7 @@ impl AppView {
             running: HashSet::new(),
             approval_pending: HashSet::new(),
             pending_approvals: HashMap::new(),
+            pending_questions: HashMap::new(),
             stats: HashMap::new(),
             todos_by_session: HashMap::new(),
             tasks_by_session: HashMap::new(),
@@ -226,6 +229,7 @@ impl AppView {
         self.running.clear();
         self.approval_pending.clear();
         self.pending_approvals.clear();
+        self.pending_questions.clear();
         self.stats.clear();
         self._agent_handle = handle;
         self.spawn_event_pump(self._agent_handle.events.clone(), cx);
@@ -566,6 +570,7 @@ impl AppView {
                     self.running.remove(sid);
                     self.approval_pending.remove(sid);
                     self.pending_approvals.remove(sid);
+                    self.pending_questions.remove(sid);
                 }
                 Event::ApprovalRequested { tool, detail, .. } => {
                     self.approval_pending.insert(sid.clone());
@@ -584,10 +589,24 @@ impl AppView {
                         },
                     );
                 }
+                Event::QuestionRequested {
+                    request_id,
+                    questions,
+                    ..
+                } => {
+                    self.pending_questions.insert(
+                        sid.clone(),
+                        PendingQuestion {
+                            request_id: request_id.clone(),
+                            questions: questions.clone(),
+                        },
+                    );
+                }
                 Event::Error { .. } => {
                     self.running.remove(sid);
                     self.approval_pending.remove(sid);
                     self.pending_approvals.remove(sid);
+                    self.pending_questions.remove(sid);
                 }
                 _ => {}
             }
@@ -645,9 +664,11 @@ impl AppView {
         let Some(sid) = &self.current else { return };
         let streaming = self.running.contains(sid);
         let approval = self.pending_approvals.get(sid).cloned();
+        let question = self.pending_questions.get(sid).cloned();
         self.composer.update(cx, |composer, cx| {
             composer.set_streaming(streaming, cx);
             composer.set_approval(approval, cx);
+            composer.set_question(question, cx);
         });
     }
 
@@ -1054,6 +1075,17 @@ impl AppView {
                     });
                 }
             }
+            ComposerEvent::QuestionReply {
+                request_id,
+                answers,
+            } => {
+                // 提交/跳过后立即撤掉问题条（不等回合结束），恢复输入框
+                if let Some(sid) = &self.current {
+                    self.pending_questions.remove(sid);
+                }
+                self.agent.question_reply(request_id.clone(), answers.clone());
+                self.sync_composer_state(cx);
+            }
             ComposerEvent::SearchFiles(query) => {
                 if let Some(sid) = &self.current {
                     self.agent.search_files(sid.clone(), query.clone());
@@ -1335,6 +1367,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::ContextUsage { session_id, .. }
         | Event::ContextCompacted { session_id, .. }
         | Event::ApprovalRequested { session_id, .. }
+        | Event::QuestionRequested { session_id, .. }
         | Event::FileChanged { session_id, .. }
         | Event::FileReverted { session_id, .. }
         | Event::TurnComplete { session_id, .. }
@@ -2039,6 +2072,94 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     }
     assert_eq!(approvals, 1, "AutoEdit 下仅 Bash 审批");
     println!("[selftest] Anthropic 供应商端到端 OK");
+
+    // AskUserQuestion：会话 E 走 SCENARIO_Q → 问题条出现 → 选选项 → 提交 → marker + 工具卡
+    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
+    let session_e = loop {
+        timer!(200).await;
+        let current = app!(|app: &mut AppView, _| app.current.clone());
+        if let Some(id) = current {
+            if id != session_a && id != session_b && id != session_c && id != session_d {
+                break id;
+            }
+        }
+    };
+    app!(|app: &mut AppView, _| {
+        app.agent.send_message(
+            session_e.clone(),
+            format!("{} 帮我决定实现方案", pig_core::mock::SCENARIO_Q_TRIGGER),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    // 等问题条出现（问题与审批互斥，问题优先，AutoEdit 下 AskUserQuestion 免审批）
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 30_000, "问题条出现超时");
+        let has = app!(|app: &mut AppView, cx| {
+            app.composer.read(cx).debug_question().is_some()
+        });
+        if has {
+            break;
+        }
+    }
+    println!("[selftest] AskUserQuestion 问题条出现 OK");
+    // 向导分页：第 1 题选「方案 A」→ 下一题 → 第 2 题选「要」→ 提交
+    let q1 = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_question());
+    assert_eq!(q1.as_deref(), Some("选择实现方案"), "首题题干: {q1:?}");
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |composer, cx| {
+            composer.debug_select_question_option(0, 0, cx);
+            composer.debug_next_question_page(cx);
+        });
+    });
+    let q2 = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_question());
+    assert_eq!(q2.as_deref(), Some("需要跑测试吗"), "翻页后应显示第 2 题: {q2:?}");
+    println!("[selftest] AskUserQuestion 翻页 OK");
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |composer, cx| {
+            composer.debug_select_question_option(1, 0, cx);
+            composer.debug_submit_question(cx);
+        });
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 30_000, "AskUserQuestion 回合超时");
+        let done = app!(|app: &mut AppView, cx| {
+            let views = app.views.get(&session_e)?;
+            let thread = views.thread.read(cx);
+            let (tool_done, text, _, tool_output) = thread.debug_last_assistant();
+            if !thread.is_streaming() && waited > 1000 && tool_done {
+                assert!(
+                    text.contains(pig_core::mock::MOCK_Q_MARKER),
+                    "E 文本标记: {text}"
+                );
+                return Some(tool_output);
+            }
+            None
+        });
+        if let Some(tool_output) = done {
+            assert!(
+                tool_output.contains("方案 A"),
+                "工具输出应含第 1 题答案: {tool_output}"
+            );
+            assert!(
+                tool_output.contains("需要跑测试吗：要"),
+                "工具输出应含第 2 题答案: {tool_output}"
+            );
+            break;
+        }
+    }
+    let has_card = app!(|app: &mut AppView, cx| {
+        let views = app.views.get(&session_e)?;
+        Some(views.thread.read(cx).debug_has_tool_call("AskUserQuestion"))
+    });
+    assert_eq!(has_card, Some(true), "工具卡应显示 AskUserQuestion");
+    println!("[selftest] AskUserQuestion 提问场景 OK");
 
     println!("SELFTEST PASS");
     std::process::exit(0);

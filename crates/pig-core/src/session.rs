@@ -23,6 +23,11 @@ use crate::{prompt, provider, tool};
 /// request_id 带 session_id 前缀，全局唯一。
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
 
+/// 等待中的结构化提问：request_id → 回执通道。None = 用户跳过；
+/// 外层按题、内层为该题选中标签（"其他"自由文本作为标签原样放入）。
+pub type PendingQuestions =
+    Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<Vec<String>>>>>>>;
+
 /// 会话级模型覆盖（SetModel）
 #[derive(Clone, Debug, Default)]
 pub struct ModelSelection {
@@ -99,6 +104,7 @@ pub struct Session {
     state: crate::task::SessionToolState,
     always_allowed: HashSet<String>,
     pending: PendingApprovals,
+    pending_questions: PendingQuestions,
     mode: ExecMode,
     model_override: Option<ModelSelection>,
     rollout: Option<Rollout>,
@@ -120,6 +126,7 @@ impl Session {
     pub fn create(
         meta: SessionMeta,
         pending: PendingApprovals,
+        pending_questions: PendingQuestions,
         store: Arc<Mutex<Store>>,
         sessions_dir: &Path,
         data_dir: PathBuf,
@@ -136,6 +143,7 @@ impl Session {
             state: crate::task::SessionToolState::new(meta.id, task_notify),
             always_allowed: HashSet::new(),
             pending,
+            pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
             model_override: None,
             rollout: Some(rollout),
@@ -153,6 +161,7 @@ impl Session {
         id: &str,
         sessions_dir: &Path,
         pending: PendingApprovals,
+        pending_questions: PendingQuestions,
         store: Arc<Mutex<Store>>,
         data_dir: PathBuf,
         task_notify: tokio::sync::mpsc::UnboundedSender<String>,
@@ -184,6 +193,7 @@ impl Session {
             state: crate::task::SessionToolState::new(id.to_string(), task_notify),
             always_allowed: HashSet::new(),
             pending,
+            pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
             model_override: None,
             rollout: None,
@@ -855,6 +865,108 @@ impl Session {
                 continue;
             }
 
+            // AskUserQuestion：结构化提问在会话层拦截执行（工具本身只注册 schema）。
+            // read_only，无需审批；Esc 跳过（None）不算错误。
+            if call.name == "AskUserQuestion" {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_default();
+                let questions = match tool::parse_questions(&args) {
+                    Ok(questions) => questions,
+                    Err(error) => {
+                        let note = format!("AskUserQuestion 参数非法: {error}");
+                        self.history.push(ChatMsg::tool_result(&call.id, note.clone()));
+                        self.record(&RolloutRecord::ToolCall {
+                            tool: call.name.clone(),
+                            summary,
+                            arguments: call.arguments.clone(),
+                            output: note.clone(),
+                            is_error: true,
+                            edit: None,
+                        });
+                        self.emit(
+                            |session_id, seq| Event::ToolCallEnd {
+                                session_id,
+                                seq,
+                                item_id,
+                                output: note,
+                                is_error: true,
+                                edit: None,
+                            },
+                            tx,
+                        );
+                        continue;
+                    }
+                };
+                let request_id = format!("{}-{turn_id}-question-{item_id}", self.id);
+                let (reply_tx, reply_rx) = oneshot::channel();
+                self.pending_questions
+                    .lock()
+                    .expect("pending questions lock")
+                    .insert(request_id.clone(), reply_tx);
+                self.emit(
+                    |session_id, seq| Event::QuestionRequested {
+                        session_id,
+                        seq,
+                        request_id: request_id.clone(),
+                        questions: questions.clone(),
+                    },
+                    tx,
+                );
+                let reply = tokio::select! {
+                    // sender 被 drop（回复方消失）按跳过处理
+                    reply = reply_rx => reply.unwrap_or(None),
+                    _ = cancel.cancelled() => {
+                        self.pending_questions
+                            .lock()
+                            .expect("pending questions lock")
+                            .remove(&request_id);
+                        self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
+                        return StepOutcome::Ended;
+                    }
+                };
+                let note = match &reply {
+                    Some(answers) => {
+                        let mut text = "用户已回答：\n".to_string();
+                        for (ix, question) in questions.iter().enumerate() {
+                            let labels = answers
+                                .get(ix)
+                                .map(|labels| labels.join("、"))
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "（未选择）".to_string());
+                            text.push_str(&format!(
+                                "{}. {}：{}\n",
+                                ix + 1,
+                                question.question,
+                                labels
+                            ));
+                        }
+                        text
+                    }
+                    None => "用户选择不回答，请根据上下文自行决定并继续。".to_string(),
+                };
+                self.history.push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.record(&RolloutRecord::ToolCall {
+                    tool: call.name.clone(),
+                    summary,
+                    arguments: call.arguments.clone(),
+                    output: note.clone(),
+                    is_error: false,
+                    edit: None,
+                });
+                self.emit(
+                    |session_id, seq| Event::ToolCallEnd {
+                        session_id,
+                        seq,
+                        item_id,
+                        output: note,
+                        is_error: false,
+                        edit: None,
+                    },
+                    tx,
+                );
+                continue;
+            }
+
             if tool_ref.is_some_and(|t| tool::requires_approval(t.as_ref(), self.mode))
                 && !self.always_allowed.contains(call.name.as_str())
             {
@@ -1180,6 +1292,7 @@ pub async fn agent_loop(
         Store::open(&data_dir).unwrap_or_else(|e| panic!("store 初始化失败: {e}")),
     ));
     let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: PendingQuestions = Arc::new(Mutex::new(HashMap::new()));
 
     let mut seq = 0u64;
     macro_rules! emit_global {
@@ -1245,7 +1358,7 @@ pub async fn agent_loop(
                                 seed.as_ref().map(|m| m.exec_mode).unwrap_or_default()
                             }),
                         };
-                        match Session::create(meta.clone(), pending.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
+                        match Session::create(meta.clone(), pending.clone(), pending_questions.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
                             Ok(mut session) => {
                                 session.set_mode(meta.exec_mode);
                                 let selection = meta_to_selection(&meta);
@@ -1309,7 +1422,7 @@ pub async fn agent_loop(
                             }
                             continue;
                         }
-                        match Session::load(&session_id, &sessions_dir, pending.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone()) {
+                        match Session::load(&session_id, &sessions_dir, pending.clone(), pending_questions.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone()) {
                             Ok((mut session, records)) => {
                                 // 恢复持久化的模式/模型覆盖（meta 由 Set* 写穿保持最新）
                                 let meta = store.lock().expect("store lock").get_session(&session_id);
@@ -1530,6 +1643,11 @@ pub async fn agent_loop(
                     Op::ApprovalReply { request_id, decision } => {
                         if let Some(reply) = pending.lock().expect("pending lock").remove(&request_id) {
                             let _ = reply.send(decision);
+                        }
+                    }
+                    Op::QuestionReply { request_id, answers } => {
+                        if let Some(reply) = pending_questions.lock().expect("pending questions lock").remove(&request_id) {
+                            let _ = reply.send(answers);
                         }
                     }
                     Op::SetExecMode { session_id, mode } => {

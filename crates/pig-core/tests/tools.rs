@@ -463,3 +463,41 @@ async fn background_bash_task_lifecycle() {
     assert!(!is_error, "{out}");
     assert!(out.contains(&task1) && out.contains(&task2), "{out}");
 }
+
+#[test]
+fn parse_questions_validates_shape() {
+    // 正常：单选 1 题（header/description）+ 多选 1 题
+    let questions = tool::parse_questions(&serde_json::json!({"questions": [
+        {"question": "选方案", "header": "方案", "options": [{"label": "A"}, {"label": "B", "description": "备选"}]},
+        {"question": "选范围", "multi_select": true, "options": [{"label": "x"}, {"label": "y"}, {"label": "z"}]},
+    ]}))
+    .expect("合法参数");
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0].question, "选方案");
+    assert_eq!(questions[0].header.as_deref(), Some("方案"));
+    assert!(!questions[0].multi_select);
+    assert_eq!(questions[0].options.len(), 2);
+    assert_eq!(questions[0].options[1].description.as_deref(), Some("备选"));
+    assert!(questions[1].multi_select);
+    assert_eq!(questions[1].options.len(), 3);
+
+    // 题数越界：0 题 / 5 题
+    assert!(tool::parse_questions(&serde_json::json!({"questions": []})).is_err());
+    let five = serde_json::json!({"questions": (0..5)
+        .map(|i| serde_json::json!({"question": format!("q{i}"), "options": [{"label": "a"}, {"label": "b"}]}))
+        .collect::<Vec<_>>()});
+    assert!(tool::parse_questions(&five).is_err());
+
+    // 选项数越界：1 个 / 5 个
+    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q", "options": [{"label": "a"}]}]})).is_err());
+    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q", "options": [
+        {"label": "1"}, {"label": "2"}, {"label": "3"}, {"label": "4"}, {"label": "5"}
+    ]}]}))
+    .is_err());
+
+    // 空 label / 空 question / 缺 options / 缺 questions
+    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q", "options": [{"label": " "}, {"label": "b"}]}]})).is_err());
+    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": " ", "options": [{"label": "a"}, {"label": "b"}]}]})).is_err());
+    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q"}]})).is_err());
+    assert!(tool::parse_questions(&serde_json::json!({})).is_err());
+}

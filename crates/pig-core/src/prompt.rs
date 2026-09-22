@@ -45,6 +45,7 @@ pub fn system_prompt(
          - 读文件/搜索优先用 Read、Glob、Grep 专用工具，而非 Bash。\n\
          - 多步任务先用 TodoList 拆分并随时更新进度。\n\
          - 长时命令（dev server/watch/长构建）用 Bash 的 run_in_background，配合 TaskOutput 查输出。\n\
+         - 需要用户拍板时用 AskUserQuestion 给出选项，而不是纯文本提问。\n\
          - 回答简洁，代码用 Markdown 代码块给出。\n",
         cwd.display(),
         std::env::consts::OS,
@@ -84,7 +85,8 @@ pub fn system_prompt(
              - FetchURL: 抓取公开网页并提取正文（不支持需登录页面）。\n\
              - TaskList: 列出后台 Bash 任务（id、状态、耗时）。\n\
              - TaskOutput: 查看后台任务输出（尾部节选）。\n\
-             - TaskStop: 停止仍在运行的后台任务。\n\n\
+             - TaskStop: 停止仍在运行的后台任务。\n\
+             - AskUserQuestion: 需要用户决策时给出 1-4 个结构化问题（每题 2-4 选项）让用户选择。\n\n\
              需要了解文件内容或验证改动时主动调用工具，拿到结果后再回答。\n",
         );
     }
