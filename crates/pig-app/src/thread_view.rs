@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::{Scrollbar, SelectableText, TextSelectionHandle};
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
-use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::{ApprovalDecision, EditDiff, Event};
@@ -49,10 +49,7 @@ pub enum Segment {
         body_scroll: ScrollHandle,
     },
     /// 一轮结束时的本轮文件改动面板（ZCode turn 头部文件更改同款）
-    TurnChanges {
-        rows: Vec<TurnFileRow>,
-        open: bool,
-    },
+    TurnChanges { rows: Vec<TurnFileRow>, open: bool },
     Approval {
         request_id: String,
         decision: Option<ApprovalDecision>,
@@ -756,7 +753,11 @@ impl ThreadView {
                         }
                         cx.notify();
                     }))
-                    .child(Icon::new(AssetIconName::Brain).size_4().text_color(subtlest))
+                    .child(
+                        Icon::new(AssetIconName::Brain)
+                            .size_4()
+                            .text_color(subtlest),
+                    )
                     // 思考进行中：shimmer 扫过高亮；id 必须稳定（文案每秒变，默认动画
                     // id 取文案会导致扫光每秒重启）
                     .child(if in_progress {
@@ -914,10 +915,10 @@ impl ThreadView {
                         )
                     })
                     // 编辑类：文件名（亮一档）+ 目录路径（最暗，优先截断）；其余工具单行摘要
+                    // 摘要只占内容宽（过长时收缩截断），让统计/箭头跟在文字后面而非靠右
                     .child(if edit.is_some() {
                         let (dir, name) = split_path(summary);
                         h_flex()
-                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -931,7 +932,6 @@ impl ThreadView {
                             )
                             .child(
                                 div()
-                                    .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
@@ -943,7 +943,6 @@ impl ThreadView {
                             .into_any_element()
                     } else {
                         div()
-                            .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -986,12 +985,7 @@ impl ThreadView {
                         )
                     })
                     .when(done && is_error, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().danger)
-                                .child("失败"),
-                        )
+                        this.child(div().text_xs().text_color(cx.theme().danger).child("失败"))
                     })
                     // 箭头默认隐藏，行悬停或展开时显示（保持行内干净）
                     .child(
@@ -1080,15 +1074,60 @@ impl ThreadView {
                                 )
                                 .into_any_element()
                         })
-                        .child(Scrollbar::vertical(body_scroll)),
+                        // diff 卡的滚动条已内置（随圆角补丁收角）；通用卡的补在这里
+                        .when(edit.is_none(), |this| {
+                            this.child(Scrollbar::vertical(body_scroll))
+                        }),
                 )
             })
             .into_any_element()
     }
 
+    /// 给圆角卡片补四角：填充每个角落的"R×R 方形 − 半径 R 的四分之一圆"区域
+    /// （圆角缺口）。gpui 的 ContentMask 只有矩形裁剪，行底色/色条/滚动条
+    /// 都会越过圆角描边；用卡片**背后**的颜色补上缺口后，内容在视觉上
+    /// 即被圆角收住，不出框。曲线用二次贝塞尔逼近四分之一圆（控制点取外角，
+    /// 偏差 <0.5px）。调用方需在此之后再描一次圆角边框（补丁盖住了角上的描边）。
+    fn paint_rounded_corner_patches(
+        bounds: Bounds<Pixels>,
+        radius: Pixels,
+        color: Hsla,
+        window: &mut Window,
+    ) {
+        let r = radius;
+        let w = bounds.size.width;
+        let h = bounds.size.height;
+        let mut path = PathBuilder::fill();
+        // 左上
+        path.move_to(point(px(0.), px(0.)));
+        path.line_to(point(r, px(0.)));
+        path.curve_to(point(px(0.), r), point(px(0.), px(0.)));
+        path.close();
+        // 右上
+        path.move_to(point(w, px(0.)));
+        path.line_to(point(w, r));
+        path.curve_to(point(w - r, px(0.)), point(w, px(0.)));
+        path.close();
+        // 左下
+        path.move_to(point(px(0.), h));
+        path.line_to(point(px(0.), h - r));
+        path.curve_to(point(r, h), point(px(0.), h));
+        path.close();
+        // 右下
+        path.move_to(point(w, h));
+        path.line_to(point(w, h - r));
+        path.curve_to(point(w - r, h), point(w, h));
+        path.close();
+        path.translate(bounds.origin);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    }
+
     /// 编辑工具的展开卡片（ZCode LightweightDiffPreview 同款）：圆角描边代码卡，
     /// 无 padding；行号 gutter（新增绿/删除红/其余最暗）+ 增删行淡底色与左缘色条，
-    /// 行号是预览行连续序号（非文件行号），限高内部滚动，超 400 行截断。
+    /// 行号是预览行连续序号（非文件行号），限高内部滚动，超 400 行截断；
+    /// 四角用卡片底色补丁收圆（gpui 内容裁剪仅矩形），滚动条内置随补丁收角。
     fn render_edit_diff(
         id: impl Into<ElementId>,
         edit: &EditDiff,
@@ -1202,20 +1241,49 @@ impl ThreadView {
             );
         }
 
+        let card_bg = cx.theme().secondary;
+        // 卡片背后 = 页面底色（消息区自身透明，与 Root 的 tokens.background 同值）
+        let behind = cx.theme().background;
         div()
-            .id(id)
+            .relative()
             .w_full()
-            .rounded_xl()
-            .border_1()
-            .border_color(border)
-            .bg(cx.theme().secondary)
-            .max_h(px(240.))
-            .overflow_y_scroll()
-            .track_scroll(body_scroll)
-            .text_xs()
-            .line_height(px(19.))
-            .font_family(cx.theme().mono_font_family.clone())
-            .children(rows)
+            .child(
+                div()
+                    .id(id)
+                    .w_full()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(border)
+                    .bg(card_bg)
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .track_scroll(body_scroll)
+                    .text_xs()
+                    .line_height(px(19.))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .children(rows),
+            )
+            // 滚动条收进卡片内部，角上同样被补丁收住
+            .child(Scrollbar::vertical(body_scroll))
+            .child(
+                canvas(
+                    |bounds, window, _| (bounds, rems(0.75).to_pixels(window.rem_size())),
+                    move |bounds, (_, radius), window, _| {
+                        Self::paint_rounded_corner_patches(bounds, radius, behind, window);
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            // 补丁盖住了角上的描边，重描一遍圆角边框
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(border),
+            )
             .into_any_element()
     }
 
@@ -1233,11 +1301,9 @@ impl ThreadView {
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
         let group_id = format!("turn-changes-{message_ix}-{segment_ix}");
-        let (adds, dels) = rows
-            .iter()
-            .fold((0u32, 0u32), |(a, d), r| {
-                (a + r.edit.additions, d + r.edit.deletions)
-            });
+        let (adds, dels) = rows.iter().fold((0u32, 0u32), |(a, d), r| {
+            (a + r.edit.additions, d + r.edit.deletions)
+        });
 
         let mut file_rows: Vec<AnyElement> = Vec::new();
         for (rix, row) in rows.iter().enumerate() {
@@ -1266,11 +1332,7 @@ impl ThreadView {
                                 }
                                 cx.notify();
                             }))
-                            .child(
-                                Icon::new(IconName::FileText)
-                                    .size_4()
-                                    .text_color(subtlest),
-                            )
+                            .child(Icon::new(IconName::FileText).size_4().text_color(subtlest))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -1280,7 +1342,6 @@ impl ThreadView {
                             )
                             .child(
                                 div()
-                                    .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
@@ -1392,7 +1453,6 @@ impl ThreadView {
                                 )
                             }),
                     )
-                    .child(div().flex_1())
                     .child(
                         div()
                             .invisible()
@@ -1441,7 +1501,14 @@ impl ThreadView {
                             body_scroll,
                             ..
                         } => self.render_thinking(
-                            ix, six, text, *open, *started, *duration, body_scroll, cx,
+                            ix,
+                            six,
+                            text,
+                            *open,
+                            *started,
+                            *duration,
+                            body_scroll,
+                            cx,
                         ),
                         Segment::Markdown { state, .. } => TextView::new(state)
                             .selectable(true)
@@ -1596,33 +1663,33 @@ impl Render for ThreadView {
                                 },
                             ))
                             .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(860.))
-                            .mx_auto()
-                            .p_4()
-                            .gap_4()
-                            .children(items)
-                            // 工作中指示：跟在最后一条消息之后，随对话一起滚动
-                            .when(self.streaming, |this| {
-                                this.child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            Spinner::new()
-                                                .icon(AssetIconName::LoaderCircle)
-                                                .color(cx.theme().muted_foreground),
+                                v_flex()
+                                    .w_full()
+                                    .max_w(px(860.))
+                                    .mx_auto()
+                                    .p_4()
+                                    .gap_4()
+                                    .children(items)
+                                    // 工作中指示：跟在最后一条消息之后，随对话一起滚动
+                                    .when(self.streaming, |this| {
+                                        this.child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Spinner::new()
+                                                        .icon(AssetIconName::LoaderCircle)
+                                                        .color(cx.theme().muted_foreground),
+                                                )
+                                                .child(
+                                                    ShimmerText::new(working_label)
+                                                        .id("working-shimmer")
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground),
+                                                ),
                                         )
-                                        .child(
-                                            ShimmerText::new(working_label)
-                                                .id("working-shimmer")
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground),
-                                        ),
-                                )
-                            })
-                            .when(self.messages.is_empty(), |this| {
-                                this.child(
+                                    })
+                                    .when(self.messages.is_empty(), |this| {
+                                        this.child(
                                     div()
                                         .w_full()
                                         .py_8()
@@ -1633,8 +1700,8 @@ impl Render for ThreadView {
                                             "空会话。输入消息开始对话，/ 查看命令，@ 引用文件。",
                                         ),
                                 )
-                            }),
-                        ),
+                                    }),
+                            ),
                     )
                     // 未跟随时浮出「最新消息」按钮：点击回到底部并恢复跟随
                     .when(!self.follow_bottom, |this| {
@@ -1731,7 +1798,9 @@ fn split_path(path: &str) -> (String, String) {
 
 /// 不滚动穿透：滚轮落在展开正文上一律吞掉（这版 gpui 的内置滚动监听不阻断冒泡，
 /// 不吞的话外层消息列表会联动）；到顶/到底也不放行给外层。
-fn consume_scroll(_handle: &ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+fn consume_scroll(
+    _handle: &ScrollHandle,
+) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
     move |_, _, cx| {
         cx.stop_propagation();
     }

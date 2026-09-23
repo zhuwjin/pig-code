@@ -1368,7 +1368,11 @@ impl Composer {
 
     /// 思考等级面板：无搜索框，「关闭」+ 等级列表，当前等级勾选。
     /// levels 为 (id, 显示名)；界面展示显示名，确认回传 id。
-    fn render_reasoning_popup(&self, levels: &[(String, String)], cx: &mut Context<Self>) -> AnyElement {
+    fn render_reasoning_popup(
+        &self,
+        levels: &[(String, String)],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
         let levels = levels.to_vec();
@@ -1503,11 +1507,9 @@ impl Composer {
                             .cursor_pointer()
                             .when(open, |this| this.bg(cx.theme().accent.opacity(0.5)))
                             .hover(|this| this.bg(cx.theme().accent))
-                            .on_click(cx.listener(
-                                |this, event: &ClickEvent, window, cx| {
-                                    this.toggle_popup(Popup::Changes, event, None, window, cx);
-                                },
-                            ))
+                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                this.toggle_popup(Popup::Changes, event, None, window, cx);
+                            }))
                             .child(
                                 Icon::new(AssetIconName::Diff)
                                     .size_4()
@@ -1619,18 +1621,14 @@ impl Composer {
                     .into_any_element(),
             };
             list = list.child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(icon)
-                    .child(
-                        div()
-                            .text_sm()
-                            .when(item.status == TodoStatus::Done, |this| {
-                                this.text_color(cx.theme().muted_foreground)
-                            })
-                            .child(item.content.clone()),
-                    ),
+                h_flex().w_full().gap_2().child(icon).child(
+                    div()
+                        .text_sm()
+                        .when(item.status == TodoStatus::Done, |this| {
+                            this.text_color(cx.theme().muted_foreground)
+                        })
+                        .child(item.content.clone()),
+                ),
             );
         }
         let content = self.aux_panel_shell(
@@ -1744,11 +1742,12 @@ impl Composer {
                     .cursor_pointer()
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.expanded_task = if this.expanded_task.as_deref() == Some(task_id.as_str()) {
-                            None
-                        } else {
-                            Some(task_id.clone())
-                        };
+                        this.expanded_task =
+                            if this.expanded_task.as_deref() == Some(task_id.as_str()) {
+                                None
+                            } else {
+                                Some(task_id.clone())
+                            };
                         cx.notify();
                     }))
                     .child(icon)
@@ -2064,12 +2063,7 @@ impl Composer {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .child(option.label.clone()),
-                            )
+                            .child(div().text_sm().font_medium().child(option.label.clone()))
                             .when_some(option.description.clone(), |this, description| {
                                 this.child(
                                     div()
@@ -2098,12 +2092,7 @@ impl Composer {
                     .border_color(cx.theme().border)
                     .when(other_active, |this| this.bg(cx.theme().accent))
                     .child(div().text_sm().child("其他"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(input).small()),
-                    )
+                    .child(div().flex_1().min_w_0().child(Input::new(input).small()))
                     .child(number_badge(q.options.len() + 1, cx)),
             );
         }
@@ -2120,8 +2109,7 @@ impl Composer {
                 let key = event.keystroke.key.as_str();
                 match key {
                     "enter" => {
-                        let Some(total) = this.question.as_ref().map(|q| q.questions.len())
-                        else {
+                        let Some(total) = this.question.as_ref().map(|q| q.questions.len()) else {
                             return;
                         };
                         let qix = this.question_page.min(total.saturating_sub(1));
@@ -2149,10 +2137,8 @@ impl Composer {
                         if other_focused {
                             return;
                         }
-                        let Some(current) = this
-                            .question
-                            .as_ref()
-                            .and_then(|q| q.questions.get(qix))
+                        let Some(current) =
+                            this.question.as_ref().and_then(|q| q.questions.get(qix))
                         else {
                             return;
                         };

@@ -312,7 +312,8 @@ impl SettingsView {
             reasoning_levels: model.reasoning_levels.clone(),
             reasoning_labels: model.reasoning_labels.clone(),
             new_level: cx.new(|cx| InputState::new(window, cx).placeholder("等级名，如 high")),
-            new_label: cx.new(|cx| InputState::new(window, cx).placeholder("显示名（可选），如 最高")),
+            new_label: cx
+                .new(|cx| InputState::new(window, cx).placeholder("显示名（可选），如 最高")),
             params_json: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 8)
@@ -384,9 +385,7 @@ impl SettingsView {
             reasoning_labels: dialog
                 .reasoning_labels
                 .iter()
-                .filter(|(id, label)| {
-                    dialog.reasoning_levels.contains(*id) && !label.is_empty()
-                })
+                .filter(|(id, label)| dialog.reasoning_levels.contains(*id) && !label.is_empty())
                 .map(|(id, label)| (id.clone(), label.clone()))
                 .collect(),
             reasoning_params: params.unwrap(),

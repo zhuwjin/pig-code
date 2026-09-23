@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui_kit::InteractiveElement as _;
+use gpui_kit::base::GlobalState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{
@@ -80,7 +81,6 @@ struct AppView {
     pending_approvals: HashMap<String, PendingApproval>,
     /// 待回答的结构化提问（问题条内容）：提交/跳过/回合结束时清除
     pending_questions: HashMap<String, PendingQuestion>,
-    stats: HashMap<String, (u32, u32)>,
     /// 各会话的 TodoList/后台任务快照（core 推送缓存，切会话时同步给 composer）
     todos_by_session: HashMap<String, Vec<pig_protocol::TodoItem>>,
     tasks_by_session: HashMap<String, Vec<pig_protocol::TaskSummary>>,
@@ -135,7 +135,6 @@ impl AppView {
             approval_pending: HashSet::new(),
             pending_approvals: HashMap::new(),
             pending_questions: HashMap::new(),
-            stats: HashMap::new(),
             todos_by_session: HashMap::new(),
             tasks_by_session: HashMap::new(),
             agent,
@@ -230,7 +229,6 @@ impl AppView {
         self.approval_pending.clear();
         self.pending_approvals.clear();
         self.pending_questions.clear();
-        self.stats.clear();
         self._agent_handle = handle;
         self.spawn_event_pump(self._agent_handle.events.clone(), cx);
         self.agent.list_sessions();
@@ -249,7 +247,8 @@ impl AppView {
     fn ensure_views(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self.views.contains_key(session_id) {
             return;
-        }        let thread = cx.new(|cx| ThreadView::new(cx));
+        }
+        let thread = cx.new(|cx| ThreadView::new(cx));
         let review = cx.new(|cx| ReviewPanel::new(cx));
         let sid = session_id.to_string();
         self._subscriptions.push(
@@ -274,21 +273,21 @@ impl AppView {
                 }
             }),
         );
-        self._subscriptions
-            .push(cx.subscribe(&review, |this, _, event: &ReviewEvent, _| {
-                match event {
-                    ReviewEvent::RefreshGit => {
-                        if let Some(cwd) = this.current_cwd() {
-                            this.agent.git_status(cwd);
-                        }
-                    }
-                    ReviewEvent::OpenGitDiff { path, staged } => {
-                        if let Some(cwd) = this.current_cwd() {
-                            this.agent.git_diff(cwd, path.clone(), *staged);
-                        }
+        self._subscriptions.push(cx.subscribe(
+            &review,
+            |this, _, event: &ReviewEvent, _| match event {
+                ReviewEvent::RefreshGit => {
+                    if let Some(cwd) = this.current_cwd() {
+                        this.agent.git_status(cwd);
                     }
                 }
-            }));
+                ReviewEvent::OpenGitDiff { path, staged } => {
+                    if let Some(cwd) = this.current_cwd() {
+                        this.agent.git_diff(cwd, path.clone(), *staged);
+                    }
+                }
+            },
+        ));
         self.views
             .insert(session_id.to_string(), SessionViews { thread, review });
     }
@@ -460,10 +459,10 @@ impl AppView {
                 }
                 // 输入框上方的改动 chip：git 口径（未暂存 + 已暂存合并统计）
                 if self.current.as_ref().is_some_and(|cur| sids.contains(cur)) {
-                    let (adds, dels) = unstaged.iter().chain(staged.iter()).fold(
-                        (0u32, 0u32),
-                        |(a, d), e| (a + e.additions, d + e.deletions),
-                    );
+                    let (adds, dels) = unstaged
+                        .iter()
+                        .chain(staged.iter())
+                        .fold((0u32, 0u32), |(a, d), e| (a + e.additions, d + e.deletions));
                     let files: Vec<(String, u32, u32)> = unstaged
                         .iter()
                         .chain(staged.iter())
@@ -474,7 +473,9 @@ impl AppView {
                     });
                 }
             }
-            Event::GitDiff { cwd, path, diff, .. } => {
+            Event::GitDiff {
+                cwd, path, diff, ..
+            } => {
                 let (path, diff) = (path.clone(), diff.clone());
                 let sids: Vec<String> = self
                     .metas
@@ -626,19 +627,15 @@ impl AppView {
                     } => {
                         let (path, diff, adds, dels) =
                             (path.clone(), unified_diff.clone(), *additions, *deletions);
-                        let totals = views.review.update(cx, |review, cx| {
+                        views.review.update(cx, |review, cx| {
                             review.upsert(path, diff, adds, dels, cx);
-                            review.totals()
                         });
-                        self.stats.insert(sid.clone(), totals);
                     }
                     Event::FileReverted { path, .. } => {
                         let path = path.clone();
-                        let totals = views.review.update(cx, |review, cx| {
+                        views.review.update(cx, |review, cx| {
                             review.remove(&path, cx);
-                            review.totals()
                         });
-                        self.stats.insert(sid.clone(), totals);
                         // 撤销改变了工作区内容：刷新 git 状态
                         if let Some(meta) = self.metas.iter().find(|m| &m.id == sid) {
                             self.agent.git_status(meta.cwd.clone());
@@ -696,20 +693,15 @@ impl AppView {
         let sessions: Vec<SidebarSession> = self
             .metas
             .iter()
-            .map(|meta| {
-                let (added, removed) = self.stats.get(&meta.id).copied().unwrap_or((0, 0));
-                SidebarSession {
-                    id: meta.id.clone(),
-                    title: meta.title.clone(),
-                    cwd: meta.cwd.clone(),
-                    updated_at: meta.updated_at,
-                    pinned: meta.pinned,
-                    archived: meta.archived,
-                    running: self.running.contains(&meta.id),
-                    waiting_approval: self.approval_pending.contains(&meta.id),
-                    added: (added > 0).then_some(added),
-                    removed: (removed > 0).then_some(removed),
-                }
+            .map(|meta| SidebarSession {
+                id: meta.id.clone(),
+                title: meta.title.clone(),
+                cwd: meta.cwd.clone(),
+                updated_at: meta.updated_at,
+                pinned: meta.pinned,
+                archived: meta.archived,
+                running: self.running.contains(&meta.id),
+                waiting_approval: self.approval_pending.contains(&meta.id),
             })
             .collect();
         let workspaces = self.compute_workspaces();
@@ -740,8 +732,7 @@ impl AppView {
             self.current = Some(session_id.clone());
             // 已打开过的会话走这条快速路径，core 不会再发 SessionConfigured——
             // 必须按 meta 恢复会话级的模型/模式/思考等级，否则会带着上一个会话的值
-            if let Some(meta) = self.metas.iter().find(|m| m.id == session_id).cloned()
-            {
+            if let Some(meta) = self.metas.iter().find(|m| m.id == session_id).cloned() {
                 self.exec_mode = meta.exec_mode;
                 self.reasoning_level = meta.reasoning_level.clone();
                 let label = match (&meta.provider_id, &meta.model_id) {
@@ -1083,7 +1074,8 @@ impl AppView {
                 if let Some(sid) = &self.current {
                     self.pending_questions.remove(sid);
                 }
-                self.agent.question_reply(request_id.clone(), answers.clone());
+                self.agent
+                    .question_reply(request_id.clone(), answers.clone());
                 self.sync_composer_state(cx);
             }
             ComposerEvent::SearchFiles(query) => {
@@ -1116,7 +1108,8 @@ impl AppView {
                 self.agent.remove_workspace(PathBuf::from(path));
             }
             SidebarEvent::RenameWorkspace(path, alias) => {
-                self.agent.rename_workspace(PathBuf::from(path), alias.clone());
+                self.agent
+                    .rename_workspace(PathBuf::from(path), alias.clone());
             }
             SidebarEvent::OpenSettings => self.open_settings(cx),
         }
@@ -1281,7 +1274,7 @@ impl AppView {
             .into_any_element()
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> TitleBar {
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_dark = cx.theme().mode.is_dark();
         let title = self
             .current
@@ -1290,65 +1283,77 @@ impl AppView {
             .map(|m| m.title.clone())
             .unwrap_or_else(|| "pig-code".to_string());
 
-        TitleBar::new()
+        // Windows 上标题栏命中 HTCAPTION：左键按下仍会派发 MouseDownEvent，但抬起被
+        // OS 的窗口移动模态循环吞掉，窗口级文本选择一旦开始手势就收不到结束，
+        // 之后移动鼠标会变成拖选。按下标题栏时抑制选择，手势便永不开始。
+        div()
+            .id("title-bar-selection-guard")
+            .w_full()
+            .flex_shrink_0()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                GlobalState::suppress_text_selection(cx);
+            })
             .child(
-                h_flex()
-                    .gap_2()
+                TitleBar::new()
                     .child(
-                        Button::new("toggle-sidebar")
-                            .ghost()
-                            .small()
-                            .occlude()
-                            .icon(IconName::PanelLeft)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_collapsed = !this.sidebar_collapsed;
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().text_sm().font_semibold().child(format!(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("toggle-sidebar")
+                                    .ghost()
+                                    .small()
+                                    .occlude()
+                                    .icon(IconName::PanelLeft)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_collapsed = !this.sidebar_collapsed;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(div().text_sm().font_semibold().child(format!(
                             "pig-code · {title}{}",
                             self.git_branch
                                 .as_ref()
                                 .map(|b| format!(" · ⎇ {b}"))
                                 .unwrap_or_default()
                         ))),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .px_2()
-                    .child(
-                        Button::new("toggle-theme")
-                            .ghost()
-                            .small()
-                            .occlude()
-                            .icon(if is_dark {
-                                IconName::Sun
-                            } else {
-                                IconName::Moon
-                            })
-                            .on_click(move |_, _, cx| {
-                                Theme::change(
-                                    if is_dark {
-                                        ThemeMode::Light
-                                    } else {
-                                        ThemeMode::Dark
-                                    },
-                                    None,
-                                    cx,
-                                );
-                                cx.set_global(ThemeFollowSystem(false));
-                            }),
                     )
                     .child(
-                        Button::new("open-settings")
-                            .ghost()
-                            .small()
-                            .occlude()
-                            .icon(IconName::Settings)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_settings(cx);
-                            })),
+                        h_flex()
+                            .gap_1()
+                            .px_2()
+                            .child(
+                                Button::new("toggle-theme")
+                                    .ghost()
+                                    .small()
+                                    .occlude()
+                                    .icon(if is_dark {
+                                        IconName::Sun
+                                    } else {
+                                        IconName::Moon
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        Theme::change(
+                                            if is_dark {
+                                                ThemeMode::Light
+                                            } else {
+                                                ThemeMode::Dark
+                                            },
+                                            None,
+                                            cx,
+                                        );
+                                        cx.set_global(ThemeFollowSystem(false));
+                                    }),
+                            )
+                            .child(
+                                Button::new("open-settings")
+                                    .ghost()
+                                    .small()
+                                    .occlude()
+                                    .icon(IconName::Settings)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_settings(cx);
+                                    })),
+                            ),
                     ),
             )
     }
@@ -1454,6 +1459,13 @@ impl Render for AppView {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
                 cx.notify();
             }))
+            // 自愈兜底：选择手势的结束依赖收到 MouseUpEvent，而某些系统级按压
+            // （HTCAPTION、边框缩放）收不到。未按键的移动说明手势早已结束。
+            .on_mouse_move(|event, window, cx| {
+                if event.pressed_button.is_none() {
+                    gpui_kit::base::TextSelection::end(window, cx);
+                }
+            })
             .size_full()
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().child(if self.settings_open {
@@ -1761,7 +1773,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] 工作区列表 OK（会话 cwd 自动出现 + 手动增删）");
 
     // 会话 B：新建 + 场景 A
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
     let session_b = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -1905,7 +1919,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] 模型摘要 compact OK");
 
     // 场景 C：计划模式闭环
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
     let session_c = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -2010,7 +2026,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] ConfigSnapshot + 模型列表 OK");
 
     // Anthropic 供应商端到端：会话 D 切到 anthropic 模型跑场景 B
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
     let session_d = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -2074,7 +2092,9 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] Anthropic 供应商端到端 OK");
 
     // AskUserQuestion：会话 E 走 SCENARIO_Q → 问题条出现 → 选选项 → 提交 → marker + 工具卡
-    app!(|app: &mut AppView, _| app.agent.new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
     let session_e = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -2098,9 +2118,8 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         timer!(200).await;
         waited += 200;
         assert!(waited < 30_000, "问题条出现超时");
-        let has = app!(|app: &mut AppView, cx| {
-            app.composer.read(cx).debug_question().is_some()
-        });
+        let has =
+            app!(|app: &mut AppView, cx| { app.composer.read(cx).debug_question().is_some() });
         if has {
             break;
         }
@@ -2116,7 +2135,11 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         });
     });
     let q2 = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_question());
-    assert_eq!(q2.as_deref(), Some("需要跑测试吗"), "翻页后应显示第 2 题: {q2:?}");
+    assert_eq!(
+        q2.as_deref(),
+        Some("需要跑测试吗"),
+        "翻页后应显示第 2 题: {q2:?}"
+    );
     println!("[selftest] AskUserQuestion 翻页 OK");
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |composer, cx| {

@@ -197,7 +197,7 @@ pig-code/
 >
 > 打磨（2026-09-22）：消息流工具调用块 1:1 对齐 ZCode —— 摘要行中文化 + 悬停才显示箭头 + 成功小勾/失败状态词、终端类展开为圆角描边卡片（`$` 命令 + 限高输出）；Write/Edit 经 `ToolCallEnd.edit`（协议可选字段，rollout 同步持久化）携带**本次编辑** diff（与 review 面板的会话累计口径分离），展开为 ZCode LightweightDiffPreview 同款代码卡（行号 gutter + 增删行淡底色/左缘色条，限 400 行截断）。
 >
-> 打磨（2026-09-22 二轮）：改动展示对齐 ZCode 双口径 —— ① 消息流每轮 turn 末尾新增**本轮改动**折叠面板（`ChangeTracker.turn_originals` 每轮首写前快照，回合结束 `Event::TurnFileChanges` 净额 diff，rollout `TurnChanges` 记录持久化可回放）；② 右侧 Review 面板改为纯 git 工作区口径（`git status --porcelain -z` + `numstat`，未暂存/已暂存 tab，untracked 逐文件数行 ≤1MB，单文件 git diff 原文，untracked 拼 /dev/null 合成 diff）；③ 输入框上方改动 chip 同步为 git 数据（未暂存+已暂存合并）。会话级 ChangeTracker 累计状态转为隐藏层，仅驱动侧栏会话 +N/-N 徽章。
+> 打磨（2026-09-22 二轮）：改动展示对齐 ZCode 双口径 —— ① 消息流每轮 turn 末尾新增**本轮改动**折叠面板（`ChangeTracker.turn_originals` 每轮首写前快照，回合结束 `Event::TurnFileChanges` 净额 diff，rollout `TurnChanges` 记录持久化可回放）；② 右侧 Review 面板改为纯 git 工作区口径（`git status --porcelain -z` + `numstat`，未暂存/已暂存 tab，untracked 逐文件数行 ≤1MB，单文件 git diff 原文，untracked 拼 /dev/null 合成 diff）；③ 输入框上方改动 chip 同步为 git 数据（未暂存+已暂存合并）。侧栏会话行的 +N/-N 徽章已去除（2026-09-23），ChangeTracker 会话级累计不再驱动任何 UI。
 
 ### M0 — 应用骨架（GUI 先行，mock 数据）
 - workspace 化（`pig-protocol`/`pig-core`/`pig-app`），`pig-app` 引入 `gpui-kit = "0.6"`，`gpui_kit::init` + 无边框窗口 + `TitleBar` + 亮暗主题。

@@ -266,8 +266,7 @@ impl ReviewPanel {
             .cursor_pointer()
             .text_xs()
             .when(active, |this| {
-                this.bg(cx.theme().accent)
-                    .text_color(cx.theme().foreground)
+                this.bg(cx.theme().accent).text_color(cx.theme().foreground)
             })
             .when(!active, |this| {
                 this.text_color(cx.theme().muted_foreground)
