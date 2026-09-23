@@ -17,7 +17,15 @@ fn commit_all(dir: &std::path::Path, message: &str) {
     assert!(git(dir, &["add", "-A"]));
     assert!(git(
         dir,
-        &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", message]
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            message
+        ]
     ));
 }
 
@@ -59,11 +67,20 @@ async fn git_status_lists_unstaged_staged_and_untracked() {
     let (is_git, unstaged, staged) = status.expect("应收到 GitStatus");
     assert!(is_git, "git 仓库应 is_git=true");
 
-    let a = unstaged.iter().find(|e| e.path == "a.txt").expect("a.txt 未暂存");
+    let a = unstaged
+        .iter()
+        .find(|e| e.path == "a.txt")
+        .expect("a.txt 未暂存");
     assert_eq!((a.status.as_str(), a.additions, a.deletions), ("M", 2, 1));
-    let c = unstaged.iter().find(|e| e.path == "c.txt").expect("c.txt 未跟踪");
+    let c = unstaged
+        .iter()
+        .find(|e| e.path == "c.txt")
+        .expect("c.txt 未跟踪");
     assert_eq!((c.status.as_str(), c.additions, c.deletions), ("?", 4, 0));
-    let b = staged.iter().find(|e| e.path == "b.txt").expect("b.txt 已暂存");
+    let b = staged
+        .iter()
+        .find(|e| e.path == "b.txt")
+        .expect("b.txt 已暂存");
     assert_eq!((b.status.as_str(), b.additions, b.deletions), ("A", 2, 0));
 
     // 未暂存 diff 原文
@@ -85,7 +102,10 @@ async fn git_status_lists_unstaged_staged_and_untracked() {
         _ => None,
     });
     let diff = diff.expect("应收到 GitDiff");
-    assert!(diff.contains("-l2") && diff.contains("+L2"), "未暂存 diff: {diff}");
+    assert!(
+        diff.contains("-l2") && diff.contains("+L2"),
+        "未暂存 diff: {diff}"
+    );
 
     // 未跟踪文件 diff：手工拼 /dev/null → 全新增
     agent
@@ -97,9 +117,11 @@ async fn git_status_lists_unstaged_staged_and_untracked() {
         })
         .await
         .unwrap();
-    let collected = recv_until(&agent.events, Duration::from_secs(5), |e| {
-        matches!(e, Event::GitDiff { path, .. } if path == "c.txt")
-    })
+    let collected = recv_until(
+        &agent.events,
+        Duration::from_secs(5),
+        |e| matches!(e, Event::GitDiff { path, .. } if path == "c.txt"),
+    )
     .await;
     let diff = collected.iter().find_map(|e| match e {
         Event::GitDiff { diff, .. } => Some(diff.clone()),

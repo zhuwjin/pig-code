@@ -5,7 +5,12 @@ use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
 use std::time::Duration;
 
-fn send(events: &async_channel::Receiver<Event>, agent: &pig_core::AgentHandle, sid: &str, text: &str) {
+fn send(
+    events: &async_channel::Receiver<Event>,
+    agent: &pig_core::AgentHandle,
+    sid: &str,
+    text: &str,
+) {
     send_with(events, agent, sid, text, ExecMode::AutoEdit)
 }
 
@@ -38,7 +43,8 @@ async fn wait_turn(events: &async_channel::Receiver<Event>) -> Vec<Event> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_summary_compact() {
     let (config_path, cwd, data_dir) = setup("m5-compact");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let events = agent.events.clone();
     let sid = new_session(&agent, cwd).await;
 
@@ -74,10 +80,8 @@ async fn model_summary_compact() {
     assert!(note.contains(mock::SUMMARY_MARKER), "应含摘要文本: {note}");
 
     // rollout 应有 compact 记录
-    let rollout = std::fs::read_to_string(
-        data_dir.join("sessions").join(format!("{sid}.jsonl")),
-    )
-    .unwrap();
+    let rollout =
+        std::fs::read_to_string(data_dir.join("sessions").join(format!("{sid}.jsonl"))).unwrap();
     assert!(rollout.contains("\"type\":\"compact\""), "{rollout}");
     assert!(rollout.contains(mock::SUMMARY_MARKER));
 
@@ -119,10 +123,7 @@ async fn auto_compact_on_high_usage() {
         .iter()
         .position(|e| matches!(e, Event::TurnComplete { .. }));
     assert!(compact_pos.is_some(), "应自动 compact: {collected:#?}");
-    assert!(
-        compact_pos < complete_pos,
-        "compact 应在 TurnComplete 之前"
-    );
+    assert!(compact_pos < complete_pos, "compact 应在 TurnComplete 之前");
     agent.shutdown();
 }
 
@@ -187,7 +188,13 @@ async fn scenario_c_plan_mode() {
         })
         .await
         .unwrap();
-    send_with(&events, &agent, &sid, "SCENARIO_C 给我一个改造计划", ExecMode::Plan);
+    send_with(
+        &events,
+        &agent,
+        &sid,
+        "SCENARIO_C 给我一个改造计划",
+        ExecMode::Plan,
+    );
     let collected = wait_turn(&events).await;
     assert!(
         collected.iter().any(|e| matches!(
@@ -197,7 +204,9 @@ async fn scenario_c_plan_mode() {
         "应输出计划文本: {collected:#?}"
     );
     assert!(
-        !collected.iter().any(|e| matches!(e, Event::ToolCallBegin { .. })),
+        !collected
+            .iter()
+            .any(|e| matches!(e, Event::ToolCallBegin { .. })),
         "计划模式不应有工具调用"
     );
     agent.shutdown();

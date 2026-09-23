@@ -65,12 +65,24 @@ pub fn checkout(cwd: &Path, branch: &str) -> Result<(), String> {
 /// 口径同 ZCode gitCliRepo：porcelain 拿状态，numstat 拿增删行数，
 /// untracked 逐文件读内容数行（>1MB / 含 NUL 的二进制计 0）。
 pub fn git_status(cwd: &Path) -> Option<(Vec<GitFileChange>, Vec<GitFileChange>)> {
-    let status_out = run_git(cwd, &["status", "--porcelain", "-z", "--untracked-files=all"])?;
+    let status_out = run_git(
+        cwd,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+    )?;
     let unstaged_numstat =
         run_git(cwd, &["diff", "--numstat", "-z", "--find-renames", "--"]).unwrap_or_default();
-    let staged_numstat =
-        run_git(cwd, &["diff", "--cached", "--numstat", "-z", "--find-renames", "--"])
-            .unwrap_or_default();
+    let staged_numstat = run_git(
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--numstat",
+            "-z",
+            "--find-renames",
+            "--",
+        ],
+    )
+    .unwrap_or_default();
     // porcelain/numstat 的路径都相对仓库根
     let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
         .map(|s| Path::new(s.trim()).to_path_buf())

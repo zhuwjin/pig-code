@@ -1,0 +1,2 @@
+# 统一 LF：文本文件入库归一 LF，checkout 也写 LF（覆盖 Windows Git 安装器系统级 core.autocrlf=true）
+* text=auto eol=lf

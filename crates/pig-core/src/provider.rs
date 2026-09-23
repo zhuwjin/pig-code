@@ -139,7 +139,11 @@ impl ChatMsg {
         }
     }
 
-    pub fn assistant(content: String, tool_calls: Vec<ToolCall>, reasoning: Option<String>) -> Self {
+    pub fn assistant(
+        content: String,
+        tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
+    ) -> Self {
         Self {
             role: "assistant".into(),
             content: (!content.is_empty()).then_some(content),
@@ -222,7 +226,9 @@ pub async fn stream_chat(
 ) {
     let result = match config.api_format {
         ApiFormat::OpenAiChat => stream_openai(&config, messages, tools, &tx, &cancel).await,
-        ApiFormat::AnthropicMessages => stream_anthropic(&config, messages, tools, &tx, &cancel).await,
+        ApiFormat::AnthropicMessages => {
+            stream_anthropic(&config, messages, tools, &tx, &cancel).await
+        }
     };
     if let Err(error) = result {
         let _ = tx.send(ProviderEvent::Failed(error));
@@ -372,7 +378,10 @@ async fn stream_openai(
                     }
                 }
             }
-            if matches!(choice.finish_reason.as_deref(), Some("stop") | Some("tool_calls")) {
+            if matches!(
+                choice.finish_reason.as_deref(),
+                Some("stop") | Some("tool_calls")
+            ) {
                 finish(tx, &mut tool_calls);
                 return Ok(());
             }
@@ -421,10 +430,7 @@ struct OpenAiUsage {
     total_tokens: Option<u64>,
 }
 
-fn finish(
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
-    tool_calls: &mut Vec<ToolCall>,
-) {
+fn finish(tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>, tool_calls: &mut Vec<ToolCall>) {
     // 模型偶尔发出无名 tool_use（name: null）：过滤掉，避免产生「未知工具」空调用；
     // 不进入历史也就不需要为它补 tool_result
     let calls: Vec<ToolCall> = std::mem::take(tool_calls)
@@ -555,12 +561,9 @@ pub fn anthropic_web_search_tool(config: &ResolvedModel) -> Option<serde_json::V
     if !config.cap_web_search {
         return None;
     }
-    Some(
-        config
-            .web_search_tool
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({"type": "web_search_20250305", "name": "web_search"})),
-    )
+    Some(config.web_search_tool.clone().unwrap_or_else(
+        || serde_json::json!({"type": "web_search_20250305", "name": "web_search"}),
+    ))
 }
 
 /// OpenAI 兼容端点：无服务端搜索标准，只有显式配置 web_search_tool 才注入
@@ -657,7 +660,9 @@ async fn stream_anthropic(
             };
             match event_type.as_str() {
                 "message_start" => {
-                    total_input = json["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                    total_input = json["message"]["usage"]["input_tokens"]
+                        .as_u64()
+                        .unwrap_or(0);
                 }
                 "content_block_start" => {
                     let index = json["index"].as_u64().unwrap_or(0) as usize;
@@ -666,8 +671,7 @@ async fn stream_anthropic(
                         while tool_calls.len() <= index {
                             tool_calls.push(ToolCall::default());
                         }
-                        tool_calls[index].id =
-                            block["id"].as_str().unwrap_or_default().to_string();
+                        tool_calls[index].id = block["id"].as_str().unwrap_or_default().to_string();
                         tool_calls[index].name =
                             block["name"].as_str().unwrap_or_default().to_string();
                     }
@@ -839,7 +843,10 @@ pub async fn test_provider(
         match format {
             ApiFormat::OpenAiChat => {
                 client
-                    .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+                    .post(format!(
+                        "{}/chat/completions",
+                        base_url.trim_end_matches('/')
+                    ))
                     .bearer_auth(api_key)
                     .json(&serde_json::json!({
                         "model": model,
@@ -941,7 +948,10 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
                     _ => {}
                 }
             }
-            println!("[net-test] stream {}/{} → {outcome}", provider.name, model.id);
+            println!(
+                "[net-test] stream {}/{} → {outcome}",
+                provider.name, model.id
+            );
         }
     }
     if tested == 0 {

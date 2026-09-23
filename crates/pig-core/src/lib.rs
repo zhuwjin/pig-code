@@ -5,9 +5,9 @@ pub mod config;
 pub mod git;
 pub mod mock;
 pub mod paths;
-pub mod rollout;
 mod prompt;
 pub mod provider;
+pub mod rollout;
 pub mod session;
 pub mod store;
 pub mod task;
@@ -81,16 +81,21 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
         let mut session_id = String::new();
         let mut sent = false;
         loop {
-            let event = match tokio::time::timeout(std::time::Duration::from_secs(90), agent.events.recv()).await {
-                Ok(Ok(event)) => event,
-                _ => {
-                    println!("[net-test] 超时：90s 内回合未结束");
-                    break;
-                }
-            };
+            let event =
+                match tokio::time::timeout(std::time::Duration::from_secs(90), agent.events.recv())
+                    .await
+                {
+                    Ok(Ok(event)) => event,
+                    _ => {
+                        println!("[net-test] 超时：90s 内回合未结束");
+                        break;
+                    }
+                };
             let elapsed = start.elapsed().as_millis();
             let label = match &event {
-                Event::SessionConfigured { session_id: sid, .. } => {
+                Event::SessionConfigured {
+                    session_id: sid, ..
+                } => {
                     session_id = sid.clone();
                     format!("SessionConfigured({sid})")
                 }
@@ -104,7 +109,9 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                 Event::ToolCallEnd { is_error, .. } => {
                     format!("ToolCallEnd(is_error={is_error})")
                 }
-                Event::ApprovalRequested { request_id, tool, .. } => {
+                Event::ApprovalRequested {
+                    request_id, tool, ..
+                } => {
                     // 探针自动批准，让续轮请求（带 thinking 回传）真实发生
                     let request_id = request_id.clone();
                     agent
@@ -164,7 +171,13 @@ pub fn spawn_agent_with_data_dir(
             .worker_threads(2)
             .build()
             .expect("agent runtime");
-        runtime.block_on(session::agent_loop(op_rx, event_tx, config_path, cwd, data_dir));
+        runtime.block_on(session::agent_loop(
+            op_rx,
+            event_tx,
+            config_path,
+            cwd,
+            data_dir,
+        ));
     });
     AgentHandle {
         ops: op_tx,

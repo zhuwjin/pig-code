@@ -46,7 +46,9 @@ async fn resume_rebuilds_history() {
         panic!("应有 SessionList");
     };
     assert!(
-        sessions.iter().any(|s| s.id == session_id && s.title.contains("读一下")),
+        sessions
+            .iter()
+            .any(|s| s.id == session_id && s.title.contains("读一下")),
         "索引里应有会话且 title 取自首条消息: {sessions:?}"
     );
 
@@ -62,11 +64,15 @@ async fn resume_rebuilds_history() {
     })
     .await;
     assert!(
-        replay.iter().any(|e| matches!(e, Event::UserMessage { text, .. } if text.contains("读一下"))),
+        replay
+            .iter()
+            .any(|e| matches!(e, Event::UserMessage { text, .. } if text.contains("读一下"))),
         "重放应含用户消息"
     );
     assert!(
-        replay.iter().any(|e| matches!(e, Event::ToolCallBegin { tool, .. } if tool == "Read")),
+        replay
+            .iter()
+            .any(|e| matches!(e, Event::ToolCallBegin { tool, .. } if tool == "Read")),
         "重放应含工具调用"
     );
 
@@ -105,7 +111,8 @@ async fn resume_rebuilds_history() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pin_and_archive_update_index() {
     let (config_path, cwd, data_dir) = setup("m4-meta");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let events = agent.events.clone();
     let session_id = new_session(&agent, cwd).await;
 
@@ -119,9 +126,11 @@ async fn pin_and_archive_update_index() {
         })
         .await
         .unwrap();
-    let collected = recv_until(&events, Duration::from_secs(5), |e| {
-        matches!(e, Event::SessionList { sessions, .. } if sessions.iter().any(|s| s.pinned))
-    })
+    let collected = recv_until(
+        &events,
+        Duration::from_secs(5),
+        |e| matches!(e, Event::SessionList { sessions, .. } if sessions.iter().any(|s| s.pinned)),
+    )
     .await;
     let Some(Event::SessionList { sessions }) = collected.last() else {
         panic!()
@@ -139,9 +148,11 @@ async fn pin_and_archive_update_index() {
         })
         .await
         .unwrap();
-    let collected = recv_until(&events, Duration::from_secs(5), |e| {
-        matches!(e, Event::SessionList { sessions, .. } if sessions.iter().any(|s| s.archived))
-    })
+    let collected = recv_until(
+        &events,
+        Duration::from_secs(5),
+        |e| matches!(e, Event::SessionList { sessions, .. } if sessions.iter().any(|s| s.archived)),
+    )
     .await;
     let Some(Event::SessionList { sessions }) = collected.last() else {
         panic!()
@@ -206,10 +217,14 @@ async fn parallel_sessions() {
     // A 的 text 事件都属于 A；B 的工具调用都属于 B
     for event in &all {
         match event {
-            Event::TextDelta { session_id, delta, .. } if delta.contains("HISTORY_COUNT") => {
+            Event::TextDelta {
+                session_id, delta, ..
+            } if delta.contains("HISTORY_COUNT") => {
                 assert_eq!(session_id, &session_a, "A 的文本不应串到 B")
             }
-            Event::ToolCallBegin { session_id, tool, .. } if tool == "Read" => {
+            Event::ToolCallBegin {
+                session_id, tool, ..
+            } if tool == "Read" => {
                 assert_eq!(session_id, &session_b, "B 的工具调用不应串到 A")
             }
             _ => {}
@@ -249,8 +264,14 @@ async fn agents_md_injected() {
         _ => None,
     });
     let text = text.expect("应有文本回复");
-    assert!(text.contains("GLOBAL_RULE_X1"), "应含全局 AGENTS.md: {text}");
-    assert!(text.contains("WORKSPACE_RULE_Y2"), "应含工作区 AGENTS.md: {text}");
+    assert!(
+        text.contains("GLOBAL_RULE_X1"),
+        "应含全局 AGENTS.md: {text}"
+    );
+    assert!(
+        text.contains("WORKSPACE_RULE_Y2"),
+        "应含工作区 AGENTS.md: {text}"
+    );
     agent.shutdown();
 }
 
@@ -452,7 +473,9 @@ async fn restart_restores_todos_changes_and_revert() {
     })
     .await;
     assert!(
-        ev.iter().any(|e| matches!(e, Event::FileReverted { path, .. } if path == mock::SCENARIO_B_FILE)),
+        ev.iter().any(
+            |e| matches!(e, Event::FileReverted { path, .. } if path == mock::SCENARIO_B_FILE)
+        ),
         "跨重启 revert 应成功（基线来自 file_originals 表）: {ev:#?}"
     );
     assert!(
@@ -484,8 +507,10 @@ async fn restart_restores_todos_changes_and_revert() {
         todo_snapshot.unwrap_or_else(|| panic!("回放应含 DB 恢复的待办快照: {replay_b:#?}"));
     assert_eq!(items.len(), 2, "{items:?}");
     assert!(
-        items.iter().any(|i| i.content.contains(mock::TODO_SCENARIO_ITEM)
-            && i.status == pig_protocol::TodoStatus::InProgress),
+        items
+            .iter()
+            .any(|i| i.content.contains(mock::TODO_SCENARIO_ITEM)
+                && i.status == pig_protocol::TodoStatus::InProgress),
         "进行中的待办应还原: {items:?}"
     );
     agent2.shutdown();
@@ -558,8 +583,18 @@ async fn session_model_mode_persist_and_inherit() {
         panic!("应有 SessionConfigured")
     };
     assert_eq!(
-        (provider_id.as_deref(), model_id.as_deref(), reasoning_level.as_deref(), *exec_mode),
-        (Some("default"), Some("mock-model"), Some("high"), ExecMode::FullAccess),
+        (
+            provider_id.as_deref(),
+            model_id.as_deref(),
+            reasoning_level.as_deref(),
+            *exec_mode
+        ),
+        (
+            Some("default"),
+            Some("mock-model"),
+            Some("high"),
+            ExecMode::FullAccess
+        ),
         "新会话应继承工作区最近活跃会话的模型/模式/思考等级"
     );
     agent.shutdown();
@@ -585,13 +620,25 @@ async fn session_model_mode_persist_and_inherit() {
         reasoning_level,
         exec_mode,
         ..
-    }) = replay.iter().find(|e| matches!(e, Event::SessionConfigured { .. }))
+    }) = replay
+        .iter()
+        .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
         panic!("回放应有 SessionConfigured: {replay:#?}")
     };
     assert_eq!(
-        (provider_id.as_deref(), model_id.as_deref(), reasoning_level.as_deref(), *exec_mode),
-        (Some("default"), Some("mock-model"), Some("high"), ExecMode::FullAccess),
+        (
+            provider_id.as_deref(),
+            model_id.as_deref(),
+            reasoning_level.as_deref(),
+            *exec_mode
+        ),
+        (
+            Some("default"),
+            Some("mock-model"),
+            Some("high"),
+            ExecMode::FullAccess
+        ),
         "重启后重开应恢复模型/模式/思考等级"
     );
     agent2.shutdown();
@@ -649,12 +696,18 @@ async fn switch_preserves_mode_without_turn() {
         reasoning_level,
         exec_mode,
         ..
-    }) = ev_b.iter().find(|e| matches!(e, Event::SessionConfigured { .. }))
+    }) = ev_b
+        .iter()
+        .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
         panic!("B 应有 SessionConfigured: {ev_b:#?}")
     };
     assert_eq!(
-        (provider_id.as_deref(), reasoning_level.as_deref(), *exec_mode),
+        (
+            provider_id.as_deref(),
+            reasoning_level.as_deref(),
+            *exec_mode
+        ),
         (None, None, ExecMode::ConfirmBeforeEdit),
         "B 不应带上 A 的值"
     );
@@ -692,13 +745,25 @@ async fn switch_preserves_mode_without_turn() {
         reasoning_level,
         exec_mode,
         ..
-    }) = ev_a.iter().find(|e| matches!(e, Event::SessionConfigured { .. }))
+    }) = ev_a
+        .iter()
+        .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
         panic!("A 应有 SessionConfigured: {ev_a:#?}")
     };
     assert_eq!(
-        (provider_id.as_deref(), model_id.as_deref(), reasoning_level.as_deref(), *exec_mode),
-        (Some("default"), Some("mock-model"), Some("high"), ExecMode::FullAccess),
+        (
+            provider_id.as_deref(),
+            model_id.as_deref(),
+            reasoning_level.as_deref(),
+            *exec_mode
+        ),
+        (
+            Some("default"),
+            Some("mock-model"),
+            Some("high"),
+            ExecMode::FullAccess
+        ),
         "切回应恢复 A 改过的值"
     );
 
@@ -718,7 +783,9 @@ async fn switch_preserves_mode_without_turn() {
         provider_id,
         reasoning_level,
         ..
-    }) = ev_b2.iter().find(|e| matches!(e, Event::SessionConfigured { .. }))
+    }) = ev_b2
+        .iter()
+        .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
         panic!("B 应有 SessionConfigured: {ev_b2:#?}")
     };
@@ -728,4 +795,107 @@ async fn switch_preserves_mode_without_turn() {
         "无模型覆盖的思考等级切换后应保留"
     );
     agent.shutdown();
+}
+
+/// 回归：resume 后新消息必须继续落盘。
+/// 曾 `Session::load` 置 `rollout: None`，重开会话里的新内容重启即丢。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_keeps_appending() {
+    let (config_path, cwd, data_dir) = setup("m4-resume-append");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "第一轮消息".into(),
+            files: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    agent.shutdown();
+
+    // 模拟重启：重开旧会话，追加第二轮
+    let agent2 = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let events2 = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    // 回放以 duration_ms=0 的 TurnComplete 收尾；排空后再发新消息
+    recv_until(&events2, Duration::from_secs(10), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    while tokio::time::timeout(Duration::from_millis(200), events2.recv())
+        .await
+        .is_ok()
+    {}
+    agent2
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "第二轮消息".into(),
+            files: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events2, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    agent2.shutdown();
+
+    // 落盘文件应同时包含两轮用户消息
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let content = std::fs::read_to_string(&rollout_path).unwrap();
+    assert!(content.contains("第一轮消息"), "第一轮应保留: {content}");
+    assert!(
+        content.contains("第二轮消息"),
+        "resume 后的新消息应落盘: {content}"
+    );
+
+    // 再模拟一次重启：重放应同时包含两轮消息
+    let agent3 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    let events3 = agent3.events.clone();
+    agent3
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let replay = recv_until(&events3, Duration::from_secs(10), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    for round in ["第一轮消息", "第二轮消息"] {
+        assert!(
+            replay
+                .iter()
+                .any(|e| matches!(e, Event::UserMessage { text, .. } if text.contains(round))),
+            "重放应含「{round}」: {replay:#?}"
+        );
+    }
+    agent3.shutdown();
 }

@@ -20,22 +20,46 @@ async fn git_info_and_checkout() {
         eprintln!("git 不可用，跳过");
         return;
     }
-    assert!(git(&cwd, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"]));
+    assert!(git(
+        &cwd,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init"
+        ]
+    ));
     assert!(git(&cwd, &["branch", "feature-x"]));
 
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let events = agent.events.clone();
 
-    agent.ops.send(Op::GitInfo { cwd: cwd.clone() }).await.unwrap();
+    agent
+        .ops
+        .send(Op::GitInfo { cwd: cwd.clone() })
+        .await
+        .unwrap();
     let collected = recv_until(&events, Duration::from_secs(5), |e| {
         matches!(e, Event::GitInfo { .. })
     })
     .await;
-    let Some(Event::GitInfo { current_branch, branches, .. }) = collected.last() else {
+    let Some(Event::GitInfo {
+        current_branch,
+        branches,
+        ..
+    }) = collected.last()
+    else {
         panic!("应有 GitInfo")
     };
     assert!(current_branch.is_some(), "应识别当前分支");
-    assert!(branches.contains(&"feature-x".to_string()), "分支列表: {branches:?}");
+    assert!(
+        branches.contains(&"feature-x".to_string()),
+        "分支列表: {branches:?}"
+    );
 
     // 切换分支
     agent
@@ -51,7 +75,9 @@ async fn git_info_and_checkout() {
     })
     .await;
     assert!(
-        collected.iter().any(|e| matches!(e, Event::BranchChanged { branch, .. } if branch == "feature-x")),
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::BranchChanged { branch, .. } if branch == "feature-x")),
         "应切换成功: {collected:#?}"
     );
     let (_, head) = pig_core::git::git_info(&cwd);

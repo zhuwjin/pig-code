@@ -8,7 +8,8 @@ use std::time::Duration;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_turn_with_tool_call() {
     let (config_path, cwd, data_dir) = setup("m2-full");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let events = agent.events.clone();
     let session_id = new_session(&agent, cwd).await;
 
@@ -29,7 +30,9 @@ async fn full_turn_with_tool_call() {
     .await;
 
     assert!(
-        events.iter().any(|e| matches!(e, Event::ReasoningDelta { delta, .. } if !delta.is_empty())),
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ReasoningDelta { delta, .. } if !delta.is_empty())),
         "应有 reasoning delta"
     );
     assert!(
@@ -59,19 +62,37 @@ async fn full_turn_with_tool_call() {
         "最终文本应含 mock 标记"
     );
     assert!(
-        events.iter().any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
         "应有上下文用量事件"
     );
     assert!(
         events.iter().all(|e| match e {
-            Event::TurnStarted { session_id: sid, .. }
-            | Event::ReasoningDelta { session_id: sid, .. }
-            | Event::TextDelta { session_id: sid, .. }
-            | Event::TextDone { session_id: sid, .. }
-            | Event::ToolCallBegin { session_id: sid, .. }
-            | Event::ToolCallEnd { session_id: sid, .. }
-            | Event::ContextUsage { session_id: sid, .. }
-            | Event::TurnComplete { session_id: sid, .. } => sid == &session_id,
+            Event::TurnStarted {
+                session_id: sid, ..
+            }
+            | Event::ReasoningDelta {
+                session_id: sid, ..
+            }
+            | Event::TextDelta {
+                session_id: sid, ..
+            }
+            | Event::TextDone {
+                session_id: sid, ..
+            }
+            | Event::ToolCallBegin {
+                session_id: sid, ..
+            }
+            | Event::ToolCallEnd {
+                session_id: sid, ..
+            }
+            | Event::ContextUsage {
+                session_id: sid, ..
+            }
+            | Event::TurnComplete {
+                session_id: sid, ..
+            } => sid == &session_id,
             _ => true,
         }),
         "事件 session_id 应一致"
@@ -112,18 +133,16 @@ async fn interrupt_during_stream() {
         matches!(e, Event::ReasoningDelta { .. } | Event::TextDelta { .. })
     })
     .await;
-    agent
-        .ops
-        .send(Op::Interrupt { session_id })
-        .await
-        .unwrap();
+    agent.ops.send(Op::Interrupt { session_id }).await.unwrap();
 
     let events = recv_until(&events, Duration::from_secs(10), |e| {
         matches!(e, Event::TurnAborted { .. } | Event::TurnComplete { .. })
     })
     .await;
     assert!(
-        events.iter().any(|e| matches!(e, Event::TurnAborted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, Event::TurnAborted { .. })),
         "应收到 TurnAborted: {events:#?}"
     );
     agent.shutdown();

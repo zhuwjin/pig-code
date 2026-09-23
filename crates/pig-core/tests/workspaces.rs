@@ -7,7 +7,8 @@ use std::time::Duration;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspaces_add_list_remove() {
     let (config_path, cwd, data_dir) = setup("m7-workspaces");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let events = agent.events.clone();
     let _sid = new_session(&agent, cwd.clone()).await;
 
@@ -27,10 +28,22 @@ async fn workspaces_add_list_remove() {
     std::fs::create_dir_all(&p1).unwrap();
     std::fs::create_dir_all(&p2).unwrap();
 
-    agent.ops.send(Op::AddWorkspace { path: p1.clone() }).await.unwrap();
-    agent.ops.send(Op::AddWorkspace { path: p2.clone() }).await.unwrap();
+    agent
+        .ops
+        .send(Op::AddWorkspace { path: p1.clone() })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::AddWorkspace { path: p2.clone() })
+        .await
+        .unwrap();
     // 重复 add 幂等
-    agent.ops.send(Op::AddWorkspace { path: p1.clone() }).await.unwrap();
+    agent
+        .ops
+        .send(Op::AddWorkspace { path: p1.clone() })
+        .await
+        .unwrap();
 
     let mut last = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -51,7 +64,11 @@ async fn workspaces_add_list_remove() {
     assert!(workspaces.iter().any(|p| p.path == p1 && p.added_at > 0));
 
     // remove 存在的 + remove 不存在的（不炸）：remove = 置为隐藏，条目保留
-    agent.ops.send(Op::RemoveWorkspace { path: p1.clone() }).await.unwrap();
+    agent
+        .ops
+        .send(Op::RemoveWorkspace { path: p1.clone() })
+        .await
+        .unwrap();
     agent
         .ops
         .send(Op::RemoveWorkspace {
@@ -81,7 +98,10 @@ async fn workspaces_add_list_remove() {
     let visible: Vec<_> = workspaces.iter().filter(|p| !p.hidden).collect();
     assert_eq!(visible.len(), 1, "移除后仅 p2 可见: {workspaces:?}");
     assert_eq!(visible[0].path, p2);
-    assert!(workspaces.iter().any(|p| p.path == p1 && p.hidden), "p1 应为隐藏条目");
+    assert!(
+        workspaces.iter().any(|p| p.path == p1 && p.hidden),
+        "p1 应为隐藏条目"
+    );
 
     // 落盘验证：重开 store，隐藏条目保留（含 proj-a）
     let store = pig_core::store::Store::open(&data_dir).unwrap();
@@ -93,7 +113,11 @@ async fn workspaces_add_list_remove() {
     );
 
     // 隐藏工作区下新建会话 → 自动恢复显示
-    agent.ops.send(Op::RemoveWorkspace { path: cwd.clone() }).await.unwrap();
+    agent
+        .ops
+        .send(Op::RemoveWorkspace { path: cwd.clone() })
+        .await
+        .unwrap();
     let _sid2 = new_session(&agent, cwd.clone()).await;
     let collected = recv_until(&events, Duration::from_secs(5), |e| {
         matches!(
@@ -103,10 +127,7 @@ async fn workspaces_add_list_remove() {
         )
     })
     .await;
-    assert!(
-        collected.last().is_some(),
-        "隐藏工作区下新建会话应恢复显示"
-    );
+    assert!(collected.last().is_some(), "隐藏工作区下新建会话应恢复显示");
 
     agent.shutdown();
 }

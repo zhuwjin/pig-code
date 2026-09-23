@@ -8,16 +8,20 @@ pub fn agents_md(data_dir: &std::path::Path, cwd: &std::path::Path) -> String {
         ("工作区", cwd.join("AGENTS.md")),
     ] {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            out.push_str(&format!("
+            out.push_str(&format!(
+                "
 ## {label} AGENTS.md
 
 {content}
-"));
+"
+            ));
         }
         if out.len() > 32 * 1024 {
             out.truncate(32 * 1024);
-            out.push_str("
-[AGENTS.md 过长，已截断]");
+            out.push_str(
+                "
+[AGENTS.md 过长，已截断]",
+            );
             break;
         }
     }
@@ -51,7 +55,9 @@ pub fn system_prompt(
         std::env::consts::OS,
         std::env::consts::ARCH,
         today(),
-        git_info(cwd).map(|info| format!("git: {info}\n")).unwrap_or_default(),
+        git_info(cwd)
+            .map(|info| format!("git: {info}\n"))
+            .unwrap_or_default(),
     );
     prompt.push_str(match mode {
         ExecMode::ConfirmBeforeEdit => {
@@ -93,7 +99,6 @@ pub fn system_prompt(
     prompt
 }
 
-
 /// 今天日期（YYYY-MM-DD，UTC）。std 无日期格式化，用 civil-from-days 算法。
 fn today() -> String {
     let secs = std::time::SystemTime::now()
@@ -134,5 +139,8 @@ fn git_info(cwd: &std::path::Path) -> Option<String> {
         .output()
         .map(|out| !out.stdout.is_empty())
         .unwrap_or(false);
-    Some(format!("{branch}{}", if dirty { " (有未提交变更)" } else { "" }))
+    Some(format!(
+        "{branch}{}",
+        if dirty { " (有未提交变更)" } else { "" }
+    ))
 }

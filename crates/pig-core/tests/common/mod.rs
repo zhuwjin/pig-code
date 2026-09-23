@@ -70,5 +70,8 @@ pub async fn recv_until(
             return collected;
         }
     }
-    panic!("等待事件超时（{}s），已收到: {collected:#?}", deadline.as_secs());
+    panic!(
+        "等待事件超时（{}s），已收到: {collected:#?}",
+        deadline.as_secs()
+    );
 }

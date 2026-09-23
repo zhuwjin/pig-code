@@ -53,30 +53,40 @@ fn home_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// 绝对路径根：Unix 为 "/"，Windows 需要盘符（"/x" 在 Windows 上无盘符、不算绝对路径）
+    #[cfg(unix)]
+    const ROOT: &str = "/";
+    #[cfg(windows)]
+    const ROOT: &str = "C:/";
+
+    fn rooted(segments: &str) -> PathBuf {
+        PathBuf::from(format!("{ROOT}{segments}"))
+    }
+
     #[test]
     fn strips_trailing_and_duplicate_separators() {
         assert_eq!(
-            normalize_workspace_path(Path::new("/Users/x/a/")),
-            PathBuf::from("/Users/x/a")
+            normalize_workspace_path(&rooted("Users/x/a/")),
+            rooted("Users/x/a")
         );
         assert_eq!(
-            normalize_workspace_path(Path::new("/Users/x//a//b/")),
-            PathBuf::from("/Users/x/a/b")
+            normalize_workspace_path(&rooted("Users/x//a//b/")),
+            rooted("Users/x/a/b")
         );
-        assert_eq!(normalize_workspace_path(Path::new("/")), PathBuf::from("/"));
+        assert_eq!(
+            normalize_workspace_path(Path::new(ROOT)),
+            PathBuf::from(ROOT)
+        );
     }
 
     #[test]
     fn resolves_dot_segments_lexically() {
         assert_eq!(
-            normalize_workspace_path(Path::new("/Users/x/a/./b/../c")),
-            PathBuf::from("/Users/x/a/c")
+            normalize_workspace_path(&rooted("Users/x/a/./b/../c")),
+            rooted("Users/x/a/c")
         );
         // 越过根的 .. 不炸，钳在根上
-        assert_eq!(
-            normalize_workspace_path(Path::new("/a/../../b")),
-            PathBuf::from("/b")
-        );
+        assert_eq!(normalize_workspace_path(&rooted("a/../../b")), rooted("b"));
     }
 
     #[test]
@@ -92,18 +102,15 @@ mod tests {
     #[test]
     fn absolutizes_relative_paths() {
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            normalize_workspace_path(Path::new("a/b")),
-            cwd.join("a/b")
-        );
+        assert_eq!(normalize_workspace_path(Path::new("a/b")), cwd.join("a/b"));
     }
 
     #[test]
     fn keeps_case_and_spelling() {
         // 不折大小写、不做 realpath：词法不同的路径保持不同
         assert_ne!(
-            normalize_workspace_path(Path::new("/Users/x/a")),
-            normalize_workspace_path(Path::new("/users/x/a"))
+            normalize_workspace_path(&rooted("Users/x/a")),
+            normalize_workspace_path(&rooted("users/x/a"))
         );
     }
 }

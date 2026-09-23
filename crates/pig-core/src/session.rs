@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt as _;
+use futures_util::stream::FuturesUnordered;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, Op, SessionMeta};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -12,12 +12,12 @@ use tokio_util::sync::CancellationToken;
 use crate::config;
 use crate::paths::normalize_workspace_path;
 use crate::provider::ResolvedModel;
-use pig_protocol::AppConfig;
 use crate::provider::{ChatMsg, ProviderEvent, ToolCall};
 use crate::rollout::{Rollout, RolloutRecord, now_secs, rebuild_history};
 use crate::store::Store;
 use crate::tool::{ChangeTracker, ToolContext};
 use crate::{prompt, provider, tool};
+use pig_protocol::AppConfig;
 
 /// 等待中的审批：request_id → 回执通道。manager 与各 session 共享；
 /// request_id 带 session_id 前缀，全局唯一。
@@ -25,8 +25,7 @@ pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDe
 
 /// 等待中的结构化提问：request_id → 回执通道。None = 用户跳过；
 /// 外层按题、内层为该题选中标签（"其他"自由文本作为标签原样放入）。
-pub type PendingQuestions =
-    Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<Vec<String>>>>>>>;
+pub type PendingQuestions = Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<Vec<String>>>>>>>;
 
 /// 会话级模型覆盖（SetModel）
 #[derive(Clone, Debug, Default)]
@@ -183,6 +182,8 @@ impl Session {
             .collect();
         let mut tracker = ChangeTracker::default();
         tracker.restore(originals);
+        // resume 后接管同一 JSONL 继续追加；失败要响亮（置 None 会静默丢后续所有记录）
+        let rollout = Rollout::open_append(sessions_dir, id)?;
         let session = Self {
             id: id.to_string(),
             cwd: cwd.clone(),
@@ -196,7 +197,7 @@ impl Session {
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
             model_override: None,
-            rollout: None,
+            rollout: Some(rollout),
             store,
             data_dir,
             last_total_tokens: None,
@@ -206,7 +207,11 @@ impl Session {
         Ok((session, records))
     }
 
-    fn emit(&mut self, build: impl FnOnce(String, u64) -> Event, tx: &async_channel::Sender<Event>) {
+    fn emit(
+        &mut self,
+        build: impl FnOnce(String, u64) -> Event,
+        tx: &async_channel::Sender<Event>,
+    ) {
         self.seq += 1;
         let _ = tx.send_blocking(build(self.id.clone(), self.seq));
     }
@@ -224,7 +229,9 @@ impl Session {
             return;
         }
         let files: Vec<pig_protocol::EditDiff> = changes.into_iter().map(Into::into).collect();
-        self.record(&RolloutRecord::TurnChanges { files: files.clone() });
+        self.record(&RolloutRecord::TurnChanges {
+            files: files.clone(),
+        });
         self.emit(
             |session_id, seq| Event::TurnFileChanges {
                 session_id,
@@ -613,10 +620,13 @@ impl Session {
         if self.history.len() == 1 {
             let title: String = content.chars().take(30).collect();
             let id = self.id.clone();
-            self.store.lock().expect("store lock").update_session(&id, |meta| {
-                meta.title = title;
-                meta.updated_at = now_secs();
-            });
+            self.store
+                .lock()
+                .expect("store lock")
+                .update_session(&id, |meta| {
+                    meta.title = title;
+                    meta.updated_at = now_secs();
+                });
         }
         // user_text 含展开后的文件内容；rollout 只记原文
         let rollout_text = if files.is_empty() {
@@ -625,7 +635,8 @@ impl Session {
             format!("{content}\n\n引用文件: {}", files.join(", "))
         };
         let record_files = files.clone();
-        self.history.push(ChatMsg::user(std::mem::take(&mut user_text)));
+        self.history
+            .push(ChatMsg::user(std::mem::take(&mut user_text)));
         self.record(&RolloutRecord::User {
             text: rollout_text.clone(),
             files: record_files.clone(),
@@ -643,7 +654,10 @@ impl Session {
         let mut step = 0usize;
         loop {
             step += 1;
-            match self.run_step(turn_id.clone(), step, config, tx, &cancel).await {
+            match self
+                .run_step(turn_id.clone(), step, config, tx, &cancel)
+                .await
+            {
                 StepOutcome::TextOnly => {
                     if self.turn_input + self.turn_output > 0 {
                         self.store.lock().expect("store lock").record_usage(
@@ -842,7 +856,8 @@ impl Session {
             if self.mode == ExecMode::Plan && !read_only {
                 let note = "计划模式：修改类工具已被禁止执行。请只输出计划文本，等用户切换到其他模式后再执行。"
                     .to_string();
-                self.history.push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.history
+                    .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
                     summary,
@@ -874,7 +889,8 @@ impl Session {
                     Ok(questions) => questions,
                     Err(error) => {
                         let note = format!("AskUserQuestion 参数非法: {error}");
-                        self.history.push(ChatMsg::tool_result(&call.id, note.clone()));
+                        self.history
+                            .push(ChatMsg::tool_result(&call.id, note.clone()));
                         self.record(&RolloutRecord::ToolCall {
                             tool: call.name.clone(),
                             summary,
@@ -944,7 +960,8 @@ impl Session {
                     }
                     None => "用户选择不回答，请根据上下文自行决定并继续。".to_string(),
                 };
-                self.history.push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.history
+                    .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
                     summary,
@@ -1001,9 +1018,11 @@ impl Session {
                         self.always_allowed.insert(call.name.clone());
                     }
                     ApprovalDecision::Reject => {
-                        let note = "用户拒绝了该操作。请尊重用户意愿，改用其他方式或说明理由后继续。"
-                            .to_string();
-                        self.history.push(ChatMsg::tool_result(&call.id, note.clone()));
+                        let note =
+                            "用户拒绝了该操作。请尊重用户意愿，改用其他方式或说明理由后继续。"
+                                .to_string();
+                        self.history
+                            .push(ChatMsg::tool_result(&call.id, note.clone()));
                         self.record(&RolloutRecord::ToolCall {
                             tool: call.name.clone(),
                             summary,
@@ -1044,7 +1063,8 @@ impl Session {
                 self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                 return StepOutcome::Ended;
             };
-            self.history.push(ChatMsg::tool_result(&call.id, output.clone()));
+            self.history
+                .push(ChatMsg::tool_result(&call.id, output.clone()));
             self.record(&RolloutRecord::ToolCall {
                 tool: call.name.clone(),
                 summary,
@@ -1182,16 +1202,21 @@ fn compaction_prompt(history: &[ChatMsg]) -> String {
         let role = &msg.role;
         if let Some(content) = &msg.content {
             let content: String = content.chars().take(2000).collect();
-            out.push_str(&format!("--- {role} ---
+            out.push_str(&format!(
+                "--- {role} ---
 {content}
-"));
+"
+            ));
         }
         if let Some(calls) = &msg.tool_calls {
             for call in calls {
                 let args: String = call.function.arguments.chars().take(200).collect();
-                out.push_str(&format!("--- {role} [tool_call {}] ---
+                out.push_str(&format!(
+                    "--- {role} [tool_call {}] ---
 {args}
-", call.function.name));
+",
+                    call.function.name
+                ));
             }
         }
     }
@@ -1317,7 +1342,9 @@ pub async fn agent_loop(
 
     macro_rules! resolve {
         ($override:expr, $level:expr) => {
-            config.as_ref().and_then(|c| resolve_model(c, $override, $level))
+            config
+                .as_ref()
+                .and_then(|c| resolve_model(c, $override, $level))
         };
     }
     macro_rules! model_label {

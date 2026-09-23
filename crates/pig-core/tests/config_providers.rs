@@ -35,7 +35,8 @@ max_output_tokens = 8192
 async fn legacy_config_migration() {
     // setup() 写的是旧格式
     let (config_path, cwd, data_dir) = setup("m8-migrate");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path.clone()), cwd.clone(), data_dir);
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path.clone()), cwd.clone(), data_dir);
     let events = agent.events.clone();
     let sid = new_session(&agent, cwd).await;
     let _ = sid;
@@ -96,9 +97,11 @@ async fn config_v2_snapshot_and_save() {
         })
         .await
         .unwrap();
-    let collected = recv_until(&events, Duration::from_secs(5), |e| {
-        matches!(e, Event::ConfigSnapshot { config, .. } if config.providers.len() == 2)
-    })
+    let collected = recv_until(
+        &events,
+        Duration::from_secs(5),
+        |e| matches!(e, Event::ConfigSnapshot { config, .. } if config.providers.len() == 2),
+    )
     .await;
     assert!(
         matches!(collected.last(), Some(Event::ConfigSnapshot { config, .. }) if config.providers[1].name == "第二个"),
@@ -106,7 +109,10 @@ async fn config_v2_snapshot_and_save() {
     );
     let raw = std::fs::read_to_string(&config_path).unwrap();
     assert!(raw.contains("第二个"), "落盘: {raw}");
-    assert!(raw.contains("${TEST_NONEXISTENT_KEY}"), "api_key 不应被展开: {raw}");
+    assert!(
+        raw.contains("${TEST_NONEXISTENT_KEY}"),
+        "api_key 不应被展开: {raw}"
+    );
     agent.shutdown();
 }
 
@@ -120,11 +126,8 @@ async fn anthropic_full_turn() {
     std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, v2_config(port, ApiFormat::AnthropicMessages)).unwrap();
-    let agent = pig_core::spawn_agent_with_data_dir(
-        Some(config_path),
-        dir.clone(),
-        dir.join("data"),
-    );
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
     let events = agent.events.clone();
     let sid = new_session(&agent, dir).await;
 
@@ -143,7 +146,9 @@ async fn anthropic_full_turn() {
     })
     .await;
     assert!(
-        collected.iter().any(|e| matches!(e, Event::ReasoningDelta { .. })),
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::ReasoningDelta { .. })),
         "Anthropic thinking_delta → reasoning"
     );
     assert!(
@@ -161,7 +166,9 @@ async fn anthropic_full_turn() {
         "text_delta 文本"
     );
     assert!(
-        collected.iter().any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
         "usage 汇总 100+42"
     );
     agent.shutdown();
@@ -203,11 +210,8 @@ high = {{ reasoning_effort = "high" }}
         ),
     )
     .unwrap();
-    let agent = pig_core::spawn_agent_with_data_dir(
-        Some(config_path),
-        dir.clone(),
-        dir.join("data"),
-    );
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
     let events = agent.events.clone();
     let sid = new_session(&agent, dir).await;
 
@@ -238,7 +242,9 @@ high = {{ reasoning_effort = "high" }}
 
     let bodies = log.lock().expect("log");
     assert!(
-        bodies.iter().any(|body| body.contains("\"reasoning_effort\":\"high\"")),
+        bodies
+            .iter()
+            .any(|body| body.contains("\"reasoning_effort\":\"high\"")),
         "请求体应 merge reasoning_params: {:?}",
         bodies.last()
     );
@@ -267,13 +273,9 @@ async fn test_provider_ok_and_fail() {
     .await;
     assert!(ok.is_ok(), "Anthropic ping: {ok:?}");
 
-    let fail = pig_core::provider::test_provider(
-        "http://127.0.0.1:1",
-        "x",
-        ApiFormat::OpenAiChat,
-        "x",
-    )
-    .await;
+    let fail =
+        pig_core::provider::test_provider("http://127.0.0.1:1", "x", ApiFormat::OpenAiChat, "x")
+            .await;
     assert!(fail.is_err());
 }
 

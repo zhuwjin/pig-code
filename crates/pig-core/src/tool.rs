@@ -119,7 +119,9 @@ pub struct ChangeTracker {
 impl ChangeTracker {
     /// 修改前快照；返回原始内容（None = 文件原本不存在）。
     pub fn snapshot(&mut self, path: &Path) -> Result<Option<String>, String> {
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.originals.entry(path.to_path_buf()) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.originals.entry(path.to_path_buf())
+        {
             let original = match std::fs::read_to_string(path) {
                 Ok(content) => Some(content),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -179,7 +181,8 @@ impl ChangeTracker {
                 _ => {}
             }
         }
-        self.stats.insert(path.to_path_buf(), (additions, deletions));
+        self.stats
+            .insert(path.to_path_buf(), (additions, deletions));
         let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let relative = path
             .strip_prefix(&cwd_canonical)
@@ -601,8 +604,8 @@ impl Tool for Glob {
             };
             let full_pattern = root.join(pattern);
             let pattern_str = full_pattern.to_string_lossy().replace('\\', "/");
-            let entries = glob::glob(&pattern_str)
-                .map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
+            let entries =
+                glob::glob(&pattern_str).map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
             let mut results: Vec<String> = Vec::new();
             for entry in entries.flatten() {
                 let relative = entry
@@ -617,7 +620,9 @@ impl Tool for Glob {
             results.sort();
             let mut out = results.join("\n");
             if results.len() >= MAX_MATCH_RESULTS {
-                out.push_str(&format!("\n\n[结果过多，已截断为前 {MAX_MATCH_RESULTS} 条]"));
+                out.push_str(&format!(
+                    "\n\n[结果过多，已截断为前 {MAX_MATCH_RESULTS} 条]"
+                ));
             }
             if out.is_empty() {
                 out = "（无匹配文件）".to_string();
@@ -662,8 +667,8 @@ impl Tool for Grep {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
-            let regex = regex::Regex::new(pattern)
-                .map_err(|e| format!("无效正则 {pattern}: {e}"))?;
+            let regex =
+                regex::Regex::new(pattern).map_err(|e| format!("无效正则 {pattern}: {e}"))?;
             let include = args["include"].as_str().map(|s| s.to_string());
             let root = match args["path"].as_str() {
                 Some(path) => resolve_checked(ctx.cwd, path, false)?,
@@ -807,7 +812,10 @@ impl Tool for Bash {
                 text.truncate(MAX_BASH_OUTPUT);
                 text.push_str("\n\n[输出过长，已截断]");
             }
-            text.push_str(&format!("\n[exit code: {}]", output.status.code().unwrap_or(-1)));
+            text.push_str(&format!(
+                "\n[exit code: {}]",
+                output.status.code().unwrap_or(-1)
+            ));
             Ok(ToolEffect::plain(text))
         })
     }
@@ -884,8 +892,10 @@ impl Tool for TodoListTool {
                     Ok(ToolEffect::plain(Self::render(&todos)))
                 }
                 Some(value) => {
-                    let new: Vec<TodoItem> = serde_json::from_value(value.clone())
-                        .map_err(|e| format!("todos 格式非法: {e}（status 须为 pending/in_progress/done）"))?;
+                    let new: Vec<TodoItem> =
+                        serde_json::from_value(value.clone()).map_err(|e| {
+                            format!("todos 格式非法: {e}（status 须为 pending/in_progress/done）")
+                        })?;
                     let mut todos = ctx.state.todos.lock().map_err(|e| e.to_string())?;
                     *todos = new;
                     Ok(ToolEffect::plain(Self::render(&todos)))
@@ -932,10 +942,41 @@ pub fn extract_text(html: &str) -> String {
     use scraper::{Html, Selector};
     const SKIP: &[&str] = &["script", "style", "noscript", "svg", "template"];
     const BLOCK: &[&str] = &[
-        "address", "article", "aside", "blockquote", "br", "dd", "details", "div", "dl", "dt",
-        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
-        "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "td", "th",
-        "tr", "ul",
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "dd",
+        "details",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
     ];
     let document = Html::parse_document(html);
     let mut root = None;
@@ -951,7 +992,13 @@ pub fn extract_text(html: &str) -> String {
     };
     // 栈遍历（None = 块级元素闭合，补换行）；(*root) 解引用到 NodeRef 以遍历文本节点
     let mut out = String::new();
-    let mut stack: Vec<Option<_>> = (*root).children().map(Some).collect::<Vec<_>>().into_iter().rev().collect();
+    let mut stack: Vec<Option<_>> = (*root)
+        .children()
+        .map(Some)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     while let Some(item) = stack.pop() {
         let Some(node) = item else {
             if !out.is_empty() && !out.ends_with('\n') {
@@ -978,7 +1025,13 @@ pub fn extract_text(html: &str) -> String {
                 if block {
                     stack.push(None);
                 }
-                stack.extend(node.children().map(Some).collect::<Vec<_>>().into_iter().rev());
+                stack.extend(
+                    node.children()
+                        .map(Some)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev(),
+                );
             }
             _ => {}
         }
@@ -1045,7 +1098,11 @@ impl Tool for FetchUrl {
                 .timeout(std::time::Duration::from_secs(30))
                 .user_agent("pig-code FetchURL/0.1 (coding agent)")
                 .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                    let private = attempt.url().host_str().map(is_private_host).unwrap_or(false);
+                    let private = attempt
+                        .url()
+                        .host_str()
+                        .map(is_private_host)
+                        .unwrap_or(false);
                     if private || attempt.previous().len() >= 5 {
                         attempt.stop()
                     } else {
@@ -1067,7 +1124,13 @@ impl Tool for FetchUrl {
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+                .map(|s| {
+                    s.split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase()
+                })
                 .unwrap_or_default();
             // 流式读体，上限 2MB
             let mut body: Vec<u8> = Vec::new();
@@ -1275,12 +1338,17 @@ struct AskUserQuestionTool;
 
 /// 解析并校验 AskUserQuestion 参数：1-4 题；每题 question 非空、options 2-4 项、
 /// label 非空。纯函数以便单测；真正的请求/等待在 session.rs 工具循环拦截。
-pub fn parse_questions(args: &serde_json::Value) -> Result<Vec<pig_protocol::QuestionItem>, String> {
+pub fn parse_questions(
+    args: &serde_json::Value,
+) -> Result<Vec<pig_protocol::QuestionItem>, String> {
     let items = args["questions"]
         .as_array()
         .ok_or("缺少参数 questions（数组）")?;
     if items.is_empty() || items.len() > 4 {
-        return Err(format!("questions 数量须在 1-4 之间（收到 {}）", items.len()));
+        return Err(format!(
+            "questions 数量须在 1-4 之间（收到 {}）",
+            items.len()
+        ));
     }
     let mut questions = Vec::new();
     for (ix, item) in items.iter().enumerate() {

@@ -54,7 +54,10 @@ pub fn load(path: &std::path::Path) -> Result<AppConfig, String> {
         expand_env_keys(&mut config);
         return Ok(config);
     }
-    Err(format!("解析配置失败 {}: 既不是新格式也不是旧格式", path.display()))
+    Err(format!(
+        "解析配置失败 {}: 既不是新格式也不是旧格式",
+        path.display()
+    ))
 }
 
 fn migrate(legacy: LegacyProvider) -> AppConfig {
@@ -88,7 +91,9 @@ fn expand_env_keys(config: &mut AppConfig) {
 pub fn expand_env(value: &str) -> String {
     let mut out = value.to_string();
     while let Some(start) = out.find("${") {
-        let Some(end) = out[start..].find('}') else { break };
+        let Some(end) = out[start..].find('}') else {
+            break;
+        };
         let var = out[start + 2..start + end].to_string();
         let replacement = std::env::var(&var).unwrap_or_default();
         out.replace_range(start..start + end + 1, &replacement);

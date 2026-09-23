@@ -70,6 +70,17 @@ impl Rollout {
         Ok(Self { file })
     }
 
+    /// resume 续写：追加模式打开已有 rollout（不覆盖 meta 与历史行）
+    pub fn open_append(dir: &Path, id: &str) -> Result<Self, String> {
+        let path = dir.join(format!("{id}.jsonl"));
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .map_err(|e| format!("打开 rollout 失败 {}: {e}", path.display()))?;
+        Ok(Self { file })
+    }
+
     pub fn append(&mut self, record: &RolloutRecord) {
         // 持久化失败不致命：打日志继续
         let _ = Self::write_line(&mut self.file, record);

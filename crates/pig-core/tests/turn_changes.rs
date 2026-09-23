@@ -10,7 +10,11 @@ use std::time::Duration;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_file_changes_emitted_and_replayed() {
     let (config_path, cwd, data_dir) = setup("turn-changes");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path.clone()), cwd.clone(), data_dir.clone());
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
     let events = agent.events.clone();
 
     let session_id = new_session(&agent, cwd.clone()).await;
@@ -37,7 +41,12 @@ async fn turn_file_changes_emitted_and_replayed() {
     let change = &files[0];
     assert_eq!(change.path, mock::SCENARIO_B_FILE);
     // 本轮首次写前不存在 → 最终 3 行全为新增（Write 3 行 + Edit 改行不增行数）
-    assert_eq!((change.additions, change.deletions), (3, 0), "净额口径: {}", change.unified_diff);
+    assert_eq!(
+        (change.additions, change.deletions),
+        (3, 0),
+        "净额口径: {}",
+        change.unified_diff
+    );
     agent.shutdown();
 
     // 模拟重启重开会话：每轮改动面板从 rollout 回放恢复

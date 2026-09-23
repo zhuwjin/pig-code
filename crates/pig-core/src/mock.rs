@@ -8,7 +8,8 @@ use tokio::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const MOCK_FILE_NAME: &str = "README.mock.md";
-pub const MOCK_FILE_CONTENT: &str = "# mock 文件\n\n这是 pig-core mock provider 自测用的已知文件。\n";
+pub const MOCK_FILE_CONTENT: &str =
+    "# mock 文件\n\n这是 pig-core mock provider 自测用的已知文件。\n";
 pub const MOCK_REASONING: &str = "用户让我读一个文件并总结。先调用 Read。";
 pub const MOCK_REPLY_MARKER: &str = "MOCK_REPLY_OK";
 
@@ -137,10 +138,7 @@ fn echo_system_response(body: &str) -> Vec<String> {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let system = parsed["messages"]
         .as_array()
-        .and_then(|msgs| {
-            msgs.iter()
-                .find(|m| m["role"].as_str() == Some("system"))
-        })
+        .and_then(|msgs| msgs.iter().find(|m| m["role"].as_str() == Some("system")))
         .and_then(|m| m["content"].as_str().map(str::to_string))
         .unwrap_or_else(|| "(no system message)".to_string());
     let system: String = system.chars().take(3000).collect();
@@ -168,7 +166,8 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
         1 => tool_call_chunks(
             "call_b_edit",
             "Edit",
-            &serde_json::json!({"path": file, "old_string": "line2", "new_string": "LINE2"}).to_string(),
+            &serde_json::json!({"path": file, "old_string": "line2", "new_string": "LINE2"})
+                .to_string(),
         ),
         2 => tool_call_chunks(
             "call_b_bash",
@@ -308,9 +307,7 @@ async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) -> 
         let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}";
         return stream.write_all(resp.as_bytes()).await.is_ok();
     }
-    let content = format!(
-        "{SUMMARY_MARKER}：用户目标=mock 自测；已完成=读取/写入文件；待办=无。"
-    );
+    let content = format!("{SUMMARY_MARKER}：用户目标=mock 自测；已完成=读取/写入文件；待办=无。");
     let json = serde_json::json!({
         "id": "chatcmpl-mock",
         "object": "chat.completion",
@@ -454,7 +451,8 @@ async fn handle_connection(
         return;
     }
 
-    let response_head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+    let response_head =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
     if stream.write_all(response_head.as_bytes()).await.is_err() {
         return;
     }

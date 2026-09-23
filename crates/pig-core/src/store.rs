@@ -103,8 +103,7 @@ impl Store {
         })
     }
 
-    const SESSION_COLUMNS: &'static str =
-        "id, title, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode";
+    const SESSION_COLUMNS: &'static str = "id, title, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode";
 
     pub fn upsert_session(&self, meta: &SessionMeta) {
         // exec_mode 存变体名（"AutoEdit" 等），读出时按 serde 变体名解析
@@ -452,10 +451,8 @@ mod tests {
     use super::*;
 
     fn open_test_store(name: &str) -> (PathBuf, Store) {
-        let dir = std::env::temp_dir().join(format!(
-            "pig-core-store-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pig-core-store-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let store = Store::open(&dir).expect("打开 store");

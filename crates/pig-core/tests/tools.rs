@@ -1,8 +1,8 @@
 //! 工具层单元测试：Edit 失败分支、路径逃逸、write/diff/revert。
 
+use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
 use pig_core::tool::{self, ChangeTracker, ToolContext};
-use pig_core::provider::ToolCall;
 
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
@@ -27,23 +27,44 @@ async fn edit_not_found_and_not_unique() {
     let state = SessionToolState::for_test();
 
     let (_, is_error, _, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "a.txt", "old_string": "baz", "new_string": "x"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "a.txt", "old_string": "baz", "new_string": "x"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(is_error);
 
     let (output, is_error, _, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "a.txt", "old_string": "foo", "new_string": "x"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "a.txt", "old_string": "foo", "new_string": "x"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(is_error);
     assert!(output.contains("2 次"), "应提示多处匹配: {output}");
 
     let (_, is_error, change, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "a.txt", "old_string": "bar", "new_string": "x"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "a.txt", "old_string": "bar", "new_string": "x"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -61,18 +82,30 @@ async fn path_escape_rejected() {
 
     for (tool_name, args) in [
         ("Read", serde_json::json!({"path": "../outside.txt"})),
-        ("Write", serde_json::json!({"path": "../outside.txt", "content": "x"})),
-        ("Edit", serde_json::json!({"path": "../outside.txt", "old_string": "a", "new_string": "b"})),
+        (
+            "Write",
+            serde_json::json!({"path": "../outside.txt", "content": "x"}),
+        ),
+        (
+            "Edit",
+            serde_json::json!({"path": "../outside.txt", "old_string": "a", "new_string": "b"}),
+        ),
         ("Read", serde_json::json!({"path": "sub/../../outside.txt"})),
     ] {
         let (output, is_error, _, _) = tool::execute(
             &call(tool_name, args),
-            ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+            ToolContext {
+                cwd: &dir,
+                tracker: &mut tracker,
+                state: &state,
+            },
         )
         .await;
         assert!(is_error, "{tool_name} 越界应失败");
         assert!(
-            output.contains("越出工作目录") || output.contains("不存在") || output.contains("读取失败"),
+            output.contains("越出工作目录")
+                || output.contains("不存在")
+                || output.contains("读取失败"),
             "错误信息: {output}"
         );
     }
@@ -85,8 +118,15 @@ async fn write_diff_revert_cycle() {
     let state = SessionToolState::for_test();
 
     let (_, is_error, change, _) = tool::execute(
-        &call("Write", serde_json::json!({"path": "sub/new.txt", "content": "a\nb\n"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Write",
+            serde_json::json!({"path": "sub/new.txt", "content": "a\nb\n"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -96,13 +136,25 @@ async fn write_diff_revert_cycle() {
 
     // 第二次修改 diff 仍相对原始快照（不存在 → 全新增）
     let (_, is_error, change, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "sub/new.txt", "old_string": "b", "new_string": "B"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "sub/new.txt", "old_string": "b", "new_string": "B"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
     let change = change.unwrap();
-    assert_eq!((change.additions, change.deletions), (2, 0), "仍是原始→当前: {}", change.unified_diff);
+    assert_eq!(
+        (change.additions, change.deletions),
+        (2, 0),
+        "仍是原始→当前: {}",
+        change.unified_diff
+    );
 
     tracker.revert(&dir.join("sub/new.txt")).unwrap();
     assert!(!dir.join("sub/new.txt").exists(), "新建文件撤销即删除");
@@ -116,29 +168,56 @@ async fn edit_produces_per_edit_diff() {
 
     // Write 的本次编辑 diff：不存在 → 全量新增
     let (_, is_error, _, edit) = tool::execute(
-        &call("Write", serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Write",
+            serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
     let edit = edit.expect("Write 应带本次编辑 diff");
     assert_eq!(edit.path, "f.txt");
     assert_eq!((edit.additions, edit.deletions), (3, 0));
-    assert!(edit.unified_diff.contains("+a"), "diff 内容: {}", edit.unified_diff);
+    assert!(
+        edit.unified_diff.contains("+a"),
+        "diff 内容: {}",
+        edit.unified_diff
+    );
 
     // Edit 的本次编辑 diff 只反映这一次替换（1 增 1 删），
     // 与会话累计口径的 file_change（相对原始快照）区分开
     let (_, is_error, change, edit) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
     let edit = edit.expect("Edit 应带本次编辑 diff");
-    assert_eq!((edit.additions, edit.deletions), (1, 1), "仅本次替换: {}", edit.unified_diff);
+    assert_eq!(
+        (edit.additions, edit.deletions),
+        (1, 1),
+        "仅本次替换: {}",
+        edit.unified_diff
+    );
     assert!(edit.unified_diff.contains("-b") && edit.unified_diff.contains("+B"));
     let change = change.expect("累计 diff 仍存在");
-    assert_eq!((change.additions, change.deletions), (3, 0), "累计口径不变（原始不存在→当前）");
+    assert_eq!(
+        (change.additions, change.deletions),
+        (3, 0),
+        "累计口径不变（原始不存在→当前）"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -149,7 +228,8 @@ async fn fallback_edit_diff_from_arguments() {
     let edit = tool::fallback_edit_diff(
         &dir,
         "Edit",
-        &serde_json::json!({"path": "sub/f.txt", "old_string": "a\nb\nc", "new_string": "a\nB\nc"}).to_string(),
+        &serde_json::json!({"path": "sub/f.txt", "old_string": "a\nb\nc", "new_string": "a\nB\nc"})
+            .to_string(),
     )
     .expect("Edit 参数应能兜底出 diff");
     assert_eq!(edit.path, "sub/f.txt");
@@ -178,8 +258,15 @@ async fn turn_changes_are_per_turn_not_cumulative() {
 
     // 「第一轮」Write 3 行：本轮净额 = 全量新增
     let (_, is_error, _, _) = tool::execute(
-        &call("Write", serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Write",
+            serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -190,8 +277,15 @@ async fn turn_changes_are_per_turn_not_cumulative() {
 
     // 「第二轮」Edit 1 行：只算本轮（1 增 1 删），不是会话累计口径
     let (_, is_error, _, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -201,18 +295,35 @@ async fn turn_changes_are_per_turn_not_cumulative() {
 
     // 「第三轮」同一轮内改回原文：turn 首末内容一致，净额归零不产出
     let (_, is_error, _, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "B", "new_string": "b"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "f.txt", "old_string": "B", "new_string": "b"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
     let (_, is_error, _, _) = tool::execute(
-        &call("Edit", serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
-    assert!(tracker.take_turn_changes(&dir).is_empty(), "轮内改回原文净额应为零");
+    assert!(
+        tracker.take_turn_changes(&dir).is_empty(),
+        "轮内改回原文净额应为零"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -223,14 +334,27 @@ async fn revert_modified_file_restores_content() {
     let state = SessionToolState::for_test();
 
     tool::execute(
-        &call("Edit", serde_json::json!({"path": "m.txt", "old_string": "original", "new_string": "changed"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Edit",
+            serde_json::json!({"path": "m.txt", "old_string": "original", "new_string": "changed"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
-    assert_eq!(std::fs::read_to_string(dir.join("m.txt")).unwrap(), "changed\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("m.txt")).unwrap(),
+        "changed\n"
+    );
 
     tracker.revert(&dir.join("m.txt")).unwrap();
-    assert_eq!(std::fs::read_to_string(dir.join("m.txt")).unwrap(), "original\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("m.txt")).unwrap(),
+        "original\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -244,7 +368,11 @@ async fn glob_and_grep() {
 
     let (out, is_error, _, _) = tool::execute(
         &call("Glob", serde_json::json!({"pattern": "**/*.rs"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -252,18 +380,35 @@ async fn glob_and_grep() {
 
     let (out, is_error, _, _) = tool::execute(
         &call("Grep", serde_json::json!({"pattern": "TODO"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
-    assert!(out.contains("src/a.rs:2:") && out.contains("src/b.md:1:"), "{out}");
+    assert!(
+        out.contains("src/a.rs:2:") && out.contains("src/b.md:1:"),
+        "{out}"
+    );
 
     let (out, _, _, _) = tool::execute(
-        &call("Grep", serde_json::json!({"pattern": "TODO", "include": "*.rs"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Grep",
+            serde_json::json!({"pattern": "TODO", "include": "*.rs"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
-    assert!(out.contains("a.rs") && !out.contains("b.md"), "include 过滤: {out}");
+    assert!(
+        out.contains("a.rs") && !out.contains("b.md"),
+        "include 过滤: {out}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -275,7 +420,11 @@ async fn todo_list_read_write_replace() {
     // 空读
     let (out, is_error, _, _) = tool::execute(
         &call("TodoList", serde_json::json!({})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -283,12 +432,19 @@ async fn todo_list_read_write_replace() {
 
     // 写入（状态挂在 ctx 句柄上，跨调用保持）
     let (out, is_error, _, _) = tool::execute(
-        &call("TodoList", serde_json::json!({"todos": [
-            {"content": "读代码", "status": "done"},
-            {"content": "改实现", "status": "in_progress"},
-            {"content": "跑测试", "status": "pending"},
-        ]})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "TodoList",
+            serde_json::json!({"todos": [
+                {"content": "读代码", "status": "done"},
+                {"content": "改实现", "status": "in_progress"},
+                {"content": "跑测试", "status": "pending"},
+            ]}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -298,7 +454,11 @@ async fn todo_list_read_write_replace() {
     // 回读
     let (out, is_error, _, _) = tool::execute(
         &call("TodoList", serde_json::json!({})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -306,8 +466,15 @@ async fn todo_list_read_write_replace() {
 
     // 整体替换：旧项应全部消失
     let (out, _, _, _) = tool::execute(
-        &call("TodoList", serde_json::json!({"todos": [{"content": "收尾", "status": "pending"}]})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "TodoList",
+            serde_json::json!({"todos": [{"content": "收尾", "status": "pending"}]}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(out.contains("1. [pending] 收尾"), "{out}");
@@ -315,17 +482,31 @@ async fn todo_list_read_write_replace() {
 
     // 非法 status 报错，且清单保持替换前的内容
     let (out, is_error, _, _) = tool::execute(
-        &call("TodoList", serde_json::json!({"todos": [{"content": "x", "status": "doing"}]})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "TodoList",
+            serde_json::json!({"todos": [{"content": "x", "status": "doing"}]}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(is_error, "非法 status 应报错: {out}");
     let (out, _, _, _) = tool::execute(
         &call("TodoList", serde_json::json!({})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
-    assert!(out.contains("1. [pending] 收尾"), "写入失败后清单应保持不变: {out}");
+    assert!(
+        out.contains("1. [pending] 收尾"),
+        "写入失败后清单应保持不变: {out}"
+    );
 }
 
 #[test]
@@ -345,7 +526,10 @@ fn fetch_url_extract_text_strips_non_content() {
     assert!(!text.contains("图标"), "svg 应剔除: {text}");
     assert!(!text.contains("菜单"), "优先 main，nav 不应出现: {text}");
     assert!(!text.contains("页脚"), "优先 main，footer 不应出现: {text}");
-    assert!(text.contains("标题\n第一段"), "块级元素之间应换行: {text:?}");
+    assert!(
+        text.contains("标题\n第一段"),
+        "块级元素之间应换行: {text:?}"
+    );
 }
 
 #[test]
@@ -358,15 +542,32 @@ fn fetch_url_extract_text_body_fallback_and_blank_collapse() {
 #[test]
 fn fetch_url_is_private_host_ranges() {
     for host in [
-        "localhost", "LOCALHOST", "localhost.", "127.0.0.1", "127.5.5.5", "::1", "[::1]",
-        "0.0.0.0", "10.0.0.1", "10.255.255.255", "192.168.1.1", "172.16.0.1", "172.31.255.1",
+        "localhost",
+        "LOCALHOST",
+        "localhost.",
+        "127.0.0.1",
+        "127.5.5.5",
+        "::1",
+        "[::1]",
+        "0.0.0.0",
+        "10.0.0.1",
+        "10.255.255.255",
+        "192.168.1.1",
+        "172.16.0.1",
+        "172.31.255.1",
         "169.254.1.1",
     ] {
         assert!(tool::is_private_host(host), "{host} 应判定为私网");
     }
     for host in [
-        "example.com", "8.8.8.8", "1.1.1.1", "172.15.0.1", "172.32.0.1", "11.0.0.1",
-        "192.167.1.1", "10x.example.com",
+        "example.com",
+        "8.8.8.8",
+        "1.1.1.1",
+        "172.15.0.1",
+        "172.32.0.1",
+        "11.0.0.1",
+        "192.167.1.1",
+        "10x.example.com",
     ] {
         assert!(!tool::is_private_host(host), "{host} 应放行");
     }
@@ -389,8 +590,15 @@ async fn background_bash_task_lifecycle() {
 
     // 后台 echo：立即返回 task_id
     let (out, is_error, _, _) = tool::execute(
-        &call("Bash", serde_json::json!({"command": "echo bg-marker", "run_in_background": true})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Bash",
+            serde_json::json!({"command": "echo bg-marker", "run_in_background": true}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -416,7 +624,11 @@ async fn background_bash_task_lifecycle() {
     // TaskOutput 含输出
     let (out, is_error, _, _) = tool::execute(
         &call("TaskOutput", serde_json::json!({"task_id": task1})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -424,15 +636,26 @@ async fn background_bash_task_lifecycle() {
 
     // sleep 30 后台启动 → TaskStop → Killed
     let (out, is_error, _, _) = tool::execute(
-        &call("Bash", serde_json::json!({"command": "sleep 30", "run_in_background": true})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        &call(
+            "Bash",
+            serde_json::json!({"command": "sleep 30", "run_in_background": true}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
     let task2 = task_id_of(&out);
     let (out, is_error, _, _) = tool::execute(
         &call("TaskStop", serde_json::json!({"task_id": task2})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -449,7 +672,11 @@ async fn background_bash_task_lifecycle() {
     // 重复停止 → 「任务已结束」错误
     let (_, is_error, _, _) = tool::execute(
         &call("TaskStop", serde_json::json!({"task_id": task2})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(is_error, "已停止的任务再停应报错");
@@ -457,7 +684,11 @@ async fn background_bash_task_lifecycle() {
     // TaskList 渲染包含两个 task_id
     let (out, is_error, _, _) = tool::execute(
         &call("TaskList", serde_json::json!({})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -489,11 +720,20 @@ fn parse_questions_validates_shape() {
     assert!(tool::parse_questions(&five).is_err());
 
     // 选项数越界：1 个 / 5 个
-    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q", "options": [{"label": "a"}]}]})).is_err());
-    assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q", "options": [
-        {"label": "1"}, {"label": "2"}, {"label": "3"}, {"label": "4"}, {"label": "5"}
-    ]}]}))
-    .is_err());
+    assert!(
+        tool::parse_questions(
+            &serde_json::json!({"questions": [{"question": "q", "options": [{"label": "a"}]}]})
+        )
+        .is_err()
+    );
+    assert!(
+        tool::parse_questions(
+            &serde_json::json!({"questions": [{"question": "q", "options": [
+                {"label": "1"}, {"label": "2"}, {"label": "3"}, {"label": "4"}, {"label": "5"}
+            ]}]})
+        )
+        .is_err()
+    );
 
     // 空 label / 空 question / 缺 options / 缺 questions
     assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q", "options": [{"label": " "}, {"label": "b"}]}]})).is_err());

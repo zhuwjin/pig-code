@@ -39,7 +39,10 @@ async fn run_scenario_b(
     let mut collected = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        assert!(Instant::now() < deadline, "等待回合结束超时: {collected:#?}");
+        assert!(
+            Instant::now() < deadline,
+            "等待回合结束超时: {collected:#?}"
+        );
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
         else {
             continue;
@@ -56,7 +59,10 @@ async fn run_scenario_b(
                     .unwrap();
             }
         }
-        let done = matches!(event, Event::TurnComplete { .. } | Event::TurnAborted { .. });
+        let done = matches!(
+            event,
+            Event::TurnComplete { .. } | Event::TurnAborted { .. }
+        );
         collected.push(event);
         if done {
             break;
@@ -109,8 +115,12 @@ fn file_changes(events: &[Event]) -> Vec<(&str, &str, u32, u32)> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scenario_b_allow_all_then_revert() {
-    let (events, dir, agent, session_id) =
-        run_scenario_b(ExecMode::ConfirmBeforeEdit, Some(ApprovalDecision::Allow), "allow").await;
+    let (events, dir, agent, session_id) = run_scenario_b(
+        ExecMode::ConfirmBeforeEdit,
+        Some(ApprovalDecision::Allow),
+        "allow",
+    )
+    .await;
 
     assert_eq!(
         approvals(&events),
@@ -118,7 +128,9 @@ async fn scenario_b_allow_all_then_revert() {
         "三处审批按序出现"
     );
     assert!(
-        events.iter().any(|e| matches!(e, Event::TurnComplete { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, Event::TurnComplete { .. })),
         "回合正常完成"
     );
     assert!(
@@ -138,14 +150,25 @@ async fn scenario_b_allow_all_then_revert() {
     );
 
     let changes = file_changes(&events);
-    assert_eq!(changes.len(), 2, "Write+Edit 各一次 FileChanged: {changes:?}");
+    assert_eq!(
+        changes.len(),
+        2,
+        "Write+Edit 各一次 FileChanged: {changes:?}"
+    );
     let (path, diff, adds, dels) = changes[0];
     assert_eq!(path, mock::SCENARIO_B_FILE);
     assert_eq!((adds, dels), (3, 0), "新建文件全是新增行: {diff}");
     assert!(diff.contains("+line2"));
     let (_, diff2, adds2, dels2) = changes[1];
-    assert_eq!((adds2, dels2), (3, 0), "diff 始终是原始（文件不存在）→当前: {diff2}");
-    assert!(diff2.contains("+LINE2") && !diff2.contains("-line2"), "diff 是原始→当前: {diff2}");
+    assert_eq!(
+        (adds2, dels2),
+        (3, 0),
+        "diff 始终是原始（文件不存在）→当前: {diff2}"
+    );
+    assert!(
+        diff2.contains("+LINE2") && !diff2.contains("-line2"),
+        "diff 是原始→当前: {diff2}"
+    );
 
     let file = dir.join(mock::SCENARIO_B_FILE);
     assert_eq!(
@@ -179,12 +202,18 @@ async fn scenario_b_allow_all_then_revert() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scenario_b_deny_all() {
-    let (events, dir, agent, _) =
-        run_scenario_b(ExecMode::ConfirmBeforeEdit, Some(ApprovalDecision::Reject), "deny").await;
+    let (events, dir, agent, _) = run_scenario_b(
+        ExecMode::ConfirmBeforeEdit,
+        Some(ApprovalDecision::Reject),
+        "deny",
+    )
+    .await;
 
     assert_eq!(approvals(&events), ["Write", "Edit", "Bash"]);
     assert!(
-        events.iter().any(|e| matches!(e, Event::TurnComplete { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, Event::TurnComplete { .. })),
         "拒绝后回合仍继续到结束"
     );
     let denied = tool_ends(&events)
@@ -216,9 +245,18 @@ async fn plan_mode_blocks_writes_without_approval() {
         .iter()
         .filter(|(_, out, _)| out.contains("计划模式"))
         .count();
-    assert_eq!(blocked, 3, "三个修改类工具都被计划模式拦截: {:?}", tool_ends(&events));
+    assert_eq!(
+        blocked,
+        3,
+        "三个修改类工具都被计划模式拦截: {:?}",
+        tool_ends(&events)
+    );
     assert!(!dir.join(mock::SCENARIO_B_FILE).exists());
-    assert!(events.iter().any(|e| matches!(e, Event::TurnComplete { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::TurnComplete { .. }))
+    );
     agent.shutdown();
 }
 
@@ -267,7 +305,9 @@ async fn interrupt_during_approval() {
                 interrupted = true;
                 agent
                     .ops
-                    .send(Op::Interrupt { session_id: session_id.clone() })
+                    .send(Op::Interrupt {
+                        session_id: session_id.clone(),
+                    })
                     .await
                     .unwrap();
             }
@@ -276,6 +316,9 @@ async fn interrupt_during_approval() {
             _ => {}
         }
     }
-    assert!(interrupted && aborted, "审批等待中 Interrupt 应解除阻塞并中止");
+    assert!(
+        interrupted && aborted,
+        "审批等待中 Interrupt 应解除阻塞并中止"
+    );
     agent.shutdown();
 }
