@@ -1768,7 +1768,13 @@ impl ThreadView {
                                     })
                                     .detach();
                                 } else {
-                                    this.nav_hover = None;
+                                    // 只清自己这根的悬停：gpui 按绘制顺序逐元素
+                                    // 判定 hover，向上滑（bar2→bar1）时新横条的
+                                    // enter 先触发、旧横条的 leave 后到，无条件
+                                    // 清空会把刚设置的 enter 抹掉
+                                    if this.nav_hover == Some(ix) {
+                                        this.nav_hover = None;
+                                    }
                                     // 离开 80ms 才关闭（对齐 ZCode closeDelay）；
                                     // 这期间移到相邻横条会取消关闭
                                     cx.spawn(async move |this, cx| {
@@ -1776,8 +1782,7 @@ impl ThreadView {
                                             .timer(std::time::Duration::from_millis(80))
                                             .await;
                                         this.update(cx, |this, cx| {
-                                            if this.nav_hover.is_none() && this.nav_card == Some(ix)
-                                            {
+                                            if this.nav_hover.is_none() {
                                                 this.nav_card = None;
                                                 cx.notify();
                                             }
