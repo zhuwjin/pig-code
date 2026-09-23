@@ -73,6 +73,7 @@ pub struct Sidebar {
     /// render_session_row 只持 &self，故用 RefCell
     title_scrolls: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>>,
     marquee: Option<TitleMarquee>,
+    focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -115,6 +116,7 @@ impl Sidebar {
             archived_open: false,
             title_scrolls: std::cell::RefCell::new(std::collections::HashMap::new()),
             marquee: None,
+            focus_handle: cx.focus_handle(),
             _subscriptions,
         }
     }
@@ -794,8 +796,8 @@ impl Render for Sidebar {
         v_flex()
             .size_full()
             .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().border)
+            // 分隔线由 dock 把手自带线绘制：侧栏自画 border_r 会画在把手命中区
+            // 右侧（gpui-base 的 Side::Left 把手命中区停在分界线左侧），线上不可拖
             .child(self.render_action_rows(cx))
             .child(
                 div()
@@ -824,5 +826,30 @@ impl Render for Sidebar {
                             .child(div().text_sm().child("设置")),
                     ),
             )
+    }
+}
+
+// dock 面板能力：侧栏自绘全部 chrome，不要 dock 的标题栏/内边距
+impl Focusable for Sidebar {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<gpui_kit::component::dock::PanelEvent> for Sidebar {}
+
+impl gpui_kit::component::dock::BasePanel for Sidebar {
+    fn panel_name(&self) -> &'static str {
+        "sidebar"
+    }
+}
+
+impl gpui_kit::component::dock::Panel for Sidebar {
+    fn title_bar(&self, _: &App) -> bool {
+        false
+    }
+
+    fn inner_padding(&self, _: &App) -> bool {
+        false
     }
 }
