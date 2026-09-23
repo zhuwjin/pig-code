@@ -1998,17 +1998,16 @@ impl Render for ThreadView {
         if user_ixs.len() >= 2 && pane_width <= px(0.) {
             cx.notify();
         }
-        // 面板够宽时内容列两侧各留 48px（对齐 ZCode 的 w-[calc(100%-6rem)]）。
-        // gutter 只由面板宽度决定、与 turn 数无关：先占住位置，第 2 条消息
-        // 发出、导航条出现时内容列宽度不变，不会抖动
+        // 内容列宽度必须纯布局驱动：paint 测得的面板宽度在面板开合后要滞后一帧
+        // 才更新，若用它算内容宽，每次开合面板内容列都会先按旧宽度错排一帧（抖动）。
+        // 因此 gutter 只看 turn 数（≥2 轮 = 导航条可能出现就先占住两侧各 48px，
+        // 对齐 ZCode w-[calc(100%-6rem)]），内容列恒为 min(860, 剩余宽度)。
+        // 导航条本体的显隐仍看测量宽度（12px 小横条晚一帧出现不可感知）。
+        let nav_eligible = user_ixs.len() >= 2;
         let pane_wide = pane_width >= px(720.);
-        let content_max_w = if pane_wide && pane_width < px(956.) {
-            pane_width - px(96.)
-        } else {
-            px(860.)
-        };
+        let content_max_w = px(860.);
         // 面板太窄时连 gutter 都留不出，隐藏导航条；turn 数 <2 也没有导航必要
-        let show_nav = user_ixs.len() >= 2 && pane_wide;
+        let show_nav = nav_eligible && pane_wide;
 
         v_flex()
             .size_full()
@@ -2040,45 +2039,67 @@ impl Render for ThreadView {
                             .children(items.into_iter().map(|item| {
                                 div()
                                     .w_full()
-                                    .max_w(content_max_w)
-                                    .mx_auto()
-                                    .px_4()
-                                    .child(item)
+                                    .when(nav_eligible, |this| this.px_12())
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(content_max_w)
+                                            .mx_auto()
+                                            .px_4()
+                                            .child(item),
+                                    )
                                     .into_any_element()
                             }))
                             // 工作中指示：跟在最后一条消息之后，随对话一起滚动
                             .when(self.streaming, |this| {
                                 this.child(
-                                    div().w_full().max_w(content_max_w).mx_auto().px_4().child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(
-                                                Spinner::new()
-                                                    .icon(AssetIconName::LoaderCircle)
-                                                    .color(cx.theme().muted_foreground),
-                                            )
-                                            .child(
-                                                ShimmerText::new(working_label)
-                                                    .id("working-shimmer")
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground),
-                                            ),
-                                    ),
+                                    div()
+                                        .w_full()
+                                        .when(nav_eligible, |this| this.px_12())
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .max_w(content_max_w)
+                                                .mx_auto()
+                                                .px_4()
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .child(
+                                                            Spinner::new()
+                                                                .icon(AssetIconName::LoaderCircle)
+                                                                .color(cx.theme().muted_foreground),
+                                                        )
+                                                        .child(
+                                                            ShimmerText::new(working_label)
+                                                                .id("working-shimmer")
+                                                                .text_xs()
+                                                                .text_color(
+                                                                    cx.theme().muted_foreground,
+                                                                ),
+                                                        ),
+                                                ),
+                                        ),
                                 )
                             })
                             .when(self.messages.is_empty(), |this| {
                                 this.child(
                                     div()
                                         .w_full()
-                                        .max_w(content_max_w)
-                                        .mx_auto()
-                                        .px_4()
-                                        .py_8()
-                                        .text_center()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
+                                        .when(nav_eligible, |this| this.px_12())
                                         .child(
-                                            "空会话。输入消息开始对话，/ 查看命令，@ 引用文件。",
+                                            div()
+                                                .w_full()
+                                                .max_w(content_max_w)
+                                                .mx_auto()
+                                                .px_4()
+                                                .py_8()
+                                                .text_center()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(
+                                                    "空会话。输入消息开始对话，/ 查看命令，@ 引用文件。",
+                                                ),
                                         ),
                                 )
                             }),

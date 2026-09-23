@@ -5,16 +5,21 @@ mod settings;
 mod sidebar;
 mod thread_view;
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::InteractiveElement as _;
+use gpui_kit::assets::IconName as AssetsIconName;
+use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
 use gpui_kit::base::GlobalState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
+    TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -27,7 +32,10 @@ gpui_kit::actions!(
         FocusSearch,
         CloseSearch,
         CloseSettings,
-        ToggleSidebar
+        ToggleSidebar,
+        ToggleChanges,
+        ToggleBrowser,
+        ToggleSideChat
     ]
 );
 
@@ -69,6 +77,26 @@ struct SessionViews {
     review: Entity<ReviewPanel>,
 }
 
+/// 右侧面板 tab：当前只有"改动"，浏览器/终端/侧边聊天后续加。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RightTab {
+    Changes,
+}
+
+impl RightTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Changes => "改动",
+        }
+    }
+
+    fn icon(self) -> AssetsIconName {
+        match self {
+            Self::Changes => AssetsIconName::GitBranch,
+        }
+    }
+}
+
 struct AppView {
     sidebar: Entity<Sidebar>,
     composer: Entity<Composer>,
@@ -104,6 +132,20 @@ struct AppView {
     settings: Entity<SettingsView>,
     settings_open: bool,
     sidebar_collapsed: bool,
+    /// 右侧面板是否展开（默认收起：进会话不自动显示改动）
+    right_open: bool,
+    /// 右侧面板打开的 tab（按打开顺序）；收起时保留
+    right_tabs: Vec<RightTab>,
+    /// 右侧面板当前激活的 tab（None = 显示面板首页/菜单页）
+    right_active: Option<RightTab>,
+    /// 面板开合后的补渲预算（帧数）：>0 时 render 里 request_animation_frame
+    layout_settle_frames: u8,
+    /// 标签页栏 "+" 的加面板菜单是否打开
+    right_menu_open: bool,
+    /// 菜单因点击外部收起时的按下位置：吞掉同一次按压触发的按钮 click，避免收起又弹开
+    right_menu_outside_close: Option<Point<Pixels>>,
+    /// 标签页栏 "+" 按钮的屏幕 bounds（on_prepaint 记录，菜单锚定用）
+    tab_add_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
     config: Option<pig_protocol::AppConfig>,
     /// (provider_id, model_id)
     current_model: Option<(String, String)>,
@@ -154,6 +196,13 @@ impl AppView {
             settings,
             settings_open: false,
             sidebar_collapsed: false,
+            right_open: false,
+            right_tabs: vec![],
+            right_active: None,
+            layout_settle_frames: 0,
+            right_menu_open: false,
+            right_menu_outside_close: None,
+            tab_add_btn_bounds: Rc::new(Cell::new(Bounds::default())),
             config: None,
             current_model: None,
             reasoning_level: None,
@@ -1182,6 +1231,314 @@ impl AppView {
         cx.notify();
     }
 
+    /// 面板开合改变了三栏宽度分配：paint 时的测量值（消息区宽度/导航条显隐）
+    /// 滞后一帧才更新。置两帧补渲预算，render 里用 request_animation_frame 排帧
+    ///（保证排在绘制之后；事件里 cx.defer 可能赶在绘制前，notify 被合并掉，
+    /// 修正帧会残留到下一次鼠标输入才执行）。
+    fn schedule_layout_settle(&mut self) {
+        self.layout_settle_frames = 2;
+    }
+
+    /// 右侧面板开关（标题栏面板按钮）：展开/收起，tab 状态保留。
+    /// 展开后没有激活 tab 时内容区显示面板首页（菜单页）。
+    fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
+        self.right_open = !self.right_open;
+        cx.notify();
+        self.schedule_layout_settle();
+    }
+
+    /// 右侧面板 tab 开关（快捷键用）：已激活时再次触发 = 收起面板；否则打开并激活该 tab。
+    fn toggle_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        if self.right_open && self.right_active == Some(tab) {
+            self.right_open = false;
+        } else {
+            if !self.right_tabs.contains(&tab) {
+                self.right_tabs.push(tab);
+            }
+            self.right_active = Some(tab);
+            self.right_open = true;
+        }
+        cx.notify();
+        self.schedule_layout_settle();
+    }
+
+    /// 打开并激活右侧 tab（菜单点击用，纯打开不带收起语义）
+    fn open_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        if !self.right_tabs.contains(&tab) {
+            self.right_tabs.push(tab);
+        }
+        self.right_active = Some(tab);
+        self.right_open = true;
+        cx.notify();
+    }
+
+    /// 关闭右侧 tab：关掉激活 tab 时切到剩余最后一个；
+    /// 没有 tab 了面板保持展开，回到面板首页（菜单页）。
+    fn close_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        self.right_tabs.retain(|t| *t != tab);
+        if self.right_active == Some(tab) {
+            self.right_active = self.right_tabs.last().copied();
+        }
+        cx.notify();
+    }
+
+    /// 开关标签页栏 "+" 的加面板菜单。
+    fn toggle_right_menu(&mut self, click: &ClickEvent, cx: &mut Context<Self>) {
+        // 菜单打开时点按钮：按下先触发菜单的 outside-close（记录按下位置），
+        // 紧随的 click 按同一按下位置吞掉，避免收起又马上弹开（composer 弹层同款处理）
+        let down_pos = match click {
+            ClickEvent::Mouse(event) => Some(event.down.position),
+            _ => None,
+        };
+        if self
+            .right_menu_outside_close
+            .take()
+            .is_some_and(|pos| Some(pos) == down_pos)
+        {
+            return;
+        }
+        self.right_menu_open = !self.right_menu_open;
+        cx.notify();
+    }
+
+    /// 右侧面板菜单项：(名称, 图标, 快捷键 action, 占位禁用, 点击打开的 tab)。
+    /// 浏览器/终端/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
+    fn right_menu_items() -> [(&'static str, AssetsIconName, Option<&'static dyn Action>, bool, Option<RightTab>); 4]
+    {
+        [
+            ("改动", AssetsIconName::GitBranch, Some(&ToggleChanges), false, Some(RightTab::Changes)),
+            ("浏览器", AssetsIconName::Globe, Some(&ToggleBrowser), true, None),
+            ("终端", AssetsIconName::SquareTerminal, None, true, None),
+            ("侧边聊天", AssetsIconName::MessageCircle, Some(&ToggleSideChat), true, None),
+        ]
+    }
+
+    /// 快捷键芯片组（ZCode 样式：每个键一个小芯片；未绑键时不显示）
+    fn render_shortcut_chips(
+        &self,
+        action: &dyn Action,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let binding =
+            window.highest_precedence_binding_for_action_in_context(action, KeyContext::default())?;
+        let stroke = binding.keystrokes().first()?.as_keystroke().clone();
+        let text = Kbd::format(&stroke);
+        // Windows 风格 "Ctrl+Shift+G" 按 + 拆成单键芯片；macOS 符号串无 + 则整体一个芯片
+        let keys: Vec<&str> = text.split('+').collect();
+        Some(
+            h_flex()
+                .gap_1()
+                .flex_shrink_0()
+                .children(keys.into_iter().map(|key| {
+                    div()
+                        .px_1()
+                        .py_0p5()
+                        .min_w_5()
+                        .text_center()
+                        .rounded(cx.theme().radius.half())
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .bg(cx.theme().muted)
+                        .child(key.to_string())
+                        .into_any_element()
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// 菜单行：图标 + 名称 + 快捷键芯片；disabled 为占位项（不可点）
+    fn render_right_menu_row(
+        &self,
+        ix: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (label, icon, shortcut, disabled, tab) = Self::right_menu_items()[ix];
+        let chips = shortcut.and_then(|action| self.render_shortcut_chips(action, window, cx));
+        h_flex()
+            .id(("right-menu-item", ix))
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .gap_2()
+            .rounded(cx.theme().radius)
+            .when(disabled, |this| this.opacity(0.5))
+            .when(!disabled, |this| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.right_menu_open = false;
+                        if let Some(tab) = tab {
+                            this.open_right_tab(tab, cx);
+                        }
+                    }))
+            })
+            .child(
+                Icon::new(icon).size_4().text_color(if disabled {
+                    cx.theme().muted_foreground
+                } else {
+                    cx.theme().foreground
+                }),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .flex_1()
+                    .whitespace_nowrap()
+                    .text_color(if disabled {
+                        cx.theme().muted_foreground
+                    } else {
+                        cx.theme().foreground
+                    })
+                    .child(label),
+            )
+            .when_some(chips, |this, chips| this.child(chips))
+            .into_any_element()
+    }
+
+    /// 面板首页（菜单页）：展开面板但没有打开的 tab 时显示——
+    /// 改动/浏览器/终端/侧边聊天四项（ZCode 同款，相当于面板的首页）。
+    /// 行全宽撑满（不做固定宽居中），面板拖宽/补帧时内容不晃。
+    fn render_right_menu_page(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w_full()
+                    .px_3()
+                    .gap_1()
+                    .children((0..4).map(|ix| self.render_right_menu_row(ix, window, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// 标签页栏 "+" 的加面板菜单：deferred 到窗口层绘制，`Positioner::side(Bottom)`
+    /// 锚定 "+" 按钮正下方（gpui-kit 的 dropdown_menu 走 corner 锚定，BottomRight
+    /// 会把菜单弹到按钮上方、超出窗口顶部；且弹层盖住标题栏 HTCAPTION 拖拽区时
+    /// 点击会被系统的窗口移动模态循环吞掉——故自绘，与 turn 导航条预览卡同一模式）。
+    fn render_right_menu_dropdown(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let bounds = self.tab_add_btn_bounds.get();
+        deferred(
+            Positioner::side(bounds)
+                .placement(Placement::Bottom)
+                .align(Align::End)
+                .offset(px(6.))
+                .margin(px(8.))
+                .occlude()
+                .child(
+                    v_flex()
+                        .id("right-menu")
+                        .w(px(220.))
+                        .p_1()
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(
+                            |this, event: &MouseDownEvent, _, cx| {
+                                this.right_menu_open = false;
+                                this.right_menu_outside_close = Some(event.position);
+                                cx.notify();
+                            },
+                        ))
+                        .children((0..4).map(|ix| self.render_right_menu_row(ix, window, cx))),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
+    /// 右侧标签页栏的单个 tab：图标 + 名称 + 关闭按钮（点击激活，× 关闭）
+    fn render_right_tab(&self, tab: RightTab, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.right_active == Some(tab);
+        h_flex()
+            .id(("right-tab", tab as usize))
+            .gap_2()
+            .pl_3()
+            .pr_1()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .when(active, |this| this.bg(cx.theme().accent))
+            .when(!active, |this| {
+                this.text_color(cx.theme().muted_foreground)
+                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+            })
+            .child(Icon::new(tab.icon()).size_3p5())
+            .child(div().text_sm().child(tab.label()))
+            .child(
+                div()
+                    .id(("right-tab-close", tab as usize))
+                    .p(px(1.))
+                    .rounded(cx.theme().radius)
+                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                    .child(
+                        Icon::new(IconName::Close)
+                            .size_3()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_right_tab(tab, cx);
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.right_active = Some(tab);
+                this.right_open = true;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// 右侧面板顶部的标签页栏：tab 列表 + 末尾 "+"（加 tab 菜单）与收起按钮
+    fn render_right_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .h(px(36.))
+            .pl_2()
+            .pr_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(
+                self.right_tabs
+                    .iter()
+                    .map(|tab| self.render_right_tab(*tab, cx)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("right-tab-add-btn")
+                    .on_prepaint({
+                        let cell = self.tab_add_btn_bounds.clone();
+                        move |bounds, _, _| cell.set(bounds)
+                    })
+                    .child(
+                        Button::new("right-tab-add")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                                this.toggle_right_menu(event, cx);
+                            })),
+                    ),
+            )
+            .child(
+                Button::new("right-panel-collapse")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::PanelRightClose)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.right_open = false;
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// 自测用。
     pub fn debug_config(&self) -> Option<&pig_protocol::AppConfig> {
         self.config.as_ref()
@@ -1307,6 +1664,7 @@ impl AppView {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.sidebar_collapsed = !this.sidebar_collapsed;
                                         cx.notify();
+                                        this.schedule_layout_settle();
                                     })),
                             )
                             .child(div().text_sm().font_semibold().child(format!(
@@ -1353,6 +1711,20 @@ impl AppView {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.open_settings(cx);
                                     })),
+                            )
+                            .child(
+                                Button::new("right-panel-menu")
+                                    .ghost()
+                                    .small()
+                                    .occlude()
+                                    .icon(if self.right_open {
+                                        IconName::PanelRightClose
+                                    } else {
+                                        IconName::PanelRight
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_right_panel(cx);
+                                    })),
                             ),
                     ),
             )
@@ -1395,7 +1767,12 @@ fn event_session_id(event: &Event) -> Option<String> {
 }
 
 impl Render for AppView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 面板开合后的补渲：本帧 paint 会记录新的测量值，再排一帧让 render 读到
+        if self.layout_settle_frames > 0 {
+            self.layout_settle_frames -= 1;
+            window.request_animation_frame();
+        }
         let hero = self.is_hero(cx) && self.pending_first_send.is_none();
         let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
 
@@ -1438,8 +1815,32 @@ impl Render for AppView {
             .child(center)
             .into_any_element();
 
-        let right: AnyElement = if let Some(views) = current_views {
-            views.review.clone().into_any_element()
+        // 面板展开时：有激活 tab 显示 tab 内容，没有则显示面板首页（菜单页）
+        let right: AnyElement = if self.right_open {
+            let content: AnyElement = match self.right_active {
+                Some(RightTab::Changes) => match current_views {
+                    Some(views) => views.review.clone().into_any_element(),
+                    None => v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("开始会话后，这里会显示工作区改动"),
+                        )
+                        .into_any_element(),
+                },
+                None => self.render_right_menu_page(window, cx),
+            };
+            v_flex()
+                .size_full()
+                .border_l_1()
+                .border_color(cx.theme().border)
+                .child(self.render_right_tab_bar(cx))
+                .child(div().flex_1().min_h_0().child(content))
+                .into_any_element()
         } else {
             div().size_full().into_any_element()
         };
@@ -1458,6 +1859,10 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
                 cx.notify();
+                this.schedule_layout_settle();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| {
+                this.toggle_right_tab(RightTab::Changes, cx);
             }))
             // 自愈兜底：选择手势的结束依赖收到 MouseUpEvent，而某些系统级按压
             // （HTCAPTION、边框缩放）收不到。未按键的移动说明手势早已结束。
@@ -1471,36 +1876,63 @@ impl Render for AppView {
             .child(div().flex_1().min_h_0().child(if self.settings_open {
                 self.settings.clone().into_any_element()
             } else {
+                // 三个面板始终挂载、用 visible 切显隐：resizable 的尺寸簿按位置
+                // 索引记录，增删面板会让索引错位、adjust 按比例误缩放其他面板
+                // （开合后面板宽度漂移、内容区错排）。固定宽面板必须 flex_none——
+                // 面板内部只在未测量时 flex_none，测量后恢复 flex_grow，兄弟面板
+                // 展开时缺口会按比例分摊到固定宽面板上（侧栏被压窄）。
+                // 把手闲置不画线（侧栏/右侧面板自带边框承担分隔线），仅拖拽时显示。
                 h_resizable("main-columns")
-                    .when(!self.sidebar_collapsed, |this| {
-                        this.child(
-                            resizable_panel()
-                                .size(px(220.))
-                                .size_range(px(180.)..px(360.))
-                                .child(
+                    .with_handle_appearance(std::rc::Rc::new(
+                        |ctx: &gpui_kit::base::ResizeHandleContext, _, cx| {
+                            if ctx.is_active() {
+                                Some(
                                     div()
-                                        .size_full()
-                                        .with_animation(
-                                            "sidebar-enter",
-                                            Animation::new(std::time::Duration::from_millis(150))
-                                                .with_easing(ease_out_quint()),
-                                            |el, delta| {
-                                                el.left(px(-8.0 * (1.0 - delta))).opacity(delta)
-                                            },
-                                        )
-                                        .child(self.sidebar.clone()),
-                                ),
-                        )
-                    })
+                                        .h_full()
+                                        .w(px(1.))
+                                        .bg(cx.theme().ring)
+                                        .into_any_element(),
+                                )
+                            } else {
+                                Some(div().into_any_element())
+                            }
+                        },
+                    ))
+                    .child(
+                        resizable_panel()
+                            .size(px(220.))
+                            .size_range(px(180.)..px(360.))
+                            .flex_none()
+                            .visible(!self.sidebar_collapsed)
+                            .child(
+                                div()
+                                    .size_full()
+                                    .with_animation(
+                                        "sidebar-enter",
+                                        Animation::new(std::time::Duration::from_millis(150))
+                                            .with_easing(ease_out_quint()),
+                                        |el, delta| {
+                                            el.left(px(-8.0 * (1.0 - delta))).opacity(delta)
+                                        },
+                                    )
+                                    .child(self.sidebar.clone()),
+                            ),
+                    )
                     .child(center)
                     .child(
                         resizable_panel()
                             .size(px(300.))
                             .size_range(px(220.)..px(520.))
+                            .flex_none()
+                            .visible(self.right_open)
                             .child(right),
                     )
                     .into_any_element()
             }))
+            // 标签页栏 "+" 的加面板菜单：deferred 到窗口层，锚定 "+" 正下方
+            .when(self.right_menu_open, |this| {
+                this.child(self.render_right_menu_dropdown(window, cx))
+            })
     }
 }
 
@@ -1596,6 +2028,10 @@ fn main() {
                 KeyBinding::new("ctrl-n", NewTask, None),
                 KeyBinding::new("ctrl-k", FocusSearch, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
+                // 右侧面板：改动可用；浏览器/侧边聊天先绑键让菜单展示快捷键，功能后续加
+                KeyBinding::new("ctrl-shift-g", ToggleChanges, None),
+                KeyBinding::new("ctrl-t", ToggleBrowser, None),
+                KeyBinding::new("alt-ctrl-b", ToggleSideChat, None),
                 KeyBinding::new("escape", CloseSearch, Some("search")),
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
             ]);
@@ -2195,6 +2631,52 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     });
     assert_eq!(has_card, Some(true), "工具卡应显示 AskUserQuestion");
     println!("[selftest] AskUserQuestion 提问场景 OK");
+
+    // 右侧面板：默认收起 → 面板按钮直开（无 tab 时显示菜单页）→ 开改动 tab →
+    // 快捷键再触发收起（tab 保留）→ × 关尽 tab 后面板保持展开、回到菜单页
+    let right_initial = app!(|app: &mut AppView, _| app.right_open);
+    assert!(!right_initial, "右侧面板默认应收起");
+    app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    assert!(open && active.is_none(), "面板展开且无 tab 时应显示菜单页");
+    app!(|app: &mut AppView, cx| app.open_right_tab(RightTab::Changes, cx));
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    assert!(open && active == Some(RightTab::Changes), "改动 tab 应打开");
+    app!(|app: &mut AppView, cx| app.toggle_right_tab(RightTab::Changes, cx));
+    let (open, kept) = app!(|app: &mut AppView, _| {
+        (app.right_open, app.right_active == Some(RightTab::Changes))
+    });
+    assert!(!open && kept, "再次触发应收起面板并保留 tab");
+    app!(|app: &mut AppView, cx| app.close_right_tab(RightTab::Changes, cx));
+    let (open, active, tabs) = app!(|app: &mut AppView, _| {
+        (app.right_open, app.right_active, app.right_tabs.len())
+    });
+    assert!(
+        !open && active.is_none() && tabs == 0,
+        "面板收起状态下关 tab 不改变收起状态；tab 清空"
+    );
+    // 面板展开时关掉最后一个 tab：面板保持展开、回到菜单页
+    app!(|app: &mut AppView, cx| {
+        app.open_right_tab(RightTab::Changes, cx);
+        app.close_right_tab(RightTab::Changes, cx);
+    });
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    assert!(open && active.is_none(), "关尽 tab 后应停在菜单页");
+    app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
+    println!("[selftest] 右侧面板开合 OK");
+
+    // 加面板菜单（标签页栏 "+"）：点开打开、再点收起
+    app!(|app: &mut AppView, cx| {
+        app.toggle_right_menu(&ClickEvent::default(), cx);
+    });
+    let menu_open = app!(|app: &mut AppView, _| app.right_menu_open);
+    assert!(menu_open, "菜单应打开");
+    app!(|app: &mut AppView, cx| {
+        app.toggle_right_menu(&ClickEvent::default(), cx);
+    });
+    let menu_closed = app!(|app: &mut AppView, _| !app.right_menu_open);
+    assert!(menu_closed, "再点应收起菜单");
+    println!("[selftest] 右侧面板菜单 OK");
 
     println!("SELFTEST PASS");
     std::process::exit(0);

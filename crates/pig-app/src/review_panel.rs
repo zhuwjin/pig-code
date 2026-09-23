@@ -380,8 +380,6 @@ impl Render for ReviewPanel {
 
         v_flex()
             .size_full()
-            .border_l_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .px_3()
