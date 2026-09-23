@@ -1,10 +1,13 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::{Scrollbar, SelectableText, TextSelectionHandle};
+use gpui_kit::base::{
+    Align, ElementExt as _, Placement, Positioner, Scrollbar, SelectableText, TextSelectionHandle,
+};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -140,6 +143,11 @@ pub struct ThreadView {
     queued: Vec<String>,
     /// turn 导航条：悬停的用户消息下标（驱动横条的山峰式加宽与高亮）
     nav_hover: Option<usize>,
+    /// 预览卡当前为哪条消息打开（悬停稳定 120ms 才打开，离开 80ms 才关闭）
+    nav_card: Option<usize>,
+    /// 各导航横条的屏幕 bounds（on_prepaint 记录），预览卡按它做侧边锚定；
+    /// render 只持 &self，故用 RefCell
+    nav_bar_bounds: RefCell<HashMap<usize, Rc<Cell<Bounds<Pixels>>>>>,
     /// 导航条自身的滚动句柄（turn 数超出可见高度时 rail 内部滚动）
     nav_rail_scroll: ScrollHandle,
     /// 上一帧的活动导航项；活动项变化时让 rail 滚动到可见
@@ -184,6 +192,8 @@ impl ThreadView {
             replay_turn: false,
             queued: Vec::new(),
             nav_hover: None,
+            nav_card: None,
+            nav_bar_bounds: RefCell::new(HashMap::new()),
             nav_rail_scroll: ScrollHandle::new(),
             nav_last_active: None,
             nav_jump: false,
@@ -270,6 +280,8 @@ impl ThreadView {
         self.item_index.clear();
         self.follow_bottom = true;
         self.nav_hover = None;
+        self.nav_card = None;
+        self.nav_bar_bounds.borrow_mut().clear();
         self.nav_last_active = None;
         self.nav_jump = false;
         cx.notify();
@@ -1635,8 +1647,9 @@ impl ThreadView {
     }
 
     /// turn 导航条（ZCode ConversationTurnNavigator 同款）：消息流左缘的竖排
-    /// 小横条，一条用户消息一根。悬停时目标与相邻横条山峰式加宽，并弹出该轮
-    /// 预览卡（用户消息前 2 行 + 助手回复前 3 行）；点击跳转对应消息。
+    /// 小横条，一条用户消息一根。悬停时目标与相邻横条山峰式加宽；悬停稳定
+    /// 120ms 后在横条右侧弹出该轮预览卡（用户消息前 2 行 + 助手回复前 3 行，
+    /// 离开 80ms 关闭）；点击跳转对应消息。
     /// 无悬停时高亮视口顶部所属的 turn；流式中的最后一根保持最低亮度。
     fn render_turn_nav(
         &self,
@@ -1663,6 +1676,24 @@ impl ThreadView {
         } else {
             rail_max_h
         };
+        // 清掉已不存在消息的横条 bounds
+        self.nav_bar_bounds
+            .borrow_mut()
+            .retain(|&ix, _| ix < self.messages.len());
+        // 预览卡内容只给当前打开的那根横条算（不必每帧为全部横条生成预览文本）
+        let card = self.nav_card.and_then(|ix| {
+            let bounds = self
+                .nav_bar_bounds
+                .borrow()
+                .get(&ix)
+                .map(|cell| cell.get())?;
+            if bounds.size.width <= px(0.) {
+                return None; // 首帧 prepaint 前还没有 bounds
+            }
+            let user_preview = nav_preview_text(&[self.messages[ix].text.as_str()], "（无文本）");
+            let (assistant_preview, assistant_is_text) = self.nav_assistant_preview(ix, user_ixs);
+            Some((bounds, user_preview, assistant_preview, assistant_is_text))
+        });
 
         div()
             .absolute()
@@ -1704,71 +1735,128 @@ impl ThreadView {
                         } else {
                             subtlest
                         };
-                        let user_preview =
-                            nav_preview_text(&[self.messages[ix].text.as_str()], "（无文本）");
-                        let (assistant_preview, assistant_is_text) =
-                            self.nav_assistant_preview(ix, user_ixs);
-                        HoverCard::new(("turn-nav", ix))
-                            .anchor(Anchor::RightCenter)
-                            .open_delay(std::time::Duration::from_millis(120))
-                            .close_delay(std::time::Duration::from_millis(80))
-                            .trigger(
+                        let bounds_cell = self
+                            .nav_bar_bounds
+                            .borrow_mut()
+                            .entry(ix)
+                            .or_insert_with(|| Rc::new(Cell::new(Bounds::default())))
+                            .clone();
+                        div()
+                            .id(("turn-nav-bar", ix))
+                            .w_full()
+                            .h(px(10.))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .on_prepaint(move |bounds, _, _| bounds_cell.set(bounds))
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered {
+                                    this.nav_hover = Some(ix);
+                                    // 悬停稳定 120ms 才开卡（对齐 ZCode openDelay），
+                                    // 快速滑过不闪卡
+                                    cx.spawn(async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(120))
+                                            .await;
+                                        this.update(cx, |this, cx| {
+                                            if this.nav_hover == Some(ix) {
+                                                this.nav_card = Some(ix);
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                    })
+                                    .detach();
+                                } else {
+                                    this.nav_hover = None;
+                                    // 离开 80ms 才关闭（对齐 ZCode closeDelay）；
+                                    // 这期间移到相邻横条会取消关闭
+                                    cx.spawn(async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(80))
+                                            .await;
+                                        this.update(cx, |this, cx| {
+                                            if this.nav_hover.is_none() && this.nav_card == Some(ix)
+                                            {
+                                                this.nav_card = None;
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                    })
+                                    .detach();
+                                }
+                                cx.notify();
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // 跳走后暂停跟随；若目标就在底部附近，render
+                                // 里的 at_bottom 检查会恢复跟随
+                                this.follow_bottom = false;
+                                this.nav_jump = true;
+                                this.scroll_handle.scroll_to_top_of_item(ix);
+                                cx.notify();
+                            }))
+                            .child(
                                 div()
-                                    .id(("turn-nav-bar", ix))
-                                    .w_full()
-                                    .h(px(10.))
-                                    .flex()
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                                        this.nav_hover = hovered.then_some(ix);
-                                        cx.notify();
-                                    }))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        // 跳走后暂停跟随；若目标就在底部附近，render
-                                        // 里的 at_bottom 检查会恢复跟随
-                                        this.follow_bottom = false;
-                                        this.nav_jump = true;
-                                        this.scroll_handle.scroll_to_top_of_item(ix);
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .h(px(2.))
-                                            .w(px(12. * scale))
-                                            .rounded_full()
-                                            .bg(color)
-                                            .opacity(opacity),
-                                    ),
+                                    .h(px(2.))
+                                    .w(px(12. * scale))
+                                    .rounded_full()
+                                    .bg(color)
+                                    .opacity(opacity),
                             )
-                            .content(move |_, _, cx| {
-                                v_flex()
-                                    .w(px(320.))
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_medium()
-                                            .line_clamp(2)
-                                            .child(user_preview.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            // 文本回复 80% 亮度，占位文案最暗档
-                                            //（对齐 ZCode 的 popover-foreground/80
-                                            // 与 foreground-subtle 分档）
-                                            .text_color(if assistant_is_text {
-                                                cx.theme().foreground.opacity(0.8)
-                                            } else {
-                                                cx.theme().muted_foreground
-                                            })
-                                            .line_clamp(3)
-                                            .child(assistant_preview.clone()),
-                                    )
-                            })
                             .into_any_element()
                     })),
+            )
+            // 预览卡：deferred 到窗口层绘制（逃出 rail 的滚动裁剪），锚定横条右侧
+            //（ZCode 是 side=right align=start sideOffset=8 的 HoverCard；gpui-kit
+            // 的 HoverCard 只有 corner 锚定、弹不到触发器右侧，故按 Positioner 自绘）
+            .when_some(
+                card,
+                |this, (bounds, user_preview, assistant_preview, is_text)| {
+                    this.child(
+                        deferred(
+                            Positioner::side(bounds)
+                                .placement(Placement::Right)
+                                .align(Align::Start)
+                                .offset(px(8.))
+                                .margin(px(8.))
+                                .occlude()
+                                .child(
+                                    v_flex()
+                                        .w(px(320.))
+                                        .p_3()
+                                        .gap_2()
+                                        .bg(cx.theme().popover)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .rounded_lg()
+                                        .shadow_lg()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_medium()
+                                                .line_clamp(2)
+                                                .child(user_preview),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                // 文本回复 80% 亮度，占位文案最暗档
+                                                //（对齐 ZCode 的 popover-foreground/80
+                                                // 与 foreground-subtle 分档）
+                                                .text_color(if is_text {
+                                                    cx.theme().foreground.opacity(0.8)
+                                                } else {
+                                                    cx.theme().muted_foreground
+                                                })
+                                                .line_clamp(3)
+                                                .child(assistant_preview),
+                                        ),
+                                ),
+                        )
+                        .with_priority(1),
+                    )
+                },
             )
             .into_any_element()
     }
@@ -1854,18 +1942,39 @@ impl Render for ThreadView {
             .filter(|(_, message)| message.role == Role::User)
             .map(|(ix, _)| ix)
             .collect();
-        // 活动项 = 视口顶部可见的第一行所属的 turn（对齐 ZCode：取 topmost
-        // visible row 所在 unit，浏览长回复中段时仍归属该 turn）
+        // 活动项 = 离视口顶部最近的可见用户消息；都不可见时取视口顶之上最近
+        // 的一条（对齐 ZCode resolveConversationTurnNavigatorActiveQueryRowId，
+        // 不能用 topmost visible row：长回复的尾巴会把高亮钉在上一轮）
         let nav_active = if user_ixs.len() >= 2 {
-            let top = self.scroll_handle.top_item();
-            Some(
-                user_ixs
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|&ix| ix <= top)
-                    .unwrap_or(user_ixs[0]),
-            )
+            let container = self.scroll_handle.bounds();
+            let scroll_top = container.top() - self.scroll_handle.offset().y;
+            let scroll_bottom = scroll_top + container.size.height;
+            let mut nearest_visible = None;
+            let mut nearest_distance = f32::MAX;
+            let mut last_above = None;
+            let mut first_below = None;
+            for &ix in &user_ixs {
+                let Some(bounds) = self.scroll_handle.bounds_for_item(ix) else {
+                    continue;
+                };
+                let (start, end) = (bounds.top(), bounds.bottom());
+                if end >= scroll_top && start <= scroll_bottom {
+                    let distance = f32::from(start - scroll_top).abs();
+                    if distance < nearest_distance {
+                        nearest_distance = distance;
+                        nearest_visible = Some(ix);
+                    }
+                }
+                if start <= scroll_top {
+                    last_above = Some(ix);
+                } else if first_below.is_none() {
+                    first_below = Some(ix);
+                }
+            }
+            nearest_visible
+                .or(last_above)
+                .or(first_below)
+                .or(user_ixs.first().copied())
         } else {
             None
         };
