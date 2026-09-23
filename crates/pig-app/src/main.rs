@@ -15,8 +15,8 @@ use gpui_kit::assets::IconName as AssetsIconName;
 use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
 use gpui_kit::base::GlobalState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dock::{DockPlacement, panel_handle};
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
     TitleBar, h_flex, v_flex,
@@ -97,6 +97,81 @@ impl RightTab {
     }
 }
 
+/// dock 中心区面板：内容回读 AppView 构建（hero 或会话列）。
+/// dock 持有 panel 实体，渲染时经 weak 引用调 AppView 的 render 辅助。
+struct DockCenterPanel {
+    app: WeakEntity<AppView>,
+    focus_handle: FocusHandle,
+    _app_observer: Subscription,
+}
+
+/// dock 右侧 dock 面板：tab 栏 + 改动/菜单页内容，同样回读 AppView。
+struct DockRightPanel {
+    app: WeakEntity<AppView>,
+    focus_handle: FocusHandle,
+    _app_observer: Subscription,
+}
+
+/// dock 皮肤用 `cached()` 包裹面板视图：缓存只在面板自身 notify 时失效。
+/// 子实体（thread/review/composer）的 notify 会沿 dispatch 树把面板祖先标脏，
+/// 自动失效；但纯 AppView 状态变化（hero↔会话切换、右侧 tab 开合）发生在祖先上，
+/// 传不下来——观察 AppView，把它的 notify 转成面板自己的。
+fn observe_app_notify<T: 'static>(
+    app: &WeakEntity<AppView>,
+    cx: &mut Context<T>,
+) -> Option<Subscription> {
+    app.upgrade().map(|app| cx.observe(&app, |_, _, cx| cx.notify()))
+}
+
+macro_rules! impl_dock_panel {
+    ($ty:ty, $name:literal) => {
+        impl Focusable for $ty {
+            fn focus_handle(&self, _: &App) -> FocusHandle {
+                self.focus_handle.clone()
+            }
+        }
+
+        impl EventEmitter<gpui_kit::component::dock::PanelEvent> for $ty {}
+
+        impl gpui_kit::component::dock::BasePanel for $ty {
+            fn panel_name(&self) -> &'static str {
+                $name
+            }
+        }
+
+        // chrome 全关：tab 栏/标题栏由我们自己画
+        impl gpui_kit::component::dock::Panel for $ty {
+            fn title_bar(&self, _: &App) -> bool {
+                false
+            }
+
+            fn inner_padding(&self, _: &App) -> bool {
+                false
+            }
+        }
+    };
+}
+
+impl_dock_panel!(DockCenterPanel, "center");
+impl_dock_panel!(DockRightPanel, "right-dock");
+
+impl Render for DockCenterPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.app
+            .update(cx, |app, cx| app.render_center(cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
+impl Render for DockRightPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.app
+            .update(cx, |app, cx| app.render_right_dock_content(window, cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
+
 struct AppView {
     sidebar: Entity<Sidebar>,
     composer: Entity<Composer>,
@@ -150,6 +225,9 @@ struct AppView {
     /// (provider_id, model_id)
     current_model: Option<(String, String)>,
     reasoning_level: Option<String>,
+    /// 三栏布局引擎（dock）：左 dock=侧栏、center=会话区、右 dock=改动面板；
+    /// set_locked(true) 锁定防拖拽重排、只保留调宽
+    dock: Entity<gpui_kit::component::dock::DockArea>,
     _agent_handle: pig_core::AgentHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -164,6 +242,10 @@ impl AppView {
         let sidebar = cx.new(|cx| Sidebar::new(window, cx));
         let composer = cx.new(|cx| Composer::new(window, cx));
         let settings = cx.new(|cx| SettingsView::new(window, cx));
+        let (dock, dock_skin) =
+            gpui_kit::component::dock::DockSkin::dock_area("pig-dock", None, window, cx);
+        // tab 栏里的 dock 开合按钮不需要（有标题栏按钮），且我们的 tab 栏自绘
+        dock_skin.set_toggle_button_visible(false, cx);
         let handle = pig_core::spawn_agent(config_path.clone(), cwd.clone());
         let agent = AgentClient::new(handle.ops.clone());
 
@@ -206,6 +288,7 @@ impl AppView {
             config: None,
             current_model: None,
             reasoning_level: None,
+            dock,
             _agent_handle: handle,
             _subscriptions: vec![],
         };
@@ -1231,6 +1314,48 @@ impl AppView {
         cx.notify();
     }
 
+    /// 安装 dock 布局（构造后由 main 调用，此时 AppView 实体已就位，面板可持
+    /// weak 引用）：左 dock = 侧栏，center = 会话区，右 dock = 改动面板。
+    /// 锁定布局防拖拽重排、只保留调宽；右 dock 默认收起（toggle 一次）。
+    fn install_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::dock::DockLayout;
+        let app = cx.weak_entity();
+        let center = cx.new(|cx| DockCenterPanel {
+            app: app.clone(),
+            focus_handle: cx.focus_handle(),
+            _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
+        });
+        let right = cx.new(|cx| DockRightPanel {
+            app: app.clone(),
+            focus_handle: cx.focus_handle(),
+            _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
+        });
+        self.dock.update(cx, |dock, cx| {
+            dock.set_center(
+                DockLayout::tabs().panel_view(panel_handle(center), cx),
+                window,
+                cx,
+            );
+            dock.set_dock(
+                DockPlacement::Left,
+                DockLayout::tabs().panel_view(panel_handle(self.sidebar.clone()), cx),
+                window,
+                cx,
+            );
+            dock.set_dock_size(DockPlacement::Left, px(220.), window, cx);
+            dock.set_dock(
+                DockPlacement::Right,
+                DockLayout::tabs().panel_view(panel_handle(right), cx),
+                window,
+                cx,
+            );
+            dock.set_dock_size(DockPlacement::Right, px(300.), window, cx);
+            dock.set_locked(true, window, cx);
+            // 右侧面板默认收起：进会话不自动显示改动
+            dock.toggle_dock(DockPlacement::Right, window, cx);
+        });
+    }
+
     /// 面板开合改变了三栏宽度分配：paint 时的测量值（消息区宽度/导航条显隐）
     /// 滞后一帧才更新。置两帧补渲预算，render 里用 request_animation_frame 排帧
     ///（保证排在绘制之后；事件里 cx.defer 可能赶在绘制前，notify 被合并掉，
@@ -1631,6 +1756,78 @@ impl AppView {
             .into_any_element()
     }
 
+    /// 中心区内容（dock center 面板调用）：hero / 会话列 / 空提示 + 换页动画
+    fn render_center(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let hero = self.is_hero(cx) && self.pending_first_send.is_none();
+        let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
+
+        let center: AnyElement = if hero {
+            self.render_hero(cx)
+        } else if let Some(views) = current_views {
+            v_flex()
+                .size_full()
+                .child(div().flex_1().min_h_0().child(views.thread.clone()))
+                .child(self.composer.clone())
+                .into_any_element()
+        } else {
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("新建任务或从左侧选择会话"),
+                )
+                .into_any_element()
+        };
+
+        let page_tag = if hero {
+            "hero".to_string()
+        } else {
+            self.current.clone().unwrap_or_default()
+        };
+        div()
+            .size_full()
+            .with_animation(
+                format!("page-{page_tag}"),
+                Animation::new(std::time::Duration::from_millis(150)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(delta),
+            )
+            .child(center)
+            .into_any_element()
+    }
+
+    /// 右 dock 面板内容：tab 栏 +（有激活 tab 显示其内容，没有则显示面板首页/菜单页）
+    fn render_right_dock_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
+        let content: AnyElement = match self.right_active {
+            Some(RightTab::Changes) => match current_views {
+                Some(views) => views.review.clone().into_any_element(),
+                None => v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("开始会话后，这里会显示工作区改动"),
+                    )
+                    .into_any_element(),
+            },
+            None => self.render_right_menu_page(window, cx),
+        };
+        v_flex()
+            .size_full()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(self.render_right_tab_bar(cx))
+            .child(div().flex_1().min_h_0().child(content))
+            .into_any_element()
+    }
+
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_dark = cx.theme().mode.is_dark();
         let title = self
@@ -1773,77 +1970,18 @@ impl Render for AppView {
             self.layout_settle_frames -= 1;
             window.request_animation_frame();
         }
-        let hero = self.is_hero(cx) && self.pending_first_send.is_none();
-        let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
 
-        let center: AnyElement = if hero {
-            self.render_hero(cx)
-        } else if let Some(views) = current_views {
-            v_flex()
-                .size_full()
-                .child(div().flex_1().min_h_0().child(views.thread.clone()))
-                .child(self.composer.clone())
-                .into_any_element()
-        } else {
-            v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("新建任务或从左侧选择会话"),
-                )
-                .into_any_element()
-        };
-
-        let page_tag = if self.settings_open {
-            "settings".to_string()
-        } else if hero {
-            "hero".to_string()
-        } else {
-            self.current.clone().unwrap_or_default()
-        };
-        let center = div()
-            .size_full()
-            .with_animation(
-                format!("page-{page_tag}"),
-                Animation::new(std::time::Duration::from_millis(150)).with_easing(ease_out_quint()),
-                |el, delta| el.opacity(delta),
-            )
-            .child(center)
-            .into_any_element();
-
-        // 面板展开时：有激活 tab 显示 tab 内容，没有则显示面板首页（菜单页）
-        let right: AnyElement = if self.right_open {
-            let content: AnyElement = match self.right_active {
-                Some(RightTab::Changes) => match current_views {
-                    Some(views) => views.review.clone().into_any_element(),
-                    None => v_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("开始会话后，这里会显示工作区改动"),
-                        )
-                        .into_any_element(),
-                },
-                None => self.render_right_menu_page(window, cx),
-            };
-            v_flex()
-                .size_full()
-                .border_l_1()
-                .border_color(cx.theme().border)
-                .child(self.render_right_tab_bar(cx))
-                .child(div().flex_1().min_h_0().child(content))
-                .into_any_element()
-        } else {
-            div().size_full().into_any_element()
-        };
+        // dock 开合同步：AppView 的标志位是唯一事实源（dock 不持久化显隐状态）
+        let left_open = self.dock.read(cx).is_dock_open(DockPlacement::Left);
+        if left_open == self.sidebar_collapsed {
+            self.dock
+                .update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Left, window, cx));
+        }
+        let right_open = self.dock.read(cx).is_dock_open(DockPlacement::Right);
+        if right_open != self.right_open {
+            self.dock
+                .update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Right, window, cx));
+        }
 
         v_flex()
             .id("app-root")
@@ -1876,57 +2014,9 @@ impl Render for AppView {
             .child(div().flex_1().min_h_0().child(if self.settings_open {
                 self.settings.clone().into_any_element()
             } else {
-                // 三个面板始终挂载、用 visible 切显隐：resizable 的尺寸簿按位置
-                // 索引记录，增删面板会让索引错位、adjust 按比例误缩放其他面板
-                // （开合后面板宽度漂移、内容区错排）。固定宽面板必须 flex_none——
-                // 面板内部只在未测量时 flex_none，测量后恢复 flex_grow，兄弟面板
-                // 展开时缺口会按比例分摊到固定宽面板上（侧栏被压窄）。
-                // 把手闲置不画线（侧栏/右侧面板自带边框承担分隔线），仅拖拽时显示。
-                h_resizable("main-columns")
-                    .with_handle_appearance(std::rc::Rc::new(
-                        |ctx: &gpui_kit::base::ResizeHandleContext, _, cx| {
-                            if ctx.is_active() {
-                                Some(
-                                    div()
-                                        .h_full()
-                                        .w(px(1.))
-                                        .bg(cx.theme().ring)
-                                        .into_any_element(),
-                                )
-                            } else {
-                                Some(div().into_any_element())
-                            }
-                        },
-                    ))
-                    .child(
-                        resizable_panel()
-                            .size(px(220.))
-                            .size_range(px(180.)..px(360.))
-                            .flex_none()
-                            .visible(!self.sidebar_collapsed)
-                            .child(
-                                div()
-                                    .size_full()
-                                    .with_animation(
-                                        "sidebar-enter",
-                                        Animation::new(std::time::Duration::from_millis(150))
-                                            .with_easing(ease_out_quint()),
-                                        |el, delta| {
-                                            el.left(px(-8.0 * (1.0 - delta))).opacity(delta)
-                                        },
-                                    )
-                                    .child(self.sidebar.clone()),
-                            ),
-                    )
-                    .child(center)
-                    .child(
-                        resizable_panel()
-                            .size(px(300.))
-                            .size_range(px(220.)..px(520.))
-                            .flex_none()
-                            .visible(self.right_open)
-                            .child(right),
-                    )
+                div()
+                    .size_full()
+                    .child(self.dock.clone())
                     .into_any_element()
             }))
             // 标签页栏 "+" 的加面板菜单：deferred 到窗口层，锚定 "+" 正下方
@@ -2060,6 +2150,8 @@ fn main() {
                     Theme::sync_system_appearance(Some(window), cx);
                     let view =
                         cx.new(|cx| AppView::new(window, cx, config_path.clone(), cwd.clone()));
+                    // AppView 实体就位后安装 dock 布局（面板持有 AppView 的 weak 引用）
+                    view.update(cx, |app, cx| app.install_dock(window, cx));
                     if selftest {
                         let view = view.clone();
                         cx.spawn(async move |cx| {
