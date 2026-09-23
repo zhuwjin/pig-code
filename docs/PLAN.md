@@ -198,6 +198,8 @@ pig-code/
 > 打磨（2026-09-22）：消息流工具调用块 1:1 对齐 ZCode —— 摘要行中文化 + 悬停才显示箭头 + 成功小勾/失败状态词、终端类展开为圆角描边卡片（`$` 命令 + 限高输出）；Write/Edit 经 `ToolCallEnd.edit`（协议可选字段，rollout 同步持久化）携带**本次编辑** diff（与 review 面板的会话累计口径分离），展开为 ZCode LightweightDiffPreview 同款代码卡（行号 gutter + 增删行淡底色/左缘色条，限 400 行截断）。
 >
 > 打磨（2026-09-22 二轮）：改动展示对齐 ZCode 双口径 —— ① 消息流每轮 turn 末尾新增**本轮改动**折叠面板（`ChangeTracker.turn_originals` 每轮首写前快照，回合结束 `Event::TurnFileChanges` 净额 diff，rollout `TurnChanges` 记录持久化可回放）；② 右侧 Review 面板改为纯 git 工作区口径（`git status --porcelain -z` + `numstat`，未暂存/已暂存 tab，untracked 逐文件数行 ≤1MB，单文件 git diff 原文，untracked 拼 /dev/null 合成 diff）；③ 输入框上方改动 chip 同步为 git 数据（未暂存+已暂存合并）。侧栏会话行的 +N/-N 徽章已去除（2026-09-23），ChangeTracker 会话级累计不再驱动任何 UI。
+>
+> 打磨（2026-09-23）：消息流左缘新增 **turn 导航条**（ZCode ConversationTurnNavigator 同款）—— 一条用户消息一根小横条，悬停时目标/相邻横条山峰式加宽（2.6x/1.7x/1.25x）并弹出该轮预览卡（HoverCard 右锚定：用户消息前 2 行 + 助手 Markdown 摘要前 3 行，段落归一 + 220 字符截断对齐 `conversationTurnNavigatorHelpers`），点击 `scroll_to_top_of_item` 跳转（`nav_jump` 抑制一帧「回底自动恢复跟随」误判）；活动项取视口顶部可见行所属 turn（`top_item`），无悬停时 0.9 亮度强调，流式中最后一根最低 0.72；rail 超高内部滚动（独立 ScrollHandle + 滚轮不穿透），活动项变化自动滚到可见；面板宽 <940px 或 turn 数 <2 时隐藏（对齐 ZCode 864px 断点）。消息列表重构为每条消息一个直接子行（滚动定位只记录直接子元素）。
 
 ### M0 — 应用骨架（GUI 先行，mock 数据）
 - workspace 化（`pig-protocol`/`pig-core`/`pig-app`），`pig-app` 引入 `gpui-kit = "0.6"`，`gpui_kit::init` + 无边框窗口 + `TitleBar` + 亮暗主题。

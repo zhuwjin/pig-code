@@ -4,10 +4,11 @@ use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::{Scrollbar, SelectableText, TextSelectionHandle};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::{ApprovalDecision, EditDiff, Event};
@@ -137,6 +138,15 @@ pub struct ThreadView {
     replay_turn: bool,
     /// 排队中的消息（FIFO）
     queued: Vec<String>,
+    /// turn 导航条：悬停的用户消息下标（驱动横条的山峰式加宽与高亮）
+    nav_hover: Option<usize>,
+    /// 导航条自身的滚动句柄（turn 数超出可见高度时 rail 内部滚动）
+    nav_rail_scroll: ScrollHandle,
+    /// 上一帧的活动导航项；活动项变化时让 rail 滚动到可见
+    nav_last_active: Option<usize>,
+    /// 导航点击后抑制一次「回到底部自动恢复跟随」：跳转滚动在 prepaint 才生效，
+    /// 生效前 offset 仍是旧值，贴着底会被误判成用户滚回了底部
+    nav_jump: bool,
     _ticker: Task<()>,
 }
 
@@ -173,6 +183,10 @@ impl ThreadView {
             turn_started: None,
             replay_turn: false,
             queued: Vec::new(),
+            nav_hover: None,
+            nav_rail_scroll: ScrollHandle::new(),
+            nav_last_active: None,
+            nav_jump: false,
             _ticker: ticker,
         }
     }
@@ -245,6 +259,9 @@ impl ThreadView {
         self.messages.clear();
         self.item_index.clear();
         self.follow_bottom = true;
+        self.nav_hover = None;
+        self.nav_last_active = None;
+        self.nav_jump = false;
         cx.notify();
     }
 
@@ -1606,6 +1623,178 @@ impl ThreadView {
             }
         }
     }
+
+    /// turn 导航条（ZCode ConversationTurnNavigator 同款）：消息流左缘的竖排
+    /// 小横条，一条用户消息一根。悬停时目标与相邻横条山峰式加宽，并弹出该轮
+    /// 预览卡（用户消息前 2 行 + 助手回复前 3 行）；点击跳转对应消息。
+    /// 无悬停时高亮视口顶部所属的 turn；流式中的最后一根保持最低亮度。
+    fn render_turn_nav(
+        &self,
+        user_ixs: &[usize],
+        active: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let foreground = cx.theme().foreground;
+        let subtlest = cx.theme().muted_foreground.opacity(0.6);
+        // 只有最后一轮可能处于流式（对齐 ZCode：同一 running turn 只有最后
+        // 一条 query 呈现 running 强调）
+        let running_ix = if self.streaming {
+            user_ixs.last().copied()
+        } else {
+            None
+        };
+        let focus_pos = self
+            .nav_hover
+            .and_then(|hover| user_ixs.iter().position(|&ix| ix == hover));
+        // rail 高度上限：对齐 ZCode 的 max-h calc(100% - 6rem)
+        let rail_max_h = self.scroll_handle.bounds().size.height - px(96.);
+        let rail_max_h = if rail_max_h < px(0.) {
+            px(0.)
+        } else {
+            rail_max_h
+        };
+
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(4.))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .child(
+                v_flex()
+                    .id("turn-nav-rail")
+                    .w(px(32.))
+                    .max_h(rail_max_h)
+                    .overflow_y_scroll()
+                    .track_scroll(&self.nav_rail_scroll)
+                    // 滚轮落在导航条上只滚 rail，不联动消息列表
+                    .on_scroll_wheel(consume_scroll(&self.nav_rail_scroll))
+                    .children(user_ixs.iter().enumerate().map(|(pos, &ix)| {
+                        // 山峰式加宽：悬停项 2.6x，相邻 1.7x / 1.25x（对齐 ZCode 档位）；
+                        // 最大 31.2px，不超出 32px 的 rail 宽度
+                        let (scale, mut opacity, focus_color): (f32, f32, bool) =
+                            match focus_pos.map(|focus| pos.abs_diff(focus)) {
+                                Some(0) => (2.6_f32, 1.0, true),
+                                Some(1) => (1.7, 0.86, false),
+                                Some(2) => (1.25, 0.72, false),
+                                _ => (1.0, 0.58, false),
+                            };
+                        // 无悬停时由滚动位置驱动的活动项强调
+                        let show_active = focus_pos.is_none() && active == Some(ix);
+                        if show_active {
+                            opacity = 0.9;
+                        }
+                        if running_ix == Some(ix) {
+                            opacity = opacity.max(0.72);
+                        }
+                        let color = if focus_color || show_active {
+                            foreground
+                        } else {
+                            subtlest
+                        };
+                        let user_preview =
+                            nav_preview_text(&[self.messages[ix].text.as_str()], "（无文本）");
+                        let (assistant_preview, assistant_is_text) =
+                            self.nav_assistant_preview(ix, user_ixs);
+                        HoverCard::new(("turn-nav", ix))
+                            .anchor(Anchor::RightCenter)
+                            .open_delay(std::time::Duration::from_millis(120))
+                            .close_delay(std::time::Duration::from_millis(80))
+                            .trigger(
+                                div()
+                                    .id(("turn-nav-bar", ix))
+                                    .w_full()
+                                    .h(px(10.))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                        this.nav_hover = hovered.then_some(ix);
+                                        cx.notify();
+                                    }))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        // 跳走后暂停跟随；若目标就在底部附近，render
+                                        // 里的 at_bottom 检查会恢复跟随
+                                        this.follow_bottom = false;
+                                        this.nav_jump = true;
+                                        this.scroll_handle.scroll_to_top_of_item(ix);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .h(px(2.))
+                                            .w(px(12. * scale))
+                                            .rounded_full()
+                                            .bg(color)
+                                            .opacity(opacity),
+                                    ),
+                            )
+                            .content(move |_, _, cx| {
+                                v_flex()
+                                    .w(px(320.))
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_medium()
+                                            .line_clamp(2)
+                                            .child(user_preview.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            // 文本回复 80% 亮度，占位文案最暗档
+                                            //（对齐 ZCode 的 popover-foreground/80
+                                            // 与 foreground-subtle 分档）
+                                            .text_color(if assistant_is_text {
+                                                cx.theme().foreground.opacity(0.8)
+                                            } else {
+                                                cx.theme().muted_foreground
+                                            })
+                                            .line_clamp(3)
+                                            .child(assistant_preview.clone()),
+                                    )
+                            })
+                            .into_any_element()
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// 导航预览卡的助手摘要：该用户消息之后第一条助手消息的 Markdown 文本拼接
+    ///（对齐 ZCode：assistantTextRows 合并、最多 2 段 220 字符）。
+    /// 无文本时按流式状态给占位文案；返回的 bool 表示是否为真实回复文本。
+    fn nav_assistant_preview(&self, ix: usize, user_ixs: &[usize]) -> (String, bool) {
+        let running = self.streaming && user_ixs.last() == Some(&ix);
+        let texts: Vec<&str> = self.messages[ix + 1..]
+            .iter()
+            .find(|message| message.role == Role::Assistant)
+            .map(|message| {
+                message
+                    .segments
+                    .iter()
+                    .filter_map(|segment| match segment {
+                        Segment::Markdown { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if texts.is_empty() {
+            return (
+                if running {
+                    "正在生成…"
+                } else {
+                    "（暂无文本回复）"
+                }
+                .to_string(),
+                false,
+            );
+        }
+        (nav_preview_text(&texts, "（暂无文本回复）"), true)
+    }
 }
 
 impl Render for ThreadView {
@@ -1636,8 +1825,52 @@ impl Render for ThreadView {
 
         // 回到底部（滚轮/拖滚动条/键盘任意方式）自动恢复跟随
         if !self.follow_bottom && self.at_bottom() {
-            self.follow_bottom = true;
+            // 导航跳转的 offset 在 prepaint 才更新，这一帧读到的还是旧位置；
+            // 跳过本次恢复，下一帧按真实位置再判断
+            if self.nav_jump {
+                self.nav_jump = false;
+            } else {
+                self.follow_bottom = true;
+            }
         }
+
+        // turn 导航条：一条用户消息 = 一个 turn 入口。消息列表的每条消息都是
+        // 滚动容器的直接子元素（见下），scroll_to_top_of_item / bounds_for_item
+        // 只按直接子元素记录，因此可按消息下标精确定位
+        let user_ixs: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == Role::User)
+            .map(|(ix, _)| ix)
+            .collect();
+        // 活动项 = 视口顶部可见的第一行所属的 turn（对齐 ZCode：取 topmost
+        // visible row 所在 unit，浏览长回复中段时仍归属该 turn）
+        let nav_active = if user_ixs.len() >= 2 {
+            let top = self.scroll_handle.top_item();
+            Some(
+                user_ixs
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&ix| ix <= top)
+                    .unwrap_or(user_ixs[0]),
+            )
+        } else {
+            None
+        };
+        // 活动项变化时 rail 跟随滚动，保持活动横条可见
+        if let Some(active) = nav_active
+            && self.nav_last_active != Some(active)
+        {
+            self.nav_last_active = Some(active);
+            if let Some(pos) = user_ixs.iter().position(|&ix| ix == active) {
+                self.nav_rail_scroll.scroll_to_item(pos);
+            }
+        }
+        // 面板太窄时左缘与内容列（860）之间没有空隙，隐藏导航条
+        //（对齐 ZCode 的 864px 断点）；turn 数 <2 也没有导航必要
+        let show_nav = user_ixs.len() >= 2 && self.scroll_handle.bounds().size.width >= px(940.);
 
         v_flex()
             .size_full()
@@ -1647,7 +1880,7 @@ impl Render for ThreadView {
                     .flex_1()
                     .min_h_0()
                     .child(
-                        div()
+                        v_flex()
                             .id("message-list")
                             .size_full()
                             .overflow_y_scroll()
@@ -1662,36 +1895,46 @@ impl Render for ThreadView {
                                     }
                                 },
                             ))
-                            .child(
-                                v_flex()
+                            .gap_4()
+                            .py_4()
+                            // 每条消息（及流式指示/空状态）都是滚动容器的直接子行：
+                            // 导航条按消息下标 scroll_to_top_of_item 依赖这一结构
+                            .children(items.into_iter().map(|item| {
+                                div()
                                     .w_full()
                                     .max_w(px(860.))
                                     .mx_auto()
-                                    .p_4()
-                                    .gap_4()
-                                    .children(items)
-                                    // 工作中指示：跟在最后一条消息之后，随对话一起滚动
-                                    .when(self.streaming, |this| {
-                                        this.child(
-                                            h_flex()
-                                                .gap_2()
-                                                .child(
-                                                    Spinner::new()
-                                                        .icon(AssetIconName::LoaderCircle)
-                                                        .color(cx.theme().muted_foreground),
-                                                )
-                                                .child(
-                                                    ShimmerText::new(working_label)
-                                                        .id("working-shimmer")
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground),
-                                                ),
-                                        )
-                                    })
-                                    .when(self.messages.is_empty(), |this| {
-                                        this.child(
+                                    .px_4()
+                                    .child(item)
+                                    .into_any_element()
+                            }))
+                            // 工作中指示：跟在最后一条消息之后，随对话一起滚动
+                            .when(self.streaming, |this| {
+                                this.child(
+                                    div().w_full().max_w(px(860.)).mx_auto().px_4().child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Spinner::new()
+                                                    .icon(AssetIconName::LoaderCircle)
+                                                    .color(cx.theme().muted_foreground),
+                                            )
+                                            .child(
+                                                ShimmerText::new(working_label)
+                                                    .id("working-shimmer")
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            ),
+                                    ),
+                                )
+                            })
+                            .when(self.messages.is_empty(), |this| {
+                                this.child(
                                     div()
                                         .w_full()
+                                        .max_w(px(860.))
+                                        .mx_auto()
+                                        .px_4()
                                         .py_8()
                                         .text_center()
                                         .text_sm()
@@ -1700,9 +1943,12 @@ impl Render for ThreadView {
                                             "空会话。输入消息开始对话，/ 查看命令，@ 引用文件。",
                                         ),
                                 )
-                                    }),
-                            ),
+                            }),
                     )
+                    // turn 导航条：左缘竖排小横条，见 render_turn_nav
+                    .when(show_nav, |this| {
+                        this.child(self.render_turn_nav(&user_ixs, nav_active, cx))
+                    })
                     // 未跟随时浮出「最新消息」按钮：点击回到底部并恢复跟随
                     .when(!self.follow_bottom, |this| {
                         this.child(
@@ -1793,6 +2039,45 @@ fn split_path(path: &str) -> (String, String) {
     match path.rfind(['/', '\\']) {
         Some(ix) => (path[..=ix].to_string(), path[ix + 1..].to_string()),
         None => (String::new(), path.to_string()),
+    }
+}
+
+/// 导航预览卡文本：按空行分段、段内连续空白折叠为空格，取前 2 段以换行拼接，
+/// 超 220 字符截断补「...」（对齐 ZCode conversationTurnNavigatorHelpers 的
+/// buildPreviewText：maxPreviewChars 220 / maxPreviewParagraphs 2）
+fn nav_preview_text(parts: &[&str], fallback: &str) -> String {
+    let joined = parts.join("\n\n");
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in joined.trim().lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(std::mem::take(&mut current));
+                if paragraphs.len() == 2 {
+                    break;
+                }
+            }
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(&words.join(" "));
+        }
+    }
+    if paragraphs.len() < 2 && !current.is_empty() {
+        paragraphs.push(current);
+    }
+    if paragraphs.is_empty() {
+        return fallback.to_string();
+    }
+    let text = paragraphs.join("\n");
+    const MAX_CHARS: usize = 220;
+    if text.chars().count() <= MAX_CHARS {
+        text
+    } else {
+        let truncated: String = text.chars().take(MAX_CHARS - 3).collect();
+        format!("{}...", truncated.trim_end())
     }
 }
 
