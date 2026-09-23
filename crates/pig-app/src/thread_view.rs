@@ -1998,16 +1998,17 @@ impl Render for ThreadView {
         if user_ixs.len() >= 2 && pane_width <= px(0.) {
             cx.notify();
         }
-        // 面板太窄时连 gutter 都留不出，隐藏导航条（对齐 ZCode 窄屏断点）；
-        // turn 数 <2 也没有导航必要
-        let show_nav = user_ixs.len() >= 2 && pane_width >= px(720.);
-        // 导航条可见时内容列两侧各留 48px 给 rail 让位（对齐 ZCode 的
-        // w-[calc(100%-6rem)] 断点行为，而不是等面板比内容列更宽才显示）
-        let content_max_w = if show_nav && pane_width < px(956.) {
+        // 面板够宽时内容列两侧各留 48px（对齐 ZCode 的 w-[calc(100%-6rem)]）。
+        // gutter 只由面板宽度决定、与 turn 数无关：先占住位置，第 2 条消息
+        // 发出、导航条出现时内容列宽度不变，不会抖动
+        let pane_wide = pane_width >= px(720.);
+        let content_max_w = if pane_wide && pane_width < px(956.) {
             pane_width - px(96.)
         } else {
             px(860.)
         };
+        // 面板太窄时连 gutter 都留不出，隐藏导航条；turn 数 <2 也没有导航必要
+        let show_nav = user_ixs.len() >= 2 && pane_wide;
 
         v_flex()
             .size_full()
