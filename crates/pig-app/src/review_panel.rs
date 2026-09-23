@@ -1,5 +1,6 @@
+use gpui_kit::assets::IconName as AssetsIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::GitFileChange;
@@ -166,19 +167,29 @@ impl ReviewPanel {
     }
 
     /// 逐行渲染 unified diff：旧/新行号两列 + 增删行淡底色 + hunk 头底色。
+    /// 行号列宽按本 diff 的最大行号位数自适应（纯新增/纯删除文件的空列收成
+    /// 窄缝），不再固定 36px 留出大块空白；两列 flex_shrink_0 定宽防长行挤压。
     /// 逐 hunk 接受/拒绝留 M6+。
     fn render_diff(diff: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
+        enum Kind {
+            Meta,
+            Hunk,
+            Add,
+            Del,
+            Context,
+        }
+        struct Row {
+            kind: Kind,
+            old_no: Option<u32>,
+            new_no: Option<u32>,
+            line: String,
+        }
+        let mut parsed = Vec::new();
         let mut old_line = 0u32;
         let mut new_line = 0u32;
+        let mut max_old = 0u32;
+        let mut max_new = 0u32;
         for line in diff.lines() {
-            enum Kind {
-                Meta,
-                Hunk,
-                Add,
-                Del,
-                Context,
-            }
             let (kind, old_no, new_no) = if line.starts_with("+++") || line.starts_with("---") {
                 (Kind::Meta, None, None)
             } else if line.starts_with("@@") {
@@ -211,44 +222,68 @@ impl ReviewPanel {
                 new_line += 1;
                 (Kind::Context, Some(o), Some(n))
             };
+            max_old = max_old.max(old_no.unwrap_or(0));
+            max_new = max_new.max(new_no.unwrap_or(0));
+            parsed.push(Row {
+                kind,
+                old_no,
+                new_no,
+                line: line.to_string(),
+            });
+        }
 
-            let (text_color, bg) = match kind {
-                Kind::Meta => (cx.theme().muted_foreground, None),
-                Kind::Hunk => (cx.theme().info, Some(cx.theme().accent.opacity(0.5))),
-                Kind::Add => (cx.theme().success, Some(cx.theme().success.opacity(0.08))),
-                Kind::Del => (cx.theme().danger, Some(cx.theme().danger.opacity(0.08))),
-                Kind::Context => (cx.theme().muted_foreground, None),
-            };
-            let line = line.to_string();
-            rows.push(
+        // 列宽按最大行号位数自适应；该列无行号（纯新增/纯删除）时收成窄缝
+        let col_w = |max: u32| {
+            if max == 0 {
+                px(4.)
+            } else {
+                px(10. + (max.ilog10() + 1) as f32 * 8.)
+            }
+        };
+        let old_w = col_w(max_old);
+        let new_w = col_w(max_new);
+
+        parsed
+            .into_iter()
+            .map(|row| {
+                let (text_color, bg) = match row.kind {
+                    Kind::Meta => (cx.theme().muted_foreground, None),
+                    Kind::Hunk => (cx.theme().info, Some(cx.theme().accent.opacity(0.5))),
+                    Kind::Add => (cx.theme().success, Some(cx.theme().success.opacity(0.08))),
+                    Kind::Del => (cx.theme().danger, Some(cx.theme().danger.opacity(0.08))),
+                    Kind::Context => (cx.theme().muted_foreground, None),
+                };
                 h_flex()
                     .w_full()
                     .when_some(bg, |this, bg| this.bg(bg))
+                    // 行号列定宽不收缩：长行溢出时 flex 收缩会把行号列压窄，
+                    // 各行行号错位（有的靠前有的靠中）
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(old_w)
+                            .flex_shrink_0()
                             .text_right()
                             .text_color(cx.theme().muted_foreground.opacity(0.6))
-                            .child(old_no.map(|n| n.to_string()).unwrap_or_default()),
+                            .child(row.old_no.map(|n| n.to_string()).unwrap_or_default()),
                     )
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(new_w)
+                            .flex_shrink_0()
                             .text_right()
                             .text_color(cx.theme().muted_foreground.opacity(0.6))
-                            .child(new_no.map(|n| n.to_string()).unwrap_or_default()),
+                            .child(row.new_no.map(|n| n.to_string()).unwrap_or_default()),
                     )
                     .child(
                         div()
                             .px_2()
                             .text_color(text_color)
                             .whitespace_nowrap()
-                            .child(line),
+                            .child(row.line),
                     )
-                    .into_any_element(),
-            );
-        }
-        rows
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// 数据源切换 chip（未暂存 / 已暂存）
@@ -309,6 +344,8 @@ impl ReviewPanel {
                 this.git_selected = Some(row_path.clone());
                 this.git_diff = None;
                 this.git_diff_loading = true;
+                // 换文件从头看起
+                this.diff_scroll.set_offset(Default::default());
                 cx.emit(ReviewEvent::OpenGitDiff {
                     path: row_path.clone(),
                     staged,
@@ -348,27 +385,14 @@ impl ReviewPanel {
     }
 }
 
-impl Render for ReviewPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ReviewPanel {
+    /// 列表视图：数据源 tab + 刷新 + 汇总，下面整片文件列表
+    fn render_list_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let summary = if !self.is_git {
             "非 git 仓库".to_string()
         } else {
             let (n, adds, dels) = self.git_totals();
             format!("{n} 个文件 · +{adds} -{dels}")
-        };
-
-        let diff_rows: Vec<AnyElement> = if self.git_diff_loading {
-            vec![
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("加载 diff 中…")
-                    .into_any_element(),
-            ]
-        } else {
-            self.git_diff
-                .as_ref()
-                .map(|(_, diff)| Self::render_diff(diff, cx))
-                .unwrap_or_default()
         };
 
         let mut rows = Vec::new();
@@ -411,6 +435,10 @@ impl Render for ReviewPanel {
             )
             .child(
                 v_flex()
+                    .id("review-file-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .py_1()
                     .children(rows)
                     .when(!self.is_git, |this| {
@@ -434,21 +462,134 @@ impl Render for ReviewPanel {
                         )
                     }),
             )
+            .into_any_element()
+    }
+
+    /// diff 视图（点开文件后整面板切换）：顶部返回栏（← 返回列表 + 头部截断的
+    /// 路径 + 重新拉取）+ 全高 unified diff，不再与文件列表上下堆叠。
+    fn render_diff_view(&self, path: String, cx: &mut Context<Self>) -> AnyElement {
+        let diff_rows: Vec<AnyElement> = if self.git_diff_loading {
+            vec![
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("加载 diff 中…")
+                    .into_any_element(),
+            ]
+        } else {
+            self.git_diff
+                .as_ref()
+                .map(|(_, diff)| Self::render_diff(diff, cx))
+                .unwrap_or_default()
+        };
+        let staged = self.source == ReviewSource::Staged;
+        let refresh_path = path.clone();
+
+        v_flex()
+            .size_full()
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .id("diff-back")
+                            .p_1()
+                            .rounded(cx.theme().radius)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(cx.theme().accent))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_selected = None;
+                                this.git_diff = None;
+                                this.git_diff_loading = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(AssetsIconName::ArrowLeft)
+                                    .size_4()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(shorten_path(&path, 30)),
+                    )
+                    .child(
+                        div()
+                            .id("diff-refresh")
+                            .p_1()
+                            .rounded(cx.theme().radius)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(cx.theme().accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.git_diff = None;
+                                this.git_diff_loading = true;
+                                cx.emit(ReviewEvent::OpenGitDiff {
+                                    path: refresh_path.clone(),
+                                    staged,
+                                });
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(AssetsIconName::RotateCw)
+                                    .size_4()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .id("diff-view")
                     .flex_1()
-                    .m_2()
-                    .p_2()
+                    .min_h_0()
+                    .px_2()
+                    .py_1()
                     .overflow_y_scroll()
                     .track_scroll(&self.diff_scroll)
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
                     .text_xs()
                     .font_family(cx.theme().mono_font_family.clone())
                     .children(diff_rows),
             )
+            .into_any_element()
+    }
+}
+
+/// 路径头部截断：太长时保留尾部（文件名最相关），截断点落在路径段边界
+fn shorten_path(path: &str, max_chars: usize) -> String {
+    let len = path.chars().count();
+    if len <= max_chars {
+        return path.to_string();
+    }
+    let keep = max_chars.saturating_sub(2); // "…/" 占两字符
+    let byte_ix = path
+        .char_indices()
+        .nth(len - keep)
+        .map(|(ix, _)| ix)
+        .unwrap_or(0);
+    let tail = &path[byte_ix..];
+    match tail.find('/') {
+        Some(ix) => format!("…/{}", &tail[ix + 1..]),
+        None => format!("…{tail}"),
+    }
+}
+
+impl Render for ReviewPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 点开文件：整面板切到 diff 视图；← 返回文件列表
+        match self.git_selected.clone() {
+            Some(path) => self.render_diff_view(path, cx),
+            None => self.render_list_view(cx),
+        }
     }
 }

@@ -796,8 +796,8 @@ impl Render for Sidebar {
         v_flex()
             .size_full()
             .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().border)
+            // 分隔线由 dock 把手自带线绘制：侧栏自画 border_r 会画在把手命中区
+            // 右侧（gpui-base 的 Side::Left 把手命中区停在分界线左侧），线上不可拖
             .child(self.render_action_rows(cx))
             .child(
                 div()

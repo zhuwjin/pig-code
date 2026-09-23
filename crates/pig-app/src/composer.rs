@@ -141,6 +141,8 @@ pub enum ComposerEvent {
         request_id: String,
         answers: Option<Vec<Vec<String>>>,
     },
+    /// 改动 chip：直接打开右侧面板的改动 tab（不走弹层）
+    OpenChanges,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,7 +157,6 @@ enum Popup {
     Context,
     Todos,
     Tasks,
-    Changes,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -664,7 +665,7 @@ impl Composer {
         cx.notify();
     }
 
-    /// 改动统计 + 文件列表（ReviewPanel 快照）；清空时收起对应弹层
+    /// 改动统计 + 文件列表（ReviewPanel 快照）
     pub fn set_changes(
         &mut self,
         added: u32,
@@ -672,9 +673,6 @@ impl Composer {
         files: Vec<(String, u32, u32)>,
         cx: &mut Context<Self>,
     ) {
-        if files.is_empty() && matches!(self.popup, Some((Popup::Changes, _))) {
-            self.popup = None;
-        }
         self.changes = (added, removed);
         self.change_files = files;
         cx.notify();
@@ -909,10 +907,9 @@ impl Composer {
             | Popup::Reasoning
             | Popup::Context
             | Popup::Todos
-            | Popup::Tasks
-            | Popup::Changes => {
+            | Popup::Tasks => {
                 unreachable!(
-                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks/Changes 由各自的专用面板渲染"
+                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks 由各自的专用面板渲染"
                 )
             }
         };
@@ -931,7 +928,6 @@ impl Composer {
             Popup::Context => "context",
             Popup::Todos => "todos",
             Popup::Tasks => "tasks",
-            Popup::Changes => "changes",
         };
         Some(
             div()
@@ -1456,7 +1452,9 @@ impl Composer {
             .into_any_element()
     }
 
-    /// 当前进度（TodoList）+ 后台 Bash 任务 + 会话改动：chip 行，点击在芯片上方弹出只读面板（v1 无停止按钮）。
+    /// 当前进度（TodoList）+ 后台 Bash 任务 + 会话改动：chip 行。
+    /// 进度/任务 chip 点击在芯片上方弹出只读面板（v1 无停止按钮）；
+    /// 改动 chip 发事件让 AppView 打开右侧面板的改动 tab。
     fn render_aux(&self, cx: &mut Context<Self>) -> AnyElement {
         let running = self
             .tasks
@@ -1492,44 +1490,38 @@ impl Composer {
             );
         }
         if !self.change_files.is_empty() {
-            let open = matches!(self.popup, Some((Popup::Changes, _)));
             let (added, removed) = self.changes;
             chips = chips.child(
-                div()
-                    .relative()
+                h_flex()
+                    .id("aux-changes")
+                    .gap_1()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().accent))
+                    // 不再弹层：点击直接打开右侧面板的改动 tab
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(ComposerEvent::OpenChanges);
+                    }))
                     .child(
-                        h_flex()
-                            .id("aux-changes")
-                            .gap_1()
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .cursor_pointer()
-                            .when(open, |this| this.bg(cx.theme().accent.opacity(0.5)))
-                            .hover(|this| this.bg(cx.theme().accent))
-                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                                this.toggle_popup(Popup::Changes, event, None, window, cx);
-                            }))
-                            .child(
-                                Icon::new(AssetIconName::Diff)
-                                    .size_4()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(div().text_sm().child("改动"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().success)
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(format!("-{removed}")),
-                            ),
+                        Icon::new(AssetIconName::Diff)
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground),
                     )
-                    .when(open, |this| this.child(self.render_changes_panel(cx))),
+                    .child(div().text_sm().child("改动"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().success)
+                            .child(format!("+{added}")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(format!("-{removed}")),
+                    ),
             );
         }
         if !self.todos.is_empty() {
@@ -1811,80 +1803,6 @@ impl Composer {
         );
         self.popup_shell(
             "composer-tasks-popup",
-            content.into_any_element(),
-            PopupAnchor::Left,
-            None,
-            cx,
-        )
-    }
-
-    /// 改动弹窗：头部「改动 +x -y」+ 文件列表（M 徽章 + 路径，截图同款只读列表）。
-    fn render_changes_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (added, removed) = self.changes;
-        let mut list = v_flex()
-            .id("aux-changes-list")
-            .w_full()
-            .gap_1()
-            .max_h(px(280.))
-            .overflow_y_scroll();
-        for (path, _, _) in &self.change_files {
-            list = list.child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(cx.theme().warning.opacity(0.5))
-                            .text_xs()
-                            .text_color(cx.theme().warning)
-                            .child("M"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_sm()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(path.clone()),
-                    ),
-            );
-        }
-
-        let content = self.aux_panel_shell(
-            v_flex()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("改动"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().success)
-                                .child(format!("+{added}")),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(format!("-{removed}")),
-                        ),
-                )
-                .child(list),
-            cx,
-        );
-        self.popup_shell(
-            "composer-changes-popup",
             content.into_any_element(),
             PopupAnchor::Left,
             None,
@@ -2289,10 +2207,7 @@ impl Render for Composer {
         let context_open = matches!(self.popup, Some((Popup::Context, _)));
         let context_popup =
             (context_open && self.context_usage.is_some()).then(|| self.render_context_popup(cx));
-        let aux_open = matches!(
-            self.popup,
-            Some((Popup::Todos | Popup::Tasks | Popup::Changes, _))
-        );
+        let aux_open = matches!(self.popup, Some((Popup::Todos | Popup::Tasks, _)));
         let palette_open = cwd_open
             || branch_open
             || exec_open

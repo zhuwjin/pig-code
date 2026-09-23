@@ -275,6 +275,29 @@ impl ThreadView {
         (turns, f32::from(self.scroll_handle.bounds().size.width))
     }
 
+    /// 自测用：导航条活动项排查——（nav_last_active, offset_y, max_offset_y,
+    /// 容器高, 各用户消息行的 [top, bottom) 内容坐标）
+    pub fn debug_nav_active_detail(&self) -> (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>) {
+        let user_rows = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::User)
+            .filter_map(|(ix, _)| {
+                self.scroll_handle
+                    .bounds_for_item(ix)
+                    .map(|b| (ix, f32::from(b.top()), f32::from(b.bottom())))
+            })
+            .collect();
+        (
+            self.nav_last_active,
+            f32::from(self.scroll_handle.offset().y),
+            f32::from(self.scroll_handle.max_offset().y),
+            f32::from(self.scroll_handle.bounds().size.height),
+            user_rows,
+        )
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         self.item_index.clear();
@@ -1699,7 +1722,7 @@ impl ThreadView {
             .absolute()
             .top_0()
             .bottom_0()
-            .left(px(4.))
+            .left(px(8.))
             .flex()
             .flex_col()
             .justify_center()
@@ -1947,10 +1970,14 @@ impl Render for ThreadView {
             .filter(|(_, message)| message.role == Role::User)
             .map(|(ix, _)| ix)
             .collect();
+        // 贴底 = 在读最新一轮：活动项恒为最后一条用户消息。底部视口里可能
+        // 同时可见多条用户消息，按「离顶最近」会把高亮钉在更早的轮次上
+        let nav_active = if user_ixs.len() >= 2 && self.at_bottom() {
+            user_ixs.last().copied()
         // 活动项 = 离视口顶部最近的可见用户消息；都不可见时取视口顶之上最近
         // 的一条（对齐 ZCode resolveConversationTurnNavigatorActiveQueryRowId，
         // 不能用 topmost visible row：长回复的尾巴会把高亮钉在上一轮）
-        let nav_active = if user_ixs.len() >= 2 {
+        } else if user_ixs.len() >= 2 {
             let container = self.scroll_handle.bounds();
             let scroll_top = container.top() - self.scroll_handle.offset().y;
             let scroll_bottom = scroll_top + container.size.height;
