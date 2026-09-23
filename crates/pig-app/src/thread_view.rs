@@ -255,6 +255,16 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// 自测用：turn 导航条可见条件——（用户消息数, 消息面板宽度 px）
+    pub fn debug_nav_state(&self) -> (usize, f32) {
+        let turns = self
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .count();
+        (turns, f32::from(self.scroll_handle.bounds().size.width))
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         self.item_index.clear();
@@ -1868,9 +1878,22 @@ impl Render for ThreadView {
                 self.nav_rail_scroll.scroll_to_item(pos);
             }
         }
-        // 面板太窄时左缘与内容列（860）之间没有空隙，隐藏导航条
-        //（对齐 ZCode 的 864px 断点）；turn 数 <2 也没有导航必要
-        let show_nav = user_ixs.len() >= 2 && self.scroll_handle.bounds().size.width >= px(940.);
+        // 首帧 paint 前面板宽度是零值：补一帧渲染让导航条出现；
+        // paint 后该条件自愈，不会形成渲染循环
+        let pane_width = self.scroll_handle.bounds().size.width;
+        if user_ixs.len() >= 2 && pane_width <= px(0.) {
+            cx.notify();
+        }
+        // 面板太窄时连 gutter 都留不出，隐藏导航条（对齐 ZCode 窄屏断点）；
+        // turn 数 <2 也没有导航必要
+        let show_nav = user_ixs.len() >= 2 && pane_width >= px(720.);
+        // 导航条可见时内容列两侧各留 48px 给 rail 让位（对齐 ZCode 的
+        // w-[calc(100%-6rem)] 断点行为，而不是等面板比内容列更宽才显示）
+        let content_max_w = if show_nav && pane_width < px(956.) {
+            pane_width - px(96.)
+        } else {
+            px(860.)
+        };
 
         v_flex()
             .size_full()
@@ -1902,7 +1925,7 @@ impl Render for ThreadView {
                             .children(items.into_iter().map(|item| {
                                 div()
                                     .w_full()
-                                    .max_w(px(860.))
+                                    .max_w(content_max_w)
                                     .mx_auto()
                                     .px_4()
                                     .child(item)
@@ -1911,7 +1934,7 @@ impl Render for ThreadView {
                             // 工作中指示：跟在最后一条消息之后，随对话一起滚动
                             .when(self.streaming, |this| {
                                 this.child(
-                                    div().w_full().max_w(px(860.)).mx_auto().px_4().child(
+                                    div().w_full().max_w(content_max_w).mx_auto().px_4().child(
                                         h_flex()
                                             .gap_2()
                                             .child(
@@ -1932,7 +1955,7 @@ impl Render for ThreadView {
                                 this.child(
                                     div()
                                         .w_full()
-                                        .max_w(px(860.))
+                                        .max_w(content_max_w)
                                         .mx_auto()
                                         .px_4()
                                         .py_8()

@@ -1825,6 +1825,18 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     assert!(saw_queued, "应出现排队芯片");
     println!("[selftest] 会话 B 完成，消息排队 OK（自动接续，第二轮历史=6）");
 
+    // turn 导航条：会话 B 有 2 轮用户消息，面板已绘制（宽度非零）且达到断点
+    let (nav_turns, nav_pane_w) = app!(|app: &mut AppView, cx| {
+        let views = app.views.get(&session_b).expect("B 视图在内存");
+        views.thread.read(cx).debug_nav_state()
+    });
+    assert!(nav_turns >= 2, "会话 B 应有 ≥2 轮用户消息");
+    assert!(
+        nav_pane_w >= 720.,
+        "消息面板宽 {nav_pane_w} 应 ≥720（导航条断点）"
+    );
+    println!("[selftest] turn 导航条可见条件 OK（{nav_turns} 轮，面板宽 {nav_pane_w:.0}）");
+
     // 切回 A：内存状态应原样保留
     app!(|app: &mut AppView, cx| app.switch_session(session_a.clone(), cx));
     let current = app!(|app: &mut AppView, _| app.current.clone());
