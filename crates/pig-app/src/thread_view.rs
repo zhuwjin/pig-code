@@ -10,10 +10,11 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use gpui_kit::{Overflow, StyleRefinement};
 use pig_protocol::{ApprovalDecision, EditDiff, Event};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1575,11 +1576,22 @@ impl ThreadView {
                             body_scroll,
                             cx,
                         ),
-                        Segment::Markdown { state, .. } => TextView::new(state)
-                            .selectable(true)
-                            .stream_fade(self.streaming)
-                            .text_sm()
-                            .into_any_element(),
+                        Segment::Markdown { state, .. } => {
+                            // 表格列宽对齐 ZCode（markdown-table.tsx 的
+                            // `w-max min-w-full` + auto table layout）：列贴合内容宽度，
+                            // 帧宽不足时先收缩并让单元格文本换行，收缩到列地板后
+                            // 整体横向滚动，而不是按字符数比例把列无限压瘪。
+                            // 组件层 TextViewStyle 会叠在主题派生样式之上，圆角/
+                            // 表头底色都保留；这里只覆盖表格容器一项。
+                            let mut table = StyleRefinement::default();
+                            table.overflow.x = Some(Overflow::Scroll);
+                            TextView::new(state)
+                                .selectable(true)
+                                .stream_fade(self.streaming)
+                                .text_sm()
+                                .style(TextViewStyle::default().table(table))
+                                .into_any_element()
+                        }
                         Segment::ToolCall {
                             tool,
                             summary,
