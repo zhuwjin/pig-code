@@ -1667,7 +1667,7 @@ pub async fn agent_loop(
                             .lock()
                             .expect("store lock")
                             .latest_active_in_workspace(&cwd);
-                        let meta = SessionMeta {
+                        let mut meta = SessionMeta {
                             id: id.clone(),
                             title: "新任务".to_string(),
                             title_custom: false,
@@ -1684,6 +1684,31 @@ pub async fn agent_loop(
                                 seed.as_ref().map(|m| m.exec_mode).unwrap_or_default()
                             }),
                         };
+                        // UI 未指定思考等级且模型配置了默认等级 → 采用默认档
+                        //（写进 meta，SessionConfigured 会同步回 UI 的等级 chip）
+                        if meta.reasoning_level.is_none()
+                            && let Some(cfg) = config.as_ref()
+                        {
+                            let pid = meta
+                                .provider_id
+                                .clone()
+                                .unwrap_or_else(|| cfg.default_provider.clone());
+                            let mid = meta
+                                .model_id
+                                .clone()
+                                .unwrap_or_else(|| cfg.default_model.clone());
+                            let model_cfg = cfg
+                                .providers
+                                .iter()
+                                .find(|p| p.id == pid)
+                                .and_then(|p| p.models.iter().find(|m| m.id == mid));
+                            if let Some(level) = model_cfg
+                                .and_then(|m| m.default_reasoning_level.clone())
+                                .filter(|lv| model_cfg.is_some_and(|m| m.reasoning_levels.contains(lv)))
+                            {
+                                meta.reasoning_level = Some(level);
+                            }
+                        }
                         match Session::create(meta.clone(), pending.clone(), pending_questions.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
                             Ok(mut session) => {
                                 session.set_mode(meta.exec_mode);

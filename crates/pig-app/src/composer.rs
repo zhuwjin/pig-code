@@ -1372,15 +1372,25 @@ impl Composer {
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     if ix.section == 0 {
+                        eprintln!("[model-popup] 点击「管理模型」(section=0)");
                         cx.emit(ComposerEvent::OpenSettings);
                     } else if let Some((_, items)) = groups.get(ix.section - 1)
                         && let Some((provider_name, provider_id, model_id, _)) = items.get(ix.row)
                     {
+                        eprintln!(
+                            "[model-popup] 选中 section={} row={} → {provider_id}/{model_id}",
+                            ix.section, ix.row
+                        );
                         this.model = format!("{provider_name}/{model_id}");
                         cx.emit(ComposerEvent::SetModel {
                             provider_id: provider_id.clone(),
                             model_id: model_id.clone(),
                         });
+                    } else {
+                        eprintln!(
+                            "[model-popup] 点击未能解析为模型: section={} row={}",
+                            ix.section, ix.row
+                        );
                     }
                     this.close_command_popup(window, cx);
                 });

@@ -203,6 +203,10 @@ pub struct ModelConfig {
     /// 可选推理等级，如 ["low","high","max"]
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
+    /// 默认思考等级：新会话未指定等级、切换模型等级不适配时的初始档；
+    /// None = 未设置（沿用现状：启发式兜底/关）
+    #[serde(default)]
+    pub default_reasoning_level: Option<String>,
     /// 等级 id → 界面显示名（如 max → "最高"）；纯展示层，请求仍按 id 合并参数
     #[serde(default)]
     pub reasoning_labels: std::collections::HashMap<String, String>,
@@ -230,6 +234,7 @@ impl ModelConfig {
             web_search_tool: None,
             cap_system_msg: false,
             reasoning_levels: vec![],
+            default_reasoning_level: None,
             reasoning_labels: Default::default(),
             reasoning_params: Default::default(),
         }

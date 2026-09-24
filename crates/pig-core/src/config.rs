@@ -32,6 +32,20 @@ pub fn default_path() -> PathBuf {
     crate::data_dir().join("config.toml")
 }
 
+/// 供应商 id 重复会让所有按 id 的查找命中第一个：模型解析落到错误供应商
+/// 的兜底模型、会话 meta/label 张冠李戴。加载时大声提醒，别让人查半天。
+fn warn_duplicate_provider_ids(config: &AppConfig) {
+    let mut seen = std::collections::HashSet::new();
+    for provider in &config.providers {
+        if !seen.insert(&provider.id) {
+            eprintln!(
+                "[config] 警告：供应商 id 重复 \"{}\"（{} 与其他供应商共用，请在设置里删掉重建受影响的供应商）",
+                provider.id, provider.name
+            );
+        }
+    }
+}
+
 pub fn load(path: &std::path::Path) -> Result<AppConfig, String> {
     // 文件不存在 = 空配置（不算错误）；只有解析失败才报错
     if !path.exists() {
@@ -42,6 +56,7 @@ pub fn load(path: &std::path::Path) -> Result<AppConfig, String> {
     // 新格式优先
     if let Ok(mut config) = toml::from_str::<AppConfig>(&raw) {
         if !config.providers.is_empty() {
+            warn_duplicate_provider_ids(&config);
             expand_env_keys(&mut config);
             return Ok(config);
         }

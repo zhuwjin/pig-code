@@ -902,3 +902,108 @@ async fn resume_keeps_appending() {
     }
     agent3.shutdown();
 }
+
+/// 模型配置默认思考等级：新会话未指定等级时采用默认档；
+/// 显式指定不受影响；默认档不在等级表内则忽略
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_reasoning_level_on_new_session() {
+    let port = mock::start_mock_server();
+    let dir =
+        std::env::temp_dir().join(format!("pig-core-m9-default-level-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"default_provider = "mock"
+default_model = "mock-model"
+
+[[providers]]
+id = "mock"
+name = "Mock 供应商"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key = "mock-key"
+api_format = "OpenAiChat"
+enabled = true
+
+[[providers.models]]
+id = "mock-model"
+context_window = 128000
+max_output_tokens = 8192
+reasoning_levels = ["low", "high", "max"]
+default_reasoning_level = "high"
+"#
+        ),
+    )
+    .unwrap();
+    let data_dir = dir.join("data");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir.clone());
+    let events = agent.events.clone();
+
+    let create = |level: Option<String>| Op::NewSession {
+        cwd: dir.clone(),
+        provider_id: None,
+        model_id: None,
+        reasoning_level: level,
+        exec_mode: None,
+    };
+    async fn wait_configured(events: &async_channel::Receiver<Event>) -> Vec<Event> {
+        recv_until(events, Duration::from_secs(5), |e| {
+            matches!(e, Event::SessionConfigured { .. })
+        })
+        .await
+    }
+
+    // 未指定等级 → 采用模型默认档 high
+    agent.ops.send(create(None)).await.unwrap();
+    let evs = wait_configured(&events).await;
+    let level = evs.iter().find_map(|e| match e {
+        Event::SessionConfigured {
+            reasoning_level, ..
+        } => Some(reasoning_level.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        level,
+        Some(Some("high".to_string())),
+        "未指定等级应采用默认档"
+    );
+
+    // 显式指定 → 不被默认档覆盖
+    agent.ops.send(create(Some("low".into()))).await.unwrap();
+    let evs = wait_configured(&events).await;
+    let level = evs.iter().find_map(|e| match e {
+        Event::SessionConfigured {
+            reasoning_level, ..
+        } => Some(reasoning_level.clone()),
+        _ => None,
+    });
+    assert_eq!(level, Some(Some("low".to_string())), "显式等级不应被覆盖");
+
+    // 显式关（None 的关语义与未指定相同）：见 NewSession 的注释——
+    // 默认档语义优先，这里再验证一遍默认档无效时的行为
+    agent.ops.send(create(None)).await.unwrap();
+    let _ = wait_configured(&events).await;
+    agent.shutdown();
+
+    // 默认档不在等级表内 → 忽略，保持未指定（关）
+    let mut config: pig_protocol::AppConfig =
+        toml::from_str(&std::fs::read_to_string(dir.join("config.toml")).unwrap()).unwrap();
+    config.providers[0].models[0].default_reasoning_level = Some("ultra".into());
+    std::fs::write(dir.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+    let agent2 =
+        pig_core::spawn_agent_with_data_dir(Some(dir.join("config.toml")), dir.clone(), data_dir);
+    let events2 = agent2.events.clone();
+    agent2.ops.send(create(None)).await.unwrap();
+    let evs = wait_configured(&events2).await;
+    let level = evs.iter().find_map(|e| match e {
+        Event::SessionConfigured {
+            reasoning_level, ..
+        } => Some(reasoning_level.clone()),
+        _ => None,
+    });
+    assert_eq!(level, Some(None), "无效默认档应被忽略");
+    agent2.shutdown();
+}

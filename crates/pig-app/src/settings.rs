@@ -47,6 +47,8 @@ pub struct ModelDialog {
     reasoning_levels: Vec<String>,
     /// 等级 id → 显示名（仅展示；随 chip 增删联动）
     reasoning_labels: std::collections::HashMap<String, String>,
+    /// 默认思考等级：新会话与切换模型的初始档；None = 不设置
+    default_level: Option<String>,
     new_level: Entity<InputState>,
     new_label: Entity<InputState>,
     params_json: Entity<TextareaState>,
@@ -280,9 +282,20 @@ impl SettingsView {
     }
 
     fn add_provider(&mut self, cx: &mut Context<Self>) {
+        // id 必须全库唯一：按「数量+1」生成会在删除过供应商后与存量撞车
+        //（撞车后所有按 id 的查找都命中第一个：模型解析落到错误供应商的
+        // 兜底模型、label 张冠李戴、会话 meta 混乱）
+        let mut n = 1usize;
+        let id = loop {
+            let candidate = format!("custom-{n}");
+            if !self.config.providers.iter().any(|p| p.id == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
         let ix = self.config.providers.len();
         self.config.providers.push(ProviderConfig {
-            id: format!("custom-{}", ix + 1),
+            id,
             name: "自定义供应商".into(),
             base_url: "https://".into(),
             api_key: String::new(),
@@ -346,6 +359,11 @@ impl SettingsView {
             enabled: model.enabled,
             reasoning_levels: model.reasoning_levels.clone(),
             reasoning_labels: model.reasoning_labels.clone(),
+            // 已被删出等级表的默认档不算数
+            default_level: model
+                .default_reasoning_level
+                .clone()
+                .filter(|lv| model.reasoning_levels.contains(lv)),
             new_level: cx.new(|cx| InputState::new(window, cx).placeholder("等级名，如 high")),
             new_label: cx
                 .new(|cx| InputState::new(window, cx).placeholder("显示名（可选），如 最高")),
@@ -456,6 +474,11 @@ impl SettingsView {
                 .and_then(|m| m.web_search_tool.clone()),
             cap_system_msg: dialog.cap_system_msg,
             reasoning_levels: dialog.reasoning_levels.clone(),
+            // 默认档必须仍在等级表内
+            default_reasoning_level: dialog
+                .default_level
+                .clone()
+                .filter(|lv| dialog.reasoning_levels.contains(lv)),
             // 显示名只保留仍存在的等级 id（防御chip外路径改列表）
             reasoning_labels: dialog
                 .reasoning_labels
@@ -586,6 +609,11 @@ impl SettingsView {
                 }
             }
             dialog.reasoning_levels = info.reasoning_levels.clone();
+            // 等级表变了：指向已删等级的默认档作废
+            dialog.default_level = dialog
+                .default_level
+                .take()
+                .filter(|lv| info.reasoning_levels.contains(lv));
         }
         // 推理参数 JSON：重置语义无条件按等级 + API 格式重新生成；
         // 回车语义只在未手配（空对象）时生成建议值
@@ -1115,6 +1143,9 @@ impl SettingsView {
                                                                             if let Some(d) = &mut this.model_dialog {
                                                                                 let label = d.reasoning_labels.remove(&level_owned).unwrap_or_default();
                                                                                 d.reasoning_levels.remove(ix);
+                                                                                if d.default_level.as_deref() == Some(level_owned.as_str()) {
+                                                                                    d.default_level = None;
+                                                                                }
                                                                                 d.new_level.update(cx, |i, cx| i.set_value(level_owned.clone(), window, cx));
                                                                                 d.new_label.update(cx, |i, cx| i.set_value(label, window, cx));
                                                                             }
@@ -1142,6 +1173,9 @@ impl SettingsView {
                                                                             if let Some(d) = &mut this.model_dialog {
                                                                                 let level = d.reasoning_levels.remove(ix);
                                                                                 d.reasoning_labels.remove(&level);
+                                                                                if d.default_level.as_deref() == Some(&level) {
+                                                                                    d.default_level = None;
+                                                                                }
                                                                             }
                                                                             cx.notify();
                                                                         }))
@@ -1181,6 +1215,44 @@ impl SettingsView {
                                                                             cx.notify();
                                                                         })),
                                                                 ),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("默认思考等级（新会话与切换模型的初始档）"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .children(
+                                                            // 首项「不设置」= None，其余为等级表各档
+                                                            [None]
+                                                                .into_iter()
+                                                                .chain(dialog.reasoning_levels.iter().cloned().map(Some))
+                                                                .enumerate()
+                                                                .map(|(ix, opt)| {
+                                                                    let selected = dialog.default_level == opt;
+                                                                    let label = opt.clone()
+                                                                        .map(|lv| dialog.reasoning_labels.get(&lv).cloned().filter(|s| !s.is_empty()).unwrap_or(lv))
+                                                                        .unwrap_or_else(|| "不设置".to_string());
+                                                                    div()
+                                                                        .id(("default-level", ix))
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_full()
+                                                                        .cursor_pointer()
+                                                                        .when(selected, |this| this.bg(cx.theme().accent))
+                                                                        .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                                                            if let Some(d) = &mut this.model_dialog {
+                                                                                d.default_level = opt.clone();
+                                                                            }
+                                                                            cx.notify();
+                                                                        }))
+                                                                        .child(div().text_xs().child(label))
+                                                                })
+                                                                .collect::<Vec<_>>(),
                                                         ),
                                                 ),
                                         )

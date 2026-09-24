@@ -251,6 +251,9 @@ struct AppView {
     hero_is_git: bool,
     hero_error: Option<String>,
     pending_first_send: Option<(String, Vec<String>, ExecMode)>,
+    /// hero 态用户已显式选过模型：apply_hero_defaults 不再用工作区种子覆盖
+    ///（否则「切模型 → 选工作区 → 发送」会把选择冲回工作区旧模型）
+    hero_model_dirty: bool,
     workspaces: Vec<String>,
     /// 已移除（隐藏）的工作区路径：会话 cwd 不再让它们回到列表
     hidden_workspaces: std::collections::HashSet<String>,
@@ -329,6 +332,7 @@ impl AppView {
             hero_is_git: false,
             hero_error: None,
             pending_first_send: None,
+            hero_model_dirty: false,
             workspaces: vec![],
             hidden_workspaces: std::collections::HashSet::new(),
             workspace_aliases: std::collections::HashMap::new(),
@@ -503,6 +507,9 @@ impl AppView {
                 ..
             } => {
                 let session_id = session_id.clone();
+                eprintln!(
+                    "[model] SessionConfigured {session_id} → provider={provider_id:?} model={model_id:?} 思考={reasoning_level:?}"
+                );
                 self.ensure_views(&session_id, cx);
                 self.current = Some(session_id.clone());
                 // 换了会话：先清掉上一个会话的上下文水位（有数据的会话随后会收到补发）
@@ -940,6 +947,45 @@ impl AppView {
     }
 
     /// 模型 chip 显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id
+    /// 从 config 取模型的思考等级列表
+    fn model_reasoning_levels(&self, provider_id: &str, model_id: &str) -> Vec<String> {
+        self.config
+            .as_ref()
+            .and_then(|c| c.providers.iter().find(|p| p.id == provider_id))
+            .and_then(|p| p.models.iter().find(|m| m.id == model_id))
+            .map(|m| m.reasoning_levels.clone())
+            .unwrap_or_default()
+    }
+
+    /// 模型配置的默认思考等级（已校验仍在等级表内才返回）
+    fn model_default_reasoning_level(&self, provider_id: &str, model_id: &str) -> Option<String> {
+        self.config
+            .as_ref()
+            .and_then(|c| c.providers.iter().find(|p| p.id == provider_id))
+            .and_then(|p| p.models.iter().find(|m| m.id == model_id))
+            .and_then(|m| {
+                m.default_reasoning_level
+                    .clone()
+                    .filter(|lv| m.reasoning_levels.contains(lv))
+            })
+    }
+
+    /// 切换模型后当前等级不可用时的落点：high 优先（多数等级表的中间档），
+    /// 否则首个非关档，再否则首档；无等级 = 关（None）
+    fn fallback_reasoning_level(levels: &[String]) -> Option<String> {
+        if levels.is_empty() {
+            return None;
+        }
+        if levels.iter().any(|l| l == "high") {
+            return Some("high".to_string());
+        }
+        levels
+            .iter()
+            .find(|l| l.as_str() != "none" && l.as_str() != "disabled")
+            .cloned()
+            .or_else(|| levels.first().cloned())
+    }
+
     fn model_display_label(&self, provider_id: &str, model_id: &str) -> String {
         let pname = self
             .config
@@ -1059,9 +1105,10 @@ impl AppView {
         };
         self.exec_mode = seed.exec_mode;
         self.reasoning_level = seed.reasoning_level.clone();
-        // 模型显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id
+        // 模型显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id。
+        // hero 态用户已显式选过模型时不覆盖（模式/思考等级仍铺种子）
         let label = match (&seed.provider_id, &seed.model_id) {
-            (Some(p), Some(m)) => {
+            (Some(p), Some(m)) if !self.hero_model_dirty => {
                 self.current_model = Some((p.clone(), m.clone()));
                 self.model_display_label(p, m)
             }
@@ -1084,6 +1131,8 @@ impl AppView {
         self.title_branches = vec![];
         self.title_branch_menu_open = false;
         self.hero_error = None;
+        // 新的 hero 周期：显式模型选择标记复位（工作区种子重新生效）
+        self.hero_model_dirty = false;
         self.composer.update(cx, |composer, cx| {
             composer.clear_context_usage(cx);
         });
@@ -1119,6 +1168,12 @@ impl AppView {
             Some((p, m)) => (Some(p), Some(m)),
             None => (None, None),
         };
+        eprintln!(
+            "[model] hero_send 新建会话：cwd={} 模型={:?} 思考={:?}",
+            cwd.display(),
+            provider_id.as_deref().zip(model_id.as_deref()),
+            self.reasoning_level
+        );
         self.agent.new_session(
             cwd,
             provider_id,
@@ -1262,7 +1317,45 @@ impl AppView {
                 provider_id,
                 model_id,
             } => {
+                eprintln!(
+                    "[model] 收到切换 → {provider_id}/{model_id}（hero={}，原思考={:?}）",
+                    self.current.is_none(),
+                    self.reasoning_level
+                );
                 self.current_model = Some((provider_id.clone(), model_id.clone()));
+                if self.current.is_none() {
+                    // hero 态的显式选择：此后的工作区种子默认值不再覆盖模型
+                    self.hero_model_dirty = true;
+                }
+                // 切模型的思考等级落点（优先级从高到低）：
+                // 1. 新模型配置的默认档
+                // 2. 继承上个模型的等级（需新模型支持；None=关原样继承）
+                // 3. 继承档不被支持（Some 但不在表内）→ 启发式兜底（high → 首个非关档）
+                let new_levels = self.model_reasoning_levels(provider_id, model_id);
+                let target = self
+                    .model_default_reasoning_level(provider_id, model_id)
+                    .or_else(|| {
+                        self.reasoning_level
+                            .clone()
+                            .filter(|lv| new_levels.contains(lv))
+                    })
+                    .or_else(|| {
+                        self.reasoning_level
+                            .is_some()
+                            .then(|| Self::fallback_reasoning_level(&new_levels))
+                            .flatten()
+                    });
+                if self.reasoning_level != target {
+                    eprintln!(
+                        "[model] 切换 {model_id}：思考等级 {:?} → {:?}",
+                        self.reasoning_level, target
+                    );
+                    self.reasoning_level = target;
+                    let level = self.reasoning_level.clone();
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_reasoning_level(level, cx);
+                    });
+                }
                 let reasoning = self.reasoning_level.clone();
                 self.update_current_meta(|m| {
                     m.provider_id = Some(provider_id.clone());
@@ -2537,6 +2630,8 @@ enabled = true
 id = "mock-model"
 context_window = 128000
 max_output_tokens = 8192
+reasoning_levels = ["low", "high"]
+default_reasoning_level = "low"
 
 [[providers]]
 id = "anthropic"
@@ -2550,6 +2645,7 @@ enabled = true
 id = "mock-model"
 context_window = 200000
 max_output_tokens = 8192
+reasoning_levels = ["high", "max"]
 "#
         ),
     )
@@ -3373,6 +3469,367 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         "删除当前会话后应切走"
     );
     println!("[selftest] 会话删除 OK（视图+列表+rollout 全清理）");
+
+    // ---- 新会话模型选择不被工作区种子冲掉（回归：曾「切模型→选工作区→发送」
+    // 被 apply_hero_defaults 用工作区旧模型覆盖）----
+    // 前置：显式用 mock 建一个会话并完成回合，成为工作区最新种子
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        Some("mock".to_string()),
+        Some("mock-model".to_string()),
+        None,
+        None,
+    ));
+    let known: Vec<String> =
+        app!(|app: &mut AppView, _| { app.metas.iter().map(|m| m.id.clone()).collect() });
+    let seed_id = loop {
+        timer!(200).await;
+        let found = app!(|app: &mut AppView, _| {
+            let Some(sid) = &app.current else { return None };
+            (!known.contains(sid)).then(|| sid.clone())
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    app!(|app: &mut AppView, _| {
+        app.agent.send_message(
+            seed_id.clone(),
+            "种子会话打个卡".to_string(),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 30_000, "模型种子会话超时");
+        let done = app!(|app: &mut AppView, cx| {
+            let Some(views) = app.views.get(&seed_id) else {
+                return false;
+            };
+            !views.thread.read(cx).is_streaming() && waited > 1000
+        });
+        if done {
+            break;
+        }
+    }
+
+    // 前置断言：未显式选模型时，hero 默认值来自工作区种子（此时最新 = 刚建的 mock 会话）
+    app!(|app: &mut AppView, cx| app.enter_hero(cx));
+    timer!(400).await;
+    let seeded = app!(|app: &mut AppView, _| app.current_model.clone());
+    assert_eq!(
+        seeded,
+        Some(("mock".to_string(), "mock-model".to_string())),
+        "未选模型时 hero 默认值应来自工作区种子: {seeded:?}"
+    );
+
+    // 变体 2：hero → 切 anthropic → 再选工作区（触发 apply_hero_defaults）→ 发送
+    app!(|app: &mut AppView, cx| app.enter_hero(cx));
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetModel {
+                provider_id: "anthropic".to_string(),
+                model_id: "mock-model".to_string(),
+            });
+        });
+    });
+    timer!(400).await;
+    let cwd_str = app!(|app: &mut AppView, _| app.cwd.display().to_string());
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SelectCwd(cwd_str.clone()));
+        });
+    });
+    timer!(400).await;
+    let picked = app!(|app: &mut AppView, _| (app.current_model.clone(), app.hero_cwd.is_some()));
+    assert_eq!(
+        picked,
+        (
+            Some(("anthropic".to_string(), "mock-model".to_string())),
+            true
+        ),
+        "选工作区后用户已选的模型不应被种子覆盖: {picked:?}"
+    );
+    app!(|app: &mut AppView, cx| {
+        app.hero_send(
+            "模型选择回归 v2".to_string(),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+            cx,
+        );
+    });
+    let mut waited = 0u64;
+    let v2_id = loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 20_000, "v2 会话建立超时");
+        let found = app!(|app: &mut AppView, cx| {
+            let Some(sid) = &app.current else { return None };
+            if known.contains(sid) {
+                return None;
+            }
+            let streaming = app
+                .views
+                .get(sid)
+                .map(|v| v.thread.read(cx).is_streaming())
+                .unwrap_or(true);
+            (!streaming).then(|| sid.clone())
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    let v2 = app!(|app: &mut AppView, _| {
+        app.metas
+            .iter()
+            .find(|m| m.id == v2_id)
+            .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+    });
+    assert_eq!(
+        v2,
+        Some((
+            Some("anthropic".to_string()),
+            Some("mock-model".to_string())
+        )),
+        "切模型→选工作区→发送：新会话应使用用户选择的模型: {v2:?}"
+    );
+    println!("[selftest] hero 切模型后选工作区，模型选择保留 OK");
+
+    // 变体 1：hero → 切 anthropic → 直接发送（无工作区选择）
+    app!(|app: &mut AppView, cx| app.enter_hero(cx));
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetModel {
+                provider_id: "anthropic".to_string(),
+                model_id: "mock-model".to_string(),
+            });
+        });
+    });
+    timer!(400).await;
+    app!(|app: &mut AppView, cx| {
+        app.hero_send(
+            "模型选择回归 v1".to_string(),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+            cx,
+        );
+    });
+    let mut waited = 0u64;
+    let v1_id = loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 20_000, "v1 会话建立超时");
+        let found = app!(|app: &mut AppView, cx| {
+            let Some(sid) = &app.current else { return None };
+            if sid == &v2_id || known.contains(sid) {
+                return None;
+            }
+            let streaming = app
+                .views
+                .get(sid)
+                .map(|v| v.thread.read(cx).is_streaming())
+                .unwrap_or(true);
+            (!streaming).then(|| sid.clone())
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    let v1 = app!(|app: &mut AppView, _| {
+        app.metas
+            .iter()
+            .find(|m| m.id == v1_id)
+            .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+    });
+    assert_eq!(
+        v1,
+        Some((
+            Some("anthropic".to_string()),
+            Some("mock-model".to_string())
+        )),
+        "hero 切模型直接发送：新会话应使用用户选择的模型: {v1:?}"
+    );
+    println!("[selftest] 新会话模型选择（用户选择优先/种子兜底）OK");
+
+    // 变体 3（用户实际流程）：工作区行点 +（NewTaskInWorkspace，预设 cwd 进
+    // hero）→ 切模型 → 发送。
+    // 前置：再显式建一个 mock 会话并完成回合——v1/v2 的 anthropic 会话已成为
+    // 工作区最新种子，会与用户选择同为 anthropic，断言无法区分「保留选择」
+    // 与「还原成种子」，必须把种子刷回 mock
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        Some("mock".to_string()),
+        Some("mock-model".to_string()),
+        None,
+        None,
+    ));
+    let known3: Vec<String> =
+        app!(|app: &mut AppView, _| { app.metas.iter().map(|m| m.id.clone()).collect() });
+    let seed3_id = loop {
+        timer!(200).await;
+        let found = app!(|app: &mut AppView, _| {
+            let Some(sid) = &app.current else { return None };
+            (!known3.contains(sid)).then(|| sid.clone())
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    app!(|app: &mut AppView, _| {
+        app.agent.send_message(
+            seed3_id.clone(),
+            "v3 前置种子会话".to_string(),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 30_000, "v3 种子会话超时");
+        let done = app!(|app: &mut AppView, cx| {
+            let Some(views) = app.views.get(&seed3_id) else {
+                return false;
+            };
+            !views.thread.read(cx).is_streaming() && waited > 1000
+        });
+        if done {
+            break;
+        }
+    }
+    // 确认种子生效：进 hero 后默认模型应是 mock（工作区最新）
+    app!(|app: &mut AppView, cx| {
+        // SidebarEvent::NewTaskInWorkspace 的 handler 本体（直调需要 window）
+        app.hero_cwd = Some(app.cwd.clone());
+        app.enter_hero(cx);
+    });
+    timer!(400).await;
+    let seeded3 = app!(|app: &mut AppView, _| app.current_model.clone());
+    assert_eq!(
+        seeded3,
+        Some(("mock".to_string(), "mock-model".to_string())),
+        "v3 前置：工作区种子应为 mock: {seeded3:?}"
+    );
+    // 切 anthropic → 发送
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetModel {
+                provider_id: "anthropic".to_string(),
+                model_id: "mock-model".to_string(),
+            });
+        });
+    });
+    timer!(400).await;
+    app!(|app: &mut AppView, cx| {
+        app.hero_send(
+            "模型选择回归 v3".to_string(),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+            cx,
+        );
+    });
+    let mut waited = 0u64;
+    let v3_id = loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 20_000, "v3 会话建立超时");
+        let found = app!(|app: &mut AppView, cx| {
+            let Some(sid) = &app.current else { return None };
+            if sid == &v1_id || sid == &v2_id || known.contains(sid) || sid == &seed3_id {
+                return None;
+            }
+            let streaming = app
+                .views
+                .get(sid)
+                .map(|v| v.thread.read(cx).is_streaming())
+                .unwrap_or(true);
+            (!streaming).then(|| sid.clone())
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    let v3 = app!(|app: &mut AppView, _| {
+        app.metas
+            .iter()
+            .find(|m| m.id == v3_id)
+            .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+    });
+    assert_eq!(
+        v3,
+        Some((
+            Some("anthropic".to_string()),
+            Some("mock-model".to_string())
+        )),
+        "工作区点+→切模型→发送：新会话应使用用户选择的模型: {v3:?}"
+    );
+    println!("[selftest] 工作区点+新建后切模型，模型选择保留 OK");
+
+    // 切模型时思考等级落点（优先级）：模型默认档 > 继承（需新模型支持）
+    // > 继承档失效时启发式。selftest 配置：mock 有默认 low，anthropic 无默认
+    // 1) 默认档优先：当前 high（mock 也支持 high）→ 切 mock 仍落到默认 low
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetReasoning(Some("high".to_string())));
+        });
+    });
+    timer!(200).await;
+    let had_level = app!(|app: &mut AppView, _| app.reasoning_level.clone());
+    assert_eq!(had_level, Some("high".to_string()), "前置：等级应为 high");
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetModel {
+                provider_id: "mock".to_string(),
+                model_id: "mock-model".to_string(),
+            });
+        });
+    });
+    timer!(200).await;
+    let (level, meta_level) = app!(|app: &mut AppView, _| {
+        let meta_level = app
+            .metas
+            .iter()
+            .find(|m| m.id == v3_id)
+            .and_then(|m| m.reasoning_level.clone());
+        (app.reasoning_level.clone(), meta_level)
+    });
+    assert_eq!(
+        level,
+        Some("low".to_string()),
+        "模型默认档应优先于可继承的等级: level={level:?}"
+    );
+    assert_eq!(
+        meta_level,
+        Some("low".to_string()),
+        "落点等级应写穿 meta: meta_level={meta_level:?}"
+    );
+
+    // 2) 未配默认 → 继承：anthropic 无默认，max 在其等级表内 → 切过去保持 max
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetReasoning(Some("max".to_string())));
+        });
+    });
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::SetModel {
+                provider_id: "anthropic".to_string(),
+                model_id: "mock-model".to_string(),
+            });
+        });
+    });
+    timer!(200).await;
+    let level = app!(|app: &mut AppView, _| app.reasoning_level.clone());
+    assert_eq!(
+        level,
+        Some("max".to_string()),
+        "未配默认且等级被支持时应继承: level={level:?}"
+    );
+    println!("[selftest] 切模型思考等级落点（默认档优先/继承）OK");
 
     // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
     assert_eq!(
