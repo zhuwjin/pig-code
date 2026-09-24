@@ -60,6 +60,22 @@ impl AgentClient {
         });
     }
 
+    /// 手动重命名（core 置 title_custom，自动命名不再覆盖）
+    pub fn rename_session(&self, session_id: &str, title: &str) {
+        self.send(Op::UpdateSessionMeta {
+            session_id: session_id.to_string(),
+            pinned: None,
+            archived: None,
+            title: Some(title.to_string()),
+        });
+    }
+
+    pub fn delete_session(&self, session_id: &str) {
+        self.send(Op::DeleteSession {
+            session_id: session_id.to_string(),
+        });
+    }
+
     pub fn send_message(
         &self,
         session_id: String,

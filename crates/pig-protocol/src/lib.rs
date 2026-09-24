@@ -43,7 +43,12 @@ pub enum Op {
         session_id: String,
         pinned: Option<bool>,
         archived: Option<bool>,
+        /// 手动重命名（置 title_custom，此后自动命名不再覆盖）
         title: Option<String>,
+    },
+    /// 删除会话：清 sessions 及关联表 + rollout JSONL，不可恢复
+    DeleteSession {
+        session_id: String,
     },
     SendMessage {
         session_id: String,
@@ -408,6 +413,9 @@ pub struct SessionMeta {
     pub updated_at: u64,
     pub pinned: bool,
     pub archived: bool,
+    /// 标题被手动重命名过：自动命名（首条消息模型生成）不再覆盖
+    #[serde(default)]
+    pub title_custom: bool,
     /// 会话最近使用的模型/思考等级/执行模式（重开恢复；新会话继承工作区最近活跃值）
     #[serde(default)]
     pub provider_id: Option<String>,
@@ -488,6 +496,11 @@ pub enum Event {
     },
     SessionList {
         sessions: Vec<SessionMeta>,
+    },
+    /// 会话标题变化（自动命名 sidecar 完成 / 手动重命名后的列表同步）
+    SessionTitleChanged {
+        session_id: String,
+        title: String,
     },
     WorkspaceList {
         workspaces: Vec<WorkspaceMeta>,

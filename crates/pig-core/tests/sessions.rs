@@ -46,10 +46,10 @@ async fn resume_rebuilds_history() {
         panic!("应有 SessionList");
     };
     assert!(
-        sessions
-            .iter()
-            .any(|s| s.id == session_id && s.title.contains("读一下")),
-        "索引里应有会话且 title 取自首条消息: {sessions:?}"
+        sessions.iter().any(|s| s.id == session_id
+            // 首条消息种子标题，或已被自动命名 sidecar 替换（两者取一，取决于时机）
+            && (s.title.contains("读一下") || s.title == mock::MOCK_TITLE)),
+        "索引里应有会话且 title 来自首条消息或自动命名: {sessions:?}"
     );
 
     agent2
@@ -442,7 +442,9 @@ async fn restart_restores_todos_changes_and_revert() {
         .await
         .unwrap();
     let replay_a = recv_until(&events2, Duration::from_secs(10), |e| {
-        matches!(e, Event::TurnComplete { .. })
+        // 回放收尾哨兵：stats=None 的 TurnComplete。回合内若有用量会先回放
+        // TurnStats 的 TurnComplete（stats=Some），不能在那时提前停
+        matches!(e, Event::TurnComplete { stats: None, .. })
     })
     .await;
     let file_changes: Vec<_> = replay_a
@@ -886,7 +888,8 @@ async fn resume_keeps_appending() {
         .await
         .unwrap();
     let replay = recv_until(&events3, Duration::from_secs(10), |e| {
-        matches!(e, Event::TurnComplete { .. })
+        // 同上：等回放收尾（stats=None 的 TurnComplete），TurnStats 的提前收尾不停
+        matches!(e, Event::TurnComplete { stats: None, .. })
     })
     .await;
     for round in ["第一轮消息", "第二轮消息"] {

@@ -33,10 +33,21 @@ pub enum SidebarEvent {
     NewTaskInWorkspace(String),
     SetPinned(String, bool),
     SetArchived(String, bool),
+    /// 会话手动重命名（此后自动命名不再覆盖）
+    RenameSession(String, String),
+    /// 删除会话（清库 + rollout 文件，不可恢复）
+    DeleteSession(String),
     RemoveWorkspace(String),
     /// 重命名工作区显示名；None 恢复默认目录名
     RenameWorkspace(String, Option<String>),
     OpenSettings,
+}
+
+/// 行内重命名的目标：工作区或会话（共用一个输入框实体）
+#[derive(Clone, PartialEq)]
+enum RenameTarget {
+    Workspace(String),
+    Session(String),
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -61,8 +72,8 @@ pub struct Sidebar {
     workspaces: Vec<String>,
     /// 工作区路径 → 用户自定义显示名
     aliases: std::collections::HashMap<String, String>,
-    /// 正在重命名的工作区路径
-    renaming: Option<String>,
+    /// 正在重命名的目标（工作区/会话共用输入框）
+    renaming: Option<RenameTarget>,
     rename_input: Entity<InputState>,
     active: Option<String>,
     search_open: bool,
@@ -272,7 +283,7 @@ impl Sidebar {
 
     fn start_rename(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.workspace_name(&path);
-        self.renaming = Some(path);
+        self.renaming = Some(RenameTarget::Workspace(path));
         self.rename_input.update(cx, |input, cx| {
             input.set_value(current, window, cx);
             input.focus(window, cx);
@@ -280,22 +291,100 @@ impl Sidebar {
         cx.notify();
     }
 
+    fn start_session_rename(
+        &mut self,
+        id: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.renaming = Some(RenameTarget::Session(id));
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(title, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.renaming.take() else {
+        let Some(target) = self.renaming.take() else {
             return;
         };
         let value = self.rename_input.read(cx).value().trim().to_string();
-        let default = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let alias = if value.is_empty() || value == default {
-            None
-        } else {
-            Some(value)
-        };
-        cx.emit(SidebarEvent::RenameWorkspace(path, alias));
+        match target {
+            RenameTarget::Workspace(path) => {
+                let default = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let alias = if value.is_empty() || value == default {
+                    None
+                } else {
+                    Some(value)
+                };
+                cx.emit(SidebarEvent::RenameWorkspace(path, alias));
+            }
+            RenameTarget::Session(id) => {
+                // 空值视为取消，不改名
+                if !value.is_empty() {
+                    cx.emit(SidebarEvent::RenameSession(id, value));
+                }
+            }
+        }
         cx.notify();
+    }
+
+    /// 会话行的右键菜单：重命名 / 置顶 / 归档 / 删除（清库+rollout，不可恢复）
+    fn session_menu(
+        view: &WeakEntity<Self>,
+        session: &SidebarSession,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + Clone + 'static
+    {
+        let view = view.clone();
+        let id = session.id.clone();
+        let title = session.title.clone();
+        let pinned = session.pinned;
+        let archived = session.archived;
+        move |menu, _, _| {
+            let rename_view = view.clone();
+            let rename_id = id.clone();
+            let rename_title = title.clone();
+            let pin_view = view.clone();
+            let pin_id = id.clone();
+            let archive_view = view.clone();
+            let archive_id = id.clone();
+            let delete_view = view.clone();
+            let delete_id = id.clone();
+            menu.item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
+                let _ = rename_view.update(cx, |this, cx| {
+                    this.start_session_rename(rename_id.clone(), rename_title.clone(), window, cx);
+                });
+            }))
+            .item(
+                PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" }).on_click(
+                    move |_, _, cx| {
+                        let _ = pin_view.update(cx, |_, cx| {
+                            cx.emit(SidebarEvent::SetPinned(pin_id.clone(), !pinned));
+                        });
+                    },
+                ),
+            )
+            .item(
+                PopupMenuItem::new(if archived { "取消归档" } else { "归档" }).on_click(
+                    move |_, _, cx| {
+                        let _ = archive_view.update(cx, |_, cx| {
+                            cx.emit(SidebarEvent::SetArchived(archive_id.clone(), !archived));
+                        });
+                    },
+                ),
+            )
+            .separator()
+            .item(PopupMenuItem::new("删除会话").on_click(move |_, _, cx| {
+                let _ = delete_view.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::DeleteSession(delete_id.clone()));
+                });
+            }))
+        }
     }
 
     /// 工作区行的选项菜单（行尾 “...” 按钮与右键共用）：
@@ -485,6 +574,7 @@ impl Sidebar {
         } else {
             None
         };
+        let renaming = self.renaming == Some(RenameTarget::Session(session.id.clone()));
 
         let mut row = h_flex()
             .id(("session", ix))
@@ -500,7 +590,13 @@ impl Sidebar {
             .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(SidebarEvent::Select(id.clone()));
-            }))
+            }));
+        if renaming {
+            // 行内重命名：只留输入框（回车/失焦提交，空值取消）
+            row = row.child(div().flex_1().child(Input::new(&self.rename_input).small()));
+            return row.into_any_element();
+        }
+        row = row
             .child({
                 let title_handle = self
                     .title_scrolls
@@ -572,7 +668,9 @@ impl Sidebar {
                         }))
                 });
         }
-        row.into_any_element()
+        // 右键菜单：重命名 / 置顶 / 归档 / 删除
+        let menu = Self::session_menu(&cx.entity().downgrade(), session);
+        row.context_menu(menu).into_any_element()
     }
 
     fn render_group_view(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -679,7 +777,7 @@ impl Sidebar {
                 continue;
             }
             let expanded = self.expanded.contains(workspace);
-            let renaming = self.renaming.as_deref() == Some(workspace.as_str());
+            let renaming = self.renaming == Some(RenameTarget::Workspace(workspace.to_string()));
             let workspace_path = workspace.clone();
 
             // 该工作区下的会话：未归档在前按 updated 倒序，归档的灰色垫底

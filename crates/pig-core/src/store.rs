@@ -30,6 +30,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                title_custom INTEGER NOT NULL DEFAULT 0,
                 cwd TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -92,28 +93,30 @@ impl Store {
         Ok(SessionMeta {
             id: row.get(0)?,
             title: row.get(1)?,
-            cwd: PathBuf::from(row.get::<_, String>(2)?),
-            created_at: row.get(3)?,
-            updated_at: row.get(4)?,
-            pinned: row.get(5)?,
-            archived: row.get(6)?,
-            provider_id: row.get(7)?,
-            model_id: row.get(8)?,
-            reasoning_level: row.get(9)?,
-            exec_mode: Self::mode_from_row(row.get::<_, String>(10)?),
+            title_custom: row.get(2)?,
+            cwd: PathBuf::from(row.get::<_, String>(3)?),
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+            pinned: row.get(6)?,
+            archived: row.get(7)?,
+            provider_id: row.get(8)?,
+            model_id: row.get(9)?,
+            reasoning_level: row.get(10)?,
+            exec_mode: Self::mode_from_row(row.get::<_, String>(11)?),
         })
     }
 
-    const SESSION_COLUMNS: &'static str = "id, title, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode";
+    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode";
 
     pub fn upsert_session(&self, meta: &SessionMeta) {
         // exec_mode 存变体名（"AutoEdit" 等），读出时按 serde 变体名解析
         let mode_raw = format!("{:?}", meta.exec_mode);
         let result = self.conn.execute(
-            "INSERT INTO sessions (id, title, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
+                title_custom = excluded.title_custom,
                 cwd = excluded.cwd,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at,
@@ -126,6 +129,7 @@ impl Store {
             params![
                 meta.id,
                 meta.title,
+                meta.title_custom,
                 meta.cwd.display().to_string(),
                 meta.created_at,
                 meta.updated_at,
@@ -148,6 +152,20 @@ impl Store {
         if let Some(mut meta) = self.get_session(id) {
             f(&mut meta);
             self.upsert_session(&meta);
+        }
+    }
+
+    /// 删除会话：级联清 turn_usage / todos / file_changes / file_originals。
+    /// rollout JSONL 文件由调用方删（句柄可能仍在回合中）
+    pub fn delete_session(&self, id: &str) {
+        let _ = self
+            .conn
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id]);
+        for table in ["turn_usage", "todos", "file_changes", "file_originals"] {
+            let _ = self.conn.execute(
+                &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                params![id],
+            );
         }
     }
 
@@ -461,6 +479,65 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let store = Store::open(&dir).expect("打开 store");
         (dir, store)
+    }
+
+    #[test]
+    fn delete_session_cascades_all_tables() {
+        let (_dir, store) = open_test_store("delete");
+        let meta = SessionMeta {
+            id: "s1".to_string(),
+            title: "t".to_string(),
+            title_custom: true,
+            cwd: PathBuf::from("/w"),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            exec_mode: Default::default(),
+        };
+        store.upsert_session(&meta);
+        store.record_usage("s1", "p", "m", 1, 2, 3);
+        store.set_todos("s1", "[]");
+        store.upsert_file_change("s1", "a.rs", "d", 1, 1);
+        store.upsert_file_original("s1", "a.rs", Some("old"));
+        store.delete_session("s1");
+        assert!(store.get_session("s1").is_none(), "sessions 行应删除");
+        assert!(store.sorted_sessions().is_empty(), "列表不再包含该会话");
+        assert!(store.get_todos("s1").is_none(), "todos 应级联删除");
+        assert!(store.file_changes("s1").is_empty());
+        assert!(store.file_originals("s1").is_empty());
+        // 再删一次不报错（幂等）
+        store.delete_session("s1");
+    }
+
+    #[test]
+    fn title_custom_roundtrip() {
+        let (_dir, store) = open_test_store("title-custom");
+        let mut meta = SessionMeta {
+            id: "s1".to_string(),
+            title: "t".to_string(),
+            title_custom: false,
+            cwd: PathBuf::from("/w"),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            exec_mode: Default::default(),
+        };
+        store.upsert_session(&meta);
+        assert!(!store.get_session("s1").unwrap().title_custom);
+        meta.title_custom = true;
+        store.upsert_session(&meta);
+        assert!(
+            store.get_session("s1").unwrap().title_custom,
+            "手动重命名标记应持久化"
+        );
     }
 
     #[test]

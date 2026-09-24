@@ -60,7 +60,16 @@ async fn turn_file_changes_emitted_and_replayed() {
         .await
         .unwrap();
     let collected = recv_until(&events2, Duration::from_secs(20), |e| {
-        matches!(e, Event::TurnComplete { duration_ms: 0, .. })
+        // 回放收尾哨兵：stats=None 的 TurnComplete（TurnStats 回放的 TurnComplete
+        // 同样 duration_ms=0，会在 TurnFileChanges 之前抢跑截断收集）
+        matches!(
+            e,
+            Event::TurnComplete {
+                stats: None,
+                duration_ms: 0,
+                ..
+            }
+        )
     })
     .await;
     let replayed = collected.iter().find_map(|e| match e {

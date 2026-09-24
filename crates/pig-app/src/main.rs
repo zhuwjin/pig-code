@@ -221,6 +221,8 @@ struct AppView {
     current: Option<String>,
     metas: Vec<SessionMeta>,
     running: HashSet<String>,
+    /// 已删除的会话 id：迟到事件过滤用（id 含时间戳不复用，无需清理）
+    deleted_sessions: HashSet<String>,
     approval_pending: HashSet<String>,
     /// 待审批详情（审批条内容）：决议/回合结束时清除
     pending_approvals: HashMap<String, PendingApproval>,
@@ -306,6 +308,7 @@ impl AppView {
             current: None,
             metas: vec![],
             running: HashSet::new(),
+            deleted_sessions: HashSet::new(),
             approval_pending: HashSet::new(),
             pending_approvals: HashMap::new(),
             pending_questions: HashMap::new(),
@@ -480,6 +483,13 @@ impl AppView {
     }
 
     fn route_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        // 已删除会话的迟到事件（删除前已入队的流式/收尾事件）直接丢弃，
+        // 防止 ensure_views 给已删会话重建僵尸视图
+        if let Some(sid) = event_session_id(&event)
+            && self.deleted_sessions.contains(&sid)
+        {
+            return;
+        }
         match &event {
             Event::SessionConfigured {
                 session_id,
@@ -595,6 +605,13 @@ impl AppView {
                     }
                 }
                 self.push_hero_info(cx);
+            }
+            Event::SessionTitleChanged { session_id, title } => {
+                // 自动命名 sidecar 完成：只补丁标题，不重发整个列表
+                if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
+                    meta.title = title.clone();
+                }
+                self.refresh_sidebar(cx);
             }
             Event::Error {
                 session_id: None,
@@ -1332,6 +1349,8 @@ impl AppView {
             }
             SidebarEvent::SetPinned(id, pinned) => self.agent.set_pinned(id, *pinned),
             SidebarEvent::SetArchived(id, archived) => self.agent.set_archived(id, *archived),
+            SidebarEvent::RenameSession(id, title) => self.rename_session(id, title, cx),
+            SidebarEvent::DeleteSession(id) => self.delete_session(id, cx),
             SidebarEvent::RemoveWorkspace(path) => {
                 self.agent.remove_workspace(PathBuf::from(path));
             }
@@ -1341,6 +1360,41 @@ impl AppView {
             }
             SidebarEvent::OpenSettings => self.open_settings(cx),
         }
+    }
+
+    /// 手动重命名会话：本地缓存即时更新（侧栏立刻生效），
+    /// core 落库（置 title_custom，自动命名不再覆盖）后发 SessionList 再同步
+    fn rename_session(&mut self, id: &str, title: &str, cx: &mut Context<Self>) {
+        if let Some(meta) = self.metas.iter_mut().find(|m| m.id == id) {
+            meta.title = title.to_string();
+        }
+        self.agent.rename_session(id, title);
+        self.refresh_sidebar(cx);
+        cx.notify();
+    }
+
+    /// 删除会话：本地视图/缓存清理 + 通知 core 清库与 rollout 文件。
+    /// 删的是当前会话时切到最近的未归档会话，没有则回 hero
+    fn delete_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.deleted_sessions.insert(id.to_string());
+        self.views.remove(id);
+        self.running.remove(id);
+        self.approval_pending.remove(id);
+        self.pending_approvals.remove(id);
+        self.pending_questions.remove(id);
+        self.todos_by_session.remove(id);
+        self.tasks_by_session.remove(id);
+        self.metas.retain(|m| m.id != id);
+        self.agent.delete_session(id);
+        if self.current.as_deref() == Some(id) {
+            self.current = None;
+            match self.metas.iter().find(|m| !m.archived) {
+                Some(next) => self.switch_session(next.id.clone(), cx),
+                None => self.enter_hero(cx),
+            }
+        }
+        self.refresh_sidebar(cx);
+        cx.notify();
     }
 
     /// 标题栏分支：cwd=None（hero 态）或非 git 目录时不显示。
@@ -2320,6 +2374,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::TaskListChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
+        | Event::SessionTitleChanged { .. }
         | Event::GitInfo { .. }
         | Event::BranchChanged { .. }
         | Event::GitStatus { .. }
@@ -3220,6 +3275,104 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         "改动 chip 应打开右侧面板并激活改动 tab"
     );
     println!("[selftest] 改动 chip → 右侧改动面板 OK");
+
+    // 会话管理：首条消息自动命名 → 手动重命名 → 删除
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
+    let session_f = loop {
+        timer!(200).await;
+        let current = app!(|app: &mut AppView, _| app.current.clone());
+        if let Some(id) = current
+            && id != session_a
+            && id != session_b
+            && id != session_c
+            && id != session_d
+            && id != session_e
+        {
+            break id;
+        }
+    };
+    // 首条消息（≥10 字）触发自动命名 sidecar；mock 回 {"title": MOCK_TITLE}
+    app!(|app: &mut AppView, _| {
+        app.agent.send_message(
+            session_f.clone(),
+            "帮我梳理这个项目的模块结构并给出重构建议".to_string(),
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 30_000, "自动命名超时");
+        let done = app!(|app: &mut AppView, cx| {
+            let Some(views) = app.views.get(&session_f) else {
+                return false;
+            };
+            let thread = views.thread.read(cx);
+            let (_, text, _, _) = thread.debug_last_assistant();
+            let title = app
+                .metas
+                .iter()
+                .find(|m| m.id == session_f)
+                .map(|m| m.title.clone());
+            !thread.is_streaming()
+                && waited > 1000
+                && !text.is_empty()
+                && title.as_deref() == Some(pig_core::mock::MOCK_TITLE)
+        });
+        if done {
+            break;
+        }
+    }
+    println!("[selftest] 首条消息自动命名 OK（mock 标题替换 30 字符种子）");
+
+    // 手动重命名：core 落库（title_custom）后 SessionList 全量刷新回来仍是新名，
+    // 才算真正持久化（本地补丁只管即时显示）
+    app!(|app: &mut AppView, cx| app.rename_session(&session_f, "手动改名F", cx));
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 10_000, "重命名持久化超时");
+        let done = app!(|app: &mut AppView, _| {
+            app.metas
+                .iter()
+                .find(|m| m.id == session_f)
+                .map(|m| m.title.as_str())
+                == Some("手动改名F")
+        });
+        if done {
+            break;
+        }
+    }
+    println!("[selftest] 会话手动重命名 OK");
+
+    // 删除会话：视图/列表/rollout 文件全清理；删当前会话自动切走
+    let data_dir =
+        std::path::PathBuf::from(std::env::var("PIG_DATA_DIR").expect("selftest 数据目录"));
+    let jsonl = data_dir.join("sessions").join(format!("{session_f}.jsonl"));
+    assert!(jsonl.exists(), "删除前 rollout 应存在: {}", jsonl.display());
+    app!(|app: &mut AppView, cx| app.delete_session(&session_f, cx));
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 10_000, "删除会话超时");
+        let gone = app!(|app: &mut AppView, _| {
+            !app.metas.iter().any(|m| m.id == session_f) && !app.views.contains_key(&session_f)
+        });
+        if gone && !jsonl.exists() {
+            break;
+        }
+    }
+    assert!(
+        app!(|app: &mut AppView, _| app.current.clone()) != Some(session_f),
+        "删除当前会话后应切走"
+    );
+    println!("[selftest] 会话删除 OK（视图+列表+rollout 全清理）");
 
     // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
     assert_eq!(

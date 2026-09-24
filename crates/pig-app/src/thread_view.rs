@@ -643,6 +643,7 @@ impl ThreadView {
             }
             // 这些事件由 AppView::route_event 拦截处理，不到这里
             Event::SessionList { .. }
+            | Event::SessionTitleChanged { .. }
             | Event::FileSearchResults { .. }
             | Event::ContextCompacted { .. }
             | Event::TodoListChanged { .. }

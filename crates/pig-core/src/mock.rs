@@ -311,6 +311,41 @@ pub const SCENARIO_C_TRIGGER: &str = "SCENARIO_C";
 pub const PLAN_MARKER: &str = "MOCK_PLAN_OK";
 pub const SUMMARY_MARKER: &str = "MOCK_SUMMARY_OK";
 pub const PLAN_CONFIRM_TEXT: &str = "计划已确认";
+/// 会话自动命名 sidecar 的 mock 标题（selftest 断言用）
+pub const MOCK_TITLE: &str = "自动命名自测标题";
+
+/// 非流式的自动命名响应：{"title": MOCK_TITLE}（两种 API 格式同内容）。
+/// 请求识别见 session::TITLE_PROMPT_MARKER
+async fn write_title_response(stream: &mut tokio::net::TcpStream, anthropic: bool) -> bool {
+    let content = format!("{{\"title\":\"{MOCK_TITLE}\"}}");
+    let json = if anthropic {
+        serde_json::json!({
+            "id": "msg-mock",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": content}],
+            "model": "mock-model",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 50, "output_tokens": 10},
+        })
+    } else {
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "mock-model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
+        })
+    };
+    let payload = json.to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    stream.write_all(resp.as_bytes()).await.is_ok()
+}
 
 /// 非流式响应（compact 摘要）。FAIL_COMPACT 触发 500 测试回退路径。
 async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) -> bool {
@@ -448,9 +483,11 @@ async fn handle_connection(
         + body.matches("\"role\": \"tool\"").count()
         + body.matches("tool_result").count();
 
-    // 非流式 = compact 摘要/连通性测试（必须在 SSE 响应头之前分支）
+    // 非流式 = 自动命名 / compact 摘要 / 连通性测试（必须在 SSE 响应头之前分支）
     if body.contains("\"stream\":false") {
-        let ok = if anthropic {
+        let ok = if body.contains(crate::session::TITLE_PROMPT_MARKER) {
+            write_title_response(&mut stream, anthropic).await
+        } else if anthropic {
             write_json_response_anthropic(&mut stream, &body).await
         } else {
             write_json_response(&mut stream, &body).await
