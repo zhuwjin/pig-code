@@ -10,6 +10,7 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -972,14 +973,7 @@ impl ThreadView {
                             .child(kind_label.to_string())
                             .into_any_element()
                     })
-                    // 成功只在工具名后给一枚小勾，失败在右侧给状态词（ZCode 同款）
-                    .when(done && !is_error, |this| {
-                        this.child(
-                            Icon::new(IconName::Check)
-                                .size_3()
-                                .text_color(cx.theme().success),
-                        )
-                    })
+                    // 成功不给标记；失败在行尾放叉号（悬停显示原因）
                     // 编辑类：文件名（亮一档）+ 目录路径（最暗，优先截断）；其余工具单行摘要
                     // 摘要只占内容宽（过长时收缩截断），让统计/箭头跟在文字后面而非靠右
                     .child(if edit.is_some() {
@@ -1050,9 +1044,6 @@ impl ThreadView {
                                 .child("等待批准"),
                         )
                     })
-                    .when(done && is_error, |this| {
-                        this.child(div().text_xs().text_color(cx.theme().danger).child("失败"))
-                    })
                     // 箭头默认隐藏，行悬停或展开时显示（保持行内干净）
                     .child(
                         div()
@@ -1068,7 +1059,32 @@ impl ThreadView {
                                 .size_4()
                                 .text_color(subtlest),
                             ),
-                    ),
+                    )
+                    // 失败：行尾叉号常显，悬停展示失败原因（输出压单行并截断）
+                    .when(done && is_error, |this| {
+                        let collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
+                        const MAX_REASON_CHARS: usize = 200;
+                        let reason = if collapsed.chars().count() > MAX_REASON_CHARS {
+                            let head: String =
+                                collapsed.chars().take(MAX_REASON_CHARS - 3).collect();
+                            format!("{}...", head.trim_end())
+                        } else {
+                            collapsed
+                        };
+                        this.child(
+                            div()
+                                .id(("tool-err", message_ix * 1024 + segment_ix))
+                                .flex_shrink_0()
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(reason.clone()).build(window, cx)
+                                })
+                                .child(
+                                    Icon::new(IconName::Close)
+                                        .size_3()
+                                        .text_color(cx.theme().danger),
+                                ),
+                        )
+                    }),
             )
             .when(expanded, |this| {
                 // 展开正文统一放进带滚动条的视口（track_scroll 持久滚动位置 + 可见滚动条）
@@ -2350,12 +2366,16 @@ fn nav_preview_text(parts: &[&str], fallback: &str) -> String {
     }
 }
 
-/// 不滚动穿透：滚轮落在展开正文上一律吞掉（这版 gpui 的内置滚动监听不阻断冒泡，
-/// 不吞的话外层消息列表会联动）；到顶/到底也不放行给外层。
+/// 滚动穿透：有滚动条（max_offset > 0，内容超出视口）时吞掉滚轮事件，不穿透到外层
+/// 消息列表（这版 gpui 的内置滚动监听不阻断冒泡，不吞的话外层会联动，到顶/到底也不放行）；
+/// 没有可滚空间时放行，滚轮直接滚动外层。
 fn consume_scroll(
-    _handle: &ScrollHandle,
+    handle: &ScrollHandle,
 ) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    let handle = handle.clone();
     move |_, _, cx| {
-        cx.stop_propagation();
+        if handle.max_offset().y > px(0.) {
+            cx.stop_propagation();
+        }
     }
 }
