@@ -1135,6 +1135,10 @@ impl AppView {
         self.hero_model_dirty = false;
         self.composer.update(cx, |composer, cx| {
             composer.clear_context_usage(cx);
+            // 进度/任务/改动 chip 同属上个会话的状态，一并清掉（setter 会收起对应弹层）
+            composer.set_todos(vec![], cx);
+            composer.set_tasks(vec![], cx);
+            composer.set_changes(0, 0, vec![], cx);
         });
         if let Some(cwd) = self.hero_cwd.clone() {
             self.agent.git_info(cwd);

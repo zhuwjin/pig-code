@@ -2439,9 +2439,11 @@ impl Render for Composer {
                             )
                         })
                         .when(
-                            !self.todos.is_empty()
-                                || !self.tasks.is_empty()
-                                || !self.change_files.is_empty(),
+                            // hero（新会话页）不属于任何会话：进度/任务/改动 chip 一律不显示
+                            !self.hero_mode
+                                && (!self.todos.is_empty()
+                                    || !self.tasks.is_empty()
+                                    || !self.change_files.is_empty()),
                             |this| this.child(self.render_aux(cx)),
                         )
                         .when(!self.attachments.is_empty(), |this| {
