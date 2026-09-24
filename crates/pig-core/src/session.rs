@@ -112,7 +112,18 @@ pub struct Session {
     last_total_tokens: Option<u64>,
     /// 当前回合累计的 token 用量（回合结束写入 turn_usage 表）
     turn_input: u64,
+    turn_cache_read: u64,
     turn_output: u64,
+    /// 当前回合累计的纯 API 耗时（只算 provider 请求，不含工具执行/审批等待；
+    /// token 速度用它算，避免跑长命令把速度拉低）
+    turn_api_ms: u64,
+    /// turn_api_ms 中等待首个输出 token 的时间（首字时间；多步调用累计）
+    turn_ttft_ms: u64,
+    /// 回合内 provider 请求次数（平均首字 = turn_ttft_ms / turn_api_steps）
+    turn_api_steps: u64,
+    /// 会话累计（回放恢复）：未命中输入 / 命中缓存输入，平均缓存命中率用
+    input_total: u64,
+    cache_read_total: u64,
 }
 
 enum StepOutcome {
@@ -150,7 +161,13 @@ impl Session {
             data_dir,
             last_total_tokens: None,
             turn_input: 0,
+            turn_cache_read: 0,
             turn_output: 0,
+            turn_api_ms: 0,
+            turn_ttft_ms: 0,
+            turn_api_steps: 0,
+            input_total: 0,
+            cache_read_total: 0,
         })
     }
 
@@ -202,7 +219,13 @@ impl Session {
             data_dir,
             last_total_tokens: None,
             turn_input: 0,
+            turn_cache_read: 0,
             turn_output: 0,
+            turn_api_ms: 0,
+            turn_ttft_ms: 0,
+            turn_api_steps: 0,
+            input_total: 0,
+            cache_read_total: 0,
         };
         Ok((session, records))
     }
@@ -389,6 +412,40 @@ impl Session {
                     );
                 }
                 RolloutRecord::Compact { .. } => {}
+                RolloutRecord::TurnStats {
+                    input,
+                    cache_read,
+                    output,
+                    duration_ms,
+                    api_ms,
+                    ttft_ms,
+                    api_steps,
+                } => {
+                    // 回放恢复：会话累计 + 水位 + 历史回合的 footer 统计
+                    self.input_total += input;
+                    self.cache_read_total += cache_read;
+                    self.last_total_tokens = Some(input + cache_read + output);
+                    let stats = pig_protocol::TurnUsageStats {
+                        input: *input,
+                        cache_read: *cache_read,
+                        output: *output,
+                        duration_ms: *duration_ms,
+                        api_ms: *api_ms,
+                        ttft_ms: *ttft_ms,
+                        api_steps: *api_steps,
+                    };
+                    // duration_ms=0 保持「回放收尾事件」语义（不触发计划模式待执行等
+                    // 新回合逻辑）；footer 的真实耗时从 stats 里取
+                    self.emit(
+                        |session_id, seq| Event::TurnComplete {
+                            session_id,
+                            seq,
+                            duration_ms: 0,
+                            stats: Some(stats),
+                        },
+                        tx,
+                    );
+                }
                 RolloutRecord::TurnChanges { files } => {
                     let files = files.clone();
                     self.emit(
@@ -444,6 +501,7 @@ impl Session {
                     session_id,
                     seq,
                     duration_ms: 0,
+                    stats: None,
                 },
                 tx,
             );
@@ -593,7 +651,11 @@ impl Session {
     ) {
         self.turn_counter += 1;
         self.turn_input = 0;
+        self.turn_cache_read = 0;
         self.turn_output = 0;
+        self.turn_api_ms = 0;
+        self.turn_ttft_ms = 0;
+        self.turn_api_steps = 0;
         let turn_id = format!("turn-{}", self.turn_counter);
         let started = Instant::now();
         self.emit(
@@ -659,22 +721,45 @@ impl Session {
                 .await
             {
                 StepOutcome::TextOnly => {
-                    if self.turn_input + self.turn_output > 0 {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    if self.turn_input + self.turn_cache_read + self.turn_output > 0 {
                         self.store.lock().expect("store lock").record_usage(
                             &self.id,
                             &config.provider_name,
                             &config.model,
                             self.turn_input,
+                            self.turn_cache_read,
                             self.turn_output,
                         );
+                        // 回合统计持久化：回放恢复 footer、会话累计与水位
+                        self.record(&RolloutRecord::TurnStats {
+                            input: self.turn_input,
+                            cache_read: self.turn_cache_read,
+                            output: self.turn_output,
+                            duration_ms,
+                            api_ms: self.turn_api_ms,
+                            ttft_ms: self.turn_ttft_ms,
+                            api_steps: self.turn_api_steps,
+                        });
                     }
                     // 本轮改动面板先于回合结束事件发出（durable 数据先于边界事件）
                     self.flush_turn_changes(tx);
+                    let stats = (self.turn_input + self.turn_cache_read + self.turn_output > 0)
+                        .then_some(pig_protocol::TurnUsageStats {
+                            input: self.turn_input,
+                            cache_read: self.turn_cache_read,
+                            output: self.turn_output,
+                            duration_ms,
+                            api_ms: self.turn_api_ms,
+                            ttft_ms: self.turn_ttft_ms,
+                            api_steps: self.turn_api_steps,
+                        });
                     self.emit(
                         |session_id, seq| Event::TurnComplete {
                             session_id,
                             seq,
-                            duration_ms: started.elapsed().as_millis() as u64,
+                            duration_ms,
+                            stats,
                         },
                         tx,
                     );
@@ -714,6 +799,7 @@ impl Session {
         let text_item = format!("{turn_id}-text-{step}");
         let reasoning_item = format!("{turn_id}-reason-{step}");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let api_started = Instant::now();
         let provider_task = tokio::spawn(provider::stream_chat(
             config.clone(),
             self.history.clone(),
@@ -726,6 +812,8 @@ impl Session {
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut provider_failed = false;
+        // 首个输出 token（思考/正文增量）到达时刻：TTFT = 该时刻 - 请求发出
+        let mut first_token_at: Option<Instant> = None;
 
         loop {
             let event = tokio::select! {
@@ -734,6 +822,7 @@ impl Session {
             };
             match event {
                 Some(ProviderEvent::Reasoning(delta)) => {
+                    first_token_at.get_or_insert_with(Instant::now);
                     reasoning.push_str(&delta);
                     self.emit(
                         |session_id, seq| Event::ReasoningDelta {
@@ -746,6 +835,7 @@ impl Session {
                     );
                 }
                 Some(ProviderEvent::Text(delta)) => {
+                    first_token_at.get_or_insert_with(Instant::now);
                     text.push_str(&delta);
                     self.emit(
                         |session_id, seq| Event::TextDelta {
@@ -760,19 +850,26 @@ impl Session {
                 Some(ProviderEvent::ToolCalls(calls)) => tool_calls = calls,
                 Some(ProviderEvent::Usage {
                     input,
+                    cache_read,
                     output,
                     used,
                     total,
                 }) => {
                     self.turn_input += input;
+                    self.turn_cache_read += cache_read;
                     self.turn_output += output;
+                    self.input_total += input;
+                    self.cache_read_total += cache_read;
                     self.last_total_tokens = Some(used);
+                    let (input_total, cache_read_total) = (self.input_total, self.cache_read_total);
                     self.emit(
                         |session_id, seq| Event::ContextUsage {
                             session_id,
                             seq,
                             used,
                             total,
+                            cache_read_total,
+                            input_total,
                         },
                         tx,
                     );
@@ -792,6 +889,15 @@ impl Session {
                 }
             }
         }
+        // 纯 API 耗时：请求发出到流结束（含失败请求），不含工具执行与审批等待；
+        // TTFT 到首个输出 token（纯 tool_call 响应没有增量事件，TTFT 记 0）
+        let api_elapsed = api_started.elapsed();
+        self.turn_api_ms += api_elapsed.as_millis() as u64;
+        self.turn_api_steps += 1;
+        self.turn_ttft_ms += first_token_at
+            .map(|at| at.duration_since(api_started).as_millis() as u64)
+            .unwrap_or(0)
+            .min(api_elapsed.as_millis() as u64);
 
         if provider_failed {
             provider_task.abort();
@@ -1445,6 +1551,23 @@ pub async fn agent_loop(
                                     let tasks = crate::task::snapshot(&entry.state.tasks);
                                     emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items });
                                     emit_global!(Event::TaskListChanged { session_id: session_id.clone(), seq, tasks });
+                                    // 补发水位/累计（composer 的容量 chip 换会话后仍是旧值）
+                                    if let Some(session) = &entry.session
+                                        && let Some(used) = session.last_total_tokens
+                                        && let Some(resolved) = resolve!(
+                                            entry.model_override.as_ref(),
+                                            entry.reasoning_level.as_deref()
+                                        )
+                                    {
+                                        emit_global!(Event::ContextUsage {
+                                            session_id: session_id.clone(),
+                                            seq,
+                                            used,
+                                            total: resolved.context_window,
+                                            cache_read_total: session.cache_read_total,
+                                            input_total: session.input_total,
+                                        });
+                                    }
                                 }
                             }
                             continue;
@@ -1485,6 +1608,23 @@ pub async fn agent_loop(
                                     if let Some(session) = entry.session.as_mut() {
                                         session.replay(&records, &event_tx);
                                     }
+                                }
+                                // 回放已恢复水位与累计：补发上下文容量，重开 app 不必
+                                // 等下一条消息即显示（模型未配置则跳过，无窗口可报）
+                                if let Some(entry) = sessions.get(&session_id)
+                                    && let Some(session) = &entry.session
+                                    && let Some(used) = session.last_total_tokens
+                                    && let Some(resolved) =
+                                        resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref())
+                                {
+                                    emit_global!(Event::ContextUsage {
+                                        session_id: session_id.clone(),
+                                        seq,
+                                        used,
+                                        total: resolved.context_window,
+                                        cache_read_total: session.cache_read_total,
+                                        input_total: session.input_total,
+                                    });
                                 }
                             }
                             Err(error) => emit_global!(Event::Error {

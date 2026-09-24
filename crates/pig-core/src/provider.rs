@@ -205,10 +205,12 @@ pub enum ProviderEvent {
     Reasoning(String),
     Text(String),
     ToolCalls(Vec<ToolCall>),
-    /// 单次请求的 token 用量：input/output 用于记账聚合，
+    /// 单次请求的 token 用量：input = 未缓存命中的输入（cache_read 是其中
+    /// 命中缓存的另一部分，两者之和为总输入），output 用于记账聚合，
     /// used 为模型上报的本请求总消耗（水位判断用），total 为模型上下文窗口
     Usage {
         input: u64,
+        cache_read: u64,
         output: u64,
         used: u64,
         total: u64,
@@ -331,12 +333,18 @@ async fn stream_openai(
                 continue;
             };
             if let Some(usage) = chunk.usage {
-                let input = usage.prompt_tokens.unwrap_or(0);
+                let prompt = usage.prompt_tokens.unwrap_or(0);
+                let cache_read = usage
+                    .prompt_tokens_details
+                    .and_then(|d| d.cached_tokens)
+                    .unwrap_or(0);
+                let input = prompt.saturating_sub(cache_read);
                 let output = usage.completion_tokens.unwrap_or(0);
-                let used = usage.total_tokens.unwrap_or(input + output);
+                let used = usage.total_tokens.unwrap_or(input + cache_read + output);
                 if used > 0 {
                     let _ = tx.send(ProviderEvent::Usage {
                         input,
+                        cache_read,
                         output,
                         used,
                         total: config.context_window,
@@ -428,6 +436,14 @@ struct OpenAiUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptDetails>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiPromptDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 fn finish(tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>, tool_calls: &mut Vec<ToolCall>) {
@@ -630,6 +646,8 @@ async fn stream_anthropic(
     let mut event_type = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut total_input = 0u64;
+    // Anthropic：input_tokens 不含缓存部分；cache_creation 是本次新写入（未命中）
+    let mut total_cache_read = 0u64;
     #[allow(unused_assignments)]
     let mut total_output = 0u64;
 
@@ -660,9 +678,10 @@ async fn stream_anthropic(
             };
             match event_type.as_str() {
                 "message_start" => {
-                    total_input = json["message"]["usage"]["input_tokens"]
-                        .as_u64()
-                        .unwrap_or(0);
+                    let usage = &json["message"]["usage"];
+                    total_input = usage["input_tokens"].as_u64().unwrap_or(0)
+                        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    total_cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
                 }
                 "content_block_start" => {
                     let index = json["index"].as_u64().unwrap_or(0) as usize;
@@ -708,11 +727,12 @@ async fn stream_anthropic(
                 "message_delta" => {
                     total_output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
                     if json["delta"]["stop_reason"].is_string() {
-                        if total_input + total_output > 0 {
+                        if total_input + total_cache_read + total_output > 0 {
                             let _ = tx.send(ProviderEvent::Usage {
                                 input: total_input,
+                                cache_read: total_cache_read,
                                 output: total_output,
-                                used: total_input + total_output,
+                                used: total_input + total_cache_read + total_output,
                                 total: config.context_window,
                             });
                         }

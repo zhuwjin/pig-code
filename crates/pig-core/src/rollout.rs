@@ -44,6 +44,22 @@ pub enum RolloutRecord {
     TurnChanges {
         files: Vec<pig_protocol::EditDiff>,
     },
+    /// 一轮的 token 用量与耗时（回放恢复 footer 统计、会话累计与上下文水位）。
+    /// duration_ms 为回合墙钟耗时；api_ms 为纯 provider 请求耗时，
+    /// ttft_ms 为其中等首 token 的时间之和、api_steps 为请求次数
+    ///（平均首字 = ttft_ms / api_steps；不含首字的解码速度用 api_ms - ttft_ms）
+    TurnStats {
+        input: u64,
+        cache_read: u64,
+        output: u64,
+        duration_ms: u64,
+        #[serde(default)]
+        api_ms: u64,
+        #[serde(default)]
+        ttft_ms: u64,
+        #[serde(default)]
+        api_steps: u64,
+    },
     Compact {
         note: String,
         omitted: usize,
@@ -113,6 +129,7 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
     for record in records {
         match record {
             RolloutRecord::Meta { .. } => {}
+            RolloutRecord::TurnStats { .. } => {}
             RolloutRecord::User { text, files } => {
                 // 新用户消息前缓冲的思考不应跨轮误挂
                 pending_reasoning = None;

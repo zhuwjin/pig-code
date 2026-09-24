@@ -234,6 +234,14 @@ struct AppView {
     config_path: Option<PathBuf>,
     exec_mode: pig_protocol::ExecMode,
     git_branch: Option<String>,
+    /// 标题栏分支切换器的分支列表（当前会话 cwd 的本地分支）
+    title_branches: Vec<String>,
+    /// 标题栏分支菜单是否打开
+    title_branch_menu_open: bool,
+    /// 分支菜单因点击外部收起时的按下位置（吞掉同一次 click，防收起又弹开）
+    title_branch_outside_close: Option<Point<Pixels>>,
+    /// 分支 chip 的 bounds（on_prepaint 记录，菜单锚定用）
+    title_branch_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// hero 页选择的工作区目录；None = 未选择（显示"选择工作区"，发送时回落到启动目录）
     hero_cwd: Option<PathBuf>,
     hero_branch: Option<String>,
@@ -309,6 +317,10 @@ impl AppView {
             config_path,
             exec_mode: pig_protocol::ExecMode::AutoEdit,
             git_branch: None,
+            title_branches: vec![],
+            title_branch_menu_open: false,
+            title_branch_outside_close: None,
+            title_branch_btn_bounds: Rc::new(Cell::new(Bounds::default())),
             hero_branch: None,
             hero_branches: vec![],
             hero_is_git: false,
@@ -483,6 +495,10 @@ impl AppView {
                 let session_id = session_id.clone();
                 self.ensure_views(&session_id, cx);
                 self.current = Some(session_id.clone());
+                // 换了会话：先清掉上一个会话的上下文水位（有数据的会话随后会收到补发）
+                self.composer.update(cx, |composer, cx| {
+                    composer.clear_context_usage(cx);
+                });
                 let label = if provider_name.is_empty() {
                     model.clone()
                 } else {
@@ -618,6 +634,13 @@ impl AppView {
                     self.hero_branch = Some(branch.clone());
                     self.agent.git_info(cwd.clone());
                 }
+                // 标题栏分支切换器：当前会话目录切了分支 → 更新 chip + 重拉分支列表，
+                // 并刷新工作区 git 状态（切分支后改动面板内容全变）
+                if self.current_cwd().as_ref() == Some(cwd) {
+                    self.git_branch = Some(branch.clone());
+                    self.refresh_git_branch(Some(cwd.clone()), cx);
+                    self.agent.git_status(cwd.clone());
+                }
             }
             Event::GitStatus {
                 cwd,
@@ -680,12 +703,15 @@ impl AppView {
                 session_id,
                 used,
                 total,
+                cache_read_total,
+                input_total,
                 ..
             } => {
                 if self.current.as_deref() == Some(session_id.as_str()) {
-                    let (used, total) = (*used, *total);
+                    let (used, total, cache_read_total, input_total) =
+                        (*used, *total, *cache_read_total, *input_total);
                     self.composer.update(cx, |composer, cx| {
-                        composer.set_context_usage(used, total, cx);
+                        composer.set_context_usage(used, total, cache_read_total, input_total, cx);
                     });
                 }
             }
@@ -914,6 +940,11 @@ impl AppView {
     fn switch_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         if self.views.contains_key(&session_id) {
             self.current = Some(session_id.clone());
+            // 快速路径不发 SessionConfigured：清上一个会话的水位，
+            // core 的 OpenSession 补发（有数据时）随后到达
+            self.composer.update(cx, |composer, cx| {
+                composer.clear_context_usage(cx);
+            });
             // 已打开过的会话走这条快速路径，core 不会再发 SessionConfigured——
             // 必须按 meta 恢复会话级的模型/模式/思考等级，否则会带着上一个会话的值
             if let Some(meta) = self.metas.iter().find(|m| m.id == session_id).cloned() {
@@ -941,6 +972,9 @@ impl AppView {
             self.refresh_git_branch(self.current_cwd(), cx);
             self.refresh_sidebar(cx);
             cx.notify();
+            // 仍要通知 core：它按当前会话补发面板快照与上下文水位
+            //（SessionConfigured 的处理是幂等的，重复恢复无害）
+            self.agent.open_session(session_id);
         } else {
             self.agent.open_session(session_id);
         }
@@ -1030,7 +1064,12 @@ impl AppView {
     fn enter_hero(&mut self, cx: &mut Context<Self>) {
         self.current = None;
         self.git_branch = None;
+        self.title_branches = vec![];
+        self.title_branch_menu_open = false;
         self.hero_error = None;
+        self.composer.update(cx, |composer, cx| {
+            composer.clear_context_usage(cx);
+        });
         if let Some(cwd) = self.hero_cwd.clone() {
             self.agent.git_info(cwd);
         } else {
@@ -1304,25 +1343,20 @@ impl AppView {
         }
     }
 
-    /// 标题栏分支：cwd=None（hero 态）或非 git 目录时不显示
+    /// 标题栏分支：cwd=None（hero 态）或非 git 目录时不显示。
+    /// 一次查齐当前分支 + 本地分支列表（切换菜单用）
     fn refresh_git_branch(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async move {
-            let cwd = cwd?;
-            let branch = std::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(&cwd)
-                .output()
-                .ok()?;
-            if !branch.status.success() {
-                return None;
-            }
-            let name = String::from_utf8_lossy(&branch.stdout).trim().to_string();
-            (!name.is_empty()).then_some(name)
+            let Some(cwd) = cwd else {
+                return (None, Vec::new());
+            };
+            pig_core::git::git_info(&cwd)
         });
         cx.spawn(async move |this: WeakEntity<AppView>, cx| {
-            let branch = task.await;
+            let (branch, branches) = task.await;
             let _ = this.update(cx, |app, cx| {
                 app.git_branch = branch;
+                app.title_branches = branches;
                 cx.notify();
             });
         })
@@ -2066,18 +2100,61 @@ impl AppView {
                                         cx.notify();
                                     })),
                             )
-                            .child(div().text_sm().font_semibold().child(format!(
-                            "pig-code · {title}{}",
-                            self.git_branch
-                                .as_ref()
-                                .map(|b| format!(" · ⎇ {b}"))
-                                .unwrap_or_default()
-                        ))),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(format!("pig-code · {title}")),
+                            ),
                     )
                     .child(
                         h_flex()
                             .gap_1()
                             .px_2()
+                            .when(self.git_branch.is_some(), |this| {
+                                this.child(
+                                    div()
+                                        .on_prepaint({
+                                            let cell = self.title_branch_btn_bounds.clone();
+                                            move |bounds, _, _| cell.set(bounds)
+                                        })
+                                        .child(
+                                            Button::new("title-branch")
+                                                .ghost()
+                                                .small()
+                                                .occlude()
+                                                .label(format!(
+                                                    "⎇ {}",
+                                                    self.git_branch.as_deref().unwrap_or_default()
+                                                ))
+                                                .on_click(cx.listener(
+                                                    |this, event: &ClickEvent, _, cx| {
+                                                        // 菜单打开时点 chip：按下先触发
+                                                        // outside-close（记录位置），同一次按压
+                                                        // 的 click 按位置吞掉，避免收起又弹开
+                                                        let down_pos = match event {
+                                                            ClickEvent::Mouse(e) => {
+                                                                Some(e.down.position)
+                                                            }
+                                                            _ => None,
+                                                        };
+                                                        if this
+                                                            .title_branch_outside_close
+                                                            .take()
+                                                            .is_some_and(|pos| {
+                                                                Some(pos) == down_pos
+                                                            })
+                                                        {
+                                                            return;
+                                                        }
+                                                        this.title_branch_menu_open =
+                                                            !this.title_branch_menu_open;
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        ),
+                                )
+                            })
                             .child(
                                 Button::new("toggle-theme")
                                     .ghost()
@@ -2127,6 +2204,95 @@ impl AppView {
                             ),
                     ),
             )
+            .when(self.title_branch_menu_open, |this| {
+                this.child(self.render_branch_menu(cx))
+            })
+    }
+
+    /// 标题栏分支切换菜单：deferred 到窗口层，锚定分支 chip 正下方
+    /// （与标签页 "+" 菜单同一模式）。当前分支高亮，点击其他分支 checkout。
+    fn render_branch_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.git_branch.clone().unwrap_or_default();
+        deferred(
+            Positioner::side(self.title_branch_btn_bounds.get())
+                .placement(Placement::Bottom)
+                .align(Align::End)
+                .offset(px(6.))
+                .margin(px(8.))
+                .occlude()
+                .child(
+                    v_flex()
+                        .id("title-branch-menu")
+                        .w(px(240.))
+                        .max_h(px(360.))
+                        .overflow_y_scroll()
+                        .p_1()
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.title_branch_menu_open = false;
+                            this.title_branch_outside_close = Some(event.position);
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("切换分支"),
+                        )
+                        .children(self.title_branches.iter().map(|branch| {
+                            let branch = branch.clone();
+                            let is_current = branch == current;
+                            div()
+                                .id(gpui_kit::SharedString::from(branch.clone()))
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .text_sm()
+                                .cursor_pointer()
+                                .when(is_current, |this| this.bg(cx.theme().accent))
+                                .when(!is_current, |this| {
+                                    this.hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
+                                })
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_color(if is_current {
+                                                    cx.theme().primary
+                                                } else {
+                                                    cx.theme().foreground
+                                                })
+                                                .child(branch.clone()),
+                                        )
+                                        .when(is_current, |this| {
+                                            this.child(
+                                                Icon::new(IconName::Check)
+                                                    .size_3()
+                                                    .text_color(cx.theme().primary),
+                                            )
+                                        }),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.title_branch_menu_open = false;
+                                    if let Some(cwd) = this.current_cwd() {
+                                        this.agent.checkout_branch(cwd, branch.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                        })),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 }
 

@@ -133,7 +133,6 @@ pub struct ThreadView {
     /// 回到底部（任意方式）或点击浮钮后恢复
     follow_bottom: bool,
     streaming: bool,
-    context_usage: Option<(u64, u64)>,
     /// 计划模式回合完成，等待用户确认执行
     plan_pending: bool,
     turn_started: Option<std::time::Instant>,
@@ -186,7 +185,6 @@ impl ThreadView {
             scroll_handle: ScrollHandle::new(),
             follow_bottom: true,
             streaming: false,
-            context_usage: None,
             plan_pending: false,
             turn_started: None,
             replay_turn: false,
@@ -559,10 +557,9 @@ impl ThreadView {
                     });
                 self.auto_scroll();
             }
-            Event::ContextUsage { used, total, .. } => {
-                self.context_usage = Some((used, total));
-            }
-            Event::TurnComplete { duration_ms, .. } => {
+            Event::TurnComplete {
+                duration_ms, stats, ..
+            } => {
                 self.finish_thinking();
                 self.replay_turn = false;
                 if let Some(message) = self.messages.last_mut() {
@@ -574,18 +571,19 @@ impl ThreadView {
                         }
                     }
                 }
-                // duration_ms=0 是会话回放的收尾事件：只退出流式状态，不写用时脚注
-                if duration_ms > 0 {
-                    let usage = self
-                        .context_usage
-                        .map(|(used, total)| {
-                            format!(" · 上下文 {:.1}k / {}k", used as f64 / 1000.0, total / 1000)
-                        })
-                        .unwrap_or_default();
+                // duration_ms=0 是会话回放的收尾事件：只退出流式状态，不写用时脚注；
+                // stats 有值的历史回合（TurnStats 回放）仍写完整统计脚注
+                if duration_ms > 0 || stats.is_some() {
+                    let stats_part = stats.as_ref().map(format_turn_stats).unwrap_or_default();
+                    let duration = stats
+                        .as_ref()
+                        .map(|s| s.duration_ms)
+                        .filter(|ms| *ms > 0)
+                        .unwrap_or(duration_ms);
                     if let Some(message) = self.messages.last_mut() {
                         message.footer = Some(format!(
-                            "回合结束 · 用时 {:.1}s{usage}",
-                            duration_ms as f64 / 1000.0
+                            "回合结束 · 用时 {:.1}s{stats_part}",
+                            duration as f64 / 1000.0
                         ));
                     }
                 }
@@ -627,7 +625,8 @@ impl ThreadView {
                 }
                 self.auto_scroll();
             }
-            Event::FileChanged { .. } | Event::FileReverted { .. } => {}
+            Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
+            }
             Event::UserMessage { text, files, .. } => {
                 let trimmed = text.trim().to_string();
                 self.append_user_message(text, files, cx);
@@ -2229,6 +2228,74 @@ fn split_path(path: &str) -> (String, String) {
         Some(ix) => (path[..=ix].to_string(), path[ix + 1..].to_string()),
         None => (String::new(), path.to_string()),
     }
+}
+
+/// token 数自动单位：<1k 原样；k/M 级整除显示整数、否则一位小数
+fn fmt_tokens(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        let k = n as f64 / 1_000.0;
+        if k.fract().abs() < 0.05 {
+            format!("{}k", k.round() as u64)
+        } else {
+            format!("{k:.1}k")
+        }
+    } else {
+        let m = n as f64 / 1_000_000.0;
+        if m.fract().abs() < 0.05 {
+            format!("{}M", m.round() as u64)
+        } else {
+            format!("{m:.1}M")
+        }
+    }
+}
+
+/// 回合脚注的 token 统计段：未缓存输入 · 缓存命中（命中率）· 输出 ·
+/// 首字时间 · 解码速度（不含首字；旧记录无 api_ms 退回墙钟）
+fn format_turn_stats(stats: &pig_protocol::TurnUsageStats) -> String {
+    let total_input = stats.input + stats.cache_read;
+    let hit_rate = if total_input > 0 {
+        format!(
+            " ({:.1}%)",
+            stats.cache_read as f64 / total_input as f64 * 100.0
+        )
+    } else {
+        String::new()
+    };
+    // 速度按纯解码时间算（API 总时长 − 首字等待，不含工具执行/审批等待）；
+    // 旧记录无 api_ms 时退回墙钟时间
+    let api_ms = if stats.api_ms > 0 {
+        stats.api_ms
+    } else {
+        stats.duration_ms
+    };
+    // 平均首字 = 首字等待总和 ÷ 请求次数（多步回合一堆 TTFT 取平均；
+    // 旧记录无 api_steps 时按一步算）
+    let steps = stats.api_steps.max(1);
+    let ttft = if stats.ttft_ms > 0 {
+        format!(
+            " · 首字 {:.1}s",
+            stats.ttft_ms as f64 / steps as f64 / 1000.0
+        )
+    } else {
+        String::new()
+    };
+    let decode_ms = api_ms.saturating_sub(stats.ttft_ms);
+    let speed = if decode_ms > 0 {
+        format!(
+            " · {:.1} tok/s",
+            stats.output as f64 / (decode_ms as f64 / 1000.0)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        " · 输入 {}（未缓存）· 命中 {}{hit_rate} · 输出 {}{ttft}{speed}",
+        fmt_tokens(stats.input),
+        fmt_tokens(stats.cache_read),
+        fmt_tokens(stats.output),
+    )
 }
 
 /// 导航预览卡文本：按空行分段、段内连续空白折叠为空格，取前 2 段以换行拼接，

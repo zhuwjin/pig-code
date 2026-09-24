@@ -53,6 +53,7 @@ impl Store {
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_turn_usage_ts ON turn_usage(ts);
@@ -321,23 +322,26 @@ impl Store {
     // ---- token 用量 ----
 
     /// 每回合结束记一行；统计聚合（按天/模型/工作区）都查这张表。
+    /// input_tokens 为未缓存命中的输入，cache_read_tokens 为缓存命中的输入。
     pub fn record_usage(
         &self,
         session_id: &str,
         provider: &str,
         model: &str,
         input_tokens: u64,
+        cache_read_tokens: u64,
         output_tokens: u64,
     ) {
         let _ = self.conn.execute(
-            "INSERT INTO turn_usage (session_id, ts, provider, model, input_tokens, output_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO turn_usage (session_id, ts, provider, model, input_tokens, cache_read_tokens, output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id,
                 now_secs(),
                 provider,
                 model,
                 input_tokens,
+                cache_read_tokens,
                 output_tokens
             ],
         );

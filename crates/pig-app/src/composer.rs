@@ -203,7 +203,7 @@ pub struct Composer {
     question_focus: FocusHandle,
     question_focused: bool,
     mention_results: Vec<String>,
-    context_usage: Option<(u64, u64)>,
+    context_usage: Option<(u64, u64, u64, u64)>,
     /// 输入区上方芯片：TodoList 进度 / 后台 Bash 任务快照（core 推送），点击弹出只读面板
     todos: Vec<TodoItem>,
     tasks: Vec<TaskSummary>,
@@ -643,9 +643,23 @@ impl Composer {
         &self.mention_results
     }
 
-    pub fn set_context_usage(&mut self, used: u64, total: u64, cx: &mut Context<Self>) {
-        self.context_usage = Some((used, total));
+    pub fn set_context_usage(
+        &mut self,
+        used: u64,
+        total: u64,
+        cache_read_total: u64,
+        input_total: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_usage = Some((used, total, cache_read_total, input_total));
         cx.notify();
+    }
+
+    /// 切换会话/回 hero 时清掉上一个会话的水位（新会话的 ContextUsage 到达前不显示）
+    pub fn clear_context_usage(&mut self, cx: &mut Context<Self>) {
+        if self.context_usage.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub fn set_todos(&mut self, todos: Vec<TodoItem>, cx: &mut Context<Self>) {
@@ -678,9 +692,9 @@ impl Composer {
         cx.notify();
     }
 
-    /// 自测用。
+    /// 自测用：返回 (used, total)。
     pub fn debug_context_usage(&self) -> Option<(u64, u64)> {
-        self.context_usage
+        self.context_usage.map(|(used, total, _, _)| (used, total))
     }
 
     pub fn set_exec_mode(&mut self, mode: ExecMode, cx: &mut Context<Self>) {
@@ -701,29 +715,39 @@ impl Composer {
         EXEC_MODES[self.exec_mode].2
     }
 
-    /// 紧凑 token 数：1 万以下原样，以上用「万」（10.5万 / 100万）
+    /// token 数自动单位：<1k 原样；k/M 级整除显示整数、否则一位小数
     fn format_tokens_compact(n: u64) -> String {
-        if n >= 10_000 {
-            let wan = n as f64 / 10_000.0;
-            if wan.fract().abs() < 0.05 {
-                format!("{}万", wan.round() as u64)
+        if n < 1_000 {
+            n.to_string()
+        } else if n < 1_000_000 {
+            let k = n as f64 / 1_000.0;
+            if k.fract().abs() < 0.05 {
+                format!("{}k", k.round() as u64)
             } else {
-                format!("{wan:.1}万")
+                format!("{k:.1}k")
             }
         } else {
-            n.to_string()
+            let m = n as f64 / 1_000_000.0;
+            if m.fract().abs() < 0.05 {
+                format!("{}M", m.round() as u64)
+            } else {
+                format!("{m:.1}M")
+            }
         }
     }
 
-    /// 上下文容量面板：标题 + 用量/占比 + 进度条，居中锚定在指示器芯片正上方（悬停展示）。
+    /// 上下文容量面板：标题 + 用量/占比 + 进度条 + 平均缓存命中率，
+    /// 居中锚定在指示器芯片正上方（悬停展示）。
     fn render_context_popup(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (used, total) = self.context_usage.unwrap_or((0, 1));
+        let (used, total, cache_read_total, input_total) =
+            self.context_usage.unwrap_or((0, 1, 0, 0));
         let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
         let bar_color = if ratio > 0.8 {
             cx.theme().warning
         } else {
             cx.theme().progress_bar
         };
+        let cache_total = cache_read_total + input_total;
 
         let content = v_flex()
             .w_full()
@@ -743,7 +767,7 @@ impl Composer {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "{}/{} ({:.1}%)",
+                                "{} / {} ({:.1}%)",
                                 Self::format_tokens_compact(used),
                                 Self::format_tokens_compact(total),
                                 ratio * 100.0
@@ -768,6 +792,19 @@ impl Composer {
                         )
                     }),
             )
+            .when(cache_total > 0, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "平均缓存命中率 {:.1}%（命中 {} / 输入 {}）",
+                            cache_read_total as f64 / cache_total as f64 * 100.0,
+                            Self::format_tokens_compact(cache_read_total),
+                            Self::format_tokens_compact(cache_total),
+                        )),
+                )
+            })
             .into_any_element();
         self.popup_shell(
             "composer-context-popup",
@@ -2447,7 +2484,7 @@ impl Render for Composer {
                                         .when_some(exec_popup, |this, popup| this.child(popup)),
                                 )
                                 .child(div().flex_1())
-                                .when_some(self.context_usage, |this, (used, total)| {
+                                .when_some(self.context_usage, |this, (used, total, _, _)| {
                                     // 上下文水位环形指示器（ZCode 同款）：悬停展示容量面板
                                     let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
                                     let ring_color = if ratio > 0.8 {

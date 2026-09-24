@@ -243,6 +243,26 @@ pub struct ProviderConfig {
     pub models: Vec<ModelConfig>,
 }
 
+/// 回合 token 用量：input = 未缓存命中的输入，cache_read = 缓存命中的输入
+///（命中率 = cache_read / (input + cache_read)），output = 输出；
+/// duration_ms 为回合墙钟耗时（含工具执行/审批等待），api_ms 为纯 provider
+/// 请求耗时，ttft_ms 为其中等待首个输出 token 的时间之和、api_steps 为请求
+/// 次数（平均首字 = ttft_ms / api_steps）；输出速度按 (api_ms - ttft_ms)
+/// 计算，即不含首字的纯解码速度
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TurnUsageStats {
+    pub input: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub api_ms: u64,
+    #[serde(default)]
+    pub ttft_ms: u64,
+    #[serde(default)]
+    pub api_steps: u64,
+}
+
 /// models.dev 的模型元数据（自动填充用）
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelRegistryInfo {
@@ -574,6 +594,12 @@ pub enum Event {
         seq: u64,
         used: u64,
         total: u64,
+        /// 会话累计（含 resume 恢复）：缓存命中的输入 token 与未命中的输入 token，
+        /// 平均缓存命中率 = cache_read_total / (cache_read_total + input_total)
+        #[serde(default)]
+        cache_read_total: u64,
+        #[serde(default)]
+        input_total: u64,
     },
     ContextCompacted {
         session_id: String,
@@ -628,6 +654,9 @@ pub enum Event {
         session_id: String,
         seq: u64,
         duration_ms: u64,
+        /// 回合 token 统计（中断/无用量数据的回合为 None）
+        #[serde(default)]
+        stats: Option<TurnUsageStats>,
     },
     TurnAborted {
         session_id: String,

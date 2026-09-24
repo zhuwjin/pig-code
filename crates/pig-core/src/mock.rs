@@ -186,7 +186,18 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
                     sse_chunk(serde_json::json!({"content": delta}), None)
                 })
                 .collect();
-            chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
+            // 终步带 usage（真实 API 流末带用量；水位条/回合统计靠它）
+            chunks.push(format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "id": "chatcmpl-mock",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "mock-model",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 42, "total_tokens": 142},
+                })
+            ));
             chunks
         }
     }
