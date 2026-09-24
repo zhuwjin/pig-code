@@ -118,6 +118,11 @@ pub enum Op {
         session_id: String,
         text: String,
     },
+    /// 非会话态：按模型 ID 查 models.dev 元数据（上下文/输入输出上限/推理等级）；
+    /// 磁盘缓存命中直接回，未命中（新模型）重新拉取后再回
+    ModelLookup {
+        id: String,
+    },
     Compact {
         session_id: String,
     },
@@ -236,6 +241,121 @@ pub struct ProviderConfig {
     pub api_format: ApiFormat,
     pub enabled: bool,
     pub models: Vec<ModelConfig>,
+}
+
+/// models.dev 的模型元数据（自动填充用）
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelRegistryInfo {
+    /// 数据源里的完整 ID（provider/model）
+    pub full_id: String,
+    /// 上下文窗口（limit.context，缺省回退 limit.input）
+    pub context: Option<u64>,
+    /// 单独的最大输入限制（多数模型没有）
+    pub input: Option<u64>,
+    /// 最大输出 token（limit.output）
+    pub output: Option<u64>,
+    /// 是否支持推理
+    pub reasoning: bool,
+    /// 推理等级（reasoning_options 里 effort 类型的 values；仅 toggle 的为空）
+    pub reasoning_levels: Vec<String>,
+    /// 输入模态（modalities.input，如 ["text","image"]）；空 = 数据源未给，UI 不动能力勾选
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    /// 结构化输出支持；None = 数据源未给，UI 不动勾选
+    #[serde(default)]
+    pub structured_output: Option<bool>,
+}
+
+/// models.dev 只给等级名，参数形态按供应商 API 格式生成（对齐 ZCode 内置规则）：
+/// 等级名直接透传（不归一）；OpenAI Chat → 四字段兼容包（thinking/enable_thinking/
+/// reasoning_effort/reasoning.effort，不同后端认不同字段）；Anthropic Messages →
+/// 关档 thinking.type=disabled，开档 thinking.type=enabled + output_config.effort
+/// （GLM-5/DeepSeek-V4/Claude-5 这代模型的形态；不使用 budget_tokens）。
+pub fn default_reasoning_params(
+    levels: &[String],
+    api_format: ApiFormat,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for level in levels {
+        let off = level == "none" || level == "disabled";
+        let params = match api_format {
+            ApiFormat::OpenAiChat => {
+                // "enabled" 是开关型等级，落到 effort high（ZCode 兜底同款）
+                let effort = if off {
+                    "none"
+                } else if level == "enabled" {
+                    "high"
+                } else {
+                    level.as_str()
+                };
+                serde_json::json!({
+                    "thinking": { "type": if off { "disabled" } else { "enabled" } },
+                    "enable_thinking": !off,
+                    "reasoning_effort": effort,
+                    "reasoning": { "effort": effort },
+                })
+            }
+            ApiFormat::AnthropicMessages => {
+                if off {
+                    serde_json::json!({ "thinking": { "type": "disabled" } })
+                } else {
+                    let effort = if level == "enabled" {
+                        "high"
+                    } else {
+                        level.as_str()
+                    };
+                    serde_json::json!({
+                        "thinking": { "type": "enabled" },
+                        "output_config": { "effort": effort },
+                    })
+                }
+            }
+        };
+        map.insert(level.clone(), params);
+    }
+    map
+}
+
+#[cfg(test)]
+mod reasoning_params_tests {
+    use super::*;
+
+    #[test]
+    fn openai_params_pass_level_through_with_compat_fields() {
+        let levels: Vec<String> = ["none", "low", "max", "enabled"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let params = default_reasoning_params(&levels, ApiFormat::OpenAiChat);
+        // none：四字段全关档
+        assert_eq!(params["none"]["thinking"]["type"], "disabled");
+        assert_eq!(params["none"]["enable_thinking"], false);
+        assert_eq!(params["none"]["reasoning_effort"], "none");
+        // 等级透传，max 不归一
+        assert_eq!(params["low"]["reasoning_effort"], "low");
+        assert_eq!(params["max"]["reasoning_effort"], "max");
+        assert_eq!(params["max"]["reasoning"]["effort"], "max");
+        assert_eq!(params["max"]["thinking"]["type"], "enabled");
+        // 开关型等级 enabled → effort high
+        assert_eq!(params["enabled"]["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_params_use_output_config_effort_without_budget() {
+        let levels: Vec<String> = ["none", "low", "max"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let params = default_reasoning_params(&levels, ApiFormat::AnthropicMessages);
+        assert_eq!(params["none"]["thinking"]["type"], "disabled");
+        assert!(params["none"].get("output_config").is_none());
+        assert_eq!(params["low"]["thinking"]["type"], "enabled");
+        assert_eq!(params["low"]["output_config"]["effort"], "low");
+        // max 透传，不映射预算
+        assert_eq!(params["max"]["output_config"]["effort"], "max");
+        let flat = serde_json::to_string(&params).unwrap();
+        assert!(!flat.contains("budget_tokens"), "不再生成 budget_tokens");
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -359,6 +479,11 @@ pub enum Event {
         provider_id: String,
         ok: bool,
         message: String,
+    },
+    /// models.dev 模型元数据查询结果；info=None = 数据源里没有该 ID
+    ModelInfo {
+        id: String,
+        info: Option<ModelRegistryInfo>,
     },
     FileSearchResults {
         session_id: String,

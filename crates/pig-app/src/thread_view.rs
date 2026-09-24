@@ -277,7 +277,9 @@ impl ThreadView {
 
     /// 自测用：导航条活动项排查——（nav_last_active, offset_y, max_offset_y,
     /// 容器高, 各用户消息行的 [top, bottom) 内容坐标）
-    pub fn debug_nav_active_detail(&self) -> (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>) {
+    pub fn debug_nav_active_detail(
+        &self,
+    ) -> (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>) {
         let user_rows = self
             .messages
             .iter()
@@ -653,6 +655,7 @@ impl ThreadView {
             | Event::GitDiff { .. }
             | Event::ConfigSnapshot { .. }
             | Event::TestResult { .. }
+            | Event::ModelInfo { .. }
             | Event::WorkspaceList { .. } => {}
             Event::Error { message, .. } => {
                 self.finish_thinking();

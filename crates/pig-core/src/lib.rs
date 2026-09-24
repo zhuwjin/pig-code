@@ -4,6 +4,7 @@
 pub mod config;
 pub mod git;
 pub mod mock;
+pub mod models_registry;
 pub mod paths;
 mod prompt;
 pub mod provider;

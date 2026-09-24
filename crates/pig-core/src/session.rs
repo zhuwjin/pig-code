@@ -1661,10 +1661,10 @@ pub async fn agent_loop(
                         });
                     }
                     Op::Interrupt { session_id } => {
-                        if let Some(entry) = sessions.get(&session_id) {
-                            if let Some(cancel) = &entry.cancel {
-                                cancel.cancel();
-                            }
+                        if let Some(entry) = sessions.get(&session_id)
+                            && let Some(cancel) = &entry.cancel
+                        {
+                            cancel.cancel();
                         }
                     }
                     Op::ApprovalReply { request_id, decision } => {
@@ -1721,6 +1721,65 @@ pub async fn agent_loop(
                                 query,
                                 results,
                             }).await;
+                        });
+                    }
+                    Op::ModelLookup { id } => {
+                        // 缓存命中直接回；未命中（新模型 ID）且缓存不新鲜才重拉，
+                        // 避免用户在对话框试错 ID 时连打 models.dev
+                        const REFETCH_AFTER_SECS: u64 = 10 * 60;
+                        let tx = event_tx.clone();
+                        let cache_path = data_dir.join("models-dev-cache.json");
+                        tokio::spawn(async move {
+                            let lookup_id = id.clone();
+                            let loaded = tokio::task::spawn_blocking({
+                                let cache_path = cache_path.clone();
+                                move || crate::models_registry::load_cache(&cache_path)
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            let (fetched_at, index) = match loaded {
+                                Some((_, index)) if index.contains_key(&lookup_id) => {
+                                    // 命中：无需网络
+                                    let _ = tx
+                                        .send(Event::ModelInfo {
+                                            id,
+                                            info: index.get(&lookup_id).cloned(),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                                Some(pair) => pair,
+                                None => (0, HashMap::new()),
+                            };
+                            let fresh =
+                                fetched_at > 0 && crate::models_registry::unix_now() < fetched_at + REFETCH_AFTER_SECS;
+                            let index = if fresh {
+                                index
+                            } else {
+                                match crate::models_registry::fetch_index().await {
+                                    Ok(fetched) => {
+                                        let for_save = fetched.clone();
+                                        let path2 = cache_path.clone();
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            crate::models_registry::save_cache(
+                                                &path2,
+                                                crate::models_registry::unix_now(),
+                                                &for_save,
+                                            );
+                                        })
+                                        .await;
+                                        fetched
+                                    }
+                                    Err(_) => index,
+                                }
+                            };
+                            let _ = tx
+                                .send(Event::ModelInfo {
+                                    id,
+                                    info: index.get(&lookup_id).cloned(),
+                                })
+                                .await;
                         });
                     }
                     Op::Compact { session_id } => {

@@ -113,6 +113,10 @@ impl AgentClient {
         self.send(Op::TestProvider { provider_id });
     }
 
+    pub fn model_lookup(&self, id: String) {
+        self.send(Op::ModelLookup { id });
+    }
+
     pub fn set_exec_mode(&self, session_id: String, mode: ExecMode) {
         self.send(Op::SetExecMode { session_id, mode });
     }

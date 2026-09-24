@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName as AssetsIconName;
-use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
 use gpui_kit::base::GlobalState;
+use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{DockPlacement, panel_handle};
 use gpui_kit::component::kbd::Kbd;
@@ -121,7 +121,10 @@ fn clamp_dock_widths(
     }
     let cap = |min: f32, opposite_extent: f32| (area - CENTER_MIN_W - opposite_extent).max(min);
     let new_left = if left_open {
-        left.clamp(SIDEBAR_MIN_W, cap(SIDEBAR_MIN_W, if right_open { right } else { 0. }))
+        left.clamp(
+            SIDEBAR_MIN_W,
+            cap(SIDEBAR_MIN_W, if right_open { right } else { 0. }),
+        )
     } else {
         left
     };
@@ -159,7 +162,8 @@ fn observe_app_notify<T: 'static>(
     app: &WeakEntity<AppView>,
     cx: &mut Context<T>,
 ) -> Option<Subscription> {
-    app.upgrade().map(|app| cx.observe(&app, |_, _, cx| cx.notify()))
+    app.upgrade()
+        .map(|app| cx.observe(&app, |_, _, cx| cx.notify()))
 }
 
 macro_rules! impl_dock_panel {
@@ -209,7 +213,6 @@ impl Render for DockRightPanel {
             .unwrap_or_else(|_| div().into_any_element())
     }
 }
-
 
 struct AppView {
     sidebar: Entity<Sidebar>,
@@ -347,6 +350,7 @@ impl AppView {
                         this.apply_config_to_composer(cx);
                     }
                     SettingsEvent::TestProvider(id) => this.agent.test_provider(id.clone()),
+                    SettingsEvent::LookupModel(id) => this.agent.model_lookup(id.clone()),
                     SettingsEvent::Close => {
                         this.settings_open = false;
                         cx.notify();
@@ -370,7 +374,7 @@ impl AppView {
             app.agent.git_info(cwd);
         }
         app.push_hero_info(cx);
-        app.refresh_git_branch(cx);
+        app.refresh_git_branch(None, cx);
         app
     }
 
@@ -515,8 +519,21 @@ impl AppView {
                 if let Some((text, files, mode)) = self.pending_first_send.take() {
                     self.agent.send_message(session_id, text, files, mode);
                 }
-                // 切换/新建会话：拉工作区 git 状态（Review 面板的未暂存/已暂存 tab）
+                // 切换/新建会话：标题栏分支跟随会话 cwd；拉工作区 git 状态（Review 面板）
+                self.refresh_git_branch(Some(cwd.clone()), cx);
                 self.agent.git_status(cwd.clone());
+            }
+            Event::ModelInfo { id, info } => {
+                // 回填 InputState::set_value 需要 window，经 AnyWindowHandle 进入窗口上下文
+                let (id, info) = (id.clone(), info.clone());
+                let settings = self.settings.clone();
+                if let Some(handle) = cx.windows().into_iter().next() {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        settings.update(cx, |settings, cx| {
+                            settings.apply_model_info(&id, info, window, cx);
+                        });
+                    });
+                }
             }
             Event::ConfigSnapshot { config } => {
                 self.config = Some(config.clone());
@@ -593,16 +610,12 @@ impl AppView {
                     self.hero_branch = current_branch.clone();
                     self.hero_branches = branches.clone();
                     self.hero_is_git = current_branch.is_some();
-                    if let Some(branch) = current_branch {
-                        self.git_branch = Some(branch.clone());
-                    }
                     self.push_hero_info(cx);
                 }
             }
             Event::BranchChanged { cwd, branch } => {
                 if self.hero_cwd.as_ref() == Some(cwd) {
                     self.hero_branch = Some(branch.clone());
-                    self.git_branch = Some(branch.clone());
                     self.agent.git_info(cwd.clone());
                 }
             }
@@ -712,7 +725,7 @@ impl AppView {
                         });
                     }
                 }
-                self.refresh_git_branch(cx);
+                self.refresh_git_branch(self.current_cwd(), cx);
                 // 回合结束（agent 写文件已落定）：刷新工作区 git 状态
                 if let Some(meta) = self.metas.iter().find(|m| &m.id == session_id) {
                     self.agent.git_status(meta.cwd.clone());
@@ -925,6 +938,7 @@ impl AppView {
                 });
             }
             self.sync_composer_state(cx);
+            self.refresh_git_branch(self.current_cwd(), cx);
             self.refresh_sidebar(cx);
             cx.notify();
         } else {
@@ -1015,6 +1029,7 @@ impl AppView {
 
     fn enter_hero(&mut self, cx: &mut Context<Self>) {
         self.current = None;
+        self.git_branch = None;
         self.hero_error = None;
         if let Some(cwd) = self.hero_cwd.clone() {
             self.agent.git_info(cwd);
@@ -1289,9 +1304,10 @@ impl AppView {
         }
     }
 
-    fn refresh_git_branch(&mut self, cx: &mut Context<Self>) {
-        let cwd = self.cwd.clone();
+    /// 标题栏分支：cwd=None（hero 态）或非 git 目录时不显示
+    fn refresh_git_branch(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async move {
+            let cwd = cwd?;
             let branch = std::process::Command::new("git")
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .current_dir(&cwd)
@@ -1460,13 +1476,36 @@ impl AppView {
 
     /// 右侧面板菜单项：(名称, 图标, 快捷键 action, 占位禁用, 点击打开的 tab)。
     /// 浏览器/终端/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
-    fn right_menu_items() -> [(&'static str, AssetsIconName, Option<&'static dyn Action>, bool, Option<RightTab>); 4]
-    {
+    fn right_menu_items() -> [(
+        &'static str,
+        AssetsIconName,
+        Option<&'static dyn Action>,
+        bool,
+        Option<RightTab>,
+    ); 4] {
         [
-            ("改动", AssetsIconName::GitBranch, Some(&ToggleChanges), false, Some(RightTab::Changes)),
-            ("浏览器", AssetsIconName::Globe, Some(&ToggleBrowser), true, None),
+            (
+                "改动",
+                AssetsIconName::GitBranch,
+                Some(&ToggleChanges),
+                false,
+                Some(RightTab::Changes),
+            ),
+            (
+                "浏览器",
+                AssetsIconName::Globe,
+                Some(&ToggleBrowser),
+                true,
+                None,
+            ),
             ("终端", AssetsIconName::SquareTerminal, None, true, None),
-            ("侧边聊天", AssetsIconName::MessageCircle, Some(&ToggleSideChat), true, None),
+            (
+                "侧边聊天",
+                AssetsIconName::MessageCircle,
+                Some(&ToggleSideChat),
+                true,
+                None,
+            ),
         ]
     }
 
@@ -1480,8 +1519,8 @@ impl AppView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let binding =
-            window.highest_precedence_binding_for_action_in_context(action, KeyContext::default())?;
+        let binding = window
+            .highest_precedence_binding_for_action_in_context(action, KeyContext::default())?;
         let stroke = binding.keystrokes().first()?.as_keystroke().clone();
         let text = Kbd::format(&stroke);
         // Windows 风格 "Ctrl+Shift+G" 按 + 拆成单键芯片；macOS 符号串无 +：
@@ -1558,13 +1597,7 @@ impl AppView {
             .w_full()
             .px_2()
             .gap_2()
-            .map(|this| {
-                if page {
-                    this.py_2()
-                } else {
-                    this.py_1p5()
-                }
-            })
+            .map(|this| if page { this.py_2() } else { this.py_1p5() })
             .rounded(cx.theme().radius)
             .when(disabled, |this| this.opacity(0.5))
             .when(!disabled, |this| {
@@ -1642,14 +1675,14 @@ impl AppView {
                         .border_color(cx.theme().border)
                         .rounded_lg()
                         .shadow_lg()
-                        .on_mouse_down_out(cx.listener(
-                            |this, event: &MouseDownEvent, _, cx| {
-                                this.right_menu_open = false;
-                                this.right_menu_outside_close = Some(event.position);
-                                cx.notify();
-                            },
-                        ))
-                        .children((0..4).map(|ix| self.render_right_menu_row(ix, false, window, cx))),
+                        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.right_menu_open = false;
+                            this.right_menu_outside_close = Some(event.position);
+                            cx.notify();
+                        }))
+                        .children(
+                            (0..4).map(|ix| self.render_right_menu_row(ix, false, window, cx)),
+                        ),
                 ),
         )
         .with_priority(1)
@@ -1883,7 +1916,11 @@ impl AppView {
     }
 
     /// 右 dock 面板内容：tab 栏 +（有激活 tab 显示其内容，没有则显示面板首页/菜单页）
-    fn render_right_dock_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_dock_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
         let content: AnyElement = match self.right_active {
             Some(RightTab::Changes) => match current_views {
@@ -1960,10 +1997,13 @@ impl AppView {
                 .cursor_col_resize()
                 .occlude()
                 .group(group)
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                    this.dock_resizing = Some(placement);
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.dock_resizing = Some(placement);
+                        cx.notify();
+                    }),
+                )
                 .child(
                     h_flex()
                         .size_full()
@@ -2120,6 +2160,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::GitDiff { .. }
         | Event::ConfigSnapshot { .. }
         | Event::TestResult { .. }
+        | Event::ModelInfo { .. }
         | Event::WorkspaceList { .. } => None,
         Event::Error { session_id, .. } => session_id.clone(),
     }
@@ -2130,13 +2171,15 @@ impl Render for AppView {
         // dock 开合同步：AppView 的标志位是唯一事实源（dock 不持久化显隐状态）
         let left_open = self.dock.read(cx).is_dock_open(DockPlacement::Left);
         if left_open == self.sidebar_collapsed {
-            self.dock
-                .update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Left, window, cx));
+            self.dock.update(cx, |dock, cx| {
+                dock.toggle_dock(DockPlacement::Left, window, cx)
+            });
         }
         let right_open = self.dock.read(cx).is_dock_open(DockPlacement::Right);
         if right_open != self.right_open {
-            self.dock
-                .update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Right, window, cx));
+            self.dock.update(cx, |dock, cx| {
+                dock.toggle_dock(DockPlacement::Right, window, cx)
+            });
         }
 
         // 三栏最小宽度补钳：拖拽/window 缩放得越界宽度在 paint 前拉回。
@@ -2189,27 +2232,25 @@ impl Render for AppView {
             // 自愈兜底：选择手势的结束依赖收到 MouseUpEvent，而某些系统级按压
             // （HTCAPTION、边框缩放）收不到。未按键的移动说明手势早已结束。
             // dock 拖宽同理：松手后没收着 up 时，首个未按键 move 清掉 dock_resizing。
-            .on_mouse_move(cx.listener(
-                |this, event: &MouseMoveEvent, window, cx| {
-                    if event.pressed_button.is_none() {
-                        gpui_kit::base::TextSelection::end(window, cx);
-                        this.dock_resizing = None;
-                    }
-                    if let Some(placement) = this.dock_resizing {
-                        let area = this.dock.read(cx).bounds();
-                        let size = match placement {
-                            DockPlacement::Left => event.position.x - area.left(),
-                            DockPlacement::Right => area.right() - event.position.x,
-                            _ => return,
-                        };
-                        // 取整：小数宽度会让分界线和面板内容抗锯齿发虚
-                        let size = px(f32::from(size).round());
-                        this.dock.update(cx, |dock, cx| {
-                            dock.set_dock_size(placement, size, window, cx);
-                        });
-                    }
-                },
-            ))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.pressed_button.is_none() {
+                    gpui_kit::base::TextSelection::end(window, cx);
+                    this.dock_resizing = None;
+                }
+                if let Some(placement) = this.dock_resizing {
+                    let area = this.dock.read(cx).bounds();
+                    let size = match placement {
+                        DockPlacement::Left => event.position.x - area.left(),
+                        DockPlacement::Right => area.right() - event.position.x,
+                        _ => return,
+                    };
+                    // 取整：小数宽度会让分界线和面板内容抗锯齿发虚
+                    let size = px(f32::from(size).round());
+                    this.dock.update(cx, |dock, cx| {
+                        dock.set_dock_size(placement, size, window, cx);
+                    });
+                }
+            }))
             .size_full()
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().child(if self.settings_open {
@@ -2581,11 +2622,10 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     loop {
         timer!(200).await;
         waited += 200;
-        let (active, offset_y, max_offset_y, view_h, user_rows) =
-            app!(|app: &mut AppView, cx| {
-                let views = app.views.get(&session_b).expect("B 视图在内存");
-                views.thread.read(cx).debug_nav_active_detail()
-            });
+        let (active, offset_y, max_offset_y, view_h, user_rows) = app!(|app: &mut AppView, cx| {
+            let views = app.views.get(&session_b).expect("B 视图在内存");
+            views.thread.read(cx).debug_nav_active_detail()
+        });
         let last_ix = user_rows.last().map(|(ix, _, _)| *ix);
         if last_ix.is_some() && active == last_ix {
             break;
@@ -2974,9 +3014,8 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     });
     assert!(!open && kept, "再次触发应收起面板并保留 tab");
     app!(|app: &mut AppView, cx| app.close_right_tab(RightTab::Changes, cx));
-    let (open, active, tabs) = app!(|app: &mut AppView, _| {
-        (app.right_open, app.right_active, app.right_tabs.len())
-    });
+    let (open, active, tabs) =
+        app!(|app: &mut AppView, _| { (app.right_open, app.right_active, app.right_tabs.len()) });
     assert!(
         !open && active.is_none() && tabs == 0,
         "面板收起状态下关 tab 不改变收起状态；tab 清空"

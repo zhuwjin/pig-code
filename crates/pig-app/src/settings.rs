@@ -1,7 +1,9 @@
+use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
 use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
@@ -9,12 +11,20 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use pig_protocol::{ApiFormat, AppConfig, ModelConfig, ProviderConfig};
+use pig_protocol::{ApiFormat, AppConfig, ModelConfig, ProviderConfig, default_reasoning_params};
+use std::cell::Cell;
+use std::rc::Rc;
+
+/// 新建模型的默认上下文/输出上限：自动填充时数据源缺字段也回落到这组值
+const NEW_MODEL_CONTEXT: u64 = 128_000;
+const NEW_MODEL_MAX_OUTPUT: u64 = 8_192;
 
 #[derive(Clone)]
 pub enum SettingsEvent {
     Save(AppConfig),
     TestProvider(String),
+    /// 模型 ID 输入完成（回车/失焦），查 models.dev 元数据
+    LookupModel(String),
     Close,
 }
 
@@ -42,6 +52,23 @@ pub struct ModelDialog {
     params_json: Entity<TextareaState>,
     params_error: Option<String>,
     snapshot: Option<ModelConfig>,
+    /// 已发起过 models.dev 查询的模型 ID（同 ID 不重查，改了 ID 才会再查）
+    looked_up_id: Option<String>,
+    /// models.dev 查询状态（loading / 未收录提示）
+    lookup_state: LookupState,
+    /// 本次查询是否按「重置表单」语义填充：完全覆盖 + 缺字段回落默认值；
+    /// 回车/失焦触发的查询走温和填充（数据源有才覆盖，手配参数 JSON 保留）
+    lookup_overwrite: bool,
+}
+
+/// models.dev 查询进度：输入框旁的提示行三态
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum LookupState {
+    #[default]
+    Idle,
+    Pending,
+    /// 查询完成但未收录（网络失败同样落这里，回车可重试）
+    NotFound,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -115,6 +142,11 @@ pub struct SettingsView {
     api_key_masked: bool,
     delete_armed: bool,
     format_popup: bool,
+    /// API 格式按钮的位置：deferred 弹层锚定用（每次 prepaint 更新）
+    format_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 最近一次被弹层 outside-close 关掉时的按下位置：弹层打开时点按钮，
+    /// outside-close 先把它关掉，同一次按压的 click 紧跟着到达——按同一位置吞掉
+    format_outside_close: Option<Point<Pixels>>,
     test_results: std::collections::HashMap<String, (bool, String)>,
     model_dialog: Option<ModelDialog>,
     save_generation: u64,
@@ -149,6 +181,8 @@ impl SettingsView {
             api_key_masked: true,
             delete_armed: false,
             format_popup: false,
+            format_btn_bounds: Rc::new(Cell::new(Bounds::default())),
+            format_outside_close: None,
             test_results: Default::default(),
             model_dialog: None,
             save_generation: 0,
@@ -291,7 +325,8 @@ impl SettingsView {
                 .cloned()
         });
         let snapshot = model.clone();
-        let model = model.unwrap_or_else(|| ModelConfig::new("", 128_000, 8_192));
+        let model =
+            model.unwrap_or_else(|| ModelConfig::new("", NEW_MODEL_CONTEXT, NEW_MODEL_MAX_OUTPUT));
         let dialog = ModelDialog {
             editing,
             id: cx.new(|cx| InputState::new(window, cx).default_value(model.id.clone())),
@@ -325,7 +360,46 @@ impl SettingsView {
             }),
             params_error: None,
             snapshot,
+            looked_up_id: None,
+            lookup_state: LookupState::Idle,
+            lookup_overwrite: false,
         };
+        // 模型 ID 输入完成（回车/失焦）→ 查 models.dev 自动填充。
+        // 对话框每次重开都新建输入框，旧订阅靠 entity id 排除
+        let id_input = dialog.id.clone();
+        self._subscriptions.push(cx.subscribe_in(
+            &id_input,
+            window,
+            |this, emitter, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                let Some(dialog) = &this.model_dialog else {
+                    return;
+                };
+                if dialog.id.entity_id() != emitter.entity_id() {
+                    return;
+                }
+                match event {
+                    gpui_kit::component::input::InputEvent::PressEnter { .. }
+                    | gpui_kit::component::input::InputEvent::Blur => {
+                        this.maybe_lookup_model(false, cx);
+                    }
+                    // 输入变化：清掉上一次查询的状态提示
+                    gpui_kit::component::input::InputEvent::Change => {
+                        let dirty = this
+                            .model_dialog
+                            .as_mut()
+                            .is_some_and(|d| d.lookup_state != LookupState::Idle);
+                        if dirty {
+                            this.model_dialog
+                                .as_mut()
+                                .map(|d| d.lookup_state = LookupState::Idle);
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        ));
+        self.format_popup = false;
         self.model_dialog = Some(dialog);
         cx.notify();
     }
@@ -359,6 +433,7 @@ impl SettingsView {
         if let Some(error) = error {
             let mut dialog = dialog;
             dialog.params_error = Some(error);
+            self.format_popup = false;
             self.model_dialog = Some(dialog);
             cx.notify();
             return;
@@ -429,6 +504,125 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// 模型 ID 输入完成：非空且与上次查询不同才发起 models.dev 查询。
+    /// overwrite=true 为「重置表单」语义（查询结果完全覆盖 + 缺字段回落默认值）
+    fn maybe_lookup_model(&mut self, overwrite: bool, cx: &mut Context<Self>) {
+        let Some(dialog) = &self.model_dialog else {
+            return;
+        };
+        let id = dialog.id.read(cx).value().trim().to_string();
+        if id.is_empty() || dialog.looked_up_id.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.model_dialog
+            .as_mut()
+            .expect("dialog checked above")
+            .looked_up_id = Some(id.clone());
+        let dialog = self.model_dialog.as_mut().expect("dialog checked above");
+        dialog.lookup_state = LookupState::Pending;
+        dialog.lookup_overwrite = overwrite;
+        cx.emit(SettingsEvent::LookupModel(id));
+    }
+
+    /// models.dev 查询结果回填弹窗。只在事件对应弹窗当前编辑的 ID 时应用。
+    /// 重置触发的查询（lookup_overwrite）：字段 = 数据源值 ?? 新建默认值，参数 JSON 无条件重生成；
+    /// 回车/失焦触发的查询：温和填充——数据源有才覆盖，缺字段不动用户值，手配参数 JSON 保留
+    pub fn apply_model_info(
+        &mut self,
+        id: &str,
+        info: Option<pig_protocol::ModelRegistryInfo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let overwrite = self
+            .model_dialog
+            .as_ref()
+            .is_some_and(|d| d.lookup_overwrite);
+        let Some(dialog) = &mut self.model_dialog else {
+            return;
+        };
+        if dialog.id.read(cx).value().trim() != id {
+            return;
+        }
+        let Some(info) = info else {
+            // None = 网络失败或数据源未收录：解锁该 ID，回车可重试
+            // （core 侧有 10 分钟节流，重试不会连打网络）
+            dialog.looked_up_id = None;
+            dialog.lookup_state = LookupState::NotFound;
+            cx.notify();
+            return;
+        };
+        dialog.lookup_state = LookupState::Idle;
+        // 上下文窗口 / 最大输出：重置语义缺字段回落新建默认值；回车语义缺则不动
+        let context_src = info.context.or(info.input);
+        if overwrite || context_src.is_some() {
+            let context = context_src.unwrap_or(NEW_MODEL_CONTEXT);
+            dialog
+                .context_window
+                .update(cx, |i, cx| i.set_value(context.to_string(), window, cx));
+        }
+        if overwrite || info.output.is_some() {
+            let output = info.output.unwrap_or(NEW_MODEL_MAX_OUTPUT);
+            dialog
+                .max_tokens
+                .update(cx, |i, cx| i.set_value(output.to_string(), window, cx));
+        }
+        if overwrite || !info.reasoning_levels.is_empty() {
+            dialog
+                .reasoning_labels
+                .retain(|k, _| info.reasoning_levels.contains(k));
+            // 常用等级配中文显示名，其余显示 id 本身
+            for (level, label) in [
+                ("none", "无"),
+                ("minimal", "极简"),
+                ("low", "低"),
+                ("medium", "中"),
+                ("high", "高"),
+                ("xhigh", "超高"),
+                ("max", "最高"),
+            ] {
+                if info.reasoning_levels.iter().any(|l| l == level) {
+                    dialog.reasoning_labels.insert(level.into(), label.into());
+                }
+            }
+            dialog.reasoning_levels = info.reasoning_levels.clone();
+        }
+        // 推理参数 JSON：重置语义无条件按等级 + API 格式重新生成；
+        // 回车语义只在未手配（空对象）时生成建议值
+        let params_current = dialog.params_json.read(cx).value().trim().to_string();
+        let untouched = serde_json::from_str::<serde_json::Value>(&params_current)
+            .map(|v| v.as_object().is_some_and(|m| m.is_empty()))
+            .unwrap_or(true);
+        if overwrite || untouched {
+            let api_format = self
+                .selected
+                .and_then(|ix| self.config.providers.get(ix))
+                .map(|p| p.api_format)
+                .unwrap_or(ApiFormat::OpenAiChat);
+            let params = default_reasoning_params(&info.reasoning_levels, api_format);
+            let has_params = !params.is_empty();
+            let raw = serde_json::to_string_pretty(&serde_json::Value::Object(params))
+                .unwrap_or_default();
+            dialog
+                .params_json
+                .update(cx, |t, cx| t.set_value(raw, window, cx));
+            if has_params {
+                dialog.advanced_open = true;
+            }
+        }
+        // 输入模态：重置语义缺数据按全 false；回车语义数据源未给则不动勾选
+        if overwrite || !info.input_modalities.is_empty() {
+            let has = |m: &str| info.input_modalities.iter().any(|v| v == m);
+            dialog.input_image = has("image");
+            dialog.input_video = has("video");
+            dialog.input_pdf = has("pdf");
+        }
+        if overwrite || info.structured_output.is_some() {
+            dialog.cap_structured = info.structured_output.unwrap_or(false);
+        }
+        cx.notify();
+    }
+
     fn render_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(p_ix) = self.selected else {
             return div()
@@ -469,7 +663,11 @@ impl SettingsView {
                         Button::new("delete-provider")
                             .ghost()
                             .small()
-                            .label(if self.delete_armed { "确认删除？" } else { "删除" })
+                            .label(if self.delete_armed {
+                                "确认删除？"
+                            } else {
+                                "删除"
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.delete_armed {
                                     this.config.providers.remove(p_ix);
@@ -487,78 +685,82 @@ impl SettingsView {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("名称"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("名称"),
+                    )
                     .child(Input::new(&self.name_input)),
             )
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Base URL"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Base URL"),
+                    )
                     .child(Input::new(&self.base_url_input)),
             )
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("API 格式"))
                     .child(
-                        div().relative().child(
-                            Button::new("api-format")
-                                .outline()
-                                .w_full()
-                                .label(if is_anthropic {
-                                    "Anthropic Messages (/v1/messages)"
-                                } else {
-                                    "OpenAI Chat Completions (/v1/chat/completions)"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.format_popup = !this.format_popup;
-                                    cx.notify();
-                                })),
-                        )
-                        .when(self.format_popup, |this| {
-                            this.child(
-                                div()
-                                    .id("format-popup")
-                                    .absolute()
-                                    .top_full()
-                                    .left_0()
-                                    .right_0()
-                                    .mt_1()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().popover)
-                                    .py_1()
-                                    .children(
-                                        [
-                                            ("OpenAI Chat Completions (/v1/chat/completions)", ApiFormat::OpenAiChat),
-                                            ("Anthropic Messages (/v1/messages)", ApiFormat::AnthropicMessages),
-                                        ]
-                                        .map(|(label, format)| {
-                                            div()
-                                                .id(gpui_kit::SharedString::from(label.to_string()))
-                                                .px_3()
-                                                .py_1()
-                                                .text_sm()
-                                                .cursor_pointer()
-                                                .hover(|this| this.bg(cx.theme().accent))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.config.providers[p_ix].api_format = format;
-                                                    this.format_popup = false;
-                                                    cx.emit(SettingsEvent::Save(this.config.clone()));
-                                                    cx.notify();
-                                                }))
-                                                .child(label)
-                                        }),
-                                    ),
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("API 格式"),
+                    )
+                    .child(
+                        div()
+                            .on_prepaint({
+                                let cell = self.format_btn_bounds.clone();
+                                move |bounds, _, _| cell.set(bounds)
+                            })
+                            .child(
+                                Button::new("api-format")
+                                    .outline()
+                                    .w_full()
+                                    .label(if is_anthropic {
+                                        "Anthropic Messages (/v1/messages)"
+                                    } else {
+                                        "OpenAI Chat Completions (/v1/chat/completions)"
+                                    })
+                                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                                        // 弹层打开时点按钮：按下先触发弹层的 outside-close
+                                        // （记录按下位置），紧随的 click 按同一位置吞掉，
+                                        // 避免收起又马上弹开（main.rs 右侧面板菜单同款处理）
+                                        let down_pos = match event {
+                                            ClickEvent::Mouse(e) => Some(e.down.position),
+                                            _ => None,
+                                        };
+                                        if this
+                                            .format_outside_close
+                                            .take()
+                                            .is_some_and(|pos| Some(pos) == down_pos)
+                                        {
+                                            return;
+                                        }
+                                        this.format_popup = !this.format_popup;
+                                        cx.notify();
+                                    })),
                             )
-                        }),
+                            .when(self.format_popup, |this| {
+                                this.child(self.render_format_popup(p_ix, cx))
+                            }),
                     ),
             )
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("API Key"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("API Key"),
+                    )
                     .child(
                         h_flex()
                             .gap_1()
@@ -587,7 +789,11 @@ impl SettingsView {
                 this.child(
                     div()
                         .text_xs()
-                        .text_color(if ok { cx.theme().success } else { cx.theme().danger })
+                        .text_color(if ok {
+                            cx.theme().success
+                        } else {
+                            cx.theme().danger
+                        })
                         .child(message),
                 )
             })
@@ -595,9 +801,7 @@ impl SettingsView {
                 h_flex()
                     .w_full()
                     .mt_2()
-                    .child(
-                        div().text_sm().font_semibold().flex_1().child("模型列表"),
-                    )
+                    .child(div().text_sm().font_semibold().flex_1().child("模型列表"))
                     .child(
                         Button::new("add-model")
                             .ghost()
@@ -683,6 +887,67 @@ impl SettingsView {
 }
 
 impl SettingsView {
+    /// API 格式下拉：deferred 到窗口层绘制，`Positioner::side(Bottom)` 锚定按钮正下方
+    /// （与 main.rs 标签页 "+" 菜单同一模式）。详情列在 overflow_y_scroll 容器内，
+    /// absolute 弹层会被滚动区裁剪，且后续表单兄弟（API Key 输入框等带背景元素）
+    /// 按文档序画在其上，看起来就是弹层没有背景。
+    fn render_format_popup(&self, p_ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        deferred(
+            Positioner::side(self.format_btn_bounds.get())
+                .placement(Placement::Bottom)
+                .align(Align::Start)
+                .offset(px(4.))
+                .margin(px(8.))
+                .occlude()
+                .child(
+                    v_flex()
+                        .id("format-popup")
+                        .w(px(360.))
+                        .py_1()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().popover)
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.format_popup = false;
+                            this.format_outside_close = Some(event.position);
+                            cx.notify();
+                        }))
+                        .children(
+                            [
+                                (
+                                    "OpenAI Chat Completions (/v1/chat/completions)",
+                                    ApiFormat::OpenAiChat,
+                                ),
+                                (
+                                    "Anthropic Messages (/v1/messages)",
+                                    ApiFormat::AnthropicMessages,
+                                ),
+                            ]
+                            .map(|(label, format)| {
+                                div()
+                                    .id(gpui_kit::SharedString::from(label.to_string()))
+                                    .px_3()
+                                    .py_1()
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.config.providers[p_ix].api_format = format;
+                                        this.format_popup = false;
+                                        cx.emit(SettingsEvent::Save(this.config.clone()));
+                                        cx.notify();
+                                    }))
+                                    .child(label)
+                            }),
+                        ),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
     fn render_model_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(dialog) = &self.model_dialog else {
             return div().into_any_element();
@@ -717,7 +982,36 @@ impl SettingsView {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("模型 ID"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("模型 ID"),
+                                    )
+                                    .child(match dialog.lookup_state {
+                                        LookupState::Pending => h_flex()
+                                            .gap_1()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(Spinner::new().small())
+                                            .child("正在查询 models.dev…")
+                                            .into_any_element(),
+                                        LookupState::NotFound => div()
+                                            .text_xs()
+                                            .text_color(cx.theme().warning)
+                                            .child("models.dev 未收录该 ID，回车可重试")
+                                            .into_any_element(),
+                                        LookupState::Idle => div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .opacity(0.7)
+                                            .child("输入后回车，自动填充上下文/输出/推理等级（models.dev）")
+                                            .into_any_element(),
+                                    }),
+                            )
                             .child(Input::new(&dialog.id)),
                     )
                     .child(
@@ -917,10 +1211,14 @@ impl SettingsView {
                                     .label("重置表单")
                                     .disabled(!snapshot_exists)
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        let snapshot = this.model_dialog.as_ref().and_then(|d| d.snapshot.clone());
+                                        let snapshot =
+                                            this.model_dialog.as_ref().and_then(|d| d.snapshot.clone());
                                         let editing = this.model_dialog.as_ref().and_then(|d| d.editing);
                                         if snapshot.is_some() {
                                             this.open_model_dialog(editing, window, cx);
+                                            // 恢复快照后按当前模型 ID 重新走 models.dev
+                                            // 自动填充（重置语义：完全覆盖 + 缺字段回落默认）
+                                            this.maybe_lookup_model(true, cx);
                                         }
                                         cx.notify();
                                     })),
