@@ -421,10 +421,9 @@ impl Session {
                     ttft_ms,
                     api_steps,
                 } => {
-                    // 回放恢复：会话累计 + 水位 + 历史回合的 footer 统计
+                    // 回放恢复：会话累计 + 历史回合的 footer 统计（水位由 StepUsage 恢复）
                     self.input_total += input;
                     self.cache_read_total += cache_read;
-                    self.last_total_tokens = Some(input + cache_read + output);
                     let stats = pig_protocol::TurnUsageStats {
                         input: *input,
                         cache_read: *cache_read,
@@ -456,6 +455,10 @@ impl Session {
                         },
                         tx,
                     );
+                }
+                RolloutRecord::StepUsage { used, .. } => {
+                    // 水位 = 单次请求的总 token，逐条覆盖、最后一条生效
+                    self.last_total_tokens = Some(*used);
                 }
             }
         }
@@ -736,7 +739,7 @@ impl Session {
                             self.turn_cache_read,
                             self.turn_output,
                         );
-                        // 回合统计持久化：回放恢复 footer、会话累计与水位
+                        // 回合统计持久化：回放恢复 footer 与会话累计（水位由 StepUsage 恢复）
                         self.record(&RolloutRecord::TurnStats {
                             input: self.turn_input,
                             cache_read: self.turn_cache_read,
@@ -866,6 +869,13 @@ impl Session {
                     self.input_total += input;
                     self.cache_read_total += cache_read;
                     self.last_total_tokens = Some(used);
+                    // 每次请求的用量即时落盘（durable 先于事件），回放用最后一条恢复水位
+                    self.record(&RolloutRecord::StepUsage {
+                        input,
+                        cache_read,
+                        output,
+                        used,
+                    });
                     let (input_total, cache_read_total) = (self.input_total, self.cache_read_total);
                     self.emit(
                         |session_id, seq| Event::ContextUsage {

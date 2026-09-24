@@ -80,12 +80,19 @@ fn sse_chunk(delta: serde_json::Value, finish_reason: Option<&str>) -> String {
     format!("data: {chunk}\n\n")
 }
 
-fn tool_call_chunks(call_id: &str, name: &str, arguments: &str) -> Vec<String> {
+/// usage: Some((prompt, completion, total)) 时并入带 finish_reason 的末块
+///（provider 见到 finish_reason 即收尾，usage 必须同块到达，对齐真实 API）
+fn tool_call_chunks(call_id: &str, name: &str, arguments: &str, usage: Option<(u64, u64, u64)>) -> Vec<String> {
     // 分片点在字符边界上取（中文参数被切到多字节字符中间会 panic）
     let mut half = arguments.len() / 2;
     while !arguments.is_char_boundary(half) {
         half += 1;
     }
+    let usage_json = usage
+        .map(|(prompt, completion, total)| {
+            serde_json::json!({"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total})
+        })
+        .unwrap_or_else(|| serde_json::json!(null));
     vec![
         sse_chunk(
             serde_json::json!({"tool_calls": [{
@@ -95,12 +102,23 @@ fn tool_call_chunks(call_id: &str, name: &str, arguments: &str) -> Vec<String> {
             }]}),
             None,
         ),
-        sse_chunk(
-            serde_json::json!({"tool_calls": [{
-                "index": 0,
-                "function": {"arguments": &arguments[half..]},
-            }]}),
-            Some("tool_calls"),
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "id": "chatcmpl-mock",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "mock-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": &arguments[half..]},
+                    }]},
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": usage_json,
+            })
         ),
     ]
 }
@@ -115,7 +133,14 @@ fn tool_call_response() -> Vec<String> {
         .collect();
     let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
     let mut chunks = reasoning;
-    chunks.extend(tool_call_chunks("call_mock_1", "Read", &arguments));
+    // 中间 step 也上报用量（真实 API 每次请求都带）：水位应以最后一步的 142 为准，
+    // 回合累计（turn_stats）则是各步之和
+    chunks.extend(tool_call_chunks(
+        "call_mock_1",
+        "Read",
+        &arguments,
+        Some((60, 10, 70)),
+    ));
     chunks
 }
 
@@ -162,17 +187,20 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
             "call_b_write",
             "Write",
             &serde_json::json!({"path": file, "content": SCENARIO_B_CONTENT}).to_string(),
+            None,
         ),
         1 => tool_call_chunks(
             "call_b_edit",
             "Edit",
             &serde_json::json!({"path": file, "old_string": "line2", "new_string": "LINE2"})
                 .to_string(),
+            None,
         ),
         2 => tool_call_chunks(
             "call_b_bash",
             "Bash",
             &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string(),
+            None,
         ),
         _ => {
             let markdown = format!(
@@ -231,6 +259,7 @@ fn todo_scenario_response(body: &str) -> Vec<String> {
                 {"content": format!("{TODO_SCENARIO_ITEM}二"), "status": "in_progress"}
             ]})
             .to_string(),
+            None,
         )
     }
 }
@@ -276,6 +305,7 @@ fn question_scenario_response(body: &str) -> Vec<String> {
                 }
             ]})
             .to_string(),
+            None,
         )
     }
 }

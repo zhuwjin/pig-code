@@ -107,6 +107,69 @@ async fn resume_rebuilds_history() {
     agent2.shutdown();
 }
 
+/// resume 后上下文水位恢复：取 step_usage 最后一条的 used（142），
+/// 而不是 turn_stats 的回合合计（60+10 + 100+42 = 212）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_restores_context_watermark() {
+    let (config_path, cwd, data_dir) = setup("m4-watermark");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd.clone()).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "读一下 mock 文件并总结".into(),
+            files: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    agent.shutdown();
+
+    // 每个带 usage 的 step 都应落盘一条 step_usage（默认场景 2 步：70 与 142）
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let content = std::fs::read_to_string(&rollout_path).unwrap();
+    assert_eq!(
+        content.matches("\"type\":\"step_usage\"").count(),
+        2,
+        "每个 step 的用量应各落一条: {content}"
+    );
+
+    // 模拟重启：OpenSession 回放后应补发水位，取最后一条 step_usage 的 used
+    let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    let events2 = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let replay = recv_until(&events2, Duration::from_secs(10), |e| {
+        matches!(e, Event::ContextUsage { .. })
+    })
+    .await;
+    assert!(
+        replay
+            .iter()
+            .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
+        "回放后水位应为最后一步的 142，而非回合合计 212: {replay:#?}"
+    );
+    agent2.shutdown();
+}
+
 /// sessions 表的 pin/archive。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pin_and_archive_update_index() {
