@@ -31,6 +31,7 @@ async fn run_scenario_b(
             session_id: session_id.clone(),
             content: format!("{} 创建并修改文件，然后跑个命令", mock::SCENARIO_B_TRIGGER),
             files: vec![],
+            images: vec![],
             mode,
         })
         .await
@@ -287,6 +288,7 @@ async fn interrupt_during_approval() {
             session_id: session_id.clone(),
             content: format!("{} 走修改链", mock::SCENARIO_B_TRIGGER),
             files: vec![],
+            images: vec![],
             mode: ExecMode::ConfirmBeforeEdit,
         })
         .await
@@ -350,6 +352,7 @@ async fn run_danger(
             session_id,
             content: format!("{} 执行危险命令", mock::SCENARIO_DANGER_TRIGGER),
             files: vec![],
+            images: vec![],
             mode,
         })
         .await
@@ -620,6 +623,7 @@ async fn run_trigger(
             session_id,
             content: format!("{trigger} 开始"),
             files: vec![],
+            images: vec![],
             mode,
         })
         .await

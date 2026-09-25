@@ -24,6 +24,7 @@ async fn turn_file_changes_emitted_and_replayed() {
             session_id: session_id.clone(),
             content: format!("{} 改个文件", mock::SCENARIO_B_TRIGGER),
             files: vec![],
+            images: vec![],
             mode: ExecMode::FullAccess,
         })
         .await

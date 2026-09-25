@@ -290,16 +290,22 @@ impl Session {
         for record in records {
             match record {
                 RolloutRecord::Meta { .. } => {}
-                RolloutRecord::User { text, files } => {
+                RolloutRecord::User {
+                    text,
+                    files,
+                    images,
+                } => {
                     in_assistant = false;
                     let text = text.clone();
                     let files = files.clone();
+                    let image_count = images.len();
                     self.emit(
                         |session_id, seq| Event::UserMessage {
                             session_id,
                             seq,
                             text,
                             files,
+                            image_count,
                         },
                         tx,
                     );
@@ -669,6 +675,7 @@ impl Session {
         &mut self,
         content: String,
         files: Vec<String>,
+        images: Vec<pig_protocol::PendingImage>,
         config: &ResolvedModel,
         tx: &async_channel::Sender<Event>,
         cancel: CancellationToken,
@@ -726,11 +733,72 @@ impl Session {
             format!("{content}\n\n引用文件: {}", files.join(", "))
         };
         let record_files = files.clone();
-        self.history
-            .push(ChatMsg::user(std::mem::take(&mut user_text)));
+        // 粘贴图片（ZCode 式管线）：压缩 → 落会话媒体目录 → rollout 记 ImageRef
+        //（不存 base64）+ history 进 ChatImage；压缩失败的图跳过并在文本里记 note。
+        // 文件名目录内续排（next_media_index）：按消息内序号命名会被后续回合覆盖
+        let mut image_refs: Vec<crate::rollout::ImageRef> = Vec::new();
+        let mut chat_images: Vec<crate::provider::ChatImage> = Vec::new();
+        if !images.is_empty() {
+            let media_dir = crate::rollout::media_dir(&self.data_dir.join("sessions"), &self.id);
+            let mut next = crate::rollout::next_media_index(&media_dir);
+            for (ix, pending) in images.iter().enumerate() {
+                match crate::tool::compress_image_for_model(&pending.bytes, &pending.mime) {
+                    Ok(comp) => {
+                        let ext = if comp.media_type == "image/png" {
+                            "png"
+                        } else {
+                            "jpg"
+                        };
+                        let file = media_dir.join(format!("{next}.{ext}"));
+                        if let Err(error) = std::fs::create_dir_all(&media_dir)
+                            .and_then(|()| std::fs::write(&file, &comp.bytes))
+                        {
+                            user_text.push_str(&format!("\n[图片 {} 落盘失败: {error}]", ix + 1));
+                            continue;
+                        }
+                        // 压缩附注（kimi-code caption 思路）：缩放/转码改变了图就在
+                        // 文本里告知模型，原图落盘供 ReadMediaFile region 看高清局部
+                        if let Some(note) =
+                            compression_note(ix + 1, pending, &comp, &media_dir, next)
+                        {
+                            user_text.push_str(&note);
+                        }
+                        next += 1;
+                        image_refs.push(crate::rollout::ImageRef {
+                            path: file,
+                            media_type: comp.media_type.clone(),
+                            width: comp.width,
+                            height: comp.height,
+                        });
+                        chat_images.push(crate::provider::ChatImage {
+                            media_type: comp.media_type,
+                            data_base64: crate::tool::base64_encode(&comp.bytes),
+                            label: Some(format!("图片 {}", ix + 1)),
+                        });
+                    }
+                    Err(error) => {
+                        user_text.push_str(&format!("\n[图片 {} 压缩失败: {error}]", ix + 1));
+                    }
+                }
+            }
+        }
+        let image_count = image_refs.len();
+        // 能力投影：模型不支持图片输入 → 不进 ChatMsg.images，文本占位告知（带媒体路径）
+        let media_paths: Vec<std::path::PathBuf> =
+            image_refs.iter().map(|r| r.path.clone()).collect();
+        project_images(
+            &mut user_text,
+            &mut chat_images,
+            &media_paths,
+            config.input_image,
+        );
+        let mut user_msg = ChatMsg::user(std::mem::take(&mut user_text));
+        user_msg.images = chat_images;
+        self.history.push(user_msg);
         self.record(&RolloutRecord::User {
             text: rollout_text.clone(),
             files: record_files.clone(),
+            images: image_refs,
         });
         self.emit(
             |session_id, seq| Event::UserMessage {
@@ -738,6 +806,7 @@ impl Session {
                 seq,
                 text: rollout_text.clone(),
                 files: record_files.clone(),
+                image_count,
             },
             tx,
         );
@@ -1833,6 +1902,67 @@ fn exec_mode_label(mode: ExecMode) -> &'static str {
     }
 }
 
+/// 压缩附注（kimi-code caption 思路）：图片被缩放/转码后附在文本里告知模型
+/// 细节可能丢失；原图同时落盘 `{n}.orig.{ext}`，需要高清局部可用 ReadMediaFile
+/// region 裁剪原图查看。图片未变（小图直通）→ None，不给文本加噪音。
+fn compression_note(
+    ix: usize,
+    pending: &pig_protocol::PendingImage,
+    comp: &crate::tool::CompressedImage,
+    media_dir: &std::path::Path,
+    n: usize,
+) -> Option<String> {
+    let orig_mime = crate::tool::sniff_image(&pending.bytes).unwrap_or(pending.mime.as_str());
+    let (ow, oh) = crate::tool::image_dimensions(&pending.bytes).unwrap_or((0, 0));
+    if (ow, oh) == (comp.width, comp.height) && orig_mime == comp.media_type {
+        return None;
+    }
+    let orig_ext = match orig_mime {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    };
+    let orig_file = media_dir.join(format!("{n}.orig.{orig_ext}"));
+    let orig_hint = match std::fs::write(&orig_file, &pending.bytes) {
+        Ok(()) => format!(
+            "；原图已存到 {}，需要看清细节（例如小字）可用 ReadMediaFile 对该路径用 region 裁剪查看",
+            orig_file.display()
+        ),
+        Err(_) => "；原图未保留".to_string(),
+    };
+    Some(format!(
+        "\n[图片 {ix} 已压缩以适应模型限制：原始 {ow}×{oh} {orig_mime} → 发送 {}×{} {}（{}KB），细节可能丢失{orig_hint}]",
+        comp.width,
+        comp.height,
+        comp.media_type,
+        comp.bytes.len() / 1024,
+    ))
+}
+
+/// 能力投影（ZCode 同款）：模型支持图片输入时 images 原样进 ChatMsg；
+/// 不支持时 images 清空、文本末尾追加占位。media_paths 与 chat_images 同序等长
+///（媒体文件先于投影落盘）：占位带上路径，模型知道有图、知道去哪读。
+pub fn project_images(
+    text: &mut String,
+    chat_images: &mut Vec<crate::provider::ChatImage>,
+    media_paths: &[std::path::PathBuf],
+    input_image: bool,
+) {
+    if !chat_images.is_empty() && !input_image {
+        let paths = media_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        text.push_str(&format!(
+            "\n[图片 {} 张未随消息发送：当前模型不支持图片输入；文件在 {paths}，需要看哪张可用 ReadMediaFile 读取]",
+            chat_images.len()
+        ));
+        chat_images.clear();
+    }
+}
+
 /// 加载项目级权限规则：文件缺失 = 空规则；解析失败不致命，stderr 提示（
 /// 会话创建/回放路径没有合适的事件通道，不硬建）
 fn load_permissions(cwd: &std::path::Path) -> crate::permissions::PermissionRules {
@@ -1952,7 +2082,12 @@ struct SessionEntry {
     /// 会话级思考等级：独立于模型覆盖存在（无覆盖时作用于配置默认模型）
     reasoning_level: Option<String>,
     /// 回合进行中到达的消息在此排队（FIFO），回合结束自动接续
-    queue: std::collections::VecDeque<(String, Vec<String>, ExecMode)>,
+    queue: std::collections::VecDeque<(
+        String,
+        Vec<String>,
+        Vec<pig_protocol::PendingImage>,
+        ExecMode,
+    )>,
 }
 
 type TurnFuture = std::pin::Pin<Box<dyn Future<Output = (String, Session)>>>;
@@ -1962,6 +2097,7 @@ fn start_turn(
     session_id: String,
     content: String,
     files: Vec<String>,
+    images: Vec<pig_protocol::PendingImage>,
     mode: ExecMode,
     config: &ResolvedModel,
     event_tx: &async_channel::Sender<Event>,
@@ -1977,7 +2113,9 @@ fn start_turn(
     let tx = event_tx.clone();
     let config = config.clone();
     turns.push(Box::pin(async move {
-        session.run_turn(content, files, &config, &tx, cancel).await;
+        session
+            .run_turn(content, files, images, &config, &tx, cancel)
+            .await;
         (session_id, session)
     }));
 }
@@ -2323,7 +2461,7 @@ pub async fn agent_loop(
                             sessions: store.lock().expect("store lock").sorted_sessions(),
                         });
                     }
-                    Op::SendMessage { session_id, content, files, mode } => {
+                    Op::SendMessage { session_id, content, files, images, mode } => {
                         let Some(entry) = sessions.get_mut(&session_id) else {
                             emit_global!(Event::Error {
                                 session_id: Some(session_id),
@@ -2334,7 +2472,7 @@ pub async fn agent_loop(
                         };
                         // 回合进行中 → 排队，回合结束自动接续（Interrupt 不清队列）
                         if entry.session.is_none() {
-                            entry.queue.push_back((content.clone(), files, mode));
+                            entry.queue.push_back((content.clone(), files, images, mode));
                             emit_global!(Event::MessageQueued {
                                 session_id: session_id.clone(),
                                 seq,
@@ -2350,11 +2488,11 @@ pub async fn agent_loop(
                             });
                             continue;
                         };
-                        start_turn(entry, session_id, content, files, mode, &resolved, &event_tx, &turns);
+                        start_turn(entry, session_id, content, files, images, mode, &resolved, &event_tx, &turns);
                     }
                     Op::CancelQueued { session_id, text } => {
                         if let Some(entry) = sessions.get_mut(&session_id) {
-                            if let Some(pos) = entry.queue.iter().position(|(t, _, _)| t == &text) {
+                            if let Some(pos) = entry.queue.iter().position(|(t, _, _, _)| t == &text) {
                                 entry.queue.remove(pos);
                             }
                         }
@@ -2706,9 +2844,9 @@ pub async fn agent_loop(
                     entry.session = Some(session);
                     entry.cancel = None;
                     // 回合结束（含中止/出错）后自动取出队首继续
-                    if let Some((content, files, mode)) = entry.queue.pop_front() {
+                    if let Some((content, files, images, mode)) = entry.queue.pop_front() {
                         if let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) {
-                            start_turn(entry, session_id.clone(), content, files, mode, &resolved, &event_tx, &turns);
+                            start_turn(entry, session_id.clone(), content, files, images, mode, &resolved, &event_tx, &turns);
                         }
                     }
                 }

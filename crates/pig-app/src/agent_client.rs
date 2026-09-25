@@ -81,12 +81,14 @@ impl AgentClient {
         session_id: String,
         content: String,
         files: Vec<String>,
+        images: Vec<pig_protocol::PendingImage>,
         mode: ExecMode,
     ) {
         self.send(Op::SendMessage {
             session_id,
             content,
             files,
+            images,
             mode,
         });
     }

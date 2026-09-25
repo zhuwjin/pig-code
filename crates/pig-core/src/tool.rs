@@ -1357,13 +1357,98 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// ReadMediaFile 的尺寸/体积上限
+/// 媒体文件的尺寸/体积上限（ReadMediaFile 与粘贴发送共用）
 const MAX_MEDIA_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_MEDIA_PIXELS: u64 = 100_000_000;
 /// 默认缩放到最长边 2000（full_resolution=true 时不缩）
 const MEDIA_MAX_EDGE: u32 = 2000;
 /// PNG 输出超过 4MB 且无 alpha → 转 JPEG q85 兜底
 const MAX_PNG_BYTES: usize = 4 * 1024 * 1024;
+
+/// 压缩产物（进模型预算的图片）
+pub struct CompressedImage {
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 解码后图片的预算内编码：最长边 2000 等比缩放（小的不动），
+/// 有 alpha 或源是 PNG/GIF/WebP → PNG；否则 JPEG q85；PNG 超 4MB 无 alpha → JPEG 兜底。
+/// ReadMediaFile（region 裁剪后）与粘贴发送共用这一段。
+pub fn encode_image_for_model(
+    mut image: image::DynamicImage,
+    source_mime: &str,
+) -> Result<CompressedImage, String> {
+    let (mut w, mut h) = (image.width(), image.height());
+    if w.max(h) > MEDIA_MAX_EDGE {
+        let scale = MEDIA_MAX_EDGE as f32 / w.max(h) as f32;
+        let (nw, nh) = (
+            (w as f32 * scale).round().max(1.) as u32,
+            (h as f32 * scale).round().max(1.) as u32,
+        );
+        image = image.resize(nw, nh, image::imageops::FilterType::Triangle);
+        w = nw;
+        h = nh;
+    }
+    if w as u64 * h as u64 > MAX_MEDIA_PIXELS {
+        return Err(format!("图片过大（{w}×{h}），请用 region 参数裁剪局部"));
+    }
+    let has_alpha = image.color().has_alpha();
+    let prefer_png = has_alpha || matches!(source_mime, "image/png" | "image/gif" | "image/webp");
+    let mut media_type = if prefer_png {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    let mut encoded = if prefer_png {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .map_err(|e| format!("图片编码失败: {e}"))?;
+        buf.into_inner()
+    } else {
+        encode_jpeg(&image)?
+    };
+    if prefer_png && encoded.len() > MAX_PNG_BYTES && !has_alpha {
+        encoded = encode_jpeg(&image)?;
+        media_type = "image/jpeg";
+    }
+    Ok(CompressedImage {
+        bytes: encoded,
+        media_type: media_type.to_string(),
+        width: w,
+        height: h,
+    })
+}
+
+/// 原始字节 → 压缩产物（粘贴发送路径）：source_mime 为空串时魔数嗅探。
+/// 尺寸预检（不解码大图）→ 解码 → encode_image_for_model。
+pub fn compress_image_for_model(
+    bytes: &[u8],
+    source_mime: &str,
+) -> Result<CompressedImage, String> {
+    let sniffed = if source_mime.is_empty() {
+        sniff_image(bytes).ok_or("不是可识别的图片（支持 PNG/JPEG/GIF/WebP）".to_string())?
+    } else {
+        source_mime
+    };
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("图片解析失败: {e}"))?;
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| format!("图片解析失败: {e}"))?;
+    if w as u64 * h as u64 > MAX_MEDIA_PIXELS {
+        return Err(format!("图片过大（{w}×{h}）"));
+    }
+    let image = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("图片解析失败: {e}"))?
+        .decode()
+        .map_err(|e| format!("图片解码失败: {e}"))?;
+    encode_image_for_model(image, sniffed)
+}
 
 struct ReadMediaFile;
 
@@ -1446,7 +1531,7 @@ impl Tool for ReadMediaFile {
 
             // region 裁剪（原图坐标；夹紧到图内，完全不相交报错）
             let mut crop_note = String::new();
-            let mut image = if let Some(region) = args.get("region") {
+            let image = if let Some(region) = args.get("region") {
                 let (rx, ry, rw, rh) = (
                     region["x"].as_u64().unwrap_or(0),
                     region["y"].as_u64().unwrap_or(0),
@@ -1469,63 +1554,69 @@ impl Tool for ReadMediaFile {
                 image
             };
 
-            // 默认等比缩到最长边 2000；full_resolution 不缩
+            // 默认等比缩到最长边 2000；full_resolution 不缩（共享编码管线恒定缩放，
+            // 故 full_resolution 走独立分支：只编码不缩放）
             let full_resolution = args["full_resolution"].as_bool().unwrap_or(false);
-            let (mut w, mut h) = (image.width(), image.height());
-            if !full_resolution && w.max(h) > MEDIA_MAX_EDGE {
-                let scale = MEDIA_MAX_EDGE as f32 / w.max(h) as f32;
-                let (nw, nh) = (
-                    (w as f32 * scale).round().max(1.) as u32,
-                    (h as f32 * scale).round().max(1.) as u32,
-                );
-                image = image.resize(nw, nh, image::imageops::FilterType::Triangle);
-                w = nw;
-                h = nh;
-            }
-            if w as u64 * h as u64 > MAX_MEDIA_PIXELS {
-                return Err(format!("图片过大（{w}×{h}），请用 region 参数裁剪局部"));
-            }
-
-            // 编码：有 alpha 或源是 PNG/GIF/WebP → PNG；否则 JPEG q85。
-            // PNG 超 4MB 且无 alpha → JPEG q85 兜底
-            let has_alpha = image.color().has_alpha();
-            let prefer_png =
-                has_alpha || matches!(source_mime, "image/png" | "image/gif" | "image/webp");
-            let mut media_type = if prefer_png {
-                "image/png"
+            let compressed = if full_resolution {
+                let has_alpha = image.color().has_alpha();
+                let prefer_png =
+                    has_alpha || matches!(source_mime, "image/png" | "image/gif" | "image/webp");
+                let w = image.width();
+                let h = image.height();
+                let mut media_type = if prefer_png {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                let mut encoded = if prefer_png {
+                    let mut buf = std::io::Cursor::new(Vec::new());
+                    image
+                        .write_to(&mut buf, image::ImageFormat::Png)
+                        .map_err(|e| format!("图片编码失败: {e}"))?;
+                    buf.into_inner()
+                } else {
+                    encode_jpeg(&image)?
+                };
+                if prefer_png && encoded.len() > MAX_PNG_BYTES && !has_alpha {
+                    encoded = encode_jpeg(&image)?;
+                    media_type = "image/jpeg";
+                }
+                CompressedImage {
+                    bytes: encoded,
+                    media_type: media_type.to_string(),
+                    width: w,
+                    height: h,
+                }
             } else {
-                "image/jpeg"
+                encode_image_for_model(image, source_mime)?
             };
-            let mut encoded = if prefer_png {
-                let mut buf = std::io::Cursor::new(Vec::new());
-                image
-                    .write_to(&mut buf, image::ImageFormat::Png)
-                    .map_err(|e| format!("图片编码失败: {e}"))?;
-                buf.into_inner()
-            } else {
-                encode_jpeg(&image)?
-            };
-            if prefer_png && encoded.len() > MAX_PNG_BYTES && !has_alpha {
-                encoded = encode_jpeg(&image)?;
-                media_type = "image/jpeg";
-            }
-
-            let kb = encoded.len() / 1024;
+            let (w, h) = (compressed.width, compressed.height);
+            let kb = compressed.bytes.len() / 1024;
             Ok(ToolEffect {
                 output: format!(
-                    "已读取图片 {path}（原始 {orig_w}×{orig_h}{crop_note} → 输出 {w}×{h}，{media_type}，{kb}KB）"
+                    "已读取图片 {path}（原始 {orig_w}×{orig_h}{crop_note} → 输出 {w}×{h}，{}，{kb}KB）",
+                    compressed.media_type
                 ),
                 file_change: None,
                 edit_diff: None,
                 images: vec![ToolImage {
-                    media_type: media_type.to_string(),
-                    data_base64: base64_encode(&encoded),
+                    media_type: compressed.media_type,
+                    data_base64: base64_encode(&compressed.bytes),
                     width: w,
                     height: h,
                 }],
             })
         })
     }
+}
+
+/// 只读尺寸（不解码）；非图片返回 None。粘贴 chip 展示用。
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// JPEG q85 编码（转 RGB 丢弃 alpha）

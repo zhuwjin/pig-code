@@ -110,6 +110,7 @@ async fn message_queue_fifo() {
             session_id: sid.clone(),
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -126,6 +127,7 @@ async fn message_queue_fifo() {
             session_id: sid.clone(),
             content: "ECHO_HISTORY".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await

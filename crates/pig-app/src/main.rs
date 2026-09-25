@@ -1,4 +1,5 @@
 mod agent_client;
+mod clipboard;
 mod composer;
 mod review_panel;
 mod settings;
@@ -250,7 +251,12 @@ struct AppView {
     hero_branches: Vec<String>,
     hero_is_git: bool,
     hero_error: Option<String>,
-    pending_first_send: Option<(String, Vec<String>, ExecMode)>,
+    pending_first_send: Option<(
+        String,
+        Vec<String>,
+        Vec<pig_protocol::PendingImage>,
+        ExecMode,
+    )>,
     /// hero 态用户已显式选过模型：apply_hero_defaults 不再用工作区种子覆盖
     ///（否则「切模型 → 选工作区 → 发送」会把选择冲回工作区旧模型）
     hero_model_dirty: bool,
@@ -557,8 +563,9 @@ impl AppView {
                     composer.set_todos(todos, cx);
                     composer.set_tasks(tasks, cx);
                 });
-                if let Some((text, files, mode)) = self.pending_first_send.take() {
-                    self.agent.send_message(session_id, text, files, mode);
+                if let Some((text, files, images, mode)) = self.pending_first_send.take() {
+                    self.agent
+                        .send_message(session_id, text, files, images, mode);
                 }
                 // 切换/新建会话：标题栏分支跟随会话 cwd；拉工作区 git 状态（Review 面板）
                 self.refresh_git_branch(Some(cwd.clone()), cx);
@@ -1185,10 +1192,11 @@ impl AppView {
         &mut self,
         text: String,
         files: Vec<String>,
+        images: Vec<pig_protocol::PendingImage>,
         mode: ExecMode,
         cx: &mut Context<Self>,
     ) {
-        self.pending_first_send = Some((text, files, mode));
+        self.pending_first_send = Some((text, files, images, mode));
         let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
         // 带上 UI 当前选择：新建会话用它们（而不是工作区种子）初始化，
         // 避免 SessionConfigured 回来把用户刚选的模式/思考等级覆盖掉
@@ -1267,8 +1275,13 @@ impl AppView {
                 thread.append_user_message(text.clone(), vec![], cx);
             });
         }
-        self.agent
-            .send_message(sid, text, vec![], pig_protocol::ExecMode::ConfirmBeforeEdit);
+        self.agent.send_message(
+            sid,
+            text,
+            vec![],
+            vec![],
+            pig_protocol::ExecMode::ConfirmBeforeEdit,
+        );
     }
 
     /// 同步更新 metas 缓存中当前会话的条目（与 core 写穿保持一致；
@@ -1385,9 +1398,14 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            ComposerEvent::Send { text, files, mode } => {
+            ComposerEvent::Send {
+                text,
+                files,
+                images,
+                mode,
+            } => {
                 if self.is_hero(cx) {
-                    self.hero_send(text.clone(), files.clone(), *mode, cx);
+                    self.hero_send(text.clone(), files.clone(), images.clone(), *mode, cx);
                     return;
                 }
                 let Some(sid) = self.current.clone() else {
@@ -1395,7 +1413,7 @@ impl AppView {
                 };
                 // 用户消息由 core 的 Event::UserMessage 统一上屏（含排队出队路径）
                 self.agent
-                    .send_message(sid, text.clone(), files.clone(), *mode);
+                    .send_message(sid, text.clone(), files.clone(), images.clone(), *mode);
             }
             ComposerEvent::PickDirectory => self.pick_directory(window, cx),
             ComposerEvent::SelectCwd(cwd) => {
@@ -2909,6 +2927,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 pig_core::mock::SCENARIO_B_TRIGGER
             ),
             vec![],
+            vec![],
             pig_protocol::ExecMode::ConfirmBeforeEdit,
             cx,
         );
@@ -3031,6 +3050,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             session_b.clone(),
             "读一下 README.mock.md 并总结".to_string(),
             vec![],
+            vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
@@ -3039,6 +3059,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         app.agent.send_message(
             session_b.clone(),
             "ECHO_HISTORY".to_string(),
+            vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
@@ -3214,6 +3235,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             session_c.clone(),
             format!("{} 给我一个改造计划", pig_core::mock::SCENARIO_C_TRIGGER),
             vec![],
+            vec![],
             pig_protocol::ExecMode::Plan,
         );
     });
@@ -3327,6 +3349,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 pig_core::mock::SCENARIO_B_TRIGGER
             ),
             vec![],
+            vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
@@ -3383,6 +3406,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         app.agent.send_message(
             session_e.clone(),
             format!("{} 帮我决定实现方案", pig_core::mock::SCENARIO_Q_TRIGGER),
+            vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
@@ -3539,6 +3563,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             session_f.clone(),
             "帮我梳理这个项目的模块结构并给出重构建议".to_string(),
             vec![],
+            vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
@@ -3641,6 +3666,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             seed_id.clone(),
             "种子会话打个卡".to_string(),
             vec![],
+            vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
@@ -3701,6 +3727,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         app.hero_send(
             "模型选择回归 v2".to_string(),
             vec![],
+            vec![],
             pig_protocol::ExecMode::AutoEdit,
             cx,
         );
@@ -3756,6 +3783,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     app!(|app: &mut AppView, cx| {
         app.hero_send(
             "模型选择回归 v1".to_string(),
+            vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
             cx,
@@ -3827,6 +3855,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             seed3_id.clone(),
             "v3 前置种子会话".to_string(),
             vec![],
+            vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
@@ -3871,6 +3900,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     app!(|app: &mut AppView, cx| {
         app.hero_send(
             "模型选择回归 v3".to_string(),
+            vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
             cx,

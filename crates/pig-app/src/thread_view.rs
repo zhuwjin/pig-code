@@ -631,9 +631,20 @@ impl ThreadView {
             }
             Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
             }
-            Event::UserMessage { text, files, .. } => {
+            Event::UserMessage {
+                text,
+                files,
+                image_count,
+                ..
+            } => {
                 let trimmed = text.trim().to_string();
-                self.append_user_message(text, files, cx);
+                // 气泡末尾追加图片张数占位（不渲染缩略图）；队列匹配用原文
+                let display = if image_count > 0 {
+                    format!("{text}\n\n[图片 ×{image_count}]")
+                } else {
+                    text
+                };
+                self.append_user_message(display, files, cx);
                 if let Some(pos) = self
                     .queued
                     .iter()

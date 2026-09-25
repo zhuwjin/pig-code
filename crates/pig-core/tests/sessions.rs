@@ -23,6 +23,7 @@ async fn resume_rebuilds_history() {
             session_id: session_id.clone(),
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -89,6 +90,7 @@ async fn resume_rebuilds_history() {
             session_id: session_id.clone(),
             content: "ECHO_HISTORY 报一下消息数".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -126,6 +128,7 @@ async fn resume_restores_context_watermark() {
             session_id: session_id.clone(),
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -245,6 +248,7 @@ async fn parallel_sessions() {
             session_id: session_a.clone(),
             content: "ECHO_HISTORY A".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -255,6 +259,7 @@ async fn parallel_sessions() {
             session_id: session_b.clone(),
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -314,6 +319,7 @@ async fn agents_md_injected() {
             session_id,
             content: "ECHO_SYSTEM 回显系统提示词".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -354,6 +360,7 @@ async fn compact_shortens_history() {
                 session_id: session_id.clone(),
                 content: text.into(),
                 files: vec![],
+                images: vec![],
                 mode: ExecMode::AutoEdit,
             })
             .await
@@ -388,6 +395,7 @@ async fn compact_shortens_history() {
             session_id: session_id.clone(),
             content: "ECHO_HISTORY".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -465,6 +473,7 @@ async fn restart_restores_todos_changes_and_revert() {
             session_id: session_a.clone(),
             content: format!("{} 改个文件", mock::SCENARIO_B_TRIGGER),
             files: vec![],
+            images: vec![],
             mode: ExecMode::FullAccess,
         })
         .await
@@ -482,6 +491,7 @@ async fn restart_restores_todos_changes_and_revert() {
             session_id: session_b.clone(),
             content: format!("{} 建两条待办", mock::TODO_SCENARIO_TRIGGER),
             files: vec![],
+            images: vec![],
             mode: ExecMode::FullAccess,
         })
         .await
@@ -880,6 +890,7 @@ async fn resume_keeps_appending() {
             session_id: session_id.clone(),
             content: "第一轮消息".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -919,6 +930,7 @@ async fn resume_keeps_appending() {
             session_id: session_id.clone(),
             content: "第二轮消息".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await

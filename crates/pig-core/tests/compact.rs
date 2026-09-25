@@ -27,6 +27,7 @@ fn send_with(
             session_id: sid.into(),
             content: text.into(),
             files: vec![],
+            images: vec![],
             mode,
         })
         .unwrap();

@@ -118,6 +118,17 @@ fn fs_toggle(
         .into_any_element()
 }
 
+/// 剪贴板图片附件（chip 条展示；发送时转 PendingImage 下发）
+struct PastedImage {
+    bytes: std::sync::Arc<Vec<u8>>,
+    mime: String,
+    width: u32,
+    height: u32,
+}
+
+/// 粘贴图片上限（ZCode 同款）
+const MAX_PASTED_IMAGES: usize = 8;
+
 /// 任务耗时：started→ended（或至今），"N 秒 / N 分"。
 fn format_task_duration(started_at: u64, end: u64) -> String {
     let secs = end.saturating_sub(started_at);
@@ -188,6 +199,8 @@ pub enum ComposerEvent {
     Send {
         text: String,
         files: Vec<String>,
+        /// 剪贴板粘贴的图片附件（原始字节，core 侧压缩）
+        images: Vec<pig_protocol::PendingImage>,
         mode: ExecMode,
     },
     Stop,
@@ -298,6 +311,10 @@ pub struct Composer {
     change_files: Vec<(String, u32, u32)>,
     /// 展开输出尾部的任务行 id
     expanded_task: Option<String>,
+    /// 剪贴板粘贴的图片附件（chip 条展示；发送时转 PendingImage 下发，发送后清空）
+    pasted_images: Vec<PastedImage>,
+    /// 粘贴提示（如超过 8 张上限）；下一次成功粘贴清除
+    paste_note: Option<String>,
     hero_mode: bool,
     hero_cwds: Vec<String>,
     hero_cwd: Option<String>,
@@ -363,6 +380,8 @@ impl Composer {
             changes: (0, 0),
             change_files: Vec::new(),
             expanded_task: None,
+            pasted_images: Vec::new(),
+            paste_note: None,
             hero_mode: false,
             hero_cwds: Vec::new(),
             hero_cwd: None,
@@ -674,7 +693,8 @@ impl Composer {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        // 有图片附件时允许空文本发送
+        if text.is_empty() && self.pasted_images.is_empty() {
             return;
         }
         let files: Vec<String> = text
@@ -683,6 +703,15 @@ impl Composer {
             .filter(|path| !path.is_empty())
             .map(str::to_string)
             .collect();
+        // 附件随消息下发并清空（chip 条消失）
+        let images: Vec<pig_protocol::PendingImage> = std::mem::take(&mut self.pasted_images)
+            .into_iter()
+            .map(|image| pig_protocol::PendingImage {
+                bytes: (*image.bytes).clone(),
+                mime: image.mime.clone(),
+            })
+            .collect();
+        self.paste_note = None;
         self.input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
@@ -690,6 +719,7 @@ impl Composer {
         cx.emit(ComposerEvent::Send {
             text,
             files,
+            images,
             mode: EXEC_MODES[self.exec_mode].2,
         });
         cx.notify();
@@ -1669,6 +1699,120 @@ impl Composer {
             .into_any_element()
     }
 
+    /// 粘贴入口（Textarea::on_paste）：仲裁结果决定是否拦截默认文本插入。
+    /// 返回 true = 已作为附件处理，输入框不插文本；false = 交给引擎插文本。
+    fn handle_paste(
+        &mut self,
+        item: &ClipboardItem,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::clipboard::{PasteArb, arbitrate_clipboard};
+        match arbitrate_clipboard(item) {
+            PasteArb::FilePath(path) => {
+                // >20MB 跳过到文本粘贴（粘贴路径文本）；读不出/非图片同样落回文本
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    return false;
+                };
+                if meta.len() > 20 * 1024 * 1024 {
+                    return false;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    return false;
+                };
+                let Some(mime) = pig_core::tool::sniff_image(&bytes) else {
+                    return false;
+                };
+                self.attach_image(bytes, mime, cx);
+                true
+            }
+            PasteArb::ImageBytes { bytes, mime } => {
+                self.attach_image(bytes, mime, cx);
+                true
+            }
+            PasteArb::Text | PasteArb::Nothing => false,
+        }
+    }
+
+    /// 图片进附件列表（chip 条）：超上限只提示不附加
+    fn attach_image(&mut self, bytes: Vec<u8>, mime: &str, cx: &mut Context<Self>) {
+        if self.pasted_images.len() >= MAX_PASTED_IMAGES {
+            self.paste_note = Some(format!("最多粘贴 {MAX_PASTED_IMAGES} 张图片"));
+            cx.notify();
+            return;
+        }
+        self.paste_note = None;
+        let (width, height) = pig_core::tool::image_dimensions(&bytes).unwrap_or((0, 0));
+        self.pasted_images.push(PastedImage {
+            bytes: std::sync::Arc::new(bytes),
+            mime: mime.to_string(),
+            width,
+            height,
+        });
+        cx.notify();
+    }
+
+    /// 图片附件 chip 条：缩略图（gpui img 从字节渲染）+ 尺寸/体积 + X 删除。
+    fn render_pasted_images(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut bar = h_flex().gap_2().items_center().flex_wrap();
+        for (ix, image) in self.pasted_images.iter().enumerate() {
+            let format = match image.mime.as_str() {
+                "image/jpeg" => ImageFormat::Jpeg,
+                "image/webp" => ImageFormat::Webp,
+                "image/gif" => ImageFormat::Gif,
+                _ => ImageFormat::Png,
+            };
+            let thumb = gpui_kit::Image {
+                format,
+                bytes: (*image.bytes).clone(),
+                id: gpui_kit::hash(&(image.bytes.as_slice(), ix)),
+            };
+            bar = bar.child(
+                h_flex()
+                    .gap_1()
+                    .p_1()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().accent)
+                    .child(
+                        gpui_kit::img(std::sync::Arc::new(thumb))
+                            .h_8()
+                            .w_8()
+                            .rounded_sm(),
+                    )
+                    .child(div().text_xs().child(format!(
+                        "图片 {}（{}×{}，{}KB）",
+                        ix + 1,
+                        image.width,
+                        image.height,
+                        image.bytes.len() / 1024
+                    )))
+                    .child(
+                        div()
+                            .id(("remove-pasted-image", ix))
+                            .cursor_pointer()
+                            .rounded_sm()
+                            .hover(|this| this.bg(cx.theme().danger.opacity(0.3)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pasted_images.remove(ix);
+                                cx.notify();
+                            }))
+                            .child(Icon::new(IconName::Close).size_3()),
+                    ),
+            );
+        }
+        if let Some(note) = &self.paste_note {
+            bar = bar.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child(note.clone()),
+            );
+        }
+        bar.into_any_element()
+    }
+
     /// 当前进度（TodoList）+ 后台 Bash 任务 + 会话改动：chip 行。
     /// 进度/任务 chip 点击在芯片上方弹出只读面板（v1 无停止按钮）；
     /// 改动 chip 发事件让 AppView 打开右侧面板的改动 tab。
@@ -2627,13 +2771,26 @@ impl Render for Composer {
                                 self.render_approval_bar(approval.as_ref().expect("approval"), cx),
                             )
                         })
+                        .when(!self.pasted_images.is_empty() || self.paste_note.is_some(), |this| {
+                            this.child(self.render_pasted_images(cx))
+                        })
                         .when(question.is_none() && approval.is_none(), |this| {
                             this.child(
                                 div()
                                     .relative()
                                     .w_full()
                                     .child(
-                                        Textarea::new(&self.input).appearance(false).bordered(false),
+                                        Textarea::new(&self.input)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .on_paste({
+                                                let composer = cx.entity();
+                                                move |item, window, cx| {
+                                                    composer.update(cx, |this, cx| {
+                                                        this.handle_paste(item, window, cx)
+                                                    })
+                                                }
+                                            }),
                                     )
                                     .children(popup),
                             )

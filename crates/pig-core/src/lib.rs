@@ -144,6 +144,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                         session_id: session_id.clone(),
                         content: "用 Read 读取 Cargo.toml，然后一句话总结".to_string(),
                         files: vec![],
+                        images: vec![],
                         mode: pig_protocol::ExecMode::AutoEdit,
                     })
                     .await

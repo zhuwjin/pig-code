@@ -8,6 +8,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// 发送消息时附带的图片（剪贴板粘贴）：进程内通道，原始字节 + mime。
+/// core 侧压缩后进模型上下文；落盘持久化用 rollout 的 ImageRef（不存 base64）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingImage {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+}
+
 /// UI → core 命令
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Op {
@@ -54,6 +62,9 @@ pub enum Op {
         session_id: String,
         content: String,
         files: Vec<String>,
+        /// 粘贴/拖拽进来的图片（原始字节，core 侧压缩后进模型上下文）
+        #[serde(default)]
+        images: Vec<PendingImage>,
         mode: ExecMode,
     },
     Interrupt {
@@ -580,6 +591,9 @@ pub enum Event {
         seq: u64,
         text: String,
         files: Vec<String>,
+        /// 附带的图片张数（UI 气泡显示「[图片 ×N]」；字节不在事件里）
+        #[serde(default)]
+        image_count: usize,
     },
     TurnStarted {
         session_id: String,

@@ -266,6 +266,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
             session_id: session_id.clone(),
             content: format!("{} 改个文件", pig_core::mock::SCENARIO_B_TRIGGER),
             files: vec![],
+            images: vec![],
             mode: ExecMode::Plan,
         })
         .await

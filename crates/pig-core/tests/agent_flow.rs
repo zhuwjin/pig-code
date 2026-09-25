@@ -19,6 +19,7 @@ async fn full_turn_with_tool_call() {
             session_id: session_id.clone(),
             content: "读一下 mock 文件并总结".into(),
             files: vec![mock::MOCK_FILE_NAME.into()],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -124,6 +125,7 @@ async fn interrupt_during_stream() {
             session_id: session_id.clone(),
             content: "说点什么".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -184,6 +186,7 @@ async fn missing_config_is_empty_not_error() {
             session_id: sid,
             content: "hi".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -214,6 +217,7 @@ async fn wait_question(
             session_id: session_id.to_string(),
             content: format!("{} 帮我决定实现方案", mock::SCENARIO_Q_TRIGGER),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await

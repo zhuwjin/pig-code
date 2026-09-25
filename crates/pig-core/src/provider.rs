@@ -286,27 +286,50 @@ struct ChatRequest<'a> {
 fn to_openai_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(messages.len());
     for msg in messages {
-        if msg.role == "tool" && !msg.images.is_empty() {
-            let mut text_only = msg.clone();
-            text_only.images = vec![];
-            out.push(serde_json::to_value(&text_only).unwrap_or_default());
-            let mut parts = Vec::with_capacity(msg.images.len() * 2);
-            for img in &msg.images {
-                let label = img.label.as_deref().unwrap_or("图片");
+        if msg.images.is_empty() {
+            out.push(serde_json::to_value(msg).unwrap_or_default());
+            continue;
+        }
+        match msg.role.as_str() {
+            // tool 角色不能带图：拆成 tool 文本 + 紧随的 user 图片消息
+            "tool" => {
+                let mut text_only = msg.clone();
+                text_only.images = vec![];
+                out.push(serde_json::to_value(&text_only).unwrap_or_default());
+                let mut parts = Vec::with_capacity(msg.images.len() * 2);
+                for img in &msg.images {
+                    let label = img.label.as_deref().unwrap_or("图片");
+                    parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": format!("[ReadMediaFile 输出图片: {label}]"),
+                    }));
+                    parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+                        },
+                    }));
+                }
+                out.push(serde_json::json!({"role": "user", "content": parts}));
+            }
+            // 用户消息带图（粘贴发送）：content 改 parts 数组（文本在前、图在后）
+            "user" => {
+                let mut parts = Vec::with_capacity(msg.images.len() + 1);
                 parts.push(serde_json::json!({
                     "type": "text",
-                    "text": format!("[ReadMediaFile 输出图片: {label}]"),
+                    "text": msg.content.clone().unwrap_or_default(),
                 }));
-                parts.push(serde_json::json!({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": format!("data:{};base64,{}", img.media_type, img.data_base64),
-                    },
-                }));
+                for img in &msg.images {
+                    parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+                        },
+                    }));
+                }
+                out.push(serde_json::json!({"role": "user", "content": parts}));
             }
-            out.push(serde_json::json!({"role": "user", "content": parts}));
-        } else {
-            out.push(serde_json::to_value(msg).unwrap_or_default());
+            _ => out.push(serde_json::to_value(msg).unwrap_or_default()),
         }
     }
     out
@@ -558,10 +581,35 @@ fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_json::Value
                     system.push_str(content);
                 }
             }
-            "user" => out.push(serde_json::json!({
-                "role": "user",
-                "content": msg.content.clone().unwrap_or_default(),
-            })),
+            "user" => {
+                if msg.images.is_empty() {
+                    out.push(serde_json::json!({
+                        "role": "user",
+                        "content": msg.content.clone().unwrap_or_default(),
+                    }));
+                } else {
+                    // 用户消息带图（粘贴发送）：图片块在前、文本在后
+                    let mut blocks: Vec<serde_json::Value> = msg
+                        .images
+                        .iter()
+                        .map(|img| {
+                            serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": img.media_type,
+                                    "data": img.data_base64,
+                                },
+                            })
+                        })
+                        .collect();
+                    blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": msg.content.clone().unwrap_or_default(),
+                    }));
+                    out.push(serde_json::json!({"role": "user", "content": blocks}));
+                }
+            }
             "assistant" => {
                 let mut blocks: Vec<serde_json::Value> = vec![];
                 // thinking 模式下 Anthropic 兼容端点（DeepSeek/Kimi）要求回传思考块，
@@ -1176,6 +1224,30 @@ mod tests {
             .map(|m| serde_json::to_value(m).unwrap())
             .collect();
         assert_eq!(built, direct);
+    }
+
+    #[test]
+    fn user_message_with_images_both_formats() {
+        let mut msg = ChatMsg::user("看图".into());
+        msg.images = vec![ChatImage {
+            media_type: "image/png".into(),
+            data_base64: "QUJD".into(),
+            label: Some("1.png".into()),
+        }];
+        // OpenAI：user content 改 parts（文本在前、image_url 在后）
+        let out = to_openai_messages(&[msg.clone()]);
+        assert_eq!(out.len(), 1, "user 带图不拆条");
+        let parts = out[0]["content"].as_array().expect("parts");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "看图");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+        // Anthropic：user content 改 blocks（image 在前、text 在后）
+        let (_s, out) = to_anthropic_messages(&[msg]);
+        let blocks = out[0]["content"].as_array().expect("blocks");
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["source"]["data"], "QUJD");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "看图");
     }
 
     #[test]

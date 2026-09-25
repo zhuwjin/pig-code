@@ -137,6 +137,7 @@ async fn anthropic_full_turn() {
             session_id: sid,
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -231,6 +232,7 @@ high = {{ reasoning_effort = "high" }}
             session_id: sid,
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -300,6 +302,7 @@ async fn retry_on_server_error() {
             session_id: sid,
             content: "FAIL_ONCE_500 读一下 mock 文件".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
@@ -343,6 +346,7 @@ async fn anthropic_thinking_echoed() {
             session_id: sid,
             content: "读一下 mock 文件并总结".into(),
             files: vec![],
+            images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
