@@ -455,6 +455,13 @@ impl AppView {
             return;
         }
         let thread = cx.new(|cx| ThreadView::new(cx));
+        // 用户消息图片附件的缩略图源：{data}/sessions/{id}.media（与 core 同源解析）
+        thread.update(cx, |thread, _| {
+            thread.set_media_dir(pig_core::rollout::media_dir(
+                &pig_core::data_dir().join("sessions"),
+                session_id,
+            ));
+        });
         let review = cx.new(|cx| ReviewPanel::new(cx));
         let sid = session_id.to_string();
         self._subscriptions.push(
@@ -2866,7 +2873,26 @@ fn main() {
                     window_size.height.min(bounds.size.height - px(96.)),
                 );
             }
-            let window_bounds = WindowBounds::centered(window_size, cx);
+            // 自检窗口贴右下角：与本机正在运行的同尺寸实例（同居中）错开——
+            // 窗口被完全遮挡时 macOS 判 occluded、绘制循环停摆，
+            // prepaint 不跑会让 selftest 的 bounds 断言全 0
+            let window_bounds = if selftest {
+                match cx.primary_display() {
+                    Some(display) => {
+                        let screen = display.bounds();
+                        WindowBounds::Windowed(gpui_kit::Bounds {
+                            origin: gpui_kit::point(
+                                screen.origin.x + screen.size.width - window_size.width,
+                                screen.origin.y + screen.size.height - window_size.height,
+                            ),
+                            size: window_size,
+                        })
+                    }
+                    None => WindowBounds::centered(window_size, cx),
+                }
+            } else {
+                WindowBounds::centered(window_size, cx)
+            };
 
             cx.spawn(async move |cx| {
                 let options = WindowOptions {
@@ -2876,6 +2902,12 @@ fn main() {
                 };
 
                 cx.open_window(options, |window, cx| {
+                    // selftest 依赖真实绘制（bounds 在 prepaint 记录）：后台启动的
+                    // 窗口可能被遮挡/未激活导致渲染循环停摆，显式提到前台
+                    window.activate_window();
+                    // 窗口若落在非当前 Space 会被系统判定遮挡、绘制循环停摆
+                    //（prepaint 不跑、selftest 的 bounds 断言全 0）；激活把 app 提到前台
+                    cx.activate(true);
                     // gpui-kit init 固定为亮色，开窗时按系统外观覆盖
                     Theme::sync_system_appearance(Some(window), cx);
                     let view =
@@ -3086,11 +3118,24 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     assert!(saw_queued, "应出现排队芯片");
     println!("[selftest] 会话 B 完成，消息排队 OK（自动接续，第二轮历史=6）");
 
-    // turn 导航条：会话 B 有 2 轮用户消息，面板已绘制（宽度非零）且达到断点
-    let (nav_turns, nav_pane_w) = app!(|app: &mut AppView, cx| {
+    // turn 导航条：会话 B 有 2 轮用户消息，面板已绘制（宽度非零）且达到断点。
+    // bounds 由 prepaint 记录：数据就绪不等于帧已绘制，等绘制循环跑完
+    let mut waited = 0u64;
+    let (mut nav_turns, mut nav_pane_w) = app!(|app: &mut AppView, cx| {
         let views = app.views.get(&session_b).expect("B 视图在内存");
         views.thread.read(cx).debug_nav_state()
     });
+    loop {
+        if nav_pane_w >= 720. || waited >= 10_000 {
+            break;
+        }
+        timer!(200).await;
+        waited += 200;
+        (nav_turns, nav_pane_w) = app!(|app: &mut AppView, cx| {
+            let views = app.views.get(&session_b).expect("B 视图在内存");
+            views.thread.read(cx).debug_nav_state()
+        });
+    }
     assert!(nav_turns >= 2, "会话 B 应有 ≥2 轮用户消息");
     assert!(
         nav_pane_w >= 720.,

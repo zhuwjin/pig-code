@@ -1619,6 +1619,12 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()
 }
 
+/// 完整解码校验：成功返回尺寸。缩略图渲染前的坏字节防护（UI 降级用）
+pub fn decode_image_check(bytes: &[u8]) -> Option<(u32, u32)> {
+    let image = image::load_from_memory(bytes).ok()?;
+    Some((image.width(), image.height()))
+}
+
 /// JPEG q85 编码（转 RGB 丢弃 alpha）
 fn encode_jpeg(image: &image::DynamicImage) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());

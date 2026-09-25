@@ -56,6 +56,26 @@ pub fn rehydrate_image(image_ref: &ImageRef) -> Option<ChatImage> {
     })
 }
 
+/// 用户消息事件的 UI 展示文本：正文 + 每张图一个 markdown 附件链接
+///（`[图片 N](pig-code-composer://attachments/mN)`，N 取 media 文件名序号）。
+/// 仅事件文本带链接——进模型 history 与 rollout 的文本保持干净（模型拿图片 block）。
+pub fn user_display_text(text: &str, image_refs: &[ImageRef]) -> String {
+    let links: Vec<String> = image_refs
+        .iter()
+        .filter_map(|image_ref| {
+            let n: u32 = image_ref.path.file_stem()?.to_str()?.parse().ok()?;
+            Some(format!("[图片 {n}](pig-code-composer://attachments/m{n})"))
+        })
+        .collect();
+    if links.is_empty() {
+        return text.to_string();
+    }
+    if text.is_empty() {
+        return links.join(" ");
+    }
+    format!("{}\n\n{}", text, links.join(" "))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RolloutRecord {

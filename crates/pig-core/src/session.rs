@@ -296,9 +296,10 @@ impl Session {
                     images,
                 } => {
                     in_assistant = false;
-                    let text = text.clone();
-                    let files = files.clone();
                     let image_count = images.len();
+                    // 事件文本带附件链接（与 live 同形态）；rollout 里的原文保持干净
+                    let text = crate::rollout::user_display_text(text, images);
+                    let files = files.clone();
                     self.emit(
                         |session_id, seq| Event::UserMessage {
                             session_id,
@@ -795,6 +796,8 @@ impl Session {
         let mut user_msg = ChatMsg::user(std::mem::take(&mut user_text));
         user_msg.images = chat_images;
         self.history.push(user_msg);
+        // 事件文本带附件链接（UI 渲染缩略图用）；history/rollout 是干净文本
+        let display_text = crate::rollout::user_display_text(&rollout_text, &image_refs);
         self.record(&RolloutRecord::User {
             text: rollout_text.clone(),
             files: record_files.clone(),
@@ -804,7 +807,7 @@ impl Session {
             |session_id, seq| Event::UserMessage {
                 session_id,
                 seq,
-                text: rollout_text.clone(),
+                text: display_text,
                 files: record_files.clone(),
                 image_count,
             },

@@ -591,7 +591,8 @@ pub enum Event {
         seq: u64,
         text: String,
         files: Vec<String>,
-        /// 附带的图片张数（UI 气泡显示「[图片 ×N]」；字节不在事件里）
+        /// 附带的图片张数（协议兼容保留；UI 展示用 text 末尾的
+        /// pig-code-composer://attachments/mN 链接，字节不在事件里）
         #[serde(default)]
         image_count: usize,
     },

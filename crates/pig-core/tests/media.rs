@@ -637,13 +637,19 @@ async fn paste_flow_persists_media_and_ships_image_payload() {
     let session_id = common::new_session(&agent, dir.clone()).await;
     let events = send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
 
-    // 用户气泡事件带图片张数
+    // 用户气泡事件带图片张数 + markdown 附件链接（m1 与 media 文件名序号一致）
+    let user_text = events
+        .iter()
+        .find_map(|e| match e {
+            Event::UserMessage {
+                text, image_count, ..
+            } if *image_count == 1 => Some(text.clone()),
+            _ => None,
+        })
+        .expect("UserMessage.image_count=1");
     assert!(
-        events.iter().any(|e| matches!(
-            e,
-            Event::UserMessage { image_count, .. } if *image_count == 1
-        )),
-        "UserMessage.image_count=1"
+        user_text.contains("[图片 1](pig-code-composer://attachments/m1)"),
+        "事件文本带附件链接: {user_text}"
     );
     // 媒体目录布局：{data}/sessions/{sid}.media/1.png
     let stored = data_dir
@@ -674,6 +680,11 @@ async fn paste_flow_persists_media_and_ships_image_payload() {
         "图片载荷发出: 请求体应有 image_url"
     );
     assert!(bodies.contains("data:image/png;base64,"), "{bodies}");
+    // 链接只对 UI 展示：进模型 history 的文本保持干净
+    assert!(
+        !bodies.contains("pig-code-composer"),
+        "history 不带附件链接: {bodies}"
+    );
     // 小图直通（未缩放/转码）：不加压缩附注、不落原图
     assert!(
         !bodies.contains("已压缩以适应模型限制"),
@@ -744,7 +755,15 @@ async fn paste_caption_orig_and_sequential_media_names() {
     assert!(bodies.contains("1.orig.png"), "附注带原图路径: {bodies}");
 
     // 第二轮粘贴：文件名续排（2.png），不覆盖第一轮的 1.png（旧 ImageRef 仍有效）
-    send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
+    let events2 = send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
+    assert!(
+        events2.iter().any(|e| matches!(
+            e,
+            Event::UserMessage { text, .. }
+                if text.contains("[图片 2](pig-code-composer://attachments/m2)")
+        )),
+        "第二轮链接序号续排 m2"
+    );
     assert!(media.join("1.png").exists() && media.join("2.png").exists());
     let rollout = std::fs::read_to_string(
         data_dir
@@ -796,9 +815,11 @@ async fn paste_resume(name: &str, delete_media: bool) {
     assert!(
         replay.iter().any(|e| matches!(
             e,
-            Event::UserMessage { image_count, .. } if *image_count == 1
+            Event::UserMessage { image_count, text, .. }
+                if *image_count == 1
+                    && text.contains("[图片 1](pig-code-composer://attachments/m1)")
         )),
-        "回放气泡仍带图片张数"
+        "回放气泡带图片张数 + 附件链接（与 live 同形态）"
     );
     // 排空回放残余事件，避免干扰后面的 recv_until
     while tokio::time::timeout(std::time::Duration::from_millis(200), agent2.events.recv())

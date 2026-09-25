@@ -70,12 +70,25 @@ pub struct TurnFileRow {
     scroll: ScrollHandle,
 }
 
+/// 用户消息的图片附件：事件文本末尾的 `pig-code-composer://attachments/mN`
+/// 链接解析而来（mN 的 N 与 media 目录文件名序号一致）
+pub struct UserImage {
+    /// media 文件名序号（降级 chip 显示用）
+    index: u32,
+    /// 缩略图（加载/解码失败 = None → 渲染降级文本 chip）
+    thumb: Option<std::sync::Arc<Image>>,
+    /// 原图尺寸（缩略图等比缩放用）
+    dims: (u32, u32),
+}
+
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
     /// 用户消息的选择 handle + 刷新订阅（拖动选择时驱动实时高亮），仅 User 角色有
     pub selection: Option<(TextSelectionHandle, Subscription)>,
     pub files: Vec<String>,
+    /// 用户消息的图片附件（链接已从 text 剥出；仅 User 角色非空）
+    pub images: Vec<UserImage>,
     pub segments: Vec<Segment>,
     pub footer: Option<String>,
 }
@@ -87,6 +100,7 @@ impl ChatMessage {
             text,
             selection: None,
             files,
+            images: vec![],
             segments: vec![],
             footer: None,
         }
@@ -98,6 +112,7 @@ impl ChatMessage {
             text,
             selection: None,
             files: vec![],
+            images: vec![],
             segments: vec![],
             footer: None,
         }
@@ -109,10 +124,45 @@ impl ChatMessage {
             text: String::new(),
             selection: None,
             files: vec![],
+            images: vec![],
             segments: vec![],
             footer: None,
         }
     }
+}
+
+/// 事件文本 → (正文, 图片序号列表)：剥出末尾的附件链接行
+///（core 生成形态：正文 + "\n\n" + 空格分隔的 `[图片 N](pig-code-composer://attachments/mN)`；
+/// 纯图消息没有正文前缀，整段就是链接行）。
+/// 注意 label「图片 N」自带空格，token 边界按 `)` 切而不是空格。
+/// 尾行混入任何非链接 token（含用户手打的相似文本）→ 整体不拆、原文保留。
+fn split_image_links(text: &str) -> (String, Vec<u32>) {
+    let (body, tail) = match text.rsplit_once("\n\n") {
+        Some((body, tail)) => (body, tail.trim()),
+        None => ("", text.trim()),
+    };
+    let mut indices = Vec::new();
+    for chunk in tail.split_inclusive(')') {
+        let Some(n) = parse_image_link(chunk.trim()) else {
+            return (text.to_string(), vec![]);
+        };
+        indices.push(n);
+    }
+    if indices.is_empty() {
+        return (text.to_string(), vec![]);
+    }
+    (body.to_string(), indices)
+}
+
+/// `[图片 N](pig-code-composer://attachments/mN)` → N（label 与 URL 序号须一致）
+fn parse_image_link(token: &str) -> Option<u32> {
+    let inner = token.strip_prefix("[图片 ")?.strip_suffix(')')?;
+    let (label, url) = inner.split_once("](")?;
+    let n: u32 = url
+        .strip_prefix("pig-code-composer://attachments/m")?
+        .parse()
+        .ok()?;
+    (label.parse::<u32>().ok()? == n).then_some(n)
 }
 
 #[derive(Clone)]
@@ -156,6 +206,9 @@ pub struct ThreadView {
     /// 导航点击后抑制一次「回到底部自动恢复跟随」：跳转滚动在 prepaint 才生效，
     /// 生效前 offset 仍是旧值，贴着底会被误判成用户滚回了底部
     nav_jump: bool,
+    /// 本会话的媒体目录（{data}/sessions/{id}.media）：用户消息图片缩略图来源；
+    /// None/目录不存在 → 附件链接整体按原文本降级显示
+    media_dir: Option<std::path::PathBuf>,
     _ticker: Task<()>,
 }
 
@@ -197,8 +250,14 @@ impl ThreadView {
             nav_rail_scroll: ScrollHandle::new(),
             nav_last_active: None,
             nav_jump: false,
+            media_dir: None,
             _ticker: ticker,
         }
+    }
+
+    /// 绑定会话媒体目录（ensure_views 创建时调用）：图片附件缩略图的文件来源
+    pub fn set_media_dir(&mut self, dir: std::path::PathBuf) {
+        self.media_dir = Some(dir);
     }
 
     fn set_streaming(&mut self, streaming: bool, _cx: &mut Context<Self>) {
@@ -258,11 +317,62 @@ impl ThreadView {
         files: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        self.messages.push(ChatMessage::user(text, files));
+        // 事件文本末尾的附件链接 → 缩略图；media 目录不可用（旧会话等）
+        // → 不拆分，原文整体保留（链接降级为文本显示）
+        let media_ready = self.media_dir.as_ref().is_some_and(|dir| dir.is_dir());
+        let (body, indices) = if media_ready {
+            split_image_links(&text)
+        } else {
+            (text, vec![])
+        };
+        let mut message = ChatMessage::user(body, files);
+        message.images = indices
+            .into_iter()
+            .map(|n| self.load_user_image(n))
+            .collect();
+        self.messages.push(message);
         // 用户自己发消息：强制回到底部并恢复跟随
         self.follow_bottom = true;
         self.auto_scroll();
         cx.notify();
+    }
+
+    /// 按序号加载媒体文件 `{N}.{ext}` → 缩略图数据；丢失/坏字节 → thumb None（降级 chip）
+    fn load_user_image(&self, n: u32) -> UserImage {
+        let missing = || UserImage {
+            index: n,
+            thumb: None,
+            dims: (0, 0),
+        };
+        let Some(dir) = &self.media_dir else {
+            return missing();
+        };
+        let file = ["png", "jpg"]
+            .into_iter()
+            .map(|ext| dir.join(format!("{n}.{ext}")))
+            .find(|path| path.exists());
+        let Some(file) = file else {
+            return missing();
+        };
+        let Ok(bytes) = std::fs::read(&file) else {
+            return missing();
+        };
+        let Some(dims) = pig_core::tool::decode_image_check(&bytes) else {
+            return missing();
+        };
+        let format = match pig_core::tool::sniff_image(&bytes) {
+            Some("image/jpeg") => ImageFormat::Jpeg,
+            _ => ImageFormat::Png,
+        };
+        UserImage {
+            index: n,
+            thumb: Some(std::sync::Arc::new(Image {
+                format,
+                bytes,
+                id: gpui_kit::hash(&file),
+            })),
+            dims,
+        }
     }
 
     /// 自测用：turn 导航条可见条件——（用户消息数, 消息面板宽度 px）
@@ -631,20 +741,11 @@ impl ThreadView {
             }
             Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
             }
-            Event::UserMessage {
-                text,
-                files,
-                image_count,
-                ..
-            } => {
-                let trimmed = text.trim().to_string();
-                // 气泡末尾追加图片张数占位（不渲染缩略图）；队列匹配用原文
-                let display = if image_count > 0 {
-                    format!("{text}\n\n[图片 ×{image_count}]")
-                } else {
-                    text
-                };
-                self.append_user_message(display, files, cx);
+            Event::UserMessage { text, files, .. } => {
+                // 链接尾巴不进队列匹配（queued 里是用户输入原文）
+                let (body, _) = split_image_links(text.as_str());
+                let trimmed = body.trim().to_string();
+                self.append_user_message(text.clone(), files, cx);
                 if let Some(pos) = self
                     .queued
                     .iter()
@@ -752,10 +853,11 @@ impl ThreadView {
                 })))
             })
             .child(
-                div()
+                v_flex()
                     .max_w(relative(0.8))
                     .px_3()
                     .py_2()
+                    .gap_2()
                     .rounded_2xl()
                     .bg(cx.theme().accent)
                     .text_sm()
@@ -767,21 +869,59 @@ impl ThreadView {
                     )
                     // 纯文本原文渲染 + 窗口级选择（拖拽/双击选词/Ctrl+C 复制）；
                     // 显式 handle + refresh_window_on_change 让拖动过程实时高亮
-                    .child(
-                        SelectableText::with_handle(
-                            ("user-msg-text", ix),
-                            message
-                                .selection
-                                .as_ref()
-                                .expect("render 时已惰性创建选择 handle")
-                                .0
-                                .clone(),
-                            message.text.clone(),
+                    .when(!message.text.is_empty(), |this| {
+                        this.child(
+                            SelectableText::with_handle(
+                                ("user-msg-text", ix),
+                                message
+                                    .selection
+                                    .as_ref()
+                                    .expect("render 时已惰性创建选择 handle")
+                                    .0
+                                    .clone(),
+                                message.text.clone(),
+                            )
+                            .document_order(ix as u64),
                         )
-                        .document_order(ix as u64),
-                    ),
+                    })
+                    // 图片附件：缩略图横排（换行）；丢失/坏字节 → 文本 chip 降级
+                    .when(!message.images.is_empty(), |this| {
+                        this.child(
+                            h_flex().gap_2().flex_wrap().children(
+                                message
+                                    .images
+                                    .iter()
+                                    .map(|image| self.render_user_image(image, cx)),
+                            ),
+                        )
+                    }),
             )
             .into_any_element()
+    }
+
+    /// 用户消息的单张图片附件：缩略图（限高 120 / 限宽 240，等比不放大）；
+    /// 文件丢失/解码失败 → 「[图片 N（已失效）]」文本 chip
+    fn render_user_image(&self, image: &UserImage, cx: &mut Context<Self>) -> AnyElement {
+        match &image.thumb {
+            Some(thumb) => {
+                let (w, h) = image.dims;
+                let scale = (120.0 / h as f32).min(240.0 / w as f32).min(1.0);
+                gpui_kit::img(thumb.clone())
+                    .w(px((w as f32 * scale).max(1.0)))
+                    .h(px((h as f32 * scale).max(1.0)))
+                    .rounded_md()
+                    .into_any_element()
+            }
+            None => div()
+                .px_2()
+                .py_1()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().muted)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("[图片 {}（已失效）]", image.index))
+                .into_any_element(),
+        }
     }
 
     /// 思考折叠块（ZCode 同款）：无边框的一行 header（大脑图标 + 文案），箭头悬停/
@@ -2390,5 +2530,58 @@ fn consume_scroll(
         if handle.max_offset().y > px(0.) {
             cx.stop_propagation();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_image_link, split_image_links};
+
+    #[test]
+    fn split_image_links_extracts_trailing_attachment_links() {
+        // 正文 + 链接行
+        let (body, indices) =
+            split_image_links("看图说话\n\n[图片 1](pig-code-composer://attachments/m1)");
+        assert_eq!(body, "看图说话");
+        assert_eq!(indices, vec![1]);
+        // 多图空格分隔
+        let (body, indices) = split_image_links(
+            "多图\n\n[图片 1](pig-code-composer://attachments/m1) [图片 2](pig-code-composer://attachments/m2)",
+        );
+        assert_eq!(body, "多图");
+        assert_eq!(indices, vec![1, 2]);
+        // 纯图消息（无正文前缀，整段即链接行）
+        let (body, indices) = split_image_links("[图片 3](pig-code-composer://attachments/m3)");
+        assert_eq!(body, "");
+        assert_eq!(indices, vec![3]);
+        // 正文本身含空行：只剥最后的链接行
+        let (body, indices) =
+            split_image_links("第一段\n\n第二段\n\n[图片 2](pig-code-composer://attachments/m2)");
+        assert_eq!(body, "第一段\n\n第二段");
+        assert_eq!(indices, vec![2]);
+    }
+
+    #[test]
+    fn split_image_links_leaves_non_links_untouched() {
+        // 无链接 → 原样
+        let (body, indices) = split_image_links("普通消息");
+        assert_eq!(body, "普通消息");
+        assert!(indices.is_empty());
+        // 尾行混入非链接 token → 整体不拆
+        let (body, indices) =
+            split_image_links("看图\n\n[图片 1](pig-code-composer://attachments/m1) 别的");
+        assert_eq!(
+            body,
+            "看图\n\n[图片 1](pig-code-composer://attachments/m1) 别的"
+        );
+        assert!(indices.is_empty());
+        // label 与 URL 序号不一致 → 不算附件链接
+        assert_eq!(
+            parse_image_link("[图片 1](pig-code-composer://attachments/m2)"),
+            None
+        );
+        // 其它协议/形态 → 不算
+        assert_eq!(parse_image_link("[图片 1](https://x.com/m1)"), None);
+        assert!(parse_image_link("[图片 12](pig-code-composer://attachments/m12)").is_some());
     }
 }
