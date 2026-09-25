@@ -56,6 +56,12 @@ pub const SCENARIO_PLAN_EXIT_TRIGGER: &str = "PLAN_EXIT_SCENARIO";
 pub const PLAN_EXIT_MARKER: &str = "MOCK_PLAN_EXIT_DONE";
 pub const PLAN_EXIT_FILE: &str = "plan_exit.txt";
 
+/// 计划进入/恢复场景（EnterPlanMode 验证）：EnterPlanMode → Write（应被 Plan
+/// 硬拒）→ ExitPlanMode → Write（恢复原模式后执行）→ 文本。
+pub const SCENARIO_PLAN_ENTER_TRIGGER: &str = "PLAN_ENTER_SCENARIO";
+pub const PLAN_ENTER_MARKER: &str = "MOCK_PLAN_ENTER_DONE";
+pub const PLAN_ENTER_FILE: &str = "plan_enter.txt";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -360,6 +366,40 @@ fn plan_exit_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
         ),
         _ => vec![
             sse_chunk(serde_json::json!({"content": PLAN_EXIT_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
+/// 计划进入/恢复场景：纯按 tool 结果数推进（Write 被 Plan 硬拒也算一步）。
+fn plan_enter_scenario_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_pn_1",
+            "EnterPlanMode",
+            &serde_json::json!({"reason": "改动范围大，先出计划"}).to_string(),
+            None,
+        ),
+        1 => tool_call_chunks(
+            "call_pn_2",
+            "Write",
+            &serde_json::json!({"path": PLAN_ENTER_FILE, "content": "from-plan\n"}).to_string(),
+            None,
+        ),
+        2 => tool_call_chunks(
+            "call_pn_3",
+            "ExitPlanMode",
+            &serde_json::json!({"plan": "计划就绪"}).to_string(),
+            None,
+        ),
+        3 => tool_call_chunks(
+            "call_pn_4",
+            "Write",
+            &serde_json::json!({"path": PLAN_ENTER_FILE, "content": "executed\n"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": PLAN_ENTER_MARKER}), None),
             sse_chunk(serde_json::json!({}), Some("stop")),
         ],
     }
@@ -692,6 +732,8 @@ async fn handle_connection(
         readonly_scenario_response(tool_results)
     } else if body.contains(SCENARIO_PLAN_EXIT_TRIGGER) {
         plan_exit_scenario_response(&body, tool_results)
+    } else if body.contains(SCENARIO_PLAN_ENTER_TRIGGER) {
+        plan_enter_scenario_response(tool_results)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {

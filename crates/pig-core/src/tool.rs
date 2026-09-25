@@ -360,6 +360,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(TaskStop),
         Box::new(AskUserQuestionTool),
         Box::new(ExitPlanModeTool),
+        Box::new(EnterPlanModeTool),
     ]
 }
 
@@ -397,6 +398,7 @@ pub fn summarize(call: &ToolCall) -> String {
             .unwrap_or("?")
             .to_string(),
         "ExitPlanMode" => "请求退出计划模式".to_string(),
+        "EnterPlanMode" => "请求进入计划模式".to_string(),
         _ => args.to_string(),
     };
     // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
@@ -2323,7 +2325,6 @@ struct AskUserQuestionTool;
 /// ExitPlanMode：模型请求退出计划模式。会话层在 Plan 硬拒之前拦截并强制弹窗
 /// （ZCode 同款）；工具实现只是防御性兜底，正常路径不会走到 execute。
 struct ExitPlanModeTool;
-
 impl Tool for ExitPlanModeTool {
     fn name(&self) -> &'static str {
         "ExitPlanMode"
@@ -2357,6 +2358,46 @@ impl Tool for ExitPlanModeTool {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
         Box::pin(async move { Err("ExitPlanMode 由会话层处理".to_string()) })
+    }
+}
+
+/// EnterPlanMode：模型主动进入计划模式（任务复杂/改动大时先调研出计划）。
+/// 进计划是自我收紧（只读化），会话层直接切换不弹窗；工具实现只是防御性兜底。
+struct EnterPlanModeTool;
+
+impl Tool for EnterPlanModeTool {
+    fn name(&self) -> &'static str {
+        "EnterPlanMode"
+    }
+
+    /// 只读标记：免审批、Plan 下不被拦（幂等提示）
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "EnterPlanMode",
+                "description": "任务复杂或改动范围大时调用：进入计划模式（只读调研），计划写好后用 ExitPlanMode 请用户确认执行。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": { "type": "string", "description": "为什么进入计划模式（可选，仅记录）" }
+                    }
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _args: serde_json::Value,
+        _ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
+        Box::pin(async move { Err("EnterPlanMode 由会话层处理".to_string()) })
     }
 }
 

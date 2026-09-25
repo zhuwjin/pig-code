@@ -947,3 +947,89 @@ async fn exit_plan_mode_outside_plan_errors() {
     );
     agent.shutdown();
 }
+
+// ---------- EnterPlanMode（与 ExitPlanMode 配对） ----------
+
+fn mode_changes(events: &[Event]) -> Vec<ExecMode> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ExecModeChanged { mode, .. } => Some(*mode),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enter_plan_switches_without_dialog_and_exit_restores_original() {
+    // AutoEdit → EnterPlanMode（不弹窗，直接切 Plan）→ Write 被 Plan 硬拒 →
+    // ExitPlanMode（弹窗 Allow）→ 恢复 AutoEdit → Write 免审批执行
+    let (events, dir, agent) = run_trigger(
+        ExecMode::AutoEdit,
+        Some(ApprovalDecision::Allow),
+        mock::SCENARIO_PLAN_ENTER_TRIGGER,
+        "plan-enter",
+        None,
+    )
+    .await;
+
+    let details = approval_details(&events);
+    assert_eq!(
+        details.len(),
+        1,
+        "只有 ExitPlanMode 弹窗（EnterPlanMode 不弹）: {details:?}"
+    );
+    assert_eq!(details[0].0, "ExitPlanMode");
+
+    assert_eq!(
+        mode_changes(&events),
+        [ExecMode::Plan, ExecMode::AutoEdit],
+        "进入 Plan → 恢复原模式（AutoEdit，不是默认的变更前确认）"
+    );
+
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter().any(|(id, out, err)| id.contains("call_pn_1")
+            && !err
+            && out.contains("已切换到计划模式")),
+        "EnterPlanMode 幂等成功: {ends:?}"
+    );
+    assert!(
+        ends.iter()
+            .any(|(id, out, err)| id.contains("call_pn_2") && *err && out.contains("计划模式")),
+        "Plan 下 Write 被硬拒: {ends:?}"
+    );
+    assert!(
+        ends.iter()
+            .any(|(id, _, err)| id.contains("call_pn_4") && !err),
+        "恢复后 Write 执行: {ends:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(mock::PLAN_ENTER_FILE)).unwrap(),
+        "executed\n"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enter_plan_mode_idempotent_when_already_plan() {
+    // Plan 下再调 EnterPlanMode：幂等提示，无模式事件；后续 ExitPlanMode 仍弹窗
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::Plan,
+        Some(ApprovalDecision::Reject),
+        mock::SCENARIO_PLAN_ENTER_TRIGGER,
+        "plan-enter-idem",
+        None,
+    )
+    .await;
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter()
+            .any(|(id, out, err)| id.contains("call_pn_1") && !err && out.contains("已在计划模式")),
+        "幂等提示: {ends:?}"
+    );
+    assert!(mode_changes(&events).is_empty(), "幂等路径不发模式事件");
+    let details = approval_details(&events);
+    assert_eq!(details.len(), 1, "只有 ExitPlanMode 一次弹窗: {details:?}");
+    agent.shutdown();
+}

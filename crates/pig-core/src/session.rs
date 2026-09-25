@@ -105,6 +105,8 @@ pub struct Session {
     always_allowed: HashSet<(String, String)>,
     /// 项目级 allow/deny 规则（.pigcode/permissions.toml，会话创建/回放时加载一次）
     permissions: crate::permissions::PermissionRules,
+    /// EnterPlanMode 进入计划模式前的模式（ExitPlanMode 确认后恢复；内存态不持久化）
+    pre_plan_mode: Option<ExecMode>,
     pending: PendingApprovals,
     pending_questions: PendingQuestions,
     mode: ExecMode,
@@ -156,6 +158,7 @@ impl Session {
             state: crate::task::SessionToolState::new(meta.id, task_notify),
             always_allowed: HashSet::new(),
             permissions: load_permissions(&meta.cwd),
+            pre_plan_mode: None,
             pending,
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -215,6 +218,7 @@ impl Session {
             state: crate::task::SessionToolState::new(id.to_string(), task_notify),
             always_allowed: HashSet::new(),
             permissions: load_permissions(&cwd),
+            pre_plan_mode: None,
             pending,
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -1028,25 +1032,32 @@ impl Session {
                     };
                     match decision {
                         ApprovalDecision::Allow | ApprovalDecision::AlwaysAllow => {
-                            // 切换到「变更前确认」：写穿 store + 发事件让 UI 模式 chip 实时更新
-                            //（Op::SetExecMode 的 store 写穿同路径；事件是 core 主动改模式的补充）
-                            self.mode = ExecMode::ConfirmBeforeEdit;
+                            // 恢复 EnterPlanMode 前的模式（没记录则回落「变更前确认」）：
+                            // 写穿 store + 发事件让 UI 模式 chip 实时更新
+                            let restored = self
+                                .pre_plan_mode
+                                .take()
+                                .unwrap_or(ExecMode::ConfirmBeforeEdit);
+                            self.mode = restored;
                             let session_id = self.id.clone();
                             self.store.lock().expect("store lock").update_session(
                                 &session_id,
                                 |m| {
-                                    m.exec_mode = ExecMode::ConfirmBeforeEdit;
+                                    m.exec_mode = restored;
                                 },
                             );
                             self.emit(
                                 |session_id, seq| Event::ExecModeChanged {
                                     session_id,
                                     seq,
-                                    mode: ExecMode::ConfirmBeforeEdit,
+                                    mode: restored,
                                 },
                                 tx,
                             );
-                            note = "已切换到「变更前确认」模式，请开始执行计划。".to_string();
+                            note = format!(
+                                "已切换到「{}」模式，请开始执行计划。",
+                                exec_mode_label(restored)
+                            );
                             is_error = false;
                         }
                         ApprovalDecision::Reject => {
@@ -1055,6 +1066,59 @@ impl Session {
                         }
                     }
                 }
+                self.history
+                    .push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.record(&RolloutRecord::ToolCall {
+                    tool: call.name.clone(),
+                    summary,
+                    arguments: call.arguments.clone(),
+                    output: note.clone(),
+                    is_error,
+                    edit: None,
+                });
+                self.emit(
+                    |session_id, seq| Event::ToolCallEnd {
+                        session_id,
+                        seq,
+                        item_id,
+                        output: note,
+                        is_error,
+                        edit: None,
+                    },
+                    tx,
+                );
+                continue;
+            }
+
+            // EnterPlanMode：进计划是自我收紧（只读化），直接切换不弹窗。
+            // 记录 pre_plan_mode，ExitPlanMode 确认后恢复原模式。
+            if call.name == "EnterPlanMode" {
+                let (note, is_error) = if self.mode == ExecMode::Plan {
+                    ("已在计划模式，请继续调研并输出计划。".to_string(), false)
+                } else {
+                    self.pre_plan_mode = Some(self.mode);
+                    self.mode = ExecMode::Plan;
+                    let session_id = self.id.clone();
+                    self.store
+                        .lock()
+                        .expect("store lock")
+                        .update_session(&session_id, |m| {
+                            m.exec_mode = ExecMode::Plan;
+                        });
+                    self.emit(
+                        |session_id, seq| Event::ExecModeChanged {
+                            session_id,
+                            seq,
+                            mode: ExecMode::Plan,
+                        },
+                        tx,
+                    );
+                    (
+                        "已切换到计划模式。接下来只能使用只读工具调研，计划写好后调用 ExitPlanMode 请用户确认执行。"
+                            .to_string(),
+                        false,
+                    )
+                };
                 self.history
                     .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
@@ -1710,6 +1774,17 @@ fn compaction_prompt(history: &[ChatMsg]) -> String {
     out
 }
 
+/// 模式中文名（工具结果文案用；与 app 侧 EXEC_MODES 的标签一致）
+fn exec_mode_label(mode: ExecMode) -> &'static str {
+    match mode {
+        ExecMode::ConfirmBeforeEdit => "变更前确认",
+        ExecMode::AutoEdit => "自动编辑",
+        ExecMode::Plan => "计划",
+        ExecMode::FullAccess => "完全访问",
+        ExecMode::Yolo => "无管制",
+    }
+}
+
 /// 加载项目级权限规则：文件缺失 = 空规则；解析失败不致命，stderr 提示（
 /// 会话创建/回放路径没有合适的事件通道，不硬建）
 fn load_permissions(cwd: &std::path::Path) -> crate::permissions::PermissionRules {
@@ -2345,6 +2420,9 @@ pub async fn agent_loop(
                         if let Some(entry) = sessions.get_mut(&session_id) {
                             if let Some(session) = entry.session.as_mut() {
                                 session.set_mode(mode);
+                                // 手动切模式：EnterPlanMode 的记忆作废（之后再
+                                // ExitPlanMode 回落到默认「变更前确认」）
+                                session.pre_plan_mode = None;
                             }
                             store.lock().expect("store lock").update_session(&session_id, |m| {
                                 m.exec_mode = mode;

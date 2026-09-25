@@ -48,6 +48,7 @@ pub fn system_prompt(
          - 不执行有破坏性的命令（删除、格式化、强制推送等）。\n\
          - 读文件/搜索优先用 Read、Glob、Grep 专用工具，而非 Bash。\n\
          - 多步任务先用 TodoList 拆分并随时更新进度。\n\
+         - 任务复杂或改动范围大时，可先调用 EnterPlanMode 进入计划模式调研并出计划。\n\
          - 长时命令（dev server/watch/长构建）用 Bash 的 run_in_background，配合 TaskOutput 查输出。\n\
          - 需要用户拍板时用 AskUserQuestion 给出选项，而不是纯文本提问。\n\
          - 默认只能读写工作区内文件与 tmp 目录；用户在模式菜单开启后才可读写工作区外文件（.env/私钥/凭据等敏感文件永远不可访问）。\n\
