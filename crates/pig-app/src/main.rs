@@ -261,6 +261,10 @@ struct AppView {
     workspace_aliases: std::collections::HashMap<String, String>,
     settings: Entity<SettingsView>,
     settings_open: bool,
+    /// 「开启无管制模式？」确认框（每次切 Yolo 都弹，不记住选择）
+    yolo_confirm_open: bool,
+    /// 确认框焦点（Esc 取消用；打开时抢焦，取消键默认聚焦）
+    yolo_confirm_focus: FocusHandle,
     sidebar_collapsed: bool,
     /// 右侧面板是否展开（默认收起：进会话不自动显示改动）
     right_open: bool,
@@ -338,6 +342,8 @@ impl AppView {
             workspace_aliases: std::collections::HashMap::new(),
             settings,
             settings_open: false,
+            yolo_confirm_open: false,
+            yolo_confirm_focus: cx.focus_handle(),
             sidebar_collapsed: false,
             right_open: false,
             right_tabs: vec![],
@@ -1261,6 +1267,103 @@ impl AppView {
         }
     }
 
+    /// 应用执行模式：本地缓存 + core 下发 + composer 勾选态（直接选中路径是幂等重设，
+    /// Yolo 确认框路径靠它补上——拦截时 composer 的下标没动过）
+    fn apply_exec_mode(&mut self, mode: ExecMode, cx: &mut Context<Self>) {
+        self.exec_mode = mode;
+        self.update_current_meta(|m| m.exec_mode = mode);
+        self.composer
+            .update(cx, |composer, cx| composer.set_exec_mode(mode, cx));
+        if let Some(sid) = &self.current {
+            self.agent.set_exec_mode(sid.clone(), mode);
+        }
+    }
+
+    /// 关闭 Yolo 确认框并回焦输入框
+    fn close_yolo_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.yolo_confirm_open = false;
+        self.composer.update(cx, |composer, cx| {
+            composer.focus_input(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Yolo 确认框「开启无管制模式」：应用模式并关闭
+    fn confirm_yolo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_yolo_confirm(window, cx);
+        self.apply_exec_mode(ExecMode::Yolo, cx);
+    }
+
+    /// 「开启无管制模式？」确认框（ModelDialog 同款覆盖层：遮罩 + 居中卡片）。
+    /// 取消/点遮罩/Esc 不生效；确认才切 Yolo。每次切换都弹，不记住选择。
+    fn render_yolo_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("yolo-confirm-overlay")
+            .absolute()
+            .inset_0()
+            .bg(gpui_kit::black().opacity(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.close_yolo_confirm(window, cx);
+            }))
+            .child(
+                v_flex()
+                    .id("yolo-confirm")
+                    .track_focus(&self.yolo_confirm_focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" {
+                            this.close_yolo_confirm(window, cx);
+                        }
+                    }))
+                    .on_click(|_, _, cx| cx.stop_propagation()) // 点卡片不触发遮罩取消
+                    .w(px(420.))
+                    .gap_3()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .text_color(cx.theme().danger)
+                            .child("开启无管制模式？"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("此模式下所有操作直接执行：不弹任何确认，危险命令也不再拦截。仅建议在容器、虚拟机等隔离环境中使用。")
+                            .child("注意：敏感文件（.env / 私钥 / 云凭据）仍会拦截。"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .justify_end()
+                            .child(
+                                Button::new("yolo-cancel")
+                                    .label("取消")
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_yolo_confirm(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("yolo-confirm")
+                                    .label("开启无管制模式")
+                                    .danger()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_yolo(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn on_composer_event(
         &mut self,
         event: &ComposerEvent,
@@ -1390,11 +1493,12 @@ impl AppView {
                 }
             }
             ComposerEvent::SetExecMode(mode) => {
-                self.exec_mode = *mode;
-                self.update_current_meta(|m| m.exec_mode = *mode);
-                if let Some(sid) = &self.current {
-                    self.agent.set_exec_mode(sid.clone(), *mode);
-                }
+                self.apply_exec_mode(*mode, cx);
+            }
+            ComposerEvent::RequestYoloConfirm => {
+                self.yolo_confirm_open = true;
+                self.yolo_confirm_focus.focus(window, cx);
+                cx.notify();
             }
             ComposerEvent::SetFsAccess {
                 read_outside,
@@ -2608,6 +2712,10 @@ impl Render for AppView {
             // 标签页栏 "+" 的加面板菜单：deferred 到窗口层，锚定 "+" 正下方
             .when(self.right_menu_open, |this| {
                 this.child(self.render_right_menu_dropdown(window, cx))
+            })
+            // Yolo 确认框：最后渲染 = 最顶层（覆盖 settings/dock/hero 全部内容）
+            .when(self.yolo_confirm_open, |this| {
+                this.child(self.render_yolo_confirm(cx))
             })
     }
 }

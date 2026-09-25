@@ -200,6 +200,8 @@ pub enum ComposerEvent {
     SetReasoning(Option<String>),
     OpenSettings,
     SetExecMode(ExecMode),
+    /// 选中「无管制模式」：先弹确认框（AppView 宿主），确认后才走 SetExecMode
+    RequestYoloConfirm,
     /// 模式菜单里的「工作区外读/写」开关
     SetFsAccess {
         read_outside: bool,
@@ -787,6 +789,11 @@ impl Composer {
             self.exec_mode = ix;
         }
         cx.notify();
+    }
+
+    /// 回焦输入框（对话框/弹层关闭后由 AppView 调用）
+    pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// 恢复会话持久化的区外读写开关（会话切换/新建/回放时由 meta 同步）
@@ -1411,6 +1418,12 @@ impl Composer {
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     if let Some((_, _, mode)) = EXEC_MODES.get(ix.row) {
+                        if *mode == ExecMode::Yolo && this.exec_mode != ix.row {
+                            // 无管制模式：先关弹层再弹确认框（确认后才 emit SetExecMode）
+                            this.close_command_popup(window, cx);
+                            cx.emit(ComposerEvent::RequestYoloConfirm);
+                            return;
+                        }
                         this.exec_mode = ix.row;
                         cx.emit(ComposerEvent::SetExecMode(*mode));
                     }
