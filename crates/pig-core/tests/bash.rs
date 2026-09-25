@@ -328,3 +328,45 @@ async fn dangerous_command_not_blocked_at_execute_layer() {
     assert!(!is_error, "{out}");
     assert!(out.contains("task_id"), "{out}");
 }
+
+// ---------- 只读命令白名单（AutoEdit 直通） ----------
+
+#[test]
+fn readonly_command_whitelist() {
+    for cmd in [
+        "ls",
+        "ls -la src",
+        "cat Cargo.toml",
+        "head -20 a.rs",
+        "git status",
+        "git log --oneline -5",
+        "git diff HEAD~1",
+        "git show HEAD",
+        "git branch",
+        "git remote",
+        "git tag",
+        "rg TODO",
+        "wc -l f.txt",
+        "echo hello",
+    ] {
+        assert!(tool::is_readonly_command(cmd), "{cmd} 应放行");
+    }
+    for cmd in [
+        "ls > files.txt",        // 重定向
+        "cat a | grep x",        // 管道
+        "ls && pwd",             // 链式
+        "ls; pwd",               // 分号
+        "echo `date`",           // 反引号命令替换
+        "echo $(date)",          // $(…) 命令替换
+        "git branch -D feature", // 带参子命令（删除分支）
+        "git push",              // 非只读子命令
+        "git checkout main",     //
+        "cargo check",           // 构建命令会写 target/
+        "npm install",           //
+        "rm -rf node_modules",   //
+        "make",                  //
+        "ls\npwd",               // 多行
+    ] {
+        assert!(!tool::is_readonly_command(cmd), "{cmd} 不应放行");
+    }
+}

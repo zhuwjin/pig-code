@@ -359,6 +359,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(TaskOutput),
         Box::new(TaskStop),
         Box::new(AskUserQuestionTool),
+        Box::new(ExitPlanModeTool),
     ]
 }
 
@@ -395,6 +396,7 @@ pub fn summarize(call: &ToolCall) -> String {
             .as_str()
             .unwrap_or("?")
             .to_string(),
+        "ExitPlanMode" => "请求退出计划模式".to_string(),
         _ => args.to_string(),
     };
     // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
@@ -967,64 +969,29 @@ impl Tool for EditFile {
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
             let doc = crate::text::decode(&bytes)?;
             let content = doc.text;
-            // 三级匹配梯队（ZCode 同款子集）：精确 → 剥离 Read 行号前缀 → 引号归一。
-            // 每级各自做唯一性检查；replace_all 只走第 1 级（宽匹配仅做单次替换）。
-            let mut effective_old = old.to_string();
-            let mut effective_new = new.to_string();
-            let mut quote_window: Option<(usize, usize)> = None;
-            let mut fuzzy_note: Option<&'static str> = None;
-            let mut count = content.matches(old).count();
-            if count == 0 && !replace_all {
-                if let Some(stripped) = strip_line_number_prefixes(old) {
-                    let stripped_count = content.matches(&stripped).count();
-                    if stripped_count > 0 {
-                        count = stripped_count;
-                        effective_old = stripped;
-                        fuzzy_note = Some("容错匹配：已剥离行号前缀");
-                    }
-                }
-                if count == 0 {
-                    let windows = find_quote_normalized_windows(&content, old);
-                    if windows.len() == 1 {
-                        let (start, end) = windows[0];
-                        count = 1;
-                        quote_window = Some((start, end));
-                        effective_new = follow_quote_style(new, &content[start..end]);
-                        fuzzy_note = Some("容错匹配：引号风格已跟随文件");
-                    } else if windows.len() > 1 {
-                        count = windows.len();
-                    }
-                }
-            }
-            if count == 0 {
-                let mut message = format!(
-                    "old_string 在 {path} 中未找到。请先用 Read 确认文件当前内容（注意缩进与换行需完全一致）。"
-                );
-                if doc.line_ending == LineEnding::Crlf {
-                    message.push_str(
-                        "该文件为 CRLF 行尾，Read 输出已转为 LF，old_string 请用 LF 换行。",
+            // 匹配+替换计算抽在 compute_edit（审批预览共用，预览即所得）
+            let outcome = match compute_edit(&content, old, new, replace_all) {
+                Ok(outcome) => outcome,
+                Err(EditMatchError::NotFound) => {
+                    let mut message = format!(
+                        "old_string 在 {path} 中未找到。请先用 Read 确认文件当前内容（注意缩进与换行需完全一致）。"
                     );
+                    if doc.line_ending == LineEnding::Crlf {
+                        message.push_str(
+                            "该文件为 CRLF 行尾，Read 输出已转为 LF，old_string 请用 LF 换行。",
+                        );
+                    }
+                    return Err(message);
                 }
-                return Err(message);
-            }
-            if count > 1 && !replace_all {
-                return Err(format!(
-                    "old_string 在 {path} 中出现 {count} 次，无法唯一定位。请扩大 old_string 范围使其唯一；如需全部替换，设 replace_all=true。"
-                ));
-            }
+                Err(EditMatchError::NotUnique { count }) => {
+                    return Err(format!(
+                        "old_string 在 {path} 中出现 {count} 次，无法唯一定位。请扩大 old_string 范围使其唯一；如需全部替换，设 replace_all=true。"
+                    ));
+                }
+            };
             ctx.tracker.snapshot(&full)?;
             // 匹配与替换都在 LF 视图（解码已归一）上做；写回时还原原编码/行尾
-            let (after, replaced) = match quote_window {
-                // 引号归一命中：整段替换原文那 N 行
-                Some((start, end)) => {
-                    let mut out = String::with_capacity(content.len());
-                    out.push_str(&content[..start]);
-                    out.push_str(&effective_new);
-                    out.push_str(&content[end..]);
-                    (out, 1)
-                }
-                None => apply_replacement(&content, &effective_old, &effective_new, replace_all),
-            };
+            let after = outcome.after;
             let encoded = crate::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
             std::fs::write(&full, &encoded)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
@@ -1033,8 +1000,8 @@ impl Tool for EditFile {
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             let output = if replace_all {
-                format!("已修改 {path}（替换 {replaced} 处）")
-            } else if let Some(note) = fuzzy_note {
+                format!("已修改 {path}（替换 {} 处）", outcome.replaced)
+            } else if let Some(note) = outcome.tier_note {
                 format!("已修改 {path}（{note}）")
             } else {
                 format!("已修改 {path}")
@@ -1046,6 +1013,142 @@ impl Tool for EditFile {
             })
         })
     }
+}
+
+/// Edit 匹配失败的两种形态（报错文案在调用方拼，那里才有 path/行尾上下文）
+#[derive(Debug)]
+pub enum EditMatchError {
+    NotFound,
+    NotUnique { count: usize },
+}
+
+/// compute_edit 的产物：替换后文本、替换处数、容错梯队命中说明
+pub struct EditOutcome {
+    pub after: String,
+    pub replaced: usize,
+    /// 「容错匹配：已剥离行号前缀」/「容错匹配：引号风格已跟随文件」；精确命中为 None
+    pub tier_note: Option<&'static str>,
+}
+
+/// Edit 的匹配+替换计算（LF 视图）：精确 → 剥离 Read 行号前缀 → 引号归一 三级梯队，
+/// 每级各自做唯一性检查；replace_all 只走精确（宽匹配仅做单次替换）。
+/// 审批预览与 Edit 执行共用，保证「预览即所得」。
+pub fn compute_edit(
+    content_lf: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<EditOutcome, EditMatchError> {
+    let mut effective_old = old.to_string();
+    let mut effective_new = new.to_string();
+    let mut quote_window: Option<(usize, usize)> = None;
+    let mut tier_note: Option<&'static str> = None;
+    let mut count = content_lf.matches(old).count();
+    if count == 0 && !replace_all {
+        if let Some(stripped) = strip_line_number_prefixes(old) {
+            let stripped_count = content_lf.matches(&stripped).count();
+            if stripped_count > 0 {
+                count = stripped_count;
+                effective_old = stripped;
+                tier_note = Some("容错匹配：已剥离行号前缀");
+            }
+        }
+        if count == 0 {
+            let windows = find_quote_normalized_windows(content_lf, old);
+            if windows.len() == 1 {
+                let (start, end) = windows[0];
+                count = 1;
+                quote_window = Some((start, end));
+                effective_new = follow_quote_style(new, &content_lf[start..end]);
+                tier_note = Some("容错匹配：引号风格已跟随文件");
+            } else if windows.len() > 1 {
+                count = windows.len();
+            }
+        }
+    }
+    if count == 0 {
+        return Err(EditMatchError::NotFound);
+    }
+    if count > 1 && !replace_all {
+        return Err(EditMatchError::NotUnique { count });
+    }
+    let (after, replaced) = match quote_window {
+        // 引号归一命中：整段替换原文那 N 行
+        Some((start, end)) => {
+            let mut out = String::with_capacity(content_lf.len());
+            out.push_str(&content_lf[..start]);
+            out.push_str(&effective_new);
+            out.push_str(&content_lf[end..]);
+            (out, 1)
+        }
+        None => apply_replacement(content_lf, &effective_old, &effective_new, replace_all),
+    };
+    Ok(EditOutcome {
+        after,
+        replaced,
+        tier_note,
+    })
+}
+
+/// 审批授权的粒度（「本会话内始终允许」记忆键）：
+/// Bash → 命令首词（二进制名）；Write/Edit → path；其余工具 → 空串（工具级）。
+pub fn approval_subject(call: &ToolCall) -> String {
+    let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+    match call.name.as_str() {
+        "Bash" => args["command"]
+            .as_str()
+            .and_then(|command| command.split_whitespace().next())
+            .unwrap_or("")
+            .to_string(),
+        "Write" | "Edit" => args["path"].as_str().unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 保守只读命令判定（AutoEdit 直通用，宁漏不放）：单条简单命令——
+/// 无管道/重定向/链式/命令替换/多行，且首词在白名单；
+/// git 再看子命令白名单（branch/remote/tag 仅无参列表形态）。
+pub fn is_readonly_command(command: &str) -> bool {
+    if command
+        .chars()
+        .any(|c| matches!(c, '>' | '<' | '|' | '&' | ';' | '`' | '\n' | '\r'))
+        || command.contains("$(")
+    {
+        return false;
+    }
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let Some(&first) = tokens.first() else {
+        return false;
+    };
+    const READONLY: &[&str] = &[
+        "ls", "cat", "head", "tail", "pwd", "echo", "find", "grep", "rg", "wc", "file", "stat",
+        "which", "whoami", "date", "uname", "hostname", "tree", "du", "df", "sort", "uniq", "diff",
+    ];
+    if READONLY.contains(&first) {
+        return true;
+    }
+    if first == "git" {
+        let second = tokens.get(1).copied().unwrap_or("");
+        const GIT_READONLY: &[&str] = &[
+            "status",
+            "log",
+            "diff",
+            "show",
+            "rev-parse",
+            "ls-files",
+            "blame",
+            "describe",
+            "shortlog",
+        ];
+        if GIT_READONLY.contains(&second) {
+            return true;
+        }
+        // branch/remote/tag 仅纯列表形态（无第三个参数）
+        if matches!(second, "branch" | "remote" | "tag") && tokens.len() == 2 {
+            return true;
+        }
+    }
+    false
 }
 
 /// 手动扫描替换（不用 String::replace，实现 ZCode 同款删除优化）：
@@ -2174,6 +2277,12 @@ impl Tool for TaskStop {
         "TaskStop"
     }
 
+    /// 杀的是本会话自己起的后台任务，风险等同会话内状态清理；
+    /// Plan 模式下也允许（与 TodoList 写操作同口径）
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
@@ -2210,6 +2319,46 @@ impl Tool for TaskStop {
 }
 
 struct AskUserQuestionTool;
+
+/// ExitPlanMode：模型请求退出计划模式。会话层在 Plan 硬拒之前拦截并强制弹窗
+/// （ZCode 同款）；工具实现只是防御性兜底，正常路径不会走到 execute。
+struct ExitPlanModeTool;
+
+impl Tool for ExitPlanModeTool {
+    fn name(&self) -> &'static str {
+        "ExitPlanMode"
+    }
+
+    /// 只读标记：Plan 硬拒只拦非只读工具，本工具由会话层的专属弹窗接管
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "ExitPlanMode",
+                "description": "计划写好、准备开始执行时调用：请用户确认后退出计划模式。仅在计划模式下可用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plan": { "type": "string", "description": "计划摘要（展示在确认弹窗里，截取前 500 字符）" }
+                    }
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _args: serde_json::Value,
+        _ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
+        Box::pin(async move { Err("ExitPlanMode 由会话层处理".to_string()) })
+    }
+}
 
 /// 解析并校验 AskUserQuestion 参数：1-4 题；每题 question 非空、options 2-4 项、
 /// label 非空。纯函数以便单测；真正的请求/等待在 session.rs 工具循环拦截。

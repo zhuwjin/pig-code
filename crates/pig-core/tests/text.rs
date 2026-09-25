@@ -1204,3 +1204,89 @@ async fn partial_read_blocks_write_paged_read_clears() {
     .await;
     assert!(!is_error, "{out}");
 }
+
+// ---------- 审批预览走文本管线（approval_detail） ----------
+
+#[test]
+fn approval_detail_edit_crlf_preview_clean() {
+    let dir = temp_dir("approval-crlf");
+    std::fs::write(dir.join("win.txt"), b"a\r\nb\r\nc\r\n").unwrap();
+
+    let detail = pig_core::session::approval_detail(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "win.txt", "old_string": "b", "new_string": "B"}),
+        ),
+        &dir,
+        None,
+    );
+    assert!(!detail.contains('\r'), "预览基于 LF 视图: {detail:?}");
+    assert!(detail.contains("-b") && detail.contains("+B"), "{detail}");
+    assert!(
+        !detail.contains("-a") && !detail.contains("-c"),
+        "未改的行不应进 diff（不全文件翻转）: {detail}"
+    );
+}
+
+#[test]
+fn approval_detail_edit_replace_all_and_fuzzy_notes() {
+    let dir = temp_dir("approval-notes");
+    std::fs::write(dir.join("all.txt"), "x\nx\nx\n").unwrap();
+    let detail = pig_core::session::approval_detail(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "all.txt", "old_string": "x", "new_string": "y", "replace_all": true}),
+        ),
+        &dir,
+        None,
+    );
+    assert!(detail.contains("（replace_all：替换 3 处）"), "{detail}");
+
+    // 容错梯队：带 Read 行号前缀的 old_string 命中第 2 级，detail 注明
+    std::fs::write(dir.join("f.rs"), "fn a() {}\nlet x = 1;\n").unwrap();
+    let detail = pig_core::session::approval_detail(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "f.rs", "old_string": "1\tfn a() {}", "new_string": "fn b() {}"}),
+        ),
+        &dir,
+        None,
+    );
+    assert!(detail.contains("（容错匹配：已剥离行号前缀）"), "{detail}");
+}
+
+#[test]
+fn approval_detail_write_decodes_existing_file() {
+    let dir = temp_dir("approval-write");
+    // CRLF：预览不应出现全文件翻转（LF 视图对比）
+    std::fs::write(dir.join("w.txt"), b"keep\r\nold\r\n").unwrap();
+    let detail = pig_core::session::approval_detail(
+        &call(
+            "Write",
+            serde_json::json!({"path": "w.txt", "content": "keep\nnew\n"}),
+        ),
+        &dir,
+        None,
+    );
+    assert!(!detail.contains('\r'), "{detail:?}");
+    assert!(
+        detail.contains("-old") && detail.contains("+new"),
+        "{detail}"
+    );
+    assert!(!detail.contains("-keep"), "未变的行不进 diff: {detail}");
+
+    // GBK：before 用解码后的文本视图，中文不乱码
+    std::fs::write(dir.join("g.txt"), gbk_bytes("中文行\n旧行\n")).unwrap();
+    let detail = pig_core::session::approval_detail(
+        &call(
+            "Write",
+            serde_json::json!({"path": "g.txt", "content": "中文行\n新行\n"}),
+        ),
+        &dir,
+        None,
+    );
+    assert!(
+        detail.contains("-旧行") && detail.contains("+新行"),
+        "{detail}"
+    );
+}

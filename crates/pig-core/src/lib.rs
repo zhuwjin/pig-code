@@ -6,6 +6,7 @@ pub mod git;
 pub mod mock;
 pub mod models_registry;
 pub mod paths;
+pub mod permissions;
 mod prompt;
 pub mod provider;
 pub mod rollout;

@@ -51,6 +51,7 @@ pub fn system_prompt(
          - 长时命令（dev server/watch/长构建）用 Bash 的 run_in_background，配合 TaskOutput 查输出。\n\
          - 需要用户拍板时用 AskUserQuestion 给出选项，而不是纯文本提问。\n\
          - 默认只能读写工作区内文件与 tmp 目录；用户在模式菜单开启后才可读写工作区外文件（.env/私钥/凭据等敏感文件永远不可访问）。\n\
+         - 项目可在 .pigcode/permissions.toml 配置 allow/deny 规则（deny 优先于一切）。\n\
          - 回答简洁，代码用 Markdown 代码块给出。\n",
         cwd.display(),
         std::env::consts::OS,
@@ -65,11 +66,11 @@ pub fn system_prompt(
             "\n当前执行模式: 变更前确认。修改文件或执行命令前会先请用户审批，审批通过才会执行。\n"
         }
         ExecMode::AutoEdit => {
-            "\n当前执行模式: 自动编辑。可以直接修改文件；执行命令前会先请用户审批。\n"
+            "\n当前执行模式: 自动编辑。可以直接修改文件；只读命令直接执行，其余命令执行前会弹窗请用户确认。\n"
         }
         ExecMode::Plan => {
             "\n当前执行模式: 计划模式。你是只读的：不要调用 Write/Edit/Bash 等修改类工具，\
-             只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。\n"
+             只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。计划写好后调用 ExitPlanMode 工具请用户确认执行。\n"
         }
         ExecMode::FullAccess => {
             "\n当前执行模式: 完全访问。所有工具直接执行，无需审批；命中高风险命令时会弹窗请用户确认。\n"

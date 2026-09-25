@@ -628,6 +628,20 @@ impl AppView {
                 }
                 self.refresh_sidebar(cx);
             }
+            Event::ExecModeChanged {
+                session_id, mode, ..
+            } => {
+                // core 侧主动切了模式（ExitPlanMode 确认后）：chip/缓存同步
+                self.exec_mode = *mode;
+                if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
+                    meta.exec_mode = *mode;
+                }
+                let mode = *mode;
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_exec_mode(mode, cx);
+                });
+                cx.notify();
+            }
             Event::Error {
                 session_id: None,
                 message,
@@ -2590,6 +2604,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::MessageQueued { session_id, .. }
         | Event::TodoListChanged { session_id, .. }
         | Event::TaskListChanged { session_id, .. }
+        | Event::ExecModeChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
         | Event::SessionTitleChanged { .. }

@@ -654,6 +654,12 @@ pub enum Event {
         /// Bash: 完整命令；Write/Edit: 路径 + diff 预览
         detail: String,
     },
+    /// core 侧主动切换了执行模式（ExitPlanMode 确认后）：UI 同步模式 chip
+    ExecModeChanged {
+        session_id: String,
+        seq: u64,
+        mode: ExecMode,
+    },
     /// AskUserQuestion：core 阻塞等待 Op::QuestionReply（同 request_id）
     QuestionRequested {
         session_id: String,

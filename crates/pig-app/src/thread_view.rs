@@ -427,6 +427,8 @@ impl ThreadView {
     pub fn reduce_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::SessionConfigured { .. } => {}
+            // 模式 chip 在 composer（main.rs 处理）；消息流无需响应
+            Event::ExecModeChanged { .. } => {}
             Event::TurnStarted { turn_id, .. } => {
                 self.plan_pending = false;
                 self.replay_turn = turn_id.starts_with("replay-");

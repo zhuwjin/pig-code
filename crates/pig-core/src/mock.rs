@@ -38,6 +38,24 @@ pub const SCENARIO_DANGER_TRIGGER: &str = "DANGER_SCENARIO";
 pub const DANGER_COMMAND: &str = "mkfs";
 pub const DANGER_MARKER: &str = "MOCK_DANGER_DONE";
 
+/// subject 粒度场景（AlwaysAllow 细化验证）：Write a → Write a → Write b →
+/// Bash echo → Bash echo → Bash ls → 文本。同 subject 的第二次不应再弹审批。
+pub const SCENARIO_SUBJECT_TRIGGER: &str = "SUBJECT_SCENARIO";
+pub const SUBJECT_MARKER: &str = "MOCK_SUBJECT_DONE";
+pub const SUBJECT_FILE_A: &str = "subject_a.txt";
+pub const SUBJECT_FILE_B: &str = "subject_b.txt";
+
+/// 只读命令场景（AutoEdit 直通验证）：Bash ls → 文本。ls 在只读白名单内。
+pub const SCENARIO_READONLY_TRIGGER: &str = "READONLY_SCENARIO";
+pub const READONLY_MARKER: &str = "MOCK_READONLY_DONE";
+
+/// 计划退出场景（ExitPlanMode 验证）：0 个结果 → ExitPlanMode；
+/// 1 个结果且含「已切换到」（用户 Allow）→ Write plan_exit.txt；否则文本收尾
+///（Reject 的结果不含切换文案 → 直接收尾）。
+pub const SCENARIO_PLAN_EXIT_TRIGGER: &str = "PLAN_EXIT_SCENARIO";
+pub const PLAN_EXIT_MARKER: &str = "MOCK_PLAN_EXIT_DONE";
+pub const PLAN_EXIT_FILE: &str = "plan_exit.txt";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -90,7 +108,12 @@ fn sse_chunk(delta: serde_json::Value, finish_reason: Option<&str>) -> String {
 
 /// usage: Some((prompt, completion, total)) 时并入带 finish_reason 的末块
 ///（provider 见到 finish_reason 即收尾，usage 必须同块到达，对齐真实 API）
-fn tool_call_chunks(call_id: &str, name: &str, arguments: &str, usage: Option<(u64, u64, u64)>) -> Vec<String> {
+fn tool_call_chunks(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+    usage: Option<(u64, u64, u64)>,
+) -> Vec<String> {
     // 分片点在字符边界上取（中文参数被切到多字节字符中间会 panic）
     let mut half = arguments.len() / 2;
     while !arguments.is_char_boundary(half) {
@@ -207,7 +230,9 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
         2 => tool_call_chunks(
             "call_b_bash",
             "Bash",
-            &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string(),
+            // printf 不在只读白名单（echo 在）：AutoEdit 审批语义靠这条命令覆盖
+            &serde_json::json!({"command": format!("printf '%s\\n' {SCENARIO_B_BASH_MARKER}")})
+                .to_string(),
             None,
         ),
         _ => {
@@ -254,6 +279,87 @@ fn danger_scenario_response(tool_results: usize) -> Vec<String> {
         ),
         _ => vec![
             sse_chunk(serde_json::json!({"content": DANGER_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
+/// subject 粒度场景：同 subject 第二次不弹（Write a 连写两次）、异 subject 弹。
+fn subject_scenario_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 | 1 => tool_call_chunks(
+            if tool_results == 0 {
+                "call_subj_w1"
+            } else {
+                "call_subj_w2"
+            },
+            "Write",
+            &serde_json::json!({"path": SUBJECT_FILE_A, "content": format!("v{}\n", tool_results)})
+                .to_string(),
+            None,
+        ),
+        2 => tool_call_chunks(
+            "call_subj_w3",
+            "Write",
+            &serde_json::json!({"path": SUBJECT_FILE_B, "content": "b\n"}).to_string(),
+            None,
+        ),
+        3 | 4 => tool_call_chunks(
+            if tool_results == 3 {
+                "call_subj_e1"
+            } else {
+                "call_subj_e2"
+            },
+            "Bash",
+            &serde_json::json!({"command": format!("echo SUBJ_{}", tool_results)}).to_string(),
+            None,
+        ),
+        5 => tool_call_chunks(
+            "call_subj_ls",
+            "Bash",
+            &serde_json::json!({"command": "ls"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": SUBJECT_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
+/// 只读命令场景：Bash ls → 文本。
+fn readonly_scenario_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_ro_ls",
+            "Bash",
+            &serde_json::json!({"command": "ls"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": READONLY_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
+/// 计划退出场景：按 tool 结果数推进；Allow 后（结果含「已切换到」）接 Write。
+fn plan_exit_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_pe_1",
+            "ExitPlanMode",
+            &serde_json::json!({"plan": "第一步：创建 plan_exit.txt 验证执行"}).to_string(),
+            None,
+        ),
+        1 if body.contains("已切换到") => tool_call_chunks(
+            "call_pe_2",
+            "Write",
+            &serde_json::json!({"path": PLAN_EXIT_FILE, "content": "executed\n"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": PLAN_EXIT_MARKER}), None),
             sse_chunk(serde_json::json!({}), Some("stop")),
         ],
     }
@@ -580,6 +686,12 @@ async fn handle_connection(
         question_scenario_response(&body)
     } else if body.contains(SCENARIO_DANGER_TRIGGER) {
         danger_scenario_response(tool_results)
+    } else if body.contains(SCENARIO_SUBJECT_TRIGGER) {
+        subject_scenario_response(tool_results)
+    } else if body.contains(SCENARIO_READONLY_TRIGGER) {
+        readonly_scenario_response(tool_results)
+    } else if body.contains(SCENARIO_PLAN_EXIT_TRIGGER) {
+        plan_exit_scenario_response(&body, tool_results)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {
@@ -726,7 +838,8 @@ fn anthropic_scenario_b(tool_results: usize) -> Vec<String> {
         1 => anthropic_tool_call(&mut out, 0, "call_b_edit", "Edit",
             &serde_json::json!({"path": SCENARIO_B_FILE, "old_string": "line2", "new_string": "LINE2"}).to_string()),
         2 => anthropic_tool_call(&mut out, 0, "call_b_bash", "Bash",
-            &serde_json::json!({"command": format!("echo {SCENARIO_B_BASH_MARKER}")}).to_string()),
+            // 与 OpenAI 分支同口径：printf 不在只读白名单（echo 在）
+            &serde_json::json!({"command": format!("printf '%s\\n' {SCENARIO_B_BASH_MARKER}")}).to_string()),
         _ => {
             let text = format!("场景B完成。**结果**: {SCENARIO_B_MARKER}
 ");

@@ -585,3 +585,365 @@ async fn yolo_sensitive_file_still_blocked() {
     assert!(out.contains("敏感文件"), "Yolo 下 .env 仍不可读: {out}");
     assert!(!out.contains("SECRET=1"), "内容不泄露: {out}");
 }
+
+// ---------- AlwaysAllow subject 粒度 / AutoEdit 只读直通 / TaskStop 豁免 ----------
+
+/// 通用触发场景驱动：每个审批弹窗都按 decision 回复（None = 不回复，出现弹窗会卡到超时）。
+/// `permissions` 非空时在 new_session 前写入 .pigcode/permissions.toml（规则随会话加载）。
+async fn run_trigger(
+    mode: ExecMode,
+    decision: Option<ApprovalDecision>,
+    trigger: &str,
+    cwd_name: &str,
+    permissions: Option<&str>,
+) -> (Vec<Event>, PathBuf, pig_core::AgentHandle) {
+    let (config_path, dir, data_dir) = setup(cwd_name);
+    if let Some(permissions) = permissions {
+        std::fs::create_dir_all(dir.join(".pigcode")).unwrap();
+        std::fs::write(dir.join(".pigcode/permissions.toml"), permissions).unwrap();
+    }
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, dir.clone()).await;
+
+    agent
+        .ops
+        .send(Op::SetExecMode {
+            session_id: session_id.clone(),
+            mode,
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id,
+            content: format!("{trigger} 开始"),
+            files: vec![],
+            mode,
+        })
+        .await
+        .unwrap();
+
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "等待回合结束超时: {collected:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
+        else {
+            continue;
+        };
+        if let Event::ApprovalRequested { request_id, .. } = &event {
+            if let Some(decision) = decision {
+                agent
+                    .ops
+                    .send(Op::ApprovalReply {
+                        request_id: request_id.clone(),
+                        decision,
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        let done = matches!(
+            event,
+            Event::TurnComplete { .. } | Event::TurnAborted { .. }
+        );
+        collected.push(event);
+        if done {
+            break;
+        }
+    }
+    (collected, dir, agent)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn always_allow_is_per_subject() {
+    // 场景：Write a → Write a（同 subject，免弹）→ Write b（异 subject，弹）→
+    // Bash echo → Bash echo（同首词，免弹）→ Bash ls（异首词，弹）
+    let (events, dir, agent) = run_trigger(
+        ExecMode::ConfirmBeforeEdit,
+        Some(ApprovalDecision::AlwaysAllow),
+        mock::SCENARIO_SUBJECT_TRIGGER,
+        "subject",
+        None,
+    )
+    .await;
+    let details = approval_details(&events);
+    assert_eq!(
+        details.len(),
+        4,
+        "a 首/b 首/echo 首/ls 首各弹一次，同 subject 第二次免弹: {details:?}"
+    );
+    assert!(details[0].1.contains(mock::SUBJECT_FILE_A), "{details:?}");
+    assert!(details[1].1.contains(mock::SUBJECT_FILE_B), "{details:?}");
+    assert!(details[2].1.contains("echo SUBJ_3"), "{details:?}");
+    assert_eq!(details[3].1.trim(), "ls", "{details:?}");
+    // 回合完成且工具都真实执行了
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::TextDone { full_text, .. } if full_text.contains(mock::SUBJECT_MARKER)
+        )),
+        "回合收尾"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(mock::SUBJECT_FILE_A)).unwrap(),
+        "v1\n",
+        "同 subject 的第二次 Write 免弹直接执行"
+    );
+    assert!(dir.join(mock::SUBJECT_FILE_B).exists());
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_edit_readonly_bash_passthrough() {
+    // AutoEdit + 白名单只读命令（ls）：不弹窗直接执行（decision=None 若弹窗会卡超时）
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::AutoEdit,
+        None,
+        mock::SCENARIO_READONLY_TRIGGER,
+        "readonly",
+        None,
+    )
+    .await;
+    assert!(approval_details(&events).is_empty(), "只读命令不应弹窗");
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter()
+            .any(|(_, out, err)| !err && out.contains("[exit code: 0]")),
+        "ls 真实执行: {ends:?}"
+    );
+    agent.shutdown();
+}
+
+#[test]
+fn approval_subject_extracts() {
+    let call = |name: &str, args: serde_json::Value| pig_core::provider::ToolCall {
+        id: "t1".into(),
+        name: name.into(),
+        arguments: args.to_string(),
+    };
+    assert_eq!(
+        pig_core::tool::approval_subject(&call(
+            "Bash",
+            serde_json::json!({"command": "cargo build --release"})
+        )),
+        "cargo"
+    );
+    assert_eq!(
+        pig_core::tool::approval_subject(&call(
+            "Bash",
+            serde_json::json!({"command": "  ls  -la"})
+        )),
+        "ls",
+        "前导空白后取首词"
+    );
+    assert_eq!(
+        pig_core::tool::approval_subject(&call("Bash", serde_json::json!({"command": ""}))),
+        ""
+    );
+    assert_eq!(
+        pig_core::tool::approval_subject(&call(
+            "Write",
+            serde_json::json!({"path": "src/a.rs", "content": "x"})
+        )),
+        "src/a.rs"
+    );
+    assert_eq!(
+        pig_core::tool::approval_subject(&call(
+            "Edit",
+            serde_json::json!({"path": "b.md", "old_string": "a", "new_string": "b"})
+        )),
+        "b.md"
+    );
+    // 其余工具 → 空串（工具级记忆）
+    assert_eq!(
+        pig_core::tool::approval_subject(&call("TaskStop", serde_json::json!({"task_id": "b1"}))),
+        ""
+    );
+}
+
+#[test]
+fn task_stop_read_only_exempt_from_approval() {
+    let tools = pig_core::tool::all();
+    let stop = tools
+        .iter()
+        .find(|t| t.name() == "TaskStop")
+        .expect("TaskStop 存在");
+    assert!(stop.read_only(), "TaskStop 应标记只读");
+    assert!(
+        !pig_core::tool::requires_approval(stop.as_ref(), ExecMode::ConfirmBeforeEdit),
+        "ConfirmBeforeEdit 下也免批"
+    );
+    assert!(
+        !pig_core::tool::requires_approval(stop.as_ref(), ExecMode::Plan),
+        "Plan 下允许（Plan 只硬拒非只读）"
+    );
+}
+
+// ---------- 项目级权限规则（优先级链路） / ExitPlanMode ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_deny_hard_rejects_even_in_full_access() {
+    // FullAccess + deny Bash(mkfs*)：连危险弹窗都不发，项目规则直接硬拒
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::FullAccess,
+        Some(ApprovalDecision::Allow),
+        mock::SCENARIO_DANGER_TRIGGER,
+        "perm-deny",
+        Some("deny = [\"Bash(mkfs*)\"]\n"),
+    )
+    .await;
+    assert!(approval_details(&events).is_empty(), "deny 优先于危险弹窗");
+    let ends = tool_ends(&events);
+    assert_eq!(ends.len(), 2, "两条 mkfs 都被拒: {ends:?}");
+    assert!(
+        ends.iter().all(|(_, out, err)| *err
+            && out.contains("项目规则禁止执行")
+            && out.contains("Bash(mkfs*)")),
+        "deny 文案含规则原文: {ends:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::TextDone { full_text, .. } if full_text.contains(mock::DANGER_MARKER)
+        )),
+        "回合正常收尾"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_allow_skips_approval() {
+    // ConfirmBeforeEdit 下 ls 本来要弹窗；allow 命中 → 免弹直接执行
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::ConfirmBeforeEdit,
+        None,
+        mock::SCENARIO_READONLY_TRIGGER,
+        "perm-allow",
+        Some("allow = [\"Bash(ls)\"]\n"),
+    )
+    .await;
+    assert!(approval_details(&events).is_empty(), "allow 免审批");
+    assert!(
+        tool_ends(&events)
+            .iter()
+            .any(|(_, out, err)| !err && out.contains("[exit code: 0]")),
+        "ls 真实执行"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_allow_does_not_exempt_danger() {
+    // allow 命中危险命令仍弹窗（危险判定在 allow 之前）
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::ConfirmBeforeEdit,
+        Some(ApprovalDecision::Allow),
+        mock::SCENARIO_DANGER_TRIGGER,
+        "perm-danger-allow",
+        Some("allow = [\"Bash(mkfs*)\"]\n"),
+    )
+    .await;
+    let details = approval_details(&events);
+    assert_eq!(details.len(), 2, "危险命令照样弹: {details:?}");
+    assert!(
+        details.iter().all(|(_, d)| d.contains("高风险命令")),
+        "{details:?}"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exit_plan_mode_allow_switches_and_executes() {
+    // Plan + ExitPlanMode + Allow：弹窗 → 切到变更前确认 → 后续 Write 在新模式下审批执行
+    let (events, dir, agent) = run_trigger(
+        ExecMode::Plan,
+        Some(ApprovalDecision::Allow),
+        mock::SCENARIO_PLAN_EXIT_TRIGGER,
+        "plan-exit-allow",
+        None,
+    )
+    .await;
+    let details = approval_details(&events);
+    assert_eq!(
+        details.len(),
+        2,
+        "ExitPlanMode + Write 各弹一次: {details:?}"
+    );
+    assert_eq!(details[0].0, "ExitPlanMode");
+    assert!(details[0].1.contains("结束计划模式"), "{details:?}");
+    assert!(
+        details[0].1.contains("第一步"),
+        "plan 摘要进 detail: {details:?}"
+    );
+    assert_eq!(details[1].0, "Write", "切模式后 Write 走正常审批");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::ExecModeChanged { mode, .. } if *mode == ExecMode::ConfirmBeforeEdit
+        )),
+        "UI 收到模式更新事件"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(mock::PLAN_EXIT_FILE)).unwrap(),
+        "executed\n",
+        "Write 在新模式下真实执行"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exit_plan_mode_reject_stays_plan() {
+    let (events, dir, agent) = run_trigger(
+        ExecMode::Plan,
+        Some(ApprovalDecision::Reject),
+        mock::SCENARIO_PLAN_EXIT_TRIGGER,
+        "plan-exit-reject",
+        None,
+    )
+    .await;
+    let details = approval_details(&events);
+    assert_eq!(details.len(), 1, "只有 ExitPlanMode 一次弹窗: {details:?}");
+    assert!(
+        tool_ends(&events)
+            .iter()
+            .any(|(_, out, err)| *err && out.contains("拒绝退出计划模式")),
+        "拒绝文案"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ExecModeChanged { .. })),
+        "模式不变"
+    );
+    assert!(
+        !dir.join(mock::PLAN_EXIT_FILE).exists(),
+        "Reject 后 Write 未发生"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exit_plan_mode_outside_plan_errors() {
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::AutoEdit,
+        None,
+        mock::SCENARIO_PLAN_EXIT_TRIGGER,
+        "plan-exit-nonplan",
+        None,
+    )
+    .await;
+    assert!(approval_details(&events).is_empty(), "非 Plan 不弹窗");
+    assert!(
+        tool_ends(&events)
+            .iter()
+            .any(|(_, out, err)| *err && out.contains("仅在计划模式下可用")),
+        "非 Plan 报错"
+    );
+    agent.shutdown();
+}

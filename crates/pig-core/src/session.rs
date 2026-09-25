@@ -101,7 +101,10 @@ pub struct Session {
     turn_counter: u64,
     tracker: ChangeTracker,
     state: crate::task::SessionToolState,
-    always_allowed: HashSet<String>,
+    /// 「本会话内始终允许」的记忆：(工具名, subject)——Bash=命令首词，Write/Edit=路径
+    always_allowed: HashSet<(String, String)>,
+    /// 项目级 allow/deny 规则（.pigcode/permissions.toml，会话创建/回放时加载一次）
+    permissions: crate::permissions::PermissionRules,
     pending: PendingApprovals,
     pending_questions: PendingQuestions,
     mode: ExecMode,
@@ -152,6 +155,7 @@ impl Session {
             tracker: ChangeTracker::default(),
             state: crate::task::SessionToolState::new(meta.id, task_notify),
             always_allowed: HashSet::new(),
+            permissions: load_permissions(&meta.cwd),
             pending,
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -210,6 +214,7 @@ impl Session {
             tracker,
             state: crate::task::SessionToolState::new(id.to_string(), task_notify),
             always_allowed: HashSet::new(),
+            permissions: load_permissions(&cwd),
             pending,
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -985,6 +990,95 @@ impl Session {
             let tool_ref = tools.iter().find(|t| t.name() == call.name);
             let read_only = tool_ref.is_some_and(|t| t.read_only());
 
+            // ExitPlanMode：在 Plan 硬拒之前拦截（它是退出计划模式的唯一出口，
+            // 强制弹窗请用户确认；复用 ApprovalRequested 通道，UI 无需新组件）。
+            if call.name == "ExitPlanMode" {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_default();
+                let plan = args["plan"].as_str().unwrap_or("");
+                let (note, is_error);
+                if self.mode != ExecMode::Plan {
+                    note = "仅在计划模式下可用".to_string();
+                    is_error = true;
+                } else {
+                    let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.id);
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    self.pending
+                        .lock()
+                        .expect("pending lock")
+                        .insert(request_id.clone(), reply_tx);
+                    let plan_preview: String = plan.chars().take(500).collect();
+                    self.emit(
+                        |session_id, seq| Event::ApprovalRequested {
+                            session_id,
+                            seq,
+                            request_id: request_id.clone(),
+                            tool: call.name.clone(),
+                            detail: format!("模型请求结束计划模式并开始执行\n\n{plan_preview}"),
+                        },
+                        tx,
+                    );
+                    let decision = tokio::select! {
+                        reply = reply_rx => reply.unwrap_or(ApprovalDecision::Reject),
+                        _ = cancel.cancelled() => {
+                            self.pending.lock().expect("pending lock").remove(&request_id);
+                            self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
+                            return StepOutcome::Ended;
+                        }
+                    };
+                    match decision {
+                        ApprovalDecision::Allow | ApprovalDecision::AlwaysAllow => {
+                            // 切换到「变更前确认」：写穿 store + 发事件让 UI 模式 chip 实时更新
+                            //（Op::SetExecMode 的 store 写穿同路径；事件是 core 主动改模式的补充）
+                            self.mode = ExecMode::ConfirmBeforeEdit;
+                            let session_id = self.id.clone();
+                            self.store.lock().expect("store lock").update_session(
+                                &session_id,
+                                |m| {
+                                    m.exec_mode = ExecMode::ConfirmBeforeEdit;
+                                },
+                            );
+                            self.emit(
+                                |session_id, seq| Event::ExecModeChanged {
+                                    session_id,
+                                    seq,
+                                    mode: ExecMode::ConfirmBeforeEdit,
+                                },
+                                tx,
+                            );
+                            note = "已切换到「变更前确认」模式，请开始执行计划。".to_string();
+                            is_error = false;
+                        }
+                        ApprovalDecision::Reject => {
+                            note = "用户拒绝退出计划模式，请继续完善计划或回答疑问。".to_string();
+                            is_error = true;
+                        }
+                    }
+                }
+                self.history
+                    .push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.record(&RolloutRecord::ToolCall {
+                    tool: call.name.clone(),
+                    summary,
+                    arguments: call.arguments.clone(),
+                    output: note.clone(),
+                    is_error,
+                    edit: None,
+                });
+                self.emit(
+                    |session_id, seq| Event::ToolCallEnd {
+                        session_id,
+                        seq,
+                        item_id,
+                        output: note,
+                        is_error,
+                        edit: None,
+                    },
+                    tx,
+                );
+                continue;
+            }
+
             if self.mode == ExecMode::Plan && !read_only {
                 let note = "计划模式：修改类工具已被禁止执行。请只输出计划文本，等用户切换到其他模式后再执行。"
                     .to_string();
@@ -1119,19 +1213,72 @@ impl Session {
             // 黑名单命中的危险命令强制弹窗（ZCode alwaysAsk 同款）：Yolo 之外的模式都弹，
             // always_allowed 对其不生效；Plan 模式已在上方整类硬拒，不走这里。
             // Yolo（容器/沙箱无管制）连危险判定都跳过，什么弹窗都不发。
-            let danger_reason = if call.name == "Bash" && self.mode != ExecMode::Yolo {
-                let args: serde_json::Value =
-                    serde_json::from_str(&call.arguments).unwrap_or_default();
-                args["command"]
-                    .as_str()
-                    .and_then(tool::is_dangerous_command)
+            let bash_command = if call.name == "Bash" {
+                serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .ok()
+                    .and_then(|args| args["command"].as_str().map(str::to_string))
             } else {
                 None
             };
 
+            // 项目规则（.pigcode/permissions.toml）：deny 命中 → 所有模式（含 Yolo）
+            // 硬拒，排在危险弹窗之前（用户显式写的 deny 是最强意图）。
+            // 注意 Bash 匹配完整命令串（比 always_allowed 的首词粒度更精细）。
+            let perm_subject = match call.name.as_str() {
+                "Bash" => bash_command.clone(),
+                "Write" | "Edit" => Some(tool::approval_subject(call)),
+                _ => None,
+            };
+            if let Some(subject) = perm_subject.as_deref()
+                && let Some(rule) = self.permissions.deny_hit(&call.name, subject)
+            {
+                let note = format!("项目规则禁止执行: {rule}（.pigcode/permissions.toml）");
+                self.history
+                    .push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.record(&RolloutRecord::ToolCall {
+                    tool: call.name.clone(),
+                    summary,
+                    arguments: call.arguments.clone(),
+                    output: note.clone(),
+                    is_error: true,
+                    edit: None,
+                });
+                self.emit(
+                    |session_id, seq| Event::ToolCallEnd {
+                        session_id,
+                        seq,
+                        item_id,
+                        output: note,
+                        is_error: true,
+                        edit: None,
+                    },
+                    tx,
+                );
+                continue;
+            }
+            // allow 命中免审批（危险命令除外——危险判定在下方弹窗优先）
+            let allowed_by_rules = perm_subject
+                .as_deref()
+                .is_some_and(|subject| self.permissions.allow_hit(&call.name, subject));
+
+            let danger_reason = if self.mode == ExecMode::Yolo {
+                None
+            } else {
+                bash_command.as_deref().and_then(tool::is_dangerous_command)
+            };
+            // AutoEdit 直通保守白名单的只读命令（ls/git status 这类）；危险判定在上方优先
+            let readonly_bash = self.mode == ExecMode::AutoEdit
+                && bash_command
+                    .as_deref()
+                    .is_some_and(tool::is_readonly_command);
+            // 「本会话内始终允许」细化到 (工具, subject)：Bash=命令首词，Write/Edit=路径
+            let approval_key = (call.name.clone(), tool::approval_subject(call));
+
             if danger_reason.is_some()
                 || (tool_ref.is_some_and(|t| tool::requires_approval(t.as_ref(), self.mode))
-                    && !self.always_allowed.contains(call.name.as_str()))
+                    && !self.always_allowed.contains(&approval_key)
+                    && !readonly_bash
+                    && !allowed_by_rules)
             {
                 let request_id = format!("{}-{turn_id}-approval-{item_id}", self.id);
                 let detail_text = approval_detail(call, &self.cwd, danger_reason);
@@ -1163,7 +1310,7 @@ impl Session {
                     ApprovalDecision::AlwaysAllow => {
                         // 危险命令不记入 always_allowed：只在本次放行，等价 Allow
                         if danger_reason.is_none() {
-                            self.always_allowed.insert(call.name.clone());
+                            self.always_allowed.insert(approval_key);
                         }
                     }
                     ApprovalDecision::Reject => {
@@ -1563,7 +1710,35 @@ fn compaction_prompt(history: &[ChatMsg]) -> String {
     out
 }
 
-fn approval_detail(call: &ToolCall, cwd: &std::path::Path, danger_reason: Option<&str>) -> String {
+/// 加载项目级权限规则：文件缺失 = 空规则；解析失败不致命，stderr 提示（
+/// 会话创建/回放路径没有合适的事件通道，不硬建）
+fn load_permissions(cwd: &std::path::Path) -> crate::permissions::PermissionRules {
+    match crate::permissions::PermissionRules::load(cwd) {
+        Ok(rules) => {
+            if rules.skipped > 0 {
+                eprintln!(
+                    "[permissions] {} 条规则语法错误已跳过（.pigcode/permissions.toml）",
+                    rules.skipped
+                );
+            }
+            rules
+        }
+        Err(error) => {
+            eprintln!("[permissions] 加载失败（按空规则继续）: {error}");
+            crate::permissions::PermissionRules::default()
+        }
+    }
+}
+
+/// 审批弹窗详情（pub 供集成测试直接断言）。
+/// Write/Edit 走文本管线：resolve_checked 解析路径（失败回退 join）、字节 →
+/// text::decode → LF 视图算 diff（预览与真实写回一致）；Edit 走 compute_edit
+///（replace_all 感知、容错梯队命中会注明）。解码失败回退直读 + replacen 的旧逻辑。
+pub fn approval_detail(
+    call: &ToolCall,
+    cwd: &std::path::Path,
+    danger_reason: Option<&str>,
+) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     match call.name.as_str() {
         "Bash" => {
@@ -1576,16 +1751,59 @@ fn approval_detail(call: &ToolCall, cwd: &std::path::Path, danger_reason: Option
         "Write" => {
             let path = args["path"].as_str().unwrap_or("?");
             let content = args["content"].as_str().unwrap_or("");
-            let old = std::fs::read_to_string(cwd.join(path)).unwrap_or_default();
-            diff_preview(path, &old, content)
+            let full =
+                crate::tool::resolve_checked(cwd, path, false).unwrap_or_else(|_| cwd.join(path));
+            // before 用 LF 视图（GBK/UTF-16/CRLF 与真实写回同口径）；读不出按空（新建）
+            let old = std::fs::read(&full)
+                .ok()
+                .and_then(|bytes| crate::text::decode(&bytes).ok())
+                .map(|doc| doc.text)
+                .unwrap_or_else(|| std::fs::read_to_string(&full).unwrap_or_default());
+            // after 防御性归一为 LF（与 Write 执行的 diff 口径一致）
+            let new = content.replace("\r\n", "\n");
+            diff_preview(path, &old, &new)
         }
         "Edit" => {
             let path = args["path"].as_str().unwrap_or("?");
             let old_string = args["old_string"].as_str().unwrap_or("");
             let new_string = args["new_string"].as_str().unwrap_or("");
-            let current = std::fs::read_to_string(cwd.join(path)).unwrap_or_default();
-            let new = current.replacen(old_string, new_string, 1);
-            diff_preview(path, &current, &new)
+            let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+            let full =
+                crate::tool::resolve_checked(cwd, path, false).unwrap_or_else(|_| cwd.join(path));
+            let decoded = std::fs::read(&full)
+                .ok()
+                .and_then(|bytes| crate::text::decode(&bytes).ok());
+            match decoded {
+                Some(doc) => {
+                    match tool::compute_edit(&doc.text, old_string, new_string, replace_all) {
+                        Ok(outcome) => {
+                            let mut detail = diff_preview(path, &doc.text, &outcome.after);
+                            if let Some(note) = outcome.tier_note {
+                                detail.push_str(&format!("\n\n（{note}）"));
+                            }
+                            if replace_all {
+                                detail.push_str(&format!(
+                                    "\n\n（replace_all：替换 {} 处）",
+                                    outcome.replaced
+                                ));
+                            }
+                            detail
+                        }
+                        // 匹配不上：退化为 naive 预览（旧口径）
+                        Err(_) => diff_preview(
+                            path,
+                            &doc.text,
+                            &doc.text.replacen(old_string, new_string, 1),
+                        ),
+                    }
+                }
+                // 解码失败（二进制/未知编码）：旧逻辑兜底
+                None => {
+                    let current = std::fs::read_to_string(&full).unwrap_or_default();
+                    let new = current.replacen(old_string, new_string, 1);
+                    diff_preview(path, &current, &new)
+                }
+            }
         }
         _ => serde_json::to_string_pretty(&args).unwrap_or_default(),
     }
