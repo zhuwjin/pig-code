@@ -60,46 +60,32 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
     }
 }
 
-/// 模式弹层 footer 里的「区外读/写」开关行：复选框（默认尺寸 16px 指示器，
-/// 与模式行的 size_4 图标列对齐）+ label + 描述，整行可点击、hover 底色与
-/// 模式行的选中态同色系（accent）。Checkbox 不挂 handler（点击事件冒泡到行），
+/// 模式弹层 footer 里的「区外读/写」小开关：label（text_xs muted）+ Checkbox
+///（不挂 handler，点击冒泡到外层），文字与复选框整体一个点击区。
 /// 点击切换并 emit SetFsAccess，不关弹层。
-fn fs_toggle_row(
+fn fs_toggle(
     id: &'static str,
     label: &'static str,
-    desc: &'static str,
     checked: bool,
     is_read: bool,
     composer: Entity<Composer>,
     cx: &mut App,
 ) -> AnyElement {
-    let (accent, accent_foreground, radius, muted) = {
+    let (accent, radius, muted) = {
         let theme = cx.theme();
-        (
-            theme.accent,
-            theme.accent_foreground,
-            theme.radius,
-            theme.muted_foreground,
-        )
+        (theme.accent, theme.radius, theme.muted_foreground)
     };
     div()
-        .id(SharedString::from(format!("{id}-row")))
-        .w_full()
-        .px_2()
-        .py_1p5()
-        .rounded(radius)
+        .id(SharedString::from(format!("{id}-toggle")))
         .cursor_pointer()
-        .hover(move |style| style.bg(accent).text_color(accent_foreground))
+        .rounded(radius)
+        .hover(move |style| style.bg(accent))
         .child(
             h_flex()
-                .gap_2()
+                .gap_1()
                 .items_center()
-                .child(Checkbox::new(id).checked(checked).tab_stop(false))
-                .child(
-                    v_flex()
-                        .child(div().text_sm().child(label))
-                        .child(div().text_xs().text_color(muted).child(desc)),
-                ),
+                .child(div().text_xs().text_color(muted).child(label))
+                .child(Checkbox::new(id).checked(checked).tab_stop(false)),
         )
         .on_click(move |_, _window, cx| {
             composer.update(cx, |this, cx| {
@@ -1117,6 +1103,9 @@ impl Composer {
                 // 外层拉伸到芯片宽度，再由 flex 把固定宽的面板居中到芯片中线
                 PopupAnchor::Center => this.left_0().right_0().flex().flex_row().justify_center(),
             })
+            // 滚轮事件不穿透到弹层背后的会话消息流；内容自身的滚动（Command 虚拟列表
+            // 等更深的滚动区）先消费事件，不受影响
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 if let Some((kind, _)) = this.popup {
                     this.outside_closed = Some((kind, event.position));
@@ -1411,46 +1400,48 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             })
-            // footer 槽：分隔线 + 分区小标题 + 两个开关行（复选框视觉，不再用
-            // CommandItem.checked 的 ✓ 表达开关态）
+            // footer 槽：分隔线 + 单行开关区（「工作区外访问  读 ☐  写 ☑」）；
+            // 复选框即开关态视觉，不再用 CommandItem.checked 的 ✓
             .footer({
                 let composer = cx.entity();
                 let read_on = self.fs_read_outside;
                 let write_on = self.fs_write_outside;
                 move |_, _window, cx| {
+                    let muted = cx.theme().muted_foreground;
                     v_flex()
                         .w_full()
                         .pt_1()
                         .child(Separator::horizontal())
                         .child(
-                            div()
+                            h_flex()
                                 .w_full()
                                 .px_2()
-                                .pt_2()
-                                .pb_1()
-                                .text_xs()
-                                .font_medium()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("工作区外访问"),
+                                .py_1p5()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_xs().text_color(muted).child("工作区外访问"))
+                                .child(
+                                    h_flex()
+                                        .gap_3()
+                                        .items_center()
+                                        .child(fs_toggle(
+                                            "fs-access-read",
+                                            "读",
+                                            read_on,
+                                            true,
+                                            composer.clone(),
+                                            cx,
+                                        ))
+                                        .child(fs_toggle(
+                                            "fs-access-write",
+                                            "写",
+                                            write_on,
+                                            false,
+                                            composer.clone(),
+                                            cx,
+                                        )),
+                                ),
                         )
-                        .child(fs_toggle_row(
-                            "fs-access-read",
-                            "允许读取工作区外文件",
-                            "tmp 目录始终可读；.env/私钥/凭据永远拦截",
-                            read_on,
-                            true,
-                            composer.clone(),
-                            cx,
-                        ))
-                        .child(fs_toggle_row(
-                            "fs-access-write",
-                            "允许写入工作区外文件",
-                            "开启前只能写入工作区内与 tmp 目录",
-                            write_on,
-                            false,
-                            composer.clone(),
-                            cx,
-                        ))
                         .into_any_element()
                 }
             });
