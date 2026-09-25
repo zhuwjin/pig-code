@@ -5,11 +5,15 @@ use std::pin::Pin;
 use pig_protocol::ExecMode;
 
 use crate::provider::ToolCall;
+use crate::text::{FileEncoding, LineEnding};
 
 const MAX_READ_LINES: usize = 2000;
+const MAX_READ_CHARS: usize = 100_000;
+/// Read 单行字符上限，超过则截断该行
+const MAX_LINE_CHARS: usize = 2000;
 const MAX_MATCH_RESULTS: usize = 200;
+/// Bash 前台输出字符上限，超过则头尾预览 + 完整输出留 spill 文件
 const MAX_BASH_OUTPUT: usize = 30 * 1024;
-const BASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_GREP_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
 pub struct FileChange {
@@ -101,47 +105,96 @@ pub(crate) fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) 
     }
 }
 
-/// 会话级变更追踪：首次修改前快照原始内容，diff 始终是「原始 → 当前」。
+/// 会话级变更追踪：首次修改前快照原始字节，diff 始终是「原始 → 当前」（LF 视图）。
 /// 快照经 dirty 标记由 session 侧落盘（file_originals 表），重启后 restore 恢复基线。
+/// 快照存原始字节（非 String），GBK/UTF-16/二进制都能字节级 revert；
+/// 持久化边界仍是 String，经 snapshot_to_store/from_store 转换（非 UTF-8 走 hex）。
 ///
 /// 另有一层**每轮**追踪（ZCode turn-file-changes 同款口径）：turn 内首次写前
 /// 记录 turn_originals，回合结束 take_turn_changes 算「本轮首次写前 → 当前」净额并清空。
 #[derive(Default)]
 pub struct ChangeTracker {
-    originals: HashMap<PathBuf, Option<String>>,
+    originals: HashMap<PathBuf, Option<Vec<u8>>>,
     stats: HashMap<PathBuf, (u32, u32)>,
     /// 本次进程内新增、尚未落盘的快照路径（session 侧 drain 后写库）
     dirty: Vec<PathBuf>,
-    /// 本轮内各文件首次写前的内容（None = 本轮新建）；回合结束 take 清空
-    turn_originals: HashMap<PathBuf, Option<String>>,
+    /// 本轮内各文件首次写前的原始字节（None = 本轮新建）；回合结束 take 清空
+    turn_originals: HashMap<PathBuf, Option<Vec<u8>>>,
+}
+
+/// 读文件原始字节（None = 文件不存在）
+fn read_original_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("读取失败 {}: {e}", path.display())),
+    }
+}
+
+/// 字节 → LF 模型视图：优先 text::decode，失败降级 lossy UTF-8（diff 兜底用）
+fn decoded_view(bytes: &[u8]) -> String {
+    match crate::text::decode(bytes) {
+        Ok(doc) => doc.text,
+        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// 快照持久化编码前缀：非 UTF-8 字节以十六进制度过 String 边界
+const SNAPSHOT_HEX_PREFIX: &str = "pigcode:hex:";
+
+/// 原始字节 → 持久化 String：合法 UTF-8 直接转；否则 hex（保持 store/session 签名不变）
+pub fn snapshot_to_store(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut out = String::with_capacity(SNAPSHOT_HEX_PREFIX.len() + bytes.len() * 2);
+            out.push_str(SNAPSHOT_HEX_PREFIX);
+            for byte in bytes {
+                out.push(char::from_digit((byte >> 4) as u32, 16).expect("0-15 是合法 hex 位"));
+                out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("0-15 是合法 hex 位"));
+            }
+            out
+        }
+    }
+}
+
+/// 持久化 String → 原始字节：有 hex 前缀则解码，否则按 UTF-8 字节（兼容旧数据）
+pub fn snapshot_from_store(s: &str) -> Vec<u8> {
+    let Some(hex) = s.strip_prefix(SNAPSHOT_HEX_PREFIX) else {
+        return s.as_bytes().to_vec();
+    };
+    let digits = hex.as_bytes();
+    let mut out = Vec::with_capacity(digits.len() / 2);
+    let mut index = 0;
+    while index + 1 < digits.len() {
+        let high = (digits[index] as char).to_digit(16);
+        let low = (digits[index + 1] as char).to_digit(16);
+        match (high, low) {
+            (Some(high), Some(low)) => out.push(((high << 4) | low) as u8),
+            // 非法 hex（数据损坏）：截断保底，不 panic
+            _ => break,
+        }
+        index += 2;
+    }
+    out
 }
 
 impl ChangeTracker {
-    /// 修改前快照；返回原始内容（None = 文件原本不存在）。
-    pub fn snapshot(&mut self, path: &Path) -> Result<Option<String>, String> {
+    /// 修改前快照原始字节（None = 文件原本不存在）；已快照过的路径不重复读盘。
+    pub fn snapshot(&mut self, path: &Path) -> Result<(), String> {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.originals.entry(path.to_path_buf())
         {
-            let original = match std::fs::read_to_string(path) {
-                Ok(content) => Some(content),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(format!("读取失败 {}: {e}", path.display())),
-            };
-            entry.insert(original);
+            entry.insert(read_original_bytes(path)?);
             self.dirty.push(path.to_path_buf());
         }
         // 每轮口径：本轮首次写前同样记一笔（独立于会话级基线）
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.turn_originals.entry(path.to_path_buf())
         {
-            let original = match std::fs::read_to_string(path) {
-                Ok(content) => Some(content),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(format!("读取失败 {}: {e}", path.display())),
-            };
-            entry.insert(original);
+            entry.insert(read_original_bytes(path)?);
         }
-        Ok(self.originals[path].clone())
+        Ok(())
     }
 
     /// 取出新增快照路径（落盘后清空）
@@ -149,28 +202,35 @@ impl ChangeTracker {
         std::mem::take(&mut self.dirty)
     }
 
-    /// 读取某路径的原始快照（None 值 = 文件原本不存在；None 返回 = 未追踪）
+    /// 读取某路径的原始快照（None 值 = 文件原本不存在；None 返回 = 未追踪）。
+    /// 内部字节经 snapshot_to_store 转成持久化 String，session 侧 4MB 检查逻辑不变。
     pub fn original(&self, path: &Path) -> Option<Option<String>> {
-        self.originals.get(path).cloned()
+        self.originals
+            .get(path)
+            .map(|original| original.as_deref().map(snapshot_to_store))
     }
 
-    /// 重启后恢复基线（来自 file_originals 表；恢复的不标 dirty，避免回写）
+    /// 重启后恢复基线（来自 file_originals 表；恢复的不标 dirty，避免回写）。
+    /// 持久化 String 经 snapshot_from_store 还原为字节。
     pub fn restore(&mut self, entries: Vec<(PathBuf, Option<String>)>) {
         for (path, original) in entries {
-            self.originals.insert(path, original);
+            self.originals
+                .insert(path, original.map(|s| snapshot_from_store(&s)));
         }
     }
 
-    /// 生成「原始 → 当前」的 unified diff 与增删行数。
+    /// 生成「原始 → 当前」的 unified diff 与增删行数（两侧都先解码为 LF 视图）。
     pub fn diff(&mut self, cwd: &Path, path: &Path) -> Result<FileChange, String> {
-        let original = self
+        let original_bytes = self
             .originals
             .get(path)
             .ok_or_else(|| "文件未追踪".to_string())?
             .clone()
             .unwrap_or_default();
-        let current = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取失败 {}: {e}", path.display()))?;
+        let original = decoded_view(&original_bytes);
+        let current_bytes =
+            std::fs::read(path).map_err(|e| format!("读取失败 {}: {e}", path.display()))?;
+        let current = decoded_view(&current_bytes);
         let diff = similar::TextDiff::from_lines(&original, &current);
         let mut additions = 0;
         let mut deletions = 0;
@@ -203,16 +263,17 @@ impl ChangeTracker {
         })
     }
 
-    /// 计算并清空「本轮改动」：每文件 本轮首次写前 → 当前磁盘 的净 diff。
+    /// 计算并清空「本轮改动」：每文件 本轮首次写前 → 当前磁盘 的净 diff（LF 视图）。
     /// 净额为零（本轮内改回原文）不产出；文件被删除的暂不产出。
     pub fn take_turn_changes(&mut self, cwd: &Path) -> Vec<FileChange> {
         let entries = std::mem::take(&mut self.turn_originals);
         let mut changes = Vec::new();
         for (path, before) in entries {
-            let before = before.unwrap_or_default();
-            let Ok(current) = std::fs::read_to_string(&path) else {
+            let before = decoded_view(&before.unwrap_or_default());
+            let Ok(current_bytes) = std::fs::read(&path) else {
                 continue;
             };
+            let current = decoded_view(&current_bytes);
             let change = per_edit_diff(cwd, &path, &before, &current);
             if change.additions == 0 && change.deletions == 0 {
                 continue;
@@ -223,14 +284,16 @@ impl ChangeTracker {
         changes
     }
 
+    /// 撤销：原始字节原样写回（GBK/UTF-16/CRLF 字节级精确）；新建文件删除。
     pub fn revert(&mut self, path: &Path) -> Result<(), String> {
         let Some(original) = self.originals.remove(path) else {
             return Err("文件未被修改过，无法撤销".to_string());
         };
         self.stats.remove(path);
         match original {
-            Some(content) => std::fs::write(path, content)
-                .map_err(|e| format!("恢复失败 {}: {e}", path.display())),
+            Some(bytes) => {
+                std::fs::write(path, bytes).map_err(|e| format!("恢复失败 {}: {e}", path.display()))
+            }
             None => std::fs::remove_file(path)
                 .map_err(|e| format!("删除新建文件失败 {}: {e}", path.display())),
         }
@@ -362,6 +425,8 @@ pub async fn execute(
 }
 
 /// 解析相对 cwd 的路径并防止越出工作目录。
+/// 父目录 canonicalize 之外，目标文件已存在时还要 canonicalize 完整路径，
+/// 拦截指向工作区外的符号链接。
 pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, String> {
     let raw = Path::new(path);
     let full = if raw.is_absolute() {
@@ -386,7 +451,71 @@ pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<P
     let file_name = full
         .file_name()
         .ok_or_else(|| format!("无效路径: {path}"))?;
-    Ok(parent_canonical.join(file_name))
+    let resolved = parent_canonical.join(file_name);
+    if resolved.exists() {
+        let full_canonical = resolved
+            .canonicalize()
+            .map_err(|e| format!("路径无效 {}: {e}", resolved.display()))?;
+        if !full_canonical.starts_with(&cwd_canonical) {
+            return Err(format!("路径越出工作目录（符号链接）: {path}"));
+        }
+    }
+    Ok(resolved)
+}
+
+/// 敏感文件判定（大小写不敏感，只看文件名）：.env 家族 / SSH 私钥 / 云凭据。
+pub fn is_sensitive_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    // .env 与 .env.*（模板类豁免）
+    if (lower == ".env" || lower.starts_with(".env."))
+        && !matches!(
+            lower.as_str(),
+            ".env.example" | ".env.sample" | ".env.template"
+        )
+    {
+        return true;
+    }
+    // SSH 私钥：精确名或 id_xxx[-_.] 变体；.pub 公钥一律豁免
+    if !lower.ends_with(".pub") {
+        for prefix in ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"] {
+            if lower == prefix {
+                return true;
+            }
+            if let Some(rest) = lower.strip_prefix(prefix) {
+                if rest
+                    .chars()
+                    .next()
+                    .is_some_and(|c| matches!(c, '-' | '_' | '.'))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    // 云凭据：~/.aws/credentials、~/.gcp/credentials
+    if lower == "credentials" {
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_ascii_lowercase);
+        if parent.as_deref() == Some(".aws") || parent.as_deref() == Some(".gcp") {
+            return true;
+        }
+    }
+    false
+}
+
+/// 敏感文件拒绝文案（Read/Write/Edit 共用）
+fn sensitive_file_error(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    format!("已拒绝访问敏感文件: {name}（.env / 私钥 / 云凭据不会进入模型上下文）")
 }
 
 struct ReadFile;
@@ -410,7 +539,7 @@ impl Tool for ReadFile {
             "type": "function",
             "function": {
                 "name": "Read",
-                "description": "读取工作区内文件内容。path 相对工作目录；文件过长时用 offset/limit 分页。",
+                "description": "读取工作区内文件内容，输出带「行号\\t」前缀。path 相对工作目录；文件过长时用 offset/limit 分页（单次约 10 万字符上限，单行超 2000 字符会截断）。UTF-16/GBK 文件自动转码显示，二进制文件会拒绝。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -432,23 +561,91 @@ impl Tool for ReadFile {
         Box::pin(async move {
             let path = args["path"].as_str().ok_or("缺少参数 path")?;
             let full = resolve_checked(ctx.cwd, path, false)?;
-            let content = std::fs::read_to_string(&full)
-                .map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
+            if is_sensitive_file(&full) {
+                return Err(sensitive_file_error(&full));
+            }
+            let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
+            let doc = crate::text::decode(&bytes)?;
+            if doc.text.is_empty() {
+                return Ok(ToolEffect::plain("（空文件）".to_string()));
+            }
             let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
             let limit = args["limit"].as_u64().unwrap_or(MAX_READ_LINES as u64) as usize;
-            let lines: Vec<&str> = content.lines().collect();
+            let lines: Vec<&str> = doc.text.lines().collect();
             let total = lines.len();
             let start = (offset - 1).min(total);
-            let end = (start + limit).min(total);
-            let mut out = lines[start..end].join("\n");
+            // 逐行渲染（带行号），行数上限与字符预算（含行号前缀）先到先停
+            let mut rendered: Vec<String> = Vec::new();
+            let mut used_chars = 0usize;
+            let mut end = start;
+            for (index, line) in lines.iter().enumerate().skip(start) {
+                if index - start >= limit {
+                    break;
+                }
+                let line_no = index + 1;
+                let line_chars = line.chars().count();
+                let body = if line_chars > MAX_LINE_CHARS {
+                    let taken: String = line.chars().take(MAX_LINE_CHARS).collect();
+                    format!("{taken} [...本行已截断，共 {line_chars} 字符]")
+                } else {
+                    (*line).to_string()
+                };
+                let row = format!("{line_no}\t{body}");
+                let row_chars = row.chars().count();
+                if !rendered.is_empty() && used_chars + row_chars > MAX_READ_CHARS {
+                    break;
+                }
+                used_chars += row_chars;
+                rendered.push(row);
+                end = index + 1;
+            }
+            let mut out = rendered.join("\n");
             if end < total {
                 out.push_str(&format!(
                     "\n\n[已截断: 显示 {}-{end} 行，共 {total} 行；用 offset 参数继续读取]",
                     start + 1
                 ));
             }
+            // 元信息：仅非默认编码/行尾或 lossy 时提示
+            if doc.encoding != FileEncoding::Utf8 || doc.line_ending == LineEnding::Crlf {
+                let mut parts = vec![format!("编码={}", doc.encoding.label())];
+                if doc.line_ending == LineEnding::Crlf {
+                    parts.push("行尾=CRLF（已转为 LF 显示，写回时还原）".to_string());
+                }
+                out.push_str(&format!("\n\n[文件信息: {}]", parts.join(", ")));
+            }
+            if doc.lossy {
+                out.push_str("\n[警告: 解码存在替换字符，编码识别可能有误]");
+            }
             Ok(ToolEffect::plain(out))
         })
+    }
+}
+
+/// Read/Edit 共用的读盘报错：文件不存在时附父目录下最多 20 个文件名，引导模型修正路径
+fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        let mut message = format!("文件不存在: {path}");
+        if let Some(parent) = full.parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                let mut names: Vec<String> = entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect();
+                names.sort();
+                names.truncate(20);
+                if !names.is_empty() {
+                    message.push_str(&format!(
+                        "。目录 {} 下有: {}",
+                        parent.display(),
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+        message
+    } else {
+        format!("读取失败 {}: {error}", full.display())
     }
 }
 
@@ -484,14 +681,48 @@ impl Tool for WriteFile {
             let path = args["path"].as_str().ok_or("缺少参数 path")?;
             let content = args["content"].as_str().ok_or("缺少参数 content")?;
             let full = resolve_checked(ctx.cwd, path, true)?;
-            let before = std::fs::read_to_string(&full).unwrap_or_default();
+            if is_sensitive_file(&full) {
+                return Err(sensitive_file_error(&full));
+            }
+            // 已存在文件沿用其编码/BOM/行尾写回；无法识别（二进制/未知编码）按 UTF-8/LF 覆盖；
+            // 新文件一律 UTF-8/LF
+            let existing = std::fs::read(&full).ok();
+            let (encoding, bom, line_ending, note) = match &existing {
+                Some(bytes) => match crate::text::decode(bytes) {
+                    Ok(doc) => {
+                        let note = match (
+                            doc.encoding != FileEncoding::Utf8,
+                            doc.line_ending == LineEnding::Crlf,
+                        ) {
+                            (true, true) => {
+                                format!("（保留原编码 {} / CRLF）", doc.encoding.label())
+                            }
+                            (true, false) => format!("（保留原编码 {}）", doc.encoding.label()),
+                            (false, true) => "（保留原行尾 CRLF）".to_string(),
+                            (false, false) => String::new(),
+                        };
+                        (doc.encoding, doc.bom, doc.line_ending, note)
+                    }
+                    Err(_) => (
+                        FileEncoding::Utf8,
+                        false,
+                        LineEnding::Lf,
+                        "（原文件编码无法识别，已按 UTF-8 覆盖）".to_string(),
+                    ),
+                },
+                None => (FileEncoding::Utf8, false, LineEnding::Lf, String::new()),
+            };
+            // diff 两侧都用 LF 视图：before = 原文件解码文本（或 ""），after = 归一后的 LF 文本
+            let before = existing.as_deref().map(decoded_view).unwrap_or_default();
+            let after = content.replace("\r\n", "\n");
             ctx.tracker.snapshot(&full)?;
-            std::fs::write(&full, content)
+            let bytes = crate::text::encode(content, encoding, bom, line_ending)?;
+            std::fs::write(&full, &bytes)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
-            let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, content));
+            let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, &after));
             Ok(ToolEffect {
-                output: format!("已写入 {}（{} 字节）", path, content.len()),
+                output: format!("已写入 {}（{} 字节）{note}", path, bytes.len()),
                 file_change,
                 edit_diff,
             })
@@ -509,13 +740,14 @@ impl Tool for EditFile {
             "type": "function",
             "function": {
                 "name": "Edit",
-                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现；先 Read 确认内容再改。",
+                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现（replace_all=true 时替换全部出现）；先 Read 确认内容再改。保留原文件的编码与行尾。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "相对工作目录的文件路径" },
-                        "old_string": { "type": "string", "description": "要被替换的原文（须唯一出现）" },
-                        "new_string": { "type": "string", "description": "替换后的新文本" }
+                        "old_string": { "type": "string", "description": "要被替换的原文（须唯一出现；replace_all=true 时替换全部）" },
+                        "new_string": { "type": "string", "description": "替换后的新文本；为空且 old_string 占整行时连行尾换行一起删除，不留空行" },
+                        "replace_all": { "type": "boolean", "description": "true 时替换全部匹配（默认 false，要求唯一出现）" }
                     },
                     "required": ["path", "old_string", "new_string"]
                 }
@@ -533,35 +765,79 @@ impl Tool for EditFile {
             let old = args["old_string"].as_str().ok_or("缺少参数 old_string")?;
             let new = args["new_string"].as_str().ok_or("缺少参数 new_string")?;
             if old.is_empty() {
-                return Err("old_string 不能为空".to_string());
+                return Err("old_string 不能为空；要创建文件请用 Write".to_string());
             }
+            if old == new {
+                return Err("old_string 与 new_string 相同，无需修改".to_string());
+            }
+            let replace_all = args["replace_all"].as_bool().unwrap_or(false);
             let full = resolve_checked(ctx.cwd, path, false)?;
-            let content = std::fs::read_to_string(&full)
-                .map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
+            if is_sensitive_file(&full) {
+                return Err(sensitive_file_error(&full));
+            }
+            let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
+            let doc = crate::text::decode(&bytes)?;
+            let content = doc.text;
             let count = content.matches(old).count();
             if count == 0 {
-                return Err(format!(
+                let mut message = format!(
                     "old_string 在 {path} 中未找到。请先用 Read 确认文件当前内容（注意缩进与换行需完全一致）。"
-                ));
+                );
+                if doc.line_ending == LineEnding::Crlf {
+                    message.push_str(
+                        "该文件为 CRLF 行尾，Read 输出已转为 LF，old_string 请用 LF 换行。",
+                    );
+                }
+                return Err(message);
             }
-            if count > 1 {
+            if count > 1 && !replace_all {
                 return Err(format!(
-                    "old_string 在 {path} 中出现 {count} 次，无法唯一定位。请扩大 old_string 范围使其唯一。"
+                    "old_string 在 {path} 中出现 {count} 次，无法唯一定位。请扩大 old_string 范围使其唯一；如需全部替换，设 replace_all=true。"
                 ));
             }
             ctx.tracker.snapshot(&full)?;
-            let after = content.replacen(old, new, 1);
-            std::fs::write(&full, &after)
+            // 匹配与替换都在 LF 视图（解码已归一）上做；写回时还原原编码/行尾
+            let (after, replaced) = apply_replacement(&content, old, new, replace_all);
+            let encoded = crate::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
+            std::fs::write(&full, &encoded)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
+            let output = if replace_all {
+                format!("已修改 {path}（替换 {replaced} 处）")
+            } else {
+                format!("已修改 {path}")
+            };
             Ok(ToolEffect {
-                output: format!("已修改 {path}"),
+                output,
                 file_change,
                 edit_diff,
             })
         })
     }
+}
+
+/// 手动扫描替换（不用 String::replace，实现 ZCode 同款删除优化）：
+/// new 为空、old 不以 \n 结尾、且匹配位置后紧跟 \n 时，连这个 \n 一起删，不留空行。
+/// 返回 (替换后文本, 替换处数)。
+fn apply_replacement(content: &str, old: &str, new: &str, replace_all: bool) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    let mut replaced = 0usize;
+    while let Some(pos) = rest.find(old) {
+        out.push_str(&rest[..pos]);
+        out.push_str(new);
+        rest = &rest[pos + old.len()..];
+        if new.is_empty() && !old.ends_with('\n') && rest.starts_with('\n') {
+            rest = &rest[1..];
+        }
+        replaced += 1;
+        if !replace_all {
+            break;
+        }
+    }
+    out.push_str(rest);
+    (out, replaced)
 }
 
 impl Tool for Glob {
@@ -578,11 +854,11 @@ impl Tool for Glob {
             "type": "function",
             "function": {
                 "name": "Glob",
-                "description": "按文件名模式匹配工作区文件（如 **/*.rs）。",
+                "description": "按文件名模式匹配工作区文件（如 **/*.rs）。尊重 .gitignore/.ignore，包含隐藏文件，按最近修改排序；敏感文件（.env/私钥等）自动过滤。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "glob 模式" },
+                        "pattern": { "type": "string", "description": "glob 模式；含 / 时按相对路径匹配，不含 / 时只匹配文件名" },
                         "path": { "type": "string", "description": "搜索根目录（相对工作目录），默认为工作目录" }
                     },
                     "required": ["pattern"]
@@ -598,35 +874,62 @@ impl Tool for Glob {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
+            let glob_pattern = glob::Pattern::new(pattern)
+                .map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
             let root = match args["path"].as_str() {
                 Some(path) => resolve_checked(ctx.cwd, path, false)?,
                 None => ctx.cwd.to_path_buf(),
             };
-            let full_pattern = root.join(pattern);
-            let pattern_str = full_pattern.to_string_lossy().replace('\\', "/");
-            let entries =
-                glob::glob(&pattern_str).map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
+            let mut files = walk_workspace(&root);
+            sort_by_mtime_desc(&mut files);
+            let match_by_path = pattern.contains('/');
             let mut results: Vec<String> = Vec::new();
-            for entry in entries.flatten() {
-                let relative = entry
+            let mut filtered_sensitive = 0usize;
+            for file in files {
+                // 含 / 的模式匹配相对 root 的完整路径；不含 / 只比文件名
+                let relative = file
+                    .strip_prefix(&root)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| file.clone());
+                let matched = if match_by_path {
+                    glob_pattern.matches_path(&relative)
+                } else {
+                    file.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|name| glob_pattern.matches(name))
+                };
+                if !matched {
+                    continue;
+                }
+                if is_sensitive_file(&file) {
+                    filtered_sensitive += 1;
+                    continue;
+                }
+                // 输出相对 cwd（path 参数指向子目录时保留前缀）
+                let display = file
                     .strip_prefix(ctx.cwd)
                     .map(|p| p.to_path_buf())
-                    .unwrap_or(entry);
-                results.push(relative.to_string_lossy().replace('\\', "/"));
+                    .unwrap_or(file);
+                results.push(display.to_string_lossy().replace('\\', "/"));
                 if results.len() >= MAX_MATCH_RESULTS {
                     break;
                 }
             }
-            results.sort();
-            let mut out = results.join("\n");
+            let mut parts: Vec<String> = Vec::new();
+            if !results.is_empty() {
+                parts.push(results.join("\n"));
+            }
             if results.len() >= MAX_MATCH_RESULTS {
-                out.push_str(&format!(
-                    "\n\n[结果过多，已截断为前 {MAX_MATCH_RESULTS} 条]"
-                ));
+                parts.push(format!("[结果过多，已截断为前 {MAX_MATCH_RESULTS} 条]"));
             }
-            if out.is_empty() {
-                out = "（无匹配文件）".to_string();
+            if filtered_sensitive > 0 {
+                parts.push(format!("[已过滤 {filtered_sensitive} 个敏感文件]"));
             }
+            let out = if parts.is_empty() {
+                "（无匹配文件）".to_string()
+            } else {
+                parts.join("\n\n")
+            };
             Ok(ToolEffect::plain(out))
         })
     }
@@ -646,13 +949,14 @@ impl Tool for Grep {
             "type": "function",
             "function": {
                 "name": "Grep",
-                "description": "用正则搜索工作区文件内容，输出 文件:行号: 内容。",
+                "description": "用正则搜索工作区文件内容，输出 文件:行号: 内容。尊重 .gitignore/.ignore，包含隐藏文件，跳过敏感文件（.env/私钥等），文件按最近修改优先搜索。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "pattern": { "type": "string", "description": "正则表达式" },
                         "path": { "type": "string", "description": "搜索目录或单文件（相对工作目录），默认工作目录" },
-                        "include": { "type": "string", "description": "文件名过滤 glob（如 *.rs）" }
+                        "include": { "type": "string", "description": "文件名过滤 glob（如 *.rs）" },
+                        "ignore_case": { "type": "boolean", "description": "true 时忽略大小写（默认 false）" }
                     },
                     "required": ["pattern"]
                 }
@@ -667,22 +971,32 @@ impl Tool for Grep {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
-            let regex =
-                regex::Regex::new(pattern).map_err(|e| format!("无效正则 {pattern}: {e}"))?;
+            let ignore_case = args["ignore_case"].as_bool().unwrap_or(false);
+            let regex = regex::RegexBuilder::new(pattern)
+                .case_insensitive(ignore_case)
+                .build()
+                .map_err(|e| format!("无效正则 {pattern}: {e}"))?;
             let include = args["include"].as_str().map(|s| s.to_string());
             let root = match args["path"].as_str() {
                 Some(path) => resolve_checked(ctx.cwd, path, false)?,
                 None => ctx.cwd.to_path_buf(),
             };
 
+            // 单文件直接搜；目录走工作区遍历并按 mtime 降序（截断时保留最近改动的文件）
             let mut files = Vec::new();
             if root.is_file() {
                 files.push(root);
             } else {
-                walk(&root, &mut files);
+                files = walk_workspace(&root);
+                sort_by_mtime_desc(&mut files);
             }
             let mut out: Vec<String> = Vec::new();
+            let mut skipped_sensitive = 0usize;
             'files: for file in files {
+                if is_sensitive_file(&file) {
+                    skipped_sensitive += 1;
+                    continue;
+                }
                 if let Some(include) = &include {
                     let name = file.file_name().unwrap_or_default().to_string_lossy();
                     let glob_pattern = glob::Pattern::new(include)
@@ -715,6 +1029,9 @@ impl Tool for Grep {
                     }
                 }
             }
+            if skipped_sensitive > 0 {
+                out.push(format!("[已跳过 {skipped_sensitive} 个敏感文件]"));
+            }
             if out.is_empty() {
                 return Ok(ToolEffect::plain("（无匹配内容）".to_string()));
             }
@@ -723,24 +1040,51 @@ impl Tool for Grep {
     }
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    const SKIP: &[&str] = &[".git", "target", "node_modules", ".pigcode"];
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || SKIP.contains(&name.as_ref()) {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out);
-        } else {
-            out.push(path);
-        }
-    }
+/// 工作区遍历（ripgrep 同款 ignore 引擎）：尊重 .gitignore/.ignore/.git exclude，
+/// 包含隐藏文件，但始终跳过 VCS 目录（.git/.svn/.hg/.bzr/.jj/.sl）与 .pigcode。
+/// 只收集文件路径。
+fn walk_workspace(root: &Path) -> Vec<PathBuf> {
+    const SKIP_DIRS: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl", ".pigcode"];
+    ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .parents(true)
+        .require_git(false)
+        .filter_entry(|entry| {
+            !(entry.file_type().is_some_and(|t| t.is_dir())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| SKIP_DIRS.contains(&name)))
+        })
+        .build()
+        .flatten()
+        .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
+/// mtime（纳秒，UNIX 纪元起）；取不到当 0
+fn mtime_nanos(path: &Path) -> u128 {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// ZCode/kimi 同款排序：mtime 降序，同 mtime 按路径字典序升序
+fn sort_by_mtime_desc(files: &mut Vec<PathBuf>) {
+    let mut stamped: Vec<(u128, PathBuf)> = std::mem::take(files)
+        .into_iter()
+        .map(|path| (mtime_nanos(&path), path))
+        .collect();
+    stamped.sort_by(|(ma, pa), (mb, pb)| mb.cmp(ma).then_with(|| pa.cmp(pb)));
+    files.extend(stamped.into_iter().map(|(_, path)| path));
 }
 
 impl Tool for Bash {
@@ -757,12 +1101,13 @@ impl Tool for Bash {
             "type": "function",
             "function": {
                 "name": "Bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。禁止破坏性命令。长时命令（dev server/watch/长构建）用 run_in_background 后台运行。",
+                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。禁止破坏性命令。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "要执行的命令" },
-                        "run_in_background": { "type": "boolean", "description": "true 时后台运行，立即返回 task_id（默认 false）" }
+                        "run_in_background": { "type": "boolean", "description": "true 时后台运行，立即返回 task_id（默认 false）" },
+                        "timeout": { "type": "integer", "description": "超时秒数，默认 60，最大 300；超时后命令自动转入后台继续运行，不丢输出" }
                     },
                     "required": ["command"]
                 }
@@ -783,40 +1128,55 @@ impl Tool for Bash {
                     "已在后台启动，task_id: {task_id}。用 TaskOutput 查看输出，TaskStop 停止。"
                 )));
             }
-            let child = if cfg!(target_os = "windows") {
-                tokio::process::Command::new("cmd")
-                    .args(["/C", command])
-                    .current_dir(ctx.cwd)
-                    .output()
-            } else {
-                tokio::process::Command::new("sh")
-                    .args(["-c", command])
-                    .current_dir(ctx.cwd)
-                    .output()
-            };
-            let output = tokio::time::timeout(BASH_TIMEOUT, child)
-                .await
-                .map_err(|_| format!("命令超时（{}s）", BASH_TIMEOUT.as_secs()))?
-                .map_err(|e| format!("启动命令失败: {e}"))?;
-
-            let mut text = String::new();
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
-            if !output.stderr.is_empty() {
-                if !text.is_empty() {
-                    text.push('\n');
+            let secs = args["timeout"].as_u64().unwrap_or(60).clamp(1, 300);
+            match crate::task::run_foreground(
+                ctx.state,
+                ctx.cwd,
+                command,
+                std::time::Duration::from_secs(secs),
+            )
+            .await
+            {
+                crate::task::ForegroundOutcome::SpawnFailed { error } => {
+                    Err(format!("启动命令失败: {error}"))
                 }
-                text.push_str("[stderr]\n");
-                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                crate::task::ForegroundOutcome::TimedOut { task_id } => {
+                    Ok(ToolEffect::plain(format!(
+                        "命令超过 {secs}s 未结束，已转入后台任务 {task_id}（输出持续保留）。用 TaskOutput 查看，TaskStop 停止。"
+                    )))
+                }
+                crate::task::ForegroundOutcome::Completed {
+                    output,
+                    code,
+                    spill_path,
+                } => {
+                    let mut text = output;
+                    if text.chars().count() <= MAX_BASH_OUTPUT {
+                        // 小输出不留痕：清掉 spill 文件
+                        if let Some(path) = &spill_path {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        text.push_str(&format!("\n[exit code: {code}]"));
+                    } else {
+                        // 头尾预览 + 全量在 spill 文件（注册表 output 有 64KB 滚动上限，不作数）
+                        let total = text.chars().count();
+                        let head: String = text.chars().take(4096).collect();
+                        let tail = crate::task::tail_chars(&text, 1024);
+                        let spill_display = spill_path
+                            .as_ref()
+                            .map(|path| {
+                                path.strip_prefix(ctx.cwd)
+                                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                                    .unwrap_or_else(|_| path.display().to_string())
+                            })
+                            .unwrap_or_else(|| "（未知路径）".to_string());
+                        text = format!(
+                            "{head}\n\n[...中间省略...]\n\n{tail}\n\n[输出过长（共 {total} 字符），完整输出已保存到 {spill_display}，可用 Read 分页查看]\n[exit code: {code}]"
+                        );
+                    }
+                    Ok(ToolEffect::plain(text))
+                }
             }
-            if text.len() > MAX_BASH_OUTPUT {
-                text.truncate(MAX_BASH_OUTPUT);
-                text.push_str("\n\n[输出过长，已截断]");
-            }
-            text.push_str(&format!(
-                "\n[exit code: {}]",
-                output.status.code().unwrap_or(-1)
-            ));
-            Ok(ToolEffect::plain(text))
         })
     }
 }
@@ -1454,10 +1814,9 @@ impl Tool for AskUserQuestionTool {
     }
 }
 
-/// @ 文件搜索：遍历工作区（跳过 .git/target/node_modules 等），按子串匹配打分排序。
+/// @ 文件搜索：遍历工作区（尊重 .gitignore、含隐藏文件、跳过 VCS 目录），按子串匹配打分排序。
 pub fn search_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
-    let mut files = Vec::new();
-    walk(cwd, &mut files);
+    let files = walk_workspace(cwd);
     let query = query.to_lowercase();
     let mut scored: Vec<(u64, String)> = files
         .iter()

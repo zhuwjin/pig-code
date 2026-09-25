@@ -81,12 +81,12 @@ pub fn system_prompt(
     if has_tools {
         prompt.push_str(
             "\n可用工具:\n\
-             - Read: 读取工作区文件内容（path 相对工作目录，支持 offset/limit 分页）。\n\
-             - Write: 写入整个文件（自动创建父目录）。\n\
-             - Edit: 精确替换文件文本（old_string 必须唯一出现）。\n\
-             - Glob: 按模式匹配文件名（如 **/*.rs）。\n\
-             - Grep: 正则搜索文件内容，输出 文件:行号: 内容。\n\
-             - Bash: 执行 shell 命令（Windows 下为 cmd /C），返回 stdout/stderr 与退出码。\n\
+             - Read: 读取工作区文件（输出带行号；UTF-16/GBK 自动转码、二进制拒绝；单次约 10 万字符上限，用 offset/limit 分页）。\n\
+             - Write: 写入整个文件（自动创建父目录；已存在的文件保留原编码与行尾）。\n\
+             - Edit: 精确替换文件文本（old_string 须唯一出现，replace_all=true 替换全部；保留原编码与行尾）。\n\
+             - Glob: 按模式匹配文件名（如 **/*.rs；尊重 .gitignore、含隐藏文件，按最近修改排序）。\n\
+             - Grep: 正则搜索文件内容，输出 文件:行号: 内容（尊重 .gitignore、含隐藏文件、跳过敏感文件；ignore_case 可忽略大小写）。\n\
+             - Bash: 执行 shell 命令（Windows 下为 cmd /C），返回 stdout/stderr 与退出码；支持 timeout（默认 60s/最大 300s，超时自动转后台），输出过长落盘到 .pigcode/tool-results/。\n\
              - TodoList: 管理会话级待办清单（省略参数读取，提供 todos 整体替换）。\n\
              - FetchURL: 抓取公开网页并提取正文（不支持需登录页面）。\n\
              - TaskList: 列出后台 Bash 任务（id、状态、耗时）。\n\

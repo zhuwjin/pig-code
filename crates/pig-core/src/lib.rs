@@ -12,6 +12,7 @@ pub mod rollout;
 pub mod session;
 pub mod store;
 pub mod task;
+pub mod text;
 pub mod tool;
 
 use std::path::PathBuf;

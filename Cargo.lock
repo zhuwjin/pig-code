@@ -5185,8 +5185,10 @@ name = "pig-core"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "encoding_rs",
  "futures-util",
  "glob",
+ "ignore",
  "pig-protocol",
  "regex",
  "reqwest",
