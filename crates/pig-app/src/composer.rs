@@ -28,23 +28,19 @@ pub const PLACEHOLDER_STREAMING: &str = "继续输入以排队后续修改";
 const EXEC_MODES: &[(&str, &str, ExecMode)] = &[
     (
         "变更前确认",
-        "改文件、跑命令前先问我。",
+        "改文件、跑命令前先问我",
         ExecMode::ConfirmBeforeEdit,
     ),
-    (
-        "自动编辑",
-        "自动编辑文件，跑命令前问我。",
-        ExecMode::AutoEdit,
-    ),
-    ("计划模式", "编辑前先出计划。", ExecMode::Plan),
+    ("自动编辑", "自动编辑文件，跑命令前问我", ExecMode::AutoEdit),
+    ("计划模式", "编辑前先出计划", ExecMode::Plan),
     (
         "完全访问",
-        "全自动执行；高风险命令仍会弹窗确认。",
+        "全自动执行；高风险命令仍会弹窗确认",
         ExecMode::FullAccess,
     ),
     (
         "无管制模式",
-        "全自动执行，无确认无拦截；仅限容器/沙箱使用。",
+        "全自动执行，无确认无拦截；仅限容器/沙箱使用",
         ExecMode::Yolo,
     ),
 ];
@@ -57,6 +53,24 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
         ExecMode::FullAccess => AssetIconName::ShieldAlert,
         // 无管制沿用警示图标（现有图标里没有更合适的）
         ExecMode::Yolo => AssetIconName::ShieldAlert,
+    }
+}
+
+/// 模式色（弹层行的图标+label、输入框 chip）：按危险程度 中性 → 蓝 → 黄 → 橙 → 红。
+/// 描述文字保持 muted 灰不上色。
+fn exec_mode_color(mode: ExecMode, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match mode {
+        // 中性：默认前景，不额外着色
+        ExecMode::ConfirmBeforeEdit => theme.foreground,
+        // 蓝：只读/信息语义
+        ExecMode::Plan => theme.info,
+        // 黄/琥珀：中间档
+        ExecMode::AutoEdit => theme.warning,
+        // 橙：激进但有护栏（主题无 orange token，用 Tailwind 色板的 orange-500）
+        ExecMode::FullAccess => gpui_kit::component::theme::orange_500(),
+        // 红：无护栏
+        ExecMode::Yolo => theme.danger,
     }
 }
 
@@ -1203,12 +1217,14 @@ impl Composer {
     }
 
     /// 底部工具栏芯片：图标 + 文本 + 下拉箭头，样式与 hero 区工作区/分支芯片一致。
+    /// `color` 非 None 时图标与文本着色（模式芯片按危险程度着色用），箭头保持 muted。
     fn render_bar_chip(
         &self,
         id: &'static str,
         icon: Option<AssetIconName>,
         label: String,
         filled: bool,
+        color: Option<Hsla>,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -1226,10 +1242,15 @@ impl Composer {
                 this.child(
                     Icon::new(icon)
                         .size_4()
-                        .text_color(cx.theme().muted_foreground),
+                        .text_color(color.unwrap_or(cx.theme().muted_foreground)),
                 )
             })
-            .child(div().text_sm().child(label))
+            .child(
+                div()
+                    .text_sm()
+                    .when_some(color, |this, color| this.text_color(color))
+                    .child(label),
+            )
             .child(
                 Icon::new(IconName::ChevronDown)
                     .size_3()
@@ -1366,22 +1387,23 @@ impl Composer {
                             .label(*label)
                             .checked(ix == self.exec_mode)
                             .child(move |_, cx| {
+                                // 图标与 label 按模式危险程度上色（显式 text_color，
+                                // hover/选中的继承色盖不住模式色）；描述保持 muted
+                                let mode_color = exec_mode_color(*mode, cx);
                                 h_flex()
                                     .flex_1()
                                     .gap_2()
                                     .items_center()
+                                    .child(Icon::new(icon).size_4().text_color(mode_color))
                                     .child(
-                                        Icon::new(icon)
-                                            .size_4()
-                                            .text_color(cx.theme().muted_foreground),
-                                    )
-                                    .child(
-                                        v_flex().child(div().child(*label)).child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(*desc),
-                                        ),
+                                        v_flex()
+                                            .child(div().text_color(mode_color).child(*label))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(*desc),
+                                            ),
                                     )
                             })
                     }),
@@ -2616,6 +2638,7 @@ impl Render for Composer {
                                             Some(exec_mode_icon(EXEC_MODES[self.exec_mode].2)),
                                             EXEC_MODES[self.exec_mode].0.to_string(),
                                             exec_open,
+                                            Some(exec_mode_color(EXEC_MODES[self.exec_mode].2, cx)),
                                             cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                 let command = this.exec_command.clone();
                                                 this.toggle_popup(
@@ -2686,6 +2709,7 @@ impl Render for Composer {
                                             None,
                                             self.model.clone(),
                                             model_open,
+                                            None,
                                             cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                 let command = this.model_command.clone();
                                                 this.toggle_popup(
@@ -2712,6 +2736,7 @@ impl Render for Composer {
                                                         .clone()
                                                         .unwrap_or_else(|| "关".into()),
                                                     reasoning_open,
+                                                    None,
                                                     cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                         let command =
                                                             this.reasoning_command.clone();
