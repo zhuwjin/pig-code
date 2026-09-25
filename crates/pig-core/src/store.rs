@@ -79,7 +79,19 @@ impl Store {
             );",
         )
         .map_err(|e| format!("store.sqlite 建表失败: {e}"))?;
-        Ok(Self { conn })
+        // 老库迁移：sessions 追加 fs_read_outside/fs_write_outside 两列。
+        // 建表语句不动（新库同样靠 ALTER 补列），重复执行撞 duplicate column 忽略。
+        let store = Self { conn };
+        for column in ["fs_read_outside", "fs_write_outside"] {
+            let sql =
+                format!("ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0");
+            if let Err(error) = store.conn.execute(&sql, []) {
+                if !error.to_string().contains("duplicate column") {
+                    return Err(format!("store.sqlite 迁移失败（{column}）: {error}"));
+                }
+            }
+        }
+        Ok(store)
     }
 
     // ---- 会话索引 ----
@@ -103,17 +115,19 @@ impl Store {
             model_id: row.get(9)?,
             reasoning_level: row.get(10)?,
             exec_mode: Self::mode_from_row(row.get::<_, String>(11)?),
+            fs_read_outside: row.get::<_, i64>(12)? != 0,
+            fs_write_outside: row.get::<_, i64>(13)? != 0,
         })
     }
 
-    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode";
+    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, fs_read_outside, fs_write_outside";
 
     pub fn upsert_session(&self, meta: &SessionMeta) {
         // exec_mode 存变体名（"AutoEdit" 等），读出时按 serde 变体名解析
         let mode_raw = format!("{:?}", meta.exec_mode);
         let result = self.conn.execute(
-            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, fs_read_outside, fs_write_outside)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 title_custom = excluded.title_custom,
@@ -125,7 +139,9 @@ impl Store {
                 provider_id = excluded.provider_id,
                 model_id = excluded.model_id,
                 reasoning_level = excluded.reasoning_level,
-                exec_mode = excluded.exec_mode",
+                exec_mode = excluded.exec_mode,
+                fs_read_outside = excluded.fs_read_outside,
+                fs_write_outside = excluded.fs_write_outside",
             params![
                 meta.id,
                 meta.title,
@@ -139,6 +155,8 @@ impl Store {
                 meta.model_id,
                 meta.reasoning_level,
                 mode_raw,
+                meta.fs_read_outside,
+                meta.fs_write_outside,
             ],
         );
         // 写失败不能静默（列缺失曾导致新会话整批丢失）：至少打到控制台
@@ -497,6 +515,8 @@ mod tests {
             model_id: None,
             reasoning_level: None,
             exec_mode: Default::default(),
+            fs_read_outside: false,
+            fs_write_outside: false,
         };
         store.upsert_session(&meta);
         store.record_usage("s1", "p", "m", 1, 2, 3);
@@ -529,6 +549,8 @@ mod tests {
             model_id: None,
             reasoning_level: None,
             exec_mode: Default::default(),
+            fs_read_outside: false,
+            fs_write_outside: false,
         };
         store.upsert_session(&meta);
         assert!(!store.get_session("s1").unwrap().title_custom);
@@ -538,6 +560,41 @@ mod tests {
             store.get_session("s1").unwrap().title_custom,
             "手动重命名标记应持久化"
         );
+    }
+
+    #[test]
+    fn fs_access_columns_roundtrip_and_reopen() {
+        let (dir, store) = open_test_store("fs-access");
+        let mut meta = SessionMeta {
+            id: "s1".to_string(),
+            title: "t".to_string(),
+            title_custom: false,
+            cwd: PathBuf::from("/w"),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            exec_mode: Default::default(),
+            fs_read_outside: true,
+            fs_write_outside: false,
+        };
+        store.upsert_session(&meta);
+        let read = store.get_session("s1").expect("写入后可读");
+        assert!(read.fs_read_outside && !read.fs_write_outside, "新列读回");
+
+        meta.fs_write_outside = true;
+        store.upsert_session(&meta);
+        let read = store.get_session("s1").unwrap();
+        assert!(read.fs_read_outside && read.fs_write_outside, "写穿更新");
+
+        // 重开同一库：ALTER 幂等（duplicate column 忽略），数据仍在
+        drop(store);
+        let store = Store::open(&dir).expect("重开同一库不报错");
+        let read = store.get_session("s1").unwrap();
+        assert!(read.fs_read_outside && read.fs_write_outside, "重开后仍在");
     }
 
     #[test]

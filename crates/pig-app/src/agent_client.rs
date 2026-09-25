@@ -137,6 +137,14 @@ impl AgentClient {
         self.send(Op::SetExecMode { session_id, mode });
     }
 
+    pub fn set_fs_access(&self, session_id: String, read_outside: bool, write_outside: bool) {
+        self.send(Op::SetFsAccess {
+            session_id,
+            read_outside,
+            write_outside,
+        });
+    }
+
     pub fn approval_reply(&self, request_id: String, decision: ApprovalDecision) {
         self.send(Op::ApprovalReply {
             request_id,

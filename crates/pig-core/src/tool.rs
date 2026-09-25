@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 
 use pig_protocol::ExecMode;
 
@@ -426,11 +427,23 @@ pub async fn execute(
     }
 }
 
-/// 解析相对 cwd 的路径并防止越出工作目录。
-/// 父目录 canonicalize 之外，目标本身也要校验符号链接：指向工作区外的拒绝；
-/// 悬空链接（目标不存在，无法 canonicalize）fail-closed 拒绝——否则 Write 会
-/// 顺着链接在工作区外创建文件。
-pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, String> {
+/// resolve_core 的越界形态（供策略层区分处理；文案由调用方定）
+enum BoundFailure {
+    /// 父目录 canonical 后在工作区外
+    ParentOutside {
+        resolved: PathBuf,
+    },
+    /// 目标已存在（含符号链接），canonical 后在工作区外
+    TargetOutside {
+        resolved: PathBuf,
+    },
+    /// 悬空符号链接：fail-closed，策略层也不放行
+    DanglingSymlink,
+    Other(String),
+}
+
+/// resolve_checked 的核心：纯路径解析 + 边界/符号链接检查，结构化返回越界形态。
+fn resolve_core(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, BoundFailure> {
     let raw = Path::new(path);
     let full = if raw.is_absolute() {
         raw.to_path_buf()
@@ -439,21 +452,26 @@ pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<P
     };
     let cwd_canonical = cwd
         .canonicalize()
-        .map_err(|e| format!("工作目录无效 {}: {e}", cwd.display()))?;
+        .map_err(|e| BoundFailure::Other(format!("工作目录无效 {}: {e}", cwd.display())))?;
     let parent = full.parent().unwrap_or(cwd);
     if create_parents {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建目录失败 {}: {e}", parent.display()))?;
+            .map_err(|e| BoundFailure::Other(format!("创建目录失败 {}: {e}", parent.display())))?;
     }
     let parent_canonical = parent
         .canonicalize()
-        .map_err(|e| format!("目录不存在 {}: {e}", parent.display()))?;
+        .map_err(|e| BoundFailure::Other(format!("目录不存在 {}: {e}", parent.display())))?;
     if !parent_canonical.starts_with(&cwd_canonical) {
-        return Err(format!("路径越出工作目录: {path}"));
+        let file_name = full
+            .file_name()
+            .ok_or_else(|| BoundFailure::Other(format!("无效路径: {path}")))?;
+        return Err(BoundFailure::ParentOutside {
+            resolved: parent_canonical.join(file_name),
+        });
     }
     let file_name = full
         .file_name()
-        .ok_or_else(|| format!("无效路径: {path}"))?;
+        .ok_or_else(|| BoundFailure::Other(format!("无效路径: {path}")))?;
     let resolved = parent_canonical.join(file_name);
     let is_symlink = std::fs::symlink_metadata(&resolved)
         .map(|m| m.file_type().is_symlink())
@@ -462,18 +480,106 @@ pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<P
         match resolved.canonicalize() {
             Ok(full_canonical) => {
                 if !full_canonical.starts_with(&cwd_canonical) {
-                    return Err(format!("路径越出工作目录（符号链接）: {path}"));
+                    return Err(BoundFailure::TargetOutside { resolved });
                 }
             }
-            Err(_) if is_symlink => {
-                return Err(format!(
-                    "符号链接指向不存在的目标，无法确认安全性，已拒绝: {path}"
-                ));
+            Err(_) if is_symlink => return Err(BoundFailure::DanglingSymlink),
+            Err(e) => {
+                return Err(BoundFailure::Other(format!(
+                    "路径无效 {}: {e}",
+                    resolved.display()
+                )));
             }
-            Err(e) => return Err(format!("路径无效 {}: {e}", resolved.display())),
         }
     }
     Ok(resolved)
+}
+
+/// 解析相对 cwd 的路径并防止越出工作目录。
+/// 父目录 canonicalize 之外，目标本身也要校验符号链接：指向工作区外的拒绝；
+/// 悬空链接（目标不存在，无法 canonicalize）fail-closed 拒绝——否则 Write 会
+/// 顺着链接在工作区外创建文件。
+pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, String> {
+    resolve_core(cwd, path, create_parents).map_err(|failure| match failure {
+        BoundFailure::ParentOutside { .. } => format!("路径越出工作目录: {path}"),
+        BoundFailure::TargetOutside { .. } => format!("路径越出工作目录（符号链接）: {path}"),
+        BoundFailure::DanglingSymlink => {
+            format!("符号链接指向不存在的目标，无法确认安全性，已拒绝: {path}")
+        }
+        BoundFailure::Other(message) => message,
+    })
+}
+
+/// 区外读/写策略：Read 看 fs_read_outside 开关，Write 看 fs_write_outside
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FsAccess {
+    Read,
+    Write,
+}
+
+/// 路径是否落在系统 tmp 下（macOS /tmp→/private/tmp，两边都 canonical 后比）。
+/// 只对**绝对路径**请求生效（相对 ../ 逃逸落在 tmp 也视为越界，避免 tempdir
+/// 工作区旁的目录成为后门）。
+fn is_tmp_absolute_path(raw: &str) -> bool {
+    let raw_path = Path::new(raw);
+    if !raw_path.is_absolute() {
+        return false;
+    }
+    // canonical 比较：请求路径可能不存在（Write 新文件），退化为父目录 canonical
+    let candidate = raw_path
+        .canonicalize()
+        .or_else(|_| raw_path.parent().unwrap_or(raw_path).canonicalize())
+        .unwrap_or_else(|_| raw_path.to_path_buf());
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(tmp) = std::env::temp_dir().canonicalize() {
+        roots.push(tmp);
+    }
+    if let Ok(tmp) = Path::new("/tmp").canonicalize() {
+        roots.push(tmp);
+    }
+    roots.iter().any(|root| candidate.starts_with(root))
+}
+
+/// resolve_checked 的策略入口（文件工具统一走这里）：工作区内与显式 tmp 绝对路径
+/// 永远放行；其余区外按会话开关；开关关时报错带模式菜单引导。悬空链接始终拒绝。
+/// 敏感文件检查（is_sensitive_file）在 resolve 之后由工具无条件执行，不受开关影响。
+pub fn resolve_with_access(
+    state: &SessionToolState,
+    cwd: &Path,
+    path: &str,
+    create_parents: bool,
+    access: FsAccess,
+) -> Result<PathBuf, String> {
+    match resolve_core(cwd, path, create_parents) {
+        Ok(resolved) => Ok(resolved),
+        Err(BoundFailure::Other(message)) => Err(message),
+        Err(BoundFailure::DanglingSymlink) => Err(format!(
+            "符号链接指向不存在的目标，无法确认安全性，已拒绝: {path}"
+        )),
+        Err(
+            BoundFailure::ParentOutside { resolved } | BoundFailure::TargetOutside { resolved },
+        ) => {
+            if is_tmp_absolute_path(path) {
+                return Ok(resolved);
+            }
+            let allowed = match access {
+                FsAccess::Read => state.fs_read_outside.load(Ordering::Relaxed),
+                FsAccess::Write => state.fs_write_outside.load(Ordering::Relaxed),
+            };
+            if allowed {
+                // 同一个闸：开关开时指向区外的 symlink 也放行
+                Ok(resolved)
+            } else {
+                let toggle = match access {
+                    FsAccess::Read => "允许读取工作区外文件",
+                    FsAccess::Write => "允许写入工作区外文件",
+                };
+                Err(format!(
+                    "路径越出工作目录: {path}（可在输入框模式菜单开启「{toggle}」）"
+                ))
+            }
+        }
+    }
 }
 
 /// 敏感文件判定（大小写不敏感，只看文件名）：.env 家族 / SSH 私钥 / 云凭据。
@@ -573,7 +679,7 @@ impl Tool for ReadFile {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let path = args["path"].as_str().ok_or("缺少参数 path")?;
-            let full = resolve_checked(ctx.cwd, path, false)?;
+            let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }
@@ -759,7 +865,7 @@ impl Tool for WriteFile {
         Box::pin(async move {
             let path = args["path"].as_str().ok_or("缺少参数 path")?;
             let content = args["content"].as_str().ok_or("缺少参数 content")?;
-            let full = resolve_checked(ctx.cwd, path, true)?;
+            let full = resolve_with_access(ctx.state, ctx.cwd, path, true, FsAccess::Write)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }
@@ -853,7 +959,7 @@ impl Tool for EditFile {
                 return Err("old_string 与 new_string 相同，无需修改".to_string());
             }
             let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-            let full = resolve_checked(ctx.cwd, path, false)?;
+            let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Write)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }
@@ -1105,7 +1211,7 @@ impl Tool for Glob {
             let glob_pattern = glob::Pattern::new(pattern)
                 .map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
             let root = match args["path"].as_str() {
-                Some(path) => resolve_checked(ctx.cwd, path, false)?,
+                Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
                 None => ctx.cwd.to_path_buf(),
             };
             let mut files = walk_workspace(&root);
@@ -1206,7 +1312,7 @@ impl Tool for Grep {
                 .map_err(|e| format!("无效正则 {pattern}: {e}"))?;
             let include = args["include"].as_str().map(|s| s.to_string());
             let root = match args["path"].as_str() {
-                Some(path) => resolve_checked(ctx.cwd, path, false)?,
+                Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
                 None => ctx.cwd.to_path_buf(),
             };
 

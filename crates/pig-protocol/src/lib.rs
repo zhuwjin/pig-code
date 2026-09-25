@@ -92,6 +92,12 @@ pub enum Op {
         session_id: String,
         mode: ExecMode,
     },
+    /// 会话级「工作区外读/写」开关（默认关；tmp 目录始终放行）
+    SetFsAccess {
+        session_id: String,
+        read_outside: bool,
+        write_outside: bool,
+    },
     RevertFile {
         session_id: String,
         path: String,
@@ -432,6 +438,11 @@ pub struct SessionMeta {
     pub reasoning_level: Option<String>,
     #[serde(default)]
     pub exec_mode: ExecMode,
+    /// 会话级开关：允许读取/写入工作区外文件（tmp 目录始终放行；敏感文件永远拦截）
+    #[serde(default)]
+    pub fs_read_outside: bool,
+    #[serde(default)]
+    pub fs_write_outside: bool,
 }
 
 /// TodoList 工具的待办项：会话级状态，写入时整体替换。
@@ -500,6 +511,11 @@ pub enum Event {
         model_id: Option<String>,
         reasoning_level: Option<String>,
         exec_mode: ExecMode,
+        /// 会话级「工作区外读/写」开关（UI 模式菜单勾选态恢复用）
+        #[serde(default)]
+        fs_read_outside: bool,
+        #[serde(default)]
+        fs_write_outside: bool,
     },
     SessionList {
         sessions: Vec<SessionMeta>,

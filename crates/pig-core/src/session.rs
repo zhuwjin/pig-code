@@ -515,6 +515,17 @@ impl Session {
         self.mode = mode;
     }
 
+    /// 会话级「工作区外读/写」开关（写进共享 state，回合进行中也生效）
+    pub fn set_fs_access(&mut self, read_outside: bool, write_outside: bool) {
+        use std::sync::atomic::Ordering;
+        self.state
+            .fs_read_outside
+            .store(read_outside, Ordering::Relaxed);
+        self.state
+            .fs_write_outside
+            .store(write_outside, Ordering::Relaxed);
+    }
+
     pub fn set_model(&mut self, selection: ModelSelection) {
         self.model_override = Some(selection);
     }
@@ -1722,6 +1733,9 @@ pub async fn agent_loop(
                             exec_mode: exec_mode.unwrap_or_else(|| {
                                 seed.as_ref().map(|m| m.exec_mode).unwrap_or_default()
                             }),
+                            // 区外读写开关随工作区种子继承（与 exec_mode 同口径）
+                            fs_read_outside: seed.as_ref().map(|m| m.fs_read_outside).unwrap_or(false),
+                            fs_write_outside: seed.as_ref().map(|m| m.fs_write_outside).unwrap_or(false),
                         };
                         // UI 未指定思考等级且模型配置了默认等级 → 采用默认档
                         //（写进 meta，SessionConfigured 会同步回 UI 的等级 chip）
@@ -1751,6 +1765,7 @@ pub async fn agent_loop(
                         match Session::create(meta.clone(), pending.clone(), pending_questions.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
                             Ok(mut session) => {
                                 session.set_mode(meta.exec_mode);
+                                session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
                                 let selection = meta_to_selection(&meta);
                                 let state = session.state.clone();
                                 sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: selection.clone(), reasoning_level: meta.reasoning_level.clone(), queue: Default::default() });
@@ -1765,6 +1780,8 @@ pub async fn agent_loop(
                                     model_id: meta.model_id.clone(),
                                     reasoning_level: meta.reasoning_level.clone(),
                                     exec_mode: meta.exec_mode,
+                                    fs_read_outside: meta.fs_read_outside,
+                                    fs_write_outside: meta.fs_write_outside,
                                 });
                                 // 新会话面板初始化为空快照
                                 emit_global!(Event::TodoListChanged { session_id: id.clone(), seq, items: vec![] });
@@ -1801,6 +1818,8 @@ pub async fn agent_loop(
                                     model_id: meta.model_id.clone(),
                                     reasoning_level: meta.reasoning_level.clone(),
                                     exec_mode: meta.exec_mode,
+                                    fs_read_outside: meta.fs_read_outside,
+                                    fs_write_outside: meta.fs_write_outside,
                                 });
                                 // 切回已打开会话：补发面板快照，UI 重置面板
                                 if let Some(entry) = sessions.get(&session_id) {
@@ -1836,6 +1855,7 @@ pub async fn agent_loop(
                                 let selection = meta.as_ref().and_then(meta_to_selection);
                                 if let Some(meta) = &meta {
                                     session.set_mode(meta.exec_mode);
+                                    session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
                                 }
                                 let cwd = session.cwd.clone();
                                 let state = session.state.clone();
@@ -1857,6 +1877,8 @@ pub async fn agent_loop(
                                     model_id: meta.as_ref().and_then(|m| m.model_id.clone()),
                                     reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
                                     exec_mode: meta.as_ref().map(|m| m.exec_mode).unwrap_or_default(),
+                                    fs_read_outside: meta.as_ref().map(|m| m.fs_read_outside).unwrap_or(false),
+                                    fs_write_outside: meta.as_ref().map(|m| m.fs_write_outside).unwrap_or(false),
                                 });
                                 // 重新打开的会话无持久化面板状态：空快照重置
                                 emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items: vec![] });
@@ -2108,6 +2130,17 @@ pub async fn agent_loop(
                             }
                             store.lock().expect("store lock").update_session(&session_id, |m| {
                                 m.exec_mode = mode;
+                            });
+                        }
+                    }
+                    Op::SetFsAccess { session_id, read_outside, write_outside } => {
+                        if let Some(entry) = sessions.get_mut(&session_id) {
+                            // state 是共享句柄：回合进行中（session=None）同样生效
+                            entry.state.fs_read_outside.store(read_outside, std::sync::atomic::Ordering::Relaxed);
+                            entry.state.fs_write_outside.store(write_outside, std::sync::atomic::Ordering::Relaxed);
+                            store.lock().expect("store lock").update_session(&session_id, |m| {
+                                m.fs_read_outside = read_outside;
+                                m.fs_write_outside = write_outside;
                             });
                         }
                     }

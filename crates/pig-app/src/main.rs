@@ -504,7 +504,8 @@ impl AppView {
                 model_id,
                 reasoning_level,
                 exec_mode,
-                ..
+                fs_read_outside,
+                fs_write_outside,
             } => {
                 let session_id = session_id.clone();
                 eprintln!(
@@ -533,6 +534,7 @@ impl AppView {
                     composer.set_hero_mode(false, cx);
                     composer.set_exec_mode(*exec_mode, cx);
                     composer.set_reasoning_level(reasoning_level.clone(), cx);
+                    composer.set_fs_access(*fs_read_outside, *fs_write_outside, cx);
                 });
                 // 切换/新建会话：用缓存快照同步进度/任务面板（无快照则清空）
                 let todos = self
@@ -1026,6 +1028,7 @@ impl AppView {
                 self.composer.update(cx, |composer, cx| {
                     composer.set_exec_mode(meta.exec_mode, cx);
                     composer.set_reasoning_level(meta.reasoning_level.clone(), cx);
+                    composer.set_fs_access(meta.fs_read_outside, meta.fs_write_outside, cx);
                     if let Some(label) = label {
                         composer.set_model_name(label, cx);
                     }
@@ -1118,6 +1121,7 @@ impl AppView {
         self.composer.update(cx, |composer, cx| {
             composer.set_exec_mode(seed.exec_mode, cx);
             composer.set_reasoning_level(seed.reasoning_level.clone(), cx);
+            composer.set_fs_access(seed.fs_read_outside, seed.fs_write_outside, cx);
             if !label.is_empty() {
                 composer.set_model_name(label, cx);
             }
@@ -1390,6 +1394,19 @@ impl AppView {
                 self.update_current_meta(|m| m.exec_mode = *mode);
                 if let Some(sid) = &self.current {
                     self.agent.set_exec_mode(sid.clone(), *mode);
+                }
+            }
+            ComposerEvent::SetFsAccess {
+                read_outside,
+                write_outside,
+            } => {
+                self.update_current_meta(|m| {
+                    m.fs_read_outside = *read_outside;
+                    m.fs_write_outside = *write_outside;
+                });
+                if let Some(sid) = &self.current {
+                    self.agent
+                        .set_fs_access(sid.clone(), *read_outside, *write_outside);
                 }
             }
             ComposerEvent::OpenSettings => self.open_settings(cx),

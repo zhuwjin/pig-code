@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pig_protocol::{TaskStatus, TaskSummary};
@@ -59,6 +59,10 @@ pub struct SessionToolState {
     pub task_seq: Arc<AtomicUsize>,
     /// Read 登记的文件新鲜度（key = resolve_checked 后的完整路径）
     pub read_states: Arc<Mutex<HashMap<PathBuf, ReadState>>>,
+    /// 会话级开关：允许读取工作区外文件（tmp 目录始终放行；敏感文件永远拦截）
+    pub fs_read_outside: Arc<AtomicBool>,
+    /// 会话级开关：允许写入工作区外文件
+    pub fs_write_outside: Arc<AtomicBool>,
 }
 
 impl Clone for SessionToolState {
@@ -70,6 +74,8 @@ impl Clone for SessionToolState {
             session_id: self.session_id.clone(),
             task_seq: self.task_seq.clone(),
             read_states: self.read_states.clone(),
+            fs_read_outside: self.fs_read_outside.clone(),
+            fs_write_outside: self.fs_write_outside.clone(),
         }
     }
 }
@@ -83,6 +89,8 @@ impl SessionToolState {
             session_id,
             task_seq: Arc::new(AtomicUsize::new(0)),
             read_states: Arc::new(Mutex::new(HashMap::new())),
+            fs_read_outside: Arc::new(AtomicBool::new(false)),
+            fs_write_outside: Arc::new(AtomicBool::new(false)),
         }
     }
 

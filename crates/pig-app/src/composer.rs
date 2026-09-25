@@ -140,6 +140,11 @@ pub enum ComposerEvent {
     SetReasoning(Option<String>),
     OpenSettings,
     SetExecMode(ExecMode),
+    /// 模式菜单里的「工作区外读/写」开关
+    SetFsAccess {
+        read_outside: bool,
+        write_outside: bool,
+    },
     SearchFiles(String),
     /// hero：打开系统目录选择器
     PickDirectory,
@@ -189,6 +194,9 @@ pub struct Composer {
     input: Entity<TextareaState>,
     attachments: Vec<&'static str>,
     exec_mode: usize,
+    /// 会话级「工作区外读/写」开关（模式菜单里的两个勾选项）
+    fs_read_outside: bool,
+    fs_write_outside: bool,
     model: String,
     models: Vec<ModelOption>,
     reasoning_level: Option<String>,
@@ -267,6 +275,8 @@ impl Composer {
             input,
             attachments: Vec::new(),
             exec_mode: 1,
+            fs_read_outside: false,
+            fs_write_outside: false,
             model: "未配置模型".to_string(),
             models: vec![],
             reasoning_level: None,
@@ -716,6 +726,18 @@ impl Composer {
         if let Some(ix) = EXEC_MODES.iter().position(|(_, _, m)| *m == mode) {
             self.exec_mode = ix;
         }
+        cx.notify();
+    }
+
+    /// 恢复会话持久化的区外读写开关（会话切换/新建/回放时由 meta 同步）
+    pub fn set_fs_access(
+        &mut self,
+        read_outside: bool,
+        write_outside: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.fs_read_outside = read_outside;
+        self.fs_write_outside = write_outside;
         cx.notify();
     }
 
@@ -1276,11 +1298,25 @@ impl Composer {
         )
     }
 
-    /// 执行模式面板：无搜索框，每项带图标 + 描述，当前模式勾选。
+    /// 执行模式面板：无搜索框，每项带图标 + 描述，当前模式勾选；
+    /// 列表下方两个「工作区外读/写」勾选项（切换不关弹层）。
     fn render_exec_mode_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
+        let toggle_item = |label: &'static str, desc: &'static str, checked: bool| {
+            CommandItem::new()
+                .label(label)
+                .checked(checked)
+                .child(move |_, cx| {
+                    v_flex().child(div().child(label)).child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(desc),
+                    )
+                })
+        };
         let command = Command::new(&self.exec_command)
             .searchable(false)
             .items(
@@ -1311,15 +1347,39 @@ impl Composer {
                                         ),
                                     )
                             })
-                    }),
+                    })
+                    .chain([
+                        toggle_item(
+                            "允许读取工作区外文件",
+                            "tmp 目录始终可读；.env/私钥/凭据永远拦截",
+                            self.fs_read_outside,
+                        ),
+                        toggle_item(
+                            "允许写入工作区外文件",
+                            "开启前只能写入工作区内与 tmp 目录",
+                            self.fs_write_outside,
+                        ),
+                    ]),
             )
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     if let Some((_, _, mode)) = EXEC_MODES.get(ix.row) {
                         this.exec_mode = ix.row;
                         cx.emit(ComposerEvent::SetExecMode(*mode));
+                        this.close_command_popup(window, cx);
+                    } else {
+                        // 勾选项：切换开关状态，不关弹层（notify 触发重渲染刷新 ✓）
+                        if ix.row == EXEC_MODES.len() {
+                            this.fs_read_outside = !this.fs_read_outside;
+                        } else {
+                            this.fs_write_outside = !this.fs_write_outside;
+                        }
+                        cx.emit(ComposerEvent::SetFsAccess {
+                            read_outside: this.fs_read_outside,
+                            write_outside: this.fs_write_outside,
+                        });
+                        cx.notify();
                     }
-                    this.close_command_popup(window, cx);
                 });
             })
             .on_cancel(move |window, cx| {
