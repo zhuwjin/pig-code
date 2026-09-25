@@ -141,6 +141,8 @@ pub enum ExecMode {
     AutoEdit,
     Plan,
     FullAccess,
+    /// 无管制全自动（容器/沙箱场景）：无审批，危险命令也不拦截
+    Yolo,
 }
 
 /// 单次编辑（Write/Edit）产生的文件 diff：UI 工具卡片内联渲染用。

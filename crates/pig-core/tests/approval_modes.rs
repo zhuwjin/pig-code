@@ -483,3 +483,105 @@ async fn danger_always_allow_not_remembered() {
     );
     agent.shutdown();
 }
+
+// ---------- Yolo（无管制全自动） ----------
+
+/// "Yolo" 字符串 serde 往返（sessions 表按变体名存取，旧数据天然兼容）
+#[test]
+fn exec_mode_yolo_serde_roundtrip() {
+    let json = serde_json::to_string(&ExecMode::Yolo).unwrap();
+    assert_eq!(json, "\"Yolo\"");
+    let back: ExecMode = serde_json::from_str("\"Yolo\"").unwrap();
+    assert_eq!(back, ExecMode::Yolo);
+    // 未知变体名回退默认（store.rs mode_from_row 同口径）
+    let fallback: ExecMode = serde_json::from_str("\"NotAMode\"").unwrap_or_default();
+    assert_eq!(fallback, ExecMode::ConfirmBeforeEdit);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yolo_danger_no_dialog_executes() {
+    // Yolo：危险命令也不弹窗，直接执行（mkfs 命中黑名单但无害，见 mock 注释）
+    let (events, _dir, agent) =
+        run_danger(ExecMode::Yolo, ApprovalDecision::Allow, "yolo-danger").await;
+    assert!(
+        approval_details(&events).is_empty(),
+        "Yolo 下不应有任何审批弹窗"
+    );
+    let ends = tool_ends(&events);
+    assert_eq!(
+        ends.iter()
+            .filter(|(_, out, err)| !err && out.contains("[exit code:"))
+            .count(),
+        2,
+        "两条危险命令都直接执行: {ends:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::TextDone { full_text, .. } if full_text.contains(mock::DANGER_MARKER)
+        )),
+        "回合正常收尾"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yolo_normal_flow_no_dialogs() {
+    let (events, dir, agent, _session_id) = run_scenario_b(ExecMode::Yolo, None, "yolo-b").await;
+    assert!(
+        approvals(&events).is_empty(),
+        "Yolo 下 Write/Edit/Bash 都不弹窗"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::TurnComplete { .. })),
+        "回合正常完成"
+    );
+    // Write+Edit 生效
+    let file = dir.join(mock::SCENARIO_B_FILE);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "hello\nLINE2\nline3\n"
+    );
+    // Bash 执行成功
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter().any(|(id, out, err)| id.contains("call_b_bash")
+            && out.contains(mock::SCENARIO_B_BASH_MARKER)
+            && !err),
+        "Bash 输出含标记: {ends:?}"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yolo_sensitive_file_still_blocked() {
+    // 敏感文件防护在工具 execute 层，与模式无关（Yolo 下也无条件生效）：
+    // tool::execute 不感知模式，直接验证 .env 读取仍被拒
+    let dir = std::env::temp_dir().join(format!("pig-core-yolo-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join(".env"), "SECRET=1\n").unwrap();
+
+    let mut tracker = pig_core::tool::ChangeTracker::default();
+    let state = pig_core::task::SessionToolState::for_test();
+    let call = pig_core::provider::ToolCall {
+        id: "t1".into(),
+        name: "Read".into(),
+        arguments: serde_json::json!({"path": ".env"}).to_string(),
+    };
+    let (out, is_error, _, _) = pig_core::tool::execute(
+        &call,
+        pig_core::tool::ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
+    )
+    .await;
+    assert!(is_error, "{out}");
+    assert!(out.contains("敏感文件"), "Yolo 下 .env 仍不可读: {out}");
+    assert!(!out.contains("SECRET=1"), "内容不泄露: {out}");
+}

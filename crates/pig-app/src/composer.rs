@@ -40,6 +40,11 @@ const EXEC_MODES: &[(&str, &str, ExecMode)] = &[
         "全自动执行；高风险命令仍会弹窗确认。",
         ExecMode::FullAccess,
     ),
+    (
+        "无管制模式",
+        "全自动执行，无确认无拦截；仅限容器/沙箱使用。",
+        ExecMode::Yolo,
+    ),
 ];
 
 fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
@@ -48,6 +53,8 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
         ExecMode::AutoEdit => AssetIconName::ShieldCheck,
         ExecMode::Plan => AssetIconName::Lightbulb,
         ExecMode::FullAccess => AssetIconName::ShieldAlert,
+        // 无管制沿用警示图标（现有图标里没有更合适的）
+        ExecMode::Yolo => AssetIconName::ShieldAlert,
     }
 }
 

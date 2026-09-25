@@ -1105,9 +1105,10 @@ impl Session {
                 continue;
             }
 
-            // 黑名单命中的危险命令强制弹窗（ZCode alwaysAsk 同款）：所有模式都弹，
+            // 黑名单命中的危险命令强制弹窗（ZCode alwaysAsk 同款）：Yolo 之外的模式都弹，
             // always_allowed 对其不生效；Plan 模式已在上方整类硬拒，不走这里。
-            let danger_reason = if call.name == "Bash" {
+            // Yolo（容器/沙箱无管制）连危险判定都跳过，什么弹窗都不发。
+            let danger_reason = if call.name == "Bash" && self.mode != ExecMode::Yolo {
                 let args: serde_json::Value =
                     serde_json::from_str(&call.arguments).unwrap_or_default();
                 args["command"]

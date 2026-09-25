@@ -73,6 +73,9 @@ pub fn system_prompt(
         ExecMode::FullAccess => {
             "\n当前执行模式: 完全访问。所有工具直接执行，无需审批；命中高风险命令时会弹窗请用户确认。\n"
         }
+        ExecMode::Yolo => {
+            "\n当前执行模式: 无管制（Yolo）。所有工具直接执行，无审批也无危险命令拦截；敏感文件（.env/私钥/凭据）仍然不可读写。\n"
+        }
     });
     let agents = agents_md(data_dir, cwd);
     if !agents.is_empty() {

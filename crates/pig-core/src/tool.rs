@@ -365,10 +365,11 @@ pub fn schemas() -> Vec<serde_json::Value> {
     all().iter().map(|tool| tool.schema()).collect()
 }
 
-/// 审批判定：Plan 模式在更早处拦截（直接拒绝），这里只管其余三档。
+/// 审批判定：Plan 模式在更早处拦截（直接拒绝），这里只管其余档。
+/// Yolo 与 FullAccess 都不审批（危险命令强制弹窗在 session 层，Yolo 在那里也跳过）。
 pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
     match mode {
-        ExecMode::FullAccess => false,
+        ExecMode::FullAccess | ExecMode::Yolo => false,
         ExecMode::Plan => false,
         ExecMode::ConfirmBeforeEdit => !tool.read_only(),
         ExecMode::AutoEdit => tool.is_shell(),
