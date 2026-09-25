@@ -1105,11 +1105,24 @@ impl Session {
                 continue;
             }
 
-            if tool_ref.is_some_and(|t| tool::requires_approval(t.as_ref(), self.mode))
-                && !self.always_allowed.contains(call.name.as_str())
+            // 黑名单命中的危险命令强制弹窗（ZCode alwaysAsk 同款）：所有模式都弹，
+            // always_allowed 对其不生效；Plan 模式已在上方整类硬拒，不走这里。
+            let danger_reason = if call.name == "Bash" {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_default();
+                args["command"]
+                    .as_str()
+                    .and_then(tool::is_dangerous_command)
+            } else {
+                None
+            };
+
+            if danger_reason.is_some()
+                || (tool_ref.is_some_and(|t| tool::requires_approval(t.as_ref(), self.mode))
+                    && !self.always_allowed.contains(call.name.as_str()))
             {
                 let request_id = format!("{}-{turn_id}-approval-{item_id}", self.id);
-                let approval_detail = approval_detail(call, &self.cwd);
+                let detail_text = approval_detail(call, &self.cwd, danger_reason);
                 let (reply_tx, reply_rx) = oneshot::channel();
                 self.pending
                     .lock()
@@ -1121,7 +1134,7 @@ impl Session {
                         seq,
                         request_id: request_id.clone(),
                         tool: call.name.clone(),
-                        detail: approval_detail,
+                        detail: detail_text,
                     },
                     tx,
                 );
@@ -1136,12 +1149,21 @@ impl Session {
                 match decision {
                     ApprovalDecision::Allow => {}
                     ApprovalDecision::AlwaysAllow => {
-                        self.always_allowed.insert(call.name.clone());
+                        // 危险命令不记入 always_allowed：只在本次放行，等价 Allow
+                        if danger_reason.is_none() {
+                            self.always_allowed.insert(call.name.clone());
+                        }
                     }
                     ApprovalDecision::Reject => {
-                        let note =
-                            "用户拒绝了该操作。请尊重用户意愿，改用其他方式或说明理由后继续。"
-                                .to_string();
+                        let note = match danger_reason {
+                            Some(reason) => format!(
+                                "用户拒绝了该高风险命令（{reason}）。请尊重用户意愿，改用其他方式或说明理由后继续。"
+                            ),
+                            None => {
+                                "用户拒绝了该操作。请尊重用户意愿，改用其他方式或说明理由后继续。"
+                                    .to_string()
+                            }
+                        };
                         self.history
                             .push(ChatMsg::tool_result(&call.id, note.clone()));
                         self.record(&RolloutRecord::ToolCall {
@@ -1529,10 +1551,16 @@ fn compaction_prompt(history: &[ChatMsg]) -> String {
     out
 }
 
-fn approval_detail(call: &ToolCall, cwd: &std::path::Path) -> String {
+fn approval_detail(call: &ToolCall, cwd: &std::path::Path, danger_reason: Option<&str>) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     match call.name.as_str() {
-        "Bash" => args["command"].as_str().unwrap_or("?").to_string(),
+        "Bash" => {
+            let command = args["command"].as_str().unwrap_or("?");
+            match danger_reason {
+                Some(reason) => format!("⚠️ 高风险命令：{reason}\n\n{command}"),
+                None => command.to_string(),
+            }
+        }
         "Write" => {
             let path = args["path"].as_str().unwrap_or("?");
             let content = args["content"].as_str().unwrap_or("");

@@ -71,7 +71,7 @@ pub fn system_prompt(
              只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。\n"
         }
         ExecMode::FullAccess => {
-            "\n当前执行模式: 完全访问。所有工具直接执行，无需审批；仍禁止破坏性命令。\n"
+            "\n当前执行模式: 完全访问。所有工具直接执行，无需审批；命中高风险命令时会弹窗请用户确认。\n"
         }
     });
     let agents = agents_md(data_dir, cwd);

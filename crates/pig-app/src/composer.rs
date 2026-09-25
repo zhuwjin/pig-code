@@ -26,12 +26,20 @@ pub const PLACEHOLDER_STREAMING: &str = "继续输入以排队后续修改";
 const EXEC_MODES: &[(&str, &str, ExecMode)] = &[
     (
         "变更前确认",
-        "改文件前先问我。",
+        "改文件、跑命令前先问我。",
         ExecMode::ConfirmBeforeEdit,
     ),
-    ("自动编辑", "自动编辑文件。", ExecMode::AutoEdit),
+    (
+        "自动编辑",
+        "自动编辑文件，跑命令前问我。",
+        ExecMode::AutoEdit,
+    ),
     ("计划模式", "编辑前先出计划。", ExecMode::Plan),
-    ("完全访问", "减少确认次数。", ExecMode::FullAccess),
+    (
+        "完全访问",
+        "全自动执行；高风险命令仍会弹窗确认。",
+        ExecMode::FullAccess,
+    ),
 ];
 
 fn exec_mode_icon(mode: ExecMode) -> AssetIconName {

@@ -322,3 +322,164 @@ async fn interrupt_during_approval() {
     );
     agent.shutdown();
 }
+
+// ---------- 危险命令强制审批（黑名单命中 = 弹窗，所有模式） ----------
+
+/// 危险命令场景驱动：每个审批弹窗都按 decision 回复。
+async fn run_danger(
+    mode: ExecMode,
+    decision: ApprovalDecision,
+    cwd_name: &str,
+) -> (Vec<Event>, PathBuf, pig_core::AgentHandle) {
+    let (config_path, dir, data_dir) = setup(cwd_name);
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, dir.clone()).await;
+
+    agent
+        .ops
+        .send(Op::SetExecMode {
+            session_id: session_id.clone(),
+            mode,
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id,
+            content: format!("{} 执行危险命令", mock::SCENARIO_DANGER_TRIGGER),
+            files: vec![],
+            mode,
+        })
+        .await
+        .unwrap();
+
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "等待回合结束超时: {collected:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
+        else {
+            continue;
+        };
+        if let Event::ApprovalRequested { request_id, .. } = &event {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision,
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(
+            event,
+            Event::TurnComplete { .. } | Event::TurnAborted { .. }
+        );
+        collected.push(event);
+        if done {
+            break;
+        }
+    }
+    (collected, dir, agent)
+}
+
+fn approval_details(events: &[Event]) -> Vec<(&str, &str)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ApprovalRequested { tool, detail, .. } => Some((tool.as_str(), detail.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn danger_full_access_allow_executes() {
+    // FullAccess 本来不问 Bash，但危险命令必须弹；mock 的 mkfs 命中黑名单且执行无害
+    //（无此命令 exit 127 / 无参数只打印用法）——exit 非 0 也足以证明走了执行路径
+    let (events, _dir, agent) = run_danger(
+        ExecMode::FullAccess,
+        ApprovalDecision::Allow,
+        "danger-allow",
+    )
+    .await;
+    let details = approval_details(&events);
+    assert_eq!(details.len(), 2, "两条危险命令都应弹窗: {details:?}");
+    assert!(
+        details
+            .iter()
+            .all(|(tool, d)| *tool == "Bash" && d.contains("高风险命令") && d.contains("mkfs")),
+        "detail 应带高风险前缀与命令全文: {details:?}"
+    );
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter()
+            .any(|(_, out, err)| !err && out.contains("[exit code:")),
+        "Allow 后应真实执行: {ends:?}"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn danger_full_access_reject() {
+    let (events, dir, agent) = run_danger(
+        ExecMode::FullAccess,
+        ApprovalDecision::Reject,
+        "danger-reject",
+    )
+    .await;
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter()
+            .any(|(_, out, err)| *err && out.contains("拒绝了该高风险命令")),
+        "Reject 给模型的文案: {ends:?}"
+    );
+    assert!(
+        !ends.iter().any(|(_, out, _)| out.contains("[exit code:")),
+        "拒绝路径不应执行: {ends:?}"
+    );
+    // 无文件副作用（场景只有 Bash）
+    assert!(file_changes(&events).is_empty());
+    let _ = dir;
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn danger_confirm_before_edit_detail_prefixed() {
+    let (events, _dir, agent) = run_danger(
+        ExecMode::ConfirmBeforeEdit,
+        ApprovalDecision::Allow,
+        "danger-cbe",
+    )
+    .await;
+    let details = approval_details(&events);
+    assert!(!details.is_empty(), "ConfirmBeforeEdit 下 Bash 本就审批");
+    assert!(
+        details.iter().all(|(_, d)| d.contains("⚠️ 高风险命令")),
+        "危险命令弹窗应带警示前缀: {details:?}"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn danger_always_allow_not_remembered() {
+    // 危险命令上点 AlwaysAllow 不记入 always_allowed：同会话第二条危险命令仍弹窗
+    let (events, _dir, agent) = run_danger(
+        ExecMode::FullAccess,
+        ApprovalDecision::AlwaysAllow,
+        "danger-always",
+    )
+    .await;
+    let details = approval_details(&events);
+    assert_eq!(
+        details.len(),
+        2,
+        "第二条危险命令仍应弹窗（不记忆）: {details:?}"
+    );
+    agent.shutdown();
+}

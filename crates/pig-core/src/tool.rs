@@ -1439,7 +1439,7 @@ impl Tool for Bash {
             "type": "function",
             "function": {
                 "name": "Bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。禁止破坏性命令。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
+                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。高风险命令会弹窗请用户确认。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1460,12 +1460,8 @@ impl Tool for Bash {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let command = args["command"].as_str().ok_or("缺少参数 command")?;
-            if let Some(reason) = is_dangerous_command(command) {
-                let preview: String = command.chars().take(100).collect();
-                return Err(format!(
-                    "已拦截高风险命令（{reason}）。如确需执行，请让用户在终端手动运行: {preview}"
-                ));
-            }
+            // 黑名单（is_dangerous_command）的拦截在会话层：命中 → 强制审批弹窗，
+            // 用户 Allow 才走到这里；execute 层不再硬拒。
             if args["run_in_background"].as_bool().unwrap_or(false) {
                 let task_id = crate::task::spawn_background(ctx.state, ctx.cwd, command);
                 return Ok(ToolEffect::plain(format!(

@@ -30,6 +30,14 @@ pub const TODO_SCENARIO_ITEM: &str = "持久化待办项";
 pub const SCENARIO_Q_TRIGGER: &str = "SCENARIO_Q";
 pub const MOCK_Q_MARKER: &str = "MOCK_QUESTION_OK";
 
+/// 危险命令场景：含此标记时按 tool 结果数推进——0/1 个结果都发危险 Bash（第二条
+/// 用于验证 AlwaysAllow 对危险命令不记忆），≥2 → 文本含 marker。
+/// 命令选 mkfs：命中黑名单（mkfs 命令位）但执行无害——macOS 无此命令（exit 127），
+/// Linux 无参数调用只打印用法，不触碰磁盘。
+pub const SCENARIO_DANGER_TRIGGER: &str = "DANGER_SCENARIO";
+pub const DANGER_COMMAND: &str = "mkfs";
+pub const DANGER_MARKER: &str = "MOCK_DANGER_DONE";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -228,6 +236,26 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
             ));
             chunks
         }
+    }
+}
+
+/// 危险命令场景：0/1 个 tool 结果都发危险 Bash，≥2 → 文本收尾。
+fn danger_scenario_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 | 1 => tool_call_chunks(
+            if tool_results == 0 {
+                "call_danger_1"
+            } else {
+                "call_danger_2"
+            },
+            "Bash",
+            &serde_json::json!({"command": DANGER_COMMAND}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": DANGER_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
     }
 }
 
@@ -550,6 +578,8 @@ async fn handle_connection(
         todo_scenario_response(&body)
     } else if body.contains(SCENARIO_Q_TRIGGER) {
         question_scenario_response(&body)
+    } else if body.contains(SCENARIO_DANGER_TRIGGER) {
+        danger_scenario_response(tool_results)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {

@@ -300,45 +300,31 @@ fn dangerous_command_blacklist_allows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bash_blocks_dangerous_before_background_branch() {
-    let dir = temp_dir("danger");
+async fn dangerous_command_not_blocked_at_execute_layer() {
+    let dir = temp_dir("danger-exec");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // 前台与后台路径都拦
+    // 黑名单拦截已上移到会话层（强制审批弹窗）；execute 层不再硬拒。
+    // mkfs 命中黑名单但执行无害：macOS 无此命令（exit 127），Linux 无参数只打印用法。
     let (out, is_error) = bash(
         &dir,
         &mut tracker,
         &state,
-        serde_json::json!({"command": "rm -rf /"}),
+        serde_json::json!({"command": "mkfs"}),
     )
     .await;
-    assert!(is_error, "{out}");
-    assert!(out.contains("已拦截高风险命令"), "{out}");
-    assert!(out.contains("rm -rf /"), "文案含命令预览: {out}");
+    assert!(!is_error, "execute 层不再拦截: {out}");
+    assert!(out.contains("[exit code:"), "命令真正走了执行路径: {out}");
 
+    // 后台路径同样不拦
     let (out, is_error) = bash(
         &dir,
         &mut tracker,
         &state,
-        serde_json::json!({"command": "rm -rf /", "run_in_background": true}),
-    )
-    .await;
-    assert!(is_error, "{out}");
-    assert!(out.contains("已拦截高风险命令"), "{out}");
-    assert!(
-        state.tasks.lock().expect("tasks lock").is_empty(),
-        "被拦命令不应注册任务"
-    );
-
-    // 放行命令正常执行
-    let (out, is_error) = bash(
-        &dir,
-        &mut tracker,
-        &state,
-        serde_json::json!({"command": "echo safe"}),
+        serde_json::json!({"command": "mkfs", "run_in_background": true}),
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("safe"), "{out}");
+    assert!(out.contains("task_id"), "{out}");
 }
