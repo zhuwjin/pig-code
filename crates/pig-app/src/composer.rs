@@ -1,8 +1,10 @@
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
@@ -56,6 +58,64 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
         // 无管制沿用警示图标（现有图标里没有更合适的）
         ExecMode::Yolo => AssetIconName::ShieldAlert,
     }
+}
+
+/// 模式弹层 footer 里的「区外读/写」开关行：复选框（默认尺寸 16px 指示器，
+/// 与模式行的 size_4 图标列对齐）+ label + 描述，整行可点击、hover 底色与
+/// 模式行的选中态同色系（accent）。Checkbox 不挂 handler（点击事件冒泡到行），
+/// 点击切换并 emit SetFsAccess，不关弹层。
+fn fs_toggle_row(
+    id: &'static str,
+    label: &'static str,
+    desc: &'static str,
+    checked: bool,
+    is_read: bool,
+    composer: Entity<Composer>,
+    cx: &mut App,
+) -> AnyElement {
+    let (accent, accent_foreground, radius, muted) = {
+        let theme = cx.theme();
+        (
+            theme.accent,
+            theme.accent_foreground,
+            theme.radius,
+            theme.muted_foreground,
+        )
+    };
+    div()
+        .id(SharedString::from(format!("{id}-row")))
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .rounded(radius)
+        .cursor_pointer()
+        .hover(move |style| style.bg(accent).text_color(accent_foreground))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(Checkbox::new(id).checked(checked).tab_stop(false))
+                .child(
+                    v_flex()
+                        .child(div().text_sm().child(label))
+                        .child(div().text_xs().text_color(muted).child(desc)),
+                ),
+        )
+        .on_click(move |_, _window, cx| {
+            composer.update(cx, |this, cx| {
+                if is_read {
+                    this.fs_read_outside = !this.fs_read_outside;
+                } else {
+                    this.fs_write_outside = !this.fs_write_outside;
+                }
+                cx.emit(ComposerEvent::SetFsAccess {
+                    read_outside: this.fs_read_outside,
+                    write_outside: this.fs_write_outside,
+                });
+                cx.notify();
+            });
+        })
+        .into_any_element()
 }
 
 /// 任务耗时：started→ended（或至今），"N 秒 / N 分"。
@@ -1298,25 +1358,13 @@ impl Composer {
         )
     }
 
-    /// 执行模式面板：无搜索框，每项带图标 + 描述，当前模式勾选；
-    /// 列表下方两个「工作区外读/写」勾选项（切换不关弹层）。
+    /// 执行模式面板：Command 单选模式列表（键盘导航保持可用）。
+    /// 「工作区外访问」开关区放在 Command 的 footer 槽：模式（单选）与开关（多选）
+    /// 分区展示，开关行不参与 Command 的键盘选择（鼠标交互，可接受的取舍）。
     fn render_exec_mode_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
-        let toggle_item = |label: &'static str, desc: &'static str, checked: bool| {
-            CommandItem::new()
-                .label(label)
-                .checked(checked)
-                .child(move |_, cx| {
-                    v_flex().child(div().child(label)).child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(desc),
-                    )
-                })
-        };
         let command = Command::new(&self.exec_command)
             .searchable(false)
             .items(
@@ -1347,51 +1395,72 @@ impl Composer {
                                         ),
                                     )
                             })
-                    })
-                    .chain([
-                        toggle_item(
-                            "允许读取工作区外文件",
-                            "tmp 目录始终可读；.env/私钥/凭据永远拦截",
-                            self.fs_read_outside,
-                        ),
-                        toggle_item(
-                            "允许写入工作区外文件",
-                            "开启前只能写入工作区内与 tmp 目录",
-                            self.fs_write_outside,
-                        ),
-                    ]),
+                    }),
             )
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     if let Some((_, _, mode)) = EXEC_MODES.get(ix.row) {
                         this.exec_mode = ix.row;
                         cx.emit(ComposerEvent::SetExecMode(*mode));
-                        this.close_command_popup(window, cx);
-                    } else {
-                        // 勾选项：切换开关状态，不关弹层（notify 触发重渲染刷新 ✓）
-                        if ix.row == EXEC_MODES.len() {
-                            this.fs_read_outside = !this.fs_read_outside;
-                        } else {
-                            this.fs_write_outside = !this.fs_write_outside;
-                        }
-                        cx.emit(ComposerEvent::SetFsAccess {
-                            read_outside: this.fs_read_outside,
-                            write_outside: this.fs_write_outside,
-                        });
-                        cx.notify();
                     }
+                    this.close_command_popup(window, cx);
                 });
             })
             .on_cancel(move |window, cx| {
                 on_cancel_composer.update(cx, |this, cx| {
                     this.close_command_popup(window, cx);
                 });
+            })
+            // footer 槽：分隔线 + 分区小标题 + 两个开关行（复选框视觉，不再用
+            // CommandItem.checked 的 ✓ 表达开关态）
+            .footer({
+                let composer = cx.entity();
+                let read_on = self.fs_read_outside;
+                let write_on = self.fs_write_outside;
+                move |_, _window, cx| {
+                    v_flex()
+                        .w_full()
+                        .pt_1()
+                        .child(Separator::horizontal())
+                        .child(
+                            div()
+                                .w_full()
+                                .px_2()
+                                .pt_2()
+                                .pb_1()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("工作区外访问"),
+                        )
+                        .child(fs_toggle_row(
+                            "fs-access-read",
+                            "允许读取工作区外文件",
+                            "tmp 目录始终可读；.env/私钥/凭据永远拦截",
+                            read_on,
+                            true,
+                            composer.clone(),
+                            cx,
+                        ))
+                        .child(fs_toggle_row(
+                            "fs-access-write",
+                            "允许写入工作区外文件",
+                            "开启前只能写入工作区内与 tmp 目录",
+                            write_on,
+                            false,
+                            composer.clone(),
+                            cx,
+                        ))
+                        .into_any_element()
+                }
             });
-        self.command_popup_shell(
+        // 定宽 300px：开关区描述文字按宽度换行，不再被弹层裁切
+        let content = v_flex().w(px(300.)).child(command).into_any_element();
+        self.popup_shell(
             "composer-exec-popup",
-            &self.exec_command,
-            command,
+            content,
             PopupAnchor::Left,
+            Some(self.exec_command.clone()),
             cx,
         )
     }
