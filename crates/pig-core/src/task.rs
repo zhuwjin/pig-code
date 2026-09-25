@@ -2,6 +2,7 @@
 //! 完成经 task_notify channel 通知 agent_loop 推送 TaskListChanged。不持久化。
 //! 前台超时自动转后台继续跑；spill 文件（.pigcode/tool-results/{id}.log）保存全量输出。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,6 +12,18 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rollout::now_secs;
 use crate::tool::TodoHandle;
+
+/// Read 记录的文件新鲜度状态（ZCode read-file-state 同款）：
+/// Write/Edit 写前比对，防止基于过期视图覆盖外部改动。
+#[derive(Debug, Clone)]
+pub struct ReadState {
+    pub mtime: Option<std::time::SystemTime>,
+    pub size: u64,
+    /// 原始字节的 DefaultHasher 值
+    pub hash: u64,
+    /// 本次读取是否被预算截断（不完整视图）；显式 offset/limit 分页读不算
+    pub partial: bool,
+}
 
 /// 注册表内 output 滚动上限（追加时从头部截断）。
 const MAX_TASK_OUTPUT: usize = 64 * 1024;
@@ -34,7 +47,7 @@ pub struct TaskEntry {
 /// 按会话保序的任务注册表（id = b{task_seq 递增}；移除条目不回收序号）。
 pub type TaskRegistry = Arc<Mutex<Vec<TaskEntry>>>;
 
-/// 会话级工具共享状态：待办清单 + 任务注册表 + 完成通知 + 任务序号发生器。
+/// 会话级工具共享状态：待办清单 + 任务注册表 + 完成通知 + 任务序号 + 文件新鲜度。
 /// 全部字段可 Clone（Arc/atomic/sender），Session 与 agent_loop 的 SessionEntry 各持一份共享。
 pub struct SessionToolState {
     pub todos: TodoHandle,
@@ -44,6 +57,8 @@ pub struct SessionToolState {
     pub session_id: String,
     /// 任务序号发生器（b1、b2…单调递增；前台任务完成移除后不复用）
     pub task_seq: Arc<AtomicUsize>,
+    /// Read 登记的文件新鲜度（key = resolve_checked 后的完整路径）
+    pub read_states: Arc<Mutex<HashMap<PathBuf, ReadState>>>,
 }
 
 impl Clone for SessionToolState {
@@ -54,6 +69,7 @@ impl Clone for SessionToolState {
             task_notify: self.task_notify.clone(),
             session_id: self.session_id.clone(),
             task_seq: self.task_seq.clone(),
+            read_states: self.read_states.clone(),
         }
     }
 }
@@ -66,6 +82,7 @@ impl SessionToolState {
             task_notify,
             session_id,
             task_seq: Arc::new(AtomicUsize::new(0)),
+            read_states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

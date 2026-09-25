@@ -5,6 +5,7 @@ use std::pin::Pin;
 use pig_protocol::ExecMode;
 
 use crate::provider::ToolCall;
+use crate::task::SessionToolState;
 use crate::text::{FileEncoding, LineEnding};
 
 const MAX_READ_LINES: usize = 2000;
@@ -425,8 +426,9 @@ pub async fn execute(
 }
 
 /// 解析相对 cwd 的路径并防止越出工作目录。
-/// 父目录 canonicalize 之外，目标文件已存在时还要 canonicalize 完整路径，
-/// 拦截指向工作区外的符号链接。
+/// 父目录 canonicalize 之外，目标本身也要校验符号链接：指向工作区外的拒绝；
+/// 悬空链接（目标不存在，无法 canonicalize）fail-closed 拒绝——否则 Write 会
+/// 顺着链接在工作区外创建文件。
 pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, String> {
     let raw = Path::new(path);
     let full = if raw.is_absolute() {
@@ -452,12 +454,22 @@ pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<P
         .file_name()
         .ok_or_else(|| format!("无效路径: {path}"))?;
     let resolved = parent_canonical.join(file_name);
-    if resolved.exists() {
-        let full_canonical = resolved
-            .canonicalize()
-            .map_err(|e| format!("路径无效 {}: {e}", resolved.display()))?;
-        if !full_canonical.starts_with(&cwd_canonical) {
-            return Err(format!("路径越出工作目录（符号链接）: {path}"));
+    let is_symlink = std::fs::symlink_metadata(&resolved)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_symlink || resolved.exists() {
+        match resolved.canonicalize() {
+            Ok(full_canonical) => {
+                if !full_canonical.starts_with(&cwd_canonical) {
+                    return Err(format!("路径越出工作目录（符号链接）: {path}"));
+                }
+            }
+            Err(_) if is_symlink => {
+                return Err(format!(
+                    "符号链接指向不存在的目标，无法确认安全性，已拒绝: {path}"
+                ));
+            }
+            Err(e) => return Err(format!("路径无效 {}: {e}", resolved.display())),
         }
     }
     Ok(resolved)
@@ -567,6 +579,7 @@ impl Tool for ReadFile {
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
             let doc = crate::text::decode(&bytes)?;
             if doc.text.is_empty() {
+                record_read_state(ctx.state, &full, &bytes, false);
                 return Ok(ToolEffect::plain("（空文件）".to_string()));
             }
             let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
@@ -617,6 +630,9 @@ impl Tool for ReadFile {
             if doc.lossy {
                 out.push_str("\n[警告: 解码存在替换字符，编码识别可能有误]");
             }
+            // ZCode 口径：只有被预算截断的「整读」才算 partial；显式分页读不算
+            let paged = args.get("offset").is_some() || args.get("limit").is_some();
+            record_read_state(ctx.state, &full, &bytes, !paged && end < total);
             Ok(ToolEffect::plain(out))
         })
     }
@@ -647,6 +663,68 @@ fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> String {
     } else {
         format!("读取失败 {}: {error}", full.display())
     }
+}
+
+/// 文件内容指纹（原始字节的 DefaultHasher）
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash_slice(bytes, &mut hasher);
+    hasher.finish()
+}
+
+/// Read 成功登记 / Write/Edit 写盘后刷新 新鲜度状态（mtime 取写盘后的新值）
+fn record_read_state(state: &SessionToolState, full: &Path, bytes: &[u8], partial: bool) {
+    let mtime = std::fs::metadata(full).ok().and_then(|m| m.modified().ok());
+    let entry = crate::task::ReadState {
+        mtime,
+        size: bytes.len() as u64,
+        hash: hash_bytes(bytes),
+        partial,
+    };
+    if let Ok(mut states) = state.read_states.lock() {
+        states.insert(full.to_path_buf(), entry);
+    }
+}
+
+/// 写前新鲜度检查（ZCode read-file-state 同款）：文件不存在（新建）放行；
+/// 未读过 / 上次是不完整视图 / 读后磁盘被外部改动，一律拒绝。
+/// mtime 或 size 有变化才比 hash；hash 相同（内容逐字未变）放行并顺手更新状态。
+fn check_fresh(
+    state: &SessionToolState,
+    full: &Path,
+    file_exists: bool,
+    verb: &str,
+) -> Result<(), String> {
+    if !file_exists {
+        return Ok(());
+    }
+    let (read_mtime, read_size, read_hash, partial) = {
+        let states = state.read_states.lock().map_err(|e| e.to_string())?;
+        let Some(read) = states.get(full) else {
+            return Err(format!(
+                "文件已存在且本会话尚未读过；为避免覆盖他人改动，请先 Read 再{verb}"
+            ));
+        };
+        (read.mtime, read.size, read.hash, read.partial)
+    };
+    if partial {
+        return Err(
+            "上次 Read 是不完整视图（输出被截断）；请用 offset/limit 分页读完或完整 Read 后再改"
+                .to_string(),
+        );
+    }
+    let meta =
+        std::fs::metadata(full).map_err(|e| format!("读取文件状态失败 {}: {e}", full.display()))?;
+    if meta.modified().ok() == read_mtime && meta.len() == read_size {
+        return Ok(());
+    }
+    let bytes = std::fs::read(full).map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
+    if hash_bytes(&bytes) == read_hash {
+        record_read_state(state, full, &bytes, false);
+        return Ok(());
+    }
+    Err("文件自上次 Read 后已被外部修改，请先重新 Read 再改（避免覆盖他人改动）".to_string())
 }
 
 impl Tool for WriteFile {
@@ -687,6 +765,7 @@ impl Tool for WriteFile {
             // 已存在文件沿用其编码/BOM/行尾写回；无法识别（二进制/未知编码）按 UTF-8/LF 覆盖；
             // 新文件一律 UTF-8/LF
             let existing = std::fs::read(&full).ok();
+            check_fresh(ctx.state, &full, existing.is_some(), "写入")?;
             let (encoding, bom, line_ending, note) = match &existing {
                 Some(bytes) => match crate::text::decode(bytes) {
                     Ok(doc) => {
@@ -719,6 +798,8 @@ impl Tool for WriteFile {
             let bytes = crate::text::encode(content, encoding, bom, line_ending)?;
             std::fs::write(&full, &bytes)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
+            // 写盘后刷新新鲜度：紧接着再 Edit 自己刚写的文件必须合法
+            record_read_state(ctx.state, &full, &bytes, false);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, &after));
             Ok(ToolEffect {
@@ -775,10 +856,39 @@ impl Tool for EditFile {
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }
+            check_fresh(ctx.state, &full, full.exists(), "修改")?;
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
             let doc = crate::text::decode(&bytes)?;
             let content = doc.text;
-            let count = content.matches(old).count();
+            // 三级匹配梯队（ZCode 同款子集）：精确 → 剥离 Read 行号前缀 → 引号归一。
+            // 每级各自做唯一性检查；replace_all 只走第 1 级（宽匹配仅做单次替换）。
+            let mut effective_old = old.to_string();
+            let mut effective_new = new.to_string();
+            let mut quote_window: Option<(usize, usize)> = None;
+            let mut fuzzy_note: Option<&'static str> = None;
+            let mut count = content.matches(old).count();
+            if count == 0 && !replace_all {
+                if let Some(stripped) = strip_line_number_prefixes(old) {
+                    let stripped_count = content.matches(&stripped).count();
+                    if stripped_count > 0 {
+                        count = stripped_count;
+                        effective_old = stripped;
+                        fuzzy_note = Some("容错匹配：已剥离行号前缀");
+                    }
+                }
+                if count == 0 {
+                    let windows = find_quote_normalized_windows(&content, old);
+                    if windows.len() == 1 {
+                        let (start, end) = windows[0];
+                        count = 1;
+                        quote_window = Some((start, end));
+                        effective_new = follow_quote_style(new, &content[start..end]);
+                        fuzzy_note = Some("容错匹配：引号风格已跟随文件");
+                    } else if windows.len() > 1 {
+                        count = windows.len();
+                    }
+                }
+            }
             if count == 0 {
                 let mut message = format!(
                     "old_string 在 {path} 中未找到。请先用 Read 确认文件当前内容（注意缩进与换行需完全一致）。"
@@ -797,14 +907,28 @@ impl Tool for EditFile {
             }
             ctx.tracker.snapshot(&full)?;
             // 匹配与替换都在 LF 视图（解码已归一）上做；写回时还原原编码/行尾
-            let (after, replaced) = apply_replacement(&content, old, new, replace_all);
+            let (after, replaced) = match quote_window {
+                // 引号归一命中：整段替换原文那 N 行
+                Some((start, end)) => {
+                    let mut out = String::with_capacity(content.len());
+                    out.push_str(&content[..start]);
+                    out.push_str(&effective_new);
+                    out.push_str(&content[end..]);
+                    (out, 1)
+                }
+                None => apply_replacement(&content, &effective_old, &effective_new, replace_all),
+            };
             let encoded = crate::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
             std::fs::write(&full, &encoded)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
+            // 写盘后刷新新鲜度：紧接着再改自己刚写的文件必须合法
+            record_read_state(ctx.state, &full, &encoded, false);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             let output = if replace_all {
                 format!("已修改 {path}（替换 {replaced} 处）")
+            } else if let Some(note) = fuzzy_note {
+                format!("已修改 {path}（{note}）")
             } else {
                 format!("已修改 {path}")
             };
@@ -838,6 +962,109 @@ fn apply_replacement(content: &str, old: &str, new: &str, replace_all: bool) -> 
     }
     out.push_str(rest);
     (out, replaced)
+}
+
+/// Edit 容错第 2 级：剥离 Read 输出的行号前缀（每行 ^\d+\t 或 ^\d+:）。
+/// 任一行不带合法前缀则整体不剥离（返回 None）；行尾单个 \n 视为终止符。
+fn strip_line_number_prefixes(s: &str) -> Option<String> {
+    let (body, trailing_newline) = match s.strip_suffix('\n') {
+        Some(body) => (body, true),
+        None => (s, false),
+    };
+    let mut lines = Vec::new();
+    for line in body.split('\n') {
+        let digit_len = line.bytes().take_while(|b| b.is_ascii_digit()).count();
+        let rest = &line[digit_len..];
+        let stripped = if digit_len > 0 && rest.starts_with('\t') {
+            &rest[1..]
+        } else if digit_len > 0 && rest.starts_with(':') {
+            &rest[1..]
+        } else {
+            return None;
+        };
+        lines.push(stripped);
+    }
+    let joined = lines.join("\n");
+    if joined.is_empty() {
+        return None;
+    }
+    Some(if trailing_newline {
+        format!("{joined}\n")
+    } else {
+        joined
+    })
+}
+
+/// Edit 容错第 3 级的弯引号归一：‘’→'，“”→"。
+fn normalize_quotes(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            _ => c,
+        })
+        .collect()
+}
+
+/// 引号归一后按行窗口匹配：content 与 old 各按行归一，逐行相等即命中。
+/// 返回各命中窗口在 content 里的字节区间（窗口覆盖整 N 行，不含尾随换行）。
+/// old 行尾单个 \n 视为终止符。
+fn find_quote_normalized_windows(content: &str, old: &str) -> Vec<(usize, usize)> {
+    let old_body = old.strip_suffix('\n').unwrap_or(old);
+    let old_lines: Vec<String> = old_body.split('\n').map(normalize_quotes).collect();
+    let n = old_lines.len();
+    let content_lines: Vec<&str> = content.split('\n').collect();
+    if n == 0 || content_lines.len() < n {
+        return Vec::new();
+    }
+    // 每行的字节起始偏移（split('\n') 的分隔符恰为 1 字节）
+    let mut offsets = Vec::with_capacity(content_lines.len());
+    let mut pos = 0usize;
+    for line in &content_lines {
+        offsets.push(pos);
+        pos += line.len() + 1;
+    }
+    let normalized: Vec<String> = content_lines
+        .iter()
+        .map(|line| normalize_quotes(line))
+        .collect();
+    let mut hits = Vec::new();
+    for i in 0..=(content_lines.len() - n) {
+        if (0..n).all(|j| normalized[i + j] == old_lines[j]) {
+            let start = offsets[i];
+            let end = offsets[i + n - 1] + content_lines[i + n - 1].len();
+            hits.push((start, end));
+        }
+    }
+    hits
+}
+
+/// 跟随文件引号风格：原文匹配段含弯引号时，把 new_string 的直引号按出现顺序交替转弯。
+fn follow_quote_style(new_string: &str, original_segment: &str) -> String {
+    let curly_double =
+        original_segment.contains('\u{201C}') || original_segment.contains('\u{201D}');
+    let curly_single =
+        original_segment.contains('\u{2018}') || original_segment.contains('\u{2019}');
+    if !curly_double && !curly_single {
+        return new_string.to_string();
+    }
+    let mut out = String::with_capacity(new_string.len());
+    let mut double_open = true;
+    let mut single_open = true;
+    for c in new_string.chars() {
+        match c {
+            '"' if curly_double => {
+                out.push(if double_open { '\u{201C}' } else { '\u{201D}' });
+                double_open = !double_open;
+            }
+            '\'' if curly_single => {
+                out.push(if single_open { '\u{2018}' } else { '\u{2019}' });
+                single_open = !single_open;
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 impl Tool for Glob {
@@ -1087,6 +1314,117 @@ fn sort_by_mtime_desc(files: &mut Vec<PathBuf>) {
     files.extend(stamped.into_iter().map(|(_, path)| path));
 }
 
+/// 保守的破坏性命令黑名单（非 AST，只拦明确形态；命中即拒绝并说明理由）。
+/// 宁可误拦也不放行，误拦文案引导用户手动执行。返回 Some(原因) 表示应拦截。
+pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let compact: String = command.chars().filter(|c| !c.is_whitespace()).collect();
+
+    // fork 炸弹：:(){ :|:& };:
+    if compact.contains(":(){") && compact.contains("|:&") {
+        return Some("fork 炸弹");
+    }
+
+    // 命令位判定：首 token，或跟在 ; & | && || sudo then do if ! ( 之后
+    let in_command_position = |i: usize| {
+        if i == 0 {
+            return true;
+        }
+        let prev = tokens[i - 1];
+        prev.ends_with(';')
+            || prev.ends_with('&')
+            || matches!(
+                prev,
+                "|" | "&&" | "||" | ";" | "(" | "sudo" | "then" | "do" | "if" | "!"
+            )
+    };
+    fn base_name(token: &str) -> &str {
+        token.rsplit('/').next().unwrap_or(token)
+    }
+
+    for (i, token) in tokens.iter().enumerate() {
+        let base = base_name(token);
+        if !in_command_position(i) {
+            continue;
+        }
+        // rm -rf/-fr 且目标为 / /* ~ ~/ $HOME .（普通 rm -rf node_modules 放行）
+        if base == "rm" {
+            let mut recursive_force = false;
+            let mut dangerous_target = false;
+            for t in &tokens[i + 1..] {
+                if t.starts_with('-') && !t.starts_with("--") {
+                    let flags = t.trim_start_matches('-');
+                    if (flags.contains('r') || flags.contains('R')) && flags.contains('f') {
+                        recursive_force = true;
+                    }
+                } else if matches!(*t, "/" | "/*" | "~" | "~/" | "$HOME" | ".") {
+                    dangerous_target = true;
+                }
+            }
+            if recursive_force && dangerous_target {
+                return Some("rm -rf 指向根/家/当前目录");
+            }
+        }
+        // 磁盘格式化/分区
+        if base == "mkfs" || base.starts_with("mkfs.") || base == "fdisk" {
+            return Some("磁盘格式化/分区操作");
+        }
+        if base == "diskutil"
+            && tokens
+                .get(i + 1)
+                .is_some_and(|next| next.starts_with("erase"))
+        {
+            return Some("磁盘格式化/分区操作");
+        }
+        // dd 写块设备（of=/dev/…，字符设备白名单放行）
+        if base == "dd" {
+            for t in &tokens[i + 1..] {
+                if let Some(target) = t.strip_prefix("of=") {
+                    if target.starts_with("/dev/")
+                        && !matches!(
+                            target,
+                            "/dev/null" | "/dev/zero" | "/dev/random" | "/dev/urandom"
+                        )
+                    {
+                        return Some("dd 写入块设备");
+                    }
+                }
+            }
+        }
+        // 关机/重启
+        if matches!(base, "shutdown" | "reboot" | "halt" | "poweroff") {
+            return Some("关机/重启操作");
+        }
+        if base == "systemctl"
+            && tokens
+                .get(i + 1)
+                .is_some_and(|next| matches!(*next, "poweroff" | "reboot" | "halt" | "kexec"))
+        {
+            return Some("关机/重启操作");
+        }
+        if base == "init"
+            && tokens
+                .get(i + 1)
+                .is_some_and(|next| matches!(*next, "0" | "6"))
+        {
+            return Some("关机/重启操作");
+        }
+        // 递归改权/改属根目录
+        if base == "chmod" || base == "chown" {
+            let recursive = tokens[i + 1..]
+                .iter()
+                .any(|t| t.starts_with('-') && t.trim_start_matches('-').contains('R'));
+            let root_target = tokens[i + 1..].iter().any(|t| *t == "/");
+            let is_777 = tokens[i + 1..].iter().any(|t| *t == "777");
+            if recursive && root_target && (base == "chown" || is_777) {
+                return Some("递归改权/改属根目录");
+            }
+        }
+        // git push --force / -f 不拦（常见操作，审批模式兜底）
+    }
+    None
+}
+
 impl Tool for Bash {
     fn name(&self) -> &'static str {
         "Bash"
@@ -1122,6 +1460,12 @@ impl Tool for Bash {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let command = args["command"].as_str().ok_or("缺少参数 command")?;
+            if let Some(reason) = is_dangerous_command(command) {
+                let preview: String = command.chars().take(100).collect();
+                return Err(format!(
+                    "已拦截高风险命令（{reason}）。如确需执行，请让用户在终端手动运行: {preview}"
+                ));
+            }
             if args["run_in_background"].as_bool().unwrap_or(false) {
                 let task_id = crate::task::spawn_background(ctx.state, ctx.cwd, command);
                 return Ok(ToolEffect::plain(format!(
@@ -1268,32 +1612,45 @@ impl Tool for TodoListTool {
 const MAX_FETCH_BODY: usize = 2 * 1024 * 1024;
 const MAX_FETCH_OUTPUT: usize = 50000;
 
-/// SSRF 防护：拒绝本机/私网地址字面量（localhost、127/8、::1、0.0.0.0、
-/// 10/8、192.168/16、172.16-31/12、169.254/16）。DNS 解析出的私网地址不在此列。
+/// 数值 IP 判定：未指定/环回/私网/链路本地/文档段/CGNAT/benchmark/组播。
+/// FetchURL 的字面 host 与 DNS 解析结果共用。
+pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let b = v4.octets();
+            v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private() // 10/8、172.16/12、192.168/16
+                || v4.is_link_local() // 169.254/16
+                || v4.is_documentation()
+                || (b[0] == 100 && (64..=127).contains(&b[1])) // 100.64.0.0/10 CGNAT
+                || (b[0] == 198 && (b[1] == 18 || b[1] == 19)) // 198.18.0.0/15 benchmark
+                || v4.is_multicast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            let b = v6.octets();
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || (b[0] & 0xfe) == 0xfc // fc00::/7 unique local
+                || (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) // fe80::/10 link-local
+                || v6.is_multicast()
+        }
+    }
+}
+
+/// SSRF 防护：IP 字面量走数值判定（见 is_private_ip）；
+/// 域名拒绝 localhost 家族（含 *.localhost）与单段主机名（内网短名）。
+/// DNS 解析出的地址由 is_private_ip 逐跳校验。
 pub fn is_private_host(host: &str) -> bool {
     let host = host
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    if host == "localhost" || host == "::1" || host == "0.0.0.0" {
-        return true;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_private_ip(&ip);
     }
-    if host.starts_with("127.")
-        || host.starts_with("10.")
-        || host.starts_with("192.168.")
-        || host.starts_with("169.254.")
-    {
-        return true;
-    }
-    if let Some(rest) = host.strip_prefix("172.") {
-        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
-            if (16..=31).contains(&second) {
-                return true;
-            }
-        }
-    }
-    false
+    host == "localhost" || host.ends_with(".localhost") || !host.contains('.')
 }
 
 /// 从 HTML 提取正文：剔除 script/style/noscript/svg/template，优先 main/article
@@ -1426,7 +1783,7 @@ impl Tool for FetchUrl {
             "type": "function",
             "function": {
                 "name": "FetchURL",
-                "description": "抓取公开网页并提取正文（HTML 自动清洗为纯文本，JSON/纯文本原样返回）。不支持需要登录的页面。",
+                "description": "抓取公开网页并提取正文（HTML 自动清洗为纯文本，JSON/纯文本原样返回）。不支持需要登录的页面。URL 不允许内嵌凭据，域名会先做 DNS 私网校验。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1445,37 +1802,34 @@ impl Tool for FetchUrl {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let url = args["url"].as_str().ok_or("缺少参数 url")?;
-            let parsed = reqwest::Url::parse(url).map_err(|e| format!("URL 无效: {e}"))?;
-            match parsed.scheme() {
-                "http" | "https" => {}
-                scheme => return Err(format!("仅支持 http/https URL（收到 {scheme}:）")),
-            }
-            let host = parsed.host_str().ok_or("URL 缺少主机名")?;
-            if is_private_host(host) {
-                return Err(format!("不允许访问本机/私网地址: {host}"));
-            }
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .user_agent("pig-code FetchURL/0.1 (coding agent)")
-                .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                    let private = attempt
-                        .url()
-                        .host_str()
-                        .map(is_private_host)
-                        .unwrap_or(false);
-                    if private || attempt.previous().len() >= 5 {
-                        attempt.stop()
-                    } else {
-                        attempt.follow()
-                    }
-                }))
-                .build()
-                .map_err(|e| e.to_string())?;
-            let mut response = client
-                .get(parsed)
-                .send()
-                .await
-                .map_err(|e| format!("请求失败: {e}"))?;
+            let mut current = reqwest::Url::parse(url).map_err(|e| format!("URL 无效: {e}"))?;
+            // 手动跟随重定向：每跳都完整重做 凭据/字面 IP/DNS 校验并钉死解析结果
+            let mut hops = 0;
+            let mut response = loop {
+                let client = pinned_client(&current).await?;
+                let response = client
+                    .get(current.clone())
+                    .send()
+                    .await
+                    .map_err(|e| format!("请求失败: {e}"))?;
+                if !response.status().is_redirection() {
+                    break response;
+                }
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok());
+                let Some(location) = location else {
+                    break response; // 3xx 无 Location：当终态（HTTP 状态检查会拦下）
+                };
+                hops += 1;
+                if hops > 5 {
+                    return Err("重定向次数过多".to_string());
+                }
+                current = current
+                    .join(location)
+                    .map_err(|e| format!("重定向 URL 无效: {e}"))?;
+            };
             let status = response.status();
             if !status.is_success() {
                 return Err(format!("HTTP {status}"));
@@ -1523,6 +1877,64 @@ impl Tool for FetchUrl {
             Ok(ToolEffect::plain(out))
         })
     }
+}
+
+/// FetchURL 的 URL 静态校验：scheme 白名单 + 内嵌凭据拒绝 + 字面 host 私网判定
+///（域名的 DNS 校验在 pinned_client 里做）。
+pub fn check_fetch_url(url: &reqwest::Url) -> Result<(), String> {
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("仅支持 http/https URL（收到 {scheme}:）")),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("URL 不允许内嵌凭据".to_string());
+    }
+    let host = url.host_str().ok_or("URL 缺少主机名")?;
+    if is_private_host(host) {
+        return Err(format!("不允许访问本机/私网地址: {host}"));
+    }
+    Ok(())
+}
+
+/// 每跳新建 pinned client：静态校验后，域名先解析（spawn_blocking + ToSocketAddrs），
+/// 所有结果逐个过 is_private_ip，任一私网即拒绝；全公网则 resolve_to_addrs 钉死，
+/// 防 check-to-connect 之间的 DNS rebinding。
+/// 注意：使用系统代理时代理自行解析 DNS，钉生不对代理生效，属已知取舍。
+async fn pinned_client(url: &reqwest::Url) -> Result<reqwest::Client, String> {
+    use std::net::ToSocketAddrs as _;
+    check_fetch_url(url)?;
+    let host = url.host_str().expect("check_fetch_url 已校验");
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("pig-code FetchURL/0.1 (coding agent)")
+        .redirect(reqwest::redirect::Policy::none()); // 重定向手动跟随，每跳重验
+    let is_ip_literal = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok();
+    if !is_ip_literal {
+        let port = url
+            .port_or_known_default()
+            .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+        let host_owned = host.to_string();
+        let resolved = tokio::task::spawn_blocking(move || {
+            (host_owned.as_str(), port)
+                .to_socket_addrs()
+                .map(|addrs| addrs.collect::<Vec<_>>())
+        })
+        .await
+        .map_err(|e| format!("DNS 解析失败: {host}: {e}"))?
+        .map_err(|_| format!("DNS 解析失败: {host}"))?;
+        if resolved.is_empty() {
+            return Err(format!("DNS 解析失败: {host}"));
+        }
+        if resolved.iter().any(|addr| is_private_ip(&addr.ip())) {
+            return Err(format!("域名解析到私网/保留地址，已拒绝: {host}"));
+        }
+        builder = builder.resolve_to_addrs(host, &resolved);
+    }
+    builder.build().map_err(|e| e.to_string())
 }
 
 fn task_status_label(status: pig_protocol::TaskStatus) -> String {

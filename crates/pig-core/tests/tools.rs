@@ -26,6 +26,18 @@ async fn edit_not_found_and_not_unique() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
+    // 写前新鲜度：已存在的文件须先 Read 登记
+    let (_, is_error, _, _) = tool::execute(
+        &call("Read", serde_json::json!({"path": "a.txt"})),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
+    )
+    .await;
+    assert!(!is_error);
+
     let (_, is_error, _, _) = tool::execute(
         &call(
             "Edit",
@@ -332,6 +344,18 @@ async fn revert_modified_file_restores_content() {
     std::fs::write(dir.join("m.txt"), "original\n").unwrap();
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
+
+    // 写前新鲜度：先 Read 再 Edit
+    let (_, is_error, _, _) = tool::execute(
+        &call("Read", serde_json::json!({"path": "m.txt"})),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
+    )
+    .await;
+    assert!(!is_error);
 
     tool::execute(
         &call(
@@ -740,4 +764,49 @@ fn parse_questions_validates_shape() {
     assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": " ", "options": [{"label": "a"}, {"label": "b"}]}]})).is_err());
     assert!(tool::parse_questions(&serde_json::json!({"questions": [{"question": "q"}]})).is_err());
     assert!(tool::parse_questions(&serde_json::json!({})).is_err());
+}
+
+// ---------- 5.2 FetchURL DNS 防 rebinding ----------
+
+#[test]
+fn fetch_url_is_private_host_extended_ranges() {
+    for host in [
+        "100.64.5.5",     // CGNAT 100.64/10
+        "198.18.0.1",     // benchmark 198.18/15
+        "198.19.255.255", //
+        "224.0.0.1",      // 组播
+        "fc00::1",        // v6 unique local
+        "fd12::1",        //
+        "fe80::1",        // v6 link-local
+        "foo.localhost",  // localhost 子域
+        "internal",       // 单段主机名（内网短名）
+        "192.0.2.1",      // 文档段 TEST-NET-1
+    ] {
+        assert!(tool::is_private_host(host), "{host} 应判定为私网/保留");
+    }
+    for host in [
+        "100.63.0.1",
+        "198.17.0.1",
+        "198.20.0.1",
+        "example.com",
+        "a.b.internal",
+    ] {
+        assert!(!tool::is_private_host(host), "{host} 应放行");
+    }
+}
+
+#[test]
+fn fetch_url_rejects_embedded_credentials() {
+    let url = reqwest::Url::parse("http://user:pass@example.com/").unwrap();
+    let err = tool::check_fetch_url(&url).unwrap_err();
+    assert!(err.contains("内嵌凭据"), "{err}");
+
+    let url = reqwest::Url::parse("http://user@example.com/").unwrap();
+    assert!(tool::check_fetch_url(&url).is_err(), "仅用户名也拒");
+
+    let url = reqwest::Url::parse("http://example.com/").unwrap();
+    assert!(tool::check_fetch_url(&url).is_ok());
+
+    let url = reqwest::Url::parse("file:///etc/passwd").unwrap();
+    assert!(tool::check_fetch_url(&url).is_err(), "scheme 白名单");
 }

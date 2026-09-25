@@ -242,3 +242,103 @@ async fn stop_kills_process_group() {
         entry.status
     );
 }
+
+// ---------- 4.3 破坏性命令黑名单 ----------
+
+#[test]
+fn dangerous_command_blacklist_hits() {
+    for (cmd, why) in [
+        ("rm -rf /", "rm 根目录"),
+        ("rm -fr ~", "rm 家目录"),
+        ("rm -rf $HOME", "rm $HOME"),
+        ("rm  -rf  .", "rm 当前目录"),
+        ("rm -rf /*", "rm 根 glob"),
+        ("sudo rm -rf /", "sudo rm 根目录"),
+        ("mkfs.ext4 /dev/sda", "mkfs"),
+        ("mkfs -t xfs /dev/sda", "mkfs 裸名"),
+        ("fdisk /dev/sda", "fdisk"),
+        ("diskutil eraseDisk APFS x /dev/disk0", "diskutil erase"),
+        ("dd if=/dev/zero of=/dev/sda", "dd 写块设备"),
+        ("shutdown -h now", "shutdown"),
+        ("reboot", "reboot"),
+        ("systemctl poweroff", "systemctl poweroff"),
+        ("systemctl kexec", "systemctl kexec"),
+        ("init 0", "init 0"),
+        ("init 6", "init 6"),
+        (":(){ :|:& };:", "fork 炸弹"),
+        ("chmod -R 777 /", "chmod -R 777 /"),
+        ("chown -R root /", "chown -R /"),
+        ("echo ok; rm -rf /", "分号后的 rm"),
+    ] {
+        assert!(
+            tool::is_dangerous_command(cmd).is_some(),
+            "{cmd}（{why}）应拦截"
+        );
+    }
+}
+
+#[test]
+fn dangerous_command_blacklist_allows() {
+    for cmd in [
+        "rm -rf node_modules",
+        "rm -rf /tmp/pig-core-somedir",
+        "rm -f a.txt",
+        "dd if=x of=/dev/null",
+        "dd if=x of=/dev/zero",
+        "dd if=x of=/dev/urandom bs=1 count=4",
+        "git push --force",
+        "git push -f",
+        "chmod 755 script.sh",
+        "chmod -R 755 src",
+        "echo shutdown", // 非命令位
+        "echo rm -rf /", // 非命令位
+        "echo mkfs",
+        "ls /dev/",
+    ] {
+        assert!(tool::is_dangerous_command(cmd).is_none(), "{cmd} 应放行");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bash_blocks_dangerous_before_background_branch() {
+    let dir = temp_dir("danger");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    // 前台与后台路径都拦
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        serde_json::json!({"command": "rm -rf /"}),
+    )
+    .await;
+    assert!(is_error, "{out}");
+    assert!(out.contains("已拦截高风险命令"), "{out}");
+    assert!(out.contains("rm -rf /"), "文案含命令预览: {out}");
+
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        serde_json::json!({"command": "rm -rf /", "run_in_background": true}),
+    )
+    .await;
+    assert!(is_error, "{out}");
+    assert!(out.contains("已拦截高风险命令"), "{out}");
+    assert!(
+        state.tasks.lock().expect("tasks lock").is_empty(),
+        "被拦命令不应注册任务"
+    );
+
+    // 放行命令正常执行
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        serde_json::json!({"command": "echo safe"}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("safe"), "{out}");
+}
