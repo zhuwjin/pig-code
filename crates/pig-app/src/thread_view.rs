@@ -81,6 +81,15 @@ pub struct UserImage {
     dims: (u32, u32),
 }
 
+/// 图片灯箱（点缩略图打开的大图覆盖层）的当前态
+struct Lightbox {
+    image: std::sync::Arc<Image>,
+    /// 顶部标签（「图片 N」）
+    label: String,
+    /// 原图尺寸（等比缩放到窗口 80% 以内用）
+    dims: (u32, u32),
+}
+
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
@@ -209,6 +218,10 @@ pub struct ThreadView {
     /// 本会话的媒体目录（{data}/sessions/{id}.media）：用户消息图片缩略图来源；
     /// None/目录不存在 → 附件链接整体按原文本降级显示
     media_dir: Option<std::path::PathBuf>,
+    /// 图片灯箱覆盖层（点用户消息缩略图打开；Esc/点遮罩/关闭钮关闭）
+    lightbox: Option<Lightbox>,
+    /// 灯箱的焦点 handle（Esc 键监听挂在卡片上）
+    lightbox_focus: FocusHandle,
     _ticker: Task<()>,
 }
 
@@ -251,6 +264,8 @@ impl ThreadView {
             nav_last_active: None,
             nav_jump: false,
             media_dir: None,
+            lightbox: None,
+            lightbox_focus: cx.focus_handle(),
             _ticker: ticker,
         }
     }
@@ -419,6 +434,7 @@ impl ThreadView {
         self.nav_bar_bounds.borrow_mut().clear();
         self.nav_last_active = None;
         self.nav_jump = false;
+        self.lightbox = None;
         cx.notify();
     }
 
@@ -867,6 +883,15 @@ impl ThreadView {
                             .with_easing(ease_out_quint()),
                         |el, delta| el.top(px(4.0 * (1.0 - delta))).opacity(delta),
                     )
+                    // 图片附件：缩略图横排（换行），在文本上方（气泡内容第一行）；
+                    // 丢失/坏字节 → 文本 chip 降级
+                    .when(!message.images.is_empty(), |this| {
+                        this.child(h_flex().gap_2().flex_wrap().children(
+                            message.images.iter().enumerate().map(|(image_ix, image)| {
+                                self.render_user_image(ix, image_ix, image, cx)
+                            }),
+                        ))
+                    })
                     // 纯文本原文渲染 + 窗口级选择（拖拽/双击选词/Ctrl+C 复制）；
                     // 显式 handle + refresh_window_on_change 让拖动过程实时高亮
                     .when(!message.text.is_empty(), |this| {
@@ -883,33 +908,36 @@ impl ThreadView {
                             )
                             .document_order(ix as u64),
                         )
-                    })
-                    // 图片附件：缩略图横排（换行）；丢失/坏字节 → 文本 chip 降级
-                    .when(!message.images.is_empty(), |this| {
-                        this.child(
-                            h_flex().gap_2().flex_wrap().children(
-                                message
-                                    .images
-                                    .iter()
-                                    .map(|image| self.render_user_image(image, cx)),
-                            ),
-                        )
                     }),
             )
             .into_any_element()
     }
 
-    /// 用户消息的单张图片附件：缩略图（限高 120 / 限宽 240，等比不放大）；
-    /// 文件丢失/解码失败 → 「[图片 N（已失效）]」文本 chip
-    fn render_user_image(&self, image: &UserImage, cx: &mut Context<Self>) -> AnyElement {
+    /// 用户消息的单张图片附件：缩略图（最长边 72px，等比不放大，圆角），
+    /// 点击开灯箱看大图；文件丢失/解码失败 → 「[图片 N（已失效）]」文本 chip（不可点）
+    fn render_user_image(
+        &self,
+        message_ix: usize,
+        image_ix: usize,
+        image: &UserImage,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match &image.thumb {
             Some(thumb) => {
                 let (w, h) = image.dims;
-                let scale = (120.0 / h as f32).min(240.0 / w as f32).min(1.0);
-                gpui_kit::img(thumb.clone())
-                    .w(px((w as f32 * scale).max(1.0)))
-                    .h(px((h as f32 * scale).max(1.0)))
-                    .rounded_md()
+                let scale = (72.0 / w.max(h) as f32).min(1.0);
+                div()
+                    .id(("user-image", message_ix * 256 + image_ix))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_lightbox(message_ix, image_ix, window, cx);
+                    }))
+                    .child(
+                        gpui_kit::img(thumb.clone())
+                            .w(px((w as f32 * scale).max(1.0)))
+                            .h(px((h as f32 * scale).max(1.0)))
+                            .rounded_md(),
+                    )
                     .into_any_element()
             }
             None => div()
@@ -922,6 +950,101 @@ impl ThreadView {
                 .child(format!("[图片 {}（已失效）]", image.index))
                 .into_any_element(),
         }
+    }
+
+    /// 打开图片灯箱（缩略图点击）；失效附件没有 thumb 不会走到这
+    fn open_lightbox(
+        &mut self,
+        message_ix: usize,
+        image_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(image) = self
+            .messages
+            .get(message_ix)
+            .and_then(|message| message.images.get(image_ix))
+        else {
+            return;
+        };
+        let Some(thumb) = &image.thumb else {
+            return;
+        };
+        self.lightbox = Some(Lightbox {
+            image: thumb.clone(),
+            label: format!("图片 {}", image.index),
+            dims: image.dims,
+        });
+        // Esc 关闭依赖焦点在灯箱上
+        self.lightbox_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_lightbox(&mut self, cx: &mut Context<Self>) {
+        self.lightbox = None;
+        cx.notify();
+    }
+
+    /// 图片灯箱（Yolo 确认框同款覆盖层）：半透明遮罩 + 居中大图（窗口 80% 以内
+    /// 等比，小图允许放大）+ 顶部「图片 N」标签与关闭钮。
+    /// 关闭：点遮罩 / Esc / 关闭钮；点内容区 stop propagation。滚轮随遮罩惯例不拦。
+    fn render_lightbox(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let lightbox = self.lightbox.as_ref().expect("lightbox");
+        let viewport = window.viewport_size();
+        let (w, h) = lightbox.dims;
+        let scale = (f32::from(viewport.width) * 0.8 / w as f32)
+            .min(f32::from(viewport.height) * 0.8 / h as f32);
+        let (w, h) = ((w as f32 * scale).max(1.0), (h as f32 * scale).max(1.0));
+        let on_mask = gpui_kit::white();
+        div()
+            .id("image-lightbox-overlay")
+            .absolute()
+            .inset_0()
+            .bg(gpui_kit::black().opacity(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, _, cx| this.close_lightbox(cx)))
+            .child(
+                v_flex()
+                    .id("image-lightbox")
+                    .track_focus(&self.lightbox_focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            this.close_lightbox(cx);
+                        }
+                    }))
+                    .on_click(|_, _, cx| cx.stop_propagation()) // 点内容不触发遮罩关闭
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(on_mask.opacity(0.8))
+                                    .child(lightbox.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("image-lightbox-close")
+                                    .cursor_pointer()
+                                    .rounded_sm()
+                                    .p_0p5()
+                                    .hover(|this| this.bg(on_mask.opacity(0.2)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.close_lightbox(cx)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(on_mask.opacity(0.8)),
+                                    ),
+                            ),
+                    )
+                    .child(gpui_kit::img(lightbox.image.clone()).w(px(w)).h(px(h))),
+            )
+            .into_any_element()
     }
 
     /// 思考折叠块（ZCode 同款）：无边框的一行 header（大脑图标 + 文案），箭头悬停/
@@ -2353,6 +2476,10 @@ impl Render for ThreadView {
                                         })),
                                 ),
                         )
+                    })
+                    // 图片灯箱：覆盖消息区（最后渲染 = 最顶层）
+                    .when(self.lightbox.is_some(), |this| {
+                        this.child(self.render_lightbox(window, cx))
                     }),
             )
             .when(!self.queued.is_empty(), |this| {
