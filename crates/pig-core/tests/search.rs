@@ -29,6 +29,7 @@ async fn run_tool(
     bool,
     Option<tool::FileChange>,
     Option<pig_protocol::EditDiff>,
+    Vec<tool::ToolImage>,
 ) {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -58,7 +59,7 @@ async fn glob_respects_gitignore_includes_hidden_skips_vcs() {
     std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
 
     // **/*.rs：gitignore 排除 target，.git 永不出现，顶层文件也命中
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.rs"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("src/a.rs"), "{out}");
@@ -67,7 +68,7 @@ async fn glob_respects_gitignore_includes_hidden_skips_vcs() {
     assert!(!out.contains(".git/"), "VCS 目录永不出现: {out}");
 
     // 隐藏目录可见：.github/workflows 能被找到
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.yml"})).await;
     assert!(!is_error, "{out}");
     assert!(
@@ -76,14 +77,15 @@ async fn glob_respects_gitignore_includes_hidden_skips_vcs() {
     );
 
     // 不含 / 的 pattern 只比文件名：嵌套文件照样命中
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.rs"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("src/a.rs"), "按文件名匹配嵌套文件: {out}");
     assert!(out.contains("main.rs"), "{out}");
 
     // 非法 pattern 报错文案保留
-    let (out, is_error, _, _) = run_tool(&dir, "Glob", serde_json::json!({"pattern": "["})).await;
+    let (out, is_error, _, _, _) =
+        run_tool(&dir, "Glob", serde_json::json!({"pattern": "["})).await;
     assert!(is_error, "{out}");
     assert!(out.contains("无效 glob 模式"), "{out}");
 }
@@ -95,7 +97,7 @@ async fn glob_sorts_by_mtime_desc() {
     std::thread::sleep(std::time::Duration::from_millis(30));
     std::fs::write(dir.join("new.rs"), "new\n").unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.rs"})).await;
     assert!(!is_error, "{out}");
     let new_pos = out.find("new.rs").expect("new.rs 在结果中");
@@ -109,7 +111,8 @@ async fn glob_filters_sensitive_files() {
     std::fs::write(dir.join(".env"), "SECRET=1\n").unwrap();
     std::fs::write(dir.join("config.toml"), "x = 1\n").unwrap();
 
-    let (out, is_error, _, _) = run_tool(&dir, "Glob", serde_json::json!({"pattern": "*"})).await;
+    let (out, is_error, _, _, _) =
+        run_tool(&dir, "Glob", serde_json::json!({"pattern": "*"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("config.toml"), "{out}");
     assert!(
@@ -131,7 +134,7 @@ async fn grep_hidden_gitignore_and_sensitive() {
     std::fs::write(dir.join(".env"), "TODO=secret\n").unwrap();
     std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Grep", serde_json::json!({"pattern": "TODO"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("src/main.rs:1:"), "{out}");
@@ -144,7 +147,7 @@ async fn grep_hidden_gitignore_and_sensitive() {
     assert!(out.contains("[已跳过 1 个敏感文件]"), "{out}");
 
     // 显式 Grep 单个敏感文件同样被拦
-    let (out, _, _, _) = run_tool(
+    let (out, _, _, _, _) = run_tool(
         &dir,
         "Grep",
         serde_json::json!({"pattern": "TODO", "path": ".env"}),
@@ -158,12 +161,12 @@ async fn grep_ignore_case() {
     let dir = temp_dir("grep-case");
     std::fs::write(dir.join("hello.txt"), "Hello World\n").unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Grep", serde_json::json!({"pattern": "hello"})).await;
     assert!(!is_error, "{out}");
     assert_eq!(out, "（无匹配内容）");
 
-    let (out, is_error, _, _) = run_tool(
+    let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Grep",
         serde_json::json!({"pattern": "hello", "ignore_case": true}),

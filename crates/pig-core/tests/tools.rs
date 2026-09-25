@@ -27,7 +27,7 @@ async fn edit_not_found_and_not_unique() {
     let state = SessionToolState::for_test();
 
     // 写前新鲜度：已存在的文件须先 Read 登记
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call("Read", serde_json::json!({"path": "a.txt"})),
         ToolContext {
             cwd: &dir,
@@ -38,7 +38,7 @@ async fn edit_not_found_and_not_unique() {
     .await;
     assert!(!is_error);
 
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "a.txt", "old_string": "baz", "new_string": "x"}),
@@ -52,7 +52,7 @@ async fn edit_not_found_and_not_unique() {
     .await;
     assert!(is_error);
 
-    let (output, is_error, _, _) = tool::execute(
+    let (output, is_error, _, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "a.txt", "old_string": "foo", "new_string": "x"}),
@@ -67,7 +67,7 @@ async fn edit_not_found_and_not_unique() {
     assert!(is_error);
     assert!(output.contains("2 次"), "应提示多处匹配: {output}");
 
-    let (_, is_error, change, _) = tool::execute(
+    let (_, is_error, change, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "a.txt", "old_string": "bar", "new_string": "x"}),
@@ -104,7 +104,7 @@ async fn path_escape_rejected() {
         ),
         ("Read", serde_json::json!({"path": "sub/../../outside.txt"})),
     ] {
-        let (output, is_error, _, _) = tool::execute(
+        let (output, is_error, _, _, _) = tool::execute(
             &call(tool_name, args),
             ToolContext {
                 cwd: &dir,
@@ -129,7 +129,7 @@ async fn write_diff_revert_cycle() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    let (_, is_error, change, _) = tool::execute(
+    let (_, is_error, change, _, _) = tool::execute(
         &call(
             "Write",
             serde_json::json!({"path": "sub/new.txt", "content": "a\nb\n"}),
@@ -147,7 +147,7 @@ async fn write_diff_revert_cycle() {
     assert_eq!((change.additions, change.deletions), (2, 0));
 
     // 第二次修改 diff 仍相对原始快照（不存在 → 全新增）
-    let (_, is_error, change, _) = tool::execute(
+    let (_, is_error, change, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "sub/new.txt", "old_string": "b", "new_string": "B"}),
@@ -179,7 +179,7 @@ async fn edit_produces_per_edit_diff() {
     let state = SessionToolState::for_test();
 
     // Write 的本次编辑 diff：不存在 → 全量新增
-    let (_, is_error, _, edit) = tool::execute(
+    let (_, is_error, _, edit, _) = tool::execute(
         &call(
             "Write",
             serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"}),
@@ -203,7 +203,7 @@ async fn edit_produces_per_edit_diff() {
 
     // Edit 的本次编辑 diff 只反映这一次替换（1 增 1 删），
     // 与会话累计口径的 file_change（相对原始快照）区分开
-    let (_, is_error, change, edit) = tool::execute(
+    let (_, is_error, change, edit, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"}),
@@ -269,7 +269,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
     let state = SessionToolState::for_test();
 
     // 「第一轮」Write 3 行：本轮净额 = 全量新增
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call(
             "Write",
             serde_json::json!({"path": "f.txt", "content": "a\nb\nc\n"}),
@@ -288,7 +288,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
     assert!(tracker.take_turn_changes(&dir).is_empty(), "take 后应清空");
 
     // 「第二轮」Edit 1 行：只算本轮（1 增 1 删），不是会话累计口径
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"}),
@@ -306,7 +306,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
     assert_eq!((changes[0].additions, changes[0].deletions), (1, 1));
 
     // 「第三轮」同一轮内改回原文：turn 首末内容一致，净额归零不产出
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "f.txt", "old_string": "B", "new_string": "b"}),
@@ -319,7 +319,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
     )
     .await;
     assert!(!is_error);
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "f.txt", "old_string": "b", "new_string": "B"}),
@@ -346,7 +346,7 @@ async fn revert_modified_file_restores_content() {
     let state = SessionToolState::for_test();
 
     // 写前新鲜度：先 Read 再 Edit
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call("Read", serde_json::json!({"path": "m.txt"})),
         ToolContext {
             cwd: &dir,
@@ -390,7 +390,7 @@ async fn glob_and_grep() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("Glob", serde_json::json!({"pattern": "**/*.rs"})),
         ToolContext {
             cwd: &dir,
@@ -402,7 +402,7 @@ async fn glob_and_grep() {
     assert!(!is_error);
     assert!(out.contains("src/a.rs") && !out.contains("b.md"), "{out}");
 
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("Grep", serde_json::json!({"pattern": "TODO"})),
         ToolContext {
             cwd: &dir,
@@ -417,7 +417,7 @@ async fn glob_and_grep() {
         "{out}"
     );
 
-    let (out, _, _, _) = tool::execute(
+    let (out, _, _, _, _) = tool::execute(
         &call(
             "Grep",
             serde_json::json!({"pattern": "TODO", "include": "*.rs"}),
@@ -442,7 +442,7 @@ async fn todo_list_read_write_replace() {
     let state = SessionToolState::for_test();
 
     // 空读
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("TodoList", serde_json::json!({})),
         ToolContext {
             cwd: &dir,
@@ -455,7 +455,7 @@ async fn todo_list_read_write_replace() {
     assert_eq!(out, "当前没有待办事项");
 
     // 写入（状态挂在 ctx 句柄上，跨调用保持）
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call(
             "TodoList",
             serde_json::json!({"todos": [
@@ -476,7 +476,7 @@ async fn todo_list_read_write_replace() {
     assert!(out.contains("2. [in_progress] 改实现"), "{out}");
 
     // 回读
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("TodoList", serde_json::json!({})),
         ToolContext {
             cwd: &dir,
@@ -489,7 +489,7 @@ async fn todo_list_read_write_replace() {
     assert!(out.contains("3. [pending] 跑测试"), "{out}");
 
     // 整体替换：旧项应全部消失
-    let (out, _, _, _) = tool::execute(
+    let (out, _, _, _, _) = tool::execute(
         &call(
             "TodoList",
             serde_json::json!({"todos": [{"content": "收尾", "status": "pending"}]}),
@@ -505,7 +505,7 @@ async fn todo_list_read_write_replace() {
     assert!(!out.contains("读代码"), "整体替换后旧项应消失: {out}");
 
     // 非法 status 报错，且清单保持替换前的内容
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call(
             "TodoList",
             serde_json::json!({"todos": [{"content": "x", "status": "doing"}]}),
@@ -518,7 +518,7 @@ async fn todo_list_read_write_replace() {
     )
     .await;
     assert!(is_error, "非法 status 应报错: {out}");
-    let (out, _, _, _) = tool::execute(
+    let (out, _, _, _, _) = tool::execute(
         &call("TodoList", serde_json::json!({})),
         ToolContext {
             cwd: &dir,
@@ -613,7 +613,7 @@ async fn background_bash_task_lifecycle() {
     };
 
     // 后台 echo：立即返回 task_id
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call(
             "Bash",
             serde_json::json!({"command": "echo bg-marker", "run_in_background": true}),
@@ -646,7 +646,7 @@ async fn background_bash_task_lifecycle() {
     }
 
     // TaskOutput 含输出
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("TaskOutput", serde_json::json!({"task_id": task1})),
         ToolContext {
             cwd: &dir,
@@ -659,7 +659,7 @@ async fn background_bash_task_lifecycle() {
     assert!(out.contains("bg-marker"), "{out}");
 
     // sleep 30 后台启动 → TaskStop → Killed
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call(
             "Bash",
             serde_json::json!({"command": "sleep 30", "run_in_background": true}),
@@ -673,7 +673,7 @@ async fn background_bash_task_lifecycle() {
     .await;
     assert!(!is_error, "{out}");
     let task2 = task_id_of(&out);
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("TaskStop", serde_json::json!({"task_id": task2})),
         ToolContext {
             cwd: &dir,
@@ -694,7 +694,7 @@ async fn background_bash_task_lifecycle() {
         assert!(entry.ended_at.is_some());
     }
     // 重复停止 → 「任务已结束」错误
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call("TaskStop", serde_json::json!({"task_id": task2})),
         ToolContext {
             cwd: &dir,
@@ -706,7 +706,7 @@ async fn background_bash_task_lifecycle() {
     assert!(is_error, "已停止的任务再停应报错");
 
     // TaskList 渲染包含两个 task_id
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("TaskList", serde_json::json!({})),
         ToolContext {
             cwd: &dir,

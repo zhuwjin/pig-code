@@ -32,7 +32,7 @@ async fn run(
     name: &str,
     args: serde_json::Value,
 ) -> (String, bool) {
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call(name, args),
         ToolContext {
             cwd: dir,

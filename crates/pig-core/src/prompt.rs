@@ -88,6 +88,7 @@ pub fn system_prompt(
         prompt.push_str(
             "\n可用工具:\n\
              - Read: 读取工作区文件（输出带行号；UTF-16/GBK 自动转码、二进制拒绝；单次约 10 万字符上限，用 offset/limit 分页）。\n\
+             - ReadMediaFile: 读取图片文件（PNG/JPEG/GIF/WebP），自动缩放至最长边 2000 像素；region 参数可裁剪原图局部。\n\
              - Write: 写入整个文件（自动创建父目录；已存在的文件保留原编码与行尾）。\n\
              - Edit: 精确替换文件文本（old_string 须唯一出现，replace_all=true 替换全部；保留原编码与行尾）。\n\
              - Glob: 按模式匹配文件名（如 **/*.rs；尊重 .gitignore、含隐藏文件，按最近修改排序）。\n\

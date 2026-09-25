@@ -62,6 +62,11 @@ pub const SCENARIO_PLAN_ENTER_TRIGGER: &str = "PLAN_ENTER_SCENARIO";
 pub const PLAN_ENTER_MARKER: &str = "MOCK_PLAN_ENTER_DONE";
 pub const PLAN_ENTER_FILE: &str = "plan_enter.txt";
 
+/// 图片工具场景（ReadMediaFile 验证）：0 个结果 → ReadMediaFile pic.png → 文本。
+/// 能力门控（input_image=false 时会话层直接报错不执行）与图片进上下文链路用。
+pub const SCENARIO_MEDIA_TRIGGER: &str = "MEDIA_SCENARIO";
+pub const MEDIA_MARKER: &str = "MOCK_MEDIA_DONE";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -405,6 +410,22 @@ fn plan_enter_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
+/// 图片工具场景：ReadMediaFile pic.png → 文本。
+fn media_scenario_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_media_1",
+            "ReadMediaFile",
+            &serde_json::json!({"path": "pic.png"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": MEDIA_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
 /// TodoList 场景：历史里还没有 TodoList 调用 → 写入；已执行 → 文本收尾。
 /// 不能按全局 tool 结果计数：请求体的 tools 声明与历史消息都会干扰，
 /// 直接解析 messages 里是否出现过 TodoList 调用。
@@ -734,6 +755,8 @@ async fn handle_connection(
         plan_exit_scenario_response(&body, tool_results)
     } else if body.contains(SCENARIO_PLAN_ENTER_TRIGGER) {
         plan_enter_scenario_response(tool_results)
+    } else if body.contains(SCENARIO_MEDIA_TRIGGER) {
+        media_scenario_response(tool_results)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {

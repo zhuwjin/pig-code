@@ -25,12 +25,23 @@ pub struct FileChange {
     pub deletions: u32,
 }
 
+/// 工具输出的图片（ReadMediaFile）：随 history 进模型上下文（Anthropic blocks /
+/// OpenAI 拆 user 消息），不进 protocol、不落 rollout
+pub struct ToolImage {
+    pub media_type: String,
+    pub data_base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct ToolEffect {
     pub output: String,
     pub file_change: Option<FileChange>,
     /// 本次编辑自身的 diff（「编辑前 → 编辑后」），UI 工具卡片内联渲染用；
     /// `file_change` 是会话累计口径（review 面板用），两者粒度不同
     pub edit_diff: Option<FileChange>,
+    /// 图片输出（ReadMediaFile）；其余工具恒为空
+    pub images: Vec<ToolImage>,
 }
 
 impl ToolEffect {
@@ -39,6 +50,7 @@ impl ToolEffect {
             output,
             file_change: None,
             edit_diff: None,
+            images: vec![],
         }
     }
 }
@@ -361,6 +373,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(AskUserQuestionTool),
         Box::new(ExitPlanModeTool),
         Box::new(EnterPlanModeTool),
+        Box::new(ReadMediaFile),
     ]
 }
 
@@ -382,7 +395,9 @@ pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
 pub fn summarize(call: &ToolCall) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     let raw = match call.name.as_str() {
-        "Read" | "Write" | "Edit" => args["path"].as_str().unwrap_or("?").to_string(),
+        "Read" | "Write" | "Edit" | "ReadMediaFile" => {
+            args["path"].as_str().unwrap_or("?").to_string()
+        }
         "Bash" => args["command"].as_str().unwrap_or("?").to_string(),
         "Glob" => args["pattern"].as_str().unwrap_or("?").to_string(),
         "Grep" => args["pattern"].as_str().unwrap_or("?").to_string(),
@@ -414,11 +429,12 @@ pub async fn execute(
     bool,
     Option<FileChange>,
     Option<pig_protocol::EditDiff>,
+    Vec<ToolImage>,
 ) {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     let tools = all();
     let Some(tool) = tools.iter().find(|tool| tool.name() == call.name) else {
-        return (format!("未知工具: {}", call.name), true, None, None);
+        return (format!("未知工具: {}", call.name), true, None, None, vec![]);
     };
     match tool.execute(args, ctx).await {
         Ok(effect) => (
@@ -426,8 +442,9 @@ pub async fn execute(
             false,
             effect.file_change,
             effect.edit_diff.map(Into::into),
+            effect.images,
         ),
-        Err(error) => (error, true, None, None),
+        Err(error) => (error, true, None, None, vec![]),
     }
 }
 
@@ -688,7 +705,25 @@ impl Tool for ReadFile {
                 return Err(sensitive_file_error(&full));
             }
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
-            let doc = crate::text::decode(&bytes)?;
+            let doc = match crate::text::decode(&bytes) {
+                Ok(doc) => doc,
+                Err(error) => {
+                    // 图片给明确指引（魔数嗅探，不信任扩展名）
+                    if let Some(mime) = sniff_image(&bytes) {
+                        let label = match mime {
+                            "image/png" => "PNG",
+                            "image/jpeg" => "JPEG",
+                            "image/gif" => "GIF",
+                            "image/webp" => "WebP",
+                            _ => mime,
+                        };
+                        return Err(format!(
+                            "这是 {label} 图片，请改用 ReadMediaFile 读取（当前模型需支持图片输入）"
+                        ));
+                    }
+                    return Err(error);
+                }
+            };
             if doc.text.is_empty() {
                 record_read_state(ctx.state, &full, &bytes, false);
                 return Ok(ToolEffect::plain("（空文件）".to_string()));
@@ -917,6 +952,7 @@ impl Tool for WriteFile {
                 output: format!("已写入 {}（{} 字节）{note}", path, bytes.len()),
                 file_change,
                 edit_diff,
+                images: vec![],
             })
         })
     }
@@ -1012,6 +1048,7 @@ impl Tool for EditFile {
                 output,
                 file_change,
                 edit_diff,
+                images: vec![],
             })
         })
     }
@@ -1277,6 +1314,227 @@ fn follow_quote_style(new_string: &str, original_segment: &str) -> String {
         }
     }
     out
+}
+
+/// 图片魔数嗅探（读文件头，不信任扩展名）：命中返回 mime，否则 None。
+/// Read/ReadMediaFile 共用。
+pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// 手写 base64（标准 alphabet + `=` 填充；不加依赖，与快照 hex 编码同风格）
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// ReadMediaFile 的尺寸/体积上限
+const MAX_MEDIA_FILE_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_MEDIA_PIXELS: u64 = 100_000_000;
+/// 默认缩放到最长边 2000（full_resolution=true 时不缩）
+const MEDIA_MAX_EDGE: u32 = 2000;
+/// PNG 输出超过 4MB 且无 alpha → 转 JPEG q85 兜底
+const MAX_PNG_BYTES: usize = 4 * 1024 * 1024;
+
+struct ReadMediaFile;
+
+impl Tool for ReadMediaFile {
+    fn name(&self) -> &'static str {
+        "ReadMediaFile"
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "ReadMediaFile",
+                "description": "读取图片文件进上下文（PNG/JPEG/GIF/WebP，魔数嗅探不信任扩展名）。默认等比缩放到最长边 2000 像素；region 可按原图坐标裁剪局部，full_resolution=true 不缩放。需要模型支持图片输入。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "相对工作目录的图片路径" },
+                        "region": {
+                            "type": "object",
+                            "description": "可选裁剪区域（原图像素坐标；越界自动夹紧，不相交报错）",
+                            "properties": {
+                                "x": { "type": "integer" },
+                                "y": { "type": "integer" },
+                                "width": { "type": "integer" },
+                                "height": { "type": "integer" }
+                            },
+                            "required": ["x", "y", "width", "height"]
+                        },
+                        "full_resolution": { "type": "boolean", "description": "true 时不做 2000px 缩放（默认 false）" }
+                    },
+                    "required": ["path"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let path = args["path"].as_str().ok_or("缺少参数 path")?;
+            let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?;
+            if is_sensitive_file(&full) {
+                return Err(sensitive_file_error(&full));
+            }
+            let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
+            if bytes.len() as u64 > MAX_MEDIA_FILE_BYTES {
+                return Err(format!(
+                    "文件超过 100MB 上限（{}MB）",
+                    bytes.len() / 1024 / 1024
+                ));
+            }
+            let Some(source_mime) = sniff_image(&bytes) else {
+                return Err("不是可识别的图片（支持 PNG/JPEG/GIF/WebP）；视频暂不支持".to_string());
+            };
+            // 先读尺寸再解码：总像素超限直接拒（防解码大图撑爆内存）
+            let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|e| format!("图片解析失败: {e}"))?;
+            let (orig_w, orig_h) = reader
+                .into_dimensions()
+                .map_err(|e| format!("图片解析失败: {e}"))?;
+            if orig_w as u64 * orig_h as u64 > MAX_MEDIA_PIXELS {
+                return Err(format!(
+                    "图片过大（{orig_w}×{orig_h}），请用 region 参数裁剪局部"
+                ));
+            }
+            let image = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|e| format!("图片解析失败: {e}"))?
+                .decode()
+                .map_err(|e| format!("图片解码失败: {e}"))?;
+
+            // region 裁剪（原图坐标；夹紧到图内，完全不相交报错）
+            let mut crop_note = String::new();
+            let mut image = if let Some(region) = args.get("region") {
+                let (rx, ry, rw, rh) = (
+                    region["x"].as_u64().unwrap_or(0),
+                    region["y"].as_u64().unwrap_or(0),
+                    region["width"].as_u64().unwrap_or(0),
+                    region["height"].as_u64().unwrap_or(0),
+                );
+                let (ix, iy) = (rx.min(orig_w as u64) as u32, ry.min(orig_h as u64) as u32);
+                let (ix2, iy2) = (
+                    (rx + rw).min(orig_w as u64) as u32,
+                    (ry + rh).min(orig_h as u64) as u32,
+                );
+                if ix >= ix2 || iy >= iy2 {
+                    return Err(format!(
+                        "裁剪区域（x={rx}, y={ry}, {rw}×{rh}）与图片（{orig_w}×{orig_h}）不相交"
+                    ));
+                }
+                crop_note = format!("，裁剪 ({rx},{ry})→({ix2},{iy2})");
+                image.crop_imm(ix, iy, ix2 - ix, iy2 - iy)
+            } else {
+                image
+            };
+
+            // 默认等比缩到最长边 2000；full_resolution 不缩
+            let full_resolution = args["full_resolution"].as_bool().unwrap_or(false);
+            let (mut w, mut h) = (image.width(), image.height());
+            if !full_resolution && w.max(h) > MEDIA_MAX_EDGE {
+                let scale = MEDIA_MAX_EDGE as f32 / w.max(h) as f32;
+                let (nw, nh) = (
+                    (w as f32 * scale).round().max(1.) as u32,
+                    (h as f32 * scale).round().max(1.) as u32,
+                );
+                image = image.resize(nw, nh, image::imageops::FilterType::Triangle);
+                w = nw;
+                h = nh;
+            }
+            if w as u64 * h as u64 > MAX_MEDIA_PIXELS {
+                return Err(format!("图片过大（{w}×{h}），请用 region 参数裁剪局部"));
+            }
+
+            // 编码：有 alpha 或源是 PNG/GIF/WebP → PNG；否则 JPEG q85。
+            // PNG 超 4MB 且无 alpha → JPEG q85 兜底
+            let has_alpha = image.color().has_alpha();
+            let prefer_png =
+                has_alpha || matches!(source_mime, "image/png" | "image/gif" | "image/webp");
+            let mut media_type = if prefer_png {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+            let mut encoded = if prefer_png {
+                let mut buf = std::io::Cursor::new(Vec::new());
+                image
+                    .write_to(&mut buf, image::ImageFormat::Png)
+                    .map_err(|e| format!("图片编码失败: {e}"))?;
+                buf.into_inner()
+            } else {
+                encode_jpeg(&image)?
+            };
+            if prefer_png && encoded.len() > MAX_PNG_BYTES && !has_alpha {
+                encoded = encode_jpeg(&image)?;
+                media_type = "image/jpeg";
+            }
+
+            let kb = encoded.len() / 1024;
+            Ok(ToolEffect {
+                output: format!(
+                    "已读取图片 {path}（原始 {orig_w}×{orig_h}{crop_note} → 输出 {w}×{h}，{media_type}，{kb}KB）"
+                ),
+                file_change: None,
+                edit_diff: None,
+                images: vec![ToolImage {
+                    media_type: media_type.to_string(),
+                    data_base64: base64_encode(&encoded),
+                    width: w,
+                    height: h,
+                }],
+            })
+        })
+    }
+}
+
+/// JPEG q85 编码（转 RGB 丢弃 alpha）
+fn encode_jpeg(image: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85)
+        .encode_image(&image.to_rgb8())
+        .map_err(|e| format!("图片编码失败: {e}"))?;
+    Ok(buf.into_inner())
 }
 
 impl Tool for Glob {

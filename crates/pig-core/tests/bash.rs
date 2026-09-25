@@ -25,7 +25,7 @@ async fn bash(
     state: &SessionToolState,
     args: serde_json::Value,
 ) -> (String, bool) {
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call("Bash", args),
         ToolContext {
             cwd: dir,
@@ -44,7 +44,7 @@ async fn task_ctl(
     name: &str,
     task_id: &str,
 ) -> (String, bool) {
-    let (out, is_error, _, _) = tool::execute(
+    let (out, is_error, _, _, _) = tool::execute(
         &call(name, serde_json::json!({"task_id": task_id})),
         ToolContext {
             cwd: dir,

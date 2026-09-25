@@ -572,7 +572,7 @@ async fn yolo_sensitive_file_still_blocked() {
         name: "Read".into(),
         arguments: serde_json::json!({"path": ".env"}).to_string(),
     };
-    let (out, is_error, _, _) = pig_core::tool::execute(
+    let (out, is_error, _, _, _) = pig_core::tool::execute(
         &call,
         pig_core::tool::ToolContext {
             cwd: &dir,

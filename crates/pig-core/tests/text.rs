@@ -185,6 +185,7 @@ async fn run_tool_in(
     bool,
     Option<tool::FileChange>,
     Option<pig_protocol::EditDiff>,
+    Vec<tool::ToolImage>,
 ) {
     tool::execute(
         &call(name, args),
@@ -206,6 +207,7 @@ async fn run_tool(
     bool,
     Option<tool::FileChange>,
     Option<pig_protocol::EditDiff>,
+    Vec<tool::ToolImage>,
 ) {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -217,14 +219,15 @@ async fn read_has_line_numbers() {
     let dir = temp_dir("read-lines");
     std::fs::write(dir.join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
 
-    let (out, is_error, _, _) = run_tool(&dir, "Read", serde_json::json!({"path": "a.txt"})).await;
+    let (out, is_error, _, _, _) =
+        run_tool(&dir, "Read", serde_json::json!({"path": "a.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("1\talpha"), "{out}");
     assert!(out.contains("2\tbeta"), "{out}");
     assert!(out.contains("3\tgamma"), "{out}");
 
     // offset 起算行号
-    let (out, is_error, _, _) = run_tool(
+    let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Read",
         serde_json::json!({"path": "a.txt", "offset": 2}),
@@ -239,7 +242,7 @@ async fn read_crlf_normalized_with_file_info() {
     let dir = temp_dir("read-crlf");
     std::fs::write(dir.join("win.txt"), b"a\r\nb\r\nc\r\n").unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "win.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(!out.contains('\r'), "输出不应含 CR: {out:?}");
@@ -257,13 +260,14 @@ async fn read_utf16le_and_gbk() {
     std::fs::write(dir.join("u16.txt"), &utf16).unwrap();
     std::fs::write(dir.join("g.txt"), gbk_bytes("中文内容\n第二行\n")).unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "u16.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("1\t你好"), "{out}");
     assert!(out.contains("编码=UTF-16LE"), "{out}");
 
-    let (out, is_error, _, _) = run_tool(&dir, "Read", serde_json::json!({"path": "g.txt"})).await;
+    let (out, is_error, _, _, _) =
+        run_tool(&dir, "Read", serde_json::json!({"path": "g.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("中文内容"), "{out}");
     assert!(out.contains("编码=GBK"), "{out}");
@@ -274,7 +278,7 @@ async fn read_binary_rejected() {
     let dir = temp_dir("read-bin");
     std::fs::write(dir.join("bin.dat"), b"PK\x03\x04\x00\x01binary").unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "bin.dat"})).await;
     assert!(is_error, "{out}");
     assert!(out.contains("二进制"), "{out}");
@@ -286,7 +290,7 @@ async fn read_long_line_truncated() {
     let long = "x".repeat(3000);
     std::fs::write(dir.join("long.txt"), format!("{long}\nshort\n")).unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "long.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(
@@ -306,7 +310,7 @@ async fn read_char_budget_truncates() {
         .collect();
     std::fs::write(dir.join("big.txt"), content).unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "big.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("[已截断: 显示 1-"), "应有截断提示: {out}");
@@ -321,12 +325,12 @@ async fn read_empty_and_missing_file() {
     std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
     std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "empty.txt"})).await;
     assert!(!is_error, "{out}");
     assert_eq!(out, "（空文件）");
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "missing.rs"})).await;
     assert!(is_error, "{out}");
     assert!(out.contains("文件不存在: missing.rs"), "{out}");
@@ -344,12 +348,13 @@ async fn read_env_rejected_but_template_allowed() {
     std::fs::write(dir.join(".env.example"), "SECRET=\n").unwrap();
 
     for path in [".env", ".env.local"] {
-        let (out, is_error, _, _) = run_tool(&dir, "Read", serde_json::json!({"path": path})).await;
+        let (out, is_error, _, _, _) =
+            run_tool(&dir, "Read", serde_json::json!({"path": path})).await;
         assert!(is_error, "{path} 应拒绝: {out}");
         assert!(out.contains("敏感文件"), "{out}");
         assert!(!out.contains("SECRET=1"), "内容不应泄露: {out}");
     }
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": ".env.example"})).await;
     assert!(!is_error, "模板文件应可读: {out}");
 }
@@ -364,7 +369,7 @@ async fn write_preserves_crlf() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
     // 写前新鲜度：已存在的文件须先 Read
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -374,7 +379,7 @@ async fn write_preserves_crlf() {
     .await;
     assert!(!is_error);
 
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -398,7 +403,7 @@ async fn write_preserves_gbk() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -408,7 +413,7 @@ async fn write_preserves_gbk() {
     .await;
     assert!(!is_error);
 
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -426,7 +431,7 @@ async fn write_preserves_gbk() {
 
     // GBK 文件写入不可编码字符 → 拒绝且文件不动
     let before = std::fs::read(dir.join("g.txt")).unwrap();
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -451,7 +456,7 @@ async fn write_symlink_escape_rejected() {
     std::fs::write(outside.join("secret.txt"), "top secret\n").unwrap();
     std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("link.txt")).unwrap();
 
-    let (out, is_error, _, _) = run_tool(
+    let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Write",
         serde_json::json!({"path": "link.txt", "content": "pwned\n"}),
@@ -465,7 +470,7 @@ async fn write_symlink_escape_rejected() {
         "符号链接目标不应被改写"
     );
 
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "link.txt"})).await;
     assert!(is_error, "{out}");
     assert!(out.contains("越出工作目录"), "{out}");
@@ -474,7 +479,7 @@ async fn write_symlink_escape_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_env_rejected() {
     let dir = temp_dir("write-env");
-    let (out, is_error, _, _) = run_tool(
+    let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Write",
         serde_json::json!({"path": ".env", "content": "SECRET=1\n"}),
@@ -495,7 +500,7 @@ async fn edit_crlf_preserved_and_diff_clean() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
     // 写前新鲜度：先 Read 再 Edit
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -505,7 +510,7 @@ async fn edit_crlf_preserved_and_diff_clean() {
     .await;
     assert!(!is_error);
 
-    let (out, is_error, _, edit) = run_tool_in(
+    let (out, is_error, _, edit, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -533,7 +538,7 @@ async fn edit_crlf_preserved_and_diff_clean() {
     assert!(edit.unified_diff.contains("-b") && edit.unified_diff.contains("+B"));
 
     // CRLF 文件用 \r\n 的 old_string 匹配不上时，报错应引导用 LF
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -552,7 +557,7 @@ async fn edit_replace_all_counts() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -563,7 +568,7 @@ async fn edit_replace_all_counts() {
     assert!(!is_error);
 
     // 不设 replace_all：多处匹配报错，保留「出现 N 次」并引导 replace_all
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -575,7 +580,7 @@ async fn edit_replace_all_counts() {
     assert!(out.contains("出现 3 次"), "{out}");
     assert!(out.contains("replace_all=true"), "{out}");
 
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -596,7 +601,7 @@ async fn edit_old_equals_new_rejected() {
     let dir = temp_dir("edit-same");
     std::fs::write(dir.join("f.txt"), "same\n").unwrap();
 
-    let (out, is_error, _, _) = run_tool(
+    let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Edit",
         serde_json::json!({"path": "f.txt", "old_string": "same", "new_string": "same"}),
@@ -616,7 +621,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
     for file in ["f.txt", "g.txt", "h.txt"] {
-        let (_, is_error, _, _) = run_tool_in(
+        let (_, is_error, _, _, _) = run_tool_in(
             &dir,
             &mut tracker,
             &state,
@@ -628,7 +633,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
     }
 
     // old_string 占整行（不含 \n）→ 连行尾 \n 一起删，不留空行
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -643,7 +648,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
     );
 
     // 文件末尾无 \n 可吞时保持原样拼接
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -655,7 +660,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
     assert_eq!(std::fs::read_to_string(dir.join("g.txt")).unwrap(), "x\n");
 
     // replace_all 逐处同样吞换行
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -690,7 +695,7 @@ async fn revert_gbk_file_is_byte_exact() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
     // 新鲜度：先 Read 再 Edit
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call("Read", serde_json::json!({"path": "g.txt"})),
         ToolContext {
             cwd: &dir,
@@ -700,7 +705,7 @@ async fn revert_gbk_file_is_byte_exact() {
     )
     .await;
     assert!(!is_error);
-    let (_, is_error, _, _) = tool::execute(
+    let (_, is_error, _, _, _) = tool::execute(
         &call(
             "Edit",
             serde_json::json!({"path": "g.txt", "old_string": "正文", "new_string": "改过的正文"}),
@@ -829,7 +834,7 @@ async fn dangling_symlink_rejected_fail_closed() {
     ));
     std::os::unix::fs::symlink(&missing, dir.join("link.txt")).unwrap();
 
-    let (out, is_error, _, _) = run_tool(
+    let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Write",
         serde_json::json!({"path": "link.txt", "content": "pwned\n"}),
@@ -840,7 +845,7 @@ async fn dangling_symlink_rejected_fail_closed() {
     assert!(!missing.exists(), "外部文件不应被创建");
 
     // 读同一路径同样 fail-closed
-    let (out, is_error, _, _) =
+    let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "link.txt"})).await;
     assert!(is_error, "{out}");
     assert!(out.contains("符号链接"), "{out}");
@@ -858,7 +863,7 @@ async fn edit_strips_read_line_number_prefixes() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
     for file in ["f.rs", "g.rs", "m.rs"] {
-        let (_, is_error, _, _) = run_tool_in(
+        let (_, is_error, _, _, _) = run_tool_in(
             &dir,
             &mut tracker,
             &state,
@@ -870,7 +875,7 @@ async fn edit_strips_read_line_number_prefixes() {
     }
 
     // 模型从 Read 输出连行号一起复制（「2\t」前缀）
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -886,7 +891,7 @@ async fn edit_strips_read_line_number_prefixes() {
     );
 
     // 「行号:」前缀变体（grep 风格，冒号后无空格）
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -901,7 +906,7 @@ async fn edit_strips_read_line_number_prefixes() {
     );
 
     // 剥离后多处匹配 → 仍报「出现 N 次」
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -921,7 +926,7 @@ async fn edit_quote_normalization_follows_file_style() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -932,7 +937,7 @@ async fn edit_quote_normalization_follows_file_style() {
     assert!(!is_error);
 
     // 直引号 old_string 命中；new_string 直引号被转成弯引号
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -956,7 +961,7 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -967,7 +972,7 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
     assert!(!is_error);
 
     // replace_all + 行号前缀：不走第 2 级宽匹配，精确找不到 → 报错文案不变
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -979,7 +984,7 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
     assert!(out.contains("未找到"), "{out}");
 
     // 三级都找不到时 not-found 报错文案不变
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1002,7 +1007,7 @@ async fn write_edit_requires_prior_read() {
     let state = SessionToolState::for_test();
 
     // 未读先写：Edit / Write 都被拒
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1012,7 +1017,7 @@ async fn write_edit_requires_prior_read() {
     .await;
     assert!(is_error, "{out}");
     assert!(out.contains("尚未读过"), "{out}");
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1024,7 +1029,7 @@ async fn write_edit_requires_prior_read() {
     assert!(out.contains("尚未读过"), "{out}");
 
     // 新文件（不存在）不需要 Read
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1035,7 +1040,7 @@ async fn write_edit_requires_prior_read() {
     assert!(!is_error, "{out}");
 
     // Write 后紧接着 Edit 自己刚写的文件：合法（写盘已刷新状态）
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1046,7 +1051,7 @@ async fn write_edit_requires_prior_read() {
     assert!(!is_error, "{out}");
 
     // Read 后 Write 放行
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1055,7 +1060,7 @@ async fn write_edit_requires_prior_read() {
     )
     .await;
     assert!(!is_error);
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1073,7 +1078,7 @@ async fn edit_blocked_after_external_modification() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1085,7 +1090,7 @@ async fn edit_blocked_after_external_modification() {
 
     // 外部进程改了文件 → Edit 拒绝
     std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1097,7 +1102,7 @@ async fn edit_blocked_after_external_modification() {
     assert!(out.contains("已被外部修改"), "{out}");
 
     // 重新 Read 后放行
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1106,7 +1111,7 @@ async fn edit_blocked_after_external_modification() {
     )
     .await;
     assert!(!is_error);
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1125,7 +1130,7 @@ async fn mtime_touch_with_same_content_allowed() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1138,7 +1143,7 @@ async fn mtime_touch_with_same_content_allowed() {
     // 改写相同内容（mtime 被碰、hash 不变）→ 放行并顺手更新状态
     std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(dir.join("f.txt"), "same content\n").unwrap();
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1160,7 +1165,7 @@ async fn partial_read_blocks_write_paged_read_clears() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1172,7 +1177,7 @@ async fn partial_read_blocks_write_paged_read_clears() {
     assert!(out.contains("[已截断"), "{out}");
 
     // 不完整视图：Edit/Write 都拒绝
-    let (out, is_error, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1185,7 +1190,7 @@ async fn partial_read_blocks_write_paged_read_clears() {
 
     // 显式分页读不算 partial：登记覆盖为完整口径（freshness/hash 仍以最后一次记录为准），
     // Write 放行——ZCode 同款口径：分页参数意味着模型知道自己只看了窗口
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1194,7 +1199,7 @@ async fn partial_read_blocks_write_paged_read_clears() {
     )
     .await;
     assert!(!is_error);
-    let (_, is_error, _, _) = run_tool_in(
+    let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,

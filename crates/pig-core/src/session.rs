@@ -89,6 +89,7 @@ pub fn resolve_model(
         reasoning_params,
         cap_web_search: model.cap_web_search,
         web_search_tool: model.web_search_tool.clone(),
+        input_image: model.input_image,
         provider_name: provider.name.clone(),
     })
 }
@@ -1143,6 +1144,35 @@ impl Session {
                 continue;
             }
 
+            // ReadMediaFile 能力门控：当前模型不支持图片输入时直接引导换模型
+            //（不执行、不弹审批；schemas 里始终可见，模型调了就被引导）
+            if call.name == "ReadMediaFile" && !config.input_image {
+                let note =
+                    "当前模型不支持图片输入，请在设置里更换模型或勾选图片输入能力".to_string();
+                self.history
+                    .push(ChatMsg::tool_result(&call.id, note.clone()));
+                self.record(&RolloutRecord::ToolCall {
+                    tool: call.name.clone(),
+                    summary,
+                    arguments: call.arguments.clone(),
+                    output: note.clone(),
+                    is_error: true,
+                    edit: None,
+                });
+                self.emit(
+                    |session_id, seq| Event::ToolCallEnd {
+                        session_id,
+                        seq,
+                        item_id,
+                        output: note,
+                        is_error: true,
+                        edit: None,
+                    },
+                    tx,
+                );
+                continue;
+            }
+
             if self.mode == ExecMode::Plan && !read_only {
                 let note = "计划模式：修改类工具已被禁止执行。请只输出计划文本，等用户切换到其他模式后再执行。"
                     .to_string();
@@ -1425,12 +1455,30 @@ impl Session {
                     _ = cancel.cancelled() => None,
                 }
             };
-            let Some((output, is_error, file_change, edit)) = result else {
+            let Some((output, is_error, file_change, edit, images)) = result else {
                 self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                 return StepOutcome::Ended;
             };
-            self.history
-                .push(ChatMsg::tool_result(&call.id, output.clone()));
+            // 图片随 history 进模型上下文（Anthropic blocks / OpenAI 拆 user 消息）；
+            // rollout 的 ToolCall 记录只存 output 文本（尺寸摘要在内），base64 不落盘
+            let chat_images: Vec<crate::provider::ChatImage> = {
+                let label = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .ok()
+                    .and_then(|v| v["path"].as_str().map(str::to_string));
+                images
+                    .into_iter()
+                    .map(|img| crate::provider::ChatImage {
+                        media_type: img.media_type,
+                        data_base64: img.data_base64,
+                        label: label.clone(),
+                    })
+                    .collect()
+            };
+            self.history.push(ChatMsg::tool_result_with_images(
+                &call.id,
+                output.clone(),
+                chat_images,
+            ));
             self.record(&RolloutRecord::ToolCall {
                 tool: call.name.clone(),
                 summary,

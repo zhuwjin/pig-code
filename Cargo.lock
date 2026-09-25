@@ -5189,6 +5189,7 @@ dependencies = [
  "futures-util",
  "glob",
  "ignore",
+ "image",
  "pig-protocol",
  "regex",
  "reqwest",

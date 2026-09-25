@@ -98,8 +98,21 @@ pub struct ResolvedModel {
     pub reasoning_params: Option<serde_json::Value>,
     pub cap_web_search: bool,
     pub web_search_tool: Option<serde_json::Value>,
+    /// 模型支持图片输入（ReadMediaFile 的门控）
+    pub input_image: bool,
     /// 展示用
     pub provider_name: String,
+}
+
+/// 随消息进上下文的图片（ReadMediaFile 输出）：Anthropic 进 content blocks，
+/// OpenAI 拆成紧随的 user image_url 消息（见 to_openai_messages）
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatImage {
+    pub media_type: String,
+    pub data_base64: String,
+    /// 展示/标注用（OpenAI 拆分消息的 text part）；Anthropic 路径不消费
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -111,6 +124,10 @@ pub struct ChatMsg {
     pub tool_calls: Option<Vec<ToolCallWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 工具输出的图片：OpenAI 路径不走 serde 直序（见 to_openai_messages），
+    /// 这个字段只被 Anthropic 的自定义构建读取
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ChatImage>,
     /// assistant 的思考内容：仅供 Anthropic 端点回传（thinking 模式要求带
     /// content[].thinking，否则第二轮 400），不参与序列化——OpenAI 兼容端点
     ///（DeepSeek 原生）要求不回传 reasoning_content。
@@ -125,6 +142,7 @@ impl ChatMsg {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            images: vec![],
             reasoning: None,
         }
     }
@@ -135,6 +153,7 @@ impl ChatMsg {
             content: Some(content),
             tool_calls: None,
             tool_call_id: None,
+            images: vec![],
             reasoning: None,
         }
     }
@@ -150,6 +169,7 @@ impl ChatMsg {
             tool_calls: (!tool_calls.is_empty())
                 .then(|| tool_calls.iter().map(ToolCall::to_wire).collect()),
             tool_call_id: None,
+            images: vec![],
             reasoning: reasoning.filter(|r| !r.is_empty()),
         }
     }
@@ -160,8 +180,16 @@ impl ChatMsg {
             content: Some(output),
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
+            images: vec![],
             reasoning: None,
         }
+    }
+
+    /// 带图片的工具结果（ReadMediaFile）：图片随 history 进上下文
+    pub fn tool_result_with_images(call_id: &str, output: String, images: Vec<ChatImage>) -> Self {
+        let mut msg = Self::tool_result(call_id, output);
+        msg.images = images;
+        msg
     }
 }
 
@@ -242,12 +270,46 @@ pub async fn stream_chat(
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: &'a [ChatMsg],
+    /// 自定义构建（见 to_openai_messages）：带图工具结果拆成 tool 文本 + user 图片两条
+    messages: &'a [serde_json::Value],
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [serde_json::Value]>,
     stream: bool,
     stream_options: StreamOptions,
     max_tokens: u64,
+}
+
+/// 内部 ChatMsg 列表 → OpenAI messages 数组。
+/// 与 serde 直序的唯一差异：OpenAI 的 tool 角色消息不能带图——带图的工具结果
+///（ReadMediaFile）拆成两条：tool 消息只留文本 output，图片拆到紧随的 user
+/// 消息（content parts：text 标注 + image_url data URL）。
+fn to_openai_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(messages.len());
+    for msg in messages {
+        if msg.role == "tool" && !msg.images.is_empty() {
+            let mut text_only = msg.clone();
+            text_only.images = vec![];
+            out.push(serde_json::to_value(&text_only).unwrap_or_default());
+            let mut parts = Vec::with_capacity(msg.images.len() * 2);
+            for img in &msg.images {
+                let label = img.label.as_deref().unwrap_or("图片");
+                parts.push(serde_json::json!({
+                    "type": "text",
+                    "text": format!("[ReadMediaFile 输出图片: {label}]"),
+                }));
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+                    },
+                }));
+            }
+            out.push(serde_json::json!({"role": "user", "content": parts}));
+        } else {
+            out.push(serde_json::to_value(msg).unwrap_or_default());
+        }
+    }
+    out
 }
 
 #[derive(Serialize)]
@@ -267,9 +329,10 @@ async fn stream_openai(
     if let Some(tool) = openai_web_search_tool(config) {
         tools.push(tool);
     }
+    let messages_json = to_openai_messages(&messages);
     let mut body = serde_json::to_value(ChatRequest {
         model: &config.model,
-        messages: &messages,
+        messages: &messages_json,
         tools: (!tools.is_empty()).then_some(tools.as_slice()),
         stream: true,
         stream_options: StreamOptions {
@@ -527,11 +590,40 @@ fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_json::Value
                 out.push(serde_json::json!({"role": "assistant", "content": blocks}));
             }
             "tool" => {
-                let block = serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id.clone().unwrap_or_default(),
-                    "content": msg.content.clone().unwrap_or_default(),
-                });
+                // 带图工具结果（ReadMediaFile）：content 从字符串改为 blocks 数组
+                //（图片块在前、文本摘要在后）；无图保持字符串原样（回归安全）
+                let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
+                let block = if msg.images.is_empty() {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": msg.content.clone().unwrap_or_default(),
+                    })
+                } else {
+                    let mut blocks: Vec<serde_json::Value> = msg
+                        .images
+                        .iter()
+                        .map(|img| {
+                            serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": img.media_type,
+                                    "data": img.data_base64,
+                                },
+                            })
+                        })
+                        .collect();
+                    blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": msg.content.clone().unwrap_or_default(),
+                    }));
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": blocks,
+                    })
+                };
                 // 连续 tool 结果并入同一条 user 消息
                 let merged = if let Some(last) = out.last_mut() {
                     if last["role"] == "user" && last["content"].is_array() {
@@ -949,6 +1041,7 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
                 reasoning_params: None,
                 cap_web_search: model.cap_web_search,
                 web_search_tool: model.web_search_tool.clone(),
+                input_image: model.input_image,
                 provider_name: provider.name.clone(),
             };
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1010,6 +1103,82 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_tool_result_with_images_becomes_blocks() {
+        let messages = vec![ChatMsg::tool_result_with_images(
+            "c1",
+            "已读取图片 x.png".into(),
+            vec![ChatImage {
+                media_type: "image/png".into(),
+                data_base64: "QUJD".into(),
+                label: Some("x.png".into()),
+            }],
+        )];
+        let (_system, out) = to_anthropic_messages(&messages);
+        let content = out[0]["content"].as_array().expect("user 消息 blocks");
+        assert_eq!(content[0]["type"], "tool_result");
+        let blocks = content[0]["content"]
+            .as_array()
+            .expect("带图时 content 是数组");
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["source"]["type"], "base64");
+        assert_eq!(blocks[0]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[0]["source"]["data"], "QUJD");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "已读取图片 x.png");
+    }
+
+    #[test]
+    fn anthropic_tool_result_without_images_stays_string() {
+        // 回归：无图路径与旧版一致（content 是字符串）
+        let messages = vec![ChatMsg::tool_result("c1", "ok".into())];
+        let (_system, out) = to_anthropic_messages(&messages);
+        let content = out[0]["content"].as_array().expect("blocks");
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["content"], "ok", "无图时 content 保持字符串");
+    }
+
+    #[test]
+    fn openai_tool_result_with_images_splits_into_two_messages() {
+        let messages = vec![ChatMsg::tool_result_with_images(
+            "c1",
+            "已读取图片 x.png".into(),
+            vec![ChatImage {
+                media_type: "image/jpeg".into(),
+                data_base64: "QUJD".into(),
+                label: Some("x.png".into()),
+            }],
+        )];
+        let out = to_openai_messages(&messages);
+        assert_eq!(out.len(), 2, "拆成 tool 文本 + user 图片两条");
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["tool_call_id"], "c1");
+        assert_eq!(out[0]["content"], "已读取图片 x.png");
+        assert!(out[0].get("images").is_none(), "tool 消息不带图");
+        assert_eq!(out[1]["role"], "user");
+        let parts = out[1]["content"].as_array().expect("content parts");
+        assert_eq!(parts[0]["type"], "text");
+        assert!(parts[0]["text"].as_str().unwrap().contains("x.png"));
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+    }
+
+    #[test]
+    fn openai_no_image_matches_plain_serde() {
+        // 回归：无图时自定义构建与 serde 直序逐字节一致
+        let messages = vec![
+            ChatMsg::system("s".into()),
+            ChatMsg::user("u".into()),
+            ChatMsg::tool_result("c1", "ok".into()),
+        ];
+        let built = to_openai_messages(&messages);
+        let direct: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        assert_eq!(built, direct);
+    }
+
+    #[test]
     fn finish_all_nameless_emits_no_tool_calls() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut calls = vec![ToolCall::default()];
@@ -1063,6 +1232,7 @@ mod tests {
             reasoning_params: None,
             cap_web_search: cap,
             web_search_tool: tool,
+            input_image: false,
             provider_name: "p".into(),
         }
     }
