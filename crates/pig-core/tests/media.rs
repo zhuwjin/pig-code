@@ -43,6 +43,14 @@ fn jpeg_bytes(w: u32, h: u32) -> Vec<u8> {
     buf.into_inner()
 }
 
+fn tiff_bytes(w: u32, h: u32) -> Vec<u8> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(w, h)
+        .write_to(&mut buf, image::ImageFormat::Tiff)
+        .unwrap();
+    buf.into_inner()
+}
+
 /// 手工拼一个最小合法 PNG（IHDR 声明巨大尺寸 + 空 IEND，不带图像数据）：
 /// ReadMediaFile 的像素上限检查在解码前，读到尺寸就应拒绝。
 fn crafted_png_with_dims(w: u32, h: u32) -> Vec<u8> {
@@ -418,6 +426,16 @@ async fn media_flows_and_rollout_stays_text_only() {
 }
 
 // ---------- 粘贴发送管线（压缩共享函数 / rollout ImageRef / 回放重建 / 能力投影） ----------
+
+#[test]
+fn tiff_clipboard_bytes_convert_to_png() {
+    let tiff = tiff_bytes(37, 23);
+    let (png, width, height) = tool::convert_tiff_to_png(&tiff).unwrap();
+    assert_eq!((width, height), (37, 23));
+    assert_eq!(tool::sniff_image(&png), Some("image/png"));
+    assert_ne!(png, tiff);
+    assert!(tool::convert_tiff_to_png(b"not a tiff").is_err());
+}
 
 #[test]
 fn compress_image_for_model_pipeline() {

@@ -1357,6 +1357,39 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// 将 TIFF 原始字节无缩放转换为 PNG，供剪贴板粘贴入口规范化格式。
+/// 先读取尺寸再解码，避免超大 TIFF 在解码阶段占用过多内存。
+pub fn convert_tiff_to_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    if bytes.len() as u64 > MAX_MEDIA_FILE_BYTES {
+        return Err(format!(
+            "TIFF 文件超过 {}MB 上限",
+            MAX_MEDIA_FILE_BYTES / 1024 / 1024
+        ));
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("TIFF 解析失败: {e}"))?;
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| format!("TIFF 尺寸读取失败: {e}"))?;
+    if width == 0 || height == 0 {
+        return Err("TIFF 尺寸无效".to_string());
+    }
+    if width as u64 * height as u64 > MAX_MEDIA_PIXELS {
+        return Err(format!("TIFF 图片过大（{width}×{height}）"));
+    }
+    let image = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("TIFF 解析失败: {e}"))?
+        .decode()
+        .map_err(|e| format!("TIFF 解码失败: {e}"))?;
+    let mut output = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut output, image::ImageFormat::Png)
+        .map_err(|e| format!("TIFF 转 PNG 编码失败: {e}"))?;
+    Ok((output.into_inner(), width, height))
+}
+
 /// 媒体文件的尺寸/体积上限（ReadMediaFile 与粘贴发送共用）
 const MAX_MEDIA_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_MEDIA_PIXELS: u64 = 100_000_000;

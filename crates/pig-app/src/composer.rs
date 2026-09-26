@@ -1708,40 +1708,94 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> bool {
         use crate::clipboard::{PasteArb, arbitrate_clipboard};
+        let entry_count = item.entries.len();
         match arbitrate_clipboard(item) {
             PasteArb::FilePath(path) => {
                 // >20MB 跳过到文本粘贴（粘贴路径文本）；读不出/非图片同样落回文本
                 let Ok(meta) = std::fs::metadata(&path) else {
+                    eprintln!("[clipboard] paste FilePath failed: metadata unavailable");
                     return false;
                 };
                 if meta.len() > 20 * 1024 * 1024 {
+                    eprintln!(
+                        "[clipboard] paste FilePath skipped: size={} exceeds 20MB",
+                        meta.len()
+                    );
                     return false;
                 }
                 let Ok(bytes) = std::fs::read(&path) else {
+                    eprintln!("[clipboard] paste FilePath failed: read error");
                     return false;
                 };
                 let Some(mime) = pig_core::tool::sniff_image(&bytes) else {
+                    eprintln!("[clipboard] paste FilePath skipped: unsupported file bytes");
                     return false;
                 };
+                eprintln!(
+                    "[clipboard] paste FilePath accepted: mime={}, bytes={}, entries={}",
+                    mime,
+                    bytes.len(),
+                    entry_count
+                );
                 self.attach_image(bytes, mime, cx);
                 true
             }
             PasteArb::ImageBytes { bytes, mime } => {
+                eprintln!(
+                    "[clipboard] paste ImageBytes accepted: mime={}, bytes={}, entries={}",
+                    mime,
+                    bytes.len(),
+                    entry_count
+                );
                 self.attach_image(bytes, mime, cx);
                 true
             }
-            PasteArb::Text | PasteArb::Nothing => false,
+            PasteArb::Text => {
+                eprintln!("[clipboard] paste Text: fallback to input text");
+                false
+            }
+            PasteArb::Nothing => {
+                eprintln!("[clipboard] paste Nothing: fallback to default paste");
+                false
+            }
         }
     }
 
-    /// 图片进附件列表（chip 条）：超上限只提示不附加
-    fn attach_image(&mut self, bytes: Vec<u8>, mime: &str, cx: &mut Context<Self>) {
+    /// 图片进附件列表（chip 条）：超上限只提示不附加；TIFF 在这里规范化为 PNG。
+    fn attach_image(&mut self, mut bytes: Vec<u8>, mut mime: &str, cx: &mut Context<Self>) {
         if self.pasted_images.len() >= MAX_PASTED_IMAGES {
+            eprintln!(
+                "[clipboard] attach_image skipped: already at max={} images",
+                MAX_PASTED_IMAGES
+            );
             self.paste_note = Some(format!("最多粘贴 {MAX_PASTED_IMAGES} 张图片"));
             cx.notify();
             return;
         }
+        if mime == "image/tiff" {
+            let source_bytes = bytes.len();
+            match pig_core::tool::convert_tiff_to_png(&bytes) {
+                Ok((png, width, height)) => {
+                    eprintln!(
+                        "[clipboard] TIFF converted to PNG: {}x{}, bytes={} -> {}",
+                        width,
+                        height,
+                        source_bytes,
+                        png.len()
+                    );
+                    bytes = png;
+                    mime = "image/png";
+                }
+                Err(error) => {
+                    eprintln!("[clipboard] TIFF conversion failed: {error}");
+                    self.paste_note = Some(format!("TIFF 图片无法转换：{error}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         self.paste_note = None;
+        let byte_len = bytes.len();
         let (width, height) = pig_core::tool::image_dimensions(&bytes).unwrap_or((0, 0));
         self.pasted_images.push(PastedImage {
             bytes: std::sync::Arc::new(bytes),
@@ -1749,6 +1803,14 @@ impl Composer {
             width,
             height,
         });
+        eprintln!(
+            "[clipboard] attach_image stored: mime={}, bytes={}, dimensions={}x{}, count={}",
+            mime,
+            byte_len,
+            width,
+            height,
+            self.pasted_images.len()
+        );
         cx.notify();
     }
 
@@ -1779,6 +1841,7 @@ impl Composer {
                         gpui_kit::img(std::sync::Arc::new(thumb))
                             .h_8()
                             .w_8()
+                            .object_fit(ObjectFit::Cover)
                             .rounded_sm(),
                     )
                     .child(div().text_xs().child(format!(
