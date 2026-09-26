@@ -130,12 +130,40 @@ pub struct Session {
     /// 会话累计（回放恢复）：未命中输入 / 命中缓存输入，平均缓存命中率用
     input_total: u64,
     cache_read_total: u64,
+    /// 子代理序号（agent_id = a{时间戳}-{agent_seq+1}；带时间戳，跨重启不撞已持久化的子代理文件）
+    agent_seq: u64,
+    /// 应用配置快照（子代理显式模型解析用；None = 未加载，仅继承可用）
+    app_config: Option<AppConfig>,
 }
 
 enum StepOutcome {
     TextOnly,
     ToolsExecuted,
     Ended,
+}
+
+/// 门控工具执行（exec_tool_gated）的结果
+pub(crate) enum GatedToolOutcome {
+    /// 已执行；调用方负责 history/rollout/ToolCallEnd（父/子各写各的）
+    Executed {
+        output: String,
+        is_error: bool,
+        /// 本次编辑的 diff（父会话工具卡片内联渲染用；子代理路径忽略）
+        edit: Option<pig_protocol::EditDiff>,
+        images: Vec<crate::provider::ChatImage>,
+    },
+    /// 审批/规则拒绝（note 即给模型的文案）；调用方负责 history/rollout/ToolCallEnd
+    Rejected { note: String },
+    /// 取消（审批等待或执行中被打断）；调用方决定 TurnAborted 与收尾
+    Cancelled,
+}
+
+/// 子代理委派（run_subagent）的结果
+enum SubagentOutcome {
+    /// 子代理已收尾（成败都在 note 里）；调用方负责 history/rollout/ToolCallEnd
+    Finished { note: String, is_error: bool },
+    /// 取消（审批等待或采样/执行中被打断）；调用方发 TurnAborted 并收尾
+    Cancelled,
 }
 
 impl Session {
@@ -147,6 +175,7 @@ impl Session {
         sessions_dir: &Path,
         data_dir: PathBuf,
         task_notify: tokio::sync::mpsc::UnboundedSender<String>,
+        app_config: Option<&AppConfig>,
     ) -> Result<Self, String> {
         let rollout = Rollout::create(sessions_dir, &meta)?;
         Ok(Self {
@@ -176,6 +205,8 @@ impl Session {
             turn_api_steps: 0,
             input_total: 0,
             cache_read_total: 0,
+            agent_seq: 0,
+            app_config: app_config.cloned(),
         })
     }
 
@@ -189,6 +220,7 @@ impl Session {
         store: Arc<Mutex<Store>>,
         data_dir: PathBuf,
         task_notify: tokio::sync::mpsc::UnboundedSender<String>,
+        app_config: Option<&AppConfig>,
     ) -> Result<(Self, Vec<RolloutRecord>), String> {
         let records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
         let Some(RolloutRecord::Meta { cwd, .. }) = records.first() else {
@@ -236,6 +268,8 @@ impl Session {
             turn_api_steps: 0,
             input_total: 0,
             cache_read_total: 0,
+            agent_seq: 0,
+            app_config: app_config.cloned(),
         };
         Ok((session, records))
     }
@@ -904,7 +938,8 @@ impl Session {
         let provider_task = tokio::spawn(provider::stream_chat(
             config.clone(),
             self.history.clone(),
-            tool::schemas(),
+            // 根会话工具集 = 内置 + Agent（每步重建：档案文件可在回合间增改）
+            tool::schemas_root(&self.cwd, &self.data_dir),
             event_tx,
             cancel.clone(),
         ));
@@ -1216,6 +1251,46 @@ impl Session {
                 continue;
             }
 
+            // Agent：委派子代理（前台同步）。拦在 ReadMediaFile 门控与 Plan 硬拒之前
+            // ——Plan 拒绝文案由 run_subagent 内部给出（比通用硬拒更贴合语义）。
+            // 子工具调用不发顶层 ToolCallBegin/End：父时间线只有 Agent 一张卡，
+            // 实时进度走 SubagentProgress，审批仍弹（子代理的写操作自己过审批门）。
+            if call.name == "Agent" {
+                match self
+                    .run_subagent(call, &turn_id, &item_id, config, tx, cancel)
+                    .await
+                {
+                    SubagentOutcome::Finished { note, is_error } => {
+                        self.history
+                            .push(ChatMsg::tool_result(&call.id, note.clone()));
+                        self.record(&RolloutRecord::ToolCall {
+                            tool: call.name.clone(),
+                            summary,
+                            arguments: call.arguments.clone(),
+                            output: note.clone(),
+                            is_error,
+                            edit: None,
+                        });
+                        self.emit(
+                            |session_id, seq| Event::ToolCallEnd {
+                                session_id,
+                                seq,
+                                item_id,
+                                output: note,
+                                is_error,
+                                edit: None,
+                            },
+                            tx,
+                        );
+                        continue;
+                    }
+                    SubagentOutcome::Cancelled => {
+                        self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
+                        return StepOutcome::Ended;
+                    }
+                }
+            }
+
             // ReadMediaFile 能力门控：当前模型不支持图片输入时直接引导换模型
             //（不执行、不弹审批；schemas 里始终可见，模型调了就被引导）
             if call.name == "ReadMediaFile" && !config.input_image {
@@ -1376,277 +1451,607 @@ impl Session {
                 continue;
             }
 
-            // 黑名单命中的危险命令强制弹窗（ZCode alwaysAsk 同款）：Yolo 之外的模式都弹，
-            // always_allowed 对其不生效；Plan 模式已在上方整类硬拒，不走这里。
-            // Yolo（容器/沙箱无管制）连危险判定都跳过，什么弹窗都不发。
-            let bash_command = if call.name == "Bash" {
-                serde_json::from_str::<serde_json::Value>(&call.arguments)
-                    .ok()
-                    .and_then(|args| args["command"].as_str().map(str::to_string))
-            } else {
-                None
-            };
-
-            // 项目规则（.pigcode/permissions.toml）：deny 命中 → 所有模式（含 Yolo）
-            // 硬拒，排在危险弹窗之前（用户显式写的 deny 是最强意图）。
-            // 注意 Bash 匹配完整命令串（比 always_allowed 的首词粒度更精细）。
-            let perm_subject = match call.name.as_str() {
-                "Bash" => bash_command.clone(),
-                "Write" | "Edit" => Some(tool::approval_subject(call)),
-                _ => None,
-            };
-            if let Some(subject) = perm_subject.as_deref()
-                && let Some(rule) = self.permissions.deny_hit(&call.name, subject)
+            // 通用路径：危险黑名单/项目权限规则/审批门/执行/会话级副作用全部在
+            // exec_tool_gated（子代理循环复用同一门控）；本处只收尾
+            // history/rollout/ToolCallEnd（父会话自己的历史与 rollout）
+            match self
+                .exec_tool_gated(
+                    call,
+                    tool_ref.map(|t| t.as_ref()),
+                    &item_id,
+                    &turn_id,
+                    tx,
+                    cancel,
+                )
+                .await
             {
-                let note = format!("项目规则禁止执行: {rule}（.pigcode/permissions.toml）");
-                self.history
-                    .push(ChatMsg::tool_result(&call.id, note.clone()));
-                self.record(&RolloutRecord::ToolCall {
-                    tool: call.name.clone(),
-                    summary,
-                    arguments: call.arguments.clone(),
-                    output: note.clone(),
-                    is_error: true,
-                    edit: None,
-                });
-                self.emit(
-                    |session_id, seq| Event::ToolCallEnd {
-                        session_id,
-                        seq,
-                        item_id,
-                        output: note,
+                GatedToolOutcome::Rejected { note } => {
+                    self.history
+                        .push(ChatMsg::tool_result(&call.id, note.clone()));
+                    self.record(&RolloutRecord::ToolCall {
+                        tool: call.name.clone(),
+                        summary,
+                        arguments: call.arguments.clone(),
+                        output: note.clone(),
                         is_error: true,
                         edit: None,
-                    },
-                    tx,
-                );
-                continue;
-            }
-            // allow 命中免审批（危险命令除外——危险判定在下方弹窗优先）
-            let allowed_by_rules = perm_subject
-                .as_deref()
-                .is_some_and(|subject| self.permissions.allow_hit(&call.name, subject));
-
-            let danger_reason = if self.mode == ExecMode::Yolo {
-                None
-            } else {
-                bash_command.as_deref().and_then(tool::is_dangerous_command)
-            };
-            // AutoEdit 直通保守白名单的只读命令（ls/git status 这类）；危险判定在上方优先
-            let readonly_bash = self.mode == ExecMode::AutoEdit
-                && bash_command
-                    .as_deref()
-                    .is_some_and(tool::is_readonly_command);
-            // 「本会话内始终允许」细化到 (工具, subject)：Bash=命令首词，Write/Edit=路径
-            let approval_key = (call.name.clone(), tool::approval_subject(call));
-
-            if danger_reason.is_some()
-                || (tool_ref.is_some_and(|t| tool::requires_approval(t.as_ref(), self.mode))
-                    && !self.always_allowed.contains(&approval_key)
-                    && !readonly_bash
-                    && !allowed_by_rules)
-            {
-                let request_id = format!("{}-{turn_id}-approval-{item_id}", self.id);
-                let detail_text = approval_detail(call, &self.cwd, danger_reason);
-                let (reply_tx, reply_rx) = oneshot::channel();
-                self.pending
-                    .lock()
-                    .expect("pending lock")
-                    .insert(request_id.clone(), reply_tx);
-                self.emit(
-                    |session_id, seq| Event::ApprovalRequested {
-                        session_id,
-                        seq,
-                        request_id: request_id.clone(),
-                        tool: call.name.clone(),
-                        detail: detail_text,
-                    },
-                    tx,
-                );
-                let decision = tokio::select! {
-                    reply = reply_rx => reply.unwrap_or(ApprovalDecision::Reject),
-                    _ = cancel.cancelled() => {
-                        self.pending.lock().expect("pending lock").remove(&request_id);
-                        self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
-                        return StepOutcome::Ended;
-                    }
-                };
-                match decision {
-                    ApprovalDecision::Allow => {}
-                    ApprovalDecision::AlwaysAllow => {
-                        // 危险命令不记入 always_allowed：只在本次放行，等价 Allow
-                        if danger_reason.is_none() {
-                            self.always_allowed.insert(approval_key);
-                        }
-                    }
-                    ApprovalDecision::Reject => {
-                        let note = match danger_reason {
-                            Some(reason) => format!(
-                                "用户拒绝了该高风险命令（{reason}）。请尊重用户意愿，改用其他方式或说明理由后继续。"
-                            ),
-                            None => {
-                                "用户拒绝了该操作。请尊重用户意愿，改用其他方式或说明理由后继续。"
-                                    .to_string()
-                            }
-                        };
-                        self.history
-                            .push(ChatMsg::tool_result(&call.id, note.clone()));
-                        self.record(&RolloutRecord::ToolCall {
-                            tool: call.name.clone(),
-                            summary,
-                            arguments: call.arguments.clone(),
-                            output: note.clone(),
+                    });
+                    self.emit(
+                        |session_id, seq| Event::ToolCallEnd {
+                            session_id,
+                            seq,
+                            item_id,
+                            output: note,
                             is_error: true,
                             edit: None,
-                        });
-                        self.emit(
-                            |session_id, seq| Event::ToolCallEnd {
-                                session_id,
-                                seq,
-                                item_id,
-                                output: note,
-                                is_error: true,
-                                edit: None,
-                            },
-                            tx,
-                        );
-                        continue;
-                    }
+                        },
+                        tx,
+                    );
                 }
-            }
-
-            let cwd = self.cwd.clone();
-            let result = {
-                let ctx = ToolContext {
-                    cwd: &cwd,
-                    tracker: &mut self.tracker,
-                    state: &self.state,
-                };
-                tokio::select! {
-                    result = tool::execute(call, ctx) => Some(result),
-                    _ = cancel.cancelled() => None,
+                GatedToolOutcome::Cancelled => {
+                    self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
+                    return StepOutcome::Ended;
                 }
-            };
-            let Some((output, is_error, file_change, edit, images)) = result else {
-                self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
-                return StepOutcome::Ended;
-            };
-            // 图片随 history 进模型上下文（Anthropic blocks / OpenAI 拆 user 消息）；
-            // rollout 的 ToolCall 记录只存 output 文本（尺寸摘要在内），base64 不落盘
-            let chat_images: Vec<crate::provider::ChatImage> = {
-                let label = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                    .ok()
-                    .and_then(|v| v["path"].as_str().map(str::to_string));
-                images
-                    .into_iter()
-                    .map(|img| crate::provider::ChatImage {
-                        media_type: img.media_type,
-                        data_base64: img.data_base64,
-                        label: label.clone(),
-                    })
-                    .collect()
-            };
-            self.history.push(ChatMsg::tool_result_with_images(
-                &call.id,
-                output.clone(),
-                chat_images,
-            ));
-            self.record(&RolloutRecord::ToolCall {
-                tool: call.name.clone(),
-                summary,
-                arguments: call.arguments.clone(),
-                output: output.clone(),
-                is_error,
-                edit: edit.clone(),
-            });
-            self.emit(
-                |session_id, seq| Event::ToolCallEnd {
-                    session_id,
-                    seq,
-                    item_id,
+                GatedToolOutcome::Executed {
                     output,
                     is_error,
                     edit,
-                },
-                tx,
-            );
-            // TodoList 写入成功后向 UI 推待办快照（读操作输出即列表，无需重复推）
-            if call.name == "TodoList" && !is_error {
-                let items = self.state.todos.lock().expect("todos lock").clone();
-                // 写操作（带 todos 参数）落 SQLite todos 表（当前态 upsert）；
-                // 读操作不落盘。事件流 JSONL 不再记状态快照
-                let is_write = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                    .ok()
-                    .is_some_and(|v| v.get("todos").is_some());
-                if is_write {
-                    let json = serde_json::to_string(&items).unwrap_or_default();
-                    self.store
-                        .lock()
-                        .expect("store lock")
-                        .set_todos(&self.id, &json);
-                }
-                self.emit(
-                    |session_id, seq| Event::TodoListChanged {
-                        session_id,
-                        seq,
-                        items,
-                    },
-                    tx,
-                );
-            }
-            if let Some(change) = file_change {
-                // 改动当前态落 SQLite file_changes 表（按路径 upsert；净额归零删行），
-                // JSONL 只留消息/工具事件流
-                {
-                    let store = self.store.lock().expect("store lock");
-                    if change.additions == 0 && change.deletions == 0 {
-                        store.delete_file_change(&self.id, &change.path);
-                    } else {
-                        store.upsert_file_change(
-                            &self.id,
-                            &change.path,
-                            &change.unified_diff,
-                            change.additions,
-                            change.deletions,
-                        );
-                    }
-                }
-                self.emit(
-                    |session_id, seq| Event::FileChanged {
-                        session_id,
-                        seq,
-                        path: change.path,
-                        unified_diff: change.unified_diff,
-                        additions: change.additions,
-                        deletions: change.deletions,
-                    },
-                    tx,
-                );
-            }
-            // 本工具新增的原始快照落 file_originals 表（跨重启 diff 基线 / revert）；
-            // 超过 4MB 的大文件不持久化（基线退回进程内存，与 kimi-code 口径一致）
-            let dirty = self.tracker.take_dirty();
-            if !dirty.is_empty() {
-                const MAX_ORIGINAL_BYTES: usize = 4 * 1024 * 1024;
-                let store = self.store.lock().expect("store lock");
-                for path in dirty {
-                    if let Some(original) = self.tracker.original(&path) {
-                        let oversized = original
-                            .as_ref()
-                            .is_some_and(|content| content.len() > MAX_ORIGINAL_BYTES);
-                        if !oversized {
-                            store.upsert_file_original(
-                                &self.id,
-                                &path.to_string_lossy(),
-                                original.as_deref(),
-                            );
-                        }
-                    }
+                    images,
+                } => {
+                    // 图片随 history 进模型上下文（Anthropic blocks / OpenAI 拆 user 消息）；
+                    // rollout 的 ToolCall 记录只存 output 文本（尺寸摘要在内），base64 不落盘
+                    self.history.push(ChatMsg::tool_result_with_images(
+                        &call.id,
+                        output.clone(),
+                        images,
+                    ));
+                    self.record(&RolloutRecord::ToolCall {
+                        tool: call.name.clone(),
+                        summary,
+                        arguments: call.arguments.clone(),
+                        output: output.clone(),
+                        is_error,
+                        edit: edit.clone(),
+                    });
+                    self.emit(
+                        |session_id, seq| Event::ToolCallEnd {
+                            session_id,
+                            seq,
+                            item_id,
+                            output,
+                            is_error,
+                            edit,
+                        },
+                        tx,
+                    );
                 }
             }
         }
         StepOutcome::ToolsExecuted
     }
+
+    /// 共享的门控执行（父会话通用路径与子代理循环复用）：
+    /// 危险黑名单 → permissions deny/allow → AutoEdit 只读直通 → 审批门 → 执行 →
+    /// 会话级副作用（TodoList 快照落库+推送、FileChanged 落库+推送、file_originals 落库）。
+    /// ToolCallBegin/history.push/RolloutRecord::ToolCall/ToolCallEnd 不在此——
+    /// 由调用方负责（父/子各写各的历史与 rollout）。
+    /// `tool` 为 None（未知工具名）时审批/权限按名匹配全部落空，直达执行段报「未知工具」。
+    async fn exec_tool_gated(
+        &mut self,
+        call: &ToolCall,
+        tool: Option<&dyn tool::Tool>,
+        item_id: &str,
+        turn_id: &str,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> GatedToolOutcome {
+        // 黑名单命中的危险命令强制弹窗（ZCode alwaysAsk 同款）：Yolo 之外的模式都弹，
+        // always_allowed 对其不生效；Plan 模式已在调用方整类硬拒，不走这里。
+        // Yolo（容器/沙箱无管制）连危险判定都跳过，什么弹窗都不发。
+        let bash_command = if call.name == "Bash" {
+            serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|args| args["command"].as_str().map(str::to_string))
+        } else {
+            None
+        };
+
+        // 项目规则（.pigcode/permissions.toml）：deny 命中 → 所有模式（含 Yolo）
+        // 硬拒，排在危险弹窗之前（用户显式写的 deny 是最强意图）。
+        // 注意 Bash 匹配完整命令串（比 always_allowed 的首词粒度更精细）。
+        let perm_subject = match call.name.as_str() {
+            "Bash" => bash_command.clone(),
+            "Write" | "Edit" => Some(tool::approval_subject(call)),
+            _ => None,
+        };
+        if let Some(subject) = perm_subject.as_deref()
+            && let Some(rule) = self.permissions.deny_hit(&call.name, subject)
+        {
+            let note = format!("项目规则禁止执行: {rule}（.pigcode/permissions.toml）");
+            return GatedToolOutcome::Rejected { note };
+        }
+        // allow 命中免审批（危险命令除外——危险判定在下方弹窗优先）
+        let allowed_by_rules = perm_subject
+            .as_deref()
+            .is_some_and(|subject| self.permissions.allow_hit(&call.name, subject));
+
+        let danger_reason = if self.mode == ExecMode::Yolo {
+            None
+        } else {
+            bash_command.as_deref().and_then(tool::is_dangerous_command)
+        };
+        // AutoEdit 直通保守白名单的只读命令（ls/git status 这类）；危险判定在上方优先
+        let readonly_bash = self.mode == ExecMode::AutoEdit
+            && bash_command
+                .as_deref()
+                .is_some_and(tool::is_readonly_command);
+        // 「本会话内始终允许」细化到 (工具, subject)：Bash=命令首词，Write/Edit=路径
+        let approval_key = (call.name.clone(), tool::approval_subject(call));
+
+        if danger_reason.is_some()
+            || (tool.is_some_and(|t| tool::requires_approval(t, self.mode))
+                && !self.always_allowed.contains(&approval_key)
+                && !readonly_bash
+                && !allowed_by_rules)
+        {
+            let request_id = format!("{}-{turn_id}-approval-{item_id}", self.id);
+            let detail_text = approval_detail(call, &self.cwd, danger_reason);
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.pending
+                .lock()
+                .expect("pending lock")
+                .insert(request_id.clone(), reply_tx);
+            self.emit(
+                |session_id, seq| Event::ApprovalRequested {
+                    session_id,
+                    seq,
+                    request_id: request_id.clone(),
+                    tool: call.name.clone(),
+                    detail: detail_text,
+                },
+                tx,
+            );
+            let decision = tokio::select! {
+                reply = reply_rx => reply.unwrap_or(ApprovalDecision::Reject),
+                _ = cancel.cancelled() => {
+                    self.pending.lock().expect("pending lock").remove(&request_id);
+                    return GatedToolOutcome::Cancelled;
+                }
+            };
+            match decision {
+                ApprovalDecision::Allow => {}
+                ApprovalDecision::AlwaysAllow => {
+                    // 危险命令不记入 always_allowed：只在本次放行，等价 Allow
+                    if danger_reason.is_none() {
+                        self.always_allowed.insert(approval_key);
+                    }
+                }
+                ApprovalDecision::Reject => {
+                    let note = match danger_reason {
+                        Some(reason) => format!(
+                            "用户拒绝了该高风险命令（{reason}）。请尊重用户意愿，改用其他方式或说明理由后继续。"
+                        ),
+                        None => "用户拒绝了该操作。请尊重用户意愿，改用其他方式或说明理由后继续。"
+                            .to_string(),
+                    };
+                    return GatedToolOutcome::Rejected { note };
+                }
+            }
+        }
+
+        let cwd = self.cwd.clone();
+        let result = {
+            let ctx = ToolContext {
+                cwd: &cwd,
+                tracker: &mut self.tracker,
+                state: &self.state,
+            };
+            tokio::select! {
+                result = tool::execute(call, ctx) => Some(result),
+                _ = cancel.cancelled() => None,
+            }
+        };
+        let Some((output, is_error, file_change, edit, images)) = result else {
+            return GatedToolOutcome::Cancelled;
+        };
+        // 图片随 history 进模型上下文（Anthropic blocks / OpenAI 拆 user 消息）；
+        // rollout 的 ToolCall 记录只存 output 文本（尺寸摘要在内），base64 不落盘
+        let chat_images: Vec<crate::provider::ChatImage> = {
+            let label = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|v| v["path"].as_str().map(str::to_string));
+            images
+                .into_iter()
+                .map(|img| crate::provider::ChatImage {
+                    media_type: img.media_type,
+                    data_base64: img.data_base64,
+                    label: label.clone(),
+                })
+                .collect()
+        };
+        // TodoList 写入成功后向 UI 推待办快照（读操作输出即列表，无需重复推）
+        if call.name == "TodoList" && !is_error {
+            let items = self.state.todos.lock().expect("todos lock").clone();
+            // 写操作（带 todos 参数）落 SQLite todos 表（当前态 upsert）；
+            // 读操作不落盘。事件流 JSONL 不再记状态快照
+            let is_write = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .is_some_and(|v| v.get("todos").is_some());
+            if is_write {
+                let json = serde_json::to_string(&items).unwrap_or_default();
+                self.store
+                    .lock()
+                    .expect("store lock")
+                    .set_todos(&self.id, &json);
+            }
+            self.emit(
+                |session_id, seq| Event::TodoListChanged {
+                    session_id,
+                    seq,
+                    items,
+                },
+                tx,
+            );
+        }
+        if let Some(change) = file_change {
+            // 改动当前态落 SQLite file_changes 表（按路径 upsert；净额归零删行），
+            // JSONL 只留消息/工具事件流
+            {
+                let store = self.store.lock().expect("store lock");
+                if change.additions == 0 && change.deletions == 0 {
+                    store.delete_file_change(&self.id, &change.path);
+                } else {
+                    store.upsert_file_change(
+                        &self.id,
+                        &change.path,
+                        &change.unified_diff,
+                        change.additions,
+                        change.deletions,
+                    );
+                }
+            }
+            self.emit(
+                |session_id, seq| Event::FileChanged {
+                    session_id,
+                    seq,
+                    path: change.path,
+                    unified_diff: change.unified_diff,
+                    additions: change.additions,
+                    deletions: change.deletions,
+                },
+                tx,
+            );
+        }
+        // 本工具新增的原始快照落 file_originals 表（跨重启 diff 基线 / revert）；
+        // 超过 4MB 的大文件不持久化（基线退回进程内存，与 kimi-code 口径一致）
+        let dirty = self.tracker.take_dirty();
+        if !dirty.is_empty() {
+            const MAX_ORIGINAL_BYTES: usize = 4 * 1024 * 1024;
+            let store = self.store.lock().expect("store lock");
+            for path in dirty {
+                if let Some(original) = self.tracker.original(&path) {
+                    let oversized = original
+                        .as_ref()
+                        .is_some_and(|content| content.len() > MAX_ORIGINAL_BYTES);
+                    if !oversized {
+                        store.upsert_file_original(
+                            &self.id,
+                            &path.to_string_lossy(),
+                            original.as_deref(),
+                        );
+                    }
+                }
+            }
+        }
+        GatedToolOutcome::Executed {
+            output,
+            is_error,
+            edit,
+            images: chat_images,
+        }
+    }
+
+    /// 前台同步子代理循环（Agent 工具）：独立上下文采样 + 收窄工具集门控执行，
+    /// 父时间线只有 Agent 一张工具卡（进度走 SubagentProgress，子工具不发顶层事件）。
+    /// 子代理上下文逐条持久化到 {sessions}/{session}.agents/{agent_id}.jsonl
+    ///（A2b 的 resume 数据基础，本期只写不读）。
+    async fn run_subagent(
+        &mut self,
+        call: &ToolCall,
+        parent_turn_id: &str,
+        parent_item_id: &str,
+        parent_config: &ResolvedModel,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> SubagentOutcome {
+        // ---- 参数解析与「开发中」门禁 ----
+        let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+        let fail = |note: String| SubagentOutcome::Finished {
+            note,
+            is_error: true,
+        };
+        let description = args["description"].as_str().unwrap_or("").trim();
+        if description.is_empty() {
+            return fail("Agent 缺少参数 description（3-5 词任务简述）".to_string());
+        }
+        let prompt_text = args["prompt"].as_str().unwrap_or("").trim();
+        if prompt_text.is_empty() {
+            return fail("Agent 缺少参数 prompt（完整自包含的任务简报）".to_string());
+        }
+        if args["run_in_background"].as_bool().unwrap_or(false) {
+            return fail(
+                "后台子代理将在下个版本提供，本次请去掉 run_in_background 以前台运行".to_string(),
+            );
+        }
+        let resume = args["resume"].as_str().unwrap_or("").trim();
+        let subagent_type = args["subagent_type"].as_str().unwrap_or("").trim();
+        if !resume.is_empty() && !subagent_type.is_empty() {
+            return fail("resume 与 subagent_type 互斥：续跑已有子代理时不能指定类型".to_string());
+        }
+        if !resume.is_empty() {
+            return fail(
+                "子代理 resume（续跑已有 agent_id）将在下个版本提供，本次请起新子代理".to_string(),
+            );
+        }
+        // 计划模式硬拒：子代理可能修改文件，Plan 只读语义不能被绕过
+        if self.mode == ExecMode::Plan {
+            return fail(
+                "计划模式下不可委派子代理（子代理可能修改文件）。请先用只读工具自行调研并输出计划，或退出计划模式后再委派。"
+                    .to_string(),
+            );
+        }
+
+        // ---- 档案与模型解析（严格：失败即报错给模型）----
+        let profiles = crate::agent::load_profiles(&self.cwd, &self.data_dir);
+        let query = if subagent_type.is_empty() {
+            "general-purpose"
+        } else {
+            subagent_type
+        };
+        let profile = match crate::agent::find_profile(&profiles, query) {
+            Ok(profile) => profile,
+            Err(error) => return fail(error),
+        };
+        let child_config = match self.app_config.as_ref() {
+            Some(app_config) => {
+                match crate::agent::resolve_subagent_model(app_config, parent_config, profile) {
+                    Ok(config) => config,
+                    Err(error) => return fail(error),
+                }
+            }
+            // 未加载应用配置：继承父模型不受影响，显式模型无法解析
+            None if profile.model.is_some() => {
+                return fail("未加载应用配置，无法解析子代理指定模型".to_string());
+            }
+            None => parent_config.clone(),
+        };
+
+        // ---- 工具收窄：子代理循环用 all()（天然无 Agent 防嵌套）----
+        let all_tools = tool::all();
+        let all_names: Vec<String> = all_tools.iter().map(|t| t.name().to_string()).collect();
+        let keep = crate::agent::child_tool_set(profile, &all_names, child_config.input_image);
+        let child_tools: Vec<&Box<dyn tool::Tool>> = all_tools
+            .iter()
+            .filter(|t| keep.iter().any(|name| name == t.name()))
+            .collect();
+        let child_schemas: Vec<serde_json::Value> =
+            child_tools.iter().map(|t| t.schema()).collect();
+
+        // ---- agent_id 与子代理上下文持久化（首行 meta，随后每条消息一行）----
+        let agent_id = format!("a{}-{}", crate::rollout::now_secs(), self.agent_seq + 1);
+        self.agent_seq += 1;
+        let agents_dir = crate::agent::agents_dir(&self.data_dir.join("sessions"), &self.id);
+        let agent_log = agents_dir.join(format!("{agent_id}.jsonl"));
+        let persist = |line: &serde_json::Value| {
+            // 持久化失败不致命：打日志继续（与 rollout.append 同口径）
+            if let Err(error) = crate::agent::append_agent_record(&agent_log, line) {
+                eprintln!("[agent] 子代理上下文落盘失败: {error}");
+            }
+        };
+        persist(&serde_json::json!({
+            "type": "meta",
+            "agent_id": agent_id,
+            "profile": profile.name,
+            "description": description,
+            "model": child_config.model,
+            "provider": child_config.provider_name,
+            "created_at": crate::rollout::now_secs(),
+        }));
+        let persist_msg = |msg: &ChatMsg| {
+            // base64 不落盘（与主 rollout 同口径）；resume 后模型看不到图，可接受
+            let mut msg = msg.clone();
+            msg.images.clear();
+            persist(&serde_json::json!({ "type": "msg", "msg": msg }));
+        };
+
+        let mut child_history = vec![
+            ChatMsg::system(crate::prompt::subagent_system_prompt(
+                profile,
+                &self.cwd,
+                &self.data_dir,
+            )),
+            ChatMsg::user(prompt_text.to_string()),
+        ];
+        for msg in &child_history {
+            persist_msg(msg);
+        }
+
+        let max_turns = profile.max_turns.unwrap_or(crate::agent::DEFAULT_MAX_TURNS);
+        let mut last_text = String::new();
+        let mut steps_run = 0usize;
+        let mut completed = false;
+
+        for step in 1..=max_turns {
+            steps_run = step;
+            let progress_note = format!("第 {step} 步 · 思考中…");
+            self.emit(
+                |session_id, seq| Event::SubagentProgress {
+                    session_id,
+                    seq,
+                    item_id: parent_item_id.to_string(),
+                    note: progress_note,
+                },
+                tx,
+            );
+            let (child_tx, mut child_rx) = tokio::sync::mpsc::unbounded_channel();
+            let provider_task = tokio::spawn(provider::stream_chat(
+                child_config.clone(),
+                child_history.clone(),
+                child_schemas.clone(),
+                child_tx,
+                cancel.clone(),
+            ));
+            let mut text = String::new();
+            let mut reasoning = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut failed: Option<String> = None;
+            loop {
+                let event = tokio::select! {
+                    event = child_rx.recv() => event,
+                    _ = cancel.cancelled() => None,
+                };
+                match event {
+                    // 子代理的思考/文本增量不转发顶层事件：父时间线只有进度状态行
+                    Some(ProviderEvent::Reasoning(delta)) => reasoning.push_str(&delta),
+                    Some(ProviderEvent::Text(delta)) => text.push_str(&delta),
+                    Some(ProviderEvent::ToolCalls(calls)) => tool_calls = calls,
+                    Some(ProviderEvent::Usage {
+                        input,
+                        cache_read,
+                        output,
+                        ..
+                    }) => {
+                        // 子代理成本计入父回合统计（不记 StepUsage/不更新水位：
+                        // 水位是父会话自己的上下文，与子代理无关）
+                        self.turn_input += input;
+                        self.turn_cache_read += cache_read;
+                        self.turn_output += output;
+                    }
+                    Some(ProviderEvent::Finished) | None => break,
+                    Some(ProviderEvent::Failed(error)) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = failed {
+                provider_task.abort();
+                return fail(format!("子代理模型请求失败: {error}"));
+            }
+            if cancel.is_cancelled() {
+                provider_task.abort();
+                return SubagentOutcome::Cancelled;
+            }
+            let _ = provider_task.await;
+
+            let assistant = ChatMsg::assistant(
+                text,
+                tool_calls.clone(),
+                Some(reasoning).filter(|r| !r.is_empty()),
+            );
+            last_text = assistant.content.clone().unwrap_or_default();
+            child_history.push(assistant);
+            persist_msg(child_history.last().expect("assistant pushed"));
+            if tool_calls.is_empty() {
+                completed = true;
+                break;
+            }
+            for child_call in &tool_calls {
+                let progress_note = format!("第 {step} 步 · {}", tool::summarize(child_call));
+                self.emit(
+                    |session_id, seq| Event::SubagentProgress {
+                        session_id,
+                        seq,
+                        item_id: parent_item_id.to_string(),
+                        note: progress_note,
+                    },
+                    tx,
+                );
+                let child_item_id = format!("{parent_item_id}-c{step}-{}", child_call.id);
+                let Some(child_tool) = child_tools
+                    .iter()
+                    .find(|t| t.name() == child_call.name)
+                    .map(|t| t.as_ref())
+                else {
+                    // 收窄后的工具集没有这个名字：记为错误结果继续（不中断子代理）
+                    let note = format!("未知工具 {}（子代理可用工具已收窄）", child_call.name);
+                    child_history.push(ChatMsg::tool_result(&child_call.id, note));
+                    persist_msg(child_history.last().expect("tool result pushed"));
+                    continue;
+                };
+                match self
+                    .exec_tool_gated(
+                        child_call,
+                        Some(child_tool),
+                        &child_item_id,
+                        parent_turn_id,
+                        tx,
+                        cancel,
+                    )
+                    .await
+                {
+                    GatedToolOutcome::Cancelled => return SubagentOutcome::Cancelled,
+                    GatedToolOutcome::Rejected { note } => {
+                        child_history.push(ChatMsg::tool_result(&child_call.id, note));
+                        persist_msg(child_history.last().expect("tool result pushed"));
+                    }
+                    GatedToolOutcome::Executed { output, images, .. } => {
+                        child_history.push(ChatMsg::tool_result_with_images(
+                            &child_call.id,
+                            output,
+                            images,
+                        ));
+                        persist_msg(child_history.last().expect("tool result pushed"));
+                    }
+                }
+            }
+        }
+
+        // ---- 收尾：结果预算 32K 字符，超出落盘全文 ----
+        let (note, is_error) = if completed {
+            if last_text.is_empty() {
+                ("子代理未产出最终文本".to_string(), true)
+            } else {
+                let result = truncate_agent_result(&self.cwd, &agent_id, last_text);
+                (
+                    format!(
+                        "agent_id: {agent_id}\n\
+                         subagent_type: {}\n\
+                         status: completed\n\
+                         turns: {steps_run}\n\
+                         [summary]\n\
+                         {result}\n\
+                         resume_hint: 用 Agent(resume=\"{agent_id}\", prompt=\"...\") 继续该子代理",
+                        profile.name
+                    ),
+                    false,
+                )
+            }
+        } else if last_text.is_empty() {
+            (format!("已达最大轮次 {max_turns}。子代理未产出结论"), true)
+        } else {
+            (format!("已达最大轮次 {max_turns}。{last_text}"), false)
+        };
+        SubagentOutcome::Finished { note, is_error }
+    }
+}
+
+/// @文件引用展开：内容注入 <file> 块；单文件 20KB、总计 100KB 上限。
+/// 子代理结果预算：32K 字符内原样返回；超出写全文到
+/// {cwd}/.pigcode/tool-results/agent-{agent_id}.md，返回前 32K + 截断指引。
+fn truncate_agent_result(cwd: &Path, agent_id: &str, result: String) -> String {
+    const MAX_RESULT_CHARS: usize = 32_000;
+    if result.chars().count() <= MAX_RESULT_CHARS {
+        return result;
+    }
+    let dir = cwd.join(".pigcode").join("tool-results");
+    let path = dir.join(format!("agent-{agent_id}.md"));
+    let hint = match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &result)) {
+        Ok(()) => format!("\n\n[结果过长已截断，全文: {}]", path.display()),
+        Err(error) => format!("\n\n[结果过长已截断，全文落盘失败: {error}]"),
+    };
+    let head: String = result.chars().take(MAX_RESULT_CHARS).collect();
+    format!("{head}{hint}")
 }
 
 /// @文件引用展开：内容注入 <file> 块；单文件 20KB、总计 100KB 上限。
@@ -2244,7 +2649,7 @@ pub async fn agent_loop(
                                 meta.reasoning_level = Some(level);
                             }
                         }
-                        match Session::create(meta.clone(), pending.clone(), pending_questions.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone()) {
+                        match Session::create(meta.clone(), pending.clone(), pending_questions.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone(), config.as_ref()) {
                             Ok(mut session) => {
                                 session.set_mode(meta.exec_mode);
                                 session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
@@ -2330,7 +2735,7 @@ pub async fn agent_loop(
                             }
                             continue;
                         }
-                        match Session::load(&session_id, &sessions_dir, pending.clone(), pending_questions.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone()) {
+                        match Session::load(&session_id, &sessions_dir, pending.clone(), pending_questions.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone(), config.as_ref()) {
                             Ok((mut session, records)) => {
                                 // 恢复持久化的模式/模型覆盖（meta 由 Set* 写穿保持最新）
                                 let meta = store.lock().expect("store lock").get_session(&session_id);

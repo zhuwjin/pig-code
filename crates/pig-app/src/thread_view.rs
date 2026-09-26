@@ -695,6 +695,19 @@ impl ThreadView {
                     });
                 self.auto_scroll();
             }
+            Event::SubagentProgress { item_id, note, .. } => {
+                // 最小处理（A3 再做完整渲染）：就地更新 Agent 工具卡片的摘要行
+                // 为实时进度；卡片不存在（回放/乱序）或已收尾时忽略
+                if let Some(&six) = self.item_index.get(&item_id)
+                    && let Some(Segment::ToolCall {
+                        summary,
+                        done: false,
+                        ..
+                    }) = self.current_segment(six)
+                {
+                    *summary = note;
+                }
+            }
             Event::TurnComplete {
                 duration_ms, stats, ..
             } => {

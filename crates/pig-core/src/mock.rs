@@ -67,6 +67,17 @@ pub const PLAN_ENTER_FILE: &str = "plan_enter.txt";
 pub const SCENARIO_MEDIA_TRIGGER: &str = "MEDIA_SCENARIO";
 pub const MEDIA_MARKER: &str = "MOCK_MEDIA_DONE";
 
+/// 子代理场景（父侧）：含此标记时发 Agent 工具调用；触发词后第一个词 = 子代理
+/// 行为令牌（GREP/WRITE/BASH/LOOP/LONG），可选第二个词 = subagent_type
+///（缺省：BASH/LOOP/LONG → general-purpose，其余 → explore）。
+/// Agent 结果回来后（tool 消息应答 call_agent_1）父侧文本收尾。
+pub const SUBAGENT_TRIGGER: &str = "SUBAGENT_SCENARIO";
+pub const SUBAGENT_PARENT_DONE: &str = "MOCK_SUBAGENT_PARENT_DONE";
+/// 子代理最终结论文本的标记（父侧 Agent 结果里应带回来）
+pub const SUBAGENT_CHILD_DONE: &str = "MOCK_SUBAGENT_CHILD_DONE";
+/// 子代理 prompt 的行为令牌前缀（子侧请求识别用；由父侧拼进 Agent.prompt）
+const SUBAGENT_CHILD_PREFIX: &str = "SUBAGENT_CHILD:";
+
 /// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
@@ -426,6 +437,112 @@ fn media_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
+/// 子代理场景（父侧）：Agent 结果已回（tool 消息应答 call_agent_1，成功或
+/// 被拒都算）→ 文本收尾；否则发 Agent 调用。行为令牌/档案名从用户消息解析。
+fn subagent_parent_response(body: &str) -> Vec<String> {
+    if body.contains("\"tool_call_id\":\"call_agent_1\"")
+        || body.contains("\"tool_call_id\": \"call_agent_1\"")
+    {
+        return vec![
+            sse_chunk(serde_json::json!({"content": SUBAGENT_PARENT_DONE}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ];
+    }
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let user_text = parsed["messages"]
+        .as_array()
+        .and_then(|msgs| {
+            msgs.iter()
+                .rev()
+                .find(|m| m["role"].as_str() == Some("user"))
+        })
+        .and_then(|m| m["content"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    let mut tokens = user_text
+        .split(SUBAGENT_TRIGGER)
+        .nth(1)
+        .unwrap_or("")
+        .split_whitespace();
+    let behavior = tokens.next().unwrap_or("GREP").to_string();
+    let default_type = match behavior.as_str() {
+        "BASH" | "LOOP" | "LONG" => "general-purpose",
+        _ => "explore",
+    };
+    let profile = tokens.next().unwrap_or(default_type);
+    tool_call_chunks(
+        "call_agent_1",
+        "Agent",
+        &serde_json::json!({
+            "description": "子代理自测委派",
+            "prompt": format!("{SUBAGENT_CHILD_PREFIX}{behavior} 读取 {MOCK_FILE_NAME} 并总结"),
+            "subagent_type": profile,
+        })
+        .to_string(),
+        None,
+    )
+}
+
+/// 子代理场景（子侧）：按 prompt 里的行为令牌出招——0 个 tool 结果出工具调用
+///（LOOP 永远出工具调用，逼父侧 max_turns 收尾；LONG 直接回 33K 字符长文），
+/// 否则回带标记的结论文本。
+fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
+    let behavior = body
+        .split(SUBAGENT_CHILD_PREFIX)
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("");
+    let done_text = |text: String| {
+        vec![
+            sse_chunk(serde_json::json!({"content": text}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ]
+    };
+    match behavior {
+        "LONG" => {
+            // 33K 字符长文：验证父侧 32K 结果预算截断 + 全文落盘。
+            // 每片 2000 字符（mock 每片 sleep 50ms，片数必须少）
+            let text = format!("子代理长结果开头。{}", "密".repeat(33_000));
+            let chars: Vec<char> = text.chars().collect();
+            let mut chunks: Vec<String> = chars
+                .chunks(2000)
+                .map(|piece| {
+                    let delta: String = piece.iter().collect();
+                    sse_chunk(serde_json::json!({"content": delta}), None)
+                })
+                .collect();
+            chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
+            chunks
+        }
+        "LOOP" => tool_call_chunks(
+            &format!("call_child_loop_{tool_results}"),
+            "Grep",
+            &serde_json::json!({"pattern": "mock"}).to_string(),
+            None,
+        ),
+        _ if tool_results == 0 => match behavior {
+            "WRITE" => tool_call_chunks(
+                "call_child_write",
+                "Write",
+                &serde_json::json!({"path": "child_write.txt", "content": "x\n"}).to_string(),
+                None,
+            ),
+            "BASH" => tool_call_chunks(
+                "call_child_bash",
+                "Bash",
+                &serde_json::json!({"command": "touch child_bash.txt"}).to_string(),
+                None,
+            ),
+            _ => tool_call_chunks(
+                "call_child_grep",
+                "Grep",
+                &serde_json::json!({"pattern": "mock"}).to_string(),
+                None,
+            ),
+        },
+        _ => done_text(format!("子代理结论：任务完成。{SUBAGENT_CHILD_DONE}")),
+    }
+}
+
 /// TodoList 场景：历史里还没有 TodoList 调用 → 写入；已执行 → 文本收尾。
 /// 不能按全局 tool 结果计数：请求体的 tools 声明与历史消息都会干扰，
 /// 直接解析 messages 里是否出现过 TodoList 调用。
@@ -757,6 +874,11 @@ async fn handle_connection(
         plan_enter_scenario_response(tool_results)
     } else if body.contains(SCENARIO_MEDIA_TRIGGER) {
         media_scenario_response(tool_results)
+    } else if body.contains(SUBAGENT_TRIGGER) {
+        // 父侧请求一定含原始触发词；子侧请求只有 prompt 里的行为令牌前缀
+        subagent_parent_response(&body)
+    } else if body.contains(SUBAGENT_CHILD_PREFIX) {
+        subagent_child_response(&body, tool_results)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
     } else if tool_results > 0 {

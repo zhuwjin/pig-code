@@ -88,7 +88,8 @@ pub fn system_prompt(
              - TaskList: 列出后台 Bash 任务（id、状态、耗时）。\n\
              - TaskOutput: 查看后台任务输出（尾部节选）。\n\
              - TaskStop: 停止仍在运行的后台任务。\n\
-             - AskUserQuestion: 需要用户决策时给出 1-4 个结构化问题（每题 2-4 选项）让用户选择。\n\n\
+             - AskUserQuestion: 需要用户决策时给出 1-4 个结构化问题（每题 2-4 选项）让用户选择。\n\
+             - Agent: 委派子代理处理独立子任务（调研/搜索/多步执行），中间过程不占本会话上下文；prompt 必须自包含。\n\n\
              需要了解文件内容或验证改动时主动调用工具，拿到结果后再回答。\n",
         );
     }
@@ -117,8 +118,6 @@ fn env_block(cwd: &std::path::Path) -> String {
 /// 子代理系统提示：env 块 + 可选 AGENTS.md 注入 + 档案正文。
 /// 自包含：不拼行为准则/执行模式段/工具清单（子代理没有计划模式与提问能力，
 /// 交付要求已写在档案正文里）。
-// A1 只到档案/配置层，A2 接 Session 的 turn 循环后启用
-#[allow(dead_code)]
 pub fn subagent_system_prompt(
     profile: &crate::agent::AgentProfile,
     cwd: &std::path::Path,

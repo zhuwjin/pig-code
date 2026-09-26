@@ -2629,6 +2629,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::MessageQueued { session_id, .. }
         | Event::TodoListChanged { session_id, .. }
         | Event::TaskListChanged { session_id, .. }
+        | Event::SubagentProgress { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }

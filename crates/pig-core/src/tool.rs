@@ -381,9 +381,31 @@ pub fn schemas() -> Vec<serde_json::Value> {
     all().iter().map(|tool| tool.schema()).collect()
 }
 
+/// 根会话工具集 = 全部内置工具 + Agent（子代理循环用 all()，天然无 Agent 防嵌套）
+pub fn all_root(cwd: &Path, data_dir: &Path) -> Vec<Box<dyn Tool>> {
+    let mut tools = all();
+    tools.push(Box::new(AgentTool::new(&crate::agent::load_profiles(
+        cwd, data_dir,
+    ))));
+    tools
+}
+
+/// 根会话工具 schema 集（含 Agent）；run_step 采样用
+pub fn schemas_root(cwd: &Path, data_dir: &Path) -> Vec<serde_json::Value> {
+    all_root(cwd, data_dir)
+        .iter()
+        .map(|tool| tool.schema())
+        .collect()
+}
+
 /// 审批判定：Plan 模式在更早处拦截（直接拒绝），这里只管其余档。
 /// Yolo 与 FullAccess 都不审批（危险命令强制弹窗在 session 层，Yolo 在那里也跳过）。
 pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
+    // Agent 一律免审批：子代理内部每个写操作会自己走审批门，
+    // 不对 Agent 调用本身二次审批（弹窗文案也没法描述整个子任务）
+    if tool.name() == "Agent" {
+        return false;
+    }
     match mode {
         ExecMode::FullAccess | ExecMode::Yolo => false,
         ExecMode::Plan => false,
@@ -414,6 +436,14 @@ pub fn summarize(call: &ToolCall) -> String {
             .to_string(),
         "ExitPlanMode" => "请求退出计划模式".to_string(),
         "EnterPlanMode" => "请求进入计划模式".to_string(),
+        "Agent" => format!(
+            "子代理 {}: {}",
+            args["subagent_type"]
+                .as_str()
+                .or_else(|| args["resume"].as_str())
+                .unwrap_or("general-purpose"),
+            args["description"].as_str().unwrap_or("?")
+        ),
         _ => args.to_string(),
     };
     // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
@@ -2786,6 +2816,76 @@ impl Tool for EnterPlanModeTool {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
         Box::pin(async move { Err("EnterPlanMode 由会话层处理".to_string()) })
+    }
+}
+
+/// Agent：委派子代理处理独立子任务。会话层在工具循环里拦截执行
+///（run_subagent 前台同步循环），工具实现只注册 schema 与描述。
+pub struct AgentTool {
+    /// 可用子代理类型清单（agent_description_list 结果），拼进 description
+    profiles_summary: String,
+}
+
+impl AgentTool {
+    pub fn new(profiles: &[crate::agent::AgentProfile]) -> Self {
+        Self {
+            profiles_summary: crate::agent::agent_description_list(profiles),
+        }
+    }
+}
+
+impl Tool for AgentTool {
+    fn name(&self) -> &'static str {
+        "Agent"
+    }
+
+    /// 非只读：让 Plan 硬拒语义成立（子代理可能修改文件）
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    fn is_shell(&self) -> bool {
+        false
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        let description = format!(
+            "启动子代理处理任务。子代理独立运行、有自己的上下文——它看不到本会话的任何消息，prompt 必须自包含（像给刚进门的同事做简报：说清目标、已知结论、确切文件路径）。\n\
+             好处：子代理的中间过程（大量文件读取/搜索）不进本会话上下文，你只收到它最后的结论。\n\
+             - 查找类任务给确切路径或命令；调查类任务给问题，不给死步骤。\n\
+             - 不要委派一两步就能完成的琐事；子代理运行中不要并行重做它的工作，也不要中途抛弃它自己手动完成。\n\
+             - 子代理的结果只有你能看到（用户看不到），需要时自己转述。\n\
+             可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
+             {}",
+            self.profiles_summary
+        );
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "Agent",
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": { "type": "string", "description": "3-5 词任务简述，UI 显示用" },
+                        "prompt": { "type": "string", "description": "完整自包含的任务简报（子代理看不到本会话任何消息）" },
+                        "subagent_type": { "type": "string", "description": "子代理类型，省略默认 general-purpose；与 resume 互斥" },
+                        "run_in_background": { "type": "boolean", "description": "true 立即返回，完成后通知送达（本期暂未开放）" },
+                        "resume": { "type": "string", "description": "已有 agent_id，在其上下文上续跑（本期暂未开放）" }
+                    },
+                    "required": ["description", "prompt"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _args: serde_json::Value,
+        _ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        // 防御：正常路径在 session.rs 工具循环拦截（run_subagent），不会走到这里
+        Box::pin(async move { Err("Agent 由会话层处理".to_string()) })
     }
 }
 

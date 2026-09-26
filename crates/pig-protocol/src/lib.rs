@@ -640,6 +640,13 @@ pub enum Event {
         #[serde(default)]
         edit: Option<EditDiff>,
     },
+    /// 子代理实时进度（live-only，不落 rollout）：item_id = 父会话 Agent 工具卡片
+    SubagentProgress {
+        session_id: String,
+        seq: u64,
+        item_id: String,
+        note: String,
+    },
     ContextUsage {
         session_id: String,
         seq: u64,

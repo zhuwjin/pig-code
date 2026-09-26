@@ -106,7 +106,7 @@ pub struct ResolvedModel {
 
 /// 随消息进上下文的图片（ReadMediaFile 输出）：Anthropic 进 content blocks，
 /// OpenAI 拆成紧随的 user image_url 消息（见 to_openai_messages）
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatImage {
     pub media_type: String,
     pub data_base64: String,
@@ -115,7 +115,8 @@ pub struct ChatImage {
     pub label: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+/// 子代理上下文持久化（{session}.agents/*.jsonl）要反序列化，故带 Deserialize
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMsg {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,15 +201,17 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+/// 子代理上下文持久化（{session}.agents/*.jsonl）要反序列化，故带 Deserialize
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallWire {
     pub id: String,
+    /// 恒为 "function"：&'static str 无法反序列化，存 String（序列化形态不变）
     #[serde(rename = "type")]
-    pub kind: &'static str,
+    pub kind: String,
     pub function: FunctionWire,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FunctionWire {
     pub name: String,
     pub arguments: String,
@@ -218,7 +221,7 @@ impl ToolCall {
     pub fn to_wire(&self) -> ToolCallWire {
         ToolCallWire {
             id: self.id.clone(),
-            kind: "function",
+            kind: "function".to_string(),
             function: FunctionWire {
                 name: self.name.clone(),
                 arguments: self.arguments.clone(),

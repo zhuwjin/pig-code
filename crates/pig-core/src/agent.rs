@@ -593,6 +593,30 @@ pub fn agent_description_list(profiles: &[AgentProfile]) -> String {
         .join("\n")
 }
 
+/// 子代理上下文目录：{sessions_dir}/{session_id}.agents/（每个子代理一个 {agent_id}.jsonl）
+pub fn agents_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir.join(format!("{session_id}.agents"))
+}
+
+/// 子代理上下文 JSONL 追加一行（meta / msg 记录）；目录不存在时创建。
+/// 失败返回 Err，调用方决定冷热（当前会话层按非致命处理，与 rollout.append 同口径）。
+pub fn append_agent_record(path: &Path, line: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write as _;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("创建子代理目录失败 {}: {e}", dir.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("打开子代理上下文失败 {}: {e}", path.display()))?;
+    let mut line = serde_json::to_string(line).map_err(|e| e.to_string())?;
+    line.push('\n');
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("写入子代理上下文失败 {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
