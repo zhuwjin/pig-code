@@ -617,6 +617,48 @@ pub fn append_agent_record(path: &Path, line: &serde_json::Value) -> Result<(), 
         .map_err(|e| format!("写入子代理上下文失败 {}: {e}", path.display()))
 }
 
+/// 子代理上下文 JSONL 的首行 meta 记录
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentMeta {
+    pub agent_id: String,
+    pub profile: String,
+    pub description: String,
+    pub model: String,
+    pub provider: String,
+    pub created_at: u64,
+}
+
+/// 读入子代理上下文：首行 meta + 余下 msg 行重建历史（resume 用）。
+/// 坏行报错带行号；meta 行的 "type" 字段 serde 默认忽略。
+pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<crate::provider::ChatMsg>), String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取子代理上下文失败 {}: {e}", path.display()))?;
+    let mut lines = raw.lines().enumerate();
+    let Some((_, first)) = lines.next() else {
+        return Err(format!("子代理上下文为空 {}: 缺少 meta 行", path.display()));
+    };
+    let first: serde_json::Value = serde_json::from_str(first)
+        .map_err(|e| format!("子代理上下文第 1 行（meta）解析失败: {e}"))?;
+    if first["type"].as_str() != Some("meta") {
+        return Err("子代理上下文第 1 行不是 meta 记录".to_string());
+    }
+    let meta: AgentMeta = serde_json::from_value(first)
+        .map_err(|e| format!("子代理上下文 meta 记录解析失败: {e}"))?;
+    let mut history = Vec::new();
+    for (ix, line) in lines {
+        let line_no = ix + 1;
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("子代理上下文第 {line_no} 行解析失败: {e}"))?;
+        if value["type"].as_str() != Some("msg") {
+            return Err(format!("子代理上下文第 {line_no} 行不是 msg 记录"));
+        }
+        let msg: crate::provider::ChatMsg = serde_json::from_value(value["msg"].clone())
+            .map_err(|e| format!("子代理上下文第 {line_no} 行消息解析失败: {e}"))?;
+        history.push(msg);
+    }
+    Ok((meta, history))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

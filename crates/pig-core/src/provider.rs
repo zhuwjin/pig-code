@@ -127,7 +127,7 @@ pub struct ChatMsg {
     pub tool_call_id: Option<String>,
     /// 工具输出的图片：OpenAI 路径不走 serde 直序（见 to_openai_messages），
     /// 这个字段只被 Anthropic 的自定义构建读取
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ChatImage>,
     /// assistant 的思考内容：仅供 Anthropic 端点回传（thinking 模式要求带
     /// content[].thinking，否则第二轮 400），不参与序列化——OpenAI 兼容端点

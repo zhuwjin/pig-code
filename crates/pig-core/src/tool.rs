@@ -2855,6 +2855,7 @@ impl Tool for AgentTool {
              - 查找类任务给确切路径或命令；调查类任务给问题，不给死步骤。\n\
              - 不要委派一两步就能完成的琐事；子代理运行中不要并行重做它的工作，也不要中途抛弃它自己手动完成。\n\
              - 子代理的结果只有你能看到（用户看不到），需要时自己转述。\n\
+             - run_in_background=true 立即返回（带 task_id），完成后结果以 <task-notification> 通知送达——不要轮询，也不要用 TaskOutput 盯着等。优先用 resume 继续已有子代理而不是新起实例。\n\
              可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
              {}",
             self.profiles_summary
@@ -2870,8 +2871,8 @@ impl Tool for AgentTool {
                         "description": { "type": "string", "description": "3-5 词任务简述，UI 显示用" },
                         "prompt": { "type": "string", "description": "完整自包含的任务简报（子代理看不到本会话任何消息）" },
                         "subagent_type": { "type": "string", "description": "子代理类型，省略默认 general-purpose；与 resume 互斥" },
-                        "run_in_background": { "type": "boolean", "description": "true 立即返回，完成后通知送达（本期暂未开放）" },
-                        "resume": { "type": "string", "description": "已有 agent_id，在其上下文上续跑（本期暂未开放）" }
+                        "run_in_background": { "type": "boolean", "description": "true 立即返回（带 task_id），子代理后台运行，完成后结果以 <task-notification> 通知送达" },
+                        "resume": { "type": "string", "description": "已有 agent_id，在其上下文上续跑（与 subagent_type 互斥）" }
                     },
                     "required": ["description", "prompt"]
                 }

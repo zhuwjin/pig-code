@@ -15,7 +15,7 @@ use std::path::Path;
 /// 规则文件在工作区根的固定位置
 pub const PERMISSIONS_FILE: &str = ".pigcode/permissions.toml";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Rule {
     /// 工具名（小写归一，匹配时大小写不敏感）
     tool: String,
@@ -50,7 +50,7 @@ impl Rule {
 }
 
 /// 一个工作区加载出的规则集（缺文件 = 空规则）
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PermissionRules {
     allow: Vec<Rule>,
     deny: Vec<Rule>,

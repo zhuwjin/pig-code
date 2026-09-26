@@ -45,6 +45,7 @@ pub fn system_prompt(
          - 多步任务先用 TodoList 拆分并随时更新进度。\n\
          - 任务复杂或改动范围大时，可先调用 EnterPlanMode 进入计划模式调研并出计划。\n\
          - 长时命令（dev server/watch/长构建）用 Bash 的 run_in_background，配合 TaskOutput 查输出。\n\
+         - 后台子代理完成会自动通知结果，等待期间继续其他工作或先收尾，不要轮询任务状态。\n\
          - 需要用户拍板时用 AskUserQuestion 给出选项，而不是纯文本提问。\n\
          - 默认只能读写工作区内文件与 tmp 目录；用户在模式菜单开启后才可读写工作区外文件（.env/私钥/凭据等敏感文件永远不可访问）。\n\
          - 项目可在 .pigcode/permissions.toml 配置 allow/deny 规则（deny 优先于一切）。\n\
@@ -89,7 +90,7 @@ pub fn system_prompt(
              - TaskOutput: 查看后台任务输出（尾部节选）。\n\
              - TaskStop: 停止仍在运行的后台任务。\n\
              - AskUserQuestion: 需要用户决策时给出 1-4 个结构化问题（每题 2-4 选项）让用户选择。\n\
-             - Agent: 委派子代理处理独立子任务（调研/搜索/多步执行），中间过程不占本会话上下文；prompt 必须自包含。\n\n\
+             - Agent: 委派子代理处理独立子任务（调研/搜索/多步执行），中间过程不占本会话上下文；prompt 必须自包含；run_in_background 可后台运行、resume 可续跑。\n\n\
              需要了解文件内容或验证改动时主动调用工具，拿到结果后再回答。\n",
         );
     }

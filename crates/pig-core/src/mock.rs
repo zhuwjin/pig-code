@@ -67,14 +67,16 @@ pub const PLAN_ENTER_FILE: &str = "plan_enter.txt";
 pub const SCENARIO_MEDIA_TRIGGER: &str = "MEDIA_SCENARIO";
 pub const MEDIA_MARKER: &str = "MOCK_MEDIA_DONE";
 
-/// 子代理场景（父侧）：含此标记时发 Agent 工具调用；触发词后第一个词 = 子代理
-/// 行为令牌（GREP/WRITE/BASH/LOOP/LONG），可选第二个词 = subagent_type
-///（缺省：BASH/LOOP/LONG → general-purpose，其余 → explore）。
-/// Agent 结果回来后（tool 消息应答 call_agent_1）父侧文本收尾。
+/// 子代理场景（父侧）：含此标记时发 Agent 工具调用；触发词后第一个词 = 行为令牌
+///（GREP/WRITE/BASH/LOOP/LONG/BG/BASHBG/BGSTOP/RESUME/RESUME_UNKNOWN/RESUME_RUNNING），
+/// 可选第二个词 = subagent_type（缺省：BASH/LOOP/LONG → general-purpose，其余 → explore）。
+/// Agent 结果回来后父侧文本收尾。
 pub const SUBAGENT_TRIGGER: &str = "SUBAGENT_SCENARIO";
 pub const SUBAGENT_PARENT_DONE: &str = "MOCK_SUBAGENT_PARENT_DONE";
 /// 子代理最终结论文本的标记（父侧 Agent 结果里应带回来）
 pub const SUBAGENT_CHILD_DONE: &str = "MOCK_SUBAGENT_CHILD_DONE";
+/// resume 续跑后子代理新结论的标记
+pub const SUBAGENT_RESUMED_DONE: &str = "MOCK_SUBAGENT_RESUMED_DONE";
 /// 子代理 prompt 的行为令牌前缀（子侧请求识别用；由父侧拼进 Agent.prompt）
 const SUBAGENT_CHILD_PREFIX: &str = "SUBAGENT_CHILD:";
 
@@ -437,19 +439,10 @@ fn media_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 子代理场景（父侧）：Agent 结果已回（tool 消息应答 call_agent_1，成功或
-/// 被拒都算）→ 文本收尾；否则发 Agent 调用。行为令牌/档案名从用户消息解析。
-fn subagent_parent_response(body: &str) -> Vec<String> {
-    if body.contains("\"tool_call_id\":\"call_agent_1\"")
-        || body.contains("\"tool_call_id\": \"call_agent_1\"")
-    {
-        return vec![
-            sse_chunk(serde_json::json!({"content": SUBAGENT_PARENT_DONE}), None),
-            sse_chunk(serde_json::json!({}), Some("stop")),
-        ];
-    }
+/// 请求体里最后一条 user 消息的文本（父侧取行为令牌、子侧取 prompt 令牌共用）
+fn last_user_text(body: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let user_text = parsed["messages"]
+    parsed["messages"]
         .as_array()
         .and_then(|msgs| {
             msgs.iter()
@@ -457,36 +450,202 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
                 .find(|m| m["role"].as_str() == Some("user"))
         })
         .and_then(|m| m["content"].as_str().map(str::to_string))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// tool 结果是否已应答（紧凑/带空格两种序列化形态）
+fn tool_answered(body: &str, call_id: &str) -> bool {
+    body.contains(&format!("\"tool_call_id\":\"{call_id}\""))
+        || body.contains(&format!("\"tool_call_id\": \"{call_id}\""))
+}
+
+/// 从请求体里提取「agent_id: a…」/「task_id: b…」（Agent 结果模板/后台回执里的行）
+fn extract_marker_id(body: &str, marker: &str) -> Option<String> {
+    let rest = body.split(marker).nth(1)?;
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+fn subagent_parent_done() -> Vec<String> {
+    vec![
+        sse_chunk(serde_json::json!({"content": SUBAGENT_PARENT_DONE}), None),
+        sse_chunk(serde_json::json!({}), Some("stop")),
+    ]
+}
+
+fn subagent_agent_call(call_id: &str, args: serde_json::Value) -> Vec<String> {
+    tool_call_chunks(call_id, "Agent", &args.to_string(), None)
+}
+
+fn child_prompt(behavior: &str) -> String {
+    format!("{SUBAGENT_CHILD_PREFIX}{behavior} 读取 {MOCK_FILE_NAME} 并总结")
+}
+
+/// 子代理场景（父侧）：按行为令牌推进状态机——
+/// 普通令牌：call_agent_1（前台）→ 结果回 → 文本收尾；
+/// BG/BASHBG：call_agent_bg（run_in_background）→ running 回执 → 文本收尾；
+/// BGSTOP：后台 LOOP → running 回执 → TaskStop → 文本收尾；
+/// RESUME：首条消息前台 GREP（call_agent_1），第二条消息 resume 原 id（call_agent_2）；
+/// RESUME_UNKNOWN：直接 resume 一个不存在的 id（call_agent_2）；
+/// RESUME_RUNNING：首条后台 LOOP（call_agent_bg），第二条 resume 同 id（call_agent_2，应撞冲突）。
+fn subagent_parent_response(body: &str) -> Vec<String> {
+    let user_text = last_user_text(body);
+    // 唤醒回合：最后一条 user 是 <task-notification> 合成消息（不含触发词）→ 直接收尾
+    if !user_text.contains(SUBAGENT_TRIGGER) {
+        return subagent_parent_done();
+    }
     let mut tokens = user_text
         .split(SUBAGENT_TRIGGER)
         .nth(1)
         .unwrap_or("")
         .split_whitespace();
-    let behavior = tokens.next().unwrap_or("GREP").to_string();
-    let default_type = match behavior.as_str() {
-        "BASH" | "LOOP" | "LONG" => "general-purpose",
-        _ => "explore",
-    };
-    let profile = tokens.next().unwrap_or(default_type);
-    tool_call_chunks(
-        "call_agent_1",
-        "Agent",
-        &serde_json::json!({
-            "description": "子代理自测委派",
-            "prompt": format!("{SUBAGENT_CHILD_PREFIX}{behavior} 读取 {MOCK_FILE_NAME} 并总结"),
-            "subagent_type": profile,
-        })
-        .to_string(),
-        None,
-    )
+    let behavior = tokens.next().unwrap_or("GREP");
+    let profile_arg = tokens.next();
+    match behavior {
+        "BG" | "BASHBG" => {
+            if tool_answered(body, "call_agent_bg") {
+                return subagent_parent_done();
+            }
+            let (child, profile) = if behavior == "BG" {
+                ("GREP", "explore")
+            } else {
+                ("BASH", "general-purpose")
+            };
+            subagent_agent_call(
+                "call_agent_bg",
+                serde_json::json!({
+                    "description": "子代理自测委派",
+                    "prompt": child_prompt(child),
+                    "subagent_type": profile_arg.unwrap_or(profile),
+                    "run_in_background": true,
+                }),
+            )
+        }
+        "BGSTOP" => {
+            if tool_answered(body, "call_taskstop") {
+                return subagent_parent_done();
+            }
+            if tool_answered(body, "call_agent_bg") {
+                // 后台子代理已在跑（LOOP 不停）：发 TaskStop 停掉它
+                let task_id =
+                    extract_marker_id(body, "task_id: ").unwrap_or_else(|| "b1".to_string());
+                return tool_call_chunks(
+                    "call_taskstop",
+                    "TaskStop",
+                    &serde_json::json!({"task_id": task_id}).to_string(),
+                    None,
+                );
+            }
+            subagent_agent_call(
+                "call_agent_bg",
+                serde_json::json!({
+                    "description": "子代理自测委派",
+                    "prompt": child_prompt("LOOP"),
+                    "subagent_type": profile_arg.unwrap_or("explore"),
+                    "run_in_background": true,
+                }),
+            )
+        }
+        "RESUME" => {
+            // 触发词出现次数 = 已发消息数：第 1 条起新子代理，第 2 条 resume 原 id
+            if body.matches(SUBAGENT_TRIGGER).count() >= 2 {
+                if tool_answered(body, "call_agent_2") {
+                    return subagent_parent_done();
+                }
+                let agent_id = extract_marker_id(body, "agent_id: ")
+                    .expect("resume 场景：历史里应有 agent_id");
+                return subagent_agent_call(
+                    "call_agent_2",
+                    serde_json::json!({
+                        "description": "子代理续跑",
+                        "prompt": child_prompt("RESUMED"),
+                        "resume": agent_id,
+                    }),
+                );
+            }
+            if tool_answered(body, "call_agent_1") {
+                return subagent_parent_done();
+            }
+            subagent_agent_call(
+                "call_agent_1",
+                serde_json::json!({
+                    "description": "子代理自测委派",
+                    "prompt": child_prompt("GREP"),
+                    "subagent_type": profile_arg.unwrap_or("explore"),
+                }),
+            )
+        }
+        "RESUME_UNKNOWN" => {
+            if tool_answered(body, "call_agent_2") {
+                return subagent_parent_done();
+            }
+            subagent_agent_call(
+                "call_agent_2",
+                serde_json::json!({
+                    "description": "续跑不存在的子代理",
+                    "prompt": child_prompt("GREP"),
+                    "resume": "a0-999",
+                }),
+            )
+        }
+        "RESUME_RUNNING" => {
+            if body.matches(SUBAGENT_TRIGGER).count() >= 2 {
+                if tool_answered(body, "call_agent_2") {
+                    return subagent_parent_done();
+                }
+                let agent_id = extract_marker_id(body, "agent_id: ")
+                    .expect("resume 场景：历史里应有 agent_id");
+                return subagent_agent_call(
+                    "call_agent_2",
+                    serde_json::json!({
+                        "description": "续跑运行中的子代理",
+                        "prompt": child_prompt("GREP"),
+                        "resume": agent_id,
+                    }),
+                );
+            }
+            if tool_answered(body, "call_agent_bg") {
+                return subagent_parent_done();
+            }
+            subagent_agent_call(
+                "call_agent_bg",
+                serde_json::json!({
+                    "description": "子代理自测委派",
+                    "prompt": child_prompt("LOOP"),
+                    "subagent_type": profile_arg.unwrap_or("explore"),
+                    "run_in_background": true,
+                }),
+            )
+        }
+        _ => {
+            if tool_answered(body, "call_agent_1") {
+                return subagent_parent_done();
+            }
+            let default_type = match behavior {
+                "BASH" | "LOOP" | "LONG" => "general-purpose",
+                _ => "explore",
+            };
+            subagent_agent_call(
+                "call_agent_1",
+                serde_json::json!({
+                    "description": "子代理自测委派",
+                    "prompt": child_prompt(behavior),
+                    "subagent_type": profile_arg.unwrap_or(default_type),
+                }),
+            )
+        }
+    }
 }
 
-/// 子代理场景（子侧）：按 prompt 里的行为令牌出招——0 个 tool 结果出工具调用
-///（LOOP 永远出工具调用，逼父侧 max_turns 收尾；LONG 直接回 33K 字符长文），
-/// 否则回带标记的结论文本。
+/// 子代理场景（子侧）：按 prompt（最后一条 user 消息）里的行为令牌出招——
+/// 0 个 tool 结果出工具调用（LOOP 永远出工具调用，逼父侧 max_turns 收尾；
+/// LONG 直接回 33K 字符长文；RESUMED 直接回续跑结论），否则回带标记的结论文本。
 fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
-    let behavior = body
+    let user_text = last_user_text(body);
+    let behavior = user_text
         .split(SUBAGENT_CHILD_PREFIX)
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
@@ -498,6 +657,7 @@ fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
         ]
     };
     match behavior {
+        "RESUMED" => done_text(format!("子代理续跑结论：任务完成。{SUBAGENT_RESUMED_DONE}")),
         "LONG" => {
             // 33K 字符长文：验证父侧 32K 结果预算截断 + 全文落盘。
             // 每片 2000 字符（mock 每片 sleep 50ms，片数必须少）

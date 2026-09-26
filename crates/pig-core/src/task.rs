@@ -42,18 +42,24 @@ pub struct TaskEntry {
     pub output: String,
     /// 全量输出落盘路径（.pigcode/tool-results/{id}.log）
     pub spill_path: Option<PathBuf>,
+    /// 子代理后台任务的驱动取消令牌（Bash 恒 None）；stop_task 优先走它而非杀进程树
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// 子代理后台任务的 agent_id（Bash 恒 None）；resume 运行中冲突检测用
+    pub agent_id: Option<String>,
 }
 
 /// 按会话保序的任务注册表（id = b{task_seq 递增}；移除条目不回收序号）。
 pub type TaskRegistry = Arc<Mutex<Vec<TaskEntry>>>;
 
-/// 会话级工具共享状态：待办清单 + 任务注册表 + 完成通知 + 任务序号 + 文件新鲜度。
+/// 会话级工具共享状态：待办清单 + 任务注册表 + 完成通知 + 唤醒通道 + 任务序号 + 文件新鲜度。
 /// 全部字段可 Clone（Arc/atomic/sender），Session 与 agent_loop 的 SessionEntry 各持一份共享。
 pub struct SessionToolState {
     pub todos: TodoHandle,
     pub tasks: TaskRegistry,
     /// watcher 完成任务后发送 session_id，agent_loop 据此推 TaskListChanged
     pub task_notify: UnboundedSender<String>,
+    /// 后台子代理完成唤醒通道：(session_id, 通知文本)，agent_loop 合成 user 消息起新回合
+    pub wake_notify: UnboundedSender<(String, String)>,
     pub session_id: String,
     /// 任务序号发生器（b1、b2…单调递增；前台任务完成移除后不复用）
     pub task_seq: Arc<AtomicUsize>,
@@ -71,6 +77,7 @@ impl Clone for SessionToolState {
             todos: self.todos.clone(),
             tasks: self.tasks.clone(),
             task_notify: self.task_notify.clone(),
+            wake_notify: self.wake_notify.clone(),
             session_id: self.session_id.clone(),
             task_seq: self.task_seq.clone(),
             read_states: self.read_states.clone(),
@@ -81,11 +88,16 @@ impl Clone for SessionToolState {
 }
 
 impl SessionToolState {
-    pub fn new(session_id: String, task_notify: UnboundedSender<String>) -> Self {
+    pub fn new(
+        session_id: String,
+        task_notify: UnboundedSender<String>,
+        wake_notify: UnboundedSender<(String, String)>,
+    ) -> Self {
         Self {
             todos: TodoHandle::default(),
             tasks: TaskRegistry::default(),
             task_notify,
+            wake_notify,
             session_id,
             task_seq: Arc::new(AtomicUsize::new(0)),
             read_states: Arc::new(Mutex::new(HashMap::new())),
@@ -94,10 +106,11 @@ impl SessionToolState {
         }
     }
 
-    /// 测试用：session_id = "test"，notify 的 receiver 直接丢弃（send 失败忽略）。
+    /// 测试用：session_id = "test"，notify/wake 的 receiver 直接丢弃（send 失败忽略）。
     pub fn for_test() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        Self::new("test".to_string(), tx)
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self::new("test".to_string(), tx, wake_tx)
     }
 }
 
@@ -184,6 +197,51 @@ fn append_spill(path: &Path, chunk: &[u8]) {
         let _ = file.write_all(&chunk[..remaining]);
         let _ = file.write_all("[输出超过 10MB，后续已丢弃]".as_bytes());
     }
+}
+
+/// 追加文本到 entry.output（沿用 64KB 头部截断；不写 spill）——子代理进度/结果用。
+pub fn note_output(registry: &TaskRegistry, task_id: &str, line: &str) {
+    let mut tasks = registry.lock().expect("task registry lock");
+    let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
+        return;
+    };
+    entry.output.push_str(line);
+    if entry.output.len() > MAX_TASK_OUTPUT {
+        let mut start = entry.output.len() - MAX_TASK_OUTPUT;
+        while start < entry.output.len() && !entry.output.is_char_boundary(start) {
+            start += 1;
+        }
+        entry.output.drain(..start);
+    }
+}
+
+/// 注册子代理后台任务条目（Running、无 pid/spill；cancel = 驱动取消令牌，
+/// agent_id 供 resume 运行中冲突检测与面板标识），立即 notify 让面板出现条目，返回 task_id。
+pub fn register_agent_task(
+    state: &SessionToolState,
+    command: String,
+    cancel: tokio_util::sync::CancellationToken,
+    agent_id: String,
+) -> String {
+    let id = {
+        let mut tasks = state.tasks.lock().expect("task registry lock");
+        let id = next_task_id(&state.task_seq);
+        tasks.push(TaskEntry {
+            id: id.clone(),
+            command,
+            status: TaskStatus::Running,
+            started_at: now_secs(),
+            ended_at: None,
+            pid: None,
+            output: String::new(),
+            spill_path: None,
+            cancel: Some(cancel),
+            agent_id: Some(agent_id),
+        });
+        id
+    };
+    let _ = state.task_notify.send(state.session_id.clone());
+    id
 }
 
 /// pipe 读者：chunk → 注册表滚动 output + spill 落盘；sink 非空时另存一份全文
@@ -294,6 +352,8 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
             pid,
             output,
             spill_path: Some(spill_path_for(cwd, &id)),
+            cancel: None,
+            agent_id: None,
         });
         id
     };
@@ -372,6 +432,8 @@ pub async fn run_foreground(
             pid: child.id(),
             output: String::new(),
             spill_path: Some(spill_path_for(cwd, &id)),
+            cancel: None,
+            agent_id: None,
         });
         id
     };
@@ -439,7 +501,8 @@ pub async fn run_foreground(
 }
 
 /// 停止任务：找不到 → Err；非 Running → Err「任务已结束」；先置 Killed + ended_at
-///（防 watcher 覆写状态），再树杀：unix 先 kill -9 整个进程组（spawn_shell 里
+///（防 watcher/驱动覆写状态）。子代理任务（cancel 令牌在）走令牌取消——驱动循环
+/// 自己收尾，无进程可杀；Bash 任务树杀：unix 先 kill -9 整个进程组（spawn_shell 里
 /// process_group(0) 使子进程自成组长），再 kill -9 直接 pid 兜底（组已散时无妨）；
 /// windows taskkill /F /T。最后 notify。
 pub fn stop_task(
@@ -448,7 +511,7 @@ pub fn stop_task(
     notify: &UnboundedSender<String>,
     session_id: &str,
 ) -> Result<String, String> {
-    let pid = {
+    let (pid, cancel) = {
         let mut tasks = registry.lock().expect("task registry lock");
         let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
             return Err(format!("任务不存在: {task_id}"));
@@ -458,9 +521,11 @@ pub fn stop_task(
         }
         entry.status = TaskStatus::Killed;
         entry.ended_at = Some(now_secs());
-        entry.pid
+        (entry.pid, entry.cancel.clone())
     };
-    if let Some(pid) = pid {
+    if let Some(token) = cancel {
+        token.cancel();
+    } else if let Some(pid) = pid {
         if cfg!(target_os = "windows") {
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/F", "/T"])
