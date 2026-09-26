@@ -213,6 +213,8 @@ pig-code/
 >
 > Dock spike 实施（2026-09-23，`dock-spike` 分支）：三栏换 dock —— 左 dock=Sidebar（实现 Panel：`title_bar/inner_padding=false` 关 chrome），center=新 `DockCenterPanel`（回读 AppView 渲染 hero/会话列），右 dock=新 `DockRightPanel`（自绘 tab 栏+菜单页/改动内容）；`set_locked(true)` 只留调宽；dock 开合状态以 AppView 标志为准、render 时同步 `toggle_dock`；`DockSkin::set_toggle_button_visible(false)`。坑：组件皮肤用 `cached()` 包面板视图，缓存只在面板自身 notify 时失效——子实体的 notify 会沿 dispatch 树把祖先面板标脏自动失效，但纯 AppView 状态变化传不下来，面板用 `cx.observe(AppView)` 桥接。dock 尺寸钳制只有 `PANEL_MIN_SIZE..容器`，没有 180..360 那样的自定义区间。自测全绿。
 
+> 子代理（2026-09-27，对齐 ZCode 体系）：**Agent 工具全链路**。档案体系（`agent.rs`）：内置 `general-purpose`（全工具）/ `explore`（只读 7 工具）双代理 + Markdown frontmatter 自定义（`~/.pigcode/agents/`、工作区 `.pigcode/agents/`，按名覆盖：项目>用户>内置）+ `agents-state.json` 内置代理模型覆盖；`model: inherit` 继承父模型、`providerId/modelId` 严格指定（解析失败即报错不回落）。执行：子代理独立 history（零父上下文），门控执行下沉 `exec_tool_gated_ctx(GateCtx)` 父子共用（危险黑名单/permissions/审批门全继承），工具收窄天然防嵌套（Agent/计划工具/AskUserQuestion 强制剔除），步数上限（档案 maxTurns/默认 20）、32K 结果预算落盘、结果=最后一条 assistant 消息 + agent_id/resume_hint；子上下文逐条落 `{session}.agents/{id}.jsonl`（resume 数据基础）。**后台运行**（run_in_background）：注册进任务表（TaskList/Output/Stop 统一管控，TaskStop 走 cancel 令牌），完成经 `<task-notification>` 合成消息唤醒父会话（忙入队/闲起新 turn）；**resume** 按 agent_id 重建上下文续跑。UI：Agent 卡片独立进度行（Spinner+muted，不覆盖摘要）、子工具调用不进父时间线（ZCode 单卡设计）、后台通知渲染为 info 通知卡而非用户气泡。管理设置页（列表/模型下拉/新建表单）与 AgentSwarm 并行未做。
+>
 ### M0 — 应用骨架（GUI 先行，mock 数据）
 - workspace 化（`pig-protocol`/`pig-core`/`pig-app`），`pig-app` 引入 `gpui-kit = "0.6"`，`gpui_kit::init` + 无边框窗口 + `TitleBar` + 亮暗主题。
 - 三栏布局：`Sidebar`（任务列表，静态数据）+ 中央消息区 + 右侧 Review 面板（`Resizable`）。

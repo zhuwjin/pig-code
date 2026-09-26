@@ -4051,6 +4051,103 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     );
     println!("[selftest] 切模型思考等级落点（默认档优先/继承）OK");
 
+    // 子代理场景（A3）：前台 Agent 卡——运行中出现进度行、收尾后原摘要保留；
+    // 随后后台子代理完成 → 合成 <task-notification> 用户消息到达（通知卡渲染路径）
+    let before_current = app!(|app: &mut AppView, _| app.current.clone());
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
+    let session_c = loop {
+        timer!(200).await;
+        let current = app!(|app: &mut AppView, _| app.current.clone());
+        if current.is_some() && current != before_current {
+            break current.expect("已判 Some");
+        }
+    };
+    app!(|app: &mut AppView, _| {
+        // 钉到 mock（OpenAI 格式）供应商：前面的切模型测试把当前选择留在了
+        // anthropic，而 mock 的子代理场景只有 OpenAI 格式分支
+        app.agent.set_model(
+            session_c.clone(),
+            "mock".to_string(),
+            "mock-model".to_string(),
+            None,
+        );
+        app.agent.send_message(
+            session_c.clone(),
+            format!("{} GREP", pig_core::mock::SUBAGENT_TRIGGER),
+            vec![],
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    let mut saw_progress = false;
+    let mut waited = 0u64;
+    loop {
+        timer!(100).await;
+        waited += 100;
+        assert!(waited < 60_000, "前台子代理场景超时");
+        let state = app!(|app: &mut AppView, cx| {
+            let views = app.views.get(&session_c)?;
+            let thread = views.thread.read(cx);
+            let (_, _, _, tool_output) = thread.debug_last_assistant();
+            Some((
+                thread.is_streaming(),
+                thread.debug_agent_card(),
+                tool_output,
+            ))
+        });
+        let Some((streaming, card, tool_output)) = state else {
+            continue;
+        };
+        let Some((summary, live_note, done)) = card else {
+            continue;
+        };
+        saw_progress |= !done && live_note.is_some();
+        if done && !streaming {
+            assert!(saw_progress, "运行中应出现过进度行（SubagentProgress）");
+            assert!(
+                summary.contains("子代理 explore"),
+                "收尾后原摘要应保留（不被进度覆盖）: {summary}"
+            );
+            assert!(live_note.is_none(), "收尾后进度行应清空: {live_note:?}");
+            assert!(
+                tool_output.contains(pig_core::mock::SUBAGENT_CHILD_DONE),
+                "Agent 卡输出应含子代理结论: {tool_output}"
+            );
+            break;
+        }
+    }
+    println!("[selftest] 子代理前台卡片（进度行出现/原摘要保留/收尾清行）OK");
+
+    // 同会话发后台子代理：running 回执收尾 → 子代理完成后 core 注入通知并唤醒收尾
+    app!(|app: &mut AppView, _| {
+        app.agent.send_message(
+            session_c.clone(),
+            format!("{} BG", pig_core::mock::SUBAGENT_TRIGGER),
+            vec![],
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 60_000, "后台子代理通知超时");
+        let (streaming, has_notification) = app!(|app: &mut AppView, cx| {
+            let Some(views) = app.views.get(&session_c) else {
+                return (true, false);
+            };
+            let thread = views.thread.read(cx);
+            (thread.is_streaming(), thread.debug_has_task_notification())
+        });
+        if has_notification && !streaming {
+            break;
+        }
+    }
+    println!("[selftest] 后台子代理完成 → task-notification 合成消息到达 OK");
+
     // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
     assert_eq!(
         clamp_dock_widths(1280., 220., 300., true, true),

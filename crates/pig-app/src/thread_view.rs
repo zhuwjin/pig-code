@@ -51,6 +51,10 @@ pub enum Segment {
         expanded: bool,
         /// 写/改类工具的本次编辑 diff（内联 diff 卡片）
         edit: Option<EditDiff>,
+        /// 前台子代理的实时进度行（SubagentProgress 写入、ToolCallEnd 清空）；
+        /// 独立字段而非覆盖 summary：运行中原摘要（「子代理 explore: …」）要保留。
+        /// 回放没有该事件，恒为 None
+        live_note: Option<String>,
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
     },
@@ -182,6 +186,18 @@ fn parse_image_link(token: &str) -> Option<u32> {
         .parse()
         .ok()?;
     (label.parse::<u32>().ok()? == n).then_some(n)
+}
+
+/// 后台子代理完成/失败时 core 注入的合成用户消息（live 与回放同文）：
+/// 整段被 `<task-notification>…</task-notification>` 包裹时识别为通知，
+/// 返回剥掉最外层标签的正文（内层同名标签不剥，按普通文本留在正文里）。
+/// 只用于显示层分流，消息原文（含标签）不动。
+fn as_task_notification(text: &str) -> Option<&str> {
+    let inner = text
+        .trim()
+        .strip_prefix("<task-notification>")?
+        .strip_suffix("</task-notification>")?;
+    Some(inner.trim())
 }
 
 #[derive(Clone)]
@@ -504,6 +520,30 @@ impl ThreadView {
         })
     }
 
+    /// 首张 Agent 工具卡片的 (summary, live_note, done)（自测用）。
+    pub fn debug_agent_card(&self) -> Option<(String, Option<String>, bool)> {
+        self.messages
+            .iter()
+            .flat_map(|m| &m.segments)
+            .find_map(|s| match s {
+                Segment::ToolCall {
+                    tool,
+                    summary,
+                    live_note,
+                    done,
+                    ..
+                } if tool == "Agent" => Some((summary.clone(), live_note.clone(), *done)),
+                _ => None,
+            })
+    }
+
+    /// 是否出现过后台子代理的合成通知用户消息（自测用）。
+    pub fn debug_has_task_notification(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
+    }
+
     /// 当前待审批的 request_id（自测用）。
     pub fn pending_approval(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| {
@@ -631,6 +671,7 @@ impl ThreadView {
                     done: false,
                     expanded: false,
                     edit: None,
+                    live_note: None,
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
@@ -654,6 +695,7 @@ impl ThreadView {
                     done: false,
                     expanded: false,
                     edit: None,
+                    live_note: None,
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall {
@@ -662,6 +704,7 @@ impl ThreadView {
                     done,
                     expanded,
                     edit: slot,
+                    live_note,
                     ..
                 }) = self.current_segment(six)
                 {
@@ -669,6 +712,8 @@ impl ThreadView {
                     *err = is_error;
                     *done = true;
                     *slot = edit;
+                    // 收尾清掉实时进度行（卡片回到静态摘要）
+                    *live_note = None;
                     // 失败的调用直接展开输出，省去用户多点一下
                     if is_error {
                         *expanded = true;
@@ -696,16 +741,17 @@ impl ThreadView {
                 self.auto_scroll();
             }
             Event::SubagentProgress { item_id, note, .. } => {
-                // 最小处理（A3 再做完整渲染）：就地更新 Agent 工具卡片的摘要行
-                // 为实时进度；卡片不存在（回放/乱序）或已收尾时忽略
+                // 前台子代理的实时进度写独立字段 live_note（渲染在摘要行下方），
+                // 不动 summary——原摘要在运行中保留，收尾后也不丢；
+                // 卡片不存在（回放/乱序）或已收尾时忽略
                 if let Some(&six) = self.item_index.get(&item_id)
                     && let Some(Segment::ToolCall {
-                        summary,
+                        live_note,
                         done: false,
                         ..
                     }) = self.current_segment(six)
                 {
-                    *summary = note;
+                    *live_note = Some(note);
                 }
             }
             Event::TurnComplete {
@@ -869,6 +915,11 @@ impl ThreadView {
         message: &ChatMessage,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // 后台子代理完成/失败的合成消息：渲染为通知卡而非用户气泡
+        //（剥标签只在显示层，message.text 原文不动，live 与回放共用此路径）
+        if let Some(body) = as_task_notification(&message.text) {
+            return self.render_task_notification(body, cx);
+        }
         v_flex()
             .w_full()
             .items_end()
@@ -930,6 +981,42 @@ impl ThreadView {
                             .document_order(ix as u64),
                         )
                     }),
+            )
+            .into_any_element()
+    }
+
+    /// 后台子代理的合成通知卡（样式对齐 plan_pending 的描边淡底卡）：
+    /// info 描边 + 淡底色 + 机器人图标 + 「后台子代理通知」小标签 + 正文纯文本
+    fn render_task_notification(&self, body: &str, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .w_full()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().info)
+            .bg(cx.theme().info.opacity(0.08))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::Bot)
+                            .size_4()
+                            .text_color(cx.theme().info),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().info)
+                            .child("后台子代理通知"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(body.to_string()),
             )
             .into_any_element()
     }
@@ -1570,6 +1657,7 @@ impl ThreadView {
         segment_ix: usize,
         tool: &str,
         summary: &str,
+        live_note: Option<&str>,
         output: &str,
         is_error: bool,
         done: bool,
@@ -1760,6 +1848,35 @@ impl ThreadView {
                                 ),
                         )
                     }),
+            )
+            // 前台子代理运行中的实时进度行（摘要行下方）：旋转小图标 + 单行省略，
+            // 左缩进对齐摘要行的图标列（图标 16px + gap 8px）；收尾/回放无此行
+            .when(
+                !done && live_note.is_some_and(|note| !note.is_empty()),
+                |this| {
+                    let note = live_note
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    this.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .pl_6()
+                            .child(Spinner::new().small().color(subtlest))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .text_color(subtle)
+                                    .child(note),
+                            ),
+                    )
+                },
             )
             .when(expanded, |this| {
                 // 展开正文统一放进带滚动条的视口（track_scroll 持久滚动位置 + 可见滚动条）
@@ -2291,6 +2408,7 @@ impl ThreadView {
                             done,
                             expanded,
                             edit,
+                            live_note,
                             body_scroll,
                         } => {
                             let approval_pending = matches!(
@@ -2302,6 +2420,7 @@ impl ThreadView {
                                 six,
                                 tool,
                                 summary,
+                                live_note.as_deref(),
                                 output,
                                 *is_error,
                                 *done,
@@ -3153,10 +3272,50 @@ fn consume_scroll(
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_image_index, clamp_lightbox_pan, collect_lightbox_positions,
+        adjacent_image_index, as_task_notification, clamp_lightbox_pan, collect_lightbox_positions,
         lightbox_display_size, lightbox_fit_scale, lightbox_pan_after_zoom, message_image_number,
         parse_image_link, split_image_links,
     };
+
+    #[test]
+    fn task_notification_strips_outer_tags() {
+        // core 注入的实际格式（含换行）
+        assert_eq!(
+            as_task_notification(
+                "<task-notification>\n后台子代理 a1（explore）已完成（3 步）。\n\n结果正文\n</task-notification>"
+            ),
+            Some("后台子代理 a1（explore）已完成（3 步）。\n\n结果正文")
+        );
+        // 外围空白容错（trim 后再判定）
+        assert_eq!(
+            as_task_notification("  <task-notification>正文</task-notification>\n"),
+            Some("正文")
+        );
+    }
+
+    #[test]
+    fn task_notification_rejects_plain_messages() {
+        assert_eq!(as_task_notification("普通用户消息"), None);
+        // 只有前缀/只有后缀都不算
+        assert_eq!(as_task_notification("<task-notification>没封口"), None);
+        assert_eq!(as_task_notification("没开头</task-notification>"), None);
+        // 标签不在整段首尾（前面有正文）不算
+        assert_eq!(
+            as_task_notification("引用：<task-notification>x</task-notification>"),
+            None
+        );
+    }
+
+    #[test]
+    fn task_notification_keeps_nested_tags() {
+        // 只剥最外层：内层同名标签原样留在正文里
+        assert_eq!(
+            as_task_notification(
+                "<task-notification>外<task-notification>内</task-notification>外</task-notification>"
+            ),
+            Some("外<task-notification>内</task-notification>外")
+        );
+    }
 
     #[test]
     fn user_image_display_numbers_are_local_to_message() {
