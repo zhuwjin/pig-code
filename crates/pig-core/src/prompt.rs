@@ -36,12 +36,7 @@ pub fn system_prompt(
 ) -> String {
     let mut prompt = format!(
         "你是 pig-code，一个运行在用户工作区里的 AI 编程助手。\n\n\
-         <env>\n\
-         工作目录: {}\n\
-         平台: {}-{}\n\
-         日期: {}\n\
-         {}\
-         </env>\n\n\
+         {}\n\n\
          行为准则:\n\
          - 回答使用与用户相同的语言（默认中文）。\n\
          - 修改代码前先读文件确认现状，不要臆测文件内容。\n\
@@ -54,13 +49,7 @@ pub fn system_prompt(
          - 默认只能读写工作区内文件与 tmp 目录；用户在模式菜单开启后才可读写工作区外文件（.env/私钥/凭据等敏感文件永远不可访问）。\n\
          - 项目可在 .pigcode/permissions.toml 配置 allow/deny 规则（deny 优先于一切）。\n\
          - 回答简洁，代码用 Markdown 代码块给出。\n",
-        cwd.display(),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        today(),
-        git_info(cwd)
-            .map(|info| format!("git: {info}\n"))
-            .unwrap_or_default(),
+        env_block(cwd),
     );
     prompt.push_str(match mode {
         ExecMode::ConfirmBeforeEdit => {
@@ -103,6 +92,44 @@ pub fn system_prompt(
              需要了解文件内容或验证改动时主动调用工具，拿到结果后再回答。\n",
         );
     }
+    prompt
+}
+
+/// <env> 块：工作目录/平台/日期/git 状态。主代理与子代理的系统提示共用。
+fn env_block(cwd: &std::path::Path) -> String {
+    format!(
+        "<env>\n\
+         工作目录: {}\n\
+         平台: {}-{}\n\
+         日期: {}\n\
+         {}\
+         </env>",
+        cwd.display(),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        today(),
+        git_info(cwd)
+            .map(|info| format!("git: {info}\n"))
+            .unwrap_or_default(),
+    )
+}
+
+/// 子代理系统提示：env 块 + 可选 AGENTS.md 注入 + 档案正文。
+/// 自包含：不拼行为准则/执行模式段/工具清单（子代理没有计划模式与提问能力，
+/// 交付要求已写在档案正文里）。
+// A1 只到档案/配置层，A2 接 Session 的 turn 循环后启用
+#[allow(dead_code)]
+pub fn subagent_system_prompt(
+    profile: &crate::agent::AgentProfile,
+    cwd: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> String {
+    let mut prompt = env_block(cwd);
+    if profile.inject_agents_md {
+        prompt.push_str(&agents_md(data_dir, cwd));
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(&profile.system_prompt);
     prompt
 }
 

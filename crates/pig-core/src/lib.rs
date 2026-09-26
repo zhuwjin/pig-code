@@ -1,6 +1,7 @@
 //! pig-code 的 agent 引擎：Session / turn 循环 / OpenAI 兼容 provider / 工具执行。
 //! 通过 `spawn_agent` 在独立线程的 tokio runtime 上运行，与 UI 用 channel 交换 Op/Event。
 
+pub mod agent;
 pub mod config;
 pub mod git;
 pub mod mock;
