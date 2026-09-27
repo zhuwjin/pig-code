@@ -26,7 +26,8 @@ pub enum Role {
 }
 
 /// 代理卡元信息（`Event::SubagentCard` 写入 Agent 工具卡；live 直发 +
-/// rollout 持久化回放重建。无元信息的旧回放记录 → 回落标准工具卡样式）
+/// rollout 持久化回放重建。无元信息时（live 中 SubagentCard 事件到达前的
+/// 瞬时态）回落标准工具卡样式）
 #[derive(Clone)]
 pub struct AgentCardMeta {
     pub agent_id: String,
@@ -227,13 +228,12 @@ fn parse_image_link(token: &str) -> Option<u32> {
 }
 
 /// 后台子代理完成/失败时 core 注入的合成用户消息（live 与回放同文）的解析结果。
-/// A3b 起开标签带结构化属性（`<task-notification agent_id=".." status=".." …>`），
-/// 缺属性 = 旧格式（A3 前期core 产物），兼容回落。
-struct TaskNotification<'a> {
+/// 开标签带结构化属性（`<task-notification agent_id=".." status=".." …>`）；
+/// 属性逐个独立解析、缺失为 None（解析健壮性），渲染侧逐字段走缺省。
+struct TaskNotification {
     agent_id: Option<String>,
     status: Option<String>,
     turns: Option<String>,
-    model: Option<String>,
     description: Option<String>,
     /// 子代理实际耗时（毫秒）
     duration_ms: Option<u64>,
@@ -241,30 +241,27 @@ struct TaskNotification<'a> {
     record: Option<String>,
     /// 子代理结果全文文件的绝对路径（{agent_id}.result.md；文件行优先指它）
     result: Option<String>,
-    /// 剥掉最外层标签的正文（内层同名标签不剥，按普通文本留在正文里）
-    body: &'a str,
 }
 
-/// 整段被 `<task-notification…>…</task-notification>` 包裹时识别为通知，
-/// 解析开标签属性 + 剥标签正文。只用于显示层分流，消息原文（含标签）不动。
-fn as_task_notification(text: &str) -> Option<TaskNotification<'_>> {
+/// 整段被 `<task-notification…>…</task-notification>` 包裹时识别为通知并解析
+/// 开标签属性。只用于显示层分流：消息原文（含标签）不动，payload 折叠区也渲染原文。
+fn as_task_notification(text: &str) -> Option<TaskNotification> {
     let rest = text.trim().strip_prefix("<task-notification")?;
     // 前缀后必须紧跟 '>' 或空白（防 <task-notification-foo> 误判）
     if !rest.starts_with('>') && !rest.starts_with(char::is_whitespace) {
         return None;
     }
     let (attrs, after) = rest.split_once('>')?;
-    let inner = after.strip_suffix("</task-notification>")?;
+    // 闭标签校验（strip_suffix 只剥最外层：内层同名标签不影响识别）
+    after.strip_suffix("</task-notification>")?;
     Some(TaskNotification {
         agent_id: notification_attr(attrs, "agent_id"),
         status: notification_attr(attrs, "status"),
         turns: notification_attr(attrs, "turns"),
-        model: notification_attr(attrs, "model"),
         description: notification_attr(attrs, "description"),
         duration_ms: notification_attr(attrs, "duration_ms").and_then(|v| v.parse().ok()),
         record: notification_attr(attrs, "record"),
         result: notification_attr(attrs, "result"),
-        body: inner.trim(),
     })
 }
 
@@ -475,7 +472,7 @@ impl ThreadView {
         files: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        // 事件文本末尾的附件链接 → 缩略图；media 目录不可用（旧会话等）
+        // 事件文本末尾的附件链接 → 缩略图；media 目录不可用（没附过图片的会话等）
         // → 不拆分，原文整体保留（链接降级为文本显示）
         let media_ready = self.media_dir.as_ref().is_some_and(|dir| dir.is_dir());
         let (body, indices) = if media_ready {
@@ -662,8 +659,8 @@ impl ThreadView {
     }
 
     /// 最近一条后台子代理通知的 (agent_id, 标题, 耗时毫秒, 记录路径, 结果路径)
-    ///（自测用；无通知/旧格式为 None）。标题 = description（缺省回退「后台子代理」），
-    /// 与气泡渲染同口径。
+    ///（自测用；无通知/通知缺 agent_id 为 None）。标题 = description（缺省回退
+    ///「后台子代理」），与气泡渲染同口径。
     pub fn debug_task_notification_meta(
         &self,
     ) -> Option<(String, String, Option<u64>, Option<String>, Option<String>)> {
@@ -1249,8 +1246,8 @@ impl ThreadView {
     /// 右对齐「✓ 由后台发送（Agent）」小标签 + 用户气泡同款底色的限宽气泡
     ///（标题 / 已完成·耗时 / 结果文件行 / 默认折叠的原始 payload）。
     /// 点击气泡开右侧子代理对话 tab（复制路径按钮与 payload 折叠行的命中区
-    /// stop_propagation 不冒泡）。
-    /// 旧格式（无 agent_id 属性）保持全文渲染，不破坏老会话的历史消息。
+    /// stop_propagation 不冒泡；缺 agent_id 属性时不挂点击——core 产物恒有，
+    /// 缺省只出现在手工构造文本的容错场景）。
     fn render_task_notification(
         &self,
         message_ix: usize,
@@ -1258,40 +1255,6 @@ impl ThreadView {
         message: &ChatMessage,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(agent_id) = note.agent_id.clone() else {
-            // 旧格式：info 描边卡 + 「后台子代理通知」小标签 + 正文全文
-            return v_flex()
-                .w_full()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().info)
-                .bg(cx.theme().info.opacity(0.08))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Icon::new(IconName::Bot)
-                                .size_4()
-                                .text_color(cx.theme().info),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().info)
-                                .child("后台子代理通知"),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().foreground)
-                        .child(note.body.to_string()),
-                )
-                .into_any_element();
-        };
         let failed = note.status.as_deref() == Some("failed");
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
@@ -1300,11 +1263,17 @@ impl ThreadView {
             .clone()
             .filter(|d| !d.is_empty())
             .unwrap_or_else(|| "后台子代理".to_string());
-        // 状态行：已完成/失败 · 耗时 …（无耗时属性时只给状态词）
+        // 状态行：已完成/失败（N 步）· 耗时 …（属性缺哪个省哪个）
         let status_word = if failed { "失败" } else { "已完成" };
-        let status_line = match note.duration_ms {
-            Some(ms) => format!("{status_word} · 耗时 {}", format_notification_duration(ms)),
-            None => status_word.to_string(),
+        let steps = note.turns.as_deref().map(|t| format!("{t} 步"));
+        let cost = note
+            .duration_ms
+            .map(|ms| format!("耗时 {}", format_notification_duration(ms)));
+        let status_line = match (steps, cost) {
+            (Some(steps), Some(cost)) => format!("{status_word} {steps} · {cost}"),
+            (Some(steps), None) => format!("{status_word} {steps}"),
+            (None, Some(cost)) => format!("{status_word} · {cost}"),
+            (None, None) => status_word.to_string(),
         };
         // UI 态在 render 前的预备循环里已惰性创建；防御 None（理论上不会走到）
         let ui = message.notification_ui.as_ref();
@@ -1312,8 +1281,10 @@ impl ThreadView {
         let copied = ui.is_some_and(|u| u.copied);
         let payload_scroll = ui.map(|u| u.payload_scroll.clone());
         let record_size = ui.and_then(|u| u.record_size);
-        let agent_id_click = agent_id.clone();
-        let title_click = title.clone();
+        let agent_id_click = note
+            .agent_id
+            .clone()
+            .map(|agent_id| (agent_id, title.clone()));
         v_flex()
             .w_full()
             .items_end()
@@ -1353,13 +1324,15 @@ impl ThreadView {
                     .py_2()
                     .rounded_2xl()
                     .bg(cx.theme().accent)
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(ThreadEvent::OpenSubagent {
-                            agent_id: agent_id_click.clone(),
-                            title: title_click.clone(),
-                        });
-                    }))
+                    .when_some(agent_id_click, |this, (agent_id, title)| {
+                        this.cursor_pointer()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ThreadEvent::OpenSubagent {
+                                    agent_id: agent_id.clone(),
+                                    title: title.clone(),
+                                });
+                            }))
+                    })
                     // 第 1 行：标题（description，缺省「后台子代理」）
                     .child(
                         div()
@@ -1380,72 +1353,65 @@ impl ThreadView {
                             .child(status_line),
                     )
                     // 第 3 行：结果文件（doc 图标 + 中段省略路径 + 大小 + 复制路径按钮）；
-                    // 指向 result.md（无 result 属性回落 record 上下文路径——旧 core 产物）
-                    .when_some(
-                        note.result.clone().or_else(|| note.record.clone()),
-                        |this, record| {
-                            let size_text = match record_size {
-                                Some(Some(bytes)) => format_file_size(bytes),
-                                Some(None) => "记录已删除".to_string(),
-                                None => String::new(),
-                            };
-                            this.child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_1()
-                                    .child(
-                                        Icon::new(IconName::FileText)
-                                            .size_3p5()
-                                            .text_color(subtlest),
-                                    )
-                                    .child(
+                    // 指向 result.md（core 产物恒带 result 属性；缺省时整行省略）
+                    .when_some(note.result.clone(), |this, result_path| {
+                        let size_text = match record_size {
+                            Some(Some(bytes)) => format_file_size(bytes),
+                            Some(None) => "记录已删除".to_string(),
+                            None => String::new(),
+                        };
+                        this.child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(
+                                    Icon::new(IconName::FileText)
+                                        .size_3p5()
+                                        .text_color(subtlest),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_xs()
+                                        .text_color(subtle)
+                                        .child(elide_record_path(&result_path)),
+                                )
+                                .when(!size_text.is_empty(), |this| {
+                                    this.child(
                                         div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
+                                            .flex_shrink_0()
                                             .text_xs()
-                                            .text_color(subtle)
-                                            .child(elide_record_path(&record)),
+                                            .text_color(subtlest)
+                                            .child(size_text),
                                     )
-                                    .when(!size_text.is_empty(), |this| {
-                                        this.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .text_color(subtlest)
-                                                .child(size_text),
-                                        )
-                                    })
-                                    .child(div().flex_1())
-                                    .child(
-                                        Button::new(("task-notification-copy", message_ix))
-                                            .xsmall()
-                                            .outline()
-                                            .label(if copied {
-                                                "已复制"
-                                            } else {
-                                                "复制路径"
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                // 复制路径不冒泡到卡体（不开子代理 tab）
-                                                cx.stop_propagation();
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    record.clone(),
-                                                ));
-                                                if let Some(ui) = this
-                                                    .messages
-                                                    .get_mut(message_ix)
-                                                    .and_then(|m| m.notification_ui.as_mut())
-                                                {
-                                                    ui.copied = true;
-                                                }
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                        },
-                    )
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new(("task-notification-copy", message_ix))
+                                        .xsmall()
+                                        .outline()
+                                        .label(if copied { "已复制" } else { "复制路径" })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            // 复制路径不冒泡到卡体（不开子代理 tab）
+                                            cx.stop_propagation();
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                result_path.clone(),
+                                            ));
+                                            if let Some(ui) = this
+                                                .messages
+                                                .get_mut(message_ix)
+                                                .and_then(|m| m.notification_ui.as_mut())
+                                            {
+                                                ui.copied = true;
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
                     // 第 4 行：「原始 payload」折叠行（默认收起；命中区不冒泡到卡体）
                     .child(
                         h_flex()
@@ -2161,7 +2127,7 @@ impl ThreadView {
         // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent 工具卡
         // 升级为描述卡（bot 图标 + 任务标题 + profile · model），点击开右侧子代理
         // 对话 tab；卡体不再提供展开区（完整结果与过程见右侧「子代理」tab）。
-        // 无元信息（回放/旧会话）回落下方标准工具卡渲染。
+        // 无元信息（live 中 SubagentCard 事件到达前的瞬时态）回落下方标准工具卡渲染。
         if let Some(card) = agent_card {
             return self.render_agent_card(
                 message_ix,
@@ -3435,13 +3401,11 @@ impl Render for ThreadView {
             // 通知卡 UI 态惰性创建 + 结果文件大小探测（每条消息只做一次，避免每帧 stat）
             if message.notification_ui.is_none()
                 && let Some(note) = as_task_notification(&message.text)
-                && note.agent_id.is_some()
             {
-                // 文件行与大小探测的目标：result.md 优先，回落 record（旧 core 产物）
+                // 文件大小探测的目标：result.md（core 产物恒带 result 属性）
                 let record_size = note
                     .result
                     .as_ref()
-                    .or(note.record.as_ref())
                     .map(|path| std::fs::metadata(path).ok().map(|m| m.len()));
                 message.notification_ui = Some(NotificationUi {
                     payload_open: false,
@@ -3771,7 +3735,7 @@ fn fmt_tokens(n: u64) -> String {
 }
 
 /// 回合脚注的 token 统计段：未缓存输入 · 缓存命中（命中率）· 输出 ·
-/// 首字时间 · 解码速度（不含首字；旧记录无 api_ms 退回墙钟）
+/// 首字时间 · 解码速度（不含首字；api_ms 为 0 的退化数据退回墙钟）
 fn format_turn_stats(stats: &pig_protocol::TurnUsageStats) -> String {
     let total_input = stats.input + stats.cache_read;
     let hit_rate = if total_input > 0 {
@@ -3783,14 +3747,14 @@ fn format_turn_stats(stats: &pig_protocol::TurnUsageStats) -> String {
         String::new()
     };
     // 速度按纯解码时间算（API 总时长 − 首字等待，不含工具执行/审批等待）；
-    // 旧记录无 api_ms 时退回墙钟时间
+    // api_ms 为 0（mock 亚毫秒回合等退化数据）时退回墙钟时间
     let api_ms = if stats.api_ms > 0 {
         stats.api_ms
     } else {
         stats.duration_ms
     };
     // 平均首字 = 首字等待总和 ÷ 请求次数（多步回合一堆 TTFT 取平均；
-    // 旧记录无 api_steps 时按一步算）
+    // api_steps 为 0 时按一步算，不除零）
     let steps = stats.api_steps.max(1);
     let ttft = if stats.ttft_ms > 0 {
         format!(
@@ -3972,19 +3936,15 @@ mod tests {
 
     #[test]
     fn task_notification_strips_outer_tags() {
-        // core 注入的实际格式（含换行；旧格式无属性）
-        assert_eq!(
+        // 无属性的最简形态（含换行；属性解析另测）：识别为通知
+        assert!(
             as_task_notification(
                 "<task-notification>\n后台子代理 a1（explore）已完成（3 步）。\n\n结果正文\n</task-notification>"
             )
-            .map(|n| n.body),
-            Some("后台子代理 a1（explore）已完成（3 步）。\n\n结果正文")
+            .is_some()
         );
         // 外围空白容错（trim 后再判定）
-        assert_eq!(
-            as_task_notification("  <task-notification>正文</task-notification>\n").map(|n| n.body),
-            Some("正文")
-        );
+        assert!(as_task_notification("  <task-notification>正文</task-notification>\n").is_some());
     }
 
     #[test]
@@ -4001,19 +3961,18 @@ mod tests {
 
     #[test]
     fn task_notification_keeps_nested_tags() {
-        // 只剥最外层：内层同名标签原样留在正文里
-        assert_eq!(
+        // 嵌套同名标签不误判：strip_suffix 只认最外层闭标签，整段仍识别为通知
+        assert!(
             as_task_notification(
                 "<task-notification>外<task-notification>内</task-notification>外</task-notification>"
             )
-            .map(|n| n.body),
-            Some("外<task-notification>内</task-notification>外")
+            .is_some()
         );
     }
 
     #[test]
     fn task_notification_parses_open_tag_attributes() {
-        // A3d core 实际产物：开标签带 agent_id/profile/status/turns/model/description/
+        // core 实际产物：开标签带 agent_id/profile/status/turns/model/description/
         // duration_ms/record/result
         let note = as_task_notification(
             "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\" duration_ms=\"12345\" record=\"/tmp/x/sessions/s1.agents/a1-2.jsonl\" result=\"/tmp/x/sessions/s1.agents/a1-2.result.md\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
@@ -4022,7 +3981,6 @@ mod tests {
         assert_eq!(note.agent_id.as_deref(), Some("a1-2"));
         assert_eq!(note.status.as_deref(), Some("completed"));
         assert_eq!(note.turns.as_deref(), Some("3"));
-        assert_eq!(note.model.as_deref(), Some("Mock · mock-model"));
         assert_eq!(note.description.as_deref(), Some("子代理自测委派"));
         assert_eq!(note.duration_ms, Some(12345));
         assert_eq!(
@@ -4033,10 +3991,6 @@ mod tests {
             note.result.as_deref(),
             Some("/tmp/x/sessions/s1.agents/a1-2.result.md")
         );
-        assert_eq!(
-            note.body,
-            "后台子代理 a1-2（explore）已完成（3 步）。\n\n结果"
-        );
         // 失败版
         let failed = as_task_notification(
             "<task-notification agent_id=\"a1-3\" profile=\"explore\" status=\"failed\" turns=\"20\" model=\"Mock · mock-model\" description=\"x\">\n失败原因\n</task-notification>",
@@ -4046,19 +4000,18 @@ mod tests {
     }
 
     #[test]
-    fn task_notification_missing_attributes_fall_back() {
-        // 旧格式（无属性）：全部属性 None，body 照常剥出
+    fn task_notification_tolerates_missing_attributes() {
+        // 属性逐个独立解析：全部缺失 → 全 None
+        //（解析健壮性；渲染侧按字段缺省——标题回退「后台子代理」、无 agent_id 不挂点击）
         let note = as_task_notification("<task-notification>正文</task-notification>")
-            .expect("旧格式应解析");
+            .expect("无属性通知应解析");
         assert!(note.agent_id.is_none());
         assert!(note.status.is_none());
         assert!(note.turns.is_none());
-        assert!(note.model.is_none());
         assert!(note.description.is_none());
         assert!(note.duration_ms.is_none());
         assert!(note.record.is_none());
         assert!(note.result.is_none());
-        assert_eq!(note.body, "正文");
         // 部分属性缺失：逐字段 None 回落；非数字耗时 → None
         let partial = as_task_notification(
             "<task-notification agent_id=\"a9-1\" duration_ms=\"abc\">x</task-notification>",

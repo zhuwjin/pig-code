@@ -212,21 +212,3 @@ async fn scenario_c_plan_mode() {
     );
     agent.shutdown();
 }
-
-/// 旧配置迁移后默认值生效。
-#[test]
-fn config_defaults() {
-    let dir = std::env::temp_dir().join(format!("pig-core-cfg-default-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config.toml");
-    std::fs::write(
-        &path,
-        "[provider]\nbase_url = \"http://x\"\napi_key = \"k\"\nmodel = \"m\"\n",
-    )
-    .unwrap();
-    let config = pig_core::config::load(&path).unwrap();
-    assert_eq!(config.providers.len(), 1);
-    assert_eq!(config.providers[0].models[0].context_window, 128_000);
-    assert_eq!(config.providers[0].models[0].max_output_tokens, 8_192);
-    assert_eq!(config.default_provider, "default");
-}

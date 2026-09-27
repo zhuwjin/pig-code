@@ -66,27 +66,6 @@ impl From<FileChange> for pig_protocol::EditDiff {
     }
 }
 
-/// 回放没有 edit 字段的旧 rollout 记录时，从参数兜底重建本次编辑 diff
-///（ZCode 前端兜底同款思路）：Edit 用 old_string/new_string 现算；
-/// Write 按新建文件处理（before 为空 → 全量新增）。其余工具返回 None。
-pub fn fallback_edit_diff(
-    cwd: &Path,
-    tool: &str,
-    arguments: &str,
-) -> Option<pig_protocol::EditDiff> {
-    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
-    let path = args["path"].as_str()?;
-    let (before, after) = match tool {
-        "Edit" => (
-            args["old_string"].as_str()?.to_string(),
-            args["new_string"].as_str()?.to_string(),
-        ),
-        "Write" => (String::new(), args["content"].as_str()?.to_string()),
-        _ => return None,
-    };
-    Some(per_edit_diff(cwd, &cwd.join(path), &before, &after).into())
-}
-
 /// 计算单次编辑的 unified diff（编辑前 → 编辑后），相对路径归一化为 `/`。
 pub(crate) fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) -> FileChange {
     let diff = similar::TextDiff::from_lines(before, after);
@@ -172,7 +151,8 @@ pub fn snapshot_to_store(bytes: &[u8]) -> String {
     }
 }
 
-/// 持久化 String → 原始字节：有 hex 前缀则解码，否则按 UTF-8 字节（兼容旧数据）
+/// 持久化 String → 原始字节：有 hex 前缀则解码；无前缀 = 写入端直存的合法 UTF-8
+///（snapshot_to_store 只对非 UTF-8 字节加 hex 前缀，UTF-8 原文不落前缀）
 pub fn snapshot_from_store(s: &str) -> Vec<u8> {
     let Some(hex) = s.strip_prefix(SNAPSHOT_HEX_PREFIX) else {
         return s.as_bytes().to_vec();
@@ -328,7 +308,7 @@ impl ChangeTracker {
     }
 }
 
-/// TodoList 工具的待办项：定义在 protocol（UI 面板共享），core 侧 re-export 兼容。
+/// TodoList 工具的待办项：定义在 protocol（UI 面板共享），core 侧统一 re-export。
 pub use pig_protocol::{TodoItem, TodoStatus};
 
 /// 会话共享的待办清单（Arc 句柄，Session 与 ToolContext 共用）。

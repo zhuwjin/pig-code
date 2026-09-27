@@ -233,36 +233,6 @@ async fn edit_produces_per_edit_diff() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fallback_edit_diff_from_arguments() {
-    let dir = temp_dir("fallback-diff");
-
-    // Edit：用 old_string/new_string 现算，只含被替换片段
-    let edit = tool::fallback_edit_diff(
-        &dir,
-        "Edit",
-        &serde_json::json!({"path": "sub/f.txt", "old_string": "a\nb\nc", "new_string": "a\nB\nc"})
-            .to_string(),
-    )
-    .expect("Edit 参数应能兜底出 diff");
-    assert_eq!(edit.path, "sub/f.txt");
-    assert_eq!((edit.additions, edit.deletions), (1, 1));
-    assert!(edit.unified_diff.contains("-b") && edit.unified_diff.contains("+B"));
-
-    // Write：按新建文件兜底（全量新增）
-    let edit = tool::fallback_edit_diff(
-        &dir,
-        "Write",
-        &serde_json::json!({"path": "n.txt", "content": "x\ny\n"}).to_string(),
-    )
-    .expect("Write 参数应能兜底出 diff");
-    assert_eq!((edit.additions, edit.deletions), (2, 0));
-
-    // 非写改工具 / 缺参数：无兜底
-    assert!(tool::fallback_edit_diff(&dir, "Bash", r#"{"command": "ls"}"#).is_none());
-    assert!(tool::fallback_edit_diff(&dir, "Edit", r#"{"path": "f.txt"}"#).is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_changes_are_per_turn_not_cumulative() {
     let dir = temp_dir("turn-changes");
     let mut tracker = ChangeTracker::default();

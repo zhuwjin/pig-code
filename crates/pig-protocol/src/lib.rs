@@ -654,7 +654,8 @@ pub enum Event {
         note: String,
     },
     /// 子代理工具卡的「代理卡」元信息（live 直发 + rollout 持久化，回放经记录重建）：
-    /// item_id = 父会话 Agent 工具卡片；旧回放记录无此字段 → UI 回落标准工具卡样式
+    /// item_id = 父会话 Agent 工具卡片；无此元信息（live 中本事件到达前的瞬时态）
+    /// 时 UI 按标准工具卡样式渲染
     SubagentCard {
         session_id: String,
         seq: u64,

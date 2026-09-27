@@ -15,11 +15,22 @@ pub fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     std::fs::write(
         &config_path,
         format!(
-            "[provider]
-base_url = \"http://127.0.0.1:{port}/v1\"
-api_key = \"mock-key\"
-model = \"mock-model\"
-"
+            r#"default_provider = "mock"
+default_model = "mock-model"
+
+[[providers]]
+id = "mock"
+name = "Mock 供应商"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key = "mock-key"
+api_format = "OpenAiChat"
+enabled = true
+
+[[providers.models]]
+id = "mock-model"
+context_window = 128000
+max_output_tokens = 8192
+"#
         ),
     )
     .unwrap();

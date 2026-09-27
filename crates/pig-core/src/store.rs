@@ -39,7 +39,9 @@ impl Store {
                 provider_id TEXT,
                 model_id TEXT,
                 reasoning_level TEXT,
-                exec_mode TEXT NOT NULL DEFAULT 'ConfirmBeforeEdit'
+                exec_mode TEXT NOT NULL DEFAULT 'ConfirmBeforeEdit',
+                fs_read_outside INTEGER NOT NULL DEFAULT 0,
+                fs_write_outside INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS workspaces (
                 path TEXT PRIMARY KEY,
@@ -79,19 +81,7 @@ impl Store {
             );",
         )
         .map_err(|e| format!("store.sqlite 建表失败: {e}"))?;
-        // 老库迁移：sessions 追加 fs_read_outside/fs_write_outside 两列。
-        // 建表语句不动（新库同样靠 ALTER 补列），重复执行撞 duplicate column 忽略。
-        let store = Self { conn };
-        for column in ["fs_read_outside", "fs_write_outside"] {
-            let sql =
-                format!("ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0");
-            if let Err(error) = store.conn.execute(&sql, []) {
-                if !error.to_string().contains("duplicate column") {
-                    return Err(format!("store.sqlite 迁移失败（{column}）: {error}"));
-                }
-            }
-        }
-        Ok(store)
+        Ok(Self { conn })
     }
 
     // ---- 会话索引 ----
@@ -590,7 +580,7 @@ mod tests {
         let read = store.get_session("s1").unwrap();
         assert!(read.fs_read_outside && read.fs_write_outside, "写穿更新");
 
-        // 重开同一库：ALTER 幂等（duplicate column 忽略），数据仍在
+        // 重开同一库：CREATE TABLE IF NOT EXISTS 幂等，数据仍在
         drop(store);
         let store = Store::open(&dir).expect("重开同一库不报错");
         let read = store.get_session("s1").unwrap();

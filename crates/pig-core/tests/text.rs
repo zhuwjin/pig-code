@@ -730,7 +730,7 @@ async fn revert_gbk_file_is_byte_exact() {
 
 #[test]
 fn snapshot_store_codec_roundtrip() {
-    // UTF-8 直通（无前缀，兼容旧数据）
+    // UTF-8 直通（合法 UTF-8 原文落盘，不加 hex 前缀）
     let text = "abc\n中文\n";
     let stored = tool::snapshot_to_store(text.as_bytes());
     assert_eq!(stored, text);

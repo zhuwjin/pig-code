@@ -1,6 +1,6 @@
 mod common;
 
-use common::{new_session, recv_until, setup};
+use common::{new_session, recv_until};
 use pig_core::mock;
 use pig_protocol::{ApiFormat, Event, ExecMode, ModelConfig, Op, ProviderConfig};
 use std::time::Duration;
@@ -28,26 +28,6 @@ context_window = 128000
 max_output_tokens = 8192
 "#
     )
-}
-
-/// 旧格式 [provider] 自动迁移到新格式
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_config_migration() {
-    // setup() 写的是旧格式
-    let (config_path, cwd, data_dir) = setup("m8-migrate");
-    let agent =
-        pig_core::spawn_agent_with_data_dir(Some(config_path.clone()), cwd.clone(), data_dir);
-    let events = agent.events.clone();
-    let sid = new_session(&agent, cwd).await;
-    let _ = sid;
-
-    let raw = std::fs::read_to_string(&config_path).unwrap();
-    assert!(raw.contains("[[providers]]"), "应迁移为新格式: {raw}");
-    assert!(raw.contains("默认供应商"), "{raw}");
-
-    // 迁移后可正常对话
-    let (config_path2, cwd2, data_dir2) = (config_path.clone(), agent, events);
-    let _ = (config_path2, cwd2, data_dir2);
 }
 
 /// config v2 roundtrip：GetConfig / SaveConfig

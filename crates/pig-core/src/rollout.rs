@@ -88,9 +88,7 @@ pub enum RolloutRecord {
     User {
         text: String,
         files: Vec<String>,
-        /// 附带的图片：媒体文件引用（字节在 {sessions}/{id}.media/ 下，不存 base64；
-        /// serde default 兼容旧记录）
-        #[serde(default)]
+        /// 附带的图片：媒体文件引用（字节在 {sessions}/{id}.media/ 下，不存 base64）
         images: Vec<ImageRef>,
     },
     Reasoning {
@@ -107,10 +105,8 @@ pub enum RolloutRecord {
         output: String,
         is_error: bool,
         /// 本次编辑的 diff（回放时恢复工具卡片的内联 diff 视图）
-        #[serde(default)]
         edit: Option<pig_protocol::EditDiff>,
-        /// Agent 工具卡的代理卡元信息（回放重建代理卡；serde default 兼容旧记录）
-        #[serde(default)]
+        /// Agent 工具卡的代理卡元信息（回放重建代理卡）
         agent_card: Option<AgentCardRecord>,
     },
     /// 一轮的文件改动（回放恢复消息流里的每轮改动面板）
@@ -126,11 +122,8 @@ pub enum RolloutRecord {
         cache_read: u64,
         output: u64,
         duration_ms: u64,
-        #[serde(default)]
         api_ms: u64,
-        #[serde(default)]
         ttft_ms: u64,
-        #[serde(default)]
         api_steps: u64,
     },
     /// 单次 API 请求的 token 用量（每请求一条，随 Usage 事件即时落盘）。

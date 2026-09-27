@@ -308,8 +308,8 @@ fn sniff_image_magic_numbers() {
 
 mod common;
 
-/// media 场景自搭环境：input_image 可配（legacy [provider] 格式无此字段=默认 false，
-/// 新格式 [[providers.models]] 里显式给 true）
+/// media 场景自搭环境：input_image 可配（缺省 false = 不声明该字段，
+/// [[providers.models]] 里显式给 true 才开）
 fn setup_media(name: &str, input_image: bool) -> (PathBuf, PathBuf, PathBuf) {
     let port = pig_core::mock::start_mock_server();
     let dir = std::env::temp_dir().join(format!("pig-core-media-{name}-{}", std::process::id()));
@@ -317,9 +317,13 @@ fn setup_media(name: &str, input_image: bool) -> (PathBuf, PathBuf, PathBuf) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("pic.png"), png_bytes(64, 48, false)).unwrap();
     let config_path = dir.join("config.toml");
-    let config = if input_image {
-        format!(
-            r#"default_provider = "mock"
+    let input_image_line = if input_image {
+        "input_image = true\n"
+    } else {
+        ""
+    };
+    let config = format!(
+        r#"default_provider = "mock"
 default_model = "mock-model"
 
 [[providers]]
@@ -334,14 +338,8 @@ enabled = true
 id = "mock-model"
 context_window = 128000
 max_output_tokens = 8192
-input_image = true
-"#
-        )
-    } else {
-        format!(
-            "[provider]\nbase_url = \"http://127.0.0.1:{port}/v1\"\napi_key = \"mock-key\"\nmodel = \"mock-model\"\n"
-        )
-    };
+{input_image_line}"#
+    );
     std::fs::write(&config_path, config).unwrap();
     let data_dir = dir.join("data");
     (config_path, dir, data_dir)
@@ -484,13 +482,6 @@ fn rollout_user_images_serde_roundtrip_and_compat() {
         }
         _ => panic!("类型往返"),
     }
-    // 旧记录无 images 字段 → serde default 兼容
-    let old: RolloutRecord =
-        serde_json::from_str(r#"{"type":"user","text":"hi","files":[]}"#).unwrap();
-    match old {
-        RolloutRecord::User { images, .. } => assert!(images.is_empty(), "旧记录空图片"),
-        _ => panic!(),
-    }
 }
 
 #[test]
@@ -592,9 +583,13 @@ fn setup_paste(
     )
     .unwrap();
     let config_path = dir.join("config.toml");
-    let config = if input_image {
-        format!(
-            r#"default_provider = "mock"
+    let input_image_line = if input_image {
+        "input_image = true\n"
+    } else {
+        ""
+    };
+    let config = format!(
+        r#"default_provider = "mock"
 default_model = "mock-model"
 
 [[providers]]
@@ -609,14 +604,8 @@ enabled = true
 id = "mock-model"
 context_window = 128000
 max_output_tokens = 8192
-input_image = true
-"#
-        )
-    } else {
-        format!(
-            "[provider]\nbase_url = \"http://127.0.0.1:{port}/v1\"\napi_key = \"mock-key\"\nmodel = \"mock-model\"\n"
-        )
-    };
+{input_image_line}"#
+    );
     std::fs::write(&config_path, config).unwrap();
     let data_dir = dir.join("data");
     let agent =

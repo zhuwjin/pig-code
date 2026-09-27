@@ -4322,21 +4322,19 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
 
     // A3b：通知开标签的结构化 meta 解析（气泡渲染数据源）
     let (agent_id, title, duration_ms, record, result) = {
-        let mut found = None;
         let mut waited = 0u64;
         loop {
             timer!(200).await;
             waited += 200;
             assert!(waited < 10_000, "通知 meta 解析超时");
-            found = app!(|app: &mut AppView, cx| {
+            let found = app!(|app: &mut AppView, cx| {
                 let views = app.views.get(&session_c)?;
                 views.thread.read(cx).debug_task_notification_meta()
             });
             if found.is_some() {
-                break;
+                break found.expect("已判 Some");
             }
         }
-        found.expect("已判 Some")
     };
     assert!(
         title.contains("子代理自测委派"),
@@ -4409,21 +4407,21 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         );
     });
     // 等 bg Agent 卡的代理卡元信息（SubagentCard 先于子代理执行到达，带 agent_id）
-    let mut bg_agent_id = String::new();
-    let mut waited = 0u64;
-    loop {
-        timer!(50).await;
-        waited += 50;
-        assert!(waited < 15_000, "后台代理卡元信息超时");
-        let meta = app!(|app: &mut AppView, cx| {
-            let views = app.views.get(&session_d)?;
-            views.thread.read(cx).debug_agent_card_meta()
-        });
-        if let Some((id, _)) = meta {
-            bg_agent_id = id;
-            break;
+    let bg_agent_id = {
+        let mut waited = 0u64;
+        loop {
+            timer!(50).await;
+            waited += 50;
+            assert!(waited < 15_000, "后台代理卡元信息超时");
+            let meta = app!(|app: &mut AppView, cx| {
+                let views = app.views.get(&session_d)?;
+                views.thread.read(cx).debug_agent_card_meta()
+            });
+            if let Some((id, _)) = meta {
+                break id;
+            }
         }
-    }
+    };
     // 立即开 tab（此刻子代理大概率仍在跑：mock 子侧 ≥2 次请求 × 50ms/片）
     app!(|app: &mut AppView, cx| {
         app.open_subagent_tab(

@@ -1,32 +1,6 @@
 use std::path::PathBuf;
 
-use pig_protocol::{AppConfig, ModelConfig, ProviderConfig};
-use serde::Deserialize;
-
-/// 旧格式（M2-M7）：[provider] 单供应商
-#[derive(Deserialize)]
-struct LegacyConfig {
-    provider: LegacyProvider,
-}
-
-#[derive(Deserialize)]
-struct LegacyProvider {
-    base_url: String,
-    api_key: String,
-    model: String,
-    #[serde(default = "default_context_window")]
-    context_window: u64,
-    #[serde(default = "default_max_output_tokens")]
-    max_output_tokens: u64,
-}
-
-fn default_context_window() -> u64 {
-    128_000
-}
-
-fn default_max_output_tokens() -> u64 {
-    8_192
-}
+use pig_protocol::AppConfig;
 
 pub fn default_path() -> PathBuf {
     crate::data_dir().join("config.toml")
@@ -53,47 +27,11 @@ pub fn load(path: &std::path::Path) -> Result<AppConfig, String> {
     }
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("读取配置失败 {}: {e}", path.display()))?;
-    // 新格式优先
-    if let Ok(mut config) = toml::from_str::<AppConfig>(&raw) {
-        if !config.providers.is_empty() {
-            warn_duplicate_provider_ids(&config);
-            expand_env_keys(&mut config);
-            return Ok(config);
-        }
-    }
-    // 旧格式迁移
-    if let Ok(legacy) = toml::from_str::<LegacyConfig>(&raw) {
-        let config = migrate(legacy.provider);
-        let _ = save(path, &config);
-        let mut config = config;
-        expand_env_keys(&mut config);
-        return Ok(config);
-    }
-    Err(format!(
-        "解析配置失败 {}: 既不是新格式也不是旧格式",
-        path.display()
-    ))
-}
-
-fn migrate(legacy: LegacyProvider) -> AppConfig {
-    let model_id = legacy.model.clone();
-    AppConfig {
-        providers: vec![ProviderConfig {
-            id: "default".to_string(),
-            name: "默认供应商".to_string(),
-            base_url: legacy.base_url,
-            api_key: legacy.api_key,
-            api_format: pig_protocol::ApiFormat::OpenAiChat,
-            enabled: true,
-            models: vec![ModelConfig::new(
-                &model_id,
-                legacy.context_window,
-                legacy.max_output_tokens,
-            )],
-        }],
-        default_provider: "default".to_string(),
-        default_model: model_id,
-    }
+    let mut config = toml::from_str::<AppConfig>(&raw)
+        .map_err(|e| format!("解析配置失败 {}: {e}", path.display()))?;
+    warn_duplicate_provider_ids(&config);
+    expand_env_keys(&mut config);
+    Ok(config)
 }
 
 fn expand_env_keys(config: &mut AppConfig) {

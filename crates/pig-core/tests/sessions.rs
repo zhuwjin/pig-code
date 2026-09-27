@@ -617,7 +617,7 @@ async fn session_model_mode_persist_and_inherit() {
         .ops
         .send(Op::SetModel {
             session_id: session_a.clone(),
-            provider_id: "default".into(),
+            provider_id: "mock".into(),
             model_id: "mock-model".into(),
             reasoning_level: Some("high".into()),
         })
@@ -665,7 +665,7 @@ async fn session_model_mode_persist_and_inherit() {
             *exec_mode
         ),
         (
-            Some("default"),
+            Some("mock"),
             Some("mock-model"),
             Some("high"),
             ExecMode::FullAccess
@@ -709,7 +709,7 @@ async fn session_model_mode_persist_and_inherit() {
             *exec_mode
         ),
         (
-            Some("default"),
+            Some("mock"),
             Some("mock-model"),
             Some("high"),
             ExecMode::FullAccess
@@ -741,7 +741,7 @@ async fn switch_preserves_mode_without_turn() {
         .ops
         .send(Op::SetModel {
             session_id: session_a.clone(),
-            provider_id: "default".into(),
+            provider_id: "mock".into(),
             model_id: "mock-model".into(),
             reasoning_level: Some("high".into()),
         })
@@ -834,7 +834,7 @@ async fn switch_preserves_mode_without_turn() {
             *exec_mode
         ),
         (
-            Some("default"),
+            Some("mock"),
             Some("mock-model"),
             Some("high"),
             ExecMode::FullAccess

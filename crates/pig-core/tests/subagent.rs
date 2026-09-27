@@ -326,7 +326,7 @@ async fn subagent_model_resolve_failure_is_strict() {
     assert!(is_error, "模型解析失败应 is_error: {output}");
     assert!(output.contains("p9"), "应点名坏供应商: {output}");
     assert!(
-        output.contains("default/mock-model"),
+        output.contains("mock/mock-model"),
         "应列可用 providerId/modelId: {output}"
     );
     agent.shutdown();
@@ -905,17 +905,4 @@ async fn subagent_background_card_replayed() {
     });
     assert!(has_finished, "回放末尾应补 finished 落终态: {collected:#?}");
     agent2.shutdown();
-}
-
-/// 旧格式 rollout 记录（无 agent_card 字段）解析兼容（serde default）：
-/// 回放路径照常工作、代理卡回落标准工具卡
-#[test]
-fn rollout_tool_call_without_agent_card_parses() {
-    let line = r#"{"type":"tool_call","tool":"Agent","summary":"子代理 explore: x","arguments":"{}","output":"agent_id: a1-1\nstatus: running","is_error":false}"#;
-    let record: pig_core::rollout::RolloutRecord =
-        serde_json::from_str(line).expect("旧记录应解析");
-    let pig_core::rollout::RolloutRecord::ToolCall { agent_card, .. } = record else {
-        panic!("应是 ToolCall 记录");
-    };
-    assert!(agent_card.is_none(), "旧记录无代理卡元信息");
 }

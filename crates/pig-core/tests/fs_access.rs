@@ -333,7 +333,7 @@ async fn extra_read_roots_allow_read_only() {
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&record_dir).unwrap();
     std::fs::write(record_dir.join("a1.result.md"), "子代理结果全文\n").unwrap();
-    std::fs::write(base.join("data").join("config.toml"), "[provider]\n").unwrap();
+    std::fs::write(base.join("data").join("config.toml"), "占位\n").unwrap();
 
     let mut tracker = ChangeTracker::default();
     let state = state_with_extra_roots(vec![sessions.clone()]);

@@ -489,7 +489,7 @@ async fn danger_always_allow_not_remembered() {
 
 // ---------- Yolo（无管制全自动） ----------
 
-/// "Yolo" 字符串 serde 往返（sessions 表按变体名存取，旧数据天然兼容）
+/// "Yolo" 字符串 serde 往返（sessions 表按变体名存取）
 #[test]
 fn exec_mode_yolo_serde_roundtrip() {
     let json = serde_json::to_string(&ExecMode::Yolo).unwrap();

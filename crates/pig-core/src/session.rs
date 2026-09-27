@@ -697,21 +697,13 @@ impl Session {
                         .unwrap_or_else(|_| arguments.clone());
                     let (tool, output) = (tool.clone(), output.clone());
                     let is_error = *is_error;
-                    // 旧记录的 summary 可能是早期 80 字符截断版：回放时从完整参数重算
+                    // 回放统一从完整参数重算 summary，summary 逻辑演进后回放也一致
                     let summary = tool::summarize(&crate::provider::ToolCall {
                         id: String::new(),
                         name: tool.clone(),
                         arguments: arguments.clone(),
                     });
-                    // 旧记录没有 edit 字段：成功的 Write/Edit 从参数兜底重建 diff
-                    //（失败/被拒绝的记录不能兜底——会把未发生的修改画成 diff 卡）
-                    let edit = edit.clone().or_else(|| {
-                        if is_error {
-                            None
-                        } else {
-                            tool::fallback_edit_diff(&self.cwd, &tool, arguments)
-                        }
-                    });
+                    let edit = edit.clone();
                     self.emit(
                         |session_id, seq| Event::ToolCallBegin {
                             session_id,
