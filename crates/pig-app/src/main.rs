@@ -4543,6 +4543,19 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     });
     let tab_active = app!(|app: &mut AppView, cx| app.debug_subagent_tab(cx).is_some());
     assert!(tab_active, "OpenSubagent 后应有激活的子代理 tab");
+    // 回归：打开「后台 Agent」弹层走真实渲染帧不炸——palette_open 漏 AgentTasks
+    // 会落进 render_popup 的 unreachable（用户实机踩到的崩溃）
+    let popup_open = app!(|app: &mut AppView, cx| {
+        app.composer
+            .update(cx, |composer, cx| composer.debug_open_agent_tasks_popup(cx))
+    });
+    assert!(popup_open, "Agent 弹层应打开");
+    timer!(200).await;
+    app!(|app: &mut AppView, cx| {
+        app.composer
+            .update(cx, |composer, cx| composer.debug_close_popup(cx));
+    });
+    println!("[selftest] 后台 Agent 弹层渲染（palette 路由回归）OK");
     println!("[selftest] 后台任务 chip 拆分（Agent chip 显隐/agent_id/点行开 tab）OK");
 
     // A3e②：模拟重启重开会话 D——代理卡元信息从 rollout 回放重建（不退化成

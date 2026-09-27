@@ -842,6 +842,20 @@ impl Composer {
             .collect()
     }
 
+    /// 自测用：模拟点开「后台 Agent」chip 弹层（复现 palette_open 漏 AgentTasks
+    /// 导致 render_popup 踩 unreachable 的崩溃路径）；返回弹层是否打开
+    pub fn debug_open_agent_tasks_popup(&mut self, cx: &mut Context<Self>) -> bool {
+        self.popup = Some((Popup::AgentTasks, 0));
+        cx.notify();
+        matches!(self.popup, Some((Popup::AgentTasks, _)))
+    }
+
+    /// 自测用：收起任意弹层
+    pub fn debug_close_popup(&mut self, cx: &mut Context<Self>) {
+        self.popup = None;
+        cx.notify();
+    }
+
     pub fn set_tasks(&mut self, tasks: Vec<TaskSummary>, cx: &mut Context<Self>) {
         // 对应类别的任务清空时收起对应弹层（chip 按 agent_id 拆分后各自判定）
         if !tasks.iter().any(|t| t.agent_id.is_none())
@@ -2743,7 +2757,10 @@ impl Render for Composer {
         let context_open = matches!(self.popup, Some((Popup::Context, _)));
         let context_popup =
             (context_open && self.context_usage.is_some()).then(|| self.render_context_popup(cx));
-        let aux_open = matches!(self.popup, Some((Popup::Todos | Popup::Tasks, _)));
+        let aux_open = matches!(
+            self.popup,
+            Some((Popup::Todos | Popup::Tasks | Popup::AgentTasks, _))
+        );
         let palette_open = cwd_open
             || branch_open
             || exec_open
