@@ -431,7 +431,13 @@ impl Session {
             seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_counter: 0,
             tracker: ChangeTracker::default(),
-            state: crate::task::SessionToolState::new(meta.id, task_notify, wake_notify),
+            state: crate::task::SessionToolState::new(
+                meta.id,
+                task_notify,
+                wake_notify,
+                // sessions 子树（子代理 result.md/上下文 jsonl）始终可读
+                vec![data_dir.join("sessions")],
+            ),
             always_allowed: HashSet::new(),
             permissions: load_permissions(&meta.cwd),
             pre_plan_mode: None,
@@ -495,7 +501,13 @@ impl Session {
             seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_counter: 0,
             tracker,
-            state: crate::task::SessionToolState::new(id.to_string(), task_notify, wake_notify),
+            state: crate::task::SessionToolState::new(
+                id.to_string(),
+                task_notify,
+                wake_notify,
+                // sessions 子树（子代理 result.md/上下文 jsonl）始终可读
+                vec![data_dir.join("sessions")],
+            ),
             always_allowed: HashSet::new(),
             permissions: load_permissions(&cwd),
             pre_plan_mode: None,
@@ -2119,13 +2131,10 @@ impl Session {
         );
         // 记录文件路径（子代理上下文 JSONL 绝对路径，过同样的属性消毒）
         let record_attr = sanitize_notification_attr(&drive.jsonl.display().to_string(), 512);
-        // 结果全文路径（drive_subagent 收尾落盘；通知文件行指它，kimi output.log 同款）
-        let result_attr = sanitize_notification_attr(
-            &agent_result_path(&drive.jsonl, &drive.agent_id)
-                .display()
-                .to_string(),
-            512,
-        );
+        // 结果全文路径（drive_subagent 收尾落盘；通知正文给指针 + Read 引导，
+        // kimi output.log 同款——不内联全文）
+        let result_path = agent_result_path(&drive.jsonl, &drive.agent_id);
+        let result_attr = sanitize_notification_attr(&result_path.display().to_string(), 512);
         let started_at = std::time::Instant::now();
         // 给父模型的即时回执（不依赖任务结果，先组好）
         let running_note = format!(
@@ -2190,18 +2199,52 @@ impl Session {
             let _ = state.task_notify.send(session_id.clone());
             // 被 TaskStop 杀掉的不唤醒父会话
             if !result.cancelled {
-                // 开标签带结构化属性（UI 紧凑卡展示用），正文逐字保持原样
-                // ——结果全文是模型唤醒的意义所在，只是 UI 不再直接展示
+                // 通知正文对齐 kimi-code：状态行 + 结果文件路径 + Read 引导，
+                // 不内联结果全文（全文在 result.md——sessions/ 子树在
+                // extra_read_roots 白名单内，模型需要时自己 Read）。
+                // 开标签的结构化属性不动（UI 紧凑卡数据源）。
                 let duration_ms = started_at.elapsed().as_millis() as u64;
+                let duration = human_duration(duration_ms);
+                let written_size = std::fs::metadata(&result_path).ok().map(|m| m.len());
+                let body = if result.is_error {
+                    match written_size {
+                        Some(bytes) => format!(
+                            "后台子代理 {agent_id}（{profile_name}）失败：{}（耗时 {duration}）。\n详细输出已写入 {}（{}），可用 Read 查看。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续（子代理保留全部上文，续跑时让它重做没拿到结果的那步）。",
+                            result.result_text,
+                            result_path.display(),
+                            human_size(bytes)
+                        ),
+                        // 落盘失败降级：无文件可指，原因内联
+                        None => format!(
+                            "后台子代理 {agent_id}（{profile_name}）失败：{}（耗时 {duration}）。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续（子代理保留全部上文，续跑时让它重做没拿到结果的那步）。",
+                            result.result_text
+                        ),
+                    }
+                } else {
+                    match written_size {
+                        Some(bytes) => format!(
+                            "后台子代理 {agent_id}（{profile_name}）已完成（{} 步，耗时 {duration}）。\n结果已写入 {}（{}），需要内容请用 Read 读取该文件。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。",
+                            result.turns,
+                            result_path.display(),
+                            human_size(bytes)
+                        ),
+                        // 落盘失败降级：无文件可指，内联 ≤3000 字符预览（kimi 同款兜底）
+                        None => format!(
+                            "后台子代理 {agent_id}（{profile_name}）已完成（{} 步，耗时 {duration}）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。",
+                            result.turns,
+                            result.result_text.chars().take(3000).collect::<String>()
+                        ),
+                    }
+                };
                 let notification = if result.is_error {
                     format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
-                        result.turns, result.result_text
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n{body}\n</task-notification>",
+                        result.turns
                     )
                 } else {
                     format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
-                        result.turns, result.turns, result.result_text
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n{body}\n</task-notification>",
+                        result.turns
                     )
                 };
                 let _ = state.wake_notify.send((session_id, notification));
@@ -2292,6 +2335,26 @@ fn sanitize_notification_attr(text: &str, max_chars: usize) -> String {
         .filter(|c| !matches!(c, '"' | '\n' | '\r'))
         .take(max_chars)
         .collect()
+}
+
+/// 耗时人类可读格式：≥60s → "Xm Ys"，否则 "X.X 秒"
+fn human_duration(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1000)
+    } else {
+        format!("{:.1} 秒", ms as f64 / 1000.0)
+    }
+}
+
+/// 文件大小人类可读格式：KB/MB 一位小数
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    }
 }
 
 /// drive_subagent 的结果

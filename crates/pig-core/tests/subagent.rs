@@ -486,14 +486,19 @@ async fn subagent_background_full_link() {
     assert!(running.contains("task_id: b"), "{running}");
     let agent_id = parse_agent_id(&running).to_string();
 
-    // 完成通知：合成 user 消息送达（含 agent_id 与子结论），其后唤醒回合收尾
+    // 完成通知：合成 user 消息送达——正文不内联结果全文，只给状态行 +
+    // 结果文件路径 + Read 引导（kimi-code 式）；子结论全文在 result.md
     let notification = notification.expect("应有 <task-notification> 合成消息");
     assert!(notification.contains(&agent_id), "{notification}");
     assert!(
-        notification.contains(mock::SUBAGENT_CHILD_DONE),
-        "通知应含子结论: {notification}"
+        !notification.contains(mock::SUBAGENT_CHILD_DONE),
+        "通知正文不应内联子结论全文: {notification}"
     );
     assert!(notification.contains("已完成"), "{notification}");
+    assert!(
+        notification.contains("耗时"),
+        "正文应带耗时: {notification}"
+    );
     // 开标签带结构化属性（UI 紧凑卡用；description 已消毒）
     assert!(
         notification.contains(&format!("agent_id=\"{agent_id}\"")),
@@ -516,13 +521,21 @@ async fn subagent_background_full_link() {
         notification.contains("record=\"") && notification.contains(".agents/"),
         "开标签应带子代理上下文路径: {notification}"
     );
-    // 结果全文路径属性 + 文件内容为完整子结论
+    // 结果全文路径属性 + 正文 Read 引导 + 文件内容为完整子结论
     assert!(
         notification.contains("result=\"") && notification.contains(".result.md"),
         "开标签应带结果文件路径: {notification}"
     );
     let result_path =
         agent_log_path(&data_dir, &sid, &agent_id).with_file_name(format!("{agent_id}.result.md"));
+    assert!(
+        notification.contains(&result_path.display().to_string()),
+        "正文应给结果文件路径: {notification}"
+    );
+    assert!(
+        notification.contains("用 Read 读取"),
+        "正文应带 Read 引导: {notification}"
+    );
     let full = std::fs::read_to_string(&result_path)
         .unwrap_or_else(|e| panic!("结果文件应存在 {}: {e}", result_path.display()));
     assert!(
@@ -729,6 +742,7 @@ async fn subagent_background_approval_gate() {
 
     let mut saw_approval = false;
     let mut notification: Option<String> = None;
+    let mut bg_output: Option<String> = None;
     let mut completes = 0usize;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -755,6 +769,11 @@ async fn subagent_background_approval_gate() {
             Event::UserMessage { text, .. } if text.contains("<task-notification") => {
                 notification = Some(text.clone());
             }
+            Event::ToolCallEnd {
+                item_id, output, ..
+            } if item_id.contains("call_agent_bg") => {
+                bg_output = Some(output.clone());
+            }
             Event::TurnComplete { .. } => completes += 1,
             _ => {}
         }
@@ -769,9 +788,23 @@ async fn subagent_background_approval_gate() {
         "批准后后台命令应真执行（文件落地）"
     );
     let notification = notification.expect("应有完成通知");
+    // 通知正文不内联结果全文；子结论在 result.md（路径见通知正文/result 属性）
     assert!(
-        notification.contains(mock::SUBAGENT_CHILD_DONE),
-        "{notification}"
+        !notification.contains(mock::SUBAGENT_CHILD_DONE),
+        "通知正文不应内联子结论全文: {notification}"
+    );
+    assert!(
+        notification.contains("用 Read 读取"),
+        "通知正文应带 Read 引导: {notification}"
+    );
+    let bg_output = bg_output.expect("应有后台 Agent ToolCallEnd");
+    let agent_id = parse_agent_id(&bg_output);
+    let result_path =
+        agent_log_path(&data_dir, &sid, agent_id).with_file_name(format!("{agent_id}.result.md"));
+    let full = std::fs::read_to_string(&result_path).expect("结果文件应存在");
+    assert!(
+        full.contains(mock::SUBAGENT_CHILD_DONE),
+        "结果文件应含子结论: {full}"
     );
     agent.shutdown();
 }

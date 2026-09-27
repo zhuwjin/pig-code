@@ -613,6 +613,21 @@ pub fn resolve_with_access(
             if is_tmp_absolute_path(path) {
                 return Ok(resolved);
             }
+            // 额外只读根（data_dir/sessions：子代理 result.md/上下文记录）始终可读——
+            // 与 tmp 并列的豁免、同口径只对绝对路径请求生效（相对 ../ 逃逸不算）；
+            // 只放 Read，Write 不放。resolved 已是 resolve_core 判定后的路径
+            //（父目录 canonical + 文件名），直接与构造期 canonical 化的 root 比前缀。
+            // 敏感文件检查（is_sensitive_file）在 resolve 之后由工具照旧执行、不受
+            // 豁免影响；config.toml 在 data_dir 根部不在 sessions/ 下，天然排除。
+            if access == FsAccess::Read
+                && Path::new(path).is_absolute()
+                && state
+                    .extra_read_roots
+                    .iter()
+                    .any(|root| resolved.starts_with(root))
+            {
+                return Ok(resolved);
+            }
             let allowed = match access {
                 FsAccess::Read => state.fs_read_outside.load(Ordering::Relaxed),
                 FsAccess::Write => state.fs_write_outside.load(Ordering::Relaxed),
@@ -2855,7 +2870,7 @@ impl Tool for AgentTool {
              - 查找类任务给确切路径或命令；调查类任务给问题，不给死步骤。\n\
              - 不要委派一两步就能完成的琐事；子代理运行中不要并行重做它的工作，也不要中途抛弃它自己手动完成。\n\
              - 子代理的结果只有你能看到（用户看不到），需要时自己转述。\n\
-             - run_in_background=true 立即返回（带 task_id），完成后结果以 <task-notification> 通知送达——不要轮询，也不要用 TaskOutput 盯着等。优先用 resume 继续已有子代理而不是新起实例。\n\
+             - run_in_background=true 立即返回（带 task_id）；完成后你会收到通知，**结果全文在通知给出的文件里，用 Read 读取**，不要轮询。优先用 resume 继续已有子代理而不是新起实例。\n\
              可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
              {}",
             self.profiles_summary
@@ -2871,7 +2886,7 @@ impl Tool for AgentTool {
                         "description": { "type": "string", "description": "3-5 词任务简述，UI 显示用" },
                         "prompt": { "type": "string", "description": "完整自包含的任务简报（子代理看不到本会话任何消息）" },
                         "subagent_type": { "type": "string", "description": "子代理类型，省略默认 general-purpose；与 resume 互斥" },
-                        "run_in_background": { "type": "boolean", "description": "true 立即返回（带 task_id），子代理后台运行，完成后结果以 <task-notification> 通知送达" },
+                        "run_in_background": { "type": "boolean", "description": "true 立即返回（带 task_id），子代理后台运行；完成后你会收到通知，结果全文在通知给出的文件里（用 Read 读取）" },
                         "resume": { "type": "string", "description": "已有 agent_id，在其上下文上续跑（与 subagent_type 互斥）" }
                     },
                     "required": ["description", "prompt"]

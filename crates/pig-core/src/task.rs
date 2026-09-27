@@ -69,6 +69,9 @@ pub struct SessionToolState {
     pub fs_read_outside: Arc<AtomicBool>,
     /// 会话级开关：允许写入工作区外文件
     pub fs_write_outside: Arc<AtomicBool>,
+    /// 始终可读的额外根（构造时尽量 canonicalize）：data_dir/sessions 子树
+    ///（子代理 result.md/上下文 jsonl），Read 豁免与 tmp 并列；只放读不放写
+    pub extra_read_roots: Vec<PathBuf>,
 }
 
 impl Clone for SessionToolState {
@@ -83,6 +86,7 @@ impl Clone for SessionToolState {
             read_states: self.read_states.clone(),
             fs_read_outside: self.fs_read_outside.clone(),
             fs_write_outside: self.fs_write_outside.clone(),
+            extra_read_roots: self.extra_read_roots.clone(),
         }
     }
 }
@@ -92,6 +96,7 @@ impl SessionToolState {
         session_id: String,
         task_notify: UnboundedSender<String>,
         wake_notify: UnboundedSender<(String, String)>,
+        extra_read_roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             todos: TodoHandle::default(),
@@ -103,14 +108,20 @@ impl SessionToolState {
             read_states: Arc::new(Mutex::new(HashMap::new())),
             fs_read_outside: Arc::new(AtomicBool::new(false)),
             fs_write_outside: Arc::new(AtomicBool::new(false)),
+            // 尽量 canonicalize（目录不存在则用原路径）：白名单比对在 canonical 口径下进行
+            extra_read_roots: extra_read_roots
+                .into_iter()
+                .map(|root| root.canonicalize().unwrap_or(root))
+                .collect(),
         }
     }
 
     /// 测试用：session_id = "test"，notify/wake 的 receiver 直接丢弃（send 失败忽略）。
+    /// extra_read_roots 给 tmp 目录（tmp 本就豁免，不改变既有用例行为）。
     pub fn for_test() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
-        Self::new("test".to_string(), tx, wake_tx)
+        Self::new("test".to_string(), tx, wake_tx, vec![std::env::temp_dir()])
     }
 }
 

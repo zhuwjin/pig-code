@@ -303,3 +303,123 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
     );
     agent.shutdown();
 }
+
+/// 带额外只读根的会话状态（data_dir/sessions 白名单测试用）
+fn state_with_extra_roots(roots: Vec<std::path::PathBuf>) -> SessionToolState {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+    SessionToolState::new("test".to_string(), tx, wake_tx, roots)
+}
+
+/// 非 tmp 的 fixture 根：tmp 豁免会放行一切 tmp 内绝对路径，白名单边界在 tmp 下
+/// 测不出来；CARGO_TARGET_TMPDIR（target/tmp/）是 cargo 给集成测试的 scratch 目录。
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pig-fs-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
+
+/// extra_read_roots（data_dir/sessions 子树）始终可读：root 内绝对路径读放行、
+/// root 外（data_dir 根部 config.toml）绝对路径仍拒、root 内写仍拒（只放读）、
+/// 相对 ../ 逃逸进 root 不放行（与 tmp 豁免同口径：只对绝对路径请求生效）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extra_read_roots_allow_read_only() {
+    let base = scratch_dir("extra-roots");
+    let workspace = base.join("workspace");
+    let sessions = base.join("data").join("sessions");
+    let record_dir = sessions.join("s1.agents");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&record_dir).unwrap();
+    std::fs::write(record_dir.join("a1.result.md"), "子代理结果全文\n").unwrap();
+    std::fs::write(base.join("data").join("config.toml"), "[provider]\n").unwrap();
+
+    let mut tracker = ChangeTracker::default();
+    let state = state_with_extra_roots(vec![sessions.clone()]);
+
+    // 1. root 内绝对路径读：放行
+    let result_md = record_dir.join("a1.result.md");
+    let (out, is_error) = run(
+        &workspace,
+        &mut tracker,
+        &state,
+        "Read",
+        serde_json::json!({"path": result_md.to_string_lossy()}),
+    )
+    .await;
+    assert!(!is_error, "白名单内读应放行: {out}");
+    assert!(out.contains("子代理结果全文"), "{out}");
+
+    // 2. root 外 data_dir 根部（config.toml）绝对路径：仍拒
+    //（真实布局即如此——config.toml 在 data_dir 根部不在 sessions/ 下，天然排除）
+    let config = base.join("data").join("config.toml");
+    let (out, is_error) = run(
+        &workspace,
+        &mut tracker,
+        &state,
+        "Read",
+        serde_json::json!({"path": config.to_string_lossy()}),
+    )
+    .await;
+    assert!(is_error, "白名单外仍应拒绝: {out}");
+    assert!(out.contains("越出工作目录"), "{out}");
+
+    // 3. root 内写（绝对路径）：仍拒（豁免只放读）
+    let new_file = record_dir.join("evil.md");
+    let (out, is_error) = run(
+        &workspace,
+        &mut tracker,
+        &state,
+        "Write",
+        serde_json::json!({"path": new_file.to_string_lossy(), "content": "x\n"}),
+    )
+    .await;
+    assert!(is_error, "白名单只放读、写仍拒: {out}");
+    assert!(!new_file.exists(), "写不应落地");
+
+    // 4. 相对 ../ 逃逸进 root：不放行（对齐 tmp 的绝对路径口径）
+    let (out, is_error) = run(
+        &workspace,
+        &mut tracker,
+        &state,
+        "Read",
+        serde_json::json!({"path": "../data/sessions/s1.agents/a1.result.md"}),
+    )
+    .await;
+    assert!(is_error, "相对逃逸不应吃白名单豁免: {out}");
+    assert!(out.contains("越出工作目录"), "{out}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// root 经 symlink 指入：构造期 canonicalize root 后，经链接路径的读仍放行。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extra_read_roots_root_via_symlink() {
+    let base = scratch_dir("extra-roots-link");
+    let workspace = base.join("workspace");
+    let real_sessions = base.join("data").join("sessions");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&real_sessions).unwrap();
+    std::fs::write(real_sessions.join("a1.result.md"), "链接结果\n").unwrap();
+    // 用链接路径当 root 传入（new() 内 canonicalize），也用链接路径发起读
+    let link = base.join("link-sessions");
+    std::os::unix::fs::symlink(&real_sessions, &link).unwrap();
+
+    let mut tracker = ChangeTracker::default();
+    let state = state_with_extra_roots(vec![link.clone()]);
+    let target = link.join("a1.result.md");
+    let (out, is_error) = run(
+        &workspace,
+        &mut tracker,
+        &state,
+        "Read",
+        serde_json::json!({"path": target.to_string_lossy()}),
+    )
+    .await;
+    assert!(!is_error, "root 经 symlink 指入的读应放行: {out}");
+    assert!(out.contains("链接结果"), "{out}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
