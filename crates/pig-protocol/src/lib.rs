@@ -140,6 +140,12 @@ pub enum Op {
         session_id: String,
         text: String,
     },
+    /// 加载后台子代理的完整对话（右侧「子代理」tab 只读展示）；
+    /// 无需 Session 实例，直接读 {sessions_dir}/{session_id}.agents/{agent_id}.jsonl
+    LoadSubagent {
+        session_id: String,
+        agent_id: String,
+    },
     /// 非会话态：按模型 ID 查 models.dev 元数据（上下文/输入输出上限/推理等级）；
     /// 磁盘缓存命中直接回，未命中（新模型）重新拉取后再回
     ModelLookup {
@@ -732,9 +738,34 @@ pub enum Event {
         seq: u64,
         files: Vec<EditDiff>,
     },
+    /// Op::LoadSubagent 的应答：子代理完整对话的只读投影（右侧「子代理」tab）
+    SubagentHistory {
+        session_id: String,
+        seq: u64,
+        agent_id: String,
+        /// meta.description（tab 标题/卡片标题用）
+        title: String,
+        /// "{provider} · {model}"
+        subtitle: String,
+        items: Vec<SubagentItem>,
+    },
     Error {
         session_id: Option<String>,
         seq: u64,
         message: String,
     },
+}
+
+/// 子代理对话的只读展示行（Event::SubagentHistory 载荷）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubagentItem {
+    /// "user" | "assistant" | "tool"
+    pub role: String,
+    /// user/assistant 正文；tool 为调用摘要
+    pub text: String,
+    /// tool 行的工具名
+    pub tool: Option<String>,
+    /// tool 行输出（core 侧截断 2000 字符，字符边界）
+    pub output: Option<String>,
+    pub is_error: bool,
 }

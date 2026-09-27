@@ -2077,6 +2077,12 @@ impl Session {
         let agent_id = drive.agent_id.clone();
         let profile_name = drive.profile.name.clone();
         let task_id_bg = task_id.clone();
+        // 通知开标签的结构化属性（UI 紧凑卡用；正文保持逐字不变）
+        let description_attr = sanitize_notification_attr(&drive.description);
+        let model_attr = format!(
+            "{} · {}",
+            drive.child_config.provider_name, drive.child_config.model
+        );
         // 给父模型的即时回执（不依赖任务结果，先组好）
         let running_note = format!(
             "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\n子代理已在后台运行，完成后结果会以 <task-notification> 通知送达——不要轮询。\n可用 TaskOutput 看进度、TaskStop 停止、Agent(resume=\"{agent_id}\", prompt=\"...\") 续跑。"
@@ -2130,15 +2136,17 @@ impl Session {
             let _ = state.task_notify.send(session_id.clone());
             // 被 TaskStop 杀掉的不唤醒父会话
             if !result.cancelled {
+                // 开标签带结构化属性（UI 紧凑卡展示用），正文逐字保持原样
+                // ——结果全文是模型唤醒的意义所在，只是 UI 不再直接展示
                 let notification = if result.is_error {
                     format!(
-                        "<task-notification>\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
-                        result.result_text
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\">\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
+                        result.turns, result.result_text
                     )
                 } else {
                     format!(
-                        "<task-notification>\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
-                        result.turns, result.result_text
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\">\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
+                        result.turns, result.turns, result.result_text
                     )
                 };
                 let _ = state.wake_notify.send((session_id, notification));
@@ -2220,6 +2228,14 @@ fn persist_agent_msg(jsonl: &Path, msg: &ChatMsg) {
     let mut msg = msg.clone();
     msg.images.clear();
     persist_agent_line(jsonl, &serde_json::json!({ "type": "msg", "msg": msg }));
+}
+
+/// 通知开标签属性值消毒：去 `"` 与换行（防标签被截断/注入），截 60 字符
+fn sanitize_notification_attr(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '"' | '\n' | '\r'))
+        .take(60)
+        .collect()
 }
 
 /// drive_subagent 的结果
@@ -3401,6 +3417,51 @@ pub async fn agent_loop(
                                         diff,
                                     })
                                     .await;
+                            }
+                        });
+                    }
+                    Op::LoadSubagent { session_id, agent_id } => {
+                        // 无需 Session 实例：直接读子代理上下文 JSONL（右侧 tab 只读展示）
+                        let tx = event_tx.clone();
+                        let path = crate::agent::agents_dir(&sessions_dir, &session_id)
+                            .join(format!("{agent_id}.jsonl"));
+                        tokio::spawn(async move {
+                            let result =
+                                tokio::task::spawn_blocking(move || crate::agent::read_agent(&path))
+                                    .await;
+                            match result {
+                                Ok(Ok((meta, msgs))) => {
+                                    let (title, subtitle, items) =
+                                        crate::agent::display_items(&meta, &msgs);
+                                    let _ = tx
+                                        .send(Event::SubagentHistory {
+                                            session_id,
+                                            seq: 0,
+                                            agent_id,
+                                            title,
+                                            subtitle,
+                                            items,
+                                        })
+                                        .await;
+                                }
+                                Ok(Err(error)) => {
+                                    let _ = tx
+                                        .send(Event::Error {
+                                            session_id: Some(session_id),
+                                            seq: 0,
+                                            message: format!("读取子代理记录失败: {error}"),
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(Event::Error {
+                                            session_id: Some(session_id),
+                                            seq: 0,
+                                            message: format!("读取子代理记录任务失败: {e}"),
+                                        })
+                                        .await;
+                                }
                             }
                         });
                     }

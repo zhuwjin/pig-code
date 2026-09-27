@@ -454,7 +454,7 @@ async fn subagent_background_full_link() {
                 assert!(!is_error, "后台委派不应失败: {output}");
                 running_output = Some(output.clone());
             }
-            Event::UserMessage { text, .. } if text.contains("<task-notification>") => {
+            Event::UserMessage { text, .. } if text.contains("<task-notification") => {
                 notification = Some(text.clone());
             }
             Event::TaskListChanged { tasks, .. } => {
@@ -482,6 +482,19 @@ async fn subagent_background_full_link() {
         "通知应含子结论: {notification}"
     );
     assert!(notification.contains("已完成"), "{notification}");
+    // 开标签带结构化属性（UI 紧凑卡用；description 已消毒）
+    assert!(
+        notification.contains(&format!("agent_id=\"{agent_id}\"")),
+        "开标签应带 agent_id 属性: {notification}"
+    );
+    assert!(
+        notification.contains("status=\"completed\""),
+        "开标签应带 status: {notification}"
+    );
+    assert!(
+        notification.contains("description=\"子代理自测委派\""),
+        "开标签应带 description: {notification}"
+    );
     assert!(saw_agent_task, "任务面板应含子代理条目");
     agent.shutdown();
 }
@@ -652,7 +665,7 @@ async fn subagent_background_taskstop_no_wake() {
     assert!(
         !collected.iter().any(|e| matches!(
             e,
-            Event::UserMessage { text, .. } if text.contains("<task-notification>")
+            Event::UserMessage { text, .. } if text.contains("<task-notification")
         )),
         "TaskStop 杀掉的子代理不应唤醒父会话: {collected:#?}"
     );
@@ -705,7 +718,7 @@ async fn subagent_background_approval_gate() {
                     .await
                     .unwrap();
             }
-            Event::UserMessage { text, .. } if text.contains("<task-notification>") => {
+            Event::UserMessage { text, .. } if text.contains("<task-notification") => {
                 notification = Some(text.clone());
             }
             Event::TurnComplete { .. } => completes += 1,

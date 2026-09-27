@@ -188,16 +188,46 @@ fn parse_image_link(token: &str) -> Option<u32> {
     (label.parse::<u32>().ok()? == n).then_some(n)
 }
 
-/// 后台子代理完成/失败时 core 注入的合成用户消息（live 与回放同文）：
-/// 整段被 `<task-notification>…</task-notification>` 包裹时识别为通知，
-/// 返回剥掉最外层标签的正文（内层同名标签不剥，按普通文本留在正文里）。
-/// 只用于显示层分流，消息原文（含标签）不动。
-fn as_task_notification(text: &str) -> Option<&str> {
-    let inner = text
-        .trim()
-        .strip_prefix("<task-notification>")?
-        .strip_suffix("</task-notification>")?;
-    Some(inner.trim())
+/// 后台子代理完成/失败时 core 注入的合成用户消息（live 与回放同文）的解析结果。
+/// A3b 起开标签带结构化属性（`<task-notification agent_id=".." status=".." …>`），
+/// 缺属性 = 旧格式（A3 前期core 产物），兼容回落。
+struct TaskNotification<'a> {
+    agent_id: Option<String>,
+    status: Option<String>,
+    turns: Option<String>,
+    model: Option<String>,
+    description: Option<String>,
+    /// 剥掉最外层标签的正文（内层同名标签不剥，按普通文本留在正文里）
+    body: &'a str,
+}
+
+/// 整段被 `<task-notification…>…</task-notification>` 包裹时识别为通知，
+/// 解析开标签属性 + 剥标签正文。只用于显示层分流，消息原文（含标签）不动。
+fn as_task_notification(text: &str) -> Option<TaskNotification<'_>> {
+    let rest = text.trim().strip_prefix("<task-notification")?;
+    // 前缀后必须紧跟 '>' 或空白（防 <task-notification-foo> 误判）
+    if !rest.starts_with('>') && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (attrs, after) = rest.split_once('>')?;
+    let inner = after.strip_suffix("</task-notification>")?;
+    Some(TaskNotification {
+        agent_id: notification_attr(attrs, "agent_id"),
+        status: notification_attr(attrs, "status"),
+        turns: notification_attr(attrs, "turns"),
+        model: notification_attr(attrs, "model"),
+        description: notification_attr(attrs, "description"),
+        body: inner.trim(),
+    })
+}
+
+/// 从开标签属性段抽 `name="value"`（简单串搜；值不含引号——core 侧已消毒）
+fn notification_attr(attrs: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = attrs.find(&needle)? + needle.len();
+    let value = &attrs[start..];
+    let end = value.find('"')?;
+    Some(value[..end].to_string())
 }
 
 #[derive(Clone)]
@@ -206,6 +236,12 @@ pub enum ThreadEvent {
     ExecutePlan,
     /// 取消排队消息（文本匹配）
     CancelQueued(String),
+    /// 点击后台子代理通知卡：打开右侧「子代理」tab（只读完整对话）
+    OpenSubagent {
+        agent_id: String,
+        /// 展示标题（通知卡的 description）
+        title: String,
+    },
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,
@@ -544,6 +580,22 @@ impl ThreadView {
             .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
     }
 
+    /// 最近一条后台子代理通知的 (agent_id, 标题)（自测用；无通知/旧格式为 None）。
+    /// 标题 = description（缺省回退「后台子代理」），与紧凑卡渲染同口径。
+    pub fn debug_task_notification_meta(&self) -> Option<(String, String)> {
+        self.messages.iter().rev().find_map(|m| {
+            if m.role != Role::User {
+                return None;
+            }
+            let note = as_task_notification(&m.text)?;
+            let title = note
+                .description
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "后台子代理".to_string());
+            Some((note.agent_id?, title))
+        })
+    }
+
     /// 当前待审批的 request_id（自测用）。
     pub fn pending_approval(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| {
@@ -824,6 +876,8 @@ impl ThreadView {
             }
             Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
             }
+            // 右侧「子代理」tab 的数据（AppView 直接路由给面板，消息流不展示）
+            Event::SubagentHistory { .. } => {}
             Event::UserMessage { text, files, .. } => {
                 // 链接尾巴不进队列匹配（queued 里是用户输入原文）
                 let (body, _) = split_image_links(text.as_str());
@@ -917,8 +971,8 @@ impl ThreadView {
     ) -> AnyElement {
         // 后台子代理完成/失败的合成消息：渲染为通知卡而非用户气泡
         //（剥标签只在显示层，message.text 原文不动，live 与回放共用此路径）
-        if let Some(body) = as_task_notification(&message.text) {
-            return self.render_task_notification(body, cx);
+        if let Some(note) = as_task_notification(&message.text) {
+            return self.render_task_notification(ix, &note, cx);
         }
         v_flex()
             .w_full()
@@ -985,38 +1039,138 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 后台子代理的合成通知卡（样式对齐 plan_pending 的描边淡底卡）：
-    /// info 描边 + 淡底色 + 机器人图标 + 「后台子代理通知」小标签 + 正文纯文本
-    fn render_task_notification(&self, body: &str, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
+    /// 后台子代理的合成通知卡。新版（开标签带 agent_id）渲染紧凑卡：
+    /// 图标方块 + 标题（description）+ 副标题（模型 · 状态），不展示结果全文；
+    /// 点击经 ThreadEvent::OpenSubagent 在右侧面板开只读对话 tab。
+    /// 旧格式（无 agent_id 属性）保持全文渲染，不破坏老会话的历史消息。
+    fn render_task_notification(
+        &self,
+        message_ix: usize,
+        note: &TaskNotification,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(agent_id) = note.agent_id.clone() else {
+            // 旧格式：info 描边卡 + 「后台子代理通知」小标签 + 正文全文
+            return v_flex()
+                .w_full()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().info)
+                .bg(cx.theme().info.opacity(0.08))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::Bot)
+                                .size_4()
+                                .text_color(cx.theme().info),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().info)
+                                .child("后台子代理通知"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(note.body.to_string()),
+                )
+                .into_any_element();
+        };
+        let failed = note.status.as_deref() == Some("failed");
+        let accent = if failed {
+            cx.theme().danger
+        } else {
+            cx.theme().info
+        };
+        let title = note
+            .description
+            .clone()
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "后台子代理".to_string());
+        let title_for_click = title.clone();
+        let status_text = if failed {
+            "失败".to_string()
+        } else {
+            format!("已完成 {} 步", note.turns.as_deref().unwrap_or("?"))
+        };
+        let subtitle = match note.model.as_ref().filter(|m| !m.is_empty()) {
+            Some(model) => format!("{model} · {status_text}"),
+            None => status_text,
+        };
+        h_flex()
+            .id(("task-notification", message_ix))
             .w_full()
-            .gap_1()
+            .gap_2()
             .px_3()
             .py_2()
             .rounded(cx.theme().radius)
             .border_1()
-            .border_color(cx.theme().info)
-            .bg(cx.theme().info.opacity(0.08))
+            .border_color(accent.opacity(0.6))
+            .bg(accent.opacity(0.08))
+            .cursor_pointer()
+            .hover(|this| this.bg(accent.opacity(0.14)))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(ThreadEvent::OpenSubagent {
+                    agent_id: agent_id.clone(),
+                    title: title_for_click.clone(),
+                });
+            }))
+            // 图标方块（kimi-code 紧凑卡同款：圆角淡底方块 + 居中机器人图标）
             .child(
-                h_flex()
-                    .gap_1()
+                div()
+                    .flex_shrink_0()
+                    .w_8()
+                    .h_8()
+                    .rounded_md()
+                    .bg(accent.opacity(0.12))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Bot).size_4().text_color(accent)),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_0p5()
                     .child(
-                        Icon::new(IconName::Bot)
-                            .size_4()
-                            .text_color(cx.theme().info),
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(cx.theme().foreground)
+                            .child(title),
                     )
                     .child(
                         div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_xs()
-                            .text_color(cx.theme().info)
-                            .child("后台子代理通知"),
+                            .text_color(if failed {
+                                accent
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(subtitle),
                     ),
             )
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().foreground)
-                    .child(body.to_string()),
+                Icon::new(IconName::ChevronRight)
+                    .size_4()
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground.opacity(0.6)),
             )
             .into_any_element()
     }
@@ -3279,31 +3433,31 @@ mod tests {
 
     #[test]
     fn task_notification_strips_outer_tags() {
-        // core 注入的实际格式（含换行）
+        // core 注入的实际格式（含换行；旧格式无属性）
         assert_eq!(
             as_task_notification(
                 "<task-notification>\n后台子代理 a1（explore）已完成（3 步）。\n\n结果正文\n</task-notification>"
-            ),
+            )
+            .map(|n| n.body),
             Some("后台子代理 a1（explore）已完成（3 步）。\n\n结果正文")
         );
         // 外围空白容错（trim 后再判定）
         assert_eq!(
-            as_task_notification("  <task-notification>正文</task-notification>\n"),
+            as_task_notification("  <task-notification>正文</task-notification>\n").map(|n| n.body),
             Some("正文")
         );
     }
 
     #[test]
     fn task_notification_rejects_plain_messages() {
-        assert_eq!(as_task_notification("普通用户消息"), None);
+        assert!(as_task_notification("普通用户消息").is_none());
         // 只有前缀/只有后缀都不算
-        assert_eq!(as_task_notification("<task-notification>没封口"), None);
-        assert_eq!(as_task_notification("没开头</task-notification>"), None);
+        assert!(as_task_notification("<task-notification>没封口").is_none());
+        assert!(as_task_notification("没开头</task-notification>").is_none());
         // 标签不在整段首尾（前面有正文）不算
-        assert_eq!(
-            as_task_notification("引用：<task-notification>x</task-notification>"),
-            None
-        );
+        assert!(as_task_notification("引用：<task-notification>x</task-notification>").is_none());
+        // 相似标签名（前缀后非 '>'/空白）不算
+        assert!(as_task_notification("<task-notification-foo>x</task-notification>").is_none());
     }
 
     #[test]
@@ -3312,9 +3466,64 @@ mod tests {
         assert_eq!(
             as_task_notification(
                 "<task-notification>外<task-notification>内</task-notification>外</task-notification>"
-            ),
+            )
+            .map(|n| n.body),
             Some("外<task-notification>内</task-notification>外")
         );
+    }
+
+    #[test]
+    fn task_notification_parses_open_tag_attributes() {
+        // A3b core 实际产物：开标签带 agent_id/profile/status/turns/model/description
+        let note = as_task_notification(
+            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
+        )
+        .expect("带属性通知应解析");
+        assert_eq!(note.agent_id.as_deref(), Some("a1-2"));
+        assert_eq!(note.status.as_deref(), Some("completed"));
+        assert_eq!(note.turns.as_deref(), Some("3"));
+        assert_eq!(note.model.as_deref(), Some("Mock · mock-model"));
+        assert_eq!(note.description.as_deref(), Some("子代理自测委派"));
+        assert_eq!(
+            note.body,
+            "后台子代理 a1-2（explore）已完成（3 步）。\n\n结果"
+        );
+        // 失败版
+        let failed = as_task_notification(
+            "<task-notification agent_id=\"a1-3\" profile=\"explore\" status=\"failed\" turns=\"20\" model=\"Mock · mock-model\" description=\"x\">\n失败原因\n</task-notification>",
+        )
+        .expect("失败通知应解析");
+        assert_eq!(failed.status.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn task_notification_missing_attributes_fall_back() {
+        // 旧格式（无属性）：全部属性 None，body 照常剥出
+        let note = as_task_notification("<task-notification>正文</task-notification>")
+            .expect("旧格式应解析");
+        assert!(note.agent_id.is_none());
+        assert!(note.status.is_none());
+        assert!(note.turns.is_none());
+        assert!(note.model.is_none());
+        assert!(note.description.is_none());
+        assert_eq!(note.body, "正文");
+        // 部分属性缺失：逐字段 None 回落
+        let partial =
+            as_task_notification("<task-notification agent_id=\"a9-1\">x</task-notification>")
+                .expect("部分属性应解析");
+        assert_eq!(partial.agent_id.as_deref(), Some("a9-1"));
+        assert!(partial.status.is_none());
+    }
+
+    #[test]
+    fn task_notification_sanitized_description_parses() {
+        // core 消毒后的 description：无引号无换行、≤60 字符，串搜解析不受影响
+        let sanitized: String = "描述 with space 与 CJK".to_string();
+        let text = format!(
+            "<task-notification agent_id=\"a1-1\" status=\"completed\" turns=\"1\" model=\"m\" description=\"{sanitized}\">\nb\n</task-notification>"
+        );
+        let note = as_task_notification(&text).expect("消毒后描述应解析");
+        assert_eq!(note.description.as_deref(), Some(sanitized.as_str()));
     }
 
     #[test]

@@ -97,6 +97,14 @@ impl AgentClient {
         self.send(Op::Interrupt { session_id });
     }
 
+    /// 加载后台子代理的完整对话（右侧「子代理」tab 只读展示）
+    pub fn load_subagent(&self, session_id: String, agent_id: String) {
+        self.send(Op::LoadSubagent {
+            session_id,
+            agent_id,
+        });
+    }
+
     pub fn set_model(
         &self,
         session_id: String,

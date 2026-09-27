@@ -4,6 +4,7 @@ mod composer;
 mod review_panel;
 mod settings;
 mod sidebar;
+mod subagent_panel;
 mod thread_view;
 
 use std::cell::Cell;
@@ -71,6 +72,7 @@ use crate::composer::{Composer, ComposerEvent, PendingApproval, PendingQuestion}
 use crate::review_panel::{ReviewEvent, ReviewPanel};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
+use crate::subagent_panel::SubagentPanel;
 use crate::thread_view::{ThreadEvent, ThreadView};
 
 struct SessionViews {
@@ -78,23 +80,32 @@ struct SessionViews {
     review: Entity<ReviewPanel>,
 }
 
-/// 右侧面板 tab：当前只有"改动"，浏览器/终端/侧边聊天后续加。
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// 右侧面板 tab：「改动」为内置页；「子代理」每个 agent_id 一个（通知卡点击打开）。
+/// 浏览器/终端/侧边聊天后续加。
+#[derive(Clone, PartialEq, Eq)]
 enum RightTab {
     Changes,
+    Subagent { agent_id: String },
 }
 
 impl RightTab {
-    fn label(self) -> &'static str {
+    /// 元素 id 用的稳定唯一键
+    fn key(&self) -> String {
         match self {
-            Self::Changes => "改动",
+            Self::Changes => "changes".to_string(),
+            Self::Subagent { agent_id } => format!("subagent-{agent_id}"),
         }
     }
+}
 
-    fn icon(self) -> AssetsIconName {
-        match self {
-            Self::Changes => AssetsIconName::GitBranch,
-        }
+/// 「子代理」tab 标题截断（12 字符 + 省略号，标签页栏宽度有限）
+fn truncate_tab_label(title: &str) -> String {
+    let mut chars = title.chars();
+    let head: String = chars.by_ref().take(12).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }
 
@@ -278,6 +289,8 @@ struct AppView {
     right_tabs: Vec<RightTab>,
     /// 右侧面板当前激活的 tab（None = 显示面板首页/菜单页）
     right_active: Option<RightTab>,
+    /// 「子代理」tab 的内容面板（agent_id → 面板实体；tab 关闭时移除）
+    subagent_tabs: HashMap<String, Entity<SubagentPanel>>,
     /// 标签页栏 "+" 的加面板菜单是否打开
     right_menu_open: bool,
     /// 菜单因点击外部收起时的按下位置：吞掉同一次按压触发的按钮 click，避免收起又弹开
@@ -354,6 +367,7 @@ impl AppView {
             right_open: false,
             right_tabs: vec![],
             right_active: None,
+            subagent_tabs: HashMap::new(),
             right_menu_open: false,
             right_menu_outside_close: None,
             tab_add_btn_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -483,6 +497,10 @@ impl AppView {
                     if let Some(sid) = this.current.clone() {
                         this.agent.cancel_queued(sid, text.clone());
                     }
+                }
+                ThreadEvent::OpenSubagent { agent_id, title } => {
+                    // 通知卡所在会话 = 该 ThreadView 的会话（sid 为订阅时捕获）
+                    this.open_subagent_tab(sid.clone(), agent_id.clone(), title.clone(), cx);
                 }
             }),
         );
@@ -826,6 +844,24 @@ impl AppView {
                 self.views[&session_id].thread.update(cx, |thread, cx| {
                     thread.add_system_note(&note, cx);
                 });
+            }
+            Event::SubagentHistory {
+                session_id,
+                agent_id,
+                title,
+                subtitle,
+                items,
+                ..
+            } => {
+                // 右侧「子代理」tab 的内容到达：只更新已开的 tab；
+                // 会话归属不符（迟到/串会话的事件）忽略
+                if let Some(panel) = self.subagent_tabs.get(agent_id)
+                    && panel.read(cx).matches_session(session_id)
+                {
+                    panel.update(cx, |panel, cx| {
+                        panel.set_history(title.clone(), subtitle.clone(), items.clone(), cx);
+                    });
+                }
             }
             _ => {}
         }
@@ -1768,11 +1804,11 @@ impl AppView {
 
     /// 右侧面板 tab 开关（快捷键用）：已激活时再次触发 = 收起面板；否则打开并激活该 tab。
     fn toggle_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        if self.right_open && self.right_active == Some(tab) {
+        if self.right_open && self.right_active.as_ref() == Some(&tab) {
             self.right_open = false;
         } else {
             if !self.right_tabs.contains(&tab) {
-                self.right_tabs.push(tab);
+                self.right_tabs.push(tab.clone());
             }
             self.right_active = Some(tab);
             self.right_open = true;
@@ -1783,7 +1819,7 @@ impl AppView {
     /// 打开并激活右侧 tab（菜单点击用，纯打开不带收起语义）
     fn open_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         if !self.right_tabs.contains(&tab) {
-            self.right_tabs.push(tab);
+            self.right_tabs.push(tab.clone());
         }
         self.right_active = Some(tab);
         self.right_open = true;
@@ -1794,9 +1830,36 @@ impl AppView {
     /// 没有 tab 了面板保持展开，回到面板首页（菜单页）。
     fn close_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         self.right_tabs.retain(|t| *t != tab);
-        if self.right_active == Some(tab) {
-            self.right_active = self.right_tabs.last().copied();
+        // 「子代理」tab 的内容面板随 tab 关闭释放
+        if let RightTab::Subagent { agent_id } = &tab {
+            self.subagent_tabs.remove(agent_id);
         }
+        if self.right_active.as_ref() == Some(&tab) {
+            self.right_active = self.right_tabs.last().cloned();
+        }
+        cx.notify();
+    }
+
+    /// 打开/聚焦「子代理」tab（通知卡点击）：未开则建面板实体并发加载请求；
+    /// 已开（同 agent_id）只聚焦，不重复加载。
+    fn open_subagent_tab(
+        &mut self,
+        session_id: String,
+        agent_id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.subagent_tabs.contains_key(&agent_id) {
+            let panel = cx.new(|_| SubagentPanel::new(session_id.clone(), title));
+            self.subagent_tabs.insert(agent_id.clone(), panel);
+            self.agent.load_subagent(session_id, agent_id.clone());
+        }
+        let tab = RightTab::Subagent { agent_id };
+        if !self.right_tabs.contains(&tab) {
+            self.right_tabs.push(tab.clone());
+        }
+        self.right_active = Some(tab);
+        self.right_open = true;
         cx.notify();
     }
 
@@ -1934,7 +1997,7 @@ impl AppView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (label, icon, shortcut, disabled, tab) = Self::right_menu_items()[ix];
+        let (label, icon, shortcut, disabled, tab) = Self::right_menu_items()[ix].clone();
         let chips =
             shortcut.and_then(|action| self.render_shortcut_chips(action, page, window, cx));
         h_flex()
@@ -1950,7 +2013,7 @@ impl AppView {
                     .hover(|this| this.bg(cx.theme().accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.right_menu_open = false;
-                        if let Some(tab) = tab {
+                        if let Some(tab) = tab.clone() {
                             this.open_right_tab(tab, cx);
                         }
                     }))
@@ -2036,9 +2099,29 @@ impl AppView {
 
     /// 右侧标签页栏的单个 tab：图标 + 名称 + 关闭按钮（点击激活，× 关闭）
     fn render_right_tab(&self, tab: RightTab, cx: &mut Context<Self>) -> AnyElement {
-        let active = self.right_active == Some(tab);
+        let active = self.right_active.as_ref() == Some(&tab);
+        // 「子代理」tab：Bot 图标 + 面板标题（description 截断）；「改动」为内置页
+        let (icon, label) = match &tab {
+            RightTab::Changes => (
+                Icon::new(AssetsIconName::GitBranch)
+                    .size_3p5()
+                    .into_any_element(),
+                "改动".to_string(),
+            ),
+            RightTab::Subagent { agent_id } => {
+                let title = self
+                    .subagent_tabs
+                    .get(agent_id)
+                    .map(|panel| panel.read(cx).title().to_string())
+                    .unwrap_or_else(|| "子代理".to_string());
+                (
+                    Icon::new(IconName::Bot).size_3p5().into_any_element(),
+                    truncate_tab_label(&title),
+                )
+            }
+        };
         h_flex()
-            .id(("right-tab", tab as usize))
+            .id(format!("right-tab-{}", tab.key()))
             .gap_2()
             .pl_3()
             .pr_1()
@@ -2050,11 +2133,11 @@ impl AppView {
                 this.text_color(cx.theme().muted_foreground)
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
             })
-            .child(Icon::new(tab.icon()).size_3p5())
-            .child(div().text_sm().child(tab.label()))
+            .child(icon)
+            .child(div().text_sm().child(label))
             .child(
                 div()
-                    .id(("right-tab-close", tab as usize))
+                    .id(format!("right-tab-close-{}", tab.key()))
                     .p(px(1.))
                     .rounded(cx.theme().radius)
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
@@ -2063,13 +2146,16 @@ impl AppView {
                             .size_3()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.close_right_tab(tab, cx);
+                    .on_click(cx.listener({
+                        let tab = tab.clone();
+                        move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_right_tab(tab.clone(), cx);
+                        }
                     })),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.right_active = Some(tab);
+                this.right_active = Some(tab.clone());
                 this.right_open = true;
                 cx.notify();
             }))
@@ -2090,7 +2176,7 @@ impl AppView {
             .children(
                 self.right_tabs
                     .iter()
-                    .map(|tab| self.render_right_tab(*tab, cx)),
+                    .map(|tab| self.render_right_tab(tab.clone(), cx)),
             )
             .child(div().flex_1())
             .child(
@@ -2125,6 +2211,15 @@ impl AppView {
     /// 自测用。
     pub fn debug_config(&self) -> Option<&pig_protocol::AppConfig> {
         self.config.as_ref()
+    }
+
+    /// 自测用：当前激活的「子代理」tab 的 (标题, 已加载 items 数)；
+    /// 无激活子代理 tab 或内容未加载为 None
+    pub fn debug_subagent_tab(&self, cx: &App) -> Option<(String, usize)> {
+        let RightTab::Subagent { agent_id } = self.right_active.as_ref()? else {
+            return None;
+        };
+        self.subagent_tabs.get(agent_id)?.read(cx).debug_state()
     }
 
     fn sync_hero_mode(&mut self, cx: &mut Context<Self>) {
@@ -2267,7 +2362,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
-        let content: AnyElement = match self.right_active {
+        let content: AnyElement = match &self.right_active {
             Some(RightTab::Changes) => match current_views {
                 Some(views) => views.review.clone().into_any_element(),
                 None => v_flex()
@@ -2281,6 +2376,10 @@ impl AppView {
                             .child("开始会话后，这里会显示工作区改动"),
                     )
                     .into_any_element(),
+            },
+            Some(RightTab::Subagent { agent_id }) => match self.subagent_tabs.get(agent_id) {
+                Some(panel) => panel.clone().into_any_element(),
+                None => self.render_right_menu_page(window, cx),
             },
             None => self.render_right_menu_page(window, cx),
         };
@@ -2630,6 +2729,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::TodoListChanged { session_id, .. }
         | Event::TaskListChanged { session_id, .. }
         | Event::SubagentProgress { session_id, .. }
+        | Event::SubagentHistory { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
@@ -3534,10 +3634,10 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let right_initial = app!(|app: &mut AppView, _| app.right_open);
     assert!(!right_initial, "右侧面板默认应收起");
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
-    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
     assert!(open && active.is_none(), "面板展开且无 tab 时应显示菜单页");
     app!(|app: &mut AppView, cx| app.open_right_tab(RightTab::Changes, cx));
-    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
     assert!(open && active == Some(RightTab::Changes), "改动 tab 应打开");
     app!(|app: &mut AppView, cx| app.toggle_right_tab(RightTab::Changes, cx));
     let (open, kept) = app!(|app: &mut AppView, _| {
@@ -3545,8 +3645,13 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     });
     assert!(!open && kept, "再次触发应收起面板并保留 tab");
     app!(|app: &mut AppView, cx| app.close_right_tab(RightTab::Changes, cx));
-    let (open, active, tabs) =
-        app!(|app: &mut AppView, _| { (app.right_open, app.right_active, app.right_tabs.len()) });
+    let (open, active, tabs) = app!(|app: &mut AppView, _| {
+        (
+            app.right_open,
+            app.right_active.clone(),
+            app.right_tabs.len(),
+        )
+    });
     assert!(
         !open && active.is_none() && tabs == 0,
         "面板收起状态下关 tab 不改变收起状态；tab 清空"
@@ -3556,7 +3661,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         app.open_right_tab(RightTab::Changes, cx);
         app.close_right_tab(RightTab::Changes, cx);
     });
-    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
     assert!(open && active.is_none(), "关尽 tab 后应停在菜单页");
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
     println!("[selftest] 右侧面板开合 OK");
@@ -3579,7 +3684,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         app.composer
             .update(cx, |_, cx| cx.emit(ComposerEvent::OpenChanges));
     });
-    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active));
+    let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
     assert!(
         open && active == Some(RightTab::Changes),
         "改动 chip 应打开右侧面板并激活改动 tab"
@@ -4147,6 +4252,54 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         }
     }
     println!("[selftest] 后台子代理完成 → task-notification 合成消息到达 OK");
+
+    // A3b：通知开标签的结构化 meta 解析（紧凑卡渲染数据源）
+    let (agent_id, title) = {
+        let mut found = None;
+        let mut waited = 0u64;
+        loop {
+            timer!(200).await;
+            waited += 200;
+            assert!(waited < 10_000, "通知 meta 解析超时");
+            found = app!(|app: &mut AppView, cx| {
+                let views = app.views.get(&session_c)?;
+                views.thread.read(cx).debug_task_notification_meta()
+            });
+            if found.is_some() {
+                break;
+            }
+        }
+        found.expect("已判 Some")
+    };
+    assert!(
+        title.contains("子代理自测委派"),
+        "通知标题应为 description: {title}"
+    );
+    println!("[selftest] 通知卡结构化 meta 解析 OK（{agent_id} · {title}）");
+
+    // 走通知卡点击的同一路径开「子代理」tab → Op::LoadSubagent → SubagentHistory
+    app!(|app: &mut AppView, cx| {
+        app.open_subagent_tab(session_c.clone(), agent_id.clone(), title.clone(), cx);
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 15_000, "子代理历史加载超时");
+        let state = app!(|app: &mut AppView, cx| app.debug_subagent_tab(cx));
+        if let Some((tab_title, items)) = state {
+            assert!(
+                items >= 3,
+                "子代理对话应有 user/tool/assistant 各至少一条: items={items}"
+            );
+            assert!(
+                tab_title.contains("子代理自测委派"),
+                "tab 标题应为 meta.description: {tab_title}"
+            );
+            break;
+        }
+    }
+    println!("[selftest] 子代理 tab（点击开面板 + 历史加载 ≥3 行）OK");
 
     // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
     assert_eq!(

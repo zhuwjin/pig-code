@@ -659,6 +659,80 @@ pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<crate::provider::ChatMs
     Ok((meta, history))
 }
 
+/// 子代理上下文 → 右侧面板只读展示的投影（A3b）：
+/// 返回 (title=meta.description, subtitle="{provider} · {model}", items)。
+/// user → 任务行；assistant → 正文行 + 每个工具调用各一条 tool 行（摘要来自
+/// tool::summarize）；tool 结果按 tool_call_id 回填对应 tool 行的 output
+///（截断 2000 字符，字符边界）；system 跳过。
+/// ChatMsg 没有工具错误标记，is_error 恒 false。
+pub fn display_items(
+    meta: &AgentMeta,
+    msgs: &[crate::provider::ChatMsg],
+) -> (String, String, Vec<pig_protocol::SubagentItem>) {
+    let title = meta.description.clone();
+    let subtitle = format!("{} · {}", meta.provider, meta.model);
+    let mut items: Vec<pig_protocol::SubagentItem> = Vec::new();
+    // tool 行下标按 call id 索引：tool 结果消息回填 output 用
+    let mut tool_row_by_call: HashMap<String, usize> = HashMap::new();
+    for msg in msgs {
+        match msg.role.as_str() {
+            "user" => items.push(pig_protocol::SubagentItem {
+                role: "user".to_string(),
+                text: msg.content.clone().unwrap_or_default(),
+                tool: None,
+                output: None,
+                is_error: false,
+            }),
+            "assistant" => {
+                if let Some(text) = msg.content.as_ref().filter(|t| !t.is_empty()) {
+                    items.push(pig_protocol::SubagentItem {
+                        role: "assistant".to_string(),
+                        text: text.clone(),
+                        tool: None,
+                        output: None,
+                        is_error: false,
+                    });
+                }
+                for wire in msg.tool_calls.iter().flatten() {
+                    let call = crate::provider::ToolCall {
+                        id: wire.id.clone(),
+                        name: wire.function.name.clone(),
+                        arguments: wire.function.arguments.clone(),
+                    };
+                    tool_row_by_call.insert(call.id.clone(), items.len());
+                    items.push(pig_protocol::SubagentItem {
+                        role: "tool".to_string(),
+                        text: crate::tool::summarize(&call),
+                        tool: Some(call.name.clone()),
+                        output: None,
+                        is_error: false,
+                    });
+                }
+            }
+            "tool" => {
+                let output: String = msg
+                    .content
+                    .clone()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(2000)
+                    .collect();
+                if let Some(ix) = msg
+                    .tool_call_id
+                    .as_ref()
+                    .and_then(|id| tool_row_by_call.get(id))
+                {
+                    items[*ix].output = Some(output);
+                }
+                // 找不到对应调用（截断/乱序的历史）则丢弃该结果
+            }
+            // system 提示不进展示
+            _ => {}
+        }
+    }
+    (title, subtitle, items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
