@@ -2336,20 +2336,22 @@ impl Composer {
             list = list.child(row);
         }
 
-        let content = self.aux_panel_shell(
-            // 固定宽：有/无内容同宽（命令文本超长走省略，见行内 text_ellipsis）
-            v_flex()
-                .w(px(420.))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .child(div().text_sm().child(title))
-                        .child(div().flex_1())
-                        .child(tabs),
-                )
-                .child(list),
-            cx,
-        );
+        // 固定宽：有/无内容同宽。必须加在 aux_panel_shell 返回之后——shell 会对
+        // 内容 w_full()，加在内层会被覆盖（命令文本超长走省略，见行内 text_ellipsis）
+        let content = self
+            .aux_panel_shell(
+                v_flex()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .child(div().text_sm().child(title))
+                            .child(div().flex_1())
+                            .child(tabs),
+                    )
+                    .child(list),
+                cx,
+            )
+            .w(px(420.));
         let popup_id = match kind {
             TaskChipKind::Bash => "composer-tasks-popup",
             TaskChipKind::Agent => "composer-agent-tasks-popup",
