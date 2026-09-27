@@ -194,6 +194,35 @@ impl TaskFilter {
     }
 }
 
+/// 后台任务 chip 类别（kimi-code 同款拆分）：Bash 后台任务 / 子代理（Agent）任务，
+/// 按 TaskSummary.agent_id 分派——chip 与弹层各自独立显隐
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskChipKind {
+    Bash,
+    Agent,
+}
+
+impl TaskChipKind {
+    fn matches(self, task: &TaskSummary) -> bool {
+        match self {
+            Self::Bash => task.agent_id.is_none(),
+            Self::Agent => task.agent_id.is_some(),
+        }
+    }
+
+    fn label(self, running: usize) -> String {
+        let name = match self {
+            Self::Bash => "后台 Bash",
+            Self::Agent => "后台 Agent",
+        };
+        if running > 0 {
+            format!("{name} {running} 运行中")
+        } else {
+            name.to_string()
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum ComposerEvent {
     Send {
@@ -238,6 +267,12 @@ pub enum ComposerEvent {
     },
     /// 改动 chip：直接打开右侧面板的改动 tab（不走弹层）
     OpenChanges,
+    /// 「后台 Agent」弹层的任务行点击：打开右侧子代理对话 tab
+    ///（title 用任务 command 原文；AppView 经 open_subagent_tab 处理）
+    OpenSubagent {
+        agent_id: String,
+        title: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -252,6 +287,8 @@ enum Popup {
     Context,
     Todos,
     Tasks,
+    /// 「后台 Agent」chip 的弹层（与 Tasks（后台 Bash）分家，独立显隐/关闭）
+    AgentTasks,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -788,8 +825,33 @@ impl Composer {
         cx.notify();
     }
 
+    /// 自测用：(「后台 Bash」chip 可见, 「后台 Agent」chip 可见)——
+    /// chip 显隐由任务快照按 agent_id 类型分派
+    pub fn debug_task_chips(&self) -> (bool, bool) {
+        (
+            self.tasks.iter().any(|t| t.agent_id.is_none()),
+            self.tasks.iter().any(|t| t.agent_id.is_some()),
+        )
+    }
+
+    /// 自测用：Agent 任务行的 agent_id 列表
+    pub fn debug_agent_task_ids(&self) -> Vec<String> {
+        self.tasks
+            .iter()
+            .filter_map(|t| t.agent_id.clone())
+            .collect()
+    }
+
     pub fn set_tasks(&mut self, tasks: Vec<TaskSummary>, cx: &mut Context<Self>) {
-        if tasks.is_empty() && matches!(self.popup, Some((Popup::Tasks, _))) {
+        // 对应类别的任务清空时收起对应弹层（chip 按 agent_id 拆分后各自判定）
+        if !tasks.iter().any(|t| t.agent_id.is_none())
+            && matches!(self.popup, Some((Popup::Tasks, _)))
+        {
+            self.popup = None;
+        }
+        if !tasks.iter().any(|t| t.agent_id.is_some())
+            && matches!(self.popup, Some((Popup::AgentTasks, _)))
+        {
             self.popup = None;
         }
         self.tasks = tasks;
@@ -1078,9 +1140,10 @@ impl Composer {
             | Popup::Reasoning
             | Popup::Context
             | Popup::Todos
-            | Popup::Tasks => {
+            | Popup::Tasks
+            | Popup::AgentTasks => {
                 unreachable!(
-                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks 由各自的专用面板渲染"
+                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks/AgentTasks 由各自的专用面板渲染"
                 )
             }
         };
@@ -1099,6 +1162,7 @@ impl Composer {
             Popup::Context => "context",
             Popup::Todos => "todos",
             Popup::Tasks => "tasks",
+            Popup::AgentTasks => "agent-tasks",
         };
         Some(
             div()
@@ -1880,10 +1944,15 @@ impl Composer {
     /// 进度/任务 chip 点击在芯片上方弹出只读面板（v1 无停止按钮）；
     /// 改动 chip 发事件让 AppView 打开右侧面板的改动 tab。
     fn render_aux(&self, cx: &mut Context<Self>) -> AnyElement {
-        let running = self
+        let bash_running = self
             .tasks
             .iter()
-            .filter(|t| matches!(t.status, TaskStatus::Running))
+            .filter(|t| TaskChipKind::Bash.matches(t) && matches!(t.status, TaskStatus::Running))
+            .count();
+        let agent_running = self
+            .tasks
+            .iter()
+            .filter(|t| TaskChipKind::Agent.matches(t) && matches!(t.status, TaskStatus::Running))
             .count();
         let done = self
             .todos
@@ -1892,12 +1961,9 @@ impl Composer {
             .count();
 
         let mut chips = h_flex().w_full().gap_2();
-        if !self.tasks.is_empty() {
-            let label = if running > 0 {
-                format!("后台 Bash {running} 运行中")
-            } else {
-                "后台 Bash".to_string()
-            };
+        // chip 按任务类型拆分（kimi-code 同款）：「后台 Bash」「后台 Agent」各自独立
+        // 显隐与弹层；对应类别的任务列表为空时该 chip 不出现
+        if self.tasks.iter().any(|t| TaskChipKind::Bash.matches(t)) {
             let open = matches!(self.popup, Some((Popup::Tasks, _)));
             chips = chips.child(
                 div()
@@ -1905,12 +1971,32 @@ impl Composer {
                     .child(self.render_aux_chip(
                         "aux-tasks",
                         AssetIconName::Terminal,
-                        label,
+                        TaskChipKind::Bash.label(bash_running),
                         open,
                         Popup::Tasks,
                         cx,
                     ))
-                    .when(open, |this| this.child(self.render_tasks_panel(cx))),
+                    .when(open, |this| {
+                        this.child(self.render_tasks_panel(TaskChipKind::Bash, cx))
+                    }),
+            );
+        }
+        if self.tasks.iter().any(|t| TaskChipKind::Agent.matches(t)) {
+            let open = matches!(self.popup, Some((Popup::AgentTasks, _)));
+            chips = chips.child(
+                div()
+                    .relative()
+                    .child(self.render_aux_chip(
+                        "aux-agent-tasks",
+                        IconName::Bot,
+                        TaskChipKind::Agent.label(agent_running),
+                        open,
+                        Popup::AgentTasks,
+                        cx,
+                    ))
+                    .when(open, |this| {
+                        this.child(self.render_tasks_panel(TaskChipKind::Agent, cx))
+                    }),
             );
         }
         if !self.change_files.is_empty() {
@@ -1970,7 +2056,7 @@ impl Composer {
     fn render_aux_chip(
         &self,
         id: &'static str,
-        icon: AssetIconName,
+        icon: impl Into<Icon>,
         label: String,
         active: bool,
         kind: Popup,
@@ -2067,17 +2153,16 @@ impl Composer {
         )
     }
 
-    fn render_tasks_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// 后台任务弹层（按 kind 拆成「后台 Bash / 后台 Agent」两个独立面板）：
+    /// Bash 行点击展开输出尾部（现状）；Agent 行点击开右侧子代理对话 tab
+    ///（收起弹层 + ComposerEvent::OpenSubagent 上冒给 AppView）
+    fn render_tasks_panel(&self, kind: TaskChipKind, cx: &mut Context<Self>) -> AnyElement {
         let running = self
             .tasks
             .iter()
-            .filter(|t| matches!(t.status, TaskStatus::Running))
+            .filter(|t| kind.matches(t) && matches!(t.status, TaskStatus::Running))
             .count();
-        let title = if running > 0 {
-            format!("后台 Bash {running} 运行中")
-        } else {
-            "后台 Bash".to_string()
-        };
+        let title = kind.label(running);
 
         // 过滤 tab：进行中 / 已完成 / 全部
         let mut tabs = h_flex().gap_1();
@@ -2110,20 +2195,28 @@ impl Composer {
         let visible: Vec<&TaskSummary> = self
             .tasks
             .iter()
-            .filter(|t| self.task_filter.matches(t.status))
+            .filter(|t| kind.matches(t) && self.task_filter.matches(t.status))
             .collect();
+        let list_id = match kind {
+            TaskChipKind::Bash => "aux-tasks-list",
+            TaskChipKind::Agent => "aux-agent-tasks-list",
+        };
         let mut list = v_flex()
-            .id("aux-tasks-list")
+            .id(list_id)
             .w_full()
             .gap_1()
             .max_h(px(280.))
             .overflow_y_scroll();
         if visible.is_empty() {
+            let empty = match kind {
+                TaskChipKind::Bash => "无后台 Bash 任务",
+                TaskChipKind::Agent => "无后台 Agent 任务",
+            };
             list = list.child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("无任务"),
+                    .child(empty),
             );
         }
         for (ix, task) in visible.iter().enumerate() {
@@ -2148,6 +2241,10 @@ impl Composer {
             let duration = format_task_duration(task.started_at, task.ended_at.unwrap_or(now));
             let expanded = self.expanded_task.as_deref() == Some(task.id.as_str());
             let task_id = task.id.clone();
+            let agent_open = task
+                .agent_id
+                .clone()
+                .map(|agent_id| (agent_id, task.command.clone()));
             let mut row = v_flex().w_full().child(
                 h_flex()
                     .id(("aux-task-row", ix))
@@ -2158,12 +2255,22 @@ impl Composer {
                     .cursor_pointer()
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.expanded_task =
-                            if this.expanded_task.as_deref() == Some(task_id.as_str()) {
-                                None
-                            } else {
-                                Some(task_id.clone())
-                            };
+                        // Agent 行：点击开右侧子代理对话 tab（收弹层 + 上冒事件）；
+                        // Bash 行：展开/收起输出尾部
+                        if let Some((agent_id, title)) = &agent_open {
+                            this.popup = None;
+                            cx.emit(ComposerEvent::OpenSubagent {
+                                agent_id: agent_id.clone(),
+                                title: title.clone(),
+                            });
+                        } else {
+                            this.expanded_task =
+                                if this.expanded_task.as_deref() == Some(task_id.as_str()) {
+                                    None
+                                } else {
+                                    Some(task_id.clone())
+                                };
+                        }
                         cx.notify();
                     }))
                     .child(icon)
@@ -2189,7 +2296,8 @@ impl Composer {
                             .text_color(cx.theme().muted_foreground),
                     ),
             );
-            if expanded {
+            // 输出尾部展开仅 Bash 行（Agent 的完整对话在右侧 tab 看）
+            if kind == TaskChipKind::Bash && expanded {
                 row = row.child(
                     div()
                         .id(("aux-task-output", ix))
@@ -2225,8 +2333,12 @@ impl Composer {
                 .child(list),
             cx,
         );
+        let popup_id = match kind {
+            TaskChipKind::Bash => "composer-tasks-popup",
+            TaskChipKind::Agent => "composer-agent-tasks-popup",
+        };
         self.popup_shell(
-            "composer-tasks-popup",
+            popup_id,
             content.into_any_element(),
             PopupAnchor::Left,
             None,

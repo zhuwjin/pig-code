@@ -494,6 +494,9 @@ pub struct TaskSummary {
     pub started_at: u64,
     pub ended_at: Option<u64>,
     pub output_tail: String,
+    /// 子代理（Agent）任务为 Some(agent_id)，Bash 后台任务为 None——
+    /// UI 按此把任务 chip/弹层拆成「后台 Bash / 后台 Agent」两类
+    pub agent_id: Option<String>,
 }
 
 /// AskUserQuestion 的选项。

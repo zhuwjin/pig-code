@@ -1658,6 +1658,13 @@ impl AppView {
             ComposerEvent::OpenChanges => {
                 self.open_right_tab(RightTab::Changes, cx);
             }
+            ComposerEvent::OpenSubagent { agent_id, title } => {
+                // 「后台 Agent」弹层的任务行点击：开右侧子代理对话 tab
+                //（弹层已在 composer 侧收起；同 agent_id 聚焦不重复加载）
+                if let Some(sid) = self.current.clone() {
+                    self.open_subagent_tab(sid, agent_id.clone(), title.clone(), cx);
+                }
+            }
         }
     }
 
@@ -4434,6 +4441,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let mut saw_running = false;
     let mut saw_card_running = false;
     let mut saw_following = false;
+    let mut saw_agent_chip = false;
     let mut initial_items = None;
     let mut waited = 0u64;
     loop {
@@ -4447,9 +4455,10 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 .views
                 .get(&session_d)
                 .and_then(|views| views.thread.read(cx).debug_agent_card_state());
-            (live, scroll, card)
+            let chips = app.composer.read(cx).debug_task_chips();
+            (live, scroll, card, chips)
         });
-        let (Some((running, items, appends)), scroll_state, card_state) = state else {
+        let (Some((running, items, appends)), scroll_state, card_state, chips) = state else {
             continue;
         };
         saw_running |= running;
@@ -4461,6 +4470,8 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         if let Some((_, done, finished)) = &card_state {
             saw_card_running |= *done && !*finished;
         }
+        // A3g：BG 在跑时「后台 Agent」chip 应出现
+        saw_agent_chip |= chips.1;
         if initial_items.is_none() && items > 0 {
             initial_items = Some(items);
         }
@@ -4509,6 +4520,30 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         }
     }
     println!("[selftest] 子代理面板跟随滚动（following 保持 + 贴底）OK");
+
+    // A3g：chip 按类型拆分——BG 在跑时见过「后台 Agent」chip；
+    // 会话 D 无 Bash 任务，「后台 Bash」chip 不应出现
+    assert!(saw_agent_chip, "BG 在跑时应出现「后台 Agent」chip");
+    let chips = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_task_chips());
+    assert_eq!(chips, (false, true), "会话 D 应只有 Agent chip: {chips:?}");
+    // agent 任务行数据带 agent_id（与代理卡一致）
+    let task_agent_ids = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_agent_task_ids());
+    assert!(
+        task_agent_ids.iter().any(|id| id == &bg_agent_id),
+        "Agent 任务行应带 agent_id: {task_agent_ids:?}"
+    );
+    // 任务行点击的事件路径：ComposerEvent::OpenSubagent → open_subagent_tab 聚焦 tab
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(ComposerEvent::OpenSubagent {
+                agent_id: bg_agent_id.clone(),
+                title: "子代理 explore: 子代理自测委派".to_string(),
+            });
+        });
+    });
+    let tab_active = app!(|app: &mut AppView, cx| app.debug_subagent_tab(cx).is_some());
+    assert!(tab_active, "OpenSubagent 后应有激活的子代理 tab");
+    println!("[selftest] 后台任务 chip 拆分（Agent chip 显隐/agent_id/点行开 tab）OK");
 
     // A3e②：模拟重启重开会话 D——代理卡元信息从 rollout 回放重建（不退化成
     // 原始输出卡），且后台代理回放即落终态（core 补发 finished，不转圈）

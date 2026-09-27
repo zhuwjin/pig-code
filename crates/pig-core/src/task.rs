@@ -146,6 +146,7 @@ pub fn snapshot(registry: &TaskRegistry) -> Vec<TaskSummary> {
             started_at: entry.started_at,
             ended_at: entry.ended_at,
             output_tail: tail_chars(&entry.output, SNAPSHOT_TAIL_CHARS),
+            agent_id: entry.agent_id.clone(),
         })
         .collect()
 }
