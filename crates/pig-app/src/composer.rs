@@ -2294,6 +2294,7 @@ impl Composer {
                             .min_w_0()
                             .overflow_x_hidden()
                             .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_sm()
                             .font_family(cx.theme().mono_font_family.clone())
                             .child(task.command.clone()),
@@ -2336,7 +2337,9 @@ impl Composer {
         }
 
         let content = self.aux_panel_shell(
+            // 固定宽：有/无内容同宽（命令文本超长走省略，见行内 text_ellipsis）
             v_flex()
+                .w(px(420.))
                 .child(
                     h_flex()
                         .w_full()
