@@ -25,8 +25,8 @@ pub enum Role {
     System,
 }
 
-/// 代理卡元信息（live-only `Event::SubagentCard` 写入 Agent 工具卡；
-/// 回放无此事件 → 回落标准工具卡样式）
+/// 代理卡元信息（`Event::SubagentCard` 写入 Agent 工具卡；live 直发 +
+/// rollout 持久化回放重建。无元信息的旧回放记录 → 回落标准工具卡样式）
 #[derive(Clone)]
 pub struct AgentCardMeta {
     pub agent_id: String,
@@ -34,6 +34,9 @@ pub struct AgentCardMeta {
     pub description: String,
     /// "{provider_name} · {model}"（可带思考档后缀）
     pub model: String,
+    /// 本次运行为后台：运行态由子代理真实生命周期（SubagentActivity finished）
+    /// 驱动——后台 Agent 工具调用立即返回 running 回执，done 不代表子代理结束
+    pub background: bool,
 }
 
 pub enum Segment {
@@ -67,8 +70,11 @@ pub enum Segment {
         /// 回放没有该事件，恒为 None
         live_note: Option<String>,
         /// 代理卡元信息（SubagentCard 事件写入；Some 时按代理卡样式渲染，
-        /// 点击开右侧子代理对话 tab；回放恒 None → 标准工具卡）
+        /// 点击开右侧子代理对话 tab；live 直发 + 回放经 rollout 记录重建）
         agent_card: Option<AgentCardMeta>,
+        /// 后台子代理已结束（SubagentActivity finished 置位；前台卡不看它——
+        /// 前台运行态跟工具调用 done 走）
+        agent_finished: bool,
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
     },
@@ -698,6 +704,24 @@ impl ThreadView {
             })
     }
 
+    /// 最近一张代理卡的 (agent_id, done, agent_finished)（自测用：验证后台卡
+    /// 运行态机——工具收尾≠子代理结束）。无代理卡为 None。
+    pub fn debug_agent_card_state(&self) -> Option<(String, bool, bool)> {
+        self.messages
+            .iter()
+            .rev()
+            .flat_map(|m| m.segments.iter().rev())
+            .find_map(|s| match s {
+                Segment::ToolCall {
+                    agent_card: Some(card),
+                    done,
+                    agent_finished,
+                    ..
+                } => Some((card.agent_id.clone(), *done, *agent_finished)),
+                _ => None,
+            })
+    }
+
     /// 当前待审批的 request_id（自测用）。
     pub fn pending_approval(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| {
@@ -827,6 +851,7 @@ impl ThreadView {
                     edit: None,
                     live_note: None,
                     agent_card: None,
+                    agent_finished: false,
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
@@ -852,6 +877,7 @@ impl ThreadView {
                     edit: None,
                     live_note: None,
                     agent_card: None,
+                    agent_finished: false,
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall {
@@ -916,9 +942,10 @@ impl ThreadView {
                 profile,
                 description,
                 model,
+                background,
                 ..
             } => {
-                // 代理卡元信息（live-only）：先于 ToolCallEnd 到达；
+                // 代理卡元信息：先于 ToolCallEnd 到达（回放时紧挨 Begin 重发）；
                 // 乱序防御允许补写已 done 的卡
                 if let Some(&six) = self.item_index.get(&item_id)
                     && let Some(Segment::ToolCall { agent_card, .. }) = self.current_segment(six)
@@ -928,7 +955,61 @@ impl ThreadView {
                         profile,
                         description,
                         model,
+                        background,
                     });
+                }
+            }
+            Event::SubagentActivity {
+                agent_id,
+                item,
+                finished,
+                ..
+            } => {
+                // 后台代理卡的运行态由子代理真实生命周期驱动：找最后一张匹配的
+                // 后台代理卡（item 更新进度行；finished 落终态）。前台卡的进度走
+                // SubagentProgress、运行态跟 done 走，这里一律不动它
+                let target = self
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|m| m.segments.iter_mut().rev())
+                    .find_map(|s| match s {
+                        Segment::ToolCall {
+                            agent_card: Some(card),
+                            live_note,
+                            agent_finished,
+                            ..
+                        } if card.agent_id == agent_id && card.background => {
+                            Some((live_note, agent_finished))
+                        }
+                        _ => None,
+                    });
+                // 找不到卡（面板独占/回放外的迟到事件）忽略
+                if let Some((live_note, finished_slot)) = target {
+                    if finished {
+                        *finished_slot = true;
+                        *live_note = None;
+                        self.auto_scroll();
+                    } else if let Some(item) = item {
+                        // 活动项 → 进度行文本：tool → "工具名 摘要"；assistant → 正文首行；
+                        // user 忽略。统一压单行截 60 字符
+                        let note = match item.role.as_str() {
+                            "tool" => Some(format!(
+                                "{} {}",
+                                item.tool.as_deref().unwrap_or("工具"),
+                                item.text
+                            )),
+                            "assistant" => item.text.lines().next().map(str::to_string),
+                            _ => None,
+                        }
+                        .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .filter(|n| !n.is_empty());
+                        if let Some(note) = note {
+                            let note: String = note.chars().take(60).collect();
+                            *live_note = Some(note);
+                            self.auto_scroll();
+                        }
+                    }
                 }
             }
             Event::TurnComplete {
@@ -1002,7 +1083,7 @@ impl ThreadView {
             Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
             }
             // 右侧「子代理」tab 的数据（AppView 直接路由给面板，消息流不展示）
-            Event::SubagentHistory { .. } | Event::SubagentActivity { .. } => {}
+            Event::SubagentHistory { .. } => {}
             Event::UserMessage { text, files, .. } => {
                 // 链接尾巴不进队列匹配（queued 里是用户输入原文）
                 let (body, _) = split_image_links(text.as_str());
@@ -2073,6 +2154,7 @@ impl ThreadView {
         approval_pending: bool,
         edit: Option<&EditDiff>,
         agent_card: Option<&AgentCardMeta>,
+        agent_finished: bool,
         body_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2087,6 +2169,7 @@ impl ThreadView {
                 card,
                 done,
                 is_error,
+                agent_finished,
                 live_note,
                 approval_pending,
                 cx,
@@ -2393,13 +2476,21 @@ impl ThreadView {
         card: &AgentCardMeta,
         done: bool,
         is_error: bool,
+        agent_finished: bool,
         live_note: Option<&str>,
         approval_pending: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
-        let running = !done && !approval_pending;
+        // 运行态真值表：前台卡跟工具调用同生命周期（!done；等审批暂停转圈）；
+        // 后台卡的工具调用立即收尾（running 回执），真实运行态由子代理生命周期
+        // 驱动（SubagentActivity finished 置 agent_finished；回放由 core 补发）
+        let running = if card.background {
+            !agent_finished
+        } else {
+            !done && !approval_pending
+        };
         let failed = done && is_error;
         let title = if card.description.is_empty() {
             "子代理".to_string()
@@ -2505,16 +2596,18 @@ impl ThreadView {
                         },
                     ),
             )
-            // 右侧状态：等待批准 / 运行中 Spinner / 失败词 / 成功勾
-            .child(if approval_pending {
+            // 右侧状态：等待批准（仅前台）/ 运行中 Spinner / 失败词 / 成功勾。
+            // 注意：SubagentActivity 的 finished 不带成败——后台卡终态的成败沿用
+            // 工具回执的 is_error（子代理失败由通知气泡呈现，卡上勾仅代表「跑完」）
+            .child(if !card.background && approval_pending {
                 div()
                     .text_xs()
                     .text_color(cx.theme().warning)
                     .child("等待批准")
                     .into_any_element()
-            } else if !done {
+            } else if running {
                 Spinner::new().small().color(subtlest).into_any_element()
-            } else if is_error {
+            } else if failed {
                 div()
                     .text_xs()
                     .text_color(cx.theme().danger)
@@ -2987,6 +3080,7 @@ impl ThreadView {
                             edit,
                             live_note,
                             agent_card,
+                            agent_finished,
                             body_scroll,
                         } => {
                             let approval_pending = matches!(
@@ -3006,6 +3100,7 @@ impl ThreadView {
                                 approval_pending,
                                 edit.as_ref(),
                                 agent_card.as_ref(),
+                                *agent_finished,
                                 body_scroll,
                                 cx,
                             )

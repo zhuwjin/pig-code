@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{new_session, setup};
+use common::{new_session, recv_until, setup};
 use pig_core::mock;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, Op};
 use std::path::{Path, PathBuf};
@@ -807,4 +807,115 @@ async fn subagent_background_approval_gate() {
         "结果文件应含子结论: {full}"
     );
     agent.shutdown();
+}
+
+/// 代理卡元信息随 rollout 持久化与回放重建（A3e）：跑一次后台子代理 → 模拟重启
+/// OpenSession 回放 → 事件流应有 SubagentCard（meta 齐全、background=true），
+/// 且其后有该 agent_id 的 SubagentActivity finished（后台任务不随进程存活，
+/// 回放落终态，防止回放卡永转圈）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subagent_background_card_replayed() {
+    let (config_path, cwd, data_dir) = setup("subagent-replay");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let sid = new_session(&agent, cwd.clone()).await;
+
+    // 后台跑完一个子代理（等到完成通知 = 任务已终结）
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid.clone(),
+            content: format!("{} BG", mock::SUBAGENT_TRIGGER),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "等通知超时");
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), agent.events.recv()).await
+        else {
+            continue;
+        };
+        if let Event::UserMessage { text, .. } = &event
+            && text.contains("<task-notification")
+        {
+            break;
+        }
+    }
+    agent.shutdown();
+
+    // 模拟重启重开会话：回放重建
+    let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    let events2 = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    // 回放序列的最后一个事件是该 agent 的 finished（在收尾 TurnComplete 之后）
+    let collected = recv_until(&events2, Duration::from_secs(20), |e| {
+        matches!(e, Event::SubagentActivity { finished: true, .. })
+    })
+    .await;
+
+    // SubagentCard：meta 齐全、background=true
+    let card = collected
+        .iter()
+        .find_map(|e| match e {
+            Event::SubagentCard {
+                agent_id,
+                profile,
+                description,
+                model,
+                background,
+                ..
+            } => Some((
+                agent_id.clone(),
+                profile.clone(),
+                description.clone(),
+                model.clone(),
+                *background,
+            )),
+            _ => None,
+        })
+        .expect("回放应重发 SubagentCard");
+    assert!(card.4, "BG 场景回放 background 应为 true");
+    assert_eq!(card.1, "explore");
+    assert_eq!(card.2, "子代理自测委派");
+    assert!(!card.3.is_empty(), "model 应非空");
+    // finished 收尾标记在卡片之后、指向同一 agent_id
+    let card_pos = collected
+        .iter()
+        .position(|e| matches!(e, Event::SubagentCard { .. }))
+        .expect("已断言存在");
+    let has_finished = collected.iter().skip(card_pos).any(|e| {
+        matches!(
+            e,
+            Event::SubagentActivity { agent_id, item: None, finished: true, .. }
+                if *agent_id == card.0
+        )
+    });
+    assert!(has_finished, "回放末尾应补 finished 落终态: {collected:#?}");
+    agent2.shutdown();
+}
+
+/// 旧格式 rollout 记录（无 agent_card 字段）解析兼容（serde default）：
+/// 回放路径照常工作、代理卡回落标准工具卡
+#[test]
+fn rollout_tool_call_without_agent_card_parses() {
+    let line = r#"{"type":"tool_call","tool":"Agent","summary":"子代理 explore: x","arguments":"{}","output":"agent_id: a1-1\nstatus: running","is_error":false}"#;
+    let record: pig_core::rollout::RolloutRecord =
+        serde_json::from_str(line).expect("旧记录应解析");
+    let pig_core::rollout::RolloutRecord::ToolCall { agent_card, .. } = record else {
+        panic!("应是 ToolCall 记录");
+    };
+    assert!(agent_card.is_none(), "旧记录无代理卡元信息");
 }

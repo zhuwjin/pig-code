@@ -405,8 +405,14 @@ pub(crate) enum GatedToolOutcome {
 
 /// 子代理委派（run_subagent）的结果
 enum SubagentOutcome {
-    /// 子代理已收尾（成败都在 note 里）；调用方负责 history/rollout/ToolCallEnd
-    Finished { note: String, is_error: bool },
+    /// 子代理已收尾（成败都在 note 里）；调用方负责 history/rollout/ToolCallEnd。
+    /// card = 代理卡元信息（随 rollout ToolCall 记录持久化，回放重建代理卡）；
+    /// 参数/档案/模型解析失败的早退没有 agent_id，记 None
+    Finished {
+        note: String,
+        is_error: bool,
+        card: Option<crate::rollout::AgentCardRecord>,
+    },
     /// 取消（审批等待或采样/执行中被打断）；调用方发 TurnAborted 并收尾
     Cancelled,
 }
@@ -579,6 +585,8 @@ impl Session {
     pub fn replay(&mut self, records: &[RolloutRecord], tx: &async_channel::Sender<Event>) {
         let mut in_assistant = false;
         let mut replay_turns = 0usize;
+        // 回放中遇到的后台子代理（去重）：回放结束后统一补 finished 落终态
+        let mut replay_bg_agents: Vec<String> = vec![];
         for record in records {
             match record {
                 RolloutRecord::Meta { .. } => {}
@@ -665,6 +673,7 @@ impl Session {
                     output,
                     is_error,
                     edit,
+                    agent_card,
                 } => {
                     if !in_assistant {
                         replay_turns += 1;
@@ -714,6 +723,31 @@ impl Session {
                         },
                         tx,
                     );
+                    // 代理卡元信息随记录回放重建（紧挨 ToolCallBegin、同一个回放合成
+                    // item_id）；后台代理的 agent_id 收集起来，回放结束后统一补
+                    // finished——后台任务不随进程存活，重开后一律视为已终结，
+                    // 否则回放的代理卡永转圈
+                    if let Some(card) = agent_card {
+                        if card.background
+                            && !replay_bg_agents.iter().any(|id| id == &card.agent_id)
+                        {
+                            replay_bg_agents.push(card.agent_id.clone());
+                        }
+                        let card = card.clone();
+                        self.emit(
+                            |session_id, seq| Event::SubagentCard {
+                                session_id,
+                                seq,
+                                item_id: item.clone(),
+                                agent_id: card.agent_id.clone(),
+                                profile: card.profile.clone(),
+                                description: card.description.clone(),
+                                model: card.model.clone(),
+                                background: card.background,
+                            },
+                            tx,
+                        );
+                    }
                     self.emit(
                         |session_id, seq| Event::ToolCallEnd {
                             session_id,
@@ -820,6 +854,20 @@ impl Session {
                     seq,
                     duration_ms: 0,
                     stats: None,
+                },
+                tx,
+            );
+        }
+        // 后台子代理的代理卡落终态：后台任务不随进程存活，重开后一律视为已终结
+        //（放在收尾 TurnComplete 之后，UI 已在非流式态）
+        for agent_id in replay_bg_agents {
+            self.emit(
+                |session_id, seq| Event::SubagentActivity {
+                    session_id,
+                    seq,
+                    agent_id,
+                    item: None,
+                    finished: true,
                 },
                 tx,
             );
@@ -1447,6 +1495,7 @@ impl Session {
                     output: note.clone(),
                     is_error,
                     edit: None,
+                    agent_card: None,
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -1500,6 +1549,7 @@ impl Session {
                     output: note.clone(),
                     is_error,
                     edit: None,
+                    agent_card: None,
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -1524,7 +1574,11 @@ impl Session {
                     .run_subagent(call, &turn_id, &item_id, config, tx, cancel)
                     .await
                 {
-                    SubagentOutcome::Finished { note, is_error } => {
+                    SubagentOutcome::Finished {
+                        note,
+                        is_error,
+                        card,
+                    } => {
                         self.history
                             .push(ChatMsg::tool_result(&call.id, note.clone()));
                         self.record(&RolloutRecord::ToolCall {
@@ -1534,6 +1588,8 @@ impl Session {
                             output: note.clone(),
                             is_error,
                             edit: None,
+                            // 代理卡元信息随记录持久化：回放经它重建代理卡
+                            agent_card: card,
                         });
                         self.emit(
                             |session_id, seq| Event::ToolCallEnd {
@@ -1569,6 +1625,7 @@ impl Session {
                     output: note.clone(),
                     is_error: true,
                     edit: None,
+                    agent_card: None,
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -1596,6 +1653,7 @@ impl Session {
                     output: note.clone(),
                     is_error: true,
                     edit: None,
+                    agent_card: None,
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -1629,6 +1687,7 @@ impl Session {
                             output: note.clone(),
                             is_error: true,
                             edit: None,
+                            agent_card: None,
                         });
                         self.emit(
                             |session_id, seq| Event::ToolCallEnd {
@@ -1700,6 +1759,7 @@ impl Session {
                     output: note.clone(),
                     is_error: false,
                     edit: None,
+                    agent_card: None,
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -1739,6 +1799,7 @@ impl Session {
                         output: note.clone(),
                         is_error: true,
                         edit: None,
+                        agent_card: None,
                     });
                     self.emit(
                         |session_id, seq| Event::ToolCallEnd {
@@ -1776,6 +1837,7 @@ impl Session {
                         output: output.clone(),
                         is_error,
                         edit: edit.clone(),
+                        agent_card: None,
                     });
                     self.emit(
                         |session_id, seq| Event::ToolCallEnd {
@@ -1839,6 +1901,8 @@ impl Session {
         let fail = |note: String| SubagentOutcome::Finished {
             note,
             is_error: true,
+            // 参数/档案/模型解析失败的早退没有 agent_id，不建代理卡
+            card: None,
         };
         let description = args["description"].as_str().unwrap_or("").trim();
         if description.is_empty() {
@@ -2003,9 +2067,9 @@ impl Session {
             description: description.to_string(),
         };
 
-        // 代理卡元信息（live-only）：agent_id 分配 + child_config 解析完成后即发，
-        // 前台/后台/resume 同路（profile/model 按本次重解析结果）；回放无此事件，
-        // UI 回落标准工具卡样式
+        // 代理卡元信息：agent_id 分配 + child_config 解析完成后即组好——
+        // live 经 SubagentCard 事件直发，并随 RolloutRecord::ToolCall 持久化
+        //（回放经记录重建）；前台/后台/resume 同路（profile/model 按本次重解析结果）
         let mut card_model = format!(
             "{} · {}",
             drive.child_config.provider_name, drive.child_config.model
@@ -2013,22 +2077,30 @@ impl Session {
         if let Some(level) = &drive.profile.thought_level {
             card_model = format!("{card_model} · {level}");
         }
+        let card_record = crate::rollout::AgentCardRecord {
+            agent_id: drive.agent_id.clone(),
+            profile: drive.profile.name.clone(),
+            description: drive.description.clone(),
+            model: card_model,
+            background,
+        };
         self.emit(
             |session_id, seq| Event::SubagentCard {
                 session_id,
                 seq,
                 item_id: parent_item_id.to_string(),
-                agent_id: drive.agent_id.clone(),
-                profile: drive.profile.name.clone(),
-                description: drive.description.clone(),
-                model: card_model.clone(),
+                agent_id: card_record.agent_id.clone(),
+                profile: card_record.profile.clone(),
+                description: card_record.description.clone(),
+                model: card_record.model.clone(),
+                background: card_record.background,
             },
             tx,
         );
 
         // ---- 后台：注册任务 + spawn 驱动，立即返回 running ----
         if background {
-            return self.spawn_subagent_background(drive, tx);
+            return self.spawn_subagent_background(drive, tx, card_record);
         }
 
         // ---- 前台：借 Session 字段组 GateCtx 同步驱动 ----
@@ -2090,6 +2162,7 @@ impl Session {
         SubagentOutcome::Finished {
             note,
             is_error: result.is_error,
+            card: Some(card_record),
         }
     }
 
@@ -2099,6 +2172,7 @@ impl Session {
         &self,
         drive: SubagentDrive,
         tx: &async_channel::Sender<Event>,
+        card: crate::rollout::AgentCardRecord,
     ) -> SubagentOutcome {
         let bg_cancel = CancellationToken::new();
         let command = format!("子代理 {}: {}", drive.profile.name, drive.description);
@@ -2253,6 +2327,7 @@ impl Session {
         SubagentOutcome::Finished {
             note: running_note,
             is_error: false,
+            card: Some(card),
         }
     }
 }

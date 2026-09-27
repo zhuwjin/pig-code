@@ -109,6 +109,9 @@ pub enum RolloutRecord {
         /// 本次编辑的 diff（回放时恢复工具卡片的内联 diff 视图）
         #[serde(default)]
         edit: Option<pig_protocol::EditDiff>,
+        /// Agent 工具卡的代理卡元信息（回放重建代理卡；serde default 兼容旧记录）
+        #[serde(default)]
+        agent_card: Option<AgentCardRecord>,
     },
     /// 一轮的文件改动（回放恢复消息流里的每轮改动面板）
     TurnChanges {
@@ -143,6 +146,19 @@ pub enum RolloutRecord {
         note: String,
         omitted: usize,
     },
+}
+
+/// Agent 工具卡的代理卡元信息（随 RolloutRecord::ToolCall 持久化，回放重建用）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentCardRecord {
+    pub agent_id: String,
+    pub profile: String,
+    pub description: String,
+    /// "{provider_name} · {model}"（可带思考档后缀）
+    pub model: String,
+    /// 本次运行为后台：后台卡运行态由子代理生命周期驱动；
+    /// 回放后由 core 补发 SubagentActivity finished 落终态（任务不随进程存活）
+    pub background: bool,
 }
 
 pub struct Rollout {

@@ -653,8 +653,8 @@ pub enum Event {
         item_id: String,
         note: String,
     },
-    /// 子代理工具卡的「代理卡」元信息（live-only，不落 rollout）：
-    /// item_id = 父会话 Agent 工具卡片；回放无此事件，UI 回落标准工具卡样式
+    /// 子代理工具卡的「代理卡」元信息（live 直发 + rollout 持久化，回放经记录重建）：
+    /// item_id = 父会话 Agent 工具卡片；旧回放记录无此字段 → UI 回落标准工具卡样式
     SubagentCard {
         session_id: String,
         seq: u64,
@@ -664,6 +664,9 @@ pub enum Event {
         description: String,
         /// "{provider_name} · {model}"（档案带 thought_level 时追加「 · {level}」）
         model: String,
+        /// 本次运行为后台（run_in_background）：后台卡的运行态由子代理真实
+        /// 生命周期（SubagentActivity）驱动，而非工具调用的 done
+        background: bool,
     },
     ContextUsage {
         session_id: String,

@@ -4427,17 +4427,29 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         );
     });
     let mut saw_running = false;
+    let mut saw_card_running = false;
     let mut initial_items = None;
     let mut waited = 0u64;
     loop {
         timer!(100).await;
         waited += 100;
         assert!(waited < 30_000, "面板实时输出超时");
-        let state = app!(|app: &mut AppView, cx| app.debug_subagent_live(&bg_agent_id, cx));
-        let Some((running, items, appends)) = state else {
+        let state = app!(|app: &mut AppView, cx| {
+            let live = app.debug_subagent_live(&bg_agent_id, cx);
+            let card = app
+                .views
+                .get(&session_d)
+                .and_then(|views| views.thread.read(cx).debug_agent_card_state());
+            (live, card)
+        });
+        let (Some((running, items, appends)), card_state) = state else {
             continue;
         };
         saw_running |= running;
+        // A3e①：工具回执早已收尾（done）但子代理仍在跑（!finished）→ 卡应转圈
+        if let Some((_, done, finished)) = &card_state {
+            saw_card_running |= *done && !*finished;
+        }
         if initial_items.is_none() && items > 0 {
             initial_items = Some(items);
         }
@@ -4452,7 +4464,66 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             break;
         }
     }
+    // 卡的终态：finished 落位（不再转圈）
+    let (_, card_done, card_finished) = app!(|app: &mut AppView, cx| {
+        app.views
+            .get(&session_d)
+            .and_then(|views| views.thread.read(cx).debug_agent_card_state())
+            .expect("D 应有代理卡")
+    });
+    assert!(card_done && card_finished, "子代理结束后卡应落终态");
+    assert!(
+        saw_card_running,
+        "应见过「工具收尾但子代理在跑」的转圈窗口（done=true 且 finished=false）"
+    );
     println!("[selftest] 子代理面板实时输出（running 指示/活动追加/收尾消失）OK");
+    println!("[selftest] 后台代理卡运行态机（转圈窗口→终态）OK");
+
+    // A3e②：模拟重启重开会话 D——代理卡元信息从 rollout 回放重建（不退化成
+    // 原始输出卡），且后台代理回放即落终态（core 补发 finished，不转圈）
+    app!(|app: &mut AppView, cx| app.restart_agent(cx));
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 10_000, "重启后自动打开会话超时");
+        let ready = app!(|app: &mut AppView, _| app.current.is_some());
+        if ready {
+            break;
+        }
+    }
+    app!(|app: &mut AppView, cx| app.switch_session(session_d.clone(), cx));
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 30_000, "重启后重放代理卡超时");
+        let state = app!(|app: &mut AppView, cx| {
+            let views = app.views.get(&session_d)?;
+            let thread = views.thread.read(cx);
+            Some((
+                thread.debug_agent_card_meta(),
+                thread.debug_agent_card_state(),
+            ))
+        });
+        let Some((meta, card_state)) = state else {
+            continue;
+        };
+        let (Some((card_agent, subtitle)), Some((_, done, finished))) = (meta, card_state) else {
+            continue;
+        };
+        assert_eq!(card_agent, bg_agent_id, "回放应重建同一代理卡");
+        assert!(
+            subtitle.contains("explore"),
+            "副标题应含 profile: {subtitle}"
+        );
+        assert!(
+            done && finished,
+            "回放的后台代理卡应直接落终态: done={done} finished={finished}"
+        );
+        break;
+    }
+    println!("[selftest] 代理卡回放重建（meta 保留 + 落终态不转圈）OK");
 
     // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
     assert_eq!(
