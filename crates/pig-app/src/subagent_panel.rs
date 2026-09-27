@@ -39,6 +39,9 @@ pub struct SubagentPanel {
     pending: Vec<SubagentItem>,
     /// 累计收到的活动项数（自测断言用）
     activity_items: usize,
+    /// 跟随模式（thread_view 同款）：追加/加载时自动贴底；用户上翻暂停
+    ///（浮出「最新消息」按钮），回到底部（任意方式）或点按钮恢复
+    following: bool,
     scroll: ScrollHandle,
 }
 
@@ -69,8 +72,15 @@ impl SubagentPanel {
             running: false,
             pending: vec![],
             activity_items: 0,
+            following: true,
             scroll: ScrollHandle::new(),
         }
+    }
+
+    /// 贴底判定（thread_view 同款）：gpui 滚动偏移是负值（顶部 0 → 底部
+    /// -max_offset），at_bottom ⟺ offset + max_offset ≈ 0
+    fn at_bottom(&self) -> bool {
+        self.scroll.offset().y + self.scroll.max_offset().y <= px(2.)
     }
 
     /// 事件路由的会话归属校验（其它会话的迟到事件忽略）
@@ -97,19 +107,23 @@ impl SubagentPanel {
         let mut all = items;
         all.append(&mut self.pending);
         self.rows = Some(all.into_iter().map(|item| build_row(item, cx)).collect());
+        // 跟随时贴底（初始加载必然 following=true——打开即读最新）；
+        // scroll_to_bottom 是延迟标记，下一帧布局后才落到真底部
+        if self.following {
+            self.scroll.scroll_to_bottom();
+        }
         cx.notify();
     }
 
-    /// SubagentActivity 增量追加；距底 80px 内跟随滚到底
+    /// SubagentActivity 增量追加；跟随时贴底（用户上翻后不打扰）
     pub fn push_item(&mut self, item: SubagentItem, cx: &mut Context<Self>) {
         self.activity_items += 1;
         match &mut self.rows {
             // 全量尚未到达：缓冲（set_history 拼尾），等 finished 后全量重拉收口
             None => self.pending.push(item),
             Some(rows) => {
-                let near_bottom = self.scroll.max_offset().y - self.scroll.offset().y < px(80.);
                 rows.push(build_row(item, cx));
-                if near_bottom {
+                if self.following {
                     self.scroll.scroll_to_bottom();
                 }
             }
@@ -137,6 +151,11 @@ impl SubagentPanel {
             self.rows.as_ref().map(|r| r.len()).unwrap_or(0) + self.pending.len(),
             self.activity_items,
         )
+    }
+
+    /// 自测用：(following, at_bottom)——跟随态与贴底判定
+    pub fn debug_scroll(&self) -> (bool, bool) {
+        (self.following, self.at_bottom())
     }
 
     /// tool 行：图标 + 工具名 + 摘要（单行省略），点击展开/收起输出卡
@@ -228,84 +247,136 @@ impl SubagentPanel {
 impl Render for SubagentPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let subtle = cx.theme().muted_foreground;
-        let Some(rows) = &self.rows else {
-            return v_flex()
+        // 用户回到底部（滚轮/拖滚动条任意方式）自动恢复跟随（thread_view 同款）
+        if !self.following && self.at_bottom() {
+            self.following = true;
+        }
+        let body: AnyElement = match &self.rows {
+            None => v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
                 .child(div().text_sm().text_color(subtle).child("加载中…"))
-                .into_any_element();
-        };
-        div()
-            .id("subagent-panel-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_3()
-                    .p_3()
-                    // 头部：标题 + 模型副标题
-                    .child(
-                        v_flex()
+                .into_any_element(),
+            Some(rows) => v_flex()
+                .w_full()
+                .gap_3()
+                .p_3()
+                // 头部：标题 + 模型副标题
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(self.title.clone()),
+                        )
+                        .when(!self.subtitle.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(subtle)
+                                    .child(self.subtitle.clone()),
+                            )
+                        }),
+                )
+                .children(rows.iter().enumerate().map(|(ix, row)| {
+                    match row.item.role.as_str() {
+                        // user 行：「任务」小字标签 + 正文
+                        "user" => v_flex()
                             .w_full()
-                            .gap_0p5()
+                            .gap_1()
+                            .child(div().text_xs().text_color(subtle).child("任务"))
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(self.title.clone()),
-                            )
-                            .when(!self.subtitle.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(subtle)
-                                        .child(self.subtitle.clone()),
-                                )
-                            }),
-                    )
-                    .children(rows.iter().enumerate().map(|(ix, row)| {
-                        match row.item.role.as_str() {
-                            // user 行：「任务」小字标签 + 正文
-                            "user" => v_flex()
-                                .w_full()
-                                .gap_1()
-                                .child(div().text_xs().text_color(subtle).child("任务"))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().foreground)
-                                        .child(row.item.text.clone()),
-                                )
-                                .into_any_element(),
-                            // tool 行：可展开
-                            "tool" => self.render_tool_row(ix, row, cx),
-                            // assistant 行：markdown 渲染
-                            _ => match &row.markdown {
-                                Some(state) => TextView::new(state)
-                                    .selectable(true)
-                                    .text_sm()
-                                    .into_any_element(),
-                                None => div()
-                                    .text_sm()
                                     .text_color(cx.theme().foreground)
-                                    .child(row.item.text.clone())
-                                    .into_any_element(),
-                            },
+                                    .child(row.item.text.clone()),
+                            )
+                            .into_any_element(),
+                        // tool 行：可展开
+                        "tool" => self.render_tool_row(ix, row, cx),
+                        // assistant 行：markdown 渲染
+                        _ => match &row.markdown {
+                            Some(state) => TextView::new(state)
+                                .selectable(true)
+                                .text_sm()
+                                .into_any_element(),
+                            None => div()
+                                .text_sm()
+                                .text_color(cx.theme().foreground)
+                                .child(row.item.text.clone())
+                                .into_any_element(),
+                        },
+                    }
+                }))
+                // 底部「运行中」指示（子代理结束时随 finished 消失）
+                .when(self.running, |this| {
+                    this.child(
+                        h_flex()
+                            .gap_2()
+                            .child(Spinner::new().small().color(subtle))
+                            .child(div().text_xs().text_color(subtle).child("子代理运行中…")),
+                    )
+                })
+                .into_any_element(),
+        };
+        div()
+            .relative()
+            .size_full()
+            .child(
+                div()
+                    .id("subagent-panel-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        // 用户上翻：暂停跟随并浮出「最新消息」按钮
+                        //（不吞这次事件，列表照常滚动）
+                        if delta.y > px(0.) && this.following {
+                            this.following = false;
+                            cx.notify();
+                        }
+                        // 能滚时吞掉滚轮，不穿透到面板外的三栏/主消息流
+                        if this.scroll.max_offset().y > px(0.) {
+                            cx.stop_propagation();
                         }
                     }))
-                    // 底部「运行中」指示（子代理结束时随 finished 消失）
-                    .when(self.running, |this| {
-                        this.child(
-                            h_flex()
-                                .gap_2()
-                                .child(Spinner::new().small().color(subtle))
-                                .child(div().text_xs().text_color(subtle).child("子代理运行中…")),
-                        )
-                    }),
+                    .child(body),
             )
+            // 未跟随时浮出「最新消息」按钮：点击回到底部并恢复跟随
+            .when(!self.following, |this| {
+                this.child(
+                    div().absolute().bottom_3().right_3().child(
+                        h_flex()
+                            .id("subagent-latest-fab")
+                            .items_center()
+                            .gap_1()
+                            .px_3()
+                            .py_1p5()
+                            .rounded_full()
+                            .bg(cx.theme().popover)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .shadow_md()
+                            .cursor_pointer()
+                            .child(
+                                Icon::new(AssetsIconName::ArrowDown)
+                                    .size_3p5()
+                                    .text_color(cx.theme().foreground),
+                            )
+                            .child(div().text_xs().child("最新消息"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.following = true;
+                                this.scroll.scroll_to_bottom();
+                                cx.notify();
+                            })),
+                    ),
+                )
+            })
             .into_any_element()
     }
 }

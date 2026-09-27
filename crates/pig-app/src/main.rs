@@ -2267,6 +2267,13 @@ impl AppView {
             .map(|panel| panel.read(cx).debug_live())
     }
 
+    /// 自测用：指定 agent_id 的「子代理」tab 的 (following, at_bottom)；无 tab 为 None
+    pub fn debug_subagent_scroll(&self, agent_id: &str, cx: &App) -> Option<(bool, bool)> {
+        self.subagent_tabs
+            .get(agent_id)
+            .map(|panel| panel.read(cx).debug_scroll())
+    }
+
     fn sync_hero_mode(&mut self, cx: &mut Context<Self>) {
         let hero = self.is_hero(cx) && self.pending_first_send.is_none();
         self.composer
@@ -4428,6 +4435,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     });
     let mut saw_running = false;
     let mut saw_card_running = false;
+    let mut saw_following = false;
     let mut initial_items = None;
     let mut waited = 0u64;
     loop {
@@ -4436,16 +4444,21 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         assert!(waited < 30_000, "面板实时输出超时");
         let state = app!(|app: &mut AppView, cx| {
             let live = app.debug_subagent_live(&bg_agent_id, cx);
+            let scroll = app.debug_subagent_scroll(&bg_agent_id, cx);
             let card = app
                 .views
                 .get(&session_d)
                 .and_then(|views| views.thread.read(cx).debug_agent_card_state());
-            (live, card)
+            (live, scroll, card)
         });
-        let (Some((running, items, appends)), card_state) = state else {
+        let (Some((running, items, appends)), scroll_state, card_state) = state else {
             continue;
         };
         saw_running |= running;
+        // 追加活动期间跟随态不应丢（A3f）
+        if let Some((following, _)) = scroll_state {
+            saw_following |= following;
+        }
         // A3e①：工具回执早已收尾（done）但子代理仍在跑（!finished）→ 卡应转圈
         if let Some((_, done, finished)) = &card_state {
             saw_card_running |= *done && !*finished;
@@ -4464,6 +4477,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
             break;
         }
     }
+    assert!(saw_following, "追加活动期间 following 应保持 true");
     // 卡的终态：finished 落位（不再转圈）
     let (_, card_done, card_finished) = app!(|app: &mut AppView, cx| {
         app.views
@@ -4478,6 +4492,25 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     );
     println!("[selftest] 子代理面板实时输出（running 指示/活动追加/收尾消失）OK");
     println!("[selftest] 后台代理卡运行态机（转圈窗口→终态）OK");
+
+    // A3f：面板跟随滚动——追加活动期间 following 未丢（上面已断言），收尾后贴底
+    //（面板内容可能不足一屏：此时 max_offset=0，at_bottom 恒真，断言退化为
+    // 跟随态检查；真实溢出场景的跟随/浮钮靠人工验证）
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 10_000, "面板贴底超时");
+        let scroll = app!(|app: &mut AppView, cx| app.debug_subagent_scroll(&bg_agent_id, cx));
+        let Some((following, at_bottom)) = scroll else {
+            continue;
+        };
+        if at_bottom {
+            assert!(following, "贴底时应处于跟随态");
+            break;
+        }
+    }
+    println!("[selftest] 子代理面板跟随滚动（following 保持 + 贴底）OK");
 
     // A3e②：模拟重启重开会话 D——代理卡元信息从 rollout 回放重建（不退化成
     // 原始输出卡），且后台代理回放即落终态（core 补发 finished，不转圈）
