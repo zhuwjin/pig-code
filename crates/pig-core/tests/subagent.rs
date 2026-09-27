@@ -495,6 +495,15 @@ async fn subagent_background_full_link() {
         notification.contains("description=\"子代理自测委派\""),
         "开标签应带 description: {notification}"
     );
+    // 耗时与记录文件路径属性（UI 状态卡用）
+    assert!(
+        notification.contains("duration_ms=\""),
+        "开标签应带 duration_ms: {notification}"
+    );
+    assert!(
+        notification.contains("record=\"") && notification.contains(".agents/"),
+        "开标签应带子代理上下文路径: {notification}"
+    );
     assert!(saw_agent_task, "任务面板应含子代理条目");
     agent.shutdown();
 }

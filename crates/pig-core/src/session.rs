@@ -1991,6 +1991,29 @@ impl Session {
             description: description.to_string(),
         };
 
+        // 代理卡元信息（live-only）：agent_id 分配 + child_config 解析完成后即发，
+        // 前台/后台/resume 同路（profile/model 按本次重解析结果）；回放无此事件，
+        // UI 回落标准工具卡样式
+        let mut card_model = format!(
+            "{} · {}",
+            drive.child_config.provider_name, drive.child_config.model
+        );
+        if let Some(level) = &drive.profile.thought_level {
+            card_model = format!("{card_model} · {level}");
+        }
+        self.emit(
+            |session_id, seq| Event::SubagentCard {
+                session_id,
+                seq,
+                item_id: parent_item_id.to_string(),
+                agent_id: drive.agent_id.clone(),
+                profile: drive.profile.name.clone(),
+                description: drive.description.clone(),
+                model: card_model.clone(),
+            },
+            tx,
+        );
+
         // ---- 后台：注册任务 + spawn 驱动，立即返回 running ----
         if background {
             return self.spawn_subagent_background(drive, tx);
@@ -2078,11 +2101,14 @@ impl Session {
         let profile_name = drive.profile.name.clone();
         let task_id_bg = task_id.clone();
         // 通知开标签的结构化属性（UI 紧凑卡用；正文保持逐字不变）
-        let description_attr = sanitize_notification_attr(&drive.description);
+        let description_attr = sanitize_notification_attr(&drive.description, 60);
         let model_attr = format!(
             "{} · {}",
             drive.child_config.provider_name, drive.child_config.model
         );
+        // 记录文件路径（子代理上下文 JSONL 绝对路径，过同样的属性消毒）
+        let record_attr = sanitize_notification_attr(&drive.jsonl.display().to_string(), 512);
+        let started_at = std::time::Instant::now();
         // 给父模型的即时回执（不依赖任务结果，先组好）
         let running_note = format!(
             "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\n子代理已在后台运行，完成后结果会以 <task-notification> 通知送达——不要轮询。\n可用 TaskOutput 看进度、TaskStop 停止、Agent(resume=\"{agent_id}\", prompt=\"...\") 续跑。"
@@ -2138,14 +2164,15 @@ impl Session {
             if !result.cancelled {
                 // 开标签带结构化属性（UI 紧凑卡展示用），正文逐字保持原样
                 // ——结果全文是模型唤醒的意义所在，只是 UI 不再直接展示
+                let duration_ms = started_at.elapsed().as_millis() as u64;
                 let notification = if result.is_error {
                     format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\">\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\">\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
                         result.turns, result.result_text
                     )
                 } else {
                     format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\">\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\">\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
                         result.turns, result.turns, result.result_text
                     )
                 };
@@ -2230,11 +2257,12 @@ fn persist_agent_msg(jsonl: &Path, msg: &ChatMsg) {
     persist_agent_line(jsonl, &serde_json::json!({ "type": "msg", "msg": msg }));
 }
 
-/// 通知开标签属性值消毒：去 `"` 与换行（防标签被截断/注入），截 60 字符
-fn sanitize_notification_attr(text: &str) -> String {
+/// 通知开标签属性值消毒：去 `"` 与换行（防标签被截断/注入），截 max_chars 字符
+///（description 用 60；record 路径用 512——绝对路径远超 60）
+fn sanitize_notification_attr(text: &str, max_chars: usize) -> String {
     text.chars()
         .filter(|c| !matches!(c, '"' | '\n' | '\r'))
-        .take(60)
+        .take(max_chars)
         .collect()
 }
 

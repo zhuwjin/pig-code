@@ -653,6 +653,18 @@ pub enum Event {
         item_id: String,
         note: String,
     },
+    /// 子代理工具卡的「代理卡」元信息（live-only，不落 rollout）：
+    /// item_id = 父会话 Agent 工具卡片；回放无此事件，UI 回落标准工具卡样式
+    SubagentCard {
+        session_id: String,
+        seq: u64,
+        item_id: String,
+        agent_id: String,
+        profile: String,
+        description: String,
+        /// "{provider_name} · {model}"（档案带 thought_level 时追加「 · {level}」）
+        model: String,
+    },
     ContextUsage {
         session_id: String,
         seq: u64,

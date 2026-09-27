@@ -25,6 +25,17 @@ pub enum Role {
     System,
 }
 
+/// 代理卡元信息（live-only `Event::SubagentCard` 写入 Agent 工具卡；
+/// 回放无此事件 → 回落标准工具卡样式）
+#[derive(Clone)]
+pub struct AgentCardMeta {
+    pub agent_id: String,
+    pub profile: String,
+    pub description: String,
+    /// "{provider_name} · {model}"（可带思考档后缀）
+    pub model: String,
+}
+
 pub enum Segment {
     Thinking {
         text: String,
@@ -55,6 +66,9 @@ pub enum Segment {
         /// 独立字段而非覆盖 summary：运行中原摘要（「子代理 explore: …」）要保留。
         /// 回放没有该事件，恒为 None
         live_note: Option<String>,
+        /// 代理卡元信息（SubagentCard 事件写入；Some 时按代理卡样式渲染，
+        /// 点击开右侧子代理对话 tab；回放恒 None → 标准工具卡）
+        agent_card: Option<AgentCardMeta>,
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
     },
@@ -114,6 +128,21 @@ pub struct ChatMessage {
     pub images: Vec<UserImage>,
     pub segments: Vec<Segment>,
     pub footer: Option<String>,
+    /// 后台子代理通知卡的 UI 态（render 前惰性创建；仅 <task-notification> 消息为 Some）
+    pub notification_ui: Option<NotificationUi>,
+}
+
+/// 后台子代理通知卡的 UI 态（随消息存放，clear() 随消息一并释放）
+pub struct NotificationUi {
+    /// 「原始 payload」折叠区展开态
+    pub payload_open: bool,
+    /// 「复制路径」已点击（按钮换「已复制」）
+    pub copied: bool,
+    /// 记录文件大小缓存：None = 无 record 属性；Some(None) = 文件已消失；
+    /// Some(Some(n)) = 字节数（render 前探测一次，避免每帧 stat）
+    pub record_size: Option<Option<u64>>,
+    /// payload 展开区的滚动句柄
+    pub payload_scroll: ScrollHandle,
 }
 
 impl ChatMessage {
@@ -126,6 +155,7 @@ impl ChatMessage {
             images: vec![],
             segments: vec![],
             footer: None,
+            notification_ui: None,
         }
     }
 
@@ -138,6 +168,7 @@ impl ChatMessage {
             images: vec![],
             segments: vec![],
             footer: None,
+            notification_ui: None,
         }
     }
 
@@ -150,6 +181,7 @@ impl ChatMessage {
             images: vec![],
             segments: vec![],
             footer: None,
+            notification_ui: None,
         }
     }
 }
@@ -197,6 +229,10 @@ struct TaskNotification<'a> {
     turns: Option<String>,
     model: Option<String>,
     description: Option<String>,
+    /// 子代理实际耗时（毫秒）
+    duration_ms: Option<u64>,
+    /// 子代理上下文 JSONL 记录文件的绝对路径
+    record: Option<String>,
     /// 剥掉最外层标签的正文（内层同名标签不剥，按普通文本留在正文里）
     body: &'a str,
 }
@@ -217,6 +253,8 @@ fn as_task_notification(text: &str) -> Option<TaskNotification<'_>> {
         turns: notification_attr(attrs, "turns"),
         model: notification_attr(attrs, "model"),
         description: notification_attr(attrs, "description"),
+        duration_ms: notification_attr(attrs, "duration_ms").and_then(|v| v.parse().ok()),
+        record: notification_attr(attrs, "record"),
         body: inner.trim(),
     })
 }
@@ -228,6 +266,40 @@ fn notification_attr(attrs: &str, name: &str) -> Option<String> {
     let value = &attrs[start..];
     let end = value.find('"')?;
     Some(value[..end].to_string())
+}
+
+/// 通知卡耗时格式化：<60s → "X.X 秒"；≥60s → "m 分 ss 秒"
+fn format_notification_duration(ms: u64) -> String {
+    if ms < 60_000 {
+        format!("{:.1} 秒", ms as f64 / 1000.0)
+    } else {
+        format!("{} 分 {:02} 秒", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
+/// 记录文件路径中段省略（保留首字符与末尾两段）：…/sessions/{sid}.agents/{id}.jsonl 式
+fn elide_record_path(path: &str) -> String {
+    const MAX_CHARS: usize = 48;
+    if path.chars().count() <= MAX_CHARS {
+        return path.to_string();
+    }
+    let mut tail = path.rsplit('/');
+    let (Some(file), Some(parent)) = (tail.next(), tail.next()) else {
+        return path.to_string();
+    };
+    let head = path.chars().next().unwrap_or('…');
+    format!("{head}…/{parent}/{file}")
+}
+
+/// 文件大小格式化（<1KB 显示 B，否则一位小数 KB/MB）
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1048576.0)
+    }
 }
 
 #[derive(Clone)]
@@ -580,9 +652,12 @@ impl ThreadView {
             .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
     }
 
-    /// 最近一条后台子代理通知的 (agent_id, 标题)（自测用；无通知/旧格式为 None）。
-    /// 标题 = description（缺省回退「后台子代理」），与紧凑卡渲染同口径。
-    pub fn debug_task_notification_meta(&self) -> Option<(String, String)> {
+    /// 最近一条后台子代理通知的 (agent_id, 标题, 耗时毫秒, 记录路径)（自测用；
+    /// 无通知/旧格式为 None）。标题 = description（缺省回退「后台子代理」），
+    /// 与紧凑状态卡渲染同口径。
+    pub fn debug_task_notification_meta(
+        &self,
+    ) -> Option<(String, String, Option<u64>, Option<String>)> {
         self.messages.iter().rev().find_map(|m| {
             if m.role != Role::User {
                 return None;
@@ -592,8 +667,26 @@ impl ThreadView {
                 .description
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| "后台子代理".to_string());
-            Some((note.agent_id?, title))
+            Some((note.agent_id?, title, note.duration_ms, note.record))
         })
+    }
+
+    /// 首张代理卡的 (agent_id, 副标题文本)（自测用；无 SubagentCard 元信息为 None）。
+    /// 副标题 = `{profile} · {model}`，与代理卡渲染同口径。
+    pub fn debug_agent_card_meta(&self) -> Option<(String, String)> {
+        self.messages
+            .iter()
+            .flat_map(|m| &m.segments)
+            .find_map(|s| match s {
+                Segment::ToolCall {
+                    agent_card: Some(card),
+                    ..
+                } => Some((
+                    card.agent_id.clone(),
+                    format!("{} · {}", card.profile, card.model),
+                )),
+                _ => None,
+            })
     }
 
     /// 当前待审批的 request_id（自测用）。
@@ -724,6 +817,7 @@ impl ThreadView {
                     expanded: false,
                     edit: None,
                     live_note: None,
+                    agent_card: None,
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
@@ -748,6 +842,7 @@ impl ThreadView {
                     expanded: false,
                     edit: None,
                     live_note: None,
+                    agent_card: None,
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall {
@@ -804,6 +899,27 @@ impl ThreadView {
                     }) = self.current_segment(six)
                 {
                     *live_note = Some(note);
+                }
+            }
+            Event::SubagentCard {
+                item_id,
+                agent_id,
+                profile,
+                description,
+                model,
+                ..
+            } => {
+                // 代理卡元信息（live-only）：先于 ToolCallEnd 到达；
+                // 乱序防御允许补写已 done 的卡
+                if let Some(&six) = self.item_index.get(&item_id)
+                    && let Some(Segment::ToolCall { agent_card, .. }) = self.current_segment(six)
+                {
+                    *agent_card = Some(AgentCardMeta {
+                        agent_id,
+                        profile,
+                        description,
+                        model,
+                    });
                 }
             }
             Event::TurnComplete {
@@ -972,7 +1088,7 @@ impl ThreadView {
         // 后台子代理完成/失败的合成消息：渲染为通知卡而非用户气泡
         //（剥标签只在显示层，message.text 原文不动，live 与回放共用此路径）
         if let Some(note) = as_task_notification(&message.text) {
-            return self.render_task_notification(ix, &note, cx);
+            return self.render_task_notification(ix, &note, message, cx);
         }
         v_flex()
             .w_full()
@@ -1039,14 +1155,16 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 后台子代理的合成通知卡。新版（开标签带 agent_id）渲染紧凑卡：
-    /// 图标方块 + 标题（description）+ 副标题（模型 · 状态），不展示结果全文；
-    /// 点击经 ThreadEvent::OpenSubagent 在右侧面板开只读对话 tab。
+    /// 后台子代理的合成通知块（A3c，kimi-code 同款气质）：
+    /// 右对齐「✓ 由后台发送（Agent）」小标签 + 限宽状态卡（标题 / 已完成·耗时 /
+    /// 记录文件行 / 默认折叠的原始 payload）。点击卡体开右侧子代理对话 tab
+    ///（复制路径按钮与 payload 折叠行的命中区 stop_propagation 不冒泡）。
     /// 旧格式（无 agent_id 属性）保持全文渲染，不破坏老会话的历史消息。
     fn render_task_notification(
         &self,
         message_ix: usize,
         note: &TaskNotification,
+        message: &ChatMessage,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(agent_id) = note.agent_id.clone() else {
@@ -1084,62 +1202,85 @@ impl ThreadView {
                 .into_any_element();
         };
         let failed = note.status.as_deref() == Some("failed");
-        let accent = if failed {
-            cx.theme().danger
-        } else {
-            cx.theme().info
-        };
+        let subtle = cx.theme().muted_foreground;
+        let subtlest = subtle.opacity(0.6);
         let title = note
             .description
             .clone()
             .filter(|d| !d.is_empty())
             .unwrap_or_else(|| "后台子代理".to_string());
-        let title_for_click = title.clone();
-        let status_text = if failed {
-            "失败".to_string()
-        } else {
-            format!("已完成 {} 步", note.turns.as_deref().unwrap_or("?"))
+        // 状态行：已完成/失败 · 耗时 …（无耗时属性时只给状态词）
+        let status_word = if failed { "失败" } else { "已完成" };
+        let status_line = match note.duration_ms {
+            Some(ms) => format!("{status_word} · 耗时 {}", format_notification_duration(ms)),
+            None => status_word.to_string(),
         };
-        let subtitle = match note.model.as_ref().filter(|m| !m.is_empty()) {
-            Some(model) => format!("{model} · {status_text}"),
-            None => status_text,
-        };
-        h_flex()
-            .id(("task-notification", message_ix))
+        // UI 态在 render 前的预备循环里已惰性创建；防御 None（理论上不会走到）
+        let ui = message.notification_ui.as_ref();
+        let payload_open = ui.is_some_and(|u| u.payload_open);
+        let copied = ui.is_some_and(|u| u.copied);
+        let payload_scroll = ui.map(|u| u.payload_scroll.clone());
+        let record_size = ui.and_then(|u| u.record_size);
+        let agent_id_click = agent_id.clone();
+        let title_click = title.clone();
+        v_flex()
             .w_full()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(accent.opacity(0.6))
-            .bg(accent.opacity(0.08))
-            .cursor_pointer()
-            .hover(|this| this.bg(accent.opacity(0.14)))
-            .on_click(cx.listener(move |_, _, _, cx| {
-                cx.emit(ThreadEvent::OpenSubagent {
-                    agent_id: agent_id.clone(),
-                    title: title_for_click.clone(),
-                });
-            }))
-            // 图标方块（kimi-code 紧凑卡同款：圆角淡底方块 + 居中机器人图标）
+            .items_end()
+            .gap_1()
+            // 上方右对齐小标签：✓/✗ 由后台发送（Agent）
             .child(
-                div()
-                    .flex_shrink_0()
-                    .w_8()
-                    .h_8()
-                    .rounded_md()
-                    .bg(accent.opacity(0.12))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::Bot).size_4().text_color(accent)),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(if failed {
+                            IconName::Close
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .size_3()
+                        .text_color(if failed {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().success
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if failed { cx.theme().danger } else { subtle })
+                            .child("由后台发送（Agent）"),
+                    ),
             )
+            // 状态卡：圆角描边限宽；失败版 danger 描边/淡底
             .child(
                 v_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .gap_0p5()
+                    .id(("task-notification", message_ix))
+                    .w_full()
+                    .max_w(px(520.))
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if failed {
+                        cx.theme().danger.opacity(0.6)
+                    } else {
+                        cx.theme().border
+                    })
+                    .bg(if failed {
+                        cx.theme().danger.opacity(0.08)
+                    } else {
+                        cx.theme().group_box
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(ThreadEvent::OpenSubagent {
+                            agent_id: agent_id_click.clone(),
+                            title: title_click.clone(),
+                        });
+                    }))
+                    // 第 1 行：标题（description，缺省「后台子代理」）
                     .child(
                         div()
                             .min_w_0()
@@ -1151,26 +1292,125 @@ impl ThreadView {
                             .text_color(cx.theme().foreground)
                             .child(title),
                     )
+                    // 第 2 行：状态（已完成/失败 · 耗时）
                     .child(
                         div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
                             .text_xs()
-                            .text_color(if failed {
-                                accent
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(subtitle),
-                    ),
-            )
-            .child(
-                Icon::new(IconName::ChevronRight)
-                    .size_4()
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground.opacity(0.6)),
+                            .text_color(if failed { cx.theme().danger } else { subtle })
+                            .child(status_line),
+                    )
+                    // 第 3 行：记录文件（doc 图标 + 中段省略路径 + 大小 + 复制路径按钮）
+                    .when_some(note.record.clone(), |this, record| {
+                        let size_text = match record_size {
+                            Some(Some(bytes)) => format_file_size(bytes),
+                            Some(None) => "记录已删除".to_string(),
+                            None => String::new(),
+                        };
+                        this.child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(
+                                    Icon::new(IconName::FileText)
+                                        .size_3p5()
+                                        .text_color(subtlest),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_xs()
+                                        .text_color(subtle)
+                                        .child(elide_record_path(&record)),
+                                )
+                                .when(!size_text.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(subtlest)
+                                            .child(size_text),
+                                    )
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new(("task-notification-copy", message_ix))
+                                        .xsmall()
+                                        .outline()
+                                        .label(if copied { "已复制" } else { "复制路径" })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            // 复制路径不冒泡到卡体（不开子代理 tab）
+                                            cx.stop_propagation();
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                record.clone(),
+                                            ));
+                                            if let Some(ui) = this
+                                                .messages
+                                                .get_mut(message_ix)
+                                                .and_then(|m| m.notification_ui.as_mut())
+                                            {
+                                                ui.copied = true;
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
+                    // 第 4 行：「原始 payload」折叠行（默认收起；命中区不冒泡到卡体）
+                    .child(
+                        h_flex()
+                            .id(("task-notification-payload-toggle", message_ix))
+                            .gap_1()
+                            .py_0p5()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(ui) = this
+                                    .messages
+                                    .get_mut(message_ix)
+                                    .and_then(|m| m.notification_ui.as_mut())
+                                {
+                                    ui.payload_open = !ui.payload_open;
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(if payload_open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size_3()
+                                .text_color(subtlest),
+                            )
+                            .child(div().text_xs().text_color(subtle).child("原始 payload")),
+                    )
+                    // 展开区：payload 原文（含标签全文），等宽 + 更深底 + 限高 240 内滚
+                    .when(payload_open, |this| {
+                        let block = div()
+                            .id(("task-notification-payload", message_ix))
+                            .w_full()
+                            .max_h(px(240.))
+                            .overflow_y_scroll()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().muted)
+                            .p_2()
+                            .text_xs()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_color(subtle)
+                            .child(message.text.clone());
+                        match payload_scroll {
+                            // 滚轮落在 payload 区时不穿透到外层消息列表
+                            Some(handle) => this.child(
+                                block
+                                    .track_scroll(&handle)
+                                    .on_scroll_wheel(consume_scroll(&handle)),
+                            ),
+                            None => this.child(block),
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -1818,9 +2058,26 @@ impl ThreadView {
         expanded: bool,
         approval_pending: bool,
         edit: Option<&EditDiff>,
+        agent_card: Option<&AgentCardMeta>,
         body_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent 工具卡
+        // 升级为描述卡（bot 图标 + 任务标题 + profile · model），点击开右侧子代理
+        // 对话 tab；卡体不再提供展开区（完整结果与过程见右侧「子代理」tab）。
+        // 无元信息（回放/旧会话）回落下方标准工具卡渲染。
+        if let Some(card) = agent_card {
+            return self.render_agent_card(
+                message_ix,
+                segment_ix,
+                card,
+                done,
+                is_error,
+                live_note,
+                approval_pending,
+                cx,
+            );
+        }
         // ZCode 三级文字层级：正文 > subtle(60%) > subtlest(30~40%)，靠层级而非边框/色彩造信息密度
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
@@ -2108,6 +2365,158 @@ impl ThreadView {
                         }),
                 )
             })
+            .into_any_element()
+    }
+
+    /// 代理卡：子代理 Agent 工具卡的升级样式（A3c，kimi-code 同款气质）——
+    /// 圆角卡 + bot 图标方块 + 任务描述标题 + `{profile} · {model}` 副标题；
+    /// 前台运行中多一行实时进度（live_note）；右侧状态：等待批准/Spinner/成功勾/失败词。
+    /// 点击卡体开右侧子代理对话 tab（完整结果与过程在那里看，故不提供展开区）。
+    fn render_agent_card(
+        &self,
+        message_ix: usize,
+        segment_ix: usize,
+        card: &AgentCardMeta,
+        done: bool,
+        is_error: bool,
+        live_note: Option<&str>,
+        approval_pending: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subtle = cx.theme().muted_foreground;
+        let subtlest = subtle.opacity(0.6);
+        let running = !done && !approval_pending;
+        let failed = done && is_error;
+        let title = if card.description.is_empty() {
+            "子代理".to_string()
+        } else {
+            card.description.clone()
+        };
+        let subtitle = if failed {
+            "失败".to_string()
+        } else if card.model.is_empty() {
+            card.profile.clone()
+        } else {
+            format!("{} · {}", card.profile, card.model)
+        };
+        let agent_id = card.agent_id.clone();
+        let title_click = title.clone();
+        h_flex()
+            .id(("agent-card", message_ix * 1024 + segment_ix))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().group_box)
+            .cursor_pointer()
+            .hover(|this| this.bg(cx.theme().accent))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(ThreadEvent::OpenSubagent {
+                    agent_id: agent_id.clone(),
+                    title: title_click.clone(),
+                });
+            }))
+            // bot 图标方块（圆角 info 淡底）
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w_8()
+                    .h_8()
+                    .rounded_md()
+                    .bg(cx.theme().info.opacity(0.12))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::Bot)
+                            .size_4()
+                            .text_color(cx.theme().info),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(cx.theme().foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(if failed { cx.theme().danger } else { subtle })
+                            .child(subtitle),
+                    )
+                    // 前台运行中的实时进度行（挪进卡里， spinner + 单行省略）
+                    .when(
+                        running && live_note.is_some_and(|note| !note.is_empty()),
+                        |this| {
+                            let note = live_note
+                                .unwrap_or_default()
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            this.child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_1()
+                                    .child(Spinner::new().small().color(subtlest))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_xs()
+                                            .text_color(subtle)
+                                            .child(note),
+                                    ),
+                            )
+                        },
+                    ),
+            )
+            // 右侧状态：等待批准 / 运行中 Spinner / 失败词 / 成功勾
+            .child(if approval_pending {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child("等待批准")
+                    .into_any_element()
+            } else if !done {
+                Spinner::new().small().color(subtlest).into_any_element()
+            } else if is_error {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child("失败")
+                    .into_any_element()
+            } else {
+                Icon::new(IconName::CircleCheck)
+                    .size_4()
+                    .text_color(cx.theme().success)
+                    .into_any_element()
+            })
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .size_4()
+                    .text_color(subtlest),
+            )
             .into_any_element()
     }
 
@@ -2563,6 +2972,7 @@ impl ThreadView {
                             expanded,
                             edit,
                             live_note,
+                            agent_card,
                             body_scroll,
                         } => {
                             let approval_pending = matches!(
@@ -2581,6 +2991,7 @@ impl ThreadView {
                                 *expanded,
                                 approval_pending,
                                 edit.as_ref(),
+                                agent_card.as_ref(),
                                 body_scroll,
                                 cx,
                             )
@@ -2911,6 +3322,22 @@ impl Render for ThreadView {
                 let handle = TextSelectionHandle::new(message.text.clone(), cx);
                 let subscription = handle.refresh_window_on_change(window, cx);
                 message.selection = Some((handle, subscription));
+            }
+            // 通知卡 UI 态惰性创建 + 记录文件大小探测（每条消息只做一次，避免每帧 stat）
+            if message.notification_ui.is_none()
+                && let Some(note) = as_task_notification(&message.text)
+                && note.agent_id.is_some()
+            {
+                let record_size = note
+                    .record
+                    .as_ref()
+                    .map(|path| std::fs::metadata(path).ok().map(|m| m.len()));
+                message.notification_ui = Some(NotificationUi {
+                    payload_open: false,
+                    copied: false,
+                    record_size,
+                    payload_scroll: ScrollHandle::new(),
+                });
             }
         }
         let mut items = Vec::with_capacity(self.messages.len());
@@ -3427,8 +3854,9 @@ fn consume_scroll(
 mod tests {
     use super::{
         adjacent_image_index, as_task_notification, clamp_lightbox_pan, collect_lightbox_positions,
-        lightbox_display_size, lightbox_fit_scale, lightbox_pan_after_zoom, message_image_number,
-        parse_image_link, split_image_links,
+        elide_record_path, format_file_size, format_notification_duration, lightbox_display_size,
+        lightbox_fit_scale, lightbox_pan_after_zoom, message_image_number, parse_image_link,
+        split_image_links,
     };
 
     #[test]
@@ -3474,9 +3902,10 @@ mod tests {
 
     #[test]
     fn task_notification_parses_open_tag_attributes() {
-        // A3b core 实际产物：开标签带 agent_id/profile/status/turns/model/description
+        // A3c core 实际产物：开标签带 agent_id/profile/status/turns/model/description/
+        // duration_ms/record
         let note = as_task_notification(
-            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
+            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\" duration_ms=\"12345\" record=\"/tmp/x/sessions/s1.agents/a1-2.jsonl\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
         )
         .expect("带属性通知应解析");
         assert_eq!(note.agent_id.as_deref(), Some("a1-2"));
@@ -3484,6 +3913,11 @@ mod tests {
         assert_eq!(note.turns.as_deref(), Some("3"));
         assert_eq!(note.model.as_deref(), Some("Mock · mock-model"));
         assert_eq!(note.description.as_deref(), Some("子代理自测委派"));
+        assert_eq!(note.duration_ms, Some(12345));
+        assert_eq!(
+            note.record.as_deref(),
+            Some("/tmp/x/sessions/s1.agents/a1-2.jsonl")
+        );
         assert_eq!(
             note.body,
             "后台子代理 a1-2（explore）已完成（3 步）。\n\n结果"
@@ -3506,13 +3940,35 @@ mod tests {
         assert!(note.turns.is_none());
         assert!(note.model.is_none());
         assert!(note.description.is_none());
+        assert!(note.duration_ms.is_none());
+        assert!(note.record.is_none());
         assert_eq!(note.body, "正文");
-        // 部分属性缺失：逐字段 None 回落
-        let partial =
-            as_task_notification("<task-notification agent_id=\"a9-1\">x</task-notification>")
-                .expect("部分属性应解析");
+        // 部分属性缺失：逐字段 None 回落；非数字耗时 → None
+        let partial = as_task_notification(
+            "<task-notification agent_id=\"a9-1\" duration_ms=\"abc\">x</task-notification>",
+        )
+        .expect("部分属性应解析");
         assert_eq!(partial.agent_id.as_deref(), Some("a9-1"));
         assert!(partial.status.is_none());
+        assert!(partial.duration_ms.is_none());
+    }
+
+    #[test]
+    fn notification_display_formatters() {
+        // 耗时：<60s → X.X 秒；≥60s → m 分 ss 秒
+        assert_eq!(format_notification_duration(2345), "2.3 秒");
+        assert_eq!(format_notification_duration(60_000), "1 分 00 秒");
+        assert_eq!(format_notification_duration(61_500), "1 分 01 秒");
+        // 记录路径中段省略：短路径原样，长路径留首尾
+        assert_eq!(elide_record_path("/tmp/a.jsonl"), "/tmp/a.jsonl");
+        let long = "/var/folders/xx/yy/data/sessions/s1-2.agents/a123-1.jsonl";
+        let elided = elide_record_path(long);
+        assert!(elided.starts_with("/…/"), "{elided}");
+        assert!(elided.ends_with("s1-2.agents/a123-1.jsonl"), "{elided}");
+        // 文件大小
+        assert_eq!(format_file_size(512), "512 B");
+        assert_eq!(format_file_size(2048), "2.0 KB");
+        assert_eq!(format_file_size(3 * 1024 * 1024), "3.0 MB");
     }
 
     #[test]

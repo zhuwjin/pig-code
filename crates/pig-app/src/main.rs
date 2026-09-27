@@ -2729,6 +2729,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::TodoListChanged { session_id, .. }
         | Event::TaskListChanged { session_id, .. }
         | Event::SubagentProgress { session_id, .. }
+        | Event::SubagentCard { session_id, .. }
         | Event::SubagentHistory { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
@@ -4220,10 +4221,23 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 tool_output.contains(pig_core::mock::SUBAGENT_CHILD_DONE),
                 "Agent 卡输出应含子代理结论: {tool_output}"
             );
+            // A3c：SubagentCard 事件已把代理卡元信息写到卡片上（agent_id + 副标题）
+            let card_meta = app!(|app: &mut AppView, cx| {
+                let views = app.views.get(&session_c)?;
+                views.thread.read(cx).debug_agent_card_meta()
+            });
+            let Some((card_agent_id, card_subtitle)) = card_meta else {
+                panic!("Agent 卡应有代理卡元信息（SubagentCard 事件）");
+            };
+            assert!(!card_agent_id.is_empty(), "代理卡 agent_id 应非空");
+            assert!(
+                card_subtitle.contains("explore"),
+                "代理卡副标题应含 profile: {card_subtitle}"
+            );
             break;
         }
     }
-    println!("[selftest] 子代理前台卡片（进度行出现/原摘要保留/收尾清行）OK");
+    println!("[selftest] 子代理前台卡片（进度行出现/原摘要保留/收尾清行/代理卡元信息）OK");
 
     // 同会话发后台子代理：running 回执收尾 → 子代理完成后 core 注入通知并唤醒收尾
     app!(|app: &mut AppView, _| {
@@ -4254,7 +4268,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] 后台子代理完成 → task-notification 合成消息到达 OK");
 
     // A3b：通知开标签的结构化 meta 解析（紧凑卡渲染数据源）
-    let (agent_id, title) = {
+    let (agent_id, title, duration_ms, record) = {
         let mut found = None;
         let mut waited = 0u64;
         loop {
@@ -4275,7 +4289,14 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         title.contains("子代理自测委派"),
         "通知标题应为 description: {title}"
     );
-    println!("[selftest] 通知卡结构化 meta 解析 OK（{agent_id} · {title}）");
+    // A3c：耗时与记录文件路径属性
+    assert!(duration_ms.is_some(), "通知应带 duration_ms");
+    let record = record.expect("通知应带 record 记录路径");
+    assert!(
+        record.contains(".agents/"),
+        "record 应为子代理上下文 JSONL: {record}"
+    );
+    println!("[selftest] 通知卡结构化 meta 解析 OK（{agent_id} · {title} · {duration_ms:?}ms）");
 
     // 走通知卡点击的同一路径开「子代理」tab → Op::LoadSubagent → SubagentHistory
     app!(|app: &mut AppView, cx| {
