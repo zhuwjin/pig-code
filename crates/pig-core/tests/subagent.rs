@@ -162,6 +162,15 @@ async fn subagent_happy_path() {
         .count();
     assert!(msg_count >= 3, "至少 3 条 msg: {log}");
 
+    // 结果全文落盘（前台也写）：{agents_dir}/{agent_id}.result.md
+    let result_path = log_path.with_file_name(format!("{agent_id}.result.md"));
+    let result_text = std::fs::read_to_string(&result_path)
+        .unwrap_or_else(|e| panic!("结果文件应存在 {}: {e}", result_path.display()));
+    assert!(
+        result_text.contains(mock::SUBAGENT_CHILD_DONE),
+        "结果文件应为完整子结论: {result_text}"
+    );
+
     // 事件流：有 SubagentProgress；子工具（Grep）不发顶层 ToolCallBegin
     let progress: Vec<&str> = collected
         .iter()
@@ -347,12 +356,15 @@ async fn subagent_result_truncated_and_spilled() {
         output.contains("[结果过长已截断，全文: "),
         "应有截断指引: {output}"
     );
-    // 全文落盘：{cwd}/.pigcode/tool-results/agent-{agent_id}.md，内容原样完整
+    // 全文落盘：{data}/sessions/{sid}.agents/{agent_id}.result.md（kimi output.log 同款），
+    // 内容原样完整；截断指引指向它
     let agent_id = parse_agent_id(output);
-    let spill = cwd
-        .join(".pigcode")
-        .join("tool-results")
-        .join(format!("agent-{agent_id}.md"));
+    assert!(
+        output.contains(".result.md"),
+        "截断指引应指向 result.md: {output}"
+    );
+    let spill =
+        agent_log_path(&data_dir, &sid, agent_id).with_file_name(format!("{agent_id}.result.md"));
     let full = std::fs::read_to_string(&spill)
         .unwrap_or_else(|e| panic!("全文应落盘 {}: {e}", spill.display()));
     let expected = format!("子代理长结果开头。{}", "密".repeat(33_000));
@@ -503,6 +515,19 @@ async fn subagent_background_full_link() {
     assert!(
         notification.contains("record=\"") && notification.contains(".agents/"),
         "开标签应带子代理上下文路径: {notification}"
+    );
+    // 结果全文路径属性 + 文件内容为完整子结论
+    assert!(
+        notification.contains("result=\"") && notification.contains(".result.md"),
+        "开标签应带结果文件路径: {notification}"
+    );
+    let result_path =
+        agent_log_path(&data_dir, &sid, &agent_id).with_file_name(format!("{agent_id}.result.md"));
+    let full = std::fs::read_to_string(&result_path)
+        .unwrap_or_else(|e| panic!("结果文件应存在 {}: {e}", result_path.display()));
+    assert!(
+        full.contains(mock::SUBAGENT_CHILD_DONE),
+        "结果文件应为完整子结论: {full}"
     );
     assert!(saw_agent_task, "任务面板应含子代理条目");
     agent.shutdown();

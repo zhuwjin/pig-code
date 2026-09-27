@@ -760,6 +760,18 @@ pub enum Event {
         /// "{provider} · {model}"
         subtitle: String,
         items: Vec<SubagentItem>,
+        /// 加载时刻子代理仍在运行（任务注册表口径）：面板显示「运行中」指示
+        #[serde(default)]
+        running: bool,
+    },
+    /// 子代理实时展示项（live-only）：子代理每完成一批消息逐条发出；
+    /// item=None + finished=true 表示子代理结束（含取消/被杀），面板关「运行中」
+    SubagentActivity {
+        session_id: String,
+        seq: u64,
+        agent_id: String,
+        item: Option<SubagentItem>,
+        finished: bool,
     },
     Error {
         session_id: Option<String>,

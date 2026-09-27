@@ -851,6 +851,7 @@ impl AppView {
                 title,
                 subtitle,
                 items,
+                running,
                 ..
             } => {
                 // 右侧「子代理」tab 的内容到达：只更新已开的 tab；
@@ -858,9 +859,45 @@ impl AppView {
                 if let Some(panel) = self.subagent_tabs.get(agent_id)
                     && panel.read(cx).matches_session(session_id)
                 {
+                    let running = *running;
                     panel.update(cx, |panel, cx| {
-                        panel.set_history(title.clone(), subtitle.clone(), items.clone(), cx);
+                        panel.set_history(
+                            title.clone(),
+                            subtitle.clone(),
+                            items.clone(),
+                            running,
+                            cx,
+                        );
                     });
+                }
+            }
+            Event::SubagentActivity {
+                session_id,
+                agent_id,
+                item,
+                finished,
+                ..
+            } => {
+                // 子代理实时增量：追加展示项 / 收尾关「运行中」。
+                // finished 后全量重拉一次收口——增量追加与初次加载分属不同任务
+                //（同一事件通道 FIFO，但读文件与驱动并发），窄竞态以全量覆盖自愈
+                if let Some(panel) = self.subagent_tabs.get(agent_id)
+                    && panel.read(cx).matches_session(session_id)
+                {
+                    let item = item.clone();
+                    let finished = *finished;
+                    panel.update(cx, |panel, cx| {
+                        if let Some(item) = item {
+                            panel.push_item(item, cx);
+                        }
+                        if finished {
+                            panel.set_finished(cx);
+                        }
+                    });
+                    if finished {
+                        self.agent
+                            .load_subagent(session_id.clone(), agent_id.clone());
+                    }
                 }
             }
             _ => {}
@@ -2222,6 +2259,14 @@ impl AppView {
         self.subagent_tabs.get(agent_id)?.read(cx).debug_state()
     }
 
+    /// 自测用：指定 agent_id 的「子代理」tab 的 (running, 行数含缓冲, 累计活动项数)；
+    /// 无 tab 为 None
+    pub fn debug_subagent_live(&self, agent_id: &str, cx: &App) -> Option<(bool, usize, usize)> {
+        self.subagent_tabs
+            .get(agent_id)
+            .map(|panel| panel.read(cx).debug_live())
+    }
+
     fn sync_hero_mode(&mut self, cx: &mut Context<Self>) {
         let hero = self.is_hero(cx) && self.pending_first_send.is_none();
         self.composer
@@ -2731,6 +2776,7 @@ fn event_session_id(event: &Event) -> Option<String> {
         | Event::SubagentProgress { session_id, .. }
         | Event::SubagentCard { session_id, .. }
         | Event::SubagentHistory { session_id, .. }
+        | Event::SubagentActivity { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
@@ -4267,8 +4313,8 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     }
     println!("[selftest] 后台子代理完成 → task-notification 合成消息到达 OK");
 
-    // A3b：通知开标签的结构化 meta 解析（紧凑卡渲染数据源）
-    let (agent_id, title, duration_ms, record) = {
+    // A3b：通知开标签的结构化 meta 解析（气泡渲染数据源）
+    let (agent_id, title, duration_ms, record, result) = {
         let mut found = None;
         let mut waited = 0u64;
         loop {
@@ -4289,14 +4335,19 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         title.contains("子代理自测委派"),
         "通知标题应为 description: {title}"
     );
-    // A3c：耗时与记录文件路径属性
+    // A3c/A3d：耗时、上下文记录路径与结果文件路径属性
     assert!(duration_ms.is_some(), "通知应带 duration_ms");
     let record = record.expect("通知应带 record 记录路径");
     assert!(
         record.contains(".agents/"),
         "record 应为子代理上下文 JSONL: {record}"
     );
-    println!("[selftest] 通知卡结构化 meta 解析 OK（{agent_id} · {title} · {duration_ms:?}ms）");
+    let result_path = result.expect("通知应带 result 结果路径");
+    assert!(
+        result_path.ends_with(".result.md"),
+        "result 应为结果全文文件: {result_path}"
+    );
+    println!("[selftest] 通知气泡结构化 meta 解析 OK（{agent_id} · {title} · {duration_ms:?}ms）");
 
     // 走通知卡点击的同一路径开「子代理」tab → Op::LoadSubagent → SubagentHistory
     app!(|app: &mut AppView, cx| {
@@ -4321,6 +4372,87 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         }
     }
     println!("[selftest] 子代理 tab（点击开面板 + 历史加载 ≥3 行）OK");
+
+    // A3d：面板实时输出——新会话发 BG，后台子代理运行中经代理卡同路径开 tab：
+    // running 指示出现 → SubagentActivity 增量追加 → finished 后 running 消失
+    let before_current = app!(|app: &mut AppView, _| app.current.clone());
+    app!(|app: &mut AppView, _| app
+        .agent
+        .new_session(app.cwd.clone(), None, None, None, None));
+    let session_d = loop {
+        timer!(200).await;
+        let current = app!(|app: &mut AppView, _| app.current.clone());
+        if current.is_some() && current != before_current {
+            break current.expect("已判 Some");
+        }
+    };
+    app!(|app: &mut AppView, _| {
+        app.agent.set_model(
+            session_d.clone(),
+            "mock".to_string(),
+            "mock-model".to_string(),
+            None,
+        );
+        app.agent.send_message(
+            session_d.clone(),
+            format!("{} BG", pig_core::mock::SUBAGENT_TRIGGER),
+            vec![],
+            vec![],
+            pig_protocol::ExecMode::AutoEdit,
+        );
+    });
+    // 等 bg Agent 卡的代理卡元信息（SubagentCard 先于子代理执行到达，带 agent_id）
+    let mut bg_agent_id = String::new();
+    let mut waited = 0u64;
+    loop {
+        timer!(50).await;
+        waited += 50;
+        assert!(waited < 15_000, "后台代理卡元信息超时");
+        let meta = app!(|app: &mut AppView, cx| {
+            let views = app.views.get(&session_d)?;
+            views.thread.read(cx).debug_agent_card_meta()
+        });
+        if let Some((id, _)) = meta {
+            bg_agent_id = id;
+            break;
+        }
+    }
+    // 立即开 tab（此刻子代理大概率仍在跑：mock 子侧 ≥2 次请求 × 50ms/片）
+    app!(|app: &mut AppView, cx| {
+        app.open_subagent_tab(
+            session_d.clone(),
+            bg_agent_id.clone(),
+            "子代理自测委派".to_string(),
+            cx,
+        );
+    });
+    let mut saw_running = false;
+    let mut initial_items = None;
+    let mut waited = 0u64;
+    loop {
+        timer!(100).await;
+        waited += 100;
+        assert!(waited < 30_000, "面板实时输出超时");
+        let state = app!(|app: &mut AppView, cx| app.debug_subagent_live(&bg_agent_id, cx));
+        let Some((running, items, appends)) = state else {
+            continue;
+        };
+        saw_running |= running;
+        if initial_items.is_none() && items > 0 {
+            initial_items = Some(items);
+        }
+        if !running && items > 0 {
+            // 收尾（finished → running=false + 全量重拉收口）
+            assert!(saw_running, "运行期间应见过 running=true（运行中指示）");
+            assert!(appends >= 1, "应有 SubagentActivity 增量追加");
+            assert!(
+                Some(items) >= initial_items,
+                "收尾重拉后 items 不应变少: {items} < {initial_items:?}"
+            );
+            break;
+        }
+    }
+    println!("[selftest] 子代理面板实时输出（running 指示/活动追加/收尾消失）OK");
 
     // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
     assert_eq!(

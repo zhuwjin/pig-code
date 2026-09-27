@@ -671,6 +671,14 @@ pub fn display_items(
 ) -> (String, String, Vec<pig_protocol::SubagentItem>) {
     let title = meta.description.clone();
     let subtitle = format!("{} · {}", meta.provider, meta.model);
+    (title, subtitle, project_display_items(msgs))
+}
+
+/// 一批消息 → 展示项（A3d：全量加载与 SubagentActivity 增量投影共用）。
+/// tool 结果按 tool_call_id 在**本批内**回填对应 tool 行的 output——
+/// 增量场景的批 = 同一 step 的 assistant（带 tool_calls）+ 紧随的 tool 结果，
+/// 匹配天然落在批内。
+pub fn project_display_items(msgs: &[crate::provider::ChatMsg]) -> Vec<pig_protocol::SubagentItem> {
     let mut items: Vec<pig_protocol::SubagentItem> = Vec::new();
     // tool 行下标按 call id 索引：tool 结果消息回填 output 用
     let mut tool_row_by_call: HashMap<String, usize> = HashMap::new();
@@ -730,7 +738,7 @@ pub fn display_items(
             _ => {}
         }
     }
-    (title, subtitle, items)
+    items
 }
 
 #[cfg(test)]

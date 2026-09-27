@@ -2044,6 +2044,17 @@ impl Session {
             )
             .await
         };
+        // 实时面板收尾（含父取消）：右侧「子代理」tab 关「运行中」指示
+        self.emit(
+            |session_id, seq| Event::SubagentActivity {
+                session_id,
+                seq,
+                agent_id: drive.agent_id.clone(),
+                item: None,
+                finished: true,
+            },
+            tx,
+        );
         if result.cancelled {
             return SubagentOutcome::Cancelled;
         }
@@ -2108,6 +2119,13 @@ impl Session {
         );
         // 记录文件路径（子代理上下文 JSONL 绝对路径，过同样的属性消毒）
         let record_attr = sanitize_notification_attr(&drive.jsonl.display().to_string(), 512);
+        // 结果全文路径（drive_subagent 收尾落盘；通知文件行指它，kimi output.log 同款）
+        let result_attr = sanitize_notification_attr(
+            &agent_result_path(&drive.jsonl, &drive.agent_id)
+                .display()
+                .to_string(),
+            512,
+        );
         let started_at = std::time::Instant::now();
         // 给父模型的即时回执（不依赖任务结果，先组好）
         let running_note = format!(
@@ -2140,6 +2158,16 @@ impl Session {
                 )
                 .await
             };
+            // 实时面板收尾（含 TaskStop 被杀/父取消）：右侧「子代理」tab 关「运行中」指示
+            emit_bg(&session_id, &seq, &tx_bg, |sid, seq| {
+                Event::SubagentActivity {
+                    session_id: sid,
+                    seq,
+                    agent_id: agent_id.clone(),
+                    item: None,
+                    finished: true,
+                }
+            });
             // 注册表收尾：TaskStop 已置 Killed 的不覆写（cancelled 情形）
             {
                 let mut tasks = state.tasks.lock().expect("task registry lock");
@@ -2167,12 +2195,12 @@ impl Session {
                 let duration_ms = started_at.elapsed().as_millis() as u64;
                 let notification = if result.is_error {
                     format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\">\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n后台子代理 {agent_id}（{profile_name}）失败：{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
                         result.turns, result.result_text
                     )
                 } else {
                     format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\">\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
+                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n后台子代理 {agent_id}（{profile_name}）已完成（{} 步）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。\n</task-notification>",
                         result.turns, result.turns, result.result_text
                     )
                 };
@@ -2283,9 +2311,62 @@ struct SubagentDriveResult {
     cancelled: bool,
 }
 
-/// 子代理驱动循环（前台/后台共用）：独立上下文采样 + 收窄工具集门控执行，
-/// 父时间线只有 Agent 一张工具卡（前台进度走 SubagentProgress，子工具不发顶层事件）。
+/// 子代理结果文件路径：{agents_dir}/{agent_id}.result.md（与上下文 jsonl 同目录）
+fn agent_result_path(jsonl: &Path, agent_id: &str) -> PathBuf {
+    jsonl.with_file_name(format!("{agent_id}.result.md"))
+}
+
+/// 子代理驱动入口：跑驱动循环，结果全文先落 {agents_dir}/{agent_id}.result.md
+///（成功/失败都写，失败写的是错误说明；取消/被杀无产物跳过；写失败仅降级、
+/// 截断提示无文件可指，不致命），随后按 32K 预算截断 result_text。
 async fn drive_subagent(
+    ctx: &mut GateCtx<'_>,
+    run: &mut SubagentDrive,
+    progress: &ProgressSink,
+    tx: &async_channel::Sender<Event>,
+    cancel: &CancellationToken,
+) -> SubagentDriveResult {
+    let result_path = agent_result_path(&run.jsonl, &run.agent_id);
+    let mut result = drive_subagent_loop(ctx, run, progress, tx, cancel).await;
+    if !result.cancelled {
+        let written = std::fs::write(&result_path, &result.result_text).is_ok();
+        result.result_text = truncate_agent_result(
+            written.then_some(result_path.as_path()),
+            std::mem::take(&mut result.result_text),
+        );
+    }
+    result
+}
+
+/// 子代理实时展示项上报（live-only，前台/后台都发）：把 history[emitted..] 的
+/// 新增消息投影成展示项逐条发出（批内 tool 结果按 tool_call_id 回填 output），
+/// 并前移水位。面板经 agent_id 认领。
+fn emit_activity_since(
+    ctx: &GateCtx<'_>,
+    tx: &async_channel::Sender<Event>,
+    agent_id: &str,
+    history: &[ChatMsg],
+    emitted: &mut usize,
+) {
+    for item in crate::agent::project_display_items(&history[*emitted..]) {
+        let agent_id = agent_id.to_string();
+        emit_bg(ctx.session_id, ctx.seq, tx, move |session_id, seq| {
+            Event::SubagentActivity {
+                session_id,
+                seq,
+                agent_id,
+                item: Some(item),
+                finished: false,
+            }
+        });
+    }
+    *emitted = history.len();
+}
+
+/// 子代理驱动循环（前台/后台共用）：独立上下文采样 + 收窄工具集门控执行，
+/// 父时间线只有 Agent 一张工具卡（前台进度走 SubagentProgress，子工具不发顶层事件）；
+/// 每个 step 追加的消息经 SubagentActivity 实时上报（右侧「子代理」tab 增量展示）。
+async fn drive_subagent_loop(
     ctx: &mut GateCtx<'_>,
     run: &mut SubagentDrive,
     progress: &ProgressSink,
@@ -2296,6 +2377,9 @@ async fn drive_subagent(
     let mut last_text = String::new();
     let mut steps_run = 0usize;
     let mut completed = false;
+    // 实时上报水位：history 里已投影为 SubagentActivity 的前缀长度
+    //（初始 system/user/resume 历史不算——它们由 LoadSubagent 全量加载覆盖）
+    let mut emitted_up_to = run.history.len();
 
     for step in 1..=run.max_turns {
         steps_run = step;
@@ -2343,6 +2427,8 @@ async fn drive_subagent(
         }
         if let Some(error) = failed {
             provider_task.abort();
+            // 收尾前把本步已落历史的消息补报给实时面板（下同）
+            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
             let note = format!("子代理模型请求失败: {error}");
             return SubagentDriveResult {
                 status_line: format!("failed: {note}"),
@@ -2356,6 +2442,7 @@ async fn drive_subagent(
         }
         if cancel.is_cancelled() {
             provider_task.abort();
+            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
             return SubagentDriveResult {
                 status_line: "cancelled".to_string(),
                 result_text: String::new(),
@@ -2377,6 +2464,8 @@ async fn drive_subagent(
         run.history.push(assistant);
         persist_agent_msg(&run.jsonl, run.history.last().expect("assistant pushed"));
         if tool_calls.is_empty() {
+            // 本步只有 assistant 一条：收尾前上报
+            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
             completed = true;
             break;
         }
@@ -2412,6 +2501,7 @@ async fn drive_subagent(
             .await
             {
                 GatedToolOutcome::Cancelled => {
+                    emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
                     return SubagentDriveResult {
                         status_line: "cancelled".to_string(),
                         result_text: String::new(),
@@ -2436,9 +2526,12 @@ async fn drive_subagent(
                 }
             }
         }
+        // 步末上报：本步的 assistant（含 tool_calls）+ 全部 tool 结果同批投影，
+        // 批内按 tool_call_id 回填 output
+        emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
     }
 
-    // ---- 收尾：结果预算 32K 字符，超出落盘全文 ----
+    // ---- 收尾：未截断全文返回（result.md 落盘与 32K 预算截断在外层 drive_subagent 收口）----
     if completed {
         if last_text.is_empty() {
             SubagentDriveResult {
@@ -2453,7 +2546,7 @@ async fn drive_subagent(
         } else {
             SubagentDriveResult {
                 status_line: format!("completed（{steps_run} 步）"),
-                result_text: truncate_agent_result(ctx.cwd, &run.agent_id, last_text),
+                result_text: last_text,
                 turns: steps_run,
                 completed: true,
                 is_error: false,
@@ -2484,18 +2577,17 @@ async fn drive_subagent(
     }
 }
 
-/// 子代理结果预算：32K 字符内原样返回；超出写全文到
-/// {cwd}/.pigcode/tool-results/agent-{agent_id}.md，返回前 32K + 截断指引。
-fn truncate_agent_result(cwd: &Path, agent_id: &str, result: String) -> String {
+/// 子代理结果预算：32K 字符内原样返回；超出返回前 32K + 截断指引。
+/// 全文由调用方先行落盘 {agents_dir}/{agent_id}.result.md（kimi output.log 同款），
+/// result_path 指它；None = 落盘失败。
+fn truncate_agent_result(result_path: Option<&Path>, result: String) -> String {
     const MAX_RESULT_CHARS: usize = 32_000;
     if result.chars().count() <= MAX_RESULT_CHARS {
         return result;
     }
-    let dir = cwd.join(".pigcode").join("tool-results");
-    let path = dir.join(format!("agent-{agent_id}.md"));
-    let hint = match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &result)) {
-        Ok(()) => format!("\n\n[结果过长已截断，全文: {}]", path.display()),
-        Err(error) => format!("\n\n[结果过长已截断，全文落盘失败: {error}]"),
+    let hint = match result_path {
+        Some(path) => format!("\n\n[结果过长已截断，全文: {}]", path.display()),
+        None => "\n\n[结果过长已截断，全文落盘失败]".to_string(),
     };
     let head: String = result.chars().take(MAX_RESULT_CHARS).collect();
     format!("{head}{hint}")
@@ -3453,6 +3545,14 @@ pub async fn agent_loop(
                         let tx = event_tx.clone();
                         let path = crate::agent::agents_dir(&sessions_dir, &session_id)
                             .join(format!("{agent_id}.jsonl"));
+                        // 「运行中」口径：会话任务注册表里同 agent_id 且 Running；
+                        // 会话不在内存（未加载）→ false
+                        let running = sessions.get(&session_id).is_some_and(|entry| {
+                            entry.state.tasks.lock().expect("task registry lock").iter().any(|t| {
+                                t.agent_id.as_deref() == Some(agent_id.as_str())
+                                    && matches!(t.status, pig_protocol::TaskStatus::Running)
+                            })
+                        });
                         tokio::spawn(async move {
                             let result =
                                 tokio::task::spawn_blocking(move || crate::agent::read_agent(&path))
@@ -3469,6 +3569,7 @@ pub async fn agent_loop(
                                             title,
                                             subtitle,
                                             items,
+                                            running,
                                         })
                                         .await;
                                 }

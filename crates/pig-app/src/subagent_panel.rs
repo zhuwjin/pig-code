@@ -1,11 +1,15 @@
-//! 右侧面板「子代理」tab：后台子代理完整对话的只读视图（A3b）。
-//! 数据流：通知卡点击 → Op::LoadSubagent → core 读
+//! 右侧面板「子代理」tab：后台/前台子代理完整对话的只读视图（A3b 起）。
+//! 数据流：通知卡/代理卡点击 → Op::LoadSubagent → core 读
 //! {sessions_dir}/{session_id}.agents/{agent_id}.jsonl → Event::SubagentHistory
 //! → set_history 填内容。加载到达前显示「加载中…」。
+//! A3d 起支持实时：core 每个 step 把新增消息投影为 SubagentActivity 逐条推来，
+//! 面板追加（running 期间底部有「运行中」指示，finished 后消失）；
+//! 增量与全量之间的窄竞态由 finished 后的全量重拉收口（AppView 侧发起）。
 
 use gpui_kit::assets::IconName as AssetsIconName;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::SubagentItem;
@@ -29,7 +33,30 @@ pub struct SubagentPanel {
     subtitle: String,
     /// None = 加载中
     rows: Option<Vec<SubagentRow>>,
+    /// 子代理仍在运行（SubagentHistory 的注册表口径初始化，SubagentActivity 增删）
+    running: bool,
+    /// 全量加载到达前收到的活动项（乱序缓冲；set_history 时拼在尾部）
+    pending: Vec<SubagentItem>,
+    /// 累计收到的活动项数（自测断言用）
+    activity_items: usize,
     scroll: ScrollHandle,
+}
+
+/// 展示项 → 行：assistant 行建 markdown 渲染状态（一次性 set_text，
+/// 参考 thread_view 的 Markdown 段用法）。初始全量与实时追加共用。
+fn build_row(item: SubagentItem, cx: &mut Context<SubagentPanel>) -> SubagentRow {
+    let markdown = (item.role == "assistant").then(|| {
+        let state = cx.new(|cx| TextViewState::markdown("", cx));
+        let text = item.text.clone();
+        state.update(cx, |state, cx| state.set_text(&text, cx));
+        state
+    });
+    SubagentRow {
+        item,
+        markdown,
+        expanded: false,
+        output_scroll: ScrollHandle::new(),
+    }
 }
 
 impl SubagentPanel {
@@ -39,6 +66,9 @@ impl SubagentPanel {
             title,
             subtitle: String::new(),
             rows: None,
+            running: false,
+            pending: vec![],
+            activity_items: 0,
             scroll: ScrollHandle::new(),
         }
     }
@@ -52,36 +82,44 @@ impl SubagentPanel {
         &self.title
     }
 
-    /// SubagentHistory 到达：assistant 行建 markdown 渲染状态（一次性 set_text，
-    /// 参考 thread_view 的 Markdown 段用法）
+    /// SubagentHistory 到达：全量填充 + 拼上先到的活动缓冲
     pub fn set_history(
         &mut self,
         title: String,
         subtitle: String,
         items: Vec<SubagentItem>,
+        running: bool,
         cx: &mut Context<Self>,
     ) {
         self.title = title;
         self.subtitle = subtitle;
-        self.rows = Some(
-            items
-                .into_iter()
-                .map(|item| {
-                    let markdown = (item.role == "assistant").then(|| {
-                        let state = cx.new(|cx| TextViewState::markdown("", cx));
-                        let text = item.text.clone();
-                        state.update(cx, |state, cx| state.set_text(&text, cx));
-                        state
-                    });
-                    SubagentRow {
-                        item,
-                        markdown,
-                        expanded: false,
-                        output_scroll: ScrollHandle::new(),
-                    }
-                })
-                .collect(),
-        );
+        self.running = running;
+        let mut all = items;
+        all.append(&mut self.pending);
+        self.rows = Some(all.into_iter().map(|item| build_row(item, cx)).collect());
+        cx.notify();
+    }
+
+    /// SubagentActivity 增量追加；距底 80px 内跟随滚到底
+    pub fn push_item(&mut self, item: SubagentItem, cx: &mut Context<Self>) {
+        self.activity_items += 1;
+        match &mut self.rows {
+            // 全量尚未到达：缓冲（set_history 拼尾），等 finished 后全量重拉收口
+            None => self.pending.push(item),
+            Some(rows) => {
+                let near_bottom = self.scroll.max_offset().y - self.scroll.offset().y < px(80.);
+                rows.push(build_row(item, cx));
+                if near_bottom {
+                    self.scroll.scroll_to_bottom();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 子代理结束（含取消/被杀）：关「运行中」指示
+    pub fn set_finished(&mut self, cx: &mut Context<Self>) {
+        self.running = false;
         cx.notify();
     }
 
@@ -90,6 +128,15 @@ impl SubagentPanel {
         self.rows
             .as_ref()
             .map(|rows| (self.title.clone(), rows.len()))
+    }
+
+    /// 自测用：(running, 已加载行数（含缓冲）, 累计活动项数)
+    pub fn debug_live(&self) -> (bool, usize, usize) {
+        (
+            self.running,
+            self.rows.as_ref().map(|r| r.len()).unwrap_or(0) + self.pending.len(),
+            self.activity_items,
+        )
     }
 
     /// tool 行：图标 + 工具名 + 摘要（单行省略），点击展开/收起输出卡
@@ -248,7 +295,16 @@ impl Render for SubagentPanel {
                                     .into_any_element(),
                             },
                         }
-                    })),
+                    }))
+                    // 底部「运行中」指示（子代理结束时随 finished 消失）
+                    .when(self.running, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .child(Spinner::new().small().color(subtle))
+                                .child(div().text_xs().text_color(subtle).child("子代理运行中…")),
+                        )
+                    }),
             )
             .into_any_element()
     }

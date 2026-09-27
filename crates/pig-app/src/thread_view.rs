@@ -233,6 +233,8 @@ struct TaskNotification<'a> {
     duration_ms: Option<u64>,
     /// 子代理上下文 JSONL 记录文件的绝对路径
     record: Option<String>,
+    /// 子代理结果全文文件的绝对路径（{agent_id}.result.md；文件行优先指它）
+    result: Option<String>,
     /// 剥掉最外层标签的正文（内层同名标签不剥，按普通文本留在正文里）
     body: &'a str,
 }
@@ -255,6 +257,7 @@ fn as_task_notification(text: &str) -> Option<TaskNotification<'_>> {
         description: notification_attr(attrs, "description"),
         duration_ms: notification_attr(attrs, "duration_ms").and_then(|v| v.parse().ok()),
         record: notification_attr(attrs, "record"),
+        result: notification_attr(attrs, "result"),
         body: inner.trim(),
     })
 }
@@ -652,12 +655,12 @@ impl ThreadView {
             .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
     }
 
-    /// 最近一条后台子代理通知的 (agent_id, 标题, 耗时毫秒, 记录路径)（自测用；
-    /// 无通知/旧格式为 None）。标题 = description（缺省回退「后台子代理」），
-    /// 与紧凑状态卡渲染同口径。
+    /// 最近一条后台子代理通知的 (agent_id, 标题, 耗时毫秒, 记录路径, 结果路径)
+    ///（自测用；无通知/旧格式为 None）。标题 = description（缺省回退「后台子代理」），
+    /// 与气泡渲染同口径。
     pub fn debug_task_notification_meta(
         &self,
-    ) -> Option<(String, String, Option<u64>, Option<String>)> {
+    ) -> Option<(String, String, Option<u64>, Option<String>, Option<String>)> {
         self.messages.iter().rev().find_map(|m| {
             if m.role != Role::User {
                 return None;
@@ -667,7 +670,13 @@ impl ThreadView {
                 .description
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| "后台子代理".to_string());
-            Some((note.agent_id?, title, note.duration_ms, note.record))
+            Some((
+                note.agent_id?,
+                title,
+                note.duration_ms,
+                note.record,
+                note.result,
+            ))
         })
     }
 
@@ -993,7 +1002,7 @@ impl ThreadView {
             Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
             }
             // 右侧「子代理」tab 的数据（AppView 直接路由给面板，消息流不展示）
-            Event::SubagentHistory { .. } => {}
+            Event::SubagentHistory { .. } | Event::SubagentActivity { .. } => {}
             Event::UserMessage { text, files, .. } => {
                 // 链接尾巴不进队列匹配（queued 里是用户输入原文）
                 let (body, _) = split_image_links(text.as_str());
@@ -1155,10 +1164,11 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 后台子代理的合成通知块（A3c，kimi-code 同款气质）：
-    /// 右对齐「✓ 由后台发送（Agent）」小标签 + 限宽状态卡（标题 / 已完成·耗时 /
-    /// 记录文件行 / 默认折叠的原始 payload）。点击卡体开右侧子代理对话 tab
-    ///（复制路径按钮与 payload 折叠行的命中区 stop_propagation 不冒泡）。
+    /// 后台子代理的合成通知块（A3d，kimi-code 同款）：
+    /// 右对齐「✓ 由后台发送（Agent）」小标签 + 用户气泡同款底色的限宽气泡
+    ///（标题 / 已完成·耗时 / 结果文件行 / 默认折叠的原始 payload）。
+    /// 点击气泡开右侧子代理对话 tab（复制路径按钮与 payload 折叠行的命中区
+    /// stop_propagation 不冒泡）。
     /// 旧格式（无 agent_id 属性）保持全文渲染，不破坏老会话的历史消息。
     fn render_task_notification(
         &self,
@@ -1251,29 +1261,18 @@ impl ThreadView {
                             .child("由后台发送（Agent）"),
                     ),
             )
-            // 状态卡：圆角描边限宽；失败版 danger 描边/淡底
+            // 气泡（A3d：与用户消息气泡同款底色/圆角/padding，宽随内容、上限 520px；
+            // 失败版不换底色，只有状态词与标签走 danger）
             .child(
                 v_flex()
                     .id(("task-notification", message_ix))
-                    .w_full()
                     .max_w(px(520.))
-                    .gap_1()
+                    .gap_2()
                     .px_3()
                     .py_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(if failed {
-                        cx.theme().danger.opacity(0.6)
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(if failed {
-                        cx.theme().danger.opacity(0.08)
-                    } else {
-                        cx.theme().group_box
-                    })
+                    .rounded_2xl()
+                    .bg(cx.theme().accent)
                     .cursor_pointer()
-                    .hover(|this| this.bg(cx.theme().accent))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(ThreadEvent::OpenSubagent {
                             agent_id: agent_id_click.clone(),
@@ -1299,65 +1298,73 @@ impl ThreadView {
                             .text_color(if failed { cx.theme().danger } else { subtle })
                             .child(status_line),
                     )
-                    // 第 3 行：记录文件（doc 图标 + 中段省略路径 + 大小 + 复制路径按钮）
-                    .when_some(note.record.clone(), |this, record| {
-                        let size_text = match record_size {
-                            Some(Some(bytes)) => format_file_size(bytes),
-                            Some(None) => "记录已删除".to_string(),
-                            None => String::new(),
-                        };
-                        this.child(
-                            h_flex()
-                                .w_full()
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::FileText)
-                                        .size_3p5()
-                                        .text_color(subtlest),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_xs()
-                                        .text_color(subtle)
-                                        .child(elide_record_path(&record)),
-                                )
-                                .when(!size_text.is_empty(), |this| {
-                                    this.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(subtlest)
-                                            .child(size_text),
+                    // 第 3 行：结果文件（doc 图标 + 中段省略路径 + 大小 + 复制路径按钮）；
+                    // 指向 result.md（无 result 属性回落 record 上下文路径——旧 core 产物）
+                    .when_some(
+                        note.result.clone().or_else(|| note.record.clone()),
+                        |this, record| {
+                            let size_text = match record_size {
+                                Some(Some(bytes)) => format_file_size(bytes),
+                                Some(None) => "记录已删除".to_string(),
+                                None => String::new(),
+                            };
+                            this.child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_1()
+                                    .child(
+                                        Icon::new(IconName::FileText)
+                                            .size_3p5()
+                                            .text_color(subtlest),
                                     )
-                                })
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new(("task-notification-copy", message_ix))
-                                        .xsmall()
-                                        .outline()
-                                        .label(if copied { "已复制" } else { "复制路径" })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            // 复制路径不冒泡到卡体（不开子代理 tab）
-                                            cx.stop_propagation();
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                record.clone(),
-                                            ));
-                                            if let Some(ui) = this
-                                                .messages
-                                                .get_mut(message_ix)
-                                                .and_then(|m| m.notification_ui.as_mut())
-                                            {
-                                                ui.copied = true;
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                    })
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_xs()
+                                            .text_color(subtle)
+                                            .child(elide_record_path(&record)),
+                                    )
+                                    .when(!size_text.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(subtlest)
+                                                .child(size_text),
+                                        )
+                                    })
+                                    .child(div().flex_1())
+                                    .child(
+                                        Button::new(("task-notification-copy", message_ix))
+                                            .xsmall()
+                                            .outline()
+                                            .label(if copied {
+                                                "已复制"
+                                            } else {
+                                                "复制路径"
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                // 复制路径不冒泡到卡体（不开子代理 tab）
+                                                cx.stop_propagation();
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    record.clone(),
+                                                ));
+                                                if let Some(ui) = this
+                                                    .messages
+                                                    .get_mut(message_ix)
+                                                    .and_then(|m| m.notification_ui.as_mut())
+                                                {
+                                                    ui.copied = true;
+                                                }
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                        },
+                    )
                     // 第 4 行：「原始 payload」折叠行（默认收起；命中区不冒泡到卡体）
                     .child(
                         h_flex()
@@ -1410,7 +1417,14 @@ impl ThreadView {
                             ),
                             None => this.child(block),
                         }
-                    }),
+                    })
+                    // 与用户气泡同款的入场动画（链尾：AnimationElement 不再支持交互方法）
+                    .with_animation(
+                        "user-msg-enter",
+                        Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(ease_out_quint()),
+                        |el, delta| el.top(px(4.0 * (1.0 - delta))).opacity(delta),
+                    ),
             )
             .into_any_element()
     }
@@ -3323,14 +3337,16 @@ impl Render for ThreadView {
                 let subscription = handle.refresh_window_on_change(window, cx);
                 message.selection = Some((handle, subscription));
             }
-            // 通知卡 UI 态惰性创建 + 记录文件大小探测（每条消息只做一次，避免每帧 stat）
+            // 通知卡 UI 态惰性创建 + 结果文件大小探测（每条消息只做一次，避免每帧 stat）
             if message.notification_ui.is_none()
                 && let Some(note) = as_task_notification(&message.text)
                 && note.agent_id.is_some()
             {
+                // 文件行与大小探测的目标：result.md 优先，回落 record（旧 core 产物）
                 let record_size = note
-                    .record
+                    .result
                     .as_ref()
+                    .or(note.record.as_ref())
                     .map(|path| std::fs::metadata(path).ok().map(|m| m.len()));
                 message.notification_ui = Some(NotificationUi {
                     payload_open: false,
@@ -3902,10 +3918,10 @@ mod tests {
 
     #[test]
     fn task_notification_parses_open_tag_attributes() {
-        // A3c core 实际产物：开标签带 agent_id/profile/status/turns/model/description/
-        // duration_ms/record
+        // A3d core 实际产物：开标签带 agent_id/profile/status/turns/model/description/
+        // duration_ms/record/result
         let note = as_task_notification(
-            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\" duration_ms=\"12345\" record=\"/tmp/x/sessions/s1.agents/a1-2.jsonl\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
+            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\" duration_ms=\"12345\" record=\"/tmp/x/sessions/s1.agents/a1-2.jsonl\" result=\"/tmp/x/sessions/s1.agents/a1-2.result.md\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
         )
         .expect("带属性通知应解析");
         assert_eq!(note.agent_id.as_deref(), Some("a1-2"));
@@ -3917,6 +3933,10 @@ mod tests {
         assert_eq!(
             note.record.as_deref(),
             Some("/tmp/x/sessions/s1.agents/a1-2.jsonl")
+        );
+        assert_eq!(
+            note.result.as_deref(),
+            Some("/tmp/x/sessions/s1.agents/a1-2.result.md")
         );
         assert_eq!(
             note.body,
@@ -3942,6 +3962,7 @@ mod tests {
         assert!(note.description.is_none());
         assert!(note.duration_ms.is_none());
         assert!(note.record.is_none());
+        assert!(note.result.is_none());
         assert_eq!(note.body, "正文");
         // 部分属性缺失：逐字段 None 回落；非数字耗时 → None
         let partial = as_task_notification(
