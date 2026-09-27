@@ -2336,8 +2336,9 @@ impl Composer {
             list = list.child(row);
         }
 
-        // 固定宽：有/无内容同宽。必须加在 aux_panel_shell 返回之后——shell 会对
-        // 内容 w_full()，加在内层会被覆盖（命令文本超长走省略，见行内 text_ellipsis）
+        // 固定宽：有/无内容同宽。宽度不许超过 popup_shell 内层容器的 max_w(360)——
+        // 超出部分没有 hitbox（可视正常但点击被判 outside 触发弹层关闭）；
+        // 命令文本超长走省略（行内 text_ellipsis）
         let content = self
             .aux_panel_shell(
                 v_flex()
@@ -2351,7 +2352,7 @@ impl Composer {
                     .child(list),
                 cx,
             )
-            .w(px(420.));
+            .w(px(360.));
         let popup_id = match kind {
             TaskChipKind::Bash => "composer-tasks-popup",
             TaskChipKind::Agent => "composer-agent-tasks-popup",
