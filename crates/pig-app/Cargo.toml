@@ -8,7 +8,7 @@ name = "pig-code"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit = "0.6"
+gpui-kit = "0.7"
 pig-protocol = { path = "../pig-protocol" }
 pig-core = { path = "../pig-core" }
 async-channel = "2"

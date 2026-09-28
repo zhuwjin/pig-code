@@ -1,19 +1,34 @@
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::component::attachment::{
+    Attachment, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia,
+    AttachmentTitle,
+};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    InlineToken, InputEvent, InputState, InputToken, Textarea, TextareaState,
+};
 use gpui_kit::component::progress::ProgressCircle;
+use gpui_kit::component::questionnaire::{
+    Questionnaire, QuestionnaireActions, QuestionnaireChoice, QuestionnaireChoiceDefinition,
+    QuestionnaireChoices, QuestionnaireDescription, QuestionnaireError, QuestionnaireEvent,
+    QuestionnaireInput, QuestionnaireInputDefinition, QuestionnaireItem,
+    QuestionnaireItemDefinition, QuestionnaireNext, QuestionnairePrevious, QuestionnaireProgress,
+    QuestionnaireShortcutMode, QuestionnaireState, QuestionnaireSubmission, QuestionnaireSubmit,
+    QuestionnaireTitle,
+};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, StyledExt as _, h_flex,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use pig_protocol::{
-    ApprovalDecision, ExecMode, QuestionItem, TaskStatus, TaskSummary, TodoItem, TodoStatus,
+    ApprovalDecision, ExecMode, QuestionItem, QuestionOption, TaskStatus, TaskSummary, TodoItem,
+    TodoStatus,
 };
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -139,17 +154,15 @@ fn format_task_duration(started_at: u64, end: u64) -> String {
     }
 }
 
-/// 问题条选项行的数字角标（小圆角方块，从 1 起）。
-fn number_badge(n: usize, cx: &App) -> Div {
-    div()
-        .size(px(18.))
-        .rounded(px(5.))
-        .bg(cx.theme().accent.opacity(0.5))
-        .items_center()
-        .justify_center()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(format!("{n}"))
+/// Questionnaire 的 choice value 直接用选项 label（提交回 label，与协议一致）：
+/// 按 label 去重保序——服务端发出重复 label 时防 schema DuplicateChoice 错误与渲染 id 冲突。
+fn dedup_question_options(question: &QuestionItem) -> Vec<&QuestionOption> {
+    let mut seen = std::collections::HashSet::new();
+    question
+        .options
+        .iter()
+        .filter(|option| seen.insert(option.label.as_str()))
+        .collect()
 }
 /// (供应商名, provider_id, model_id, 推理等级列表[(id, 显示名)])
 pub type ModelOption = (String, String, String, Vec<(String, String)>);
@@ -304,7 +317,6 @@ enum PopupAnchor {
 
 pub struct Composer {
     input: Entity<TextareaState>,
-    attachments: Vec<&'static str>,
     exec_mode: usize,
     /// 会话级「工作区外读/写」开关（模式菜单里的两个勾选项）
     fs_read_outside: bool,
@@ -326,15 +338,12 @@ pub struct Composer {
     approval_focused: bool,
     /// 待回答提问：Some 时输入区隐藏，显示问题条（与审批互斥，问题优先）
     question: Option<PendingQuestion>,
-    /// 向导分页的当前页（题号，0 起）
-    question_page: usize,
-    /// 每题已选中的选项下标（多选可多个）
-    question_selected: Vec<Vec<usize>>,
-    /// 每题「其他」自由文本输入
-    question_other: Vec<Entity<InputState>>,
-    /// 「其他」输入的 Change 订阅（单选时输入文本即清掉选项选择）
-    question_other_subs: Vec<Subscription>,
-    /// 问题条焦点（承接 ⏎ 提交 / Esc 跳过）
+    /// 问题条的问卷实体与事件订阅：InputState 需要 window 才能建，render 里惰性构建；
+    /// request_id 变化 / 提交 / 放弃 / 清空时释放
+    questionnaire: Option<(Entity<QuestionnaireState>, Subscription)>,
+    /// 问卷当前页题号（0 起）：CurrentItemChanged 事件的镜像（debug_question 无 cx，读不了实体）
+    question_current: usize,
+    /// 问题条焦点（承接 Esc 放弃）
     question_focus: FocusHandle,
     question_focused: bool,
     mention_results: Vec<String>,
@@ -389,7 +398,6 @@ impl Composer {
 
         Self {
             input,
-            attachments: Vec::new(),
             exec_mode: 1,
             fs_read_outside: false,
             fs_write_outside: false,
@@ -403,10 +411,8 @@ impl Composer {
             approval_focus: cx.focus_handle(),
             approval_focused: false,
             question: None,
-            question_page: 0,
-            question_selected: Vec::new(),
-            question_other: Vec::new(),
-            question_other_subs: Vec::new(),
+            questionnaire: None,
+            question_current: 0,
             question_focus: cx.focus_handle(),
             question_focused: false,
             mention_results: Vec::new(),
@@ -516,7 +522,8 @@ impl Composer {
     }
 
     /// 待回答提问：Some 时显示问题条；None 清除（提交/放弃/回合结束后）。
-    /// 新提问（request_id 变化）时页码归 0；同一提问的重复同步保留翻页与已选状态。
+    /// request_id 变化（或清空）时问卷实体一并释放（render 惰性重建）；同一提问的
+    /// 重复同步保留问卷（翻页与已选状态不丢）。
     pub fn set_question(&mut self, question: Option<PendingQuestion>, cx: &mut Context<Self>) {
         let changed = match (&self.question, &question) {
             (Some(old), Some(new)) => old.request_id != new.request_id,
@@ -524,153 +531,114 @@ impl Composer {
             _ => true,
         };
         if changed {
-            self.question_page = 0;
+            self.questionnaire = None;
+            self.question_current = 0;
         }
         self.question = question;
         cx.notify();
     }
 
-    /// 问题条出现时按需补齐每题的选择向量与「其他」输入框（实体需要 window 才能建），
-    /// 并订阅输入变化：单选时输入「其他」即视为选中其他（清掉选项选择）。
-    fn ensure_question_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let needed = self
-            .question
-            .as_ref()
-            .map(|q| q.questions.len())
-            .unwrap_or(0);
-        while self.question_other.len() < needed {
-            let qix = self.question_other.len();
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("说说你的想法…"));
-            let sub = cx.subscribe_in(
-                &input,
-                window,
-                move |this: &mut Self, _input, event: &InputEvent, _window, cx| {
-                    if !matches!(event, InputEvent::Change) {
-                        return;
-                    }
-                    let single = this
-                        .question
-                        .as_ref()
-                        .and_then(|q| q.questions.get(qix))
-                        .map(|q| !q.multi_select)
-                        .unwrap_or(false);
-                    let has_text = this
-                        .question_other
-                        .get(qix)
-                        .is_some_and(|input| !input.read(cx).value().trim().is_empty());
-                    if single && has_text {
-                        if let Some(selected) = this.question_selected.get_mut(qix) {
-                            selected.clear();
-                        }
-                    }
-                    cx.notify();
-                },
-            );
-            self.question_other.push(input);
-            self.question_other_subs.push(sub);
+    /// 惰性构建问卷实体（InputState 需要 window，set_question 拿不到，故在 render 调用）。
+    /// 每题：题号为 item 名、题干为标题、可选 header 为题注、选项 label 为 choice value
+    /// （提交直接回 label，与协议一致）、每题一个「其他」自由文本输入；全部必答
+    /// （对齐原「每题作答才可提交」门控），数字键快捷选中。
+    fn ensure_questionnaire(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.questionnaire.is_some() {
+            return;
         }
-        while self.question_selected.len() < needed {
-            self.question_selected.push(Vec::new());
-        }
-    }
-
-    /// 选中某题某选项：单选互斥、多选 toggle（仅更新选择向量）。
-    fn apply_option_select(&mut self, qix: usize, oix: usize) {
-        let multi = self
-            .question
-            .as_ref()
-            .and_then(|q| q.questions.get(qix))
-            .map(|q| q.multi_select)
-            .unwrap_or(false);
-        if qix >= self.question_selected.len() {
-            self.question_selected.resize(qix + 1, Vec::new());
-        }
-        let selected = &mut self.question_selected[qix];
-        if multi {
-            if let Some(pos) = selected.iter().position(|&i| i == oix) {
-                selected.remove(pos);
-            } else {
-                selected.push(oix);
-            }
-        } else {
-            *selected = vec![oix];
-        }
-    }
-
-    /// 某题是否已作答：有选中项或「其他」文本。
-    fn question_answered(&self, qix: usize, cx: &App) -> bool {
-        let selected = self
-            .question_selected
-            .get(qix)
-            .is_some_and(|s| !s.is_empty());
-        let other = self
-            .question_other
-            .get(qix)
-            .is_some_and(|input| !input.read(cx).value().trim().is_empty());
-        selected || other
-    }
-
-    /// 提交可用：每题都已作答。
-    fn question_submittable(&self, cx: &App) -> bool {
         let Some(question) = &self.question else {
-            return false;
-        };
-        (0..question.questions.len()).all(|qix| self.question_answered(qix, cx))
-    }
-
-    /// 翻到下一题：仅当前题已作答时前进（[下一题] 按钮、⏎、debug 共用）。
-    fn next_question_page(&mut self, cx: &mut Context<Self>) {
-        let Some(total) = self.question.as_ref().map(|q| q.questions.len()) else {
             return;
         };
-        let qix = self.question_page.min(total.saturating_sub(1));
-        if self.question_answered(qix, cx) && qix + 1 < total {
-            self.question_page += 1;
-            cx.notify();
+        let mut items = Vec::with_capacity(question.questions.len());
+        for (ix, q) in question.questions.iter().enumerate() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("说说你的想法…"));
+            let choices: Vec<QuestionnaireChoiceDefinition> = dedup_question_options(q)
+                .into_iter()
+                .map(|option| {
+                    let choice = QuestionnaireChoiceDefinition::new(
+                        option.label.clone(),
+                        option.label.clone(),
+                    );
+                    match &option.description {
+                        Some(description) => choice.with_description(description.clone()),
+                        None => choice,
+                    }
+                })
+                .collect();
+            let mut item = QuestionnaireItemDefinition::new(ix.to_string(), q.question.clone())
+                .with_required(true)
+                .with_multiple(q.multi_select)
+                .with_choices(choices)
+                .with_input(QuestionnaireInputDefinition::new(input, "其他"));
+            if let Some(header) = &q.header {
+                item = item.with_description(header.clone());
+            }
+            items.push(item);
         }
+        let state = cx.new(|cx| {
+            QuestionnaireState::new(items, cx)
+                .map(|state| state.with_shortcuts(QuestionnaireShortcutMode::Numbers))
+                .expect("item 名为题号、choice 已按 label 去重，schema 必然合法")
+        });
+        let sub = cx.subscribe_in(
+            &state,
+            window,
+            |this, _state, event: &QuestionnaireEvent, window, cx| match event {
+                // submit() 校验通过先 emit Completed 再 emit Submit：
+                // finish 内部 take(question)，只处理先到的一个
+                QuestionnaireEvent::Completed(submission)
+                | QuestionnaireEvent::Submit(submission) => {
+                    this.finish_question_submission(submission, window, cx);
+                }
+                // 翻页：镜像当前页题号
+                QuestionnaireEvent::CurrentItemChanged { current, .. } => {
+                    if let Some(ix) = current
+                        .as_ref()
+                        .and_then(|name| name.parse::<usize>().ok())
+                    {
+                        this.question_current = ix;
+                    }
+                    cx.notify();
+                }
+                // 选择/「其他」输入变化：重绘问题条刷新选中态与按钮显隐
+                QuestionnaireEvent::AnswerChanged(_) => cx.notify(),
+                _ => cx.notify(),
+            },
+        );
+        self.question_current = 0;
+        self.questionnaire = Some((state, sub));
     }
 
-    /// 收集答案（选中标签 + 非空「其他」文本作为标签原样放入）并清空问题态；
-    /// 没有问题则 None。
-    fn take_question_answers(&mut self, cx: &App) -> Option<(String, Vec<Vec<String>>)> {
-        let question = self.question.take()?;
-        let mut answers: Vec<Vec<String>> = Vec::new();
-        for (ix, q) in question.questions.iter().enumerate() {
-            let mut labels: Vec<String> = self
-                .question_selected
-                .get(ix)
-                .map(|selected| {
-                    selected
-                        .iter()
-                        .filter_map(|&oix| q.options.get(oix))
-                        .map(|o| o.label.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let other = self
-                .question_other
-                .get(ix)
-                .map(|input| input.read(cx).value().trim().to_string())
-                .unwrap_or_default();
-            if !other.is_empty() {
-                labels.push(other);
+    /// 问卷提交：按题序收集答案（选中 label 按选项定义序 + 非空「其他」文本 trim 后
+    /// 追加为一个 label），发 QuestionReply、清问题态与问卷实体、焦点还回输入框。
+    fn finish_question_submission(
+        &mut self,
+        submission: &QuestionnaireSubmission,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        self.questionnaire = None;
+        self.question_current = 0;
+        let mut answers: Vec<Vec<String>> = Vec::with_capacity(question.questions.len());
+        for ix in 0..question.questions.len() {
+            let mut labels: Vec<String> = Vec::new();
+            if let Some(answer) = submission.answer(&ix.to_string()) {
+                labels.extend(answer.choices().iter().map(ToString::to_string));
+                let other = answer
+                    .freeform()
+                    .map(|text| text.trim().to_string())
+                    .unwrap_or_default();
+                if !other.is_empty() {
+                    labels.push(other);
+                }
             }
             answers.push(labels);
         }
-        self.question_selected.clear();
-        self.question_other.clear();
-        self.question_other_subs.clear();
-        self.question_page = 0;
-        Some((question.request_id, answers))
-    }
-
-    /// 提交答案并发 QuestionReply，焦点还回输入框。
-    fn submit_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((request_id, answers)) = self.take_question_answers(cx) else {
-            return;
-        };
         cx.emit(ComposerEvent::QuestionReply {
-            request_id,
+            request_id: question.request_id,
             answers: Some(answers),
         });
         self.input.update(cx, |input, cx| input.focus(window, cx));
@@ -680,10 +648,8 @@ impl Composer {
     /// 放弃：回复 None（core 按「用户选择不回答」继续，不算错误）。
     fn skip_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(question) = self.question.take() {
-            self.question_selected.clear();
-            self.question_other.clear();
-            self.question_other_subs.clear();
-            self.question_page = 0;
+            self.questionnaire = None;
+            self.question_current = 0;
             cx.emit(ComposerEvent::QuestionReply {
                 request_id: question.request_id,
                 answers: None,
@@ -696,34 +662,62 @@ impl Composer {
     /// 自测用：问题条是否在显示（返回当前页题干）。
     pub fn debug_question(&self) -> Option<String> {
         let question = self.question.as_ref()?;
+        self.questionnaire.as_ref()?;
         let qix = self
-            .question_page
+            .question_current
             .min(question.questions.len().saturating_sub(1));
         question.questions.get(qix).map(|q| q.question.clone())
     }
 
-    /// 自测用：等价点「下一题」（受当前题已作答门控）。
+    /// 自测用：等价点「下一题」（受当前题已作答门控；go_next 需要 Window，取首窗口）。
     pub fn debug_next_question_page(&mut self, cx: &mut Context<Self>) {
-        self.next_question_page(cx);
-    }
-
-    /// 自测用：选中某题某选项（等价点击选项按钮；不清空「其他」输入，selftest 无 window）。
-    pub fn debug_select_question_option(&mut self, qix: usize, oix: usize, cx: &mut Context<Self>) {
-        self.apply_option_select(qix, oix);
+        let Some(state) = self.questionnaire.as_ref().map(|(state, _)| state.clone()) else {
+            return;
+        };
+        let Some(window) = cx.windows().first().copied() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            state.update(cx, |state, cx| {
+                state.go_next(window, cx);
+            });
+        });
         cx.notify();
     }
 
-    /// 自测用：等价点「提交」（selftest 无 window，不做焦点交还）。
-    pub fn debug_submit_question(&mut self, cx: &mut Context<Self>) {
-        if !self.question_submittable(cx) {
-            return;
-        }
-        let Some((request_id, answers)) = self.take_question_answers(cx) else {
+    /// 自测用：选中某题某选项（等价点击选项按钮；不管焦点与「其他」输入）。
+    pub fn debug_select_question_option(&mut self, qix: usize, oix: usize, cx: &mut Context<Self>) {
+        let Some(label) = self
+            .question
+            .as_ref()
+            .and_then(|q| q.questions.get(qix))
+            .and_then(|q| q.options.get(oix))
+            .map(|option| option.label.clone())
+        else {
             return;
         };
-        cx.emit(ComposerEvent::QuestionReply {
-            request_id,
-            answers: Some(answers),
+        let Some(state) = self.questionnaire.as_ref().map(|(state, _)| state.clone()) else {
+            return;
+        };
+        let name = qix.to_string();
+        state.update(cx, |state, cx| {
+            let _ = state.activate_choice(&name, &label, cx);
+        });
+        cx.notify();
+    }
+
+    /// 自测用：等价点「提交」（问卷校验全过才经事件订阅发 QuestionReply，门控与原实现一致）。
+    pub fn debug_submit_question(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.questionnaire.as_ref().map(|(state, _)| state.clone()) else {
+            return;
+        };
+        let Some(window) = cx.windows().first().copied() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            state.update(cx, |state, cx| {
+                state.submit(window, cx);
+            });
         });
         cx.notify();
     }
@@ -734,10 +728,14 @@ impl Composer {
         if text.is_empty() && self.pasted_images.is_empty() {
             return;
         }
-        let files: Vec<String> = text
-            .split_whitespace()
-            .filter_map(|word| word.strip_prefix('@'))
-            .filter(|path| !path.is_empty())
+        // @提及已存为 InlineToken 原子 token：从 token 列表收集文件
+        //（不去重，与原先按空白切词的行为一致）；纯文本里的 @ 不再计入
+        let files: Vec<String> = self
+            .input
+            .read(cx)
+            .tokens()
+            .iter()
+            .filter_map(|span| span.token().text().strip_prefix('@'))
             .map(str::to_string)
             .collect();
         // 附件随消息下发并清空（chip 条消失）
@@ -1045,9 +1043,22 @@ impl Composer {
             return;
         };
         let caret = self.input.read(cx).selected_range().start;
+        // 文档文本是完整 @path（发送时据此收集文件），展示文本只显示文件名
+        let file_name = path.rsplit('/').next().unwrap_or(path.as_str());
+        let token =
+            InlineToken::new(path.clone(), format!("@{path}")).with_label(format!("@{file_name}"));
         self.input.update(cx, |input, cx| {
-            input.set_selected_range(start..caret, cx);
-            input.replace(format!("@{path} "), window, cx);
+            if input
+                .replace_range_with_token(start..caret, token, window, cx)
+                .is_ok()
+            {
+                // token API 不自动加分隔符：插入后选区已塌缩在 token 尾，补一个尾随空格
+                input.replace(" ", window, cx);
+            } else {
+                // token 校验失败等场景回落为纯文本插入
+                input.set_selected_range(start..caret, cx);
+                input.replace(format!("@{path} "), window, cx);
+            }
             input.focus(window, cx);
         });
         self.popup = None;
@@ -1742,41 +1753,6 @@ impl Composer {
         )
     }
 
-    fn render_attachments(&self, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .gap_2()
-            .children(self.attachments.iter().enumerate().map(|(ix, name)| {
-                h_flex()
-                    .gap_1()
-                    .pl_2()
-                    .pr_1()
-                    .py_0p5()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().accent)
-                    .child(
-                        Icon::new(IconName::FileText)
-                            .size_3()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(div().text_xs().child(*name))
-                    .child(
-                        div()
-                            .id(("remove-attachment", ix))
-                            .cursor_pointer()
-                            .rounded_sm()
-                            .hover(|this| this.bg(cx.theme().danger.opacity(0.3)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.attachments.remove(ix);
-                                cx.notify();
-                            }))
-                            .child(Icon::new(IconName::Close).size_3()),
-                    )
-            }))
-            .into_any_element()
-    }
-
     /// 粘贴入口（Textarea::on_paste）：仲裁结果决定是否拦截默认文本插入。
     /// 返回 true = 已作为附件处理，输入框不插文本；false = 交给引擎插文本。
     fn handle_paste(
@@ -1892,66 +1868,69 @@ impl Composer {
         cx.notify();
     }
 
-    /// 图片附件 chip 条：缩略图（gpui img 从字节渲染）+ 尺寸/体积 + X 删除。
-    fn render_pasted_images(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut bar = h_flex().gap_2().items_center().flex_wrap();
-        for (ix, image) in self.pasted_images.iter().enumerate() {
-            let format = match image.mime.as_str() {
-                "image/jpeg" => ImageFormat::Jpeg,
-                "image/webp" => ImageFormat::Webp,
-                "image/gif" => ImageFormat::Gif,
-                _ => ImageFormat::Png,
-            };
-            let thumb = gpui_kit::Image {
-                format,
-                bytes: (*image.bytes).clone(),
-                id: gpui_kit::hash(&(image.bytes.as_slice(), ix)),
-            };
-            bar = bar.child(
-                h_flex()
-                    .gap_1()
-                    .p_1()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().accent)
-                    .child(
-                        gpui_kit::img(std::sync::Arc::new(thumb))
-                            .h_8()
-                            .w_8()
-                            .object_fit(ObjectFit::Cover)
-                            .rounded_sm(),
+    /// 图片附件条：官方 AttachmentGroup（每图一个 Attachment：缩略图 + 尺寸/体积 +
+    /// 悬停删除钮）；paste_note 警告行跟在 Group 之后（样式不变）。
+    /// `surface` 是行背后的表面色（输入框容器色），用于 Group 的边缘渐隐。
+    fn render_pasted_images(&self, surface: Hsla, cx: &mut Context<Self>) -> AnyElement {
+        let attachments: Vec<AnyElement> = self
+            .pasted_images
+            .iter()
+            .enumerate()
+            .map(|(ix, image)| {
+                let format = match image.mime.as_str() {
+                    "image/jpeg" => ImageFormat::Jpeg,
+                    "image/webp" => ImageFormat::Webp,
+                    "image/gif" => ImageFormat::Gif,
+                    _ => ImageFormat::Png,
+                };
+                let thumb = std::sync::Arc::new(gpui_kit::Image {
+                    format,
+                    bytes: (*image.bytes).clone(),
+                    id: gpui_kit::hash(&(image.bytes.as_slice(), ix)),
+                });
+                let title = format!("图片 {}", ix + 1);
+                let info = format!(
+                    "{}×{} · {}KB",
+                    image.width,
+                    image.height,
+                    image.bytes.len() / 1024
+                );
+                Attachment::new()
+                    .id(("pasted-image", ix))
+                    .media(AttachmentMedia::new().src(thumb))
+                    .content(
+                        AttachmentContent::new()
+                            .title(AttachmentTitle::new(title.clone()))
+                            .description(AttachmentDescription::new(info.clone())),
                     )
-                    .child(div().text_xs().child(format!(
-                        "图片 {}（{}×{}，{}KB）",
-                        ix + 1,
-                        image.width,
-                        image.height,
-                        image.bytes.len() / 1024
-                    )))
-                    .child(
-                        div()
-                            .id(("remove-pasted-image", ix))
-                            .cursor_pointer()
-                            .rounded_sm()
-                            .hover(|this| this.bg(cx.theme().danger.opacity(0.3)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.pasted_images.remove(ix);
-                                cx.notify();
-                            }))
-                            .child(Icon::new(IconName::Close).size_3()),
-                    ),
-            );
-        }
-        if let Some(note) = &self.paste_note {
-            bar = bar.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().warning)
-                    .child(note.clone()),
-            );
-        }
-        bar.into_any_element()
+                    .tooltip(format!("{title}（{info}）"))
+                    .on_remove(cx.listener(move |this, _, _, cx| {
+                        this.pasted_images.remove(ix);
+                        cx.notify();
+                    }))
+                    .axis(Axis::Horizontal)
+                    .small()
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .when(!attachments.is_empty(), |this| {
+                this.child(
+                    AttachmentGroup::new("pasted-images")
+                        .with_edge_fade(surface)
+                        .children(attachments),
+                )
+            })
+            .when_some(self.paste_note.clone(), |this, note| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child(note),
+                )
+            })
+            .into_any_element()
     }
 
     /// 当前进度（TodoList）+ 后台 Bash 任务 + 会话改动：chip 行。
@@ -2434,9 +2413,11 @@ impl Composer {
                 h_flex()
                     .w_full()
                     .gap_2()
+                    // 与问卷动作按钮同尺寸（Small），各确认条按钮字号一致
                     .child(
                         Button::new("approval-always")
                             .secondary()
+                            .small()
                             .label("本会话内批准  Ctrl+⏎")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.decide_approval(ApprovalDecision::AlwaysAllow, window, cx);
@@ -2446,6 +2427,7 @@ impl Composer {
                     .child(
                         Button::new("approval-reject")
                             .secondary()
+                            .small()
                             .label("拒绝  Esc")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.decide_approval(ApprovalDecision::Reject, window, cx);
@@ -2454,6 +2436,7 @@ impl Composer {
                     .child(
                         Button::new("approval-allow")
                             .primary()
+                            .small()
                             .label("批准  ⏎")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.decide_approval(ApprovalDecision::Allow, window, cx);
@@ -2463,116 +2446,44 @@ impl Composer {
             .into_any_element()
     }
 
-    /// 问题条（kimi 桌面版提问卡样式，向导分页）：一次只显示一题——可选 header
-    ///（标题上方 muted 小字）→ 图标 + 当前题号角标（与选项角标同款，页码 1 起）+
-    /// 问题本身做标题 → 纵向选项行（label 粗体 + description muted 次行 + 数字
-    /// 角标）→「其他」行（内联输入 + 角标 n+1）。底部右对齐：多题 [上一题]
-    /// [放弃 Esc] [下一题 ⏎]，最后一题 [下一题] 变 [提交 ⏎]，单题只有 放弃/提交。
-    /// 数字键 1..n+1 作用于当前页（n+1 聚焦「其他」输入框），⏎ 下一题/提交，
-    /// Esc 放弃。翻页保留各题已选与「其他」文本。
+    /// 问题条（gpui-kit Questionnaire 官方组件，向导分页一次一题）：Progress（题号/总数）→
+    /// 当前题 Item（Title 题干 / Description 放可选 header / Choices 选项卡 / Input「其他」/
+    /// Error 校验提示）→ Actions（[上一题] [放弃 Esc] [下一题]/[提交]，按问卷导航态自动显隐）。
+    /// 数字键选选项、⏎ 确认进下一题/提交由 Questionnaire 根的键盘路由承接；「放弃」协议是
+    /// 整卷 answers: None（官方 Skip 是逐题跳过，表达不了），自绘按钮 + 外层 Esc 走 skip_question。
     fn render_question_bar(
         &self,
         question: &PendingQuestion,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let total = question.questions.len();
-        let qix = self.question_page.min(total.saturating_sub(1));
-        let q = &question.questions[qix];
-        let wizard = total > 1;
-        let last_page = qix + 1 >= total;
-
-        let mut block = v_flex().w_full().gap_2();
-        if let Some(header) = &q.header {
-            block = block.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(header.clone()),
+        let Some((state, _)) = &self.questionnaire else {
+            // ensure_questionnaire 先于本帧渲染执行，正常到不了这里
+            return div().into_any_element();
+        };
+        let progress = state.read(cx).progress();
+        let mut item_parts = Vec::with_capacity(question.questions.len());
+        for (ix, q) in question.questions.iter().enumerate() {
+            let name = ix.to_string();
+            // 与 ensure_questionnaire 同一套 label 去重（渲染 id 按 value 生成）
+            let choice_parts: Vec<QuestionnaireChoice> = dedup_question_options(q)
+                .into_iter()
+                .map(|option| {
+                    // 选项卡两行（label+description）：官方默认把指示器/角标对齐
+                    // 首行文本（items_start），整行垂直居中更顺眼
+                    QuestionnaireChoice::new(state, name.clone(), option.label.clone())
+                        .items_center()
+                })
+                .collect();
+            // 非当前题的 part 自行渲染为空，全部挂上即可
+            item_parts.push(
+                QuestionnaireItem::new(state, name.clone())
+                    .child(QuestionnaireTitle::new(state, name.clone()))
+                    .child(QuestionnaireDescription::new(state, name.clone()))
+                    .child(QuestionnaireChoices::new(state, name.clone()).children(choice_parts))
+                    .child(QuestionnaireInput::new(state, name.clone()))
+                    .child(QuestionnaireError::new(state, name.clone())),
             );
         }
-        // 问题本身做区块标题（图标 + 当前题号角标 + 问题文本）
-        block = block.child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Icon::new(AssetIconName::MessageCircleQuestionMark)
-                        .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(number_badge(qix + 1, cx))
-                .child(div().text_sm().font_medium().child(q.question.clone())),
-        );
-        let multi = q.multi_select;
-        let mut options = v_flex().w_full().gap_1();
-        for (oix, option) in q.options.iter().enumerate() {
-            let selected = self
-                .question_selected
-                .get(qix)
-                .is_some_and(|s| s.contains(&oix));
-            options = options.child(
-                h_flex()
-                    .id(("question-option", qix * 16 + oix))
-                    .w_full()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(10.))
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .when(selected, |this| this.bg(cx.theme().accent))
-                    .when(!selected, |this| this.bg(cx.theme().accent.opacity(0.3)))
-                    .hover(|this| this.bg(cx.theme().accent))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.apply_option_select(qix, oix);
-                        // 单选：选中选项与「其他」文本互斥
-                        if !multi {
-                            if let Some(input) = this.question_other.get(qix) {
-                                input.update(cx, |state, cx| state.set_value("", window, cx));
-                            }
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().font_medium().child(option.label.clone()))
-                            .when_some(option.description.clone(), |this, description| {
-                                this.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(description),
-                                )
-                            }),
-                    )
-                    .child(number_badge(oix + 1, cx)),
-            );
-        }
-        block = block.child(options);
-        // 「其他」行：输入文本即视为选中（单选清选项选择由 Change 订阅处理；
-        // 多选与选项共存）
-        if let Some(input) = self.question_other.get(qix) {
-            let other_active = !input.read(cx).value().trim().is_empty();
-            block = block.child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .when(other_active, |this| this.bg(cx.theme().accent))
-                    .child(div().text_sm().child("其他"))
-                    .child(div().flex_1().min_w_0().child(Input::new(input).small()))
-                    .child(number_badge(q.options.len() + 1, cx)),
-            );
-        }
-
-        let submittable = self.question_submittable(cx);
-        let current_answered = self.question_answered(qix, cx);
         v_flex()
             .id("question-bar")
             .w_full()
@@ -2580,114 +2491,36 @@ impl Composer {
             .p_2()
             .track_focus(&self.question_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                match key {
-                    "enter" => {
-                        let Some(total) = this.question.as_ref().map(|q| q.questions.len()) else {
-                            return;
-                        };
-                        let qix = this.question_page.min(total.saturating_sub(1));
-                        if qix + 1 >= total {
-                            // 最后一题：⏎ = 提交
-                            if this.question_submittable(cx) {
-                                this.submit_question(window, cx);
-                            }
-                        } else {
-                            // ⏎ = 下一题（内部有当前题已作答门控）
-                            this.next_question_page(cx);
-                        }
-                    }
-                    "escape" => this.skip_question(window, cx),
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                        // 数字键作用于当前页；焦点在「其他」输入框里时让位给文本输入
-                        let Some((total,)) = this.question.as_ref().map(|q| (q.questions.len(),))
-                        else {
-                            return;
-                        };
-                        let qix = this.question_page.min(total.saturating_sub(1));
-                        let other_focused = this.question_other.get(qix).is_some_and(|input| {
-                            input.read(cx).focus_handle(cx).is_focused(window)
-                        });
-                        if other_focused {
-                            return;
-                        }
-                        let Some(current) =
-                            this.question.as_ref().and_then(|q| q.questions.get(qix))
-                        else {
-                            return;
-                        };
-                        let n = current.options.len();
-                        let multi = current.multi_select;
-                        let digit = key.parse::<usize>().expect("数字键");
-                        if digit >= 1 && digit <= n {
-                            this.apply_option_select(qix, digit - 1);
-                            if !multi {
-                                if let Some(input) = this.question_other.get(qix) {
-                                    input.update(cx, |state, cx| state.set_value("", window, cx));
-                                }
-                            }
-                            cx.notify();
-                        } else if digit == n + 1 {
-                            // 角标 n+1 = 「其他」行：聚焦输入框
-                            if let Some(input) = this.question_other.get(qix) {
-                                let handle = input.read(cx).focus_handle(cx);
-                                handle.focus(window, cx);
-                            }
-                        }
-                    }
-                    _ => {}
+                // Esc 放弃走协议层（answers: None），Questionnaire 无对应概念
+                if event.keystroke.key.as_str() == "escape" {
+                    this.skip_question(window, cx);
                 }
             }))
-            .child(block)
             .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(div().flex_1())
-                    .when(wizard, |this| {
-                        this.child(
-                            Button::new("question-prev")
-                                .secondary()
-                                .label("上一题")
-                                .when(qix == 0, |this| this.disabled(true))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.question_page = this.question_page.saturating_sub(1);
-                                    cx.notify();
-                                })),
-                        )
-                    })
+                Questionnaire::new(state)
+                    // 输入区是紧凑条形：整体小一号贴现状（行距/题干字重沿用 part 默认）
+                    .with_size(Size::Small)
                     .child(
-                        Button::new("question-skip")
-                            .secondary()
-                            .label("放弃  Esc")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.skip_question(window, cx);
-                            })),
+                        QuestionnaireProgress::new(state)
+                            .child(format!("{}/{}", progress.current(), progress.total())),
                     )
-                    .when(last_page, |this| {
-                        this.child(
-                            Button::new("question-submit")
-                                .primary()
-                                .label("提交  ⏎")
-                                .when(!submittable, |this| this.disabled(true))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    if this.question_submittable(cx) {
-                                        this.submit_question(window, cx);
-                                    }
-                                })),
-                        )
-                    })
-                    .when(!last_page, |this| {
-                        this.child(
-                            Button::new("question-next")
-                                .primary()
-                                .label("下一题  ⏎")
-                                .when(!current_answered, |this| this.disabled(true))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.next_question_page(cx);
-                                })),
-                        )
-                    }),
+                    .children(item_parts)
+                    .child(
+                        QuestionnaireActions::new(state)
+                            .child(QuestionnairePrevious::new(state).child("上一题"))
+                            .child(
+                                // 与官方问卷动作按钮同尺寸（Small）
+                                Button::new("question-skip")
+                                    .secondary()
+                                    .small()
+                                    .label("放弃  Esc")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.skip_question(window, cx);
+                                    })),
+                            )
+                            .child(QuestionnaireNext::new(state).child("下一题  ⏎"))
+                            .child(QuestionnaireSubmit::new(state).child("提交  ⏎")),
+                    ),
             )
             .into_any_element()
     }
@@ -2721,12 +2554,17 @@ impl Render for Composer {
             _ => {}
         }
         let question = self.question.clone();
-        self.ensure_question_inputs(window, cx);
-        // 问题条焦点交接（与审批条同模式；与审批互斥、问题优先）
+        self.ensure_questionnaire(window, cx);
+        // 问题条焦点交接（与审批条同模式；与审批互斥、问题优先）：出现时焦点交给问卷
+        // 当前题（承接数字键/⏎），消失后焦点还回输入框
         match (&question, self.question_focused) {
             (Some(_), false) => {
                 self.question_focused = true;
-                self.question_focus.focus(window, cx);
+                if let Some(state) = self.questionnaire.as_ref().map(|(state, _)| state.clone()) {
+                    state.update(cx, |state, cx| {
+                        state.focus_current_item(window, cx);
+                    });
+                }
             }
             (None, true) => {
                 self.question_focused = false;
@@ -2958,9 +2796,6 @@ impl Render for Composer {
                                     || !self.change_files.is_empty()),
                             |this| this.child(self.render_aux(cx)),
                         )
-                        .when(!self.attachments.is_empty(), |this| {
-                            this.child(self.render_attachments(cx))
-                        })
                         .when_some(question.clone(), |this, question| {
                             this.child(self.render_question_bar(&question, cx))
                         })
@@ -2970,7 +2805,7 @@ impl Render for Composer {
                             )
                         })
                         .when(!self.pasted_images.is_empty() || self.paste_note.is_some(), |this| {
-                            this.child(self.render_pasted_images(cx))
+                            this.child(self.render_pasted_images(composer_surface, cx))
                         })
                         .when(question.is_none() && approval.is_none(), |this| {
                             this.child(
@@ -2981,6 +2816,10 @@ impl Render for Composer {
                                         Textarea::new(&self.input)
                                             .appearance(false)
                                             .bordered(false)
+                                            // @提及 token 的展示：默认样式加文件图标
+                                            .token(|ctx, _, _| {
+                                                InputToken::new(ctx).icon(IconName::FileText)
+                                            })
                                             .on_paste({
                                                 let composer = cx.entity();
                                                 move |item, window, cx| {

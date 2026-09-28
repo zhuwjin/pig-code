@@ -33,6 +33,8 @@ gpui_kit::actions!(
         NewTask,
         FocusSearch,
         CloseSearch,
+        FocusThreadSearch,
+        CloseThreadSearch,
         CloseSettings,
         ToggleSidebar,
         ToggleChanges,
@@ -369,8 +371,6 @@ struct AppView {
     /// 三栏布局引擎（dock）：左 dock=侧栏、center=会话区、右 dock=改动面板；
     /// set_locked(true) 锁定防拖拽重排、只保留调宽
     dock: Entity<gpui_kit::component::dock::DockArea>,
-    /// 正在拖宽的 dock（自绘把手热区按下时置位；松手后的首个未按键 move 清除）
-    dock_resizing: Option<DockPlacement>,
     _agent_handle: pig_core::AgentHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -448,7 +448,6 @@ impl AppView {
             current_model: None,
             reasoning_level: None,
             dock,
-            dock_resizing: None,
             _agent_handle: handle,
             _subscriptions: vec![],
         };
@@ -1524,9 +1523,11 @@ impl AppView {
                             .gap_2()
                             .justify_end()
                             .child(
+                                // 与问卷/审批条按钮同尺寸（Small），确认弹框按钮字号一致
                                 Button::new("yolo-cancel")
                                     .label("取消")
                                     .outline()
+                                    .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.close_yolo_confirm(window, cx);
                                     })),
@@ -1535,6 +1536,7 @@ impl AppView {
                                 Button::new("yolo-confirm")
                                     .label("开启无管制模式")
                                     .danger()
+                                    .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.confirm_yolo(window, cx);
                                     })),
@@ -2127,7 +2129,7 @@ impl AppView {
                         .left_0()
                         .w(w)
                         .bg(bg)
-                        // 滑动边 = 虚拟分隔线（中段期间真实把手条隐藏）
+                        // 滑动边 = 虚拟分隔线（边缘段期间 dock 未开，无把手线）
                         .map(|this| match placement {
                             DockPlacement::Left => {
                                 this.border_r_1().border_color(cx.theme().border)
@@ -2174,10 +2176,11 @@ impl AppView {
         });
     }
 
-    /// 补间步进一帧（左右两栏一起）：到点落终态并 notify AppView 一次（把动画
-    /// 期间隐藏的拖宽把手画回）；否则匀速插值写 dock 宽——目标宽超出单帧步
-    /// 长封顶时按封顶走（掉帧不追帧），并取整像素（小数宽让分界线与内容抗
-    /// 锯齿发虚）。只 notify dock。返回是否还有活动补间（false = 链终止）。
+    /// 补间步进一帧（左右两栏一起）：到点落终态并 notify AppView 一次（动画
+    /// 期间 AppView 树冻结，落定帧让树按终态重排）；否则匀速插值写 dock 宽——
+    /// 目标宽超出单帧步长封顶时按封顶走（掉帧不追帧），并取整像素（小数宽
+    /// 让分界线与内容抗锯齿发虚）。只 notify dock。返回是否还有活动补间
+    ///（false = 链终止）。
     fn step_dock_anims_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut active = false;
         for placement in [DockPlacement::Left, DockPlacement::Right] {
@@ -2836,8 +2839,7 @@ impl AppView {
         };
         div()
             .size_full()
-            // 不透明底：盖住左 dock 把手自带线的跑偏——它画在分界线右 2px 的
-            // 中心区里（把手内容区被 padding 挤到元素外），中心区后绘制直接覆盖
+            // 不透明底：边缘段覆盖层滑动/页面淡入都叠在这层上
             .bg(cx.theme().background)
             .with_animation(
                 format!("page-{page_tag}"),
@@ -2899,101 +2901,6 @@ impl AppView {
                     ),
             )
             .into_any_element()
-    }
-
-    /// dock 拖宽把手：gpui-base 自带把手的命中区只有 1px 宽（`w(HANDLE_SIZE)`
-    /// 是 border-box，4px padding 吃掉内容区），左 dock（Side::Left 特例）还
-    /// 左偏 1px 压不到线上，且左把手的可见线被 dock 框架 overflow_hidden 裁掉
-    /// （右把手线恰好落在分界线上）——左右一有一无，不对称。自绘 8px 热区
-    /// 骑跨分界线 + 居中 1px 分隔线（静止 border 色 / hover 提亮 / 拖拽高亮），
-    /// 按下后由根容器的 on_mouse_move 驱动 set_dock_size；宽度仍受
-    /// clamp_dock_widths 约束。0.6.7 把手渲染重做（#3175/#3200）后复核移除。
-    fn render_dock_resize_strip(
-        &self,
-        placement: DockPlacement,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let dock = self.dock.read(cx);
-        if !dock.is_dock_open(placement) {
-            return None;
-        }
-        // 开合补间期间隐藏把手：把手定位在 AppView 树里，而动画帧只重绘 dock
-        //（见 step_dock_anims_frame），把手会冻结在旧分隔线处——1px 线 + 覆盖
-        // 色悬在中心区上。落定帧补的那次 notify 会把它画回正确位置
-        let animating = match placement {
-            DockPlacement::Left => self.left_dock_anim.is_some(),
-            DockPlacement::Right => self.right_dock_anim.is_some(),
-            _ => false,
-        };
-        if animating {
-            return None;
-        }
-        let size = dock.dock_size(placement)?;
-        let area_w = dock.bounds().size.width;
-        // 取整到整像素：拖动产生的小数位置会让 1px 分隔线抗锯齿发虚显粗
-        let left = match placement {
-            DockPlacement::Left => size - px(4.),
-            DockPlacement::Right => area_w - size - px(4.),
-            _ => return None,
-        };
-        let left = px(f32::from(left).round());
-        if left < px(0.) {
-            return None; // 首帧未测量/极窄
-        }
-        let active = self.dock_resizing == Some(placement);
-        let group = match placement {
-            DockPlacement::Left => "dock-resize-left",
-            _ => "dock-resize-right",
-        };
-        // 上游把手自带线会跑偏（左 dock 的线落在缝左 1~2px 的侧栏里），热区用
-        // 两侧面板底色铺满把它整个盖住，只留中间我们自己的 1px 线
-        let (cover_l, cover_r) = match placement {
-            DockPlacement::Left => (cx.theme().sidebar, cx.theme().background),
-            _ => (cx.theme().background, cx.theme().background),
-        };
-        Some(
-            div()
-                .id(("dock-resize", placement as usize))
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(left)
-                .w(px(8.))
-                .cursor_col_resize()
-                .occlude()
-                .group(group)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.dock_resizing = Some(placement);
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    h_flex()
-                        .size_full()
-                        .child(div().w(px(4.)).h_full().bg(cover_l))
-                        .child(
-                            div()
-                                .w(px(1.))
-                                .h_full()
-                                .bg(if active {
-                                    cx.theme().ring
-                                } else {
-                                    cx.theme().border
-                                })
-                                // hover/拖拽用 ring（焦点环色）：暗色下 accent 比
-                                // border 还暗，hover 会像"变更暗/没效果"
-                                .when(!active, |this| {
-                                    this.group_hover(group, |this| {
-                                        this.bg(cx.theme().ring.opacity(0.7))
-                                    })
-                                }),
-                        )
-                        .child(div().w(px(3.)).h_full().bg(cover_r)),
-                )
-                .into_any_element(),
-        )
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3278,6 +3185,24 @@ impl Render for AppView {
         self.right_dock_anim =
             self.step_dock_anim(DockPlacement::Right, self.right_dock_anim, window, cx);
 
+        // 上游把手拖宽不经过 AppView：稳态（无补间/边缘段）render 先把目标宽
+        // 副本对齐 dock 实宽，拖拽结果才不会被下面的补钳写回冲掉；补间/边缘段
+        // 期间实宽是过渡值，不同步
+        if self.dock_edge.is_none() {
+            if self.left_dock_anim.is_none()
+                && let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Left)
+                && size > px(0.)
+            {
+                self.sidebar_w = f32::from(size).round();
+            }
+            if self.right_dock_anim.is_none()
+                && let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Right)
+                && size > px(0.)
+            {
+                self.right_w = f32::from(size).round();
+            }
+        }
+
         // 三栏最小宽度补钳：对展开目标宽副本钳（拖拽/window 缩放得越界宽度在
         // paint 前拉回），收起的栏不参与预算、存储宽度原样保留；补间中的 dock
         // 实宽由补间接管，不受钳。区域宽为 0（首帧未测量）时不动作
@@ -3291,8 +3216,8 @@ impl Render for AppView {
         );
         self.sidebar_w = new_left;
         self.right_w = new_right;
-        // 稳态（无补间）时把钳后的宽度写回 dock；拖宽路径已在 on_mouse_move
-        // 同步副本，这里只兜窗口缩放等被动越界
+        // 稳态（无补间）时把钳后的宽度写回 dock；拖宽结果已在上面同步进副本，
+        // 这里只兜窗口缩放等被动越界
         if self.left_dock_anim.is_none() {
             let left_actual = self
                 .dock
@@ -3338,6 +3263,26 @@ impl Render for AppView {
                 this.sidebar
                     .update(cx, |sidebar, cx| sidebar.open_search(window, cx));
             }))
+            // 会话内搜索：转发给当前会话的线程视图；Close 由 Esc 在搜索条的
+            // thread-search 上下文触发（输入框的 Escape action 会放行到该上下文）
+            .on_action(cx.listener(|this, _: &FocusThreadSearch, window, cx| {
+                if let Some(sid) = &this.current
+                    && let Some(views) = this.views.get(sid)
+                {
+                    views.thread.update(cx, |thread, cx| {
+                        thread.open_search(window, cx);
+                    });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseThreadSearch, window, cx| {
+                if let Some(sid) = &this.current
+                    && let Some(views) = this.views.get(sid)
+                {
+                    views.thread.update(cx, |thread, cx| {
+                        thread.close_search(window, cx);
+                    });
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
                 cx.notify();
@@ -3347,31 +3292,9 @@ impl Render for AppView {
             }))
             // 自愈兜底：选择手势的结束依赖收到 MouseUpEvent，而某些系统级按压
             // （HTCAPTION、边框缩放）收不到。未按键的移动说明手势早已结束。
-            // dock 拖宽同理：松手后没收着 up 时，首个未按键 move 清掉 dock_resizing。
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            .on_mouse_move(cx.listener(|_, event: &MouseMoveEvent, window, cx| {
                 if event.pressed_button.is_none() {
                     gpui_kit::base::TextSelection::end(window, cx);
-                    this.dock_resizing = None;
-                }
-                if let Some(placement) = this.dock_resizing {
-                    let area = this.dock.read(cx).bounds();
-                    let size = match placement {
-                        DockPlacement::Left => event.position.x - area.left(),
-                        DockPlacement::Right => area.right() - event.position.x,
-                        _ => return,
-                    };
-                    // 取整：小数宽度会让分界线和面板内容抗锯齿发虚
-                    let size = px(f32::from(size).round());
-                    this.dock.update(cx, |dock, cx| {
-                        dock.set_dock_size(placement, size, window, cx);
-                    });
-                    // 拖宽改的是 dock 实宽；同步目标宽副本（开合动画目标、
-                    // 补钳、内容锚定宽都读副本）
-                    match placement {
-                        DockPlacement::Left => this.sidebar_w = f32::from(size),
-                        DockPlacement::Right => this.right_w = f32::from(size),
-                        _ => {}
-                    }
                 }
             }))
             .size_full()
@@ -3383,14 +3306,6 @@ impl Render for AppView {
                     .size_full()
                     .relative()
                     .child(self.dock.clone())
-                    .children(
-                        [
-                            self.render_dock_resize_strip(DockPlacement::Left, cx),
-                            self.render_dock_resize_strip(DockPlacement::Right, cx),
-                        ]
-                        .into_iter()
-                        .flatten(),
-                    )
                     // 边缘段覆盖层最后渲染 = 最顶层（dock 已关，无把手条冲突）
                     .when_some(self.render_dock_edge(window, cx), ParentElement::child)
                     .into_any_element()
@@ -3500,12 +3415,16 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("ctrl-n", NewTask, None),
                 KeyBinding::new("ctrl-k", FocusSearch, None),
+                // 会话内搜索（普通输入框不消费 ctrl-f：上游 Search action 对
+                // 非 searchable 输入 cx.propagate() 放行到应用层）
+                KeyBinding::new("ctrl-f", FocusThreadSearch, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 // 右侧面板：改动可用；浏览器/侧边聊天先绑键让菜单展示快捷键，功能后续加
                 KeyBinding::new("ctrl-shift-g", ToggleChanges, None),
                 KeyBinding::new("ctrl-t", ToggleBrowser, None),
                 KeyBinding::new("alt-ctrl-b", ToggleSideChat, None),
                 KeyBinding::new("escape", CloseSearch, Some("search")),
+                KeyBinding::new("escape", CloseThreadSearch, Some("thread-search")),
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
             ]);
 

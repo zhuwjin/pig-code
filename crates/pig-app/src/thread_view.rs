@@ -1,16 +1,21 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::{
-    Align, ElementExt as _, Placement, Positioner, Scrollbar, SelectableText, TextSelectionHandle,
+    Align, ElementExt as _, Placement, Positioner, ScrollableMask, Scrollbar, SelectableText,
+    TextSelectionHandle,
 };
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::{TextView, TextViewState, TextViewStyle};
+use gpui_kit::component::text::{
+    RangeHighlight, RenderedText, TextView, TextViewState, TextViewStyle,
+};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -52,6 +57,8 @@ pub enum Segment {
         duration: Option<std::time::Duration>,
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
+        /// 进行中 header 滚动输出行的横向滚动句柄（钉尾显示最新内容）
+        ticker_scroll: ScrollHandle,
     },
     Markdown {
         state: Entity<TextViewState>,
@@ -326,6 +333,22 @@ pub enum ThreadEvent {
     },
 }
 
+/// 会话内搜索的一次命中：定位到消息/段/段内字节区间。区间基于该段
+/// rendered_text 的 UTF-8 字节偏移，与 set_range_highlights / reveal_range
+/// 同一坐标系
+#[derive(Clone)]
+struct SearchMatch {
+    msg_ix: usize,
+    seg_ix: usize,
+    range: Range<usize>,
+}
+
+/// 一段的上次搜索结果（见 ThreadView.search_cache）
+struct SearchSegmentCache {
+    snapshot: RenderedText,
+    ranges: Vec<Range<usize>>,
+}
+
 pub struct ThreadView {
     messages: Vec<ChatMessage>,
     item_index: HashMap<String, usize>,
@@ -362,6 +385,23 @@ pub struct ThreadView {
     lightbox: Option<Lightbox>,
     /// 灯箱的焦点 handle（Esc 键监听挂在卡片上）
     lightbox_focus: FocusHandle,
+    /// 会话内搜索条是否打开（Ctrl+F / Esc）
+    search_open: bool,
+    /// 搜索输入框：首开时惰性创建（InputState::new 需要 Window，
+    /// ThreadView::new 拿不到——ensure_views 在事件处理链里没有 Window 可传）；
+    /// 创建后跨开关复用，关闭只清值。Subscription 随元组存放保活
+    search_input: Option<(Entity<InputState>, Subscription)>,
+    /// 当前命中是为哪个 query 算出的（输入框原文；匹配时双方再小写化）
+    search_query: String,
+    /// 全部命中，按消息/段/区间起点顺序
+    search_matches: Vec<SearchMatch>,
+    /// 活动命中下标（goto_match 前进/回绕；计数显示 active+1/total）
+    active_match: usize,
+    /// 每段的搜索缓存（key = 段 TextViewState 的 EntityId）：上次搜索时的
+    /// 渲染快照 + 该段命中区间。RenderedText 的 PartialEq 按 (owner, revision)
+    /// 比较——revision 没变 = 内容没变，同 query 重跑（流式 TextDone、重复
+    /// Ctrl+F）时直接复用命中区间，只对内容变了的段重新查找
+    search_cache: HashMap<EntityId, SearchSegmentCache>,
     _ticker: Task<()>,
 }
 
@@ -406,6 +446,12 @@ impl ThreadView {
             media_dir: None,
             lightbox: None,
             lightbox_focus: cx.focus_handle(),
+            search_open: false,
+            search_input: None,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            active_match: 0,
+            search_cache: HashMap::new(),
             _ticker: ticker,
         }
     }
@@ -573,6 +619,219 @@ impl ThreadView {
         self.nav_last_active = None;
         self.nav_jump = false;
         self.lightbox = None;
+        // 搜索命中/缓存随消息一并失效（高亮挂在段上，随段释放）；
+        // 搜索条本身与 query 保留，回放重建经 TextDone 重跑
+        self.search_matches.clear();
+        self.search_cache.clear();
+        self.active_match = 0;
+        cx.notify();
+    }
+
+    /// 惰性创建搜索输入框（首开时）。订阅：输入变化重跑搜索；
+    /// Enter=下一个、Shift+Enter=上一个（单行输入框的 Enter/Shift+Enter
+    /// 都发 PressEnter、不插换行，action 在输入框层就被消费，不会冒泡到
+    /// 输入区成发送——同 composer 用 PressEnter 发送的路径）
+    fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("在会话中搜索…"));
+        let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::Change => this.run_search(cx),
+            InputEvent::PressEnter { shift, .. } => this.goto_match(!shift, cx),
+            _ => {}
+        });
+        self.search_input = Some((input, subscription));
+    }
+
+    /// 搜索输入框实体（仅首开以后存在）
+    fn search_input(&self) -> Option<&Entity<InputState>> {
+        self.search_input.as_ref().map(|(input, _)| input)
+    }
+
+    /// 打开搜索条并聚焦输入框；已有 query 时重跑一次（内容可能已流式更新）
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_search_input(window, cx);
+        self.search_open = true;
+        if let Some(input) = self.search_input() {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        if !self.search_query.is_empty() {
+            self.run_search(cx);
+        }
+        cx.notify();
+    }
+
+    /// 关闭搜索条：清 query、清所有段高亮、清命中、复位活动下标。
+    /// set_value 不发 Change（上游 emit_events=false），这里全部显式复位
+    pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.clear_search_highlights(cx);
+        if let Some(input) = self.search_input() {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_cache.clear();
+        self.active_match = 0;
+        cx.notify();
+    }
+
+    /// 会话内搜索：大小写不敏感地命中所有 Markdown 段（rendered_text 与
+    /// query 都小写化后做字节级 match_indices）。无大小写的文字（中文等）
+    /// 小写化是恒等，区间即原文字节偏移；极少数小写化后字节数变化的字符
+    /// （如土耳其语 İ）区间会偏，该段整批被 set_range_highlights 拒绝
+    /// （Err 忽略）降级为无高亮，不影响其他段
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let query = self
+            .search_input()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let query_lc = query.to_lowercase();
+        // 复用条件：query 没变且段 revision 没变；query 变了全段重搜
+        let same_query = self.search_query.to_lowercase() == query_lc;
+        self.search_query = query;
+        // 上轮有命中的段：本轮不再命中时要清掉旧高亮
+        let mut touched: HashSet<EntityId> = self
+            .search_cache
+            .iter()
+            .filter(|(_, cache)| !cache.ranges.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        let mut matches = Vec::new();
+        let mut new_cache: HashMap<EntityId, SearchSegmentCache> = HashMap::new();
+        if !query_lc.is_empty() {
+            for (msg_ix, message) in self.messages.iter().enumerate() {
+                for (seg_ix, segment) in message.segments.iter().enumerate() {
+                    let Segment::Markdown { state, .. } = segment else {
+                        continue;
+                    };
+                    let id = state.entity_id();
+                    let text = state.read(cx).rendered_text();
+                    let ranges = match self.search_cache.get(&id) {
+                        Some(cache) if same_query && cache.snapshot == text => {
+                            cache.ranges.clone()
+                        }
+                        _ => text
+                            .as_str()
+                            .to_lowercase()
+                            .match_indices(&query_lc)
+                            .map(|(start, _)| start..start + query_lc.len())
+                            .collect(),
+                    };
+                    if !ranges.is_empty() {
+                        touched.insert(id);
+                        matches.extend(ranges.iter().map(|range| SearchMatch {
+                            msg_ix,
+                            seg_ix,
+                            range: range.clone(),
+                        }));
+                    }
+                    new_cache.insert(id, SearchSegmentCache {
+                        snapshot: text,
+                        ranges,
+                    });
+                }
+            }
+        }
+        self.search_cache = new_cache;
+        self.search_matches = matches;
+        if self.active_match >= self.search_matches.len() {
+            self.active_match = 0;
+        }
+        for (msg_ix, message) in self.messages.iter().enumerate() {
+            for (seg_ix, segment) in message.segments.iter().enumerate() {
+                let Segment::Markdown { state, .. } = segment else {
+                    continue;
+                };
+                if touched.contains(&state.entity_id()) {
+                    self.highlight_segment(msg_ix, seg_ix, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 重打某段的搜索高亮：活动命中更深的 accent 0.5，其余 0.25；无命中则清。
+    /// set_range_highlights 整批校验区间、任一非法整批拒绝——Err 忽略，
+    /// 该段降级为不高亮（区间坐标系说明见 run_search）
+    fn highlight_segment(&self, msg_ix: usize, seg_ix: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Markdown { state, .. }) = self
+            .messages
+            .get(msg_ix)
+            .and_then(|message| message.segments.get(seg_ix))
+        else {
+            return;
+        };
+        let active_bg = cx.theme().accent.opacity(0.5);
+        let normal_bg = cx.theme().accent.opacity(0.25);
+        let highlights: Vec<RangeHighlight> = self
+            .search_matches
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.msg_ix == msg_ix && m.seg_ix == seg_ix)
+            .map(|(ix, m)| {
+                RangeHighlight::new(
+                    m.range.clone(),
+                    if ix == self.active_match {
+                        active_bg
+                    } else {
+                        normal_bg
+                    },
+                )
+            })
+            .collect();
+        state.update(cx, |state, cx| {
+            if highlights.is_empty() {
+                state.clear_range_highlights(cx);
+            } else {
+                let _ = state.set_range_highlights(highlights, cx);
+            }
+        });
+    }
+
+    /// 清掉所有 Markdown 段的搜索高亮（段上没有高亮时上游是 no-op）
+    fn clear_search_highlights(&mut self, cx: &mut Context<Self>) {
+        for message in &self.messages {
+            for segment in &message.segments {
+                if let Segment::Markdown { state, .. } = segment {
+                    state.update(cx, |state, cx| state.clear_range_highlights(cx));
+                }
+            }
+        }
+    }
+
+    /// 跳到下一个/上一个命中（回绕）：旧/新活动命中所在段重打高亮换色，
+    /// 目标行 reveal 进可视区。跳转 = 离开底部，暂停跟随；reveal 的滚动
+    /// 后续帧才生效，nav_jump 抑制一次「回到底部自动恢复跟随」（同导航条
+    /// 跳转的时序，见 render 里的恢复逻辑）
+    fn goto_match(&mut self, next: bool, cx: &mut Context<Self>) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let total = self.search_matches.len();
+        let previous = self.active_match;
+        self.active_match = if next {
+            (previous + 1) % total
+        } else {
+            (previous + total - 1) % total
+        };
+        for ix in [previous, self.active_match] {
+            let m = &self.search_matches[ix];
+            self.highlight_segment(m.msg_ix, m.seg_ix, cx);
+        }
+        let target = self.search_matches[self.active_match].clone();
+        if let Some(Segment::Markdown { state, .. }) = self
+            .messages
+            .get(target.msg_ix)
+            .and_then(|message| message.segments.get(target.seg_ix))
+        {
+            self.follow_bottom = false;
+            self.nav_jump = true;
+            state.update(cx, |state, cx| {
+                let _ = state.reveal_range(target.range.clone(), cx);
+            });
+        }
         cx.notify();
     }
 
@@ -797,6 +1056,7 @@ impl ThreadView {
                     started: std::time::Instant::now(),
                     duration: None,
                     body_scroll: ScrollHandle::new(),
+                    ticker_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::Thinking { text, .. }) = self.current_segment(six) {
                     text.push_str(&delta);
@@ -829,6 +1089,10 @@ impl ThreadView {
                 if let Some(Segment::Markdown { state, text }) = self.current_segment(six) {
                     *text = full_text.clone();
                     state.update(cx, |state, cx| state.set_text(&full_text, cx));
+                }
+                // 搜索开着：段内容落定后重跑（revision 没变的段会直接复用缓存）
+                if self.search_open {
+                    self.run_search(cx);
                 }
             }
             Event::ToolCallBegin {
@@ -2009,7 +2273,9 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 思考折叠块（ZCode 同款）：无边框的一行 header（大脑图标 + 文案），箭头悬停/
+    /// 思考折叠块（ZCode reasoning.tsx 同款）：无边框的一行 header（大脑图标 + 文案），
+    /// 进行中文案为扫光「正在思考」，后随 `·` + 滚动输出行（累计思考全文的最后一个非空
+    /// 行，单行钉尾显示最新内容、左缘渐隐遮罩；纵向滚轮冒泡给外层消息列表）；箭头悬停/
     /// 展开时才显示；展开后正文以左侧竖线缩进展示，超高内部滚动。
     #[allow(clippy::too_many_arguments)]
     fn render_thinking(
@@ -2018,25 +2284,90 @@ impl ThreadView {
         segment_ix: usize,
         text: &str,
         open: bool,
-        started: std::time::Instant,
         duration: Option<std::time::Duration>,
         body_scroll: &ScrollHandle,
+        ticker_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let secs = |d: std::time::Duration| (d.as_secs_f64().ceil() as u64).max(1);
         let in_progress = duration.is_none() && self.streaming && !self.replay_turn;
         let label = match duration {
             Some(d) => format!("思考 · 持续了 {} 秒", secs(d)),
-            // 思考仍在进行：流式中且不是回放（回放的 TurnComplete 前 streaming 也为 true）
-            None if self.streaming && !self.replay_turn => {
-                format!("正在思考 · {} 秒", secs(started.elapsed()))
-            }
+            // 进行中只显示「正在思考」（ZCode：秒数只在完成态出现）
+            None if self.streaming && !self.replay_turn => "正在思考".to_string(),
             // 回放重建的历史段没有真实时钟
             None => "思考 · 持续了几秒".to_string(),
         };
+        // 滚动输出行 = 累计思考全文的最后一个非空行（折叠且进行中才显示）
+        let ticker_line = if in_progress && !open {
+            text.lines().rev().map(str::trim).find(|l| !l.is_empty())
+        } else {
+            None
+        };
         let muted = cx.theme().muted_foreground;
         let subtlest = muted.opacity(0.6);
+        // ZCode：滚动行比标签亮一档（subtle vs subtlest）
+        let ticker_color = muted.opacity(0.85);
         let group_id = format!("thinking-row-{message_ix}-{segment_ix}");
+        let ticker_key = message_ix * 1024 + segment_ix;
+        // 滚动行钉尾：offset 右滚为负，钉尾 = -max（首帧未测量为 0，流式渲染中快速收敛）
+        if ticker_line.is_some() {
+            let max = ticker_scroll.max_offset();
+            ticker_scroll.set_offset(point(-max.x, px(0.)));
+        }
+        let ticker = ticker_line.map(|line| {
+            let bg = cx.theme().background;
+            let max = ticker_scroll.max_offset().x;
+            let offset = ticker_scroll.offset().x;
+            let scrollable = max > px(1.);
+            let hides_leading = scrollable && offset < px(-1.);
+            let hides_trailing = scrollable && offset > px(1.) - max;
+            let fade = |leading: bool| {
+                let (from, to) = if leading {
+                    (bg, bg.opacity(0.))
+                } else {
+                    (bg.opacity(0.), bg)
+                };
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .when(leading, |this| this.left_0())
+                    .when(!leading, |this| this.right_0())
+                    .w(px(16.))
+                    .bg(linear_gradient(
+                        90.,
+                        linear_color_stop(from, 0.),
+                        linear_color_stop(to, 1.),
+                    ))
+            };
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .id(("thinking-ticker", ticker_key))
+                        .w_full()
+                        .overflow_x_scroll()
+                        .track_scroll(ticker_scroll)
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_sm()
+                                .text_color(ticker_color)
+                                .child(line.to_string()),
+                        ),
+                )
+                // 滚轮接管：横向滚动由本行消费，纵向滚轮冒泡给外层消息列表
+                .child(
+                    ScrollableMask::new(Axis::Horizontal, ticker_scroll)
+                        .id(("thinking-ticker-mask", ticker_key)),
+                )
+                .when(hides_leading, |this| this.child(fade(true)))
+                .when(hides_trailing, |this| this.child(fade(false)))
+                .into_any_element()
+        });
         v_flex()
             .w_full()
             .child(
@@ -2063,8 +2394,8 @@ impl ThreadView {
                             .size_4()
                             .text_color(subtlest),
                     )
-                    // 思考进行中：shimmer 扫过高亮；id 必须稳定（文案每秒变，默认动画
-                    // id 取文案会导致扫光每秒重启）
+                    // 思考进行中：shimmer 扫过高亮；id 必须稳定（默认动画 id 取文案，
+                    // 变化会导致扫光重启）
                     .child(if in_progress {
                         ShimmerText::new(label)
                             .id(("thinking-shimmer", message_ix * 1024 + segment_ix))
@@ -2078,6 +2409,11 @@ impl ThreadView {
                             .child(label)
                             .into_any_element()
                     })
+                    // 进行中的滚动输出行（ZCode reasoning trigger 同款）
+                    .when(ticker.is_some(), |this| {
+                        this.child(div().text_sm().text_color(subtlest).child("·"))
+                    })
+                    .children(ticker)
                     // 箭头默认隐藏，行悬停或展开时显示
                     .child(
                         div()
@@ -3027,27 +3363,30 @@ impl ThreadView {
                         Segment::Thinking {
                             text,
                             open,
-                            started,
                             duration,
                             body_scroll,
+                            ticker_scroll,
                             ..
                         } => self.render_thinking(
                             ix,
                             six,
                             text,
                             *open,
-                            *started,
                             *duration,
                             body_scroll,
+                            ticker_scroll,
                             cx,
                         ),
                         Segment::Markdown { state, .. } => {
-                            // 表格列宽对齐 ZCode（markdown-table.tsx 的
-                            // `w-max min-w-full` + auto table layout）：列贴合内容宽度，
-                            // 帧宽不足时先收缩并让单元格文本换行，收缩到列地板后
-                            // 整体横向滚动，而不是按字符数比例把列无限压瘪。
-                            // 组件层 TextViewStyle 会叠在主题派生样式之上，圆角/
-                            // 表头底色都保留；这里只覆盖表格容器一项。
+                            // 表格对齐 ZCode（w-max min-w-full，PR #2）：列宽按实测
+                            // 内容分配、贴合内容（wrap 表格按字符数比例分列，「前四
+                            // slot」这种短文本列会被压到折行）；帧宽不足时列先收缩
+                            // 换行、到列地板后整体横向滚动（上游无滚动条，窗口极窄时
+                            // 超宽可横滚但无视觉提示）。
+                            // 不要动 table_cell 的 padding：列宽测量含 CELL_PAD_PX(16)，
+                            // 改大会让所有列的内容盒比测量窄、短列反而折行（实测）。
+                            // 行尾吞字根因是 #3293（inline flow 全角标点量宽少算），
+                            // 等上游 0.7.1+ 根治。
                             let mut table = StyleRefinement::default();
                             table.overflow.x = Some(Overflow::Scroll);
                             TextView::new(state)
@@ -3055,6 +3394,27 @@ impl ThreadView {
                                 .stream_fade(self.streaming)
                                 .text_sm()
                                 .style(TextViewStyle::default().table(table))
+                                // 搜索跳转的 reveal 兜底：外层消息列表是
+                                // v_flex().overflow_y_scroll() 的 div 滚动容器，
+                                // 不是 gpui::list——reveal_range 不会自动滚它
+                                //（行不可见时上游报 Hidden，见 TextView::on_reveal
+                                // 文档）。这里按行 bounds（窗口坐标）手动把目标行
+                                // 滚进可视区；行已可见时上游报 Shown，不会调这里
+                                .on_reveal({
+                                    let scroll_handle = self.scroll_handle.clone();
+                                    move |line, _window, _cx| {
+                                        let view = scroll_handle.bounds();
+                                        let mut offset = scroll_handle.offset();
+                                        if line.top() < view.top() {
+                                            offset.y += view.top() - line.top();
+                                        } else if line.bottom() > view.bottom() {
+                                            offset.y -= line.bottom() - view.bottom();
+                                        } else {
+                                            return;
+                                        }
+                                        scroll_handle.set_offset(offset);
+                                    }
+                                })
                                 .into_any_element()
                         }
                         Segment::ToolCall {
@@ -3407,6 +3767,63 @@ impl ThreadView {
         }
         (nav_preview_text(&texts, "（暂无文本回复）"), true)
     }
+
+    /// 会话内搜索条：输入框 + 命中计数 + 上/下一个 + 关闭（消息列表之上的
+    /// 固定行）。key_context("thread-search") 让 Esc → CloseThreadSearch
+    /// 绑定生效（输入框的 Escape action 默认 cx.propagate() 放行到该上下文，
+    /// 见 main.rs 键绑定）；关闭走 main.rs 转发回 close_search
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let input = self.search_input()?;
+        let total = self.search_matches.len();
+        // 无命中显示 0/0
+        let counter = if total == 0 {
+            "0/0".to_string()
+        } else {
+            format!("{}/{}", self.active_match + 1, total)
+        };
+        Some(
+            h_flex()
+                .key_context("thread-search")
+                .w_full()
+                .max_w(px(860.))
+                .mx_auto()
+                .px_4()
+                .py_2()
+                .gap_2()
+                .items_center()
+                .child(div().flex_1().child(Input::new(input).small()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(counter),
+                )
+                .child(
+                    Button::new("thread-search-prev")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ChevronUp)
+                        .on_click(cx.listener(|this, _, _, cx| this.goto_match(false, cx))),
+                )
+                .child(
+                    Button::new("thread-search-next")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ChevronDown)
+                        .on_click(cx.listener(|this, _, _, cx| this.goto_match(true, cx))),
+                )
+                .child(
+                    Button::new("thread-search-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.close_search(window, cx)),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for ThreadView {
@@ -3540,6 +3957,10 @@ impl Render for ThreadView {
 
         v_flex()
             .size_full()
+            // 会话内搜索条：消息列表之上的固定行（Ctrl+F 打开）
+            .when(self.search_open, |this| {
+                this.when_some(self.render_search_bar(cx), ParentElement::child)
+            })
             .child(
                 div()
                     .relative()
