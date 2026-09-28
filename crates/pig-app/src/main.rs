@@ -2301,8 +2301,8 @@ impl AppView {
         cx.notify();
     }
 
-    /// 关闭右侧 tab：关掉激活 tab 时切到剩余最后一个；
-    /// 没有 tab 了面板保持展开，回到面板首页（菜单页）。
+    /// 关闭右侧 tab：关掉激活 tab 时切到剩余最后一个；关掉的是最后一个 tab
+    /// 时面板没有内容可显示，自动收起（经 step_dock_anim 走收起动画）。
     fn close_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         self.right_tabs.retain(|t| *t != tab);
         // 「子代理」tab 的内容面板随 tab 关闭释放
@@ -2311,6 +2311,9 @@ impl AppView {
         }
         if self.right_active.as_ref() == Some(&tab) {
             self.right_active = self.right_tabs.last().cloned();
+        }
+        if self.right_tabs.is_empty() {
+            self.right_open = false;
         }
         cx.notify();
     }
@@ -4172,7 +4175,7 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     println!("[selftest] AskUserQuestion 提问场景 OK");
 
     // 右侧面板：默认收起 → 面板按钮直开（无 tab 时显示菜单页）→ 开改动 tab →
-    // 快捷键再触发收起（tab 保留）→ × 关尽 tab 后面板保持展开、回到菜单页
+    // 快捷键再触发收起（tab 保留）→ × 关尽 tab 后面板自动收起
     let right_initial = app!(|app: &mut AppView, _| app.right_open);
     assert!(!right_initial, "右侧面板默认应收起");
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
@@ -4198,13 +4201,13 @@ async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         !open && active.is_none() && tabs == 0,
         "面板收起状态下关 tab 不改变收起状态；tab 清空"
     );
-    // 面板展开时关掉最后一个 tab：面板保持展开、回到菜单页
+    // 面板展开时关掉最后一个 tab：面板自动收起
     app!(|app: &mut AppView, cx| {
         app.open_right_tab(RightTab::Changes, cx);
         app.close_right_tab(RightTab::Changes, cx);
     });
     let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
-    assert!(open && active.is_none(), "关尽 tab 后应停在菜单页");
+    assert!(!open && active.is_none(), "关尽最后一个 tab 后面板应自动收起");
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
     println!("[selftest] 右侧面板开合 OK");
 
