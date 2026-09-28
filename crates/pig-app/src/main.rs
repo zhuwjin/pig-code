@@ -116,6 +116,56 @@ const SIDEBAR_MIN_W: f32 = 200.;
 const CENTER_MIN_W: f32 = 480.;
 const RIGHT_PANEL_MIN_W: f32 = 280.;
 
+/// dock 开合宽度补间（中段）：dock 保持 open，宽度按时间从 from 匀速插值到
+/// to，由 on_next_frame 链每帧步进、每帧只 notify dock——与拖宽把手同一渲染
+/// 路径（中心区随之连续重排，拖宽实测流畅）。匀速 + 整数像素 + 单帧步长封
+/// 顶是关键：文本重排成本随单帧宽度增量超线性增长，缓动的速度峰值会让中间
+/// 某几帧突发重排（「中点顿一下」的根源），拖拽正是匀速小步长才流畅；掉帧
+/// 时封顶阻止追帧大步长，宁可动画略微拉长。面板内容按目标宽锚定在分隔线一
+/// 侧（Sidebar::render / render_right_dock_content），配合 dock_frame 的
+/// overflow_hidden 得到滑动而非压缩重排。
+#[derive(Clone, Copy)]
+struct DockSizeAnim {
+    from: f32,
+    to: f32,
+    /// 本段时长：与首尾边缘段（DockEdgePhase）按路程比例分摊总时长，全程
+    /// 匀速衔接
+    duration: std::time::Duration,
+    start: std::time::Instant,
+}
+
+/// dock 开合动画总时长（与拖宽一段侧栏的典型用时相当），中段补间与首尾边
+/// 缘段按路程比例分摊
+const DOCK_ANIM_DURATION: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// dock 开合单帧宽度步长封顶（px）
+const DOCK_ANIM_MAX_STEP: f32 = 32.;
+
+/// 补间宽度下限：gpui-base 的 `Dock::set_size` 有 PANEL_MIN_SIZE(100) 下限，
+/// 开着的 dock 无法更窄（拖宽同理，拖到 100 就到头）。首尾各 100px 因此走
+/// 覆盖层边缘段（见 DockEdgePhase），中段才补间真实宽度。
+const DOCK_ANIM_MIN_W: f32 = 100.;
+
+/// dock 开合的边缘段覆盖层：补间宽度无法触达的 首/尾 100px 由绝对定位覆盖
+/// 层滑动补足（with_animation 样式补间，不失效任何视图缓存；面板内容实体
+/// 只在覆盖层出现一次——两种时序下真实 dock 都不渲染它）：
+/// - 展开前段（opening）：dock 保持关闭、中心区保持原宽，面板内容从窗口边
+///   滑入到下限位置；收尾定时器到点才开 dock（下限宽）并无缝交接给中段补
+///   间（交接帧两侧内容像素一致）；
+/// - 收起后段（!opening）：中段补间到下限时已真正关 dock（中心区瞬时补宽
+///   是「变宽」型重排，换行结构几乎不变、几乎不可见），覆盖层把剩余内容滑
+///   出去。
+#[derive(Clone, Copy)]
+struct DockEdgePhase {
+    placement: DockPlacement,
+    /// true = 展开前段（滑入，结束后开 dock 接补间）；false = 收起后段（滑出）
+    opening: bool,
+    /// 面板内容固定宽（展开目标宽）
+    width: f32,
+    /// 代次：收尾定时器只处理自己这一代（可能被反向开关替换）
+    generation: u32,
+}
+
 /// 三栏宽度钳制：展开的栏不低于各自最小值，且为中心区保留 CENTER_MIN_W
 ///（封顶 = 区域宽 - 中心最小值 - 对侧栏当前占位）。收起的栏占位为 0 不参与
 /// 预算，其存储宽度原样保留，重开后由后续 render 再钳。区域宽为 0（首帧
@@ -285,6 +335,21 @@ struct AppView {
     sidebar_collapsed: bool,
     /// 右侧面板是否展开（默认收起：进会话不自动显示改动）
     right_open: bool,
+    /// 侧栏 / 右面板展开目标宽（AppView 侧副本，兼作开合动画的内容锚定宽）。
+    /// 收起补间末段 dock 实际宽被插值到 0，展开目标不能读 dock_size，一律取
+    /// 副本；拖宽与窗口缩放的补钳也都作用在副本上
+    sidebar_w: f32,
+    right_w: f32,
+    /// 进行中的左右 dock 开合补间（None = 稳态；两栏可同时各跑一段）
+    left_dock_anim: Option<DockSizeAnim>,
+    right_dock_anim: Option<DockSizeAnim>,
+    /// 进行中的边缘段（首/尾 100px 覆盖层滑动；单份，跨侧替换时先替旧侧收尾）
+    dock_edge: Option<DockEdgePhase>,
+    /// 边缘段代次计数（配 DockEdgePhase::generation）
+    dock_edge_generation: u32,
+    /// dock 开合的下一帧回调已排队（防补间起步/链自续时重复注册导致回调链
+    /// 翻倍——左右两栏同帧起步、链自续都会再走注册路径）
+    dock_anim_frames_scheduled: bool,
     /// 右侧面板打开的 tab（按打开顺序）；收起时保留
     right_tabs: Vec<RightTab>,
     /// 右侧面板当前激活的 tab（None = 显示面板首页/菜单页）
@@ -365,6 +430,14 @@ impl AppView {
             yolo_confirm_focus: cx.focus_handle(),
             sidebar_collapsed: false,
             right_open: false,
+            // 初始宽度单一来源：install_dock 的 set_dock_size 从这里取值
+            sidebar_w: 220.,
+            right_w: 300.,
+            left_dock_anim: None,
+            right_dock_anim: None,
+            dock_edge: None,
+            dock_edge_generation: 0,
+            dock_anim_frames_scheduled: false,
             right_tabs: vec![],
             right_active: None,
             subagent_tabs: HashMap::new(),
@@ -1825,17 +1898,375 @@ impl AppView {
                 window,
                 cx,
             );
-            dock.set_dock_size(DockPlacement::Left, px(220.), window, cx);
+            dock.set_dock_size(DockPlacement::Left, px(self.sidebar_w), window, cx);
             dock.set_dock(
                 DockPlacement::Right,
                 DockLayout::tabs().panel_view(panel_handle(right), cx),
                 window,
                 cx,
             );
-            dock.set_dock_size(DockPlacement::Right, px(300.), window, cx);
+            dock.set_dock_size(DockPlacement::Right, px(self.right_w), window, cx);
             dock.set_locked(true, window, cx);
             // 右侧面板默认收起：进会话不自动显示改动
             dock.toggle_dock(DockPlacement::Right, window, cx);
+        });
+    }
+
+    /// dock 开合补间的渲染侧：开合标志位（sidebar_collapsed / right_open）是
+    /// 唯一事实源，翻转后登记一段宽度补间（见 [`DockSizeAnim`]），逐帧步进由
+    /// [`Self::schedule_dock_anim_frames`] 的 on_next_frame 链驱动——动画帧只
+    /// notify dock，与拖宽路径一致；若 notify AppView，dock 面板观察器会把
+    /// cached 的中心区/右面板连带标脏，整棵树每帧重建，纯浪费。补间期间 dock
+    /// 保持 open，dock_frame 自带的 overflow_hidden 裁掉出界内容，面板内容按
+    /// 目标宽锚定在分隔线一侧（Sidebar::render / render_right_dock_content），
+    /// 视觉上是滑出/滑入而非压缩重排，中心区宽度与面板同步连续变化（与拖宽
+    /// 同观感）。动画中途反向开关：从当前实际宽重新出发。reduce_motion 直接
+    /// 落终态。
+    fn step_dock_anim(
+        &mut self,
+        placement: DockPlacement,
+        anim: Option<DockSizeAnim>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<DockSizeAnim> {
+        let (flag_open, target_w) = match placement {
+            DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
+            DockPlacement::Right => (self.right_open, self.right_w),
+            _ => return None,
+        };
+        // 本侧边缘段进行中：方向一致等待其定时器收尾（展开段收尾会开 dock
+        // 并交接补间），方向相反撤段硬切。注意本函数每 render 对两侧各跑一
+        // 遍，动作必须限定在本侧确实要转换的分支里，否则会把刚起步的动画
+        // 在下一帧杀掉
+        if let Some(edge) = self.dock_edge {
+            if edge.placement == placement {
+                if edge.opening == flag_open {
+                    return None;
+                }
+                self.dock_edge = None;
+                self.apply_dock_flags(placement, window, cx);
+                return None;
+            }
+        }
+        let (dock_open, current) = {
+            let dock = self.dock.read(cx);
+            (
+                dock.is_dock_open(placement),
+                dock.dock_size(placement).map(f32::from).unwrap_or(0.),
+            )
+        };
+        // 已有本侧补间在跑且目标仍一致：继续（中途的无关 render 不得重启或
+        // 清掉它——清了会让 dock 卡在半宽、被补钳硬拉回）
+        if let Some(a) = anim {
+            let want_to = if flag_open { target_w } else { DOCK_ANIM_MIN_W };
+            if a.to == want_to {
+                self.schedule_dock_anim_frames(window, cx);
+                return Some(a);
+            }
+        }
+        // 稳态：无补间且 dock 开合已与标志位一致
+        if anim.is_none() && dock_open == flag_open {
+            return None;
+        }
+        if cx.reduce_motion() {
+            self.apply_dock_flags(placement, window, cx);
+            return None;
+        }
+        // 走到这里 = 本侧确实要转换：另侧的展开边缘段还挂着（dock 延迟未开）
+        // 时先替它落终态，否则其标志位悬空
+        if let Some(old) = self.dock_edge {
+            if old.opening {
+                self.apply_dock_flags(old.placement, window, cx);
+            }
+            self.dock_edge = None;
+        }
+        let share = |from: f32, to: f32| {
+            DOCK_ANIM_DURATION.mul_f32((to - from).abs().max(1.) / target_w.max(1.))
+        };
+        if flag_open {
+            if dock_open {
+                // 中途反向回展开（dock 已开在中间宽度）：从当前宽补间回目标
+                let anim = DockSizeAnim {
+                    from: current,
+                    to: target_w,
+                    duration: share(current, target_w),
+                    start: std::time::Instant::now(),
+                };
+                self.schedule_dock_anim_frames(window, cx);
+                return Some(anim);
+            }
+            // 展开前段：dock 保持关闭、中心区保持原宽，面板内容从窗口边滑入
+            // 下限位置（覆盖层），收尾定时器到点开 dock 并接中段补间
+            self.mount_dock_edge(placement, true, target_w, window, cx);
+            return None;
+        }
+        // 收起（新鲜收起或从展开补间反向）：中段补间 实际宽→下限，终态关
+        // dock 并挂后段滑出；时长按路程比例分摊，与前段/后段全程匀速
+        let anim = DockSizeAnim {
+            from: current,
+            to: DOCK_ANIM_MIN_W,
+            duration: share(current, DOCK_ANIM_MIN_W),
+            start: std::time::Instant::now(),
+        };
+        self.schedule_dock_anim_frames(window, cx);
+        Some(anim)
+    }
+
+    /// 挂边缘段覆盖层并起收尾定时器（+20ms 余量保证 with_animation 先走完，
+    /// 早收尾会在透明层下露出双重内容）：展开段到点开 dock（下限宽）、接中
+    /// 段补间（from=下限读回实际值），收起段到点仅清层。定时器按代次与标志
+    /// 位双重校验，被反向抢占时安全空过。
+    fn mount_dock_edge(
+        &mut self,
+        placement: DockPlacement,
+        opening: bool,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.dock_edge_generation;
+        self.dock_edge_generation += 1;
+        self.dock_edge = Some(DockEdgePhase {
+            placement,
+            opening,
+            width,
+            generation,
+        });
+        let expiry =
+            DOCK_ANIM_DURATION.mul_f32(DOCK_ANIM_MIN_W / width.max(1.)) + std::time::Duration::from_millis(20);
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(expiry).await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let Some(edge) = this.dock_edge else {
+                        return;
+                    };
+                    if edge.generation != generation {
+                        return;
+                    }
+                    this.dock_edge = None;
+                    if edge.opening {
+                        // 标志位中途被反向则就此打住（dock 保持关闭 = 稳态）
+                        let flag_open_now = match edge.placement {
+                            DockPlacement::Left => !this.sidebar_collapsed,
+                            _ => this.right_open,
+                        };
+                        if !flag_open_now {
+                            cx.notify();
+                            return;
+                        }
+                        // 开 dock（下限宽）并接中段补间，交接帧与覆盖层内容
+                        // 像素一致
+                        this.dock.update(cx, |dock, cx| {
+                            dock.set_dock_size(edge.placement, px(DOCK_ANIM_MIN_W), window, cx);
+                            dock.toggle_dock(edge.placement, window, cx);
+                        });
+                        let anim = DockSizeAnim {
+                            from: DOCK_ANIM_MIN_W,
+                            to: edge.width,
+                            duration: DOCK_ANIM_DURATION.mul_f32(
+                                (edge.width - DOCK_ANIM_MIN_W).max(1.) / edge.width.max(1.),
+                            ),
+                            start: std::time::Instant::now(),
+                        };
+                        match edge.placement {
+                            DockPlacement::Left => this.left_dock_anim = Some(anim),
+                            DockPlacement::Right => this.right_dock_anim = Some(anim),
+                            _ => {}
+                        }
+                        this.schedule_dock_anim_frames(window, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// 边缘段覆盖层：容器固定在下限宽（100px）、贴窗口边，内容按目标宽、
+    /// 从「贴分隔线的交接位」向窗口外滑动（展开）/从窗外滑到交接位（收起），
+    /// 与中段补间同匀速（时长按路程比例分摊）。滑动边带 1px 分隔线色。
+    fn render_dock_edge(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let edge = self.dock_edge?;
+        let placement = edge.placement;
+        let width = edge.width;
+        let opening = edge.opening;
+        let w = px(width);
+        // 内容实体只在覆盖层出现一次：边缘段两种时序下真实 dock 都不渲染它。
+        // 左=侧栏（自带 sidebar 底色）；右=面板内容（dock 皮肤平时铺的
+        // tab_bar 底色这里自铺）
+        let (bg, content): (Hsla, AnyElement) = match placement {
+            DockPlacement::Left => (cx.theme().sidebar, self.sidebar.clone().into_any_element()),
+            _ => (
+                *cx.theme().tokens.tab_bar,
+                self.render_right_dock_content(window, cx),
+            ),
+        };
+        let duration = DOCK_ANIM_DURATION.mul_f32(DOCK_ANIM_MIN_W / width.max(1.));
+        let slide_left = placement == DockPlacement::Left;
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .map(|this| match placement {
+                    DockPlacement::Left => this.left_0(),
+                    _ => this.right_0(),
+                })
+                .w(px(DOCK_ANIM_MIN_W))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(w)
+                        .bg(bg)
+                        // 滑动边 = 虚拟分隔线（中段期间真实把手条隐藏）
+                        .map(|this| match placement {
+                            DockPlacement::Left => {
+                                this.border_r_1().border_color(cx.theme().border)
+                            }
+                            _ => this.border_l_1().border_color(cx.theme().border),
+                        })
+                        // 默认 linear 缓动：与中段补间同匀速
+                        .with_animation(
+                            ("dock-edge-slide", placement as usize),
+                            Animation::new(duration),
+                            move |el, delta| {
+                                // d = 内容从「完全出窗」到「交接位」的进度
+                                let d = if opening { delta } else { 1. - delta };
+                                if slide_left {
+                                    el.left(px(-width + DOCK_ANIM_MIN_W * d))
+                                } else {
+                                    el.left(px(DOCK_ANIM_MIN_W * (1. - d)))
+                                }
+                            },
+                        )
+                        .child(content),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 注册 dock 开合动画的下一帧回调（on_next_frame 链）：回调里步进补间、
+    /// 按需自续。标记位防重复排队（左右两栏同帧起步 + 链自续都走这里）。
+    fn schedule_dock_anim_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock_anim_frames_scheduled {
+            return;
+        }
+        self.dock_anim_frames_scheduled = true;
+        let app = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let Some(app) = app.upgrade() else { return };
+            app.update(cx, |this, cx| {
+                // 回调已消费，先清标记再按需自续
+                this.dock_anim_frames_scheduled = false;
+                if this.step_dock_anims_frame(window, cx) {
+                    this.schedule_dock_anim_frames(window, cx);
+                }
+            });
+        });
+    }
+
+    /// 补间步进一帧（左右两栏一起）：到点落终态并 notify AppView 一次（把动画
+    /// 期间隐藏的拖宽把手画回）；否则匀速插值写 dock 宽——目标宽超出单帧步
+    /// 长封顶时按封顶走（掉帧不追帧），并取整像素（小数宽让分界线与内容抗
+    /// 锯齿发虚）。只 notify dock。返回是否还有活动补间（false = 链终止）。
+    fn step_dock_anims_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut active = false;
+        for placement in [DockPlacement::Left, DockPlacement::Right] {
+            let anim = match placement {
+                DockPlacement::Left => self.left_dock_anim,
+                DockPlacement::Right => self.right_dock_anim,
+                _ => continue,
+            };
+            let Some(anim) = anim else {
+                continue;
+            };
+            let t = anim.start.elapsed().as_secs_f32() / anim.duration.as_secs_f32();
+            if cx.reduce_motion() || t >= 1. {
+                let (flag_open, target_w) = match placement {
+                    DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
+                    _ => (self.right_open, self.right_w),
+                };
+                self.apply_dock_flags(placement, window, cx);
+                match placement {
+                    DockPlacement::Left => self.left_dock_anim = None,
+                    DockPlacement::Right => self.right_dock_anim = None,
+                    _ => {}
+                }
+                // 收起后段：dock 已真正关闭（中心区瞬时补宽），剩余下限宽内
+                // 容由覆盖层同匀速滑出
+                if !flag_open && !cx.reduce_motion() {
+                    self.mount_dock_edge(placement, false, target_w, window, cx);
+                }
+                // 动画期间 AppView 树冻结（不逐帧重渲染），落定补一次
+                cx.notify();
+                continue;
+            }
+            // 匀速线性插值：目标位置 = from→to 按时间。步长封顶朝「目标位
+            // 置」走且绝不倒退（单调向 to）——若朝 to 本身走，current 意外
+            // 超前（如 set_size 下限抬高了起点）会在终点附近来回修正抖动
+            let target = anim.from + (anim.to - anim.from) * t;
+            let current = self
+                .dock
+                .read(cx)
+                .dock_size(placement)
+                .map(f32::from)
+                .unwrap_or(0.);
+            let dir = (anim.to - anim.from).signum();
+            let proposed = if (target - current).abs() > DOCK_ANIM_MAX_STEP {
+                current + dir * DOCK_ANIM_MAX_STEP
+            } else {
+                target
+            };
+            let size = if dir > 0. {
+                proposed.max(current)
+            } else {
+                proposed.min(current)
+            };
+            self.dock.update(cx, |dock, cx| {
+                dock.set_dock_size(placement, px(size.round()), window, cx);
+            });
+            active = true;
+        }
+        active
+    }
+
+    /// 把一侧 dock 直接落到开合标志位对应的终态（跳过动画）：补间收尾、
+    /// reduce_motion 共用。
+    fn apply_dock_flags(
+        &mut self,
+        placement: DockPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (flag_open, target_w) = match placement {
+            DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
+            DockPlacement::Right => (self.right_open, self.right_w),
+            _ => return,
+        };
+        let dock_open = self.dock.read(cx).is_dock_open(placement);
+        self.dock.update(cx, |dock, cx| {
+            if flag_open {
+                if !dock_open {
+                    // 先归零再 open：避免以旧宽先闪一帧
+                    dock.set_dock_size(placement, px(0.), window, cx);
+                    dock.toggle_dock(placement, window, cx);
+                }
+                // 精确落目标宽：补间最后一步按时间采样可能差几像素
+                dock.set_dock_size(placement, px(target_w), window, cx);
+            } else if dock_open {
+                dock.toggle_dock(placement, window, cx);
+                // 关闭态宽度不参与布局，写回存储值供下次展开作目标
+                dock.set_dock_size(placement, px(target_w), window, cx);
+            }
         });
     }
 
@@ -2442,11 +2873,28 @@ impl AppView {
             },
             None => self.render_right_menu_page(window, cx),
         };
-        v_flex()
+        // 开合动画锚定层（同 Sidebar::render）：dock_frame 自带 overflow_hidden，
+        // 补间期间 dock 实宽小于内容宽；内容固定 right_w 并左锚贴分隔线，收拢时
+        // 整体右滑被裁而非压缩重排。稳态实宽 == right_w，绝对定位子层正好铺满
+        div()
+            .relative()
             .size_full()
-            // 分隔线由 dock 把手自带线绘制（与侧栏一致，不再自画 border_l）
-            .child(self.render_right_tab_bar(cx))
-            .child(div().flex_1().min_h_0().child(content))
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(self.right_w))
+                    .child(
+                        v_flex()
+                            .size_full()
+                            // 分隔线由 dock 把手自带线绘制（与侧栏一致，不再自画 border_l）
+                            .child(self.render_right_tab_bar(cx))
+                            .child(div().flex_1().min_h_0().child(content)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -2464,6 +2912,17 @@ impl AppView {
     ) -> Option<AnyElement> {
         let dock = self.dock.read(cx);
         if !dock.is_dock_open(placement) {
+            return None;
+        }
+        // 开合补间期间隐藏把手：把手定位在 AppView 树里，而动画帧只重绘 dock
+        //（见 step_dock_anims_frame），把手会冻结在旧分隔线处——1px 线 + 覆盖
+        // 色悬在中心区上。落定帧补的那次 notify 会把它画回正确位置
+        let animating = match placement {
+            DockPlacement::Left => self.left_dock_anim.is_some(),
+            DockPlacement::Right => self.right_dock_anim.is_some(),
+            _ => false,
+        };
+        if animating {
             return None;
         }
         let size = dock.dock_size(placement)?;
@@ -2809,48 +3268,61 @@ fn event_session_id(event: &Event) -> Option<String> {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // dock 开合同步：AppView 的标志位是唯一事实源（dock 不持久化显隐状态）
-        let left_open = self.dock.read(cx).is_dock_open(DockPlacement::Left);
-        if left_open == self.sidebar_collapsed {
-            self.dock.update(cx, |dock, cx| {
-                dock.toggle_dock(DockPlacement::Left, window, cx)
-            });
+        // dock 开合同步：标志位（sidebar_collapsed / right_open）是唯一事实源
+        //（dock 不持久化显隐状态），翻转后经 step_dock_anim 补间过渡（见其文档）
+        self.left_dock_anim =
+            self.step_dock_anim(DockPlacement::Left, self.left_dock_anim, window, cx);
+        self.right_dock_anim =
+            self.step_dock_anim(DockPlacement::Right, self.right_dock_anim, window, cx);
+
+        // 三栏最小宽度补钳：对展开目标宽副本钳（拖拽/window 缩放得越界宽度在
+        // paint 前拉回），收起的栏不参与预算、存储宽度原样保留；补间中的 dock
+        // 实宽由补间接管，不受钳。区域宽为 0（首帧未测量）时不动作
+        let area_w = f32::from(self.dock.read(cx).bounds().size.width);
+        let (new_left, new_right) = clamp_dock_widths(
+            area_w,
+            self.sidebar_w,
+            self.right_w,
+            !self.sidebar_collapsed,
+            self.right_open,
+        );
+        self.sidebar_w = new_left;
+        self.right_w = new_right;
+        // 稳态（无补间）时把钳后的宽度写回 dock；拖宽路径已在 on_mouse_move
+        // 同步副本，这里只兜窗口缩放等被动越界
+        if self.left_dock_anim.is_none() {
+            let left_actual = self
+                .dock
+                .read(cx)
+                .dock_size(DockPlacement::Left)
+                .map(f32::from)
+                .unwrap_or(0.);
+            if left_actual != new_left {
+                self.dock.update(cx, |dock, cx| {
+                    dock.set_dock_size(DockPlacement::Left, px(new_left), window, cx);
+                });
+            }
         }
-        let right_open = self.dock.read(cx).is_dock_open(DockPlacement::Right);
-        if right_open != self.right_open {
-            self.dock.update(cx, |dock, cx| {
-                dock.toggle_dock(DockPlacement::Right, window, cx)
-            });
+        if self.right_dock_anim.is_none() {
+            let right_actual = self
+                .dock
+                .read(cx)
+                .dock_size(DockPlacement::Right)
+                .map(f32::from)
+                .unwrap_or(0.);
+            if right_actual != new_right {
+                self.dock.update(cx, |dock, cx| {
+                    dock.set_dock_size(DockPlacement::Right, px(new_right), window, cx);
+                });
+            }
         }
 
-        // 三栏最小宽度补钳：拖拽/window 缩放得越界宽度在 paint 前拉回。
-        // 开合同步刚执行完，is_dock_open 读的已是新值
-        let (area_w, left_w, right_w, left_open, right_open) = {
-            let dock = self.dock.read(cx);
-            (
-                f32::from(dock.bounds().size.width),
-                dock.dock_size(DockPlacement::Left)
-                    .map(f32::from)
-                    .unwrap_or(0.),
-                dock.dock_size(DockPlacement::Right)
-                    .map(f32::from)
-                    .unwrap_or(0.),
-                dock.is_dock_open(DockPlacement::Left),
-                dock.is_dock_open(DockPlacement::Right),
-            )
-        };
-        let (new_left, new_right) =
-            clamp_dock_widths(area_w, left_w, right_w, left_open, right_open);
-        if new_left != left_w || new_right != right_w {
-            self.dock.update(cx, |dock, cx| {
-                if new_left != left_w {
-                    dock.set_dock_size(DockPlacement::Left, px(new_left), window, cx);
-                }
-                if new_right != right_w {
-                    dock.set_dock_size(DockPlacement::Right, px(new_right), window, cx);
-                }
-            });
-        }
+        // 侧栏内容宽推送：开合动画期间内容固定目标宽并锚定分隔线一侧（见
+        // Sidebar::render）才能滑出而非压缩；稳态两值相等，值变才 notify，
+        // 动画帧不额外扰动侧栏重渲染
+        let sidebar_w = self.sidebar_w;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_panel_width(sidebar_w, cx));
 
         v_flex()
             .id("app-root")
@@ -2890,6 +3362,13 @@ impl Render for AppView {
                     this.dock.update(cx, |dock, cx| {
                         dock.set_dock_size(placement, size, window, cx);
                     });
+                    // 拖宽改的是 dock 实宽；同步目标宽副本（开合动画目标、
+                    // 补钳、内容锚定宽都读副本）
+                    match placement {
+                        DockPlacement::Left => this.sidebar_w = f32::from(size),
+                        DockPlacement::Right => this.right_w = f32::from(size),
+                        _ => {}
+                    }
                 }
             }))
             .size_full()
@@ -2909,6 +3388,8 @@ impl Render for AppView {
                         .into_iter()
                         .flatten(),
                     )
+                    // 边缘段覆盖层最后渲染 = 最顶层（dock 已关，无把手条冲突）
+                    .when_some(self.render_dock_edge(window, cx), ParentElement::child)
                     .into_any_element()
             }))
             // 标签页栏 "+" 的加面板菜单：deferred 到窗口层，锚定 "+" 正下方

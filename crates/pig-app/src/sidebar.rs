@@ -84,6 +84,9 @@ pub struct Sidebar {
     /// render_session_row 只持 &self，故用 RefCell
     title_scrolls: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>>,
     marquee: Option<TitleMarquee>,
+    /// dock 侧栏内容锚定宽（AppView 每次 render 推送）：开合动画期间 dock 实
+    /// 宽被补间，内容固定该宽并锚定分隔线一侧，滑出/滑入而非压缩重排
+    panel_width: f32,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -127,6 +130,9 @@ impl Sidebar {
             archived_open: false,
             title_scrolls: std::cell::RefCell::new(std::collections::HashMap::new()),
             marquee: None,
+            // 与 AppView 的侧栏初始宽一致；AppView 每次 render 都会推送，这里
+            // 只是首帧前的兜底
+            panel_width: 220.,
             focus_handle: cx.focus_handle(),
             _subscriptions,
         }
@@ -155,6 +161,15 @@ impl Sidebar {
             self.marquee = None;
         }
         cx.notify();
+    }
+
+    /// AppView 推送侧栏展开目标宽（拖宽/补钳后可能变化）：值变才 notify，
+    /// 开合动画帧不额外扰动侧栏重渲染
+    pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if self.panel_width != width {
+            self.panel_width = width;
+            cx.notify();
+        }
     }
 
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -891,37 +906,54 @@ impl Render for Sidebar {
             SidebarView::Workspace => self.render_workspace_view(window, cx),
         };
 
-        v_flex()
+        // 开合动画锚定层：dock_frame 自带 overflow_hidden，开合补间期间 dock 实
+        // 宽小于内容宽；内容固定 panel_width 并右锚贴分隔线，收拢时整体左滑被
+        // 裁而非压缩重排。稳态实宽 == panel_width，绝对定位子层正好铺满
+        div()
+            .relative()
             .size_full()
-            .bg(cx.theme().sidebar)
-            // 分隔线由 dock 把手自带线绘制：侧栏自画 border_r 会画在把手命中区
-            // 右侧（gpui-base 的 Side::Left 把手命中区停在分界线左侧），线上不可拖
-            .child(self.render_action_rows(cx))
+            .overflow_hidden()
             .child(
                 div()
-                    .id("session-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(v_flex().gap_1().py_1().children(content)),
-            )
-            .child(
-                div()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .p_2()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(self.panel_width))
                     .child(
-                        h_flex()
-                            .id("settings-entry")
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .rounded(cx.theme().radius)
-                            .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(SidebarEvent::OpenSettings);
-                            }))
-                            .child(Icon::new(IconName::Settings).size_4())
-                            .child(div().text_sm().child("设置")),
+                        v_flex()
+                            .size_full()
+                            .bg(cx.theme().sidebar)
+                            // 分隔线由 dock 把手自带线绘制：侧栏自画 border_r 会画在把手命中区
+                            // 右侧（gpui-base 的 Side::Left 把手命中区停在分界线左侧），线上不可拖
+                            .child(self.render_action_rows(cx))
+                            .child(
+                                div()
+                                    .id("session-list")
+                                    .flex_1()
+                                    .overflow_y_scroll()
+                                    .child(v_flex().gap_1().py_1().children(content)),
+                            )
+                            .child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .p_2()
+                                    .child(
+                                        h_flex()
+                                            .id("settings-entry")
+                                            .gap_2()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(cx.theme().radius)
+                                            .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(SidebarEvent::OpenSettings);
+                                            }))
+                                            .child(Icon::new(IconName::Settings).size_4())
+                                            .child(div().text_sm().child("设置")),
+                                    ),
+                            ),
                     ),
             )
     }
