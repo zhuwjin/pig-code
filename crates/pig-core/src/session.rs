@@ -413,8 +413,23 @@ enum SubagentOutcome {
         is_error: bool,
         card: Option<crate::rollout::AgentCardRecord>,
     },
-    /// 取消（审批等待或采样/执行中被打断）；调用方发 TurnAborted 并收尾
-    Cancelled,
+    /// 取消（审批等待或采样/执行中被打断）；调用方发 TurnAborted 并收尾。
+    /// card = 代理卡元信息（取消同样随 rollout 持久化，回放重建代理卡）
+    Cancelled {
+        card: Option<crate::rollout::AgentCardRecord>,
+    },
+}
+
+/// settle_cancelled_tool 的入参组：当前被取消的调用 + 同响应剩余未执行的调用。
+struct CancelledTool<'a> {
+    call: &'a crate::provider::ToolCall,
+    /// 工具卡摘要（随 rollout 记录持久化）
+    summary: String,
+    item_id: &'a str,
+    /// 同响应里排在当前之后的调用（不会再执行，补空回执保持 tool_use 配对）
+    rest: &'a [crate::provider::ToolCall],
+    /// 代理卡元信息（Agent 工具取消路径；其余工具 None）
+    card: Option<crate::rollout::AgentCardRecord>,
 }
 
 impl Session {
@@ -551,6 +566,46 @@ impl Session {
         if let Some(rollout) = &mut self.rollout {
             rollout.append(record);
         }
+    }
+
+    /// 工具执行中取消（用户点停止）的统一收尾：当前调用补「已停止」回执——
+    /// 历史（tool_use/tool_result 配对，防下次请求悬空被 API 拒）、rollout
+    /// （重启回放重建卡片，不凭空消失）、ToolCallEnd（落定 live 卡片）；
+    /// 同响应里排在后面的调用不会再执行，一并补回执保持配对完整。
+    fn settle_cancelled_tool(
+        &mut self,
+        cancelled: CancelledTool<'_>,
+        tx: &async_channel::Sender<Event>,
+    ) {
+        self.history.push(ChatMsg::tool_result(
+            &cancelled.call.id,
+            "已停止".to_string(),
+        ));
+        for rest in cancelled.rest {
+            self.history
+                .push(ChatMsg::tool_result(&rest.id, "已停止".to_string()));
+        }
+        self.record(&RolloutRecord::ToolCall {
+            tool: cancelled.call.name.clone(),
+            summary: cancelled.summary,
+            arguments: cancelled.call.arguments.clone(),
+            output: "已停止".to_string(),
+            is_error: false,
+            edit: None,
+            agent_card: cancelled.card,
+        });
+        let item_id = cancelled.item_id.to_string();
+        self.emit(
+            |session_id, seq| Event::ToolCallEnd {
+                session_id,
+                seq,
+                item_id,
+                output: "已停止".to_string(),
+                is_error: false,
+                edit: None,
+            },
+            tx,
+        );
     }
 
     /// 回合收尾：产出「本轮改动」（落 rollout + 推 UI 消息流面板）；无改动不发。
@@ -1385,7 +1440,7 @@ impl Session {
         }
 
         let tools = tool::all();
-        for call in &tool_calls {
+        for (call_ix, call) in tool_calls.iter().enumerate() {
             let item_id = format!("{}-tool-{}", turn_id, call.id);
             let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
@@ -1438,6 +1493,16 @@ impl Session {
                         reply = reply_rx => reply.unwrap_or(ApprovalDecision::Reject),
                         _ = cancel.cancelled() => {
                             self.pending.lock().expect("pending lock").remove(&request_id);
+                            self.settle_cancelled_tool(
+                                CancelledTool {
+                                    call,
+                                    summary,
+                                    item_id: &item_id,
+                                    rest: &tool_calls[call_ix + 1..],
+                                    card: None,
+                                },
+                                tx,
+                            );
                             self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                             return StepOutcome::Ended;
                         }
@@ -1596,7 +1661,17 @@ impl Session {
                         );
                         continue;
                     }
-                    SubagentOutcome::Cancelled => {
+                    SubagentOutcome::Cancelled { card } => {
+                        self.settle_cancelled_tool(
+                            CancelledTool {
+                                call,
+                                summary,
+                                item_id: &item_id,
+                                rest: &tool_calls[call_ix + 1..],
+                                card,
+                            },
+                            tx,
+                        );
                         self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                         return StepOutcome::Ended;
                     }
@@ -1718,6 +1793,16 @@ impl Session {
                             .lock()
                             .expect("pending questions lock")
                             .remove(&request_id);
+                        self.settle_cancelled_tool(
+                            CancelledTool {
+                                call,
+                                summary,
+                                item_id: &item_id,
+                                rest: &tool_calls[call_ix + 1..],
+                                card: None,
+                            },
+                            tx,
+                        );
                         self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                         return StepOutcome::Ended;
                     }
@@ -1806,6 +1891,16 @@ impl Session {
                     );
                 }
                 GatedToolOutcome::Cancelled => {
+                    self.settle_cancelled_tool(
+                        CancelledTool {
+                            call,
+                            summary,
+                            item_id: &item_id,
+                            rest: &tool_calls[call_ix + 1..],
+                            card: None,
+                        },
+                        tx,
+                    );
                     self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
                     return StepOutcome::Ended;
                 }
@@ -2132,7 +2227,9 @@ impl Session {
             tx,
         );
         if result.cancelled {
-            return SubagentOutcome::Cancelled;
+            return SubagentOutcome::Cancelled {
+                card: Some(card_record),
+            };
         }
         // 子代理成本计入父回合统计（不记 StepUsage/不更新水位）
         self.turn_input += result.usage.0;

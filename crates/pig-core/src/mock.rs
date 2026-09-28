@@ -49,6 +49,11 @@ pub const SUBJECT_FILE_B: &str = "subject_b.txt";
 pub const SCENARIO_READONLY_TRIGGER: &str = "READONLY_SCENARIO";
 pub const READONLY_MARKER: &str = "MOCK_READONLY_DONE";
 
+/// 慢命令场景（工具执行中点停止的路径验证）：Bash sleep 30 → 文本收尾。
+/// 面向中断用例；不打断的用例别用（真等 30s）。
+pub const SCENARIO_SLOW_TRIGGER: &str = "SLOW_BASH_SCENARIO";
+pub const SLOW_MARKER: &str = "MOCK_SLOW_DONE";
+
 /// 计划退出场景（ExitPlanMode 验证）：0 个结果 → ExitPlanMode；
 /// 1 个结果且含「已切换到」（用户 Allow）→ Write plan_exit.txt；否则文本收尾
 ///（Reject 的结果不含切换文案 → 直接收尾）。
@@ -362,6 +367,23 @@ fn readonly_scenario_response(tool_results: usize) -> Vec<String> {
         ),
         _ => vec![
             sse_chunk(serde_json::json!({"content": READONLY_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
+/// 慢命令场景（工具执行中点停止的路径验证）：Bash sleep 30 → 文本收尾。
+/// 面向中断用例；不打断的用例别用（真等 30s）。
+fn slow_bash_scenario_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_slow_bash",
+            "Bash",
+            &serde_json::json!({"command": "sleep 30"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": SLOW_MARKER}), None),
             sse_chunk(serde_json::json!({}), Some("stop")),
         ],
     }
@@ -1028,6 +1050,8 @@ async fn handle_connection(
         subject_scenario_response(tool_results)
     } else if body.contains(SCENARIO_READONLY_TRIGGER) {
         readonly_scenario_response(tool_results)
+    } else if body.contains(SCENARIO_SLOW_TRIGGER) {
+        slow_bash_scenario_response(tool_results)
     } else if body.contains(SCENARIO_PLAN_EXIT_TRIGGER) {
         plan_exit_scenario_response(&body, tool_results)
     } else if body.contains(SCENARIO_PLAN_ENTER_TRIGGER) {
