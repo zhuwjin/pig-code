@@ -1,6 +1,7 @@
 //! 会话级 Bash 任务（前台/后台统一注册表）：读者收输出、watcher 等退出更新状态，
 //! 完成经 task_notify channel 通知 agent_loop 推送 TaskListChanged。不持久化。
 //! 前台超时自动转后台继续跑；spill 文件（.pigcode/tool-results/{id}.log）保存全量输出。
+//! 前台执行中的条目对快照隐藏（普通命令不是后台任务），超时转后台时翻转 foreground 才上屏。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,9 @@ pub struct TaskEntry {
     pub cancel: Option<tokio_util::sync::CancellationToken>,
     /// 子代理后台任务的 agent_id（Bash 恒 None）；resume 运行中冲突检测用
     pub agent_id: Option<String>,
+    /// 前台执行中的普通命令：snapshot 对面板隐藏（它不是后台任务）；
+    /// 仅在超时转后台时翻转为 false，从此对快照可见
+    pub foreground: bool,
 }
 
 /// 按会话保序的任务注册表（id = b{task_seq 递增}；移除条目不回收序号）。
@@ -134,11 +138,13 @@ pub fn tail_chars(text: &str, max: usize) -> String {
     text.chars().skip(total - max).collect()
 }
 
-/// 面板快照：output_tail 取尾部 4000 字符。
+/// 面板快照：output_tail 取尾部 4000 字符；前台执行中的条目不上屏
+///（普通命令不是后台任务，避免执行期间的任意 notify 把它推成「后台 Bash · 运行中」）。
 pub fn snapshot(registry: &TaskRegistry) -> Vec<TaskSummary> {
     let tasks = registry.lock().expect("task registry lock");
     tasks
         .iter()
+        .filter(|entry| !entry.foreground)
         .map(|entry| TaskSummary {
             id: entry.id.clone(),
             command: entry.command.clone(),
@@ -249,6 +255,7 @@ pub fn register_agent_task(
             spill_path: None,
             cancel: Some(cancel),
             agent_id: Some(agent_id),
+            foreground: false,
         });
         id
     };
@@ -366,9 +373,12 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
             spill_path: Some(spill_path_for(cwd, &id)),
             cancel: None,
             agent_id: None,
+            foreground: false,
         });
         id
     };
+    // 注册即 notify：chip/面板立刻上屏（启动失败同样推，让失败条目可见）
+    let _ = state.task_notify.send(state.session_id.clone());
     let Ok(mut child) = spawned else {
         return task_id;
     };
@@ -398,6 +408,34 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
     task_id
 }
 
+/// run_foreground 的取消收尾：执行中 future 被 drop（用户点停止、回合中止）时，
+/// 进程随 kill_on_drop 已杀，注册表条目与 spill 文件移除不留痕，notify 刷新面板。
+/// 正常完成/超时转后台路径在返回前 disarm（state 置 None），drop 时不再动作。
+struct ForegroundCancelGuard {
+    state: Option<SessionToolState>,
+    task_id: String,
+}
+
+impl Drop for ForegroundCancelGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        let spill = {
+            let mut tasks = state.tasks.lock().expect("task registry lock");
+            // 只收尾仍是前台状态的条目（已转后台/已移除的不归它管）
+            tasks
+                .iter()
+                .position(|t| t.id == self.task_id && t.foreground)
+                .map(|ix| tasks.remove(ix).spill_path)
+        };
+        if let Some(spill) = spill.flatten() {
+            let _ = std::fs::remove_file(spill);
+        }
+        let _ = state.task_notify.send(state.session_id.clone());
+    }
+}
+
 /// 前台执行结果。
 pub enum ForegroundOutcome {
     /// 完成：output 已按「stdout + [stderr] 段」拼装；前台任务已从注册表移除（不留痕）。
@@ -417,7 +455,8 @@ pub enum ForegroundOutcome {
 }
 
 /// 前台跑 shell 命令：注册 Running 条目 → 读者分流 stdout/stderr → 限时等退出。
-/// 完成则排空管道取全文（注册表移除不留痕）；超时则 watcher 接管、转后台继续跑。
+/// 完成则排空管道取全文（注册表移除不留痕）；超时则 watcher 接管、转后台继续跑；
+/// 执行中被取消（future drop）由 guard 收尾移除条目，不残留「运行中」。
 pub async fn run_foreground(
     state: &SessionToolState,
     cwd: &Path,
@@ -446,8 +485,13 @@ pub async fn run_foreground(
             spill_path: Some(spill_path_for(cwd, &id)),
             cancel: None,
             agent_id: None,
+            foreground: true,
         });
         id
+    };
+    let mut cancel_guard = ForegroundCancelGuard {
+        state: Some(state.clone()),
+        task_id: task_id.clone(),
     };
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -480,6 +524,8 @@ pub async fn run_foreground(
                 tasks.retain(|t| t.id != task_id);
                 spill_path
             };
+            // 正常完成：guard 不再负责收尾
+            cancel_guard.state = None;
             let stdout = std::mem::take(&mut *stdout_sink.lock().expect("stream sink lock"));
             let stderr = std::mem::take(&mut *stderr_sink.lock().expect("stream sink lock"));
             let mut output = stdout;
@@ -497,7 +543,16 @@ pub async fn run_foreground(
             }
         }
         Err(_) => {
-            // 超时转后台：watcher 接管 child 与读者（sink 随读者存活至进程退出）
+            // 超时转后台：条目从「前台隐藏」转为正式后台任务（快照可见），
+            // 立即 notify 上屏；watcher 接管 child 与读者（sink 随读者存活至进程退出）
+            {
+                let mut tasks = state.tasks.lock().expect("task registry lock");
+                if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) {
+                    entry.foreground = false;
+                }
+            }
+            // 已转正为后台任务：guard 不再负责收尾
+            cancel_guard.state = None;
             spawn_watcher(
                 state.tasks.clone(),
                 state.task_notify.clone(),
@@ -507,6 +562,7 @@ pub async fn run_foreground(
                 read_out,
                 read_err,
             );
+            let _ = state.task_notify.send(state.session_id.clone());
             ForegroundOutcome::TimedOut { task_id }
         }
     }

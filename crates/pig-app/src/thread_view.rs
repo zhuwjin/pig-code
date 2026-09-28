@@ -1044,6 +1044,27 @@ impl ThreadView {
             Event::TurnAborted { .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;
+                // 中止收尾：没等到 ToolCallEnd 的工具卡停在「执行中」转圈——
+                // 全部落定（清实时进度行，无输出置「已停止」）。只有最后一条
+                // assistant 消息可能有未完成段，遍历全部消息只是防御乱序
+                for message in &mut self.messages {
+                    for segment in &mut message.segments {
+                        if let Segment::ToolCall {
+                            output,
+                            done,
+                            live_note,
+                            ..
+                        } = segment
+                            && !*done
+                        {
+                            *done = true;
+                            *live_note = None;
+                            if output.is_empty() {
+                                *output = "已停止".to_string();
+                            }
+                        }
+                    }
+                }
                 if let Some(message) = self.messages.last_mut() {
                     message.footer = Some("已停止".to_string());
                 }

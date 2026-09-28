@@ -370,3 +370,122 @@ fn readonly_command_whitelist() {
         assert!(!tool::is_readonly_command(cmd), "{cmd} 不应放行");
     }
 }
+
+// ---------- 快照可见性：前台执行中不上屏、转后台/注册即上屏 ----------
+
+/// 带真实 notify channel 的 state（for_test 的 receiver 直接丢弃，收不到通知）
+fn notify_state() -> (
+    SessionToolState,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+    (
+        SessionToolState::new("test".into(), tx, wake_tx, vec![]),
+        rx,
+    )
+}
+
+/// 后台任务执行期间跑普通前台命令：notify 落在执行窗口内，
+/// 快照不得把前台命令当「后台 Bash · 运行中」推上屏。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_command_not_leaked_into_snapshot() {
+    let dir = temp_dir("fg-snapshot");
+    let (state, mut rx) = notify_state();
+
+    // 后台任务 0.2s 后退出 → 它的 watcher notify 会落进前台命令执行窗口
+    let bg_id = pig_core::task::spawn_background(&state, &dir, "sleep 0.2");
+    rx.recv().await.expect("spawn_background 注册即 notify");
+
+    let fg_state = state.clone();
+    let fg_dir = dir.clone();
+    let fg = tokio::spawn(async move {
+        pig_core::task::run_foreground(
+            &fg_state,
+            &fg_dir,
+            "sleep 1 && echo fg",
+            std::time::Duration::from_secs(10),
+        )
+        .await
+    });
+
+    // 后台退出 notify 到达时 agent_loop 会推此刻的快照
+    rx.recv().await.expect("后台退出应 notify");
+    let snap = pig_core::task::snapshot(&state.tasks);
+    assert!(
+        snap.iter().any(|t| t.id == bg_id),
+        "后台任务应在快照: {snap:?}"
+    );
+    assert!(
+        snap.iter().all(|t| t.command != "sleep 1 && echo fg"),
+        "前台命令不得泄漏进快照: {snap:?}"
+    );
+
+    // 前台正常完成（条目移除不留痕）
+    let outcome = fg.await.expect("fg join");
+    assert!(matches!(
+        outcome,
+        pig_core::task::ForegroundOutcome::Completed { .. }
+    ));
+}
+
+/// 前台超时转后台：条目立即对快照可见（Running）并 notify 上屏。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timeout_conversion_visible_and_notified() {
+    let dir = temp_dir("fg-convert");
+    let (state, mut rx) = notify_state();
+
+    let outcome =
+        pig_core::task::run_foreground(&state, &dir, "sleep 5", std::time::Duration::from_secs(1))
+            .await;
+    let pig_core::task::ForegroundOutcome::TimedOut { task_id } = outcome else {
+        panic!("sleep 5 限 1s 应超时转后台")
+    };
+
+    // 转后台即刻 notify + 快照可见 Running
+    rx.recv().await.expect("转后台应 notify");
+    let snap = pig_core::task::snapshot(&state.tasks);
+    let entry = snap
+        .iter()
+        .find(|t| t.id == task_id)
+        .expect("转后台条目应立即可见: {snap:?}");
+    assert!(matches!(entry.status, pig_protocol::TaskStatus::Running));
+
+    // 收尾杀掉，不留 sleep 进程
+    let mut tracker = ChangeTracker::default();
+    let (out, is_error) = task_ctl(&dir, &mut tracker, &state, "TaskStop", &task_id).await;
+    assert!(!is_error, "{out}");
+}
+
+/// 前台执行中取消（点停止 → exec_tool_gated 的 select! drop 掉工具 future）：
+/// guard 收尾移除注册表条目与 spill，不残留「运行中」孤儿。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_foreground_leaves_no_trace() {
+    let dir = temp_dir("fg-cancel");
+    let (state, mut rx) = notify_state();
+
+    let fg_state = state.clone();
+    let fg_dir = dir.clone();
+    let handle = tokio::spawn(async move {
+        pig_core::task::run_foreground(
+            &fg_state,
+            &fg_dir,
+            "sleep 5",
+            std::time::Duration::from_secs(10),
+        )
+        .await
+    });
+    // 等注册完成（future 已在 child.wait() 上挂起）
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 模拟取消：drop 掉 run_foreground future（abort 即 drop）
+    handle.abort();
+    let _ = handle.await;
+
+    // guard 收尾：notify 到达 + 注册表/快照无残留
+    rx.recv().await.expect("取消应收尾 notify");
+    let raw_empty = state.tasks.lock().expect("tasks lock").is_empty();
+    assert!(raw_empty, "注册表不应有孤儿条目");
+    let snap = pig_core::task::snapshot(&state.tasks);
+    assert!(snap.is_empty(), "取消后快照应为空: {snap:?}");
+}
