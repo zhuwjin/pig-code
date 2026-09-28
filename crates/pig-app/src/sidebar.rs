@@ -1,6 +1,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -64,6 +65,8 @@ struct TitleMarquee {
 const MARQUEE_HOLD_TICKS: u8 = 45;
 /// 悬停后先静止片刻再开始滚动
 const MARQUEE_START_TICKS: u8 = 30;
+/// 工作区展开后每页展示的会话条数（默认一页，展开更多每次 +1 页）
+const WORKSPACE_PAGE_SIZE: usize = 5;
 
 pub struct Sidebar {
     view: SidebarView,
@@ -80,6 +83,13 @@ pub struct Sidebar {
     search_input: Entity<InputState>,
     expanded: std::collections::HashSet<String>,
     archived_open: bool,
+    /// 悬停中的工作区行路径：行尾浮层（名字渐隐 + 按钮）仅悬停时渲染占位，
+    /// 未悬停时名字用满行宽、不裁减
+    hovered_workspace: Option<String>,
+    /// 悬停中的会话行 id：渐隐底色与行尾按钮（分组视图）显隐跟随行悬停
+    hovered_session: Option<String>,
+    /// 工作区会话分页：路径 → 当前展示条数（缺省 = WORKSPACE_PAGE_SIZE）
+    workspace_shown: std::collections::HashMap<String, usize>,
     /// 会话标题的横向滚动把手（悬停跑马灯用），key = 会话 id；
     /// render_session_row 只持 &self，故用 RefCell
     title_scrolls: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>>,
@@ -128,6 +138,9 @@ impl Sidebar {
             search_input,
             expanded: std::collections::HashSet::new(),
             archived_open: false,
+            hovered_workspace: None,
+            hovered_session: None,
+            workspace_shown: std::collections::HashMap::new(),
             title_scrolls: std::cell::RefCell::new(std::collections::HashMap::new()),
             marquee: None,
             // 与 AppView 的侧栏初始宽一致；AppView 每次 render 都会推送，这里
@@ -150,14 +163,20 @@ impl Sidebar {
         self.workspaces = workspaces;
         self.aliases = aliases;
         self.active = active;
-        self.title_scrolls
-            .borrow_mut()
-            .retain(|id, _| self.sessions.iter().any(|s| &s.id == id));
-        if self
-            .marquee
-            .as_ref()
-            .is_some_and(|m| !self.sessions.iter().any(|s| s.id == m.session_id))
-        {
+        self.title_scrolls.borrow_mut().retain(|id, _| {
+            // 置顶区行的键带 "pinned-" 前缀（同一会话在两个视图的键不冲突）
+            let sid = id.strip_prefix("pinned-").unwrap_or(id.as_str());
+            self.sessions.iter().any(|s| s.id == sid)
+        });
+        self.workspace_shown
+            .retain(|path, _| self.workspaces.iter().any(|w| w == path));
+        if self.marquee.as_ref().is_some_and(|m| {
+            let sid = m
+                .session_id
+                .strip_prefix("pinned-")
+                .unwrap_or(m.session_id.as_str());
+            !self.sessions.iter().any(|s| s.id == sid)
+        }) {
             self.marquee = None;
         }
         cx.notify();
@@ -572,6 +591,102 @@ impl Sidebar {
             .width
     }
 
+    /// 会话标题端部的渐隐条：base 为行背景实色（常态 sidebar / 选中 accent），
+    /// tint 为悬停叠加层（accent 60%）；叠加后与行背景合成一致，尾端无色差
+    fn title_fade(leading: bool, base: Hsla, tint: Option<Hsla>) -> Div {
+        let (from, to) = if leading {
+            (base, base.opacity(0.))
+        } else {
+            (base.opacity(0.), base)
+        };
+        let fade = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .when(leading, |this| this.left_0())
+            .when(!leading, |this| this.right_0())
+            .w(px(20.))
+            .bg(linear_gradient(
+                90.,
+                linear_color_stop(from, 0.),
+                linear_color_stop(to, 1.),
+            ));
+        match tint {
+            Some(tint) => {
+                let (from, to) = if leading {
+                    (tint, tint.opacity(0.))
+                } else {
+                    (tint.opacity(0.), tint)
+                };
+                fade.child(div().size_full().bg(linear_gradient(
+                    90.,
+                    linear_color_stop(from, 0.),
+                    linear_color_stop(to, 1.),
+                )))
+            }
+            None => fade,
+        }
+    }
+
+    /// 会话标题区：横向滚动（悬停跑马灯）+ 两端渐隐。key 为 title_scrolls
+    /// 的键：普通会话行用会话 id，置顶区行用 "pinned-{id}"（同一会话在两
+    /// 种行的滚动状态互不干扰）
+    fn render_title_scroll(
+        &self,
+        key: &str,
+        element_id: impl Into<ElementId>,
+        title: &str,
+        fade_base: Hsla,
+        fade_tint: Option<Hsla>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let title_handle = self
+            .title_scrolls
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_insert_with(ScrollHandle::new)
+            .clone();
+        let hover_key = key.to_string();
+        // 显式真实宽度（+2px 余量防字宽取整误差），把溢出撑给 ScrollHandle
+        let title_width = Self::measure_title_width(title, window, cx) + px(2.);
+        // 渐隐显隐跟滚动位置（thread_view 思考滚动行同款）：右端还有未露出
+        // 的文字才渐隐，跑马灯滚出开头后左端也渐隐
+        let max = title_handle.max_offset().x;
+        let offset = title_handle.offset().x;
+        let hides_leading = max > px(1.) && offset < px(-1.);
+        let hides_trailing = max > px(1.) && offset > px(1.) - max;
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .id(element_id)
+                    .text_sm()
+                    .w_full()
+                    // 双轴滚动而非 overflow_x_scroll：gpui 对单轴滚动容器会把另一轴的
+                    // 滚轮增量折进来，双轴下纵向滚轮原样冒泡给会话列表，互不影响
+                    .overflow_scroll()
+                    .whitespace_nowrap()
+                    .track_scroll(&title_handle)
+                    .on_hover(cx.listener(move |this, hovered, _, cx| {
+                        if *hovered {
+                            this.begin_title_marquee(&hover_key, cx);
+                        } else {
+                            this.end_title_marquee(&hover_key, cx);
+                        }
+                    }))
+                    .child(div().w(title_width).child(title.to_string())),
+            )
+            .when(hides_leading, |this| {
+                this.child(Self::title_fade(true, fade_base, fade_tint))
+            })
+            .when(hides_trailing, |this| {
+                this.child(Self::title_fade(false, fade_base, fade_tint))
+            })
+    }
+
     fn render_session_row(
         &self,
         window: &Window,
@@ -582,15 +697,22 @@ impl Sidebar {
         let session = &self.sessions[ix];
         let id = session.id.clone();
         let active = self.active.as_deref() == Some(session.id.as_str());
-        let status_color = if session.running {
-            Some(cx.theme().success)
-        } else if session.waiting_approval {
+        // 状态指示：待审批黄点；运行中不画点，转圈占用行尾时间槽（见下）
+        let status_color = if session.waiting_approval {
             Some(cx.theme().warning)
         } else {
             None
         };
         let renaming = self.renaming == Some(RenameTarget::Session(session.id.clone()));
+        let hovered = self.hovered_session.as_deref() == Some(session.id.as_str());
+        // 渐隐底色 = 行背景：选中与悬停同为 sidebar + accent 60%，常态 sidebar
+        let (fade_base, fade_tint) = if hovered || active {
+            (cx.theme().sidebar, Some(cx.theme().accent.opacity(0.6)))
+        } else {
+            (cx.theme().sidebar, None)
+        };
 
+        let hover_id = session.id.clone();
         let mut row = h_flex()
             .id(("session", ix))
             .mx_2()
@@ -601,10 +723,17 @@ impl Sidebar {
             .when(session.archived, |this| {
                 this.text_color(cx.theme().muted_foreground)
             })
-            .when(active, |this| this.bg(cx.theme().accent))
+            .when(active, |this| this.bg(cx.theme().accent.opacity(0.6)))
             .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(SidebarEvent::Select(id.clone()));
+            }))
+            .on_hover(cx.listener(move |this, is_hovered: &bool, _, cx| {
+                let was = this.hovered_session.as_deref() == Some(hover_id.as_str());
+                if *is_hovered != was {
+                    this.hovered_session = (*is_hovered).then(|| hover_id.clone());
+                    cx.notify();
+                }
             }));
         if renaming {
             // 行内重命名：只留输入框（回车/失焦提交，空值取消）
@@ -612,45 +741,39 @@ impl Sidebar {
             return row.into_any_element();
         }
         row = row
-            .child({
-                let title_handle = self
-                    .title_scrolls
-                    .borrow_mut()
-                    .entry(session.id.clone())
-                    .or_insert_with(ScrollHandle::new)
-                    .clone();
-                let hover_id = session.id.clone();
-                // 显式真实宽度（+2px 余量防字宽取整误差），把溢出撑给 ScrollHandle
-                let title_width = Self::measure_title_width(&session.title, window, cx) + px(2.);
-                div()
-                    .id(("session-title", ix))
-                    .text_sm()
-                    .flex_1()
-                    // 双轴滚动而非 overflow_x_scroll：gpui 对单轴滚动容器会把另一轴的
-                    // 滚轮增量折进来，双轴下纵向滚轮原样冒泡给会话列表，互不影响
-                    .overflow_scroll()
-                    .whitespace_nowrap()
-                    .track_scroll(&title_handle)
-                    .on_hover(cx.listener(move |this, hovered, _, cx| {
-                        if *hovered {
-                            this.begin_title_marquee(&hover_id, cx);
-                        } else {
-                            this.end_title_marquee(&hover_id, cx);
-                        }
-                    }))
-                    .child(div().w(title_width).child(session.title.clone()))
-            })
+            .child(self.render_title_scroll(
+                &session.id,
+                ("session-title", ix),
+                &session.title,
+                fade_base,
+                fade_tint,
+                window,
+                cx,
+            ))
             .when_some(status_color, |this, color| {
                 this.child(div().size_2().rounded_full().bg(color))
             });
-        if show_time {
-            row = row.child(
+        if session.running && !show_time {
+            // 分组视图无时间槽：运行中的转圈跟在标题后（原绿点位）
+            row = row.child(Spinner::new().xsmall().color(cx.theme().muted_foreground));
+        }
+        if show_time && !hovered {
+            // 悬停时行尾让位给置顶/归档按钮；运行中时间换成转圈
+            row = row.child(if session.running {
+                Spinner::new()
+                    .xsmall()
+                    .color(cx.theme().muted_foreground)
+                    .into_any_element()
+            } else {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(session.updated_at.relative()),
-            );
-        } else {
+                    .child(session.updated_at.relative())
+                    .into_any_element()
+            });
+        }
+        if hovered {
+            // 悬停才渲染置顶/归档按钮：让出的宽度归标题，此时才裁减文字
             row = row
                 .child({
                     let id = session.id.clone();
@@ -774,9 +897,169 @@ impl Sidebar {
         out
     }
 
+    /// 工作区视图置顶区的会话行：标题 + 时间一行，所属工作区一行（置顶会话
+    /// 跨工作区集中展示，需标注归属）
+    fn render_workspace_pinned_row(
+        &self,
+        window: &Window,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let session = &self.sessions[ix];
+        let id = session.id.clone();
+        let active = self.active.as_deref() == Some(session.id.as_str());
+        let hovered = self.hovered_session.as_deref() == Some(session.id.as_str());
+        // 状态指示：待审批黄点；运行中不画点，转圈占用行尾时间槽（见下）
+        let status_color = if session.waiting_approval {
+            Some(cx.theme().warning)
+        } else {
+            None
+        };
+        let (fade_base, fade_tint) = if hovered || active {
+            (cx.theme().sidebar, Some(cx.theme().accent.opacity(0.6)))
+        } else {
+            (cx.theme().sidebar, None)
+        };
+        let marquee_key = format!("pinned-{}", session.id);
+        let workspace_name = self.workspace_name(&session.cwd.display().to_string());
+
+        let mut line1 = h_flex()
+            .gap_2()
+            .child(self.render_title_scroll(
+                &marquee_key,
+                ("pinned-title", ix),
+                &session.title,
+                fade_base,
+                fade_tint,
+                window,
+                cx,
+            ))
+            .when_some(status_color, |this, color| {
+                this.child(div().size_2().rounded_full().bg(color))
+            });
+        if hovered {
+            // 悬停才渲染置顶/归档按钮（与分组视图一致），时间让位不显示，
+            // 此时标题才让宽裁减
+            let pin_id = session.id.clone();
+            let pinned = session.pinned;
+            let archive_id = session.id.clone();
+            let archived = session.archived;
+            line1 = line1
+                .child(
+                    Button::new(("pin", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(if pinned {
+                            IconName::StarFill
+                        } else {
+                            IconName::Star
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SidebarEvent::SetPinned(pin_id.clone(), !pinned));
+                        })),
+                )
+                .child(
+                    Button::new(("archive", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(if archived {
+                            IconName::Undo2
+                        } else {
+                            IconName::Inbox
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SidebarEvent::SetArchived(archive_id.clone(), !archived));
+                        })),
+                );
+        } else if session.running {
+            // 运行中：时间槽显示转圈
+            line1 = line1.child(Spinner::new().xsmall().color(cx.theme().muted_foreground));
+        } else {
+            line1 = line1.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(session.updated_at.relative()),
+            );
+        }
+
+        let hover_id = session.id.clone();
+        let row = div()
+            .id(("pinned-session", ix))
+            .mx_2()
+            .px_2()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .when(active, |this| this.bg(cx.theme().accent.opacity(0.6)))
+            .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(SidebarEvent::Select(id.clone()));
+            }))
+            .on_hover(cx.listener(move |this, is_hovered: &bool, _, cx| {
+                let was = this.hovered_session.as_deref() == Some(hover_id.as_str());
+                if *is_hovered != was {
+                    this.hovered_session = (*is_hovered).then(|| hover_id.clone());
+                    cx.notify();
+                }
+            }))
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(line1)
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::FolderClosed)
+                                    .size_3()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(workspace_name),
+                            ),
+                    ),
+            );
+        // 右键菜单：重命名 / 置顶 / 归档 / 删除
+        let menu = Self::session_menu(&cx.entity().downgrade(), session);
+        row.context_menu(menu).into_any_element()
+    }
+
     fn render_workspace_view(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.query(cx);
-        let mut out: Vec<AnyElement> = vec![
+        let mut out: Vec<AnyElement> = vec![];
+
+        // 置顶区：跨工作区集中展示置顶会话（归档的不显示），行内标注所属工作区
+        let mut pinned: Vec<usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.pinned && !s.archived && self.matches(&query, &s.title))
+            .map(|(ix, _)| ix)
+            .collect();
+        pinned.sort_by_key(|ix| std::cmp::Reverse(self.sessions[*ix].updated_at));
+        if !pinned.is_empty() {
+            out.push(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("置顶")
+                    .into_any_element(),
+            );
+            out.extend(
+                pinned
+                    .iter()
+                    .map(|ix| self.render_workspace_pinned_row(window, *ix, cx)),
+            );
+        }
+
+        out.push(
             div()
                 .px_3()
                 .py_1()
@@ -784,7 +1067,7 @@ impl Sidebar {
                 .text_color(cx.theme().muted_foreground)
                 .child("工作区")
                 .into_any_element(),
-        ];
+        );
 
         for (p_ix, workspace) in self.workspaces.iter().enumerate() {
             let name = self.workspace_name(workspace);
@@ -795,23 +1078,22 @@ impl Sidebar {
             let renaming = self.renaming == Some(RenameTarget::Workspace(workspace.to_string()));
             let workspace_path = workspace.clone();
 
-            // 该工作区下的会话：未归档在前按 updated 倒序，归档的灰色垫底
+            // 该工作区下的会话：置顶（入置顶区）与归档的不在此列，按 updated 倒序
             let mut sessions: Vec<usize> = self
                 .sessions
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.cwd.display().to_string() == *workspace)
+                .filter(|(_, s)| {
+                    s.cwd.display().to_string() == *workspace && !s.pinned && !s.archived
+                })
                 .map(|(ix, _)| ix)
                 .collect();
-            sessions.sort_by_key(|ix| {
-                let s = &self.sessions[*ix];
-                (s.archived, std::cmp::Reverse(s.updated_at))
-            });
+            sessions.sort_by_key(|ix| std::cmp::Reverse(self.sessions[*ix].updated_at));
 
-            let group_name: SharedString = format!("workspace-row-{p_ix}").into();
+            let hovered = self.hovered_workspace.as_deref() == Some(workspace.as_str());
             let mut row = h_flex()
                 .id(("workspace", p_ix))
-                .group(group_name.clone())
+                .relative()
                 .mx_2()
                 .px_2()
                 .py_1()
@@ -844,54 +1126,156 @@ impl Sidebar {
             } else {
                 let menu = Self::workspace_menu(&cx.entity().downgrade(), workspace);
                 let new_task_path = workspace.clone();
-                // 悬停显示：选项（...）与该工作区下新建任务（+）
-                let row = row
-                    .child(
-                        div()
-                            .invisible()
-                            .group_hover(group_name.clone(), |this| this.visible())
-                            .child(
-                                Button::new(("workspace-menu", p_ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Ellipsis)
-                                    .dropdown_menu(menu.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .invisible()
-                            .group_hover(group_name.clone(), |this| this.visible())
-                            .child(
-                                Button::new(("workspace-add", p_ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Plus)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(SidebarEvent::NewTaskInWorkspace(
-                                            new_task_path.clone(),
-                                        ));
-                                    })),
-                            ),
-                    )
+                let hover_path = workspace.clone();
+                let mut row = row
+                    .on_hover(cx.listener(move |this, is_hovered: &bool, _, cx| {
+                        let was = this.hovered_workspace.as_deref() == Some(hover_path.as_str());
+                        if *is_hovered != was {
+                            this.hovered_workspace = (*is_hovered).then(|| hover_path.clone());
+                            cx.notify();
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded.remove(&workspace_path) {
                             this.expanded.insert(workspace_path.clone());
                         }
                         cx.notify();
                     }))
-                    .context_menu(menu);
+                    .context_menu(menu.clone());
+                if hovered {
+                    // 悬停才渲染行尾浮层：名字右端渐隐 + 选项（...）/新建任务（+）。
+                    // 浮层绝对定位不占位，未悬停时名字用满行宽不被裁减；渐隐与
+                    // 按钮托底各叠两层底色（sidebar + accent 60%），合成结果与行
+                    // .hover() 背景一致，浮层盖住文字处无色差
+                    let sidebar_bg = cx.theme().sidebar;
+                    let hover_tint = cx.theme().accent.opacity(0.6);
+                    row = row.child(
+                        h_flex()
+                            .absolute()
+                            .right_2()
+                            .top_0()
+                            .bottom_0()
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .h_full()
+                                    .bg(linear_gradient(
+                                        90.,
+                                        linear_color_stop(sidebar_bg.opacity(0.), 0.),
+                                        linear_color_stop(sidebar_bg, 1.),
+                                    ))
+                                    .child(div().size_full().bg(linear_gradient(
+                                        90.,
+                                        linear_color_stop(hover_tint.opacity(0.), 0.),
+                                        linear_color_stop(hover_tint, 1.),
+                                    ))),
+                            )
+                            .child(
+                                div().h_full().bg(sidebar_bg).child(
+                                    div().h_full().bg(hover_tint).child(
+                                        h_flex()
+                                            .h_full()
+                                            .child(
+                                                Button::new(("workspace-menu", p_ix))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(IconName::Ellipsis)
+                                                    .dropdown_menu(menu.clone()),
+                                            )
+                                            .child(
+                                                Button::new(("workspace-add", p_ix))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(IconName::Plus)
+                                                    .on_click(cx.listener(
+                                                        move |_, _, _, cx| {
+                                                            cx.emit(
+                                                                SidebarEvent::NewTaskInWorkspace(
+                                                                    new_task_path.clone(),
+                                                                ),
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
+                                ),
+                            ),
+                    );
+                }
                 out.push(row.into_any_element());
             }
 
             if expanded {
-                for ix in sessions {
+                // 分页：默认一页（5 条），展开更多每次 +1 页，收起回到一页
+                let shown = self
+                    .workspace_shown
+                    .get(workspace)
+                    .copied()
+                    .unwrap_or(WORKSPACE_PAGE_SIZE);
+                let total = sessions.len();
+                for ix in sessions.iter().take(shown) {
                     out.push(
                         div()
-                            .pl_4()
-                            .child(self.render_session_row(window, ix, true, cx))
+                            // 缩进 24px：会话文字与工作区名字对齐（行 mx+px 16 +
+                            // 图标 16 + gap 8 = 40）
+                            .pl_6()
+                            .child(self.render_session_row(window, *ix, true, cx))
                             .into_any_element(),
                     );
+                }
+                let can_more = shown < total;
+                let can_collapse = shown > WORKSPACE_PAGE_SIZE;
+                if can_more || can_collapse {
+                    let mut controls = h_flex()
+                        .mx_2()
+                        .px_2()
+                        .py_1()
+                        .gap_3()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground);
+                    if can_more {
+                        let path = workspace.clone();
+                        controls = controls.child(
+                            h_flex()
+                                .id(("workspace-more", p_ix))
+                                .gap_1()
+                                .px_1()
+                                .rounded(cx.theme().radius)
+                                .cursor_pointer()
+                                .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    *this
+                                        .workspace_shown
+                                        .entry(path.clone())
+                                        .or_insert(WORKSPACE_PAGE_SIZE) += WORKSPACE_PAGE_SIZE;
+                                    cx.notify();
+                                }))
+                                .child(Icon::new(IconName::ChevronDown).size_3())
+                                .child("展开更多"),
+                        );
+                    }
+                    if can_more && can_collapse {
+                        controls = controls.child("·");
+                    }
+                    if can_collapse {
+                        let path = workspace.clone();
+                        controls = controls.child(
+                            h_flex()
+                                .id(("workspace-collapse", p_ix))
+                                .gap_1()
+                                .px_1()
+                                .rounded(cx.theme().radius)
+                                .cursor_pointer()
+                                .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.workspace_shown.remove(&path);
+                                    cx.notify();
+                                }))
+                                .child(Icon::new(IconName::ChevronUp).size_3())
+                                .child("收起"),
+                        );
+                    }
+                    out.push(div().pl_6().child(controls).into_any_element());
                 }
             }
         }
