@@ -56,6 +56,7 @@ pub(crate) use parse::*;
 pub(crate) use profiles::*;
 pub(crate) use records::*;
 pub(crate) use store::*;
+pub use store::set_model_override;
 
 /// 按名字找档案：精确匹配 → 归一匹配；多个命中报错列候选，零命中报错列全部可用名。
 pub fn find_profile<'a>(
