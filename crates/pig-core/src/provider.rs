@@ -290,7 +290,6 @@ pub(crate) use anthropic::*;
 pub use anthropic::anthropic_web_search_tool;
 pub(crate) use openai::*;
 pub use openai::openai_web_search_tool;
-pub(crate) use sidecar::*;
 pub use sidecar::{complete_text, net_test_blocking, test_provider};
 
 fn finish(tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>, tool_calls: &mut Vec<ToolCall>) {
