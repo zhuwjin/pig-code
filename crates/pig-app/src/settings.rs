@@ -35,8 +35,6 @@ mod pages;
 mod providers;
 
 pub(crate) use dialog::*;
-pub(crate) use pages::*;
-pub(crate) use providers::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
