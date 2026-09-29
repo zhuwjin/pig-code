@@ -200,3 +200,29 @@ fn search_files_respects_gitignore_includes_hidden() {
         "隐藏文件应进 @ 补全: {github:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_truncates_overlong_matched_lines() {
+    let dir = temp_dir("grep-longline");
+    // 1200 字符的命中行（模拟 minified 文件）：截断到 500 + 标注；短行原样
+    let long_line = format!("match {}", "x".repeat(1200));
+    std::fs::write(dir.join("big.js"), format!("{long_line}\nshort match\n")).unwrap();
+    let (out, is_error, ..) = run_tool(&dir, "Grep", serde_json::json!({"pattern": "match"})).await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("[...行超长已截断]"), "{out}");
+    let long_row = out
+        .lines()
+        .find(|l| l.contains("行超长已截断"))
+        .expect("截断行仍在输出里");
+    assert!(
+        long_row.chars().count() < 600,
+        "截断后仍过长（{} 字符）",
+        long_row.chars().count()
+    );
+    assert!(out.contains("short match"), "短行不受影响: {out}");
+    assert!(
+        !out.contains(&"x".repeat(600)),
+        "超长行未截断: {}",
+        &out[..out.chars().count().min(200)]
+    );
+}

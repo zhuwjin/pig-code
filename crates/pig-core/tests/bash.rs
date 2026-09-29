@@ -71,17 +71,30 @@ async fn foreground_env_injection() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
+    // 按实际 shell 选方言：Git Bash 用 $VAR，回退 cmd 才用 %VAR%；
+    // 两种写法展开后的输出一致，断言共用。
+    let cmd_dialect = cfg!(windows)
+        && matches!(
+            pig_core::task::windows_shell(),
+            pig_core::task::WindowsShell::Cmd
+        );
+    let echo_env = if cmd_dialect {
+        "echo gtp=%GIT_TERMINAL_PROMPT% nc=%NO_COLOR% term=%TERM% pyio=%PYTHONIOENCODING%"
+    } else {
+        "echo gtp=$GIT_TERMINAL_PROMPT nc=$NO_COLOR term=$TERM pyio=$PYTHONIOENCODING"
+    };
     let (out, is_error) = bash(
         &dir,
         &mut tracker,
         &state,
-        serde_json::json!({"command": "echo gtp=$GIT_TERMINAL_PROMPT nc=$NO_COLOR term=$TERM"}),
+        serde_json::json!({"command": echo_env}),
     )
     .await;
     assert!(!is_error, "{out}");
     assert!(out.contains("gtp=0"), "GIT_TERMINAL_PROMPT=0: {out}");
     assert!(out.contains("nc=1"), "NO_COLOR=1: {out}");
     assert!(out.contains("term=dumb"), "TERM=dumb: {out}");
+    assert!(out.contains("pyio=utf-8"), "PYTHONIOENCODING=utf-8: {out}");
     assert!(out.contains("[exit code: 0]"), "{out}");
 }
 
@@ -488,4 +501,123 @@ async fn cancelled_foreground_leaves_no_trace() {
     assert!(raw_empty, "注册表不应有孤儿条目");
     let snap = pig_core::task::snapshot(&state.tasks);
     assert!(snap.is_empty(), "取消后快照应为空: {snap:?}");
+}
+
+/// 前台狂喷输出（seq ≈ 23MB > 16MiB）：超限强停，完成的输出尾部带说明。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_output_cap_kills_command() {
+    let dir = temp_dir("cap16m-fg");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        serde_json::json!({"command": "seq 1 3000000", "timeout": 120}),
+    )
+    .await;
+    assert!(!is_error, "强停不是错误: {out}");
+    assert!(out.contains("16MiB 上限"), "应说明上限: {out}");
+    assert!(out.contains("强制停止"), "尾部预览应含强停说明: {out}");
+}
+
+/// 后台同样强停：条目转 Killed（watcher 不覆写），TaskOutput 尾部可见说明。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_output_cap_kills_and_notes() {
+    let dir = temp_dir("cap16m-bg");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        serde_json::json!({"command": "seq 1 3000000", "run_in_background": true}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    let task_id = out
+        .strip_prefix("已在后台启动，task_id: ")
+        .and_then(|rest| rest.split('。').next())
+        .expect("后台文案含 task_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let killed = {
+            let tasks = state.tasks.lock().expect("tasks lock");
+            tasks.iter().any(|t| {
+                t.id == task_id && matches!(t.status, pig_protocol::TaskStatus::Killed)
+            })
+        };
+        if killed {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "未在期限内强停");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let (out, is_error) = task_ctl(&dir, &mut tracker, &state, "TaskOutput", &task_id).await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("强制停止"), "注册表 output 尾部应留说明: {out}");
+}
+
+/// Git Bash 方言生效：pwd 输出 MSYS 路径（/c/... 形式），且 coreutils 可用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_bash_dialect_when_available() {
+    if !cfg!(windows)
+        || !matches!(
+            pig_core::task::windows_shell(),
+            pig_core::task::WindowsShell::GitBash(_)
+        )
+    {
+        return; // 回退 cmd 的机器跳过：行为与既有 cmd 用例一致
+    }
+    let dir = temp_dir("msys");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        serde_json::json!({"command": "pwd && printf 'shell:ok\\n'"}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(
+        out.lines().next().is_some_and(|l| l.starts_with('/')),
+        "pwd 应输出 MSYS 路径: {out}"
+    );
+    assert!(out.contains("shell:ok"), "printf 可用: {out}");
+}
+
+/// GBK 回退解码：printf 输出原始 GBK 字节（D6 D0 = 「中」），
+/// StreamDecoder 应按 GBK 解出而不是替换字符。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gbk_fallback_decodes_native_output() {
+    if !cfg!(windows)
+        || !matches!(
+            pig_core::task::windows_shell(),
+            pig_core::task::WindowsShell::GitBash(_)
+        )
+    {
+        return; // 回退 cmd 无 printf；非 Windows 走 lossy 不适用
+    }
+    let dir = temp_dir("gbk");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    let (out, is_error) = bash(
+        &dir,
+        &mut tracker,
+        &state,
+        // Rust 层双反斜杠 → shell 收到字面 \xd6 文本，printf 转成原始字节 D6 D0（GBK「中」）
+        serde_json::json!({"command": "printf 'prefix: \\xd6\\xd0\\n'"}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("prefix: 中"), "GBK 字节应整段回退解码: {out}");
+    assert!(!out.contains("\u{fffd}"), "不应出现替换字符: {out}");
 }

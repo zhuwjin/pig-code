@@ -32,6 +32,10 @@ const MAX_TASK_OUTPUT: usize = 64 * 1024;
 const SNAPSHOT_TAIL_CHARS: usize = 4000;
 /// spill 文件（全量输出落盘）上限 10MB，超出后停止写入。
 const MAX_SPILL_BYTES: u64 = 10 * 1024 * 1024;
+/// 任务累计输出上限（stdout+stderr 合计）：超过即强制停止任务——
+/// 防「狂喷输出的命令」在超时窗口内吃满前台 sink 内存，或转后台后无限跑下去
+///（kimi-code 同款 16MiB 强杀；spill 的 10MB 落盘上限与此独立）。
+const MAX_TASK_OUTPUT_TOTAL: usize = 16 * 1024 * 1024;
 
 pub struct TaskEntry {
     pub id: String,
@@ -170,13 +174,15 @@ fn spill_path_for(cwd: &Path, task_id: &str) -> PathBuf {
 }
 
 /// 注册表滚动 output（64KB 头部截断不变）；有 spill_path 同时追加落盘。
-fn append_output(registry: &TaskRegistry, task_id: &str, chunk: &[u8]) {
+/// raw 进 spill（字节保真，含挂起中的不完整序列）；text 是解码后的视图
+///（StreamDecoder 产出，Windows 上对非 UTF-8 输出按 GBK 回退）。
+fn append_output(registry: &TaskRegistry, task_id: &str, raw: &[u8], text: &str) {
     let spill = {
         let mut tasks = registry.lock().expect("task registry lock");
         let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
             return;
         };
-        entry.output.push_str(&String::from_utf8_lossy(chunk));
+        entry.output.push_str(text);
         if entry.output.len() > MAX_TASK_OUTPUT {
             let mut start = entry.output.len() - MAX_TASK_OUTPUT;
             while start < entry.output.len() && !entry.output.is_char_boundary(start) {
@@ -187,7 +193,7 @@ fn append_output(registry: &TaskRegistry, task_id: &str, chunk: &[u8]) {
         entry.spill_path.clone()
     };
     if let Some(path) = spill {
-        append_spill(&path, chunk);
+        append_spill(&path, raw);
     }
 }
 
@@ -263,46 +269,281 @@ pub fn register_agent_task(
     id
 }
 
-/// pipe 读者：chunk → 注册表滚动 output + spill 落盘；sink 非空时另存一份全文
+/// 任务输出累计计量（stdout/stderr 两个读者共享）：越过总量上限只触发一次强停。
+#[derive(Default)]
+struct OutputMeter {
+    total: AtomicUsize,
+    capped: AtomicBool,
+}
+
+impl OutputMeter {
+    /// 累计 n 字节；返回 true 表示「本次越过上限且此前未标记」，调用方执行一次性强停。
+    fn add(&self, n: usize) -> bool {
+        let prev = self.total.fetch_add(n, Ordering::Relaxed);
+        prev + n > MAX_TASK_OUTPUT_TOTAL && !self.capped.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// 输出超限的一次性强停：置 Killed（watcher 只在仍为 Running 时才写 Exited，
+/// 不会覆写）、output 落提示（滚动窗口保尾，提示恰好留在末尾）、杀进程树。
+fn cap_kill(registry: &TaskRegistry, task_id: &str) {
+    let pid = {
+        let mut tasks = registry.lock().expect("task registry lock");
+        let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
+            return;
+        };
+        if matches!(entry.status, TaskStatus::Running) {
+            entry.status = TaskStatus::Killed;
+            entry.ended_at = Some(now_secs());
+        }
+        entry
+            .output
+            .push_str("\n[输出超过 16MiB 上限，任务已被强制停止。请把大输出重定向到文件（如 command > out.txt）后用 Read/Grep 处理]");
+        entry.pid
+    };
+    if let Some(pid) = pid {
+        kill_process_tree(pid);
+    }
+}
+
+/// 杀进程树：Windows taskkill /T（含子进程）；unix 先杀进程组再补杀 pid
+///（spawn_shell 里 process_group(0) 使子进程自成组长）。
+fn kill_process_tree(pid: u32) {
+    if cfg!(target_os = "windows") {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .output();
+    } else {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", "--", &format!("-{pid}")])
+            .output();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
+
+/// pipe 读者：chunk → 解码（StreamDecoder：UTF-8 优先/Windows GBK 回退/跨块挂起）
+/// → 注册表滚动 output + spill 落盘（原始字节）；sink 非空时另存一份全文
 ///（前台 Completed 需要 stdout/stderr 分开渲染，注册表那份是合并流）。
+/// 越过 16MiB 总量上限时强停任务并停止读取。
 async fn read_into<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     registry: TaskRegistry,
     task_id: String,
     sink: Option<Arc<Mutex<String>>>,
+    meter: Arc<OutputMeter>,
 ) {
+    let mut decoder = crate::text::StreamDecoder::new();
     let mut buf = [0u8; 4096];
     loop {
         match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                append_output(&registry, &task_id, &buf[..n]);
+                let text = decoder.push(&buf[..n]);
+                append_output(&registry, &task_id, &buf[..n], &text);
                 if let Some(sink) = &sink {
-                    sink.lock()
-                        .expect("stream sink lock")
-                        .push_str(&String::from_utf8_lossy(&buf[..n]));
+                    sink.lock().expect("stream sink lock").push_str(&text);
+                }
+                if meter.add(n) {
+                    cap_kill(&registry, &task_id);
+                    break;
                 }
             }
         }
     }
+    // 流结束：残留的不完整尾部字节出清（不进 spill——原始字节已按块落过盘）
+    let tail = decoder.finish();
+    if !tail.is_empty() {
+        append_output(&registry, &task_id, b"", &tail);
+    }
 }
 
-/// 统一起 shell：sh -c / Windows cmd /C、工作目录、stdin null、stdout/stderr piped、
+/// Windows shell 探测结果：优先 Git Bash（Unix 语法 + UTF-8 输出），
+/// 找不到回退 cmd（pig-code 的既有行为，零新增失败模式）。
+#[derive(Clone, Debug)]
+pub enum WindowsShell {
+    GitBash(PathBuf),
+    Cmd,
+}
+
+/// 进程级缓存：探测链要跑 `git --exec-path`（子进程），不该每条命令重复；
+/// 结果在进程生命周期内不变，提示词 env 块也复用它做 Shell 标注。
+static WINDOWS_SHELL: std::sync::OnceLock<WindowsShell> = std::sync::OnceLock::new();
+
+pub fn windows_shell() -> WindowsShell {
+    WINDOWS_SHELL.get_or_init(detect_windows_shell).clone()
+}
+
+fn detect_windows_shell() -> WindowsShell {
+    detect_git_bash().map_or(WindowsShell::Cmd, WindowsShell::GitBash)
+}
+
+/// Git Bash 探测链（kimi-code 同款）：
+/// PIGCODE_SHELL_PATH 显式指定 → PATH 上的 bash.exe → PATH 上的 git.exe 反推
+/// 安装根（常规 cmd/bin 布局取上级；包管理器 shim 用 `git --exec-path` 穿透）
+/// → 常规安装位置。
+fn detect_git_bash() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PIGCODE_SHELL_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .collect();
+    for dir in &dirs {
+        let candidate = dir.join("bash.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    for dir in &dirs {
+        for git_exe in [
+            dir.join("git.exe"),
+            dir.join("cmd").join("git.exe"),
+            dir.join("bin").join("git.exe"),
+        ] {
+            if !git_exe.is_file() {
+                continue;
+            }
+            for candidate in git_bash_candidates(&git_exe) {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            if let Some(root) = git_root_from_exec_path(&git_exe) {
+                for sub in ["bin", "usr\\bin"] {
+                    let candidate = root.join(sub).join("bash.exe");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+    for base in program_file_bases() {
+        for sub in ["Git\\bin", "Git\\usr\\bin"] {
+            let candidate = base.join(sub).join("bash.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// git.exe → 同根 bash.exe 候选（常规安装布局：git 在 cmd\ 或 bin\ 下，取上上级为根）。
+fn git_bash_candidates(git_exe: &Path) -> Vec<PathBuf> {
+    let Some(parent) = git_exe.parent() else {
+        return Vec::new();
+    };
+    let in_layout_dir = parent
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| matches!(name.to_ascii_lowercase().as_str(), "cmd" | "bin"));
+    if !in_layout_dir {
+        return Vec::new();
+    }
+    let Some(root) = parent.parent() else {
+        return Vec::new();
+    };
+    vec![root.join("bin").join("bash.exe"), root.join("usr").join("bash.exe")]
+}
+
+/// `git --exec-path` 输出 → 安装根：…/Git/mingw64/libexec/git-core → …/Git。
+/// Scoop/Chocolatey/WinGet 的 shim 不在 cmd/bin 布局里，靠这一步定位真实安装根。
+fn git_root_from_exec_path(git_exe: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new(git_exe)
+        .arg("--exec-path")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    root_from_exec_path_text(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn root_from_exec_path_text(text: &str) -> Option<PathBuf> {
+    let path = Path::new(text.trim());
+    let components: Vec<_> = path.components().collect();
+    for (ix, component) in components.iter().enumerate() {
+        if let std::path::Component::Normal(name) = component {
+            let Some(name) = name.to_str() else { continue };
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "mingw32" | "mingw64" | "ucrt64" | "clang64" | "clangarm64"
+            ) {
+                return Some(components[..ix].iter().collect());
+            }
+        }
+    }
+    // 无 MINGW 段（非常规布局）：exec-path/libexec/git-core 往上两级兜底
+    path.ancestors().nth(2).map(Path::to_path_buf)
+}
+
+fn program_file_bases() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(value) = std::env::var_os(key) {
+            bases.push(PathBuf::from(value));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        bases.push(PathBuf::from(local).join("Programs"));
+    }
+    bases
+}
+
+/// 提示词 env 块的 Shell 标注：模型据此选择命令方言。
+pub fn shell_label() -> String {
+    if cfg!(target_os = "windows") {
+        match windows_shell() {
+            WindowsShell::GitBash(_) => "Git Bash（bash -c，Unix 语法）".to_string(),
+            WindowsShell::Cmd => "cmd /C（Windows 语法）".to_string(),
+        }
+    } else {
+        "sh -c（Unix 语法）".to_string()
+    }
+}
+
+/// cmd 的 NUL 重定向改写为 /dev/null（Git Bash 下 NUL 设备不可用；kimi 同款）。
+/// 只改写 `>nul`/`>NUL`（含 `>>` 与空格形态），不影响作为普通参数的 NUL。
+fn rewrite_nul_redirects(command: &str) -> String {
+    command
+        .replace("> nul", "> /dev/null")
+        .replace("> NUL", "> /dev/null")
+        .replace(">nul", ">/dev/null")
+        .replace(">NUL", ">/dev/null")
+}
+
+/// 统一起 shell：Windows 优先 Git Bash（bash -c，探测见 windows_shell）、
+/// 回退 cmd /C；其余平台 sh -c。工作目录、stdin null、stdout/stderr piped、
 /// kill_on_drop。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0
-///（防 git 交互提问挂死，kimi-code 同款三件套）。
+///（防 git 交互提问挂死）+ PYTHONIOENCODING/PYTHONUTF8=1（Python 子进程强制
+/// UTF-8 输出，ZCode 同款）；LANG 未设时补 C.UTF-8。
 /// unix 上 process_group(0) 让子进程自成进程组组长，stop_task 才能整组树杀。
 fn spawn_shell(cwd: &Path, command: &str) -> std::io::Result<tokio::process::Child> {
+    let command = command.to_string();
     let mut shell = if cfg!(target_os = "windows") {
-        tokio::process::Command::new("cmd")
+        match windows_shell() {
+            WindowsShell::GitBash(bash) => {
+                let mut shell = tokio::process::Command::new(bash);
+                shell.arg("-c").arg(rewrite_nul_redirects(&command));
+                shell
+            }
+            WindowsShell::Cmd => {
+                let mut shell = tokio::process::Command::new("cmd");
+                shell.arg("/C").arg(command);
+                shell
+            }
+        }
     } else {
-        tokio::process::Command::new("sh")
+        let mut shell = tokio::process::Command::new("sh");
+        shell.arg("-c").arg(command);
+        shell
     };
     shell
-        .args(if cfg!(target_os = "windows") {
-            vec!["/C", command]
-        } else {
-            vec!["-c", command]
-        })
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -310,7 +551,12 @@ fn spawn_shell(cwd: &Path, command: &str) -> std::io::Result<tokio::process::Chi
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .kill_on_drop(true);
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1");
+    if std::env::var_os("LANG").is_none() && std::env::var_os("LC_ALL").is_none() {
+        shell.env("LANG", "C.UTF-8");
+    }
+    shell.kill_on_drop(true);
     #[cfg(unix)]
     shell.process_group(0);
     shell.spawn()
@@ -384,17 +630,20 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
     };
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
+    let meter = Arc::new(OutputMeter::default());
     let read_out = tokio::spawn(read_into(
         stdout,
         state.tasks.clone(),
         task_id.clone(),
         None,
+        meter.clone(),
     ));
     let read_err = tokio::spawn(read_into(
         stderr,
         state.tasks.clone(),
         task_id.clone(),
         None,
+        meter,
     ));
     spawn_watcher(
         state.tasks.clone(),
@@ -497,17 +746,20 @@ pub async fn run_foreground(
     let stderr = child.stderr.take().expect("stderr piped");
     let stdout_sink = Arc::new(Mutex::new(String::new()));
     let stderr_sink = Arc::new(Mutex::new(String::new()));
+    let meter = Arc::new(OutputMeter::default());
     let read_out = tokio::spawn(read_into(
         stdout,
         state.tasks.clone(),
         task_id.clone(),
         Some(stdout_sink.clone()),
+        meter.clone(),
     ));
     let read_err = tokio::spawn(read_into(
         stderr,
         state.tasks.clone(),
         task_id.clone(),
         Some(stderr_sink.clone()),
+        meter.clone(),
     ));
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => {
@@ -535,6 +787,13 @@ pub async fn run_foreground(
                 }
                 output.push_str("[stderr]\n");
                 output.push_str(&stderr);
+            }
+            // 输出总量超限被强停：完成的输出尾部补说明（注册表那条提示
+            // 随条目一起移除了，模型只能看到这里的 sink 全文）
+            if meter.capped.load(Ordering::Relaxed) {
+                output.push_str(
+                    "\n\n[输出超过 16MiB 上限，命令已被强制停止。请把大输出重定向到文件（如 command > out.txt）后用 Read/Grep 处理]",
+                );
             }
             ForegroundOutcome::Completed {
                 output,
@@ -594,19 +853,84 @@ pub fn stop_task(
     if let Some(token) = cancel {
         token.cancel();
     } else if let Some(pid) = pid {
-        if cfg!(target_os = "windows") {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F", "/T"])
-                .output();
-        } else {
-            let _ = std::process::Command::new("kill")
-                .args(["-9", "--", &format!("-{pid}")])
-                .output();
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output();
-        }
+        kill_process_tree(pid);
     }
     let _ = notify.send(session_id.to_string());
     Ok(format!("已停止任务 {task_id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `git --exec-path` 输出 → 安装根：MINGW 段定位（git 输出正斜杠路径）。
+    #[test]
+    fn exec_path_root_inference() {
+        let root = root_from_exec_path_text(
+            "C:/Program Files/Git/mingw64/libexec/git-core\n",
+        )
+        .expect("常规布局应命中");
+        assert_eq!(root, PathBuf::from("C:\\Program Files\\Git"));
+
+        let root = root_from_exec_path_text("C:/Git/ucrt64/libexec/git-core").unwrap();
+        assert_eq!(root, PathBuf::from("C:\\Git"));
+
+        // shim 布局：mingw 段在最前也能取到盘符根
+        let root = root_from_exec_path_text("D:/mingw64/libexec/git-core").unwrap();
+        assert_eq!(root, PathBuf::from("D:\\"));
+
+        // 无 MINGW 段：往上两级兜底（libexec/git-core → 根）
+        let root = root_from_exec_path_text("C:/x/libexec/git-core").unwrap();
+        assert_eq!(root, PathBuf::from("C:\\x"));
+
+        assert!(root_from_exec_path_text("").is_none());
+    }
+
+    /// git.exe 布局反推 bash 候选：cmd/bin 下取上上级；其他布局不出候选。
+    #[test]
+    fn git_bash_candidate_inference() {
+        let candidates = git_bash_candidates(Path::new("C:/Git/cmd/git.exe"));
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("C:/Git/bin/bash.exe"),
+                PathBuf::from("C:/Git/usr/bash.exe")
+            ]
+        );
+        // shim 目录（非 cmd/bin）不该出候选
+        assert!(git_bash_candidates(Path::new("C:/shim/git.exe")).is_empty());
+    }
+
+    /// NUL 重定向改写：只动重定向目标，不动普通参数。
+    #[test]
+    fn nul_redirect_rewrite() {
+        assert_eq!(
+            rewrite_nul_redirects("ipconfig > NUL 2>&1 && echo ok"),
+            "ipconfig > /dev/null 2>&1 && echo ok"
+        );
+        assert_eq!(
+            rewrite_nul_redirects("dir >>nul"),
+            "dir >>/dev/null"
+        );
+        assert_eq!(
+            rewrite_nul_redirects("echo NUL is a word"),
+            "echo NUL is a word"
+        );
+    }
+
+    /// 本机有 git 时（pig-code 硬依赖），探测必须找到 Git Bash。
+    #[test]
+    fn detection_finds_bash_when_git_present() {
+        let git_on_path = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !git_on_path {
+            return; // 无 git 的机器（理论不存在：pig-code 硬依赖 git）跳过
+        }
+        assert!(
+            matches!(windows_shell(), WindowsShell::GitBash(_)),
+            "git 可用却没探测到 Git Bash"
+        );
+    }
 }

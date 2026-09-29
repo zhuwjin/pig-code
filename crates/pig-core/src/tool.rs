@@ -17,6 +17,24 @@ const MAX_MATCH_RESULTS: usize = 200;
 /// Bash 前台输出字符上限，超过则头尾预览 + 完整输出留 spill 文件
 const MAX_BASH_OUTPUT: usize = 30 * 1024;
 const MAX_GREP_FILE_SIZE: u64 = 2 * 1024 * 1024;
+/// Grep 匹配行字符上限（对标 rg --max-columns）：minified JS/单行大 JSON
+/// 一次命中就能打爆上下文，超长行截断显示
+const MAX_GREP_LINE_CHARS: usize = 500;
+/// Read 读盘前的文件体积上限：防止「先整个读进内存再做输出预算」撑爆内存
+const MAX_READ_FILE_BYTES: u64 = 100 * 1024 * 1024;
+/// Edit 上限（整读+整写，比 Read 更保守）
+const MAX_EDIT_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// 体积护栏的报错构造：超上限返回 Some(文案)，调用方各自负责 stat 与 NotFound 文案。
+fn file_size_error(len: u64, cap: u64, hint: &str) -> Option<String> {
+    (len > cap).then(|| {
+        format!(
+            "文件过大（{} MB，超过 {} MB 上限）；{hint}",
+            len / 1024 / 1024,
+            cap / 1024 / 1024
+        )
+    })
+}
 
 pub struct FileChange {
     pub path: String,
@@ -704,7 +722,7 @@ impl Tool for ReadFile {
             "type": "function",
             "function": {
                 "name": "Read",
-                "description": "读取工作区内文件内容，输出带「行号\\t」前缀。path 相对工作目录；文件过长时用 offset/limit 分页（单次约 10 万字符上限，单行超 2000 字符会截断）。UTF-16/GBK 文件自动转码显示，二进制文件会拒绝。",
+                "description": "读取工作区内文件内容，输出带「行号\\t」前缀。path 相对工作目录；文件过长时用 offset/limit 分页（单次约 10 万字符上限，单行超 2000 字符会截断）。UTF-16/GBK 文件自动转码显示，二进制文件会拒绝。超过 100MB 的文件会拒绝（用 Grep 定位或 Bash 分段查看）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -728,6 +746,15 @@ impl Tool for ReadFile {
             let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
+            }
+            // 体积护栏：先 stat 再读盘，防整文件进内存（NotFound 仍走引导文案）
+            let meta = std::fs::metadata(&full).map_err(|e| read_io_error(path, &full, e))?;
+            if let Some(err) = file_size_error(
+                meta.len(),
+                MAX_READ_FILE_BYTES,
+                "请用 Grep 搜索关键内容，或用 Bash（head/tail/grep）分段查看",
+            ) {
+                return Err(err);
             }
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
             let doc = match crate::text::decode(&bytes) {
@@ -934,7 +961,16 @@ impl Tool for WriteFile {
                 return Err(sensitive_file_error(&full));
             }
             // 已存在文件沿用其编码/BOM/行尾写回；无法识别（二进制/未知编码）按 UTF-8/LF 覆盖；
-            // 新文件一律 UTF-8/LF
+            // 新文件一律 UTF-8/LF。存量文件超 Read 上限不允许整文件覆盖（内存护栏同口径）
+            if let Some(err) = std::fs::metadata(&full).ok().and_then(|m| {
+                file_size_error(
+                    m.len(),
+                    MAX_READ_FILE_BYTES,
+                    "目标文件过大，请改用 Edit 做局部修改",
+                )
+            }) {
+                return Err(err);
+            }
             let existing = std::fs::read(&full).ok();
             check_fresh(ctx.state, &full, existing.is_some(), "写入")?;
             let (encoding, bom, line_ending, note) = match &existing {
@@ -993,7 +1029,7 @@ impl Tool for EditFile {
             "type": "function",
             "function": {
                 "name": "Edit",
-                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现（replace_all=true 时替换全部出现）；先 Read 确认内容再改。保留原文件的编码与行尾。",
+                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现（replace_all=true 时替换全部出现）；先 Read 确认内容再改。保留原文件的编码与行尾。超过 50MB 的文件会拒绝（大文件请用 Bash sed/awk）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1027,6 +1063,16 @@ impl Tool for EditFile {
             let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Write)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
+            }
+            // 体积护栏放在新鲜度检查之前：大文件直接拒绝，不进整读整写
+            if let Some(err) = std::fs::metadata(&full).ok().and_then(|m| {
+                file_size_error(
+                    m.len(),
+                    MAX_EDIT_FILE_BYTES,
+                    "不适合整文件编辑；请用 Bash（sed/awk）做局部修改，或先拆分文件",
+                )
+            }) {
+                return Err(err);
             }
             check_fresh(ctx.state, &full, full.exists(), "修改")?;
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
@@ -1873,7 +1919,15 @@ impl Tool for Grep {
                 let relative = relative.to_string_lossy().replace('\\', "/");
                 for (line_no, line) in content.lines().enumerate() {
                     if regex.is_match(line) {
-                        out.push(format!("{relative}:{}: {line}", line_no + 1));
+                        // 超长行截断（对标 rg --max-columns）：minified 文件单行命中
+                        // 就能打爆上下文
+                        let shown = if line.chars().count() > MAX_GREP_LINE_CHARS {
+                            let taken: String = line.chars().take(MAX_GREP_LINE_CHARS).collect();
+                            format!("{taken} [...行超长已截断]")
+                        } else {
+                            line.to_string()
+                        };
+                        out.push(format!("{relative}:{}: {shown}", line_no + 1));
                         if out.len() >= MAX_MATCH_RESULTS {
                             out.push(format!("[结果过多，已截断为前 {MAX_MATCH_RESULTS} 行]"));
                             break 'files;
@@ -2064,7 +2118,7 @@ impl Tool for Bash {
             "type": "function",
             "function": {
                 "name": "Bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。高风险命令会弹窗请用户确认。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
+                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。高风险命令会弹窗请用户确认。Windows 下优先用 Git Bash（Unix 语法），未安装时回退 cmd /C——以系统提示 env 块的 Shell 标注为准。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览，累计超 16MiB 强制停止。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
                 "parameters": {
                     "type": "object",
                     "properties": {

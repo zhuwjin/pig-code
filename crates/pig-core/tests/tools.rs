@@ -780,3 +780,71 @@ fn fetch_url_rejects_embedded_credentials() {
     let url = reqwest::Url::parse("file:///etc/passwd").unwrap();
     assert!(tool::check_fetch_url(&url).is_err(), "scheme 白名单");
 }
+
+/// 读盘前体积护栏：set_len 造出 101MB 逻辑大文件（NTFS 稀疏扩展，秒级），
+/// Read 应在读盘前拒绝；护栏优先于新鲜度检查（Edit 无需先 Read 就报体积错误）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_and_edit_reject_oversized_files() {
+    let dir = temp_dir("size-cap");
+
+    let huge_read = dir.join("huge_read.log");
+    let f = std::fs::File::create(&huge_read).unwrap();
+    f.set_len(101 * 1024 * 1024).unwrap();
+    drop(f);
+    let (out, is_error, ..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "huge_read.log"})),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut ChangeTracker::default(),
+            state: &SessionToolState::for_test(),
+        },
+    )
+    .await;
+    assert!(is_error, "应拒绝: {out}");
+    assert!(
+        out.contains("文件过大") && out.contains("100 MB"),
+        "文案带上限与绕行引导: {out}"
+    );
+
+    // 51MB：低于 Read 上限但高于 Edit 上限；未 Read 过也应先报体积（护栏在前）
+    let huge_edit = dir.join("huge_edit.txt");
+    let f = std::fs::File::create(&huge_edit).unwrap();
+    f.set_len(51 * 1024 * 1024).unwrap();
+    drop(f);
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "huge_edit.txt", "old_string": "a", "new_string": "b"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut ChangeTracker::default(),
+            state: &SessionToolState::for_test(),
+        },
+    )
+    .await;
+    assert!(is_error, "应拒绝: {out}");
+    assert!(
+        out.contains("50 MB"),
+        "体积护栏应先于新鲜度检查: {out}"
+    );
+
+    // 存量超限文件整文件覆盖同样拒绝（Write 的内存护栏）
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "Write",
+            serde_json::json!({"path": "huge_read.log", "content": "x"}),
+        ),
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut ChangeTracker::default(),
+            state: &SessionToolState::for_test(),
+        },
+    )
+    .await;
+    assert!(is_error, "应拒绝: {out}");
+    assert!(out.contains("文件过大"), "{out}");
+
+    let _ = std::fs::remove_file(&huge_read);
+    let _ = std::fs::remove_file(&huge_edit);
+}
