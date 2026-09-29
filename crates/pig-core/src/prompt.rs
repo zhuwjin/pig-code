@@ -175,10 +175,10 @@ pub fn system_prompt(
 /// 单测保证清单与 tool::all() 注册表同步（新增工具必须同步补一行）。
 fn tool_summaries() -> &'static [(&'static str, &'static str)] {
     &[
-        ("Read", "读取工作区文件，输出带行号；超长用 offset/limit 分页"),
+        ("Read", "读取工作区文件，输出带行号；offset/limit 分页，超长行 column_offset 续读"),
         ("ReadMediaFile", "读取图片（PNG/JPEG/GIF/WebP），自动缩放，region 可裁剪局部"),
         ("Write", "写入整个文件（自动创建父目录）"),
-        ("Edit", "精确替换文本片段（old_string 唯一定位；replace_all=true 全替换）"),
+        ("Edit", "精确替换文本片段（old_string 唯一定位；replace_all 全替换；行号/引号/转义容错）"),
         ("Glob", "按模式匹配文件名（尊重 .gitignore，mtime 降序；head_limit/offset 分页）"),
         ("Grep", "正则搜索内容，输出 文件:行号: 内容；支持上下文行、files/count 模式与分页"),
         ("Bash", "执行 shell 命令（按 env 块 Shell 标注选方言）；timeout 超时自动转后台，长输出落盘"),

@@ -848,3 +848,121 @@ async fn read_and_edit_reject_oversized_files() {
     let _ = std::fs::remove_file(&huge_read);
     let _ = std::fs::remove_file(&huge_edit);
 }
+
+/// Edit 第 4 级容错:old_string 写成字面 \n 等转义序列时自动反转义匹配,
+/// new_string 同步反转义;精确命中优先;未识别转义不套用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_unescape_tier_matches_literal_escapes() {
+    let dir = temp_dir("edit-unescape");
+    std::fs::write(dir.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    // 先 Read 过(新鲜度)
+    let (..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "a.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+
+    // old_string 是字面 "alpha\nbeta"(Rust 源里 \n = 反斜杠+n 两字符)
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "a.txt", "old_string": "alpha\\nbeta", "new_string": "X\\tY"}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("已反转义"), "应注明容错层级: {out}");
+    let after = std::fs::read_to_string(dir.join("a.txt")).unwrap();
+    assert_eq!(after, "X\tY\n", "new_string 的字面 \t 应转成真实制表符");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
+    let dir = temp_dir("edit-unescape2");
+    // 文件里就是字面反斜杠 n 两个字符
+    std::fs::write(dir.join("b.txt"), "a\\nb plain\n").unwrap();
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+    let (..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "b.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+
+    // 精确命中:无需容错,替换后不含层级注记
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "b.txt", "old_string": "a\\nb", "new_string": "ok"}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(!out.contains("容错"), "精确命中不该走容错: {out}");
+
+    // 未识别转义(\d 不是可反转义序列):反转义级不套用 → NotFound
+    std::fs::write(dir.join("c.txt"), "hello\n").unwrap();
+    let (..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "c.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "c.txt", "old_string": "hel\\dlo", "new_string": "x"}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(is_error, "未识别转义应不匹配: {out}");
+    assert!(out.contains("未找到"), "{out}");
+}
+
+/// Read 重复读短路:同参数 + 内容未变 → 「文件未变化」;外部修改后恢复全文输出。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_shortcircuits_identical_view() {
+    let dir = temp_dir("read-unchanged");
+    std::fs::write(dir.join("u.txt"), "same content\n").unwrap();
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    let (out, is_error, ..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "u.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("same content"), "{out}");
+
+    // 同参数重读 → 短路
+    let (out, is_error, ..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "u.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("文件未变化"), "{out}");
+
+    // 不同参数(limit) → 正常输出
+    let (out, ..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "u.txt", "limit": 5})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(out.contains("same content"), "不同视图参数应正常输出: {out}");
+
+    // 外部修改 → hash 变化,恢复正常输出(并更新状态)
+    std::fs::write(dir.join("u.txt"), "changed content\n").unwrap();
+    let (out, ..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "u.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(out.contains("changed content"), "{out}");
+}

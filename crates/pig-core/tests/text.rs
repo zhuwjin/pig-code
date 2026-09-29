@@ -294,11 +294,22 @@ async fn read_long_line_truncated() {
         run_tool(&dir, "Read", serde_json::json!({"path": "long.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(
-        out.contains("[...本行已截断，共 3000 字符]"),
-        "应有单行截断标记: {}",
+        out.contains("用 column_offset=2000 续读"),
+        "截断标记应带续读参数: {}",
         &out[..out.len().min(300)]
     );
+    assert!(out.contains("共 3000"), "{out}");
     assert!(out.contains("2\tshort"), "{out}");
+
+    // 续读:2000 起可见 1000 字符,装得下 → 无续读标记,带区间说明
+    let (out, _, _, _, _) = run_tool(
+        &dir,
+        "Read",
+        serde_json::json!({"path": "long.txt", "column_offset": 2000}),
+    )
+    .await;
+    assert!(!out.contains("续读"), "末段不应再有续读标记: {out}");
+    assert!(out.contains("本行第 2001-3000 字符"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

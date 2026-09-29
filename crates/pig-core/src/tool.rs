@@ -735,13 +735,14 @@ impl Tool for ReadFile {
             "type": "function",
             "function": {
                 "name": "Read",
-                "description": "读取工作区内文件内容，输出带「行号\\t」前缀。path 相对工作目录；文件过长时用 offset/limit 分页（单次约 10 万字符上限，单行超 2000 字符会截断）。UTF-16/GBK 文件自动转码显示，二进制文件会拒绝。超过 100MB 的文件会拒绝（用 Grep 定位或 Bash 分段查看）。",
+                "description": "读取工作区内文件内容，输出带「行号\\t」前缀。path 相对工作目录；文件过长用 offset/limit 分页（单次约 10 万字符上限）；单行超 2000 字符用 column_offset 续读。UTF-16/GBK 文件自动转码显示，二进制文件会拒绝。超过 100MB 的文件会拒绝（用 Grep 定位或 Bash 分段查看）。相同参数重读未变化的文件会返回「文件未变化」而不重复输出全文。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "相对工作目录的文件路径" },
                         "offset": { "type": "integer", "description": "起始行号（从 1 开始），默认 1" },
-                        "limit": { "type": "integer", "description": "最多读取行数，默认 2000" }
+                        "limit": { "type": "integer", "description": "最多读取行数，默认 2000" },
+                        "column_offset": { "type": "integer", "description": "每行起始字符列（0 起）。用于续读超 2000 字符的长行——截断提示会给出下一页的 column_offset 值" }
                     },
                     "required": ["path"]
                 }
@@ -790,15 +791,33 @@ impl Tool for ReadFile {
                 }
             };
             if doc.text.is_empty() {
-                record_read_state(ctx.state, &full, &bytes, false);
+                record_read_state(ctx.state, &full, &bytes, false, None);
                 return Ok(ToolEffect::plain("（空文件）".to_string()));
             }
             let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
             let limit = args["limit"].as_u64().unwrap_or(MAX_READ_LINES as u64) as usize;
+            let column_offset = args["column_offset"].as_u64().unwrap_or(0) as usize;
+            // 重复读短路（ZCode file_unchanged 同款）：同视图参数 + 内容 hash 未变
+            // → 不再输出全文，省 token。刷新流程用的是同一条 read_states 记录，
+            // hash 一致意味着新鲜度信息无需更新。
+            let view = (offset, limit, column_offset);
+            let unchanged = match ctx.state.read_states.lock() {
+                Ok(states) => states.get(&full).is_some_and(|r| {
+                    // 截断输出对同参数是确定性的，预算截断的读同样可短路
+                    r.hash == hash_bytes(&bytes) && r.view == Some(view)
+                }),
+                Err(_) => false,
+            };
+            if unchanged {
+                return Ok(ToolEffect::plain(
+                    "（文件未变化：与上次 Read 参数相同且内容一致，无需重复读取）".to_string(),
+                ));
+            }
             let lines: Vec<&str> = doc.text.lines().collect();
             let total = lines.len();
             let start = (offset - 1).min(total);
-            // 逐行渲染（带行号），行数上限与字符预算（含行号前缀）先到先停
+            // 逐行渲染（带行号），行数上限与字符预算（含行号前缀）先到先停；
+            // 超长行按 column_offset 起读，截断提示带续读参数
             let mut rendered: Vec<String> = Vec::new();
             let mut used_chars = 0usize;
             let mut end = start;
@@ -808,9 +827,21 @@ impl Tool for ReadFile {
                 }
                 let line_no = index + 1;
                 let line_chars = line.chars().count();
-                let body = if line_chars > MAX_LINE_CHARS {
-                    let taken: String = line.chars().take(MAX_LINE_CHARS).collect();
-                    format!("{taken} [...本行已截断，共 {line_chars} 字符]")
+                let visible = line_chars.saturating_sub(column_offset);
+                let body = if visible > MAX_LINE_CHARS {
+                    let taken: String = line
+                        .chars()
+                        .skip(column_offset)
+                        .take(MAX_LINE_CHARS)
+                        .collect();
+                    let next = column_offset + MAX_LINE_CHARS;
+                    format!(
+                        "{taken} [...本行未完，已读第 {}-{next} 字符（共 {line_chars}），用 column_offset={next} 续读]",
+                        column_offset + 1
+                    )
+                } else if column_offset > 0 {
+                    let taken: String = line.chars().skip(column_offset).collect();
+                    format!("{taken} [本行第 {}-{line_chars} 字符（共 {line_chars}）]", column_offset + 1)
                 } else {
                     (*line).to_string()
                 };
@@ -843,7 +874,13 @@ impl Tool for ReadFile {
             }
             // ZCode 口径：只有被预算截断的「整读」才算 partial；显式分页读不算
             let paged = args.get("offset").is_some() || args.get("limit").is_some();
-            record_read_state(ctx.state, &full, &bytes, !paged && end < total);
+            record_read_state(
+                ctx.state,
+                &full,
+                &bytes,
+                !paged && end < total,
+                Some(view),
+            );
             Ok(ToolEffect::plain(out))
         })
     }
@@ -884,14 +921,22 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// Read 成功登记 / Write/Edit 写盘后刷新 新鲜度状态（mtime 取写盘后的新值）
-fn record_read_state(state: &SessionToolState, full: &Path, bytes: &[u8], partial: bool) {
+/// Read 成功登记 / Write/Edit 写盘后刷新 新鲜度状态（mtime 取写盘后的新值）。
+/// view：Read 携带本次视图参数（供重复读短路）；内部刷新传 None。
+fn record_read_state(
+    state: &SessionToolState,
+    full: &Path,
+    bytes: &[u8],
+    partial: bool,
+    view: Option<(usize, usize, usize)>,
+) {
     let mtime = std::fs::metadata(full).ok().and_then(|m| m.modified().ok());
     let entry = crate::task::ReadState {
         mtime,
         size: bytes.len() as u64,
         hash: hash_bytes(bytes),
         partial,
+        view,
     };
     if let Ok(mut states) = state.read_states.lock() {
         states.insert(full.to_path_buf(), entry);
@@ -932,7 +977,7 @@ fn check_fresh(
     }
     let bytes = std::fs::read(full).map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
     if hash_bytes(&bytes) == read_hash {
-        record_read_state(state, full, &bytes, false);
+        record_read_state(state, full, &bytes, false, None);
         return Ok(());
     }
     Err("文件自上次 Read 后已被外部修改，请先重新 Read 再改（避免覆盖他人改动）".to_string())
@@ -1019,7 +1064,7 @@ impl Tool for WriteFile {
             std::fs::write(&full, &bytes)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
             // 写盘后刷新新鲜度：紧接着再 Edit 自己刚写的文件必须合法
-            record_read_state(ctx.state, &full, &bytes, false);
+            record_read_state(ctx.state, &full, &bytes, false, None);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, &after));
             Ok(ToolEffect {
@@ -1042,7 +1087,7 @@ impl Tool for EditFile {
             "type": "function",
             "function": {
                 "name": "Edit",
-                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现（replace_all=true 时替换全部出现）；先 Read 确认内容再改。保留原文件的编码与行尾。超过 50MB 的文件会拒绝（大文件请用 Bash sed/awk）。",
+                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现（replace_all=true 时替换全部出现）；先 Read 确认内容再改。行号前缀、弯直引号、字面 \\n 等转义序列的常见笔误有容错匹配（命中时输出会注明）。保留原文件的编码与行尾。超过 50MB 的文件会拒绝（大文件请用 Bash sed/awk）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1118,7 +1163,7 @@ impl Tool for EditFile {
             std::fs::write(&full, &encoded)
                 .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
             // 写盘后刷新新鲜度：紧接着再改自己刚写的文件必须合法
-            record_read_state(ctx.state, &full, &encoded, false);
+            record_read_state(ctx.state, &full, &encoded, false, None);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             let output = if replace_all {
@@ -1153,9 +1198,9 @@ pub struct EditOutcome {
     pub tier_note: Option<&'static str>,
 }
 
-/// Edit 的匹配+替换计算（LF 视图）：精确 → 剥离 Read 行号前缀 → 引号归一 三级梯队，
-/// 每级各自做唯一性检查；replace_all 只走精确（宽匹配仅做单次替换）。
-/// 审批预览与 Edit 执行共用，保证「预览即所得」。
+/// Edit 的匹配+替换计算（LF 视图）：精确 → 剥离 Read 行号前缀 → 引号归一 →
+/// 反转义归一 四级梯队，每级各自做唯一性检查；replace_all 只走精确
+/// （宽匹配仅做单次替换）。审批预览与 Edit 执行共用，保证「预览即所得」。
 pub fn compute_edit(
     content_lf: &str,
     old: &str,
@@ -1186,6 +1231,21 @@ pub fn compute_edit(
                 tier_note = Some("容错匹配：引号风格已跟随文件");
             } else if windows.len() > 1 {
                 count = windows.len();
+            }
+        }
+        // 第 4 级：反转义归一——模型把字面 \n\t\r 等写进 old_string
+        //（从字符串字面量/JSON 复制时常见）；new_string 同步反转义（ZCode 同款）。
+        // 出现未识别转义或尾部孤立反斜杠时不应用（宁可不匹配也不乱改）。
+        if count == 0
+            && let Some(old_un) = unescape_literal(old)
+        {
+            let new_un = unescape_literal(new).unwrap_or_else(|| new.to_string());
+            let un_count = content_lf.matches(&old_un).count();
+            if un_count > 0 {
+                count = un_count;
+                effective_old = old_un;
+                effective_new = new_un;
+                tier_note = Some("容错匹配：已反转义字面转义序列");
             }
         }
     }
@@ -1403,6 +1463,45 @@ fn apply_replacement(content: &str, old: &str, new: &str, replace_all: bool) -> 
     }
     out.push_str(rest);
     (out, replaced)
+}
+
+/// Edit 容错第 4 级：反转义字面转义序列（\n \t \r \" \' \` \$ \\ → 真实字符）。
+/// 未识别的转义组合保持原样；尾部孤立反斜杠返回 None（无法安全解释）；
+/// 完全不含转义序列也返回 None（该级无需参与）。
+fn unescape_literal(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut escaped_any = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => {
+                out.push('\n');
+                escaped_any = true;
+            }
+            Some('t') => {
+                out.push('\t');
+                escaped_any = true;
+            }
+            Some('r') => {
+                out.push('\r');
+                escaped_any = true;
+            }
+            Some(escaped @ ('"' | '\'' | '`' | '$' | '\\')) => {
+                out.push(escaped);
+                escaped_any = true;
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => return None,
+        }
+    }
+    escaped_any.then_some(out)
 }
 
 /// Edit 容错第 2 级：剥离 Read 输出的行号前缀（每行 ^\d+\t 或 ^\d+:）。

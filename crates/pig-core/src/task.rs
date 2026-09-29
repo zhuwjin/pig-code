@@ -24,6 +24,10 @@ pub struct ReadState {
     pub hash: u64,
     /// 本次读取是否被预算截断（不完整视图）；显式 offset/limit 分页读不算
     pub partial: bool,
+    /// 最近一次成功 Read 的视图参数（offset, limit, column_offset）：
+    /// 同参数重读且 hash 未变时短路返回「文件未变化」省 token。
+    /// Write/Edit/check_fresh 的内部刷新不带视图（None）。
+    pub view: Option<(usize, usize, usize)>,
 }
 
 /// 注册表内 output 滚动上限（追加时从头部截断）。
