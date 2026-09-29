@@ -1,5 +1,31 @@
 use super::*;
 
+/// 原子落盘（Write/Edit 共用）：同目录临时文件 + rename，中途崩溃/断电不会
+/// 留下半截内容（同卷 rename 原子；Windows 上 std rename 也覆盖已存在目标）。
+/// 临时名带 pid+纳秒防并发碰撞；失败清理临时文件。
+pub(crate) fn atomic_write(full: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = full.parent().unwrap_or_else(|| Path::new("."));
+    let name = full
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), nanos));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        return Err(format!("写入失败 {}: {e}", full.display()));
+    }
+    match std::fs::rename(&tmp, full) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("写入失败 {}: {e}", full.display()))
+        }
+    }
+}
+
 impl Tool for WriteFile {
     fn name(&self) -> &'static str {
         "Write"
@@ -78,8 +104,7 @@ impl Tool for WriteFile {
             let after = content.replace("\r\n", "\n");
             ctx.tracker.snapshot(&full)?;
             let bytes = crate::text::encode(content, encoding, bom, line_ending)?;
-            std::fs::write(&full, &bytes)
-                .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
+            atomic_write(&full, &bytes)?;
             // 写盘后刷新新鲜度：紧接着再 Edit 自己刚写的文件必须合法
             record_read_state(ctx.state, &full, &bytes, false, None);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();

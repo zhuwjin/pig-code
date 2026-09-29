@@ -174,7 +174,7 @@ impl Tool for FetchUrl {
             "type": "function",
             "function": {
                 "name": "FetchURL",
-                "description": "抓取公开网页并提取正文（HTML 自动清洗为纯文本，JSON/纯文本原样返回）。不支持需要登录的页面。URL 不允许内嵌凭据，域名会先做 DNS 私网校验。",
+                "description": "抓取网页并提取正文（HTML 自动清洗为纯文本，JSON/纯文本原样返回；GBK/Big5/Shift-JIS 等非 UTF-8 页面按 charset 自动解码）。支持 http 与 https——本机/局域网地址（localhost、192.168.x.x 等）可直接用 http 访问。不支持需要登录的页面，URL 不允许内嵌凭据。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -194,10 +194,17 @@ impl Tool for FetchUrl {
         Box::pin(async move {
             let url = args["url"].as_str().ok_or("缺少参数 url")?;
             let mut current = reqwest::Url::parse(url).map_err(|e| format!("URL 无效: {e}"))?;
-            // 手动跟随重定向：每跳都完整重做 凭据/字面 IP/DNS 校验并钉死解析结果
+            check_fetch_url(&current)?;
+            // 本地工具放开私网访问（本机/局域网 http 是刚需），只留 scheme 白名单
+            // 与凭据拒绝；重定向手动跟随，每跳重做凭据校验
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .user_agent("pig-code FetchURL/0.1 (coding agent)")
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| e.to_string())?;
             let mut hops = 0;
             let mut response = loop {
-                let client = pinned_client(&current).await?;
                 let response = client
                     .get(current.clone())
                     .send()
@@ -214,29 +221,35 @@ impl Tool for FetchUrl {
                     break response; // 3xx 无 Location：当终态（HTTP 状态检查会拦下）
                 };
                 hops += 1;
-                if hops > 5 {
+                if hops > 10 {
                     return Err("重定向次数过多".to_string());
                 }
                 current = current
                     .join(location)
                     .map_err(|e| format!("重定向 URL 无效: {e}"))?;
+                check_fetch_url(&current)?;
             };
             let status = response.status();
             if !status.is_success() {
                 return Err(format!("HTTP {status}"));
             }
-            let content_type = response
+            // 完整 Content-Type（含 charset 参数）与 mime 分别留存
+            let content_type_full = response
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
-                .map(|s| {
-                    s.split(';')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_ascii_lowercase()
-                })
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let content_type = content_type_full
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let charset_param = content_type_full
+                .split(';')
+                .skip(1)
+                .find_map(|part| part.trim().strip_prefix("charset=").map(str::to_string));
             // 流式读体，上限 2MB
             let mut body: Vec<u8> = Vec::new();
             while let Some(chunk) = response
@@ -251,7 +264,8 @@ impl Tool for FetchUrl {
                 }
                 body.extend_from_slice(&chunk);
             }
-            let text = String::from_utf8_lossy(&body).to_string();
+            let is_html = content_type == "text/html";
+            let text = decode_body(&body, charset_param.as_deref(), is_html);
             let mut out = match content_type.as_str() {
                 "text/html" => extract_text(&text),
                 "text/plain" | "text/markdown" | "application/json" => text,
@@ -270,8 +284,9 @@ impl Tool for FetchUrl {
     }
 }
 
-/// FetchURL 的 URL 静态校验：scheme 白名单 + 内嵌凭据拒绝 + 字面 host 私网判定
-///（域名的 DNS 校验在 pinned_client 里做）。
+/// FetchURL 的 URL 静态校验：scheme 白名单 + 内嵌凭据拒绝。
+/// 本地桌面工具放开私网访问（本机/局域网 http 是刚需，见 is_private_ip/host
+/// 工具函数——保留判定逻辑供调用方按需复用，不再作为 FetchURL 的拦截条件）。
 pub fn check_fetch_url(url: &reqwest::Url) -> Result<(), String> {
     match url.scheme() {
         "http" | "https" => {}
@@ -280,51 +295,43 @@ pub fn check_fetch_url(url: &reqwest::Url) -> Result<(), String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("URL 不允许内嵌凭据".to_string());
     }
-    let host = url.host_str().ok_or("URL 缺少主机名")?;
-    if is_private_host(host) {
-        return Err(format!("不允许访问本机/私网地址: {host}"));
-    }
+    let _ = url.host_str().ok_or("URL 缺少主机名")?;
     Ok(())
 }
 
-/// 每跳新建 pinned client：静态校验后，域名先解析（spawn_blocking + ToSocketAddrs），
-/// 所有结果逐个过 is_private_ip，任一私网即拒绝；全公网则 resolve_to_addrs 钉死，
-/// 防 check-to-connect 之间的 DNS rebinding。
-/// 注意：使用系统代理时代理自行解析 DNS，钉生不对代理生效，属已知取舍。
-async fn pinned_client(url: &reqwest::Url) -> Result<reqwest::Client, String> {
-    use std::net::ToSocketAddrs as _;
-    check_fetch_url(url)?;
-    let host = url.host_str().expect("check_fetch_url 已校验");
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("pig-code FetchURL/0.1 (coding agent)")
-        .redirect(reqwest::redirect::Policy::none()); // 重定向手动跟随，每跳重验
-    let is_ip_literal = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>()
-        .is_ok();
-    if !is_ip_literal {
-        let port = url
-            .port_or_known_default()
-            .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
-        let host_owned = host.to_string();
-        let resolved = tokio::task::spawn_blocking(move || {
-            (host_owned.as_str(), port)
-                .to_socket_addrs()
-                .map(|addrs| addrs.collect::<Vec<_>>())
-        })
-        .await
-        .map_err(|e| format!("DNS 解析失败: {host}: {e}"))?
-        .map_err(|_| format!("DNS 解析失败: {host}"))?;
-        if resolved.is_empty() {
-            return Err(format!("DNS 解析失败: {host}"));
+/// 响应体解码：charset 优先级 = Content-Type 参数、HTML meta 嗅探（前 2KB）、
+/// UTF-8 有损兜底；encoding_rs 覆盖 GBK/GB18030/Big5/Shift-JIS/EUC-KR 等标签，
+/// BOM 由对应 Encoding::decode 处理。前置 BOM 字符顺手剥掉。
+fn decode_body(body: &[u8], charset_param: Option<&str>, is_html: bool) -> String {
+    let label = charset_param
+        .map(str::to_string)
+        .or_else(|| if is_html { sniff_html_charset(body) } else { None });
+    let text = match label
+        .as_deref()
+        .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
+    {
+        Some(encoding) => {
+            let (text, _, _) = encoding.decode(body);
+            text.into_owned()
         }
-        if resolved.iter().any(|addr| is_private_ip(&addr.ip())) {
-            return Err(format!("域名解析到私网/保留地址，已拒绝: {host}"));
-        }
-        builder = builder.resolve_to_addrs(host, &resolved);
-    }
-    builder.build().map_err(|e| e.to_string())
+        None => String::from_utf8_lossy(body).into_owned(),
+    };
+    text.strip_prefix('\u{feff}')
+        .unwrap_or(&text)
+        .to_string()
+}
+
+/// HTML 头部 meta charset 嗅探：找第一个 `charset` 出现处，取其后的标签词
+///（同时覆盖 <meta charset="gbk"> 与 http-equiv content 里的 charset= 形态）。
+fn sniff_html_charset(body: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(&body[..body.len().min(2048)]);
+    let lower = head.to_ascii_lowercase();
+    let rest = lower.split("charset").nth(1)?;
+    let rest = rest.trim_start_matches([' ', '=', '"', '\'']);
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .unwrap_or(rest.len());
+    let label = &rest[..end];
+    (!label.is_empty()).then(|| label.to_string())
 }
 

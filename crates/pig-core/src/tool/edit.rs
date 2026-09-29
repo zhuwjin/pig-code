@@ -73,9 +73,23 @@ impl Tool for EditFile {
                     }
                     return Err(message);
                 }
-                Err(EditMatchError::NotUnique { count }) => {
+                Err(EditMatchError::NotUnique { count, lines }) => {
+                    let lines_note = if lines.is_empty() {
+                        String::new()
+                    } else {
+                        let joined = lines
+                            .iter()
+                            .map(|l| l.to_string())
+                            .collect::<Vec<_>>()
+                            .join("、");
+                        if count > lines.len() {
+                            format!("（第 {joined} 行等）")
+                        } else {
+                            format!("（第 {joined} 行）")
+                        }
+                    };
                     return Err(format!(
-                        "old_string 在 {path} 中出现 {count} 次，无法唯一定位。请扩大 old_string 范围使其唯一；如需全部替换，设 replace_all=true。"
+                        "old_string 在 {path} 中出现 {count} 次{lines_note}，无法唯一定位。请扩大 old_string 范围使其唯一；如需全部替换，设 replace_all=true。"
                     ));
                 }
             };
@@ -83,8 +97,7 @@ impl Tool for EditFile {
             // 匹配与替换都在 LF 视图（解码已归一）上做；写回时还原原编码/行尾
             let after = outcome.after;
             let encoded = crate::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
-            std::fs::write(&full, &encoded)
-                .map_err(|e| format!("写入失败 {}: {e}", full.display()))?;
+            atomic_write(&full, &encoded)?;
             // 写盘后刷新新鲜度：紧接着再改自己刚写的文件必须合法
             record_read_state(ctx.state, &full, &encoded, false, None);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
@@ -106,11 +119,12 @@ impl Tool for EditFile {
     }
 }
 
-/// Edit 匹配失败的两种形态（报错文案在调用方拼，那里才有 path/行尾上下文）
+/// Edit 匹配失败的两种形态（报错文案在调用方拼，那里才有 path/行尾上下文）。
+/// NotUnique 携带各匹配所在行号（1 起，最多 5 个，帮助模型扩大范围时定位）。
 #[derive(Debug)]
 pub enum EditMatchError {
     NotFound,
-    NotUnique { count: usize },
+    NotUnique { count: usize, lines: Vec<usize> },
 }
 
 /// compute_edit 的产物：替换后文本、替换处数、容错梯队命中说明
@@ -133,6 +147,8 @@ pub fn compute_edit(
     let mut effective_old = old.to_string();
     let mut effective_new = new.to_string();
     let mut quote_window: Option<(usize, usize)> = None;
+    // 引号归一多命中时的窗口起始行号（NotUnique 报错用）
+    let mut quote_multi_lines: Vec<usize> = Vec::new();
     let mut tier_note: Option<&'static str> = None;
     let mut count = content_lf.matches(old).count();
     if count == 0 && !replace_all {
@@ -154,6 +170,11 @@ pub fn compute_edit(
                 tier_note = Some("容错匹配：引号风格已跟随文件");
             } else if windows.len() > 1 {
                 count = windows.len();
+                quote_multi_lines = windows
+                    .iter()
+                    .take(5)
+                    .map(|(start, _)| line_of(content_lf, *start))
+                    .collect();
             }
         }
         // 第 4 级：反转义归一——模型把字面 \n\t\r 等写进 old_string
@@ -176,7 +197,12 @@ pub fn compute_edit(
         return Err(EditMatchError::NotFound);
     }
     if count > 1 && !replace_all {
-        return Err(EditMatchError::NotUnique { count });
+        let lines = if quote_multi_lines.is_empty() {
+            match_lines(content_lf, &effective_old, 5)
+        } else {
+            quote_multi_lines
+        };
+        return Err(EditMatchError::NotUnique { count, lines });
     }
     let (after, replaced) = match quote_window {
         // 引号归一命中：整段替换原文那 N 行
@@ -257,6 +283,25 @@ fn unescape_literal(s: &str) -> Option<String> {
         }
     }
     escaped_any.then_some(out)
+}
+
+/// needle 在 content 中各次出现的行号（1 起，取前 max 个）。
+fn match_lines(content: &str, needle: &str, max: usize) -> Vec<usize> {
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+    while let Some(pos) = content[offset..].find(needle) {
+        lines.push(line_of(content, offset + pos));
+        if lines.len() >= max {
+            break;
+        }
+        offset += pos + needle.len();
+    }
+    lines
+}
+
+/// 字节偏移 pos 所在行号（1 起）。
+fn line_of(text: &str, pos: usize) -> usize {
+    1 + text[..pos].matches('\n').count()
 }
 
 /// Edit 容错第 2 级：剥离 Read 输出的行号前缀（每行 ^\d+\t 或 ^\d+:）。

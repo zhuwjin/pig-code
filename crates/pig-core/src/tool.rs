@@ -146,6 +146,7 @@ mod read;
 mod search;
 mod tracker;
 mod write;
+pub(crate) use write::atomic_write;
 
 // 子模块整体提升到 crate 可见（根模块的 registry/工具间互引用）；对外 API
 // 的可见性以原先为准，由下方显式 pub use 钉住（调用点零改动）。

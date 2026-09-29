@@ -966,3 +966,121 @@ async fn read_shortcircuits_identical_view() {
     .await;
     assert!(out.contains("changed content"), "{out}");
 }
+
+/// 批次6:本机 http 放行 + GBK 页面按 charset 解码(端到端:本地起 HTTP 服务)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_url_allows_local_http_and_decodes_gbk() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf); // 请求行(丢弃)
+        let mut body = b"<html><body>".to_vec();
+        body.extend_from_slice(&[0xd6, 0xd0, 0xce, 0xc4]); // GBK「中文」
+        body.extend_from_slice(b" local page</body></html>");
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=gbk\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(&body).unwrap();
+    });
+    let dir = temp_dir("fetch-local");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "FetchURL",
+            serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    handle.join().unwrap();
+    assert!(!is_error, "{out}");
+    assert!(out.contains("中文 local page"), "GBK 正文应解码: {out}");
+}
+
+/// 本机/局域网 URL 校验直接放行(不再拦私网)。
+#[test]
+fn fetch_url_allows_private_hosts() {
+    for url in [
+        "http://localhost:8080/",
+        "http://127.0.0.1:3000/api",
+        "http://192.168.1.1/",
+        "http://10.0.0.5:9090/health",
+        "http://[::1]:8080/",
+    ] {
+        let url = reqwest::Url::parse(url).unwrap();
+        assert!(tool::check_fetch_url(&url).is_ok(), "{url} 应放行");
+    }
+}
+
+/// Write/Edit 原子写:内容正确且目录无 .tmp 残留。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_and_edit_leave_no_temp_files() {
+    let dir = temp_dir("atomic-write");
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+
+    let (_, is_error, ..) = tool::execute(
+        &call(
+            "Write",
+            serde_json::json!({"path": "a.txt", "content": "hello\nworld\n"}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error);
+    let (_, is_error, ..) = tool::execute(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "a.txt", "old_string": "world", "new_string": "pig"}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(!is_error);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "hello\npig\n"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "不应有临时文件残留: {leftovers:?}");
+}
+
+/// Edit 多匹配报错附行号(最多 5 个,超出加「等」)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_not_unique_reports_line_numbers() {
+    let dir = temp_dir("edit-lines");
+    // 6 处 dup:行 1/3/5/7/9/11
+    let body: String = (0..6)
+        .map(|i| format!("{}\ndup\ntail{i}\n", "head"))
+        .collect();
+    std::fs::write(dir.join("dup.txt"), body).unwrap();
+    let mut tracker = ChangeTracker::default();
+    let state = SessionToolState::for_test();
+    let (_, ..) = tool::execute(
+        &call("Read", serde_json::json!({"path": "dup.txt"})),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    let (out, is_error, ..) = tool::execute(
+        &call(
+            "Edit",
+            serde_json::json!({"path": "dup.txt", "old_string": "dup", "new_string": "x"}),
+        ),
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+    )
+    .await;
+    assert!(is_error, "{out}");
+    assert!(out.contains("出现 6 次"), "{out}");
+    assert!(out.contains("第 2、5、8、11、14"), "应带前几个行号: {out}");
+    assert!(out.contains("行等"), "超过 5 处应标「等」: {out}");
+}
