@@ -349,8 +349,6 @@ fn readonly_command_whitelist() {
     for cmd in [
         "ls",
         "ls -la src",
-        "cat Cargo.toml",
-        "head -20 a.rs",
         "git status",
         "git log --oneline -5",
         "git diff HEAD~1",
@@ -379,6 +377,9 @@ fn readonly_command_whitelist() {
         "rm -rf node_modules",   //
         "make",                  //
         "ls\npwd",               // 多行
+        "cat Cargo.toml",        // 吐文件全文的命令免审批会绕过敏感过滤（cat .env）
+        "head -20 a.rs",         //
+        "tail -n 50 app.log",    //
     ] {
         assert!(!tool::is_readonly_command(cmd), "{cmd} 不应放行");
     }

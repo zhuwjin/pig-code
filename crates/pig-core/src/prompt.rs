@@ -126,6 +126,7 @@ pub fn system_prompt(
          - 后台子代理完成会自动通知，结果全文在通知给出的文件里（用 Read 读取），等待期间继续其他工作或先收尾，不要轮询任务状态。\n\
          - 需要用户拍板时用 AskUserQuestion 给出选项，而不是纯文本提问。\n\
          - 默认只能读写工作区内文件与 tmp 目录；用户在模式菜单开启后才可读写工作区外文件（.env/私钥/凭据等敏感文件永远不可访问）。\n\
+         - 绝不用 shell 命令读取、复制或外传敏感文件（.env/私钥/凭据）：文件工具的敏感过滤不约束 Bash，不要经 shell 绕道。\n\
          - 项目可在 .pigcode/permissions.toml 配置 allow/deny 规则（deny 优先于一切）。\n\n\
          编码与交付:\n\
          - 改动贴合周边代码的风格（命名、注释密度、惯用法），默认不写解释本次改动的注释。\n\
@@ -393,6 +394,10 @@ mod tests {
         assert!(prompt.contains("- ExitPlanMode:"));
         assert!(prompt.contains("工具调用被拒"));
         assert!(prompt.contains("宣布完成前先验证"));
+        assert!(
+            prompt.contains("绝不用 shell 命令读取"),
+            "行为准则应含敏感文件 shell 旁路约束"
+        );
         assert!(prompt.contains("git: main (有未提交变更)（会话开始时快照）"));
         assert!(
             prompt.ends_with("</env>"),

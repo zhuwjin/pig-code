@@ -1218,6 +1218,8 @@ pub fn approval_subject(call: &ToolCall) -> String {
 /// 保守只读命令判定（AutoEdit 直通用，宁漏不放）：单条简单命令——
 /// 无管道/重定向/链式/命令替换/多行，且首词在白名单；
 /// git 再看子命令白名单（branch/remote/tag 仅无参列表形态）。
+/// 吐文件全文的 cat/head/tail 刻意不在白名单：文件工具的敏感过滤
+/// 不约束 shell，读文件应走带过滤的 Read（防 `cat .env` 免审批旁路）。
 pub fn is_readonly_command(command: &str) -> bool {
     if command
         .chars()
@@ -1231,8 +1233,8 @@ pub fn is_readonly_command(command: &str) -> bool {
         return false;
     };
     const READONLY: &[&str] = &[
-        "ls", "cat", "head", "tail", "pwd", "echo", "find", "grep", "rg", "wc", "file", "stat",
-        "which", "whoami", "date", "uname", "hostname", "tree", "du", "df", "sort", "uniq", "diff",
+        "ls", "pwd", "echo", "find", "grep", "rg", "wc", "file", "stat", "which", "whoami",
+        "date", "uname", "hostname", "tree", "du", "df", "sort", "uniq", "diff",
     ];
     if READONLY.contains(&first) {
         return true;
