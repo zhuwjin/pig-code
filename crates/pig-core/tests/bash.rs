@@ -396,8 +396,8 @@ fn readonly_command_whitelist() {
         "cat ../outside.txt",
         "cat /etc/hosts", // 绝对路径区外(Windows 下 MSYS /x 直接拒)
         "head -20 src/*.rs",
-        "cat",        // 无文件参数 = stdin
-        "cat -",      // stdin
+        "cat",          // 无文件参数 = stdin
+        "cat -",        // stdin
         "head -n .env", // 敏感路径落进选项值位也因「无文件参数」被拒
         "tail -f app.log",
         "tail --follow log",
@@ -580,9 +580,9 @@ async fn background_output_cap_kills_and_notes() {
     loop {
         let killed = {
             let tasks = state.tasks.lock().expect("tasks lock");
-            tasks.iter().any(|t| {
-                t.id == task_id && matches!(t.status, pig_protocol::TaskStatus::Killed)
-            })
+            tasks
+                .iter()
+                .any(|t| t.id == task_id && matches!(t.status, pig_protocol::TaskStatus::Killed))
         };
         if killed {
             break;
@@ -593,7 +593,10 @@ async fn background_output_cap_kills_and_notes() {
 
     let (out, is_error) = task_ctl(&dir, &mut tracker, &state, "TaskOutput", &task_id).await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("强制停止"), "注册表 output 尾部应留说明: {out}");
+    assert!(
+        out.contains("强制停止"),
+        "注册表 output 尾部应留说明: {out}"
+    );
 }
 
 /// Git Bash 方言生效：pwd 输出 MSYS 路径（/c/... 形式），且 coreutils 可用。

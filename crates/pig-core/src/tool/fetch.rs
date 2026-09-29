@@ -327,4 +327,3 @@ async fn pinned_client(url: &reqwest::Url) -> Result<reqwest::Client, String> {
     }
     builder.build().map_err(|e| e.to_string())
 }
-

@@ -1,7 +1,12 @@
 use super::*;
 
 impl Sidebar {
-    pub(crate) fn start_rename(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_rename(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let current = self.workspace_name(&path);
         self.renaming = Some(RenameTarget::Workspace(path));
         self.rename_input.update(cx, |input, cx| {
@@ -10,7 +15,6 @@ impl Sidebar {
         });
         cx.notify();
     }
-
 
     pub(crate) fn start_session_rename(
         &mut self,
@@ -26,7 +30,6 @@ impl Sidebar {
         });
         cx.notify();
     }
-
 
     pub(crate) fn commit_rename(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.renaming.take() else {
@@ -55,6 +58,4 @@ impl Sidebar {
         }
         cx.notify();
     }
-
-
 }

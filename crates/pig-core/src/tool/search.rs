@@ -38,8 +38,9 @@ impl Tool for Glob {
             let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
             let glob_pattern = glob::Pattern::new(pattern)
                 .map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
-            let head_limit =
-                args["head_limit"].as_u64().unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
+            let head_limit = args["head_limit"]
+                .as_u64()
+                .unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
             let root = match args["path"].as_str() {
                 Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
@@ -187,8 +188,9 @@ impl Tool for Grep {
                 .map_err(|e| format!("无效正则 {pattern}: {e}"))?;
             let include = args["include"].as_str().map(|s| s.to_string());
             let output_mode = args["output_mode"].as_str().unwrap_or("content");
-            let head_limit =
-                args["head_limit"].as_u64().unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
+            let head_limit = args["head_limit"]
+                .as_u64()
+                .unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
             // 上下文行仅 content 模式生效；显式 before/after 优先于 context
             let mut before = args["before"].as_u64().unwrap_or(0) as usize;
@@ -254,14 +256,16 @@ impl Tool for Grep {
                 }
                 // 复用文本管线：GBK/UTF-16 解码后搜索（行号与 Read 视图一致），
                 // 二进制/未知编码计数跳过（不再静默消失）
-                let doc =
-                    match std::fs::read(&file).ok().and_then(|b| crate::text::decode(&b).ok()) {
-                        Some(doc) => doc,
-                        None => {
-                            skipped_undecodable += 1;
-                            continue;
-                        }
-                    };
+                let doc = match std::fs::read(&file)
+                    .ok()
+                    .and_then(|b| crate::text::decode(&b).ok())
+                {
+                    Some(doc) => doc,
+                    None => {
+                        skipped_undecodable += 1;
+                        continue;
+                    }
+                };
                 let content: Vec<&str> = doc.text.lines().collect();
                 let relative = file
                     .strip_prefix(ctx.cwd)
@@ -339,8 +343,11 @@ impl Tool for Grep {
                         }
                         if before == 0 && after == 0 {
                             for &ix in &page_hit_lines {
-                                let row =
-                                    format!("{relative}:{}: {}", ix + 1, truncate_grep_line(content[ix]));
+                                let row = format!(
+                                    "{relative}:{}: {}",
+                                    ix + 1,
+                                    truncate_grep_line(content[ix])
+                                );
                                 used_chars += row.chars().count() + 1;
                                 if used_chars > MAX_GREP_OUTPUT_CHARS {
                                     budget_hit = true;
@@ -373,9 +380,7 @@ impl Tool for Grep {
                                     lines.push("--".to_string());
                                 }
                                 first_window = false;
-                                for (window_ix, line) in
-                                    content[start..=end].iter().enumerate()
-                                {
+                                for (window_ix, line) in content[start..=end].iter().enumerate() {
                                     let row = format!(
                                         "{relative}:{}: {}",
                                         start + window_ix + 1,
@@ -500,7 +505,6 @@ fn sort_by_mtime_desc(files: &mut Vec<PathBuf>) {
     stamped.sort_by(|(ma, pa), (mb, pb)| mb.cmp(ma).then_with(|| pa.cmp(pb)));
     files.extend(stamped.into_iter().map(|(_, path)| path));
 }
-
 
 /// @ 文件搜索：遍历工作区（尊重 .gitignore、含隐藏文件、跳过 VCS 目录），按子串匹配打分排序。
 pub fn search_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {

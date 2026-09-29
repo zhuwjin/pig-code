@@ -138,6 +138,10 @@ pub struct Session {
     agent_seq: u64,
     /// 应用配置快照（子代理显式模型解析用；None = 未加载，仅继承可用）
     app_config: Option<AppConfig>,
+    /// MCP 连接管理器：首个 step 采样前懒连接（None = 尚未尝试）；Arc 共享——
+    /// 并发组 spawn 任务与子代理后台任务 clone  owned 句柄现取工具；
+    /// 子进程 kill_on_drop 兜底，会话析构即回收
+    mcp: Option<Arc<crate::mcp::McpManager>>,
 }
 
 enum StepOutcome {
@@ -171,6 +175,9 @@ pub(crate) struct GateCtx<'a> {
     pub session_id: &'a str,
     pub seq: &'a std::sync::atomic::AtomicU64,
     pub store: &'a Arc<Mutex<Store>>,
+    /// 内置工具以外的运行时工具（MCP）：执行段的按名查找兜底；
+    /// 根会话传全部已连接 MCP 工具，子代理传按档案继承规则收窄后的子集
+    pub extra_tools: &'a [Box<dyn tool::Tool>],
 }
 
 /// 门控执行的自由函数实现（Session::exec_tool_gated 与后台子代理驱动共用）：
@@ -205,6 +212,8 @@ pub(crate) async fn exec_tool_gated_ctx(
     let perm_subject = match call.name.as_str() {
         "Bash" => bash_command.clone(),
         "Write" | "Edit" => Some(tool::approval_subject(call)),
+        // MCP 工具以全名为 subject：项目规则 `mcp__fs__write(*)` 可命中
+        name if name.starts_with("mcp__") => Some(call.name.clone()),
         _ => None,
     };
     if let Some(subject) = perm_subject.as_deref()
@@ -289,7 +298,7 @@ pub(crate) async fn exec_tool_gated_ctx(
             state: ctx.state,
         };
         tokio::select! {
-            result = tool::execute(call, tool_ctx) => Some(result),
+            result = tool::execute_with_extra(call, tool_ctx, ctx.extra_tools) => Some(result),
             _ = cancel.cancelled() => None,
         }
     };
@@ -298,19 +307,7 @@ pub(crate) async fn exec_tool_gated_ctx(
     };
     // 图片随 history 进模型上下文（Anthropic blocks / OpenAI 拆 user 消息）；
     // rollout 的 ToolCall 记录只存 output 文本（尺寸摘要在内），base64 不落盘
-    let chat_images: Vec<crate::provider::ChatImage> = {
-        let label = serde_json::from_str::<serde_json::Value>(&call.arguments)
-            .ok()
-            .and_then(|v| v["path"].as_str().map(str::to_string));
-        images
-            .into_iter()
-            .map(|img| crate::provider::ChatImage {
-                media_type: img.media_type,
-                data_base64: img.data_base64,
-                label: label.clone(),
-            })
-            .collect()
-    };
+    let chat_images = tool_images_to_chat(&call.arguments, images);
     // TodoList 写入成功后向 UI 推待办快照（读操作输出即列表，无需重复推）
     if call.name == "TodoList" && !is_error {
         let items = ctx.state.todos.lock().expect("todos lock").clone();
@@ -391,6 +388,24 @@ pub(crate) async fn exec_tool_gated_ctx(
     }
 }
 
+/// ToolImage → ChatImage：label 取调用参数里的 path（门控路径与并发只读段共用）。
+fn tool_images_to_chat(
+    arguments: &str,
+    images: Vec<tool::ToolImage>,
+) -> Vec<crate::provider::ChatImage> {
+    let label = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v["path"].as_str().map(str::to_string));
+    images
+        .into_iter()
+        .map(|img| crate::provider::ChatImage {
+            media_type: img.media_type,
+            data_base64: img.data_base64,
+            label: label.clone(),
+        })
+        .collect()
+}
+
 /// 门控工具执行（exec_tool_gated）的结果
 pub(crate) enum GatedToolOutcome {
     /// 已执行；调用方负责 history/rollout/ToolCallEnd（父/子各写各的）
@@ -407,20 +422,23 @@ pub(crate) enum GatedToolOutcome {
     Cancelled,
 }
 
-/// 子代理委派（run_subagent）的结果
+/// 子代理委派（run_subagent/run_swarm）的结果
 pub(crate) enum SubagentOutcome {
-    /// 子代理已收尾（成败都在 note 里）；调用方负责 history/rollout/ToolCallEnd。
-    /// card = 代理卡元信息（随 rollout ToolCall 记录持久化，回放重建代理卡）；
-    /// 参数/档案/模型解析失败的早退没有 agent_id，记 None
+    /// 子代理已收尾（成败都在 note 里；后台派发则是即时回执）；调用方负责
+    /// history/rollout/ToolCallEnd。card = 单代理卡元信息（Agent 路径；随 rollout
+    /// ToolCall 记录持久化，回放重建代理卡）；cards = 批量代理卡（AgentSwarm 路径，
+    /// 每个子代理一张）。参数/档案/模型解析失败的早退没有 agent_id，两者皆空
     Finished {
         note: String,
         is_error: bool,
         card: Option<crate::rollout::AgentCardRecord>,
+        cards: Vec<crate::rollout::AgentCardRecord>,
     },
     /// 取消（审批等待或采样/执行中被打断）；调用方发 TurnAborted 并收尾。
-    /// card = 代理卡元信息（取消同样随 rollout 持久化，回放重建代理卡）
+    /// card/cards = 代理卡元信息（取消同样随 rollout 持久化，回放重建代理卡）
     Cancelled {
         card: Option<crate::rollout::AgentCardRecord>,
+        cards: Vec<crate::rollout::AgentCardRecord>,
     },
 }
 
@@ -434,6 +452,8 @@ struct CancelledTool<'a> {
     rest: &'a [crate::provider::ToolCall],
     /// 代理卡元信息（Agent 工具取消路径；其余工具 None）
     card: Option<crate::rollout::AgentCardRecord>,
+    /// 批量代理卡元信息（AgentSwarm 工具取消路径；其余工具空列表）
+    cards: Vec<crate::rollout::AgentCardRecord>,
 }
 
 impl Session {
@@ -485,9 +505,9 @@ impl Session {
             cache_read_total: 0,
             agent_seq: 0,
             app_config: app_config.cloned(),
+            mcp: None,
         })
     }
-
 
     /// 从 rollout 重建。diff 基线从 file_originals 表恢复到 ChangeTracker：
     /// resume 后改动仍以「会话首次快照 → 当前」计算，revert 跨重启可用。
@@ -558,10 +578,25 @@ impl Session {
             cache_read_total: 0,
             agent_seq: 0,
             app_config: app_config.cloned(),
+            mcp: None,
         };
         Ok((session, records))
     }
 
+    /// 根会话工具集：内置 + Agent/AgentSwarm + MCP（子代理循环用 tool::all() 收窄
+    /// + MCP 继承规则，天然无 Agent/AgentSwarm 防嵌套；档案与 MCP 清单每次调用重建）
+    pub(crate) fn root_tools(&self) -> Vec<Box<dyn tool::Tool>> {
+        let mut tools = tool::all_root(&self.cwd, &self.data_dir);
+        if let Some(mcp) = &self.mcp {
+            tools.extend(mcp.tools());
+        }
+        tools
+    }
+
+    /// 根会话工具 schema 集（run_step 采样用）
+    pub(crate) fn root_schemas(&self) -> Vec<serde_json::Value> {
+        self.root_tools().iter().map(|tool| tool.schema()).collect()
+    }
 
     fn emit(
         &mut self,
@@ -571,13 +606,11 @@ impl Session {
         emit_bg(&self.id, &self.seq, tx, build);
     }
 
-
     fn record(&mut self, record: &RolloutRecord) {
         if let Some(rollout) = &mut self.rollout {
             rollout.append(record);
         }
     }
-
 
     /// 工具执行中取消（用户点停止）的统一收尾：当前调用补「已停止」回执——
     /// 历史（tool_use/tool_result 配对，防下次请求悬空被 API 拒）、rollout
@@ -604,6 +637,7 @@ impl Session {
             is_error: false,
             edit: None,
             agent_card: cancelled.card,
+            agent_cards: cancelled.cards,
         });
         let item_id = cancelled.item_id.to_string();
         self.emit(
@@ -618,7 +652,6 @@ impl Session {
             tx,
         );
     }
-
 
     /// 回合收尾：产出「本轮改动」（落 rollout + 推 UI 消息流面板）；无改动不发。
     fn flush_turn_changes(&mut self, tx: &async_channel::Sender<Event>) {
@@ -640,7 +673,6 @@ impl Session {
         );
     }
 
-
     fn touch_index(&mut self) {
         let id = self.id.clone();
         self.store
@@ -649,11 +681,9 @@ impl Session {
             .update_session(&id, |meta| meta.updated_at = now_secs());
     }
 
-
     pub fn set_mode(&mut self, mode: ExecMode) {
         self.mode = mode;
     }
-
 
     /// 会话级「工作区外读/写」开关（写进共享 state，回合进行中也生效）
     pub fn set_fs_access(&mut self, read_outside: bool, write_outside: bool) {
@@ -666,11 +696,9 @@ impl Session {
             .store(write_outside, Ordering::Relaxed);
     }
 
-
     pub fn set_model(&mut self, selection: ModelSelection) {
         self.model_override = Some(selection);
     }
-
 
     pub fn revert_file(&mut self, path: &str, tx: &async_channel::Sender<Event>) {
         let result = tool::resolve_checked(&self.cwd, path, false)
@@ -702,8 +730,6 @@ impl Session {
             ),
         }
     }
-
-
 }
 
 mod approval;
@@ -717,14 +743,14 @@ mod turn;
 
 // 大 impl 拆到子模块(同 crate 内 impl 块可分散;子模块可见根的私有项),
 // 对外 API 由显式 re-export 钉住;跨子模块引用经根转发。
-pub(crate) use approval::exec_mode_label;
-pub(crate) use images::compression_note;
-pub(crate) use title::spawn_title_generation;
 pub use approval::approval_detail;
+pub(crate) use approval::exec_mode_label;
 pub use compact::COMPACTION_MARKER;
+pub(crate) use images::compression_note;
 pub use images::project_images;
 pub use runner::agent_loop;
 pub use title::TITLE_PROMPT_MARKER;
+pub(crate) use title::spawn_title_generation;
 
 /// 加载项目级权限规则：文件缺失 = 空规则；解析失败不致命，stderr 提示（
 /// 会话创建/回放路径没有合适的事件通道，不硬建）
@@ -745,4 +771,3 @@ fn load_permissions(cwd: &std::path::Path) -> crate::permissions::PermissionRule
         }
     }
 }
-

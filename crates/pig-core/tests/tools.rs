@@ -824,10 +824,7 @@ async fn read_and_edit_reject_oversized_files() {
     )
     .await;
     assert!(is_error, "应拒绝: {out}");
-    assert!(
-        out.contains("50 MB"),
-        "体积护栏应先于新鲜度检查: {out}"
-    );
+    assert!(out.contains("50 MB"), "体积护栏应先于新鲜度检查: {out}");
 
     // 存量超限文件整文件覆盖同样拒绝（Write 的内存护栏）
     let (out, is_error, ..) = tool::execute(
@@ -861,7 +858,11 @@ async fn edit_unescape_tier_matches_literal_escapes() {
     // 先 Read 过(新鲜度)
     let (..) = tool::execute(
         &call("Read", serde_json::json!({"path": "a.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
 
@@ -889,7 +890,11 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
     let state = SessionToolState::for_test();
     let (..) = tool::execute(
         &call("Read", serde_json::json!({"path": "b.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
 
@@ -899,7 +904,11 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
             "Edit",
             serde_json::json!({"path": "b.txt", "old_string": "a\\nb", "new_string": "ok"}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -909,7 +918,11 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
     std::fs::write(dir.join("c.txt"), "hello\n").unwrap();
     let (..) = tool::execute(
         &call("Read", serde_json::json!({"path": "c.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     let (out, is_error, ..) = tool::execute(
@@ -917,7 +930,11 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
             "Edit",
             serde_json::json!({"path": "c.txt", "old_string": "hel\\dlo", "new_string": "x"}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(is_error, "未识别转义应不匹配: {out}");
@@ -934,7 +951,11 @@ async fn read_shortcircuits_identical_view() {
 
     let (out, is_error, ..) = tool::execute(
         &call("Read", serde_json::json!({"path": "u.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -943,7 +964,11 @@ async fn read_shortcircuits_identical_view() {
     // 同参数重读 → 短路
     let (out, is_error, ..) = tool::execute(
         &call("Read", serde_json::json!({"path": "u.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -952,16 +977,27 @@ async fn read_shortcircuits_identical_view() {
     // 不同参数(limit) → 正常输出
     let (out, ..) = tool::execute(
         &call("Read", serde_json::json!({"path": "u.txt", "limit": 5})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
-    assert!(out.contains("same content"), "不同视图参数应正常输出: {out}");
+    assert!(
+        out.contains("same content"),
+        "不同视图参数应正常输出: {out}"
+    );
 
     // 外部修改 → hash 变化,恢复正常输出(并更新状态)
     std::fs::write(dir.join("u.txt"), "changed content\n").unwrap();
     let (out, ..) = tool::execute(
         &call("Read", serde_json::json!({"path": "u.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(out.contains("changed content"), "{out}");

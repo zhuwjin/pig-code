@@ -13,7 +13,6 @@ impl AppView {
         }
     }
 
-
     pub(crate) fn push_hero_info(&self, cx: &mut Context<Self>) {
         let label = self
             .hero_cwd
@@ -47,7 +46,6 @@ impl AppView {
             composer.set_hero_info(cwd, label, cwds, branch, branches, is_git, cx);
         });
     }
-
 
     /// hero 默认值：把「工作区最近活跃会话」的模型/模式/思考等级铺到 composer，
     /// 作为下次新建会话的默认值（用户可再改；hero_send 时按当前选择创建）。
@@ -86,7 +84,6 @@ impl AppView {
         cx.notify();
     }
 
-
     pub(crate) fn enter_hero(&mut self, cx: &mut Context<Self>) {
         self.current = None;
         self.git_branch = None;
@@ -118,7 +115,6 @@ impl AppView {
         self.apply_hero_defaults(cx);
         cx.notify();
     }
-
 
     pub(crate) fn hero_send(
         &mut self,
@@ -155,7 +151,6 @@ impl AppView {
         cx.notify();
     }
 
-
     /// 关闭 Yolo 确认框并回焦输入框
     pub(crate) fn close_yolo_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.yolo_confirm_open = false;
@@ -165,13 +160,11 @@ impl AppView {
         cx.notify();
     }
 
-
     /// Yolo 确认框「开启无管制模式」：应用模式并关闭
     pub(crate) fn confirm_yolo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_yolo_confirm(window, cx);
         self.apply_exec_mode(ExecMode::Yolo, cx);
     }
-
 
     /// 「开启无管制模式？」确认框（ModelDialog 同款覆盖层：遮罩 + 居中卡片）。
     /// 取消/点遮罩/Esc 不生效；确认才切 Yolo。每次切换都弹，不记住选择。
@@ -246,7 +239,6 @@ impl AppView {
             .into_any_element()
     }
 
-
     pub(crate) fn sync_hero_mode(&mut self, cx: &mut Context<Self>) {
         let hero = self.is_hero(cx) && self.pending_first_send.is_none();
         self.composer
@@ -256,12 +248,10 @@ impl AppView {
         }
     }
 
-
     /// 自测用。
     pub fn debug_is_hero(&self, cx: &App) -> bool {
         self.is_hero(cx)
     }
-
 
     pub(crate) fn render_hero(&self, cx: &mut Context<Self>) -> AnyElement {
         let hour = time::OffsetDateTime::now_local()
@@ -335,6 +325,4 @@ impl AppView {
             })
             .into_any_element()
     }
-
-
 }

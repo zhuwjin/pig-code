@@ -38,7 +38,6 @@ impl Sidebar {
         .detach();
     }
 
-
     pub(crate) fn end_title_marquee(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self
             .marquee
@@ -54,7 +53,6 @@ impl Sidebar {
         }
         cx.notify();
     }
-
 
     /// 跑马灯推进一步；返回 false 表示循环该停了
     pub(crate) fn tick_title_marquee(&mut self, session_id: &str, cx: &mut Context<Self>) -> bool {
@@ -101,7 +99,6 @@ impl Sidebar {
         true
     }
 
-
     /// 用文本系统量出标题单行渲染宽度。
     ///
     /// gpui 的文本测量会把宽度钳制进可用空间，导致 ScrollHandle 感知不到
@@ -129,7 +126,6 @@ impl Sidebar {
             )
             .width
     }
-
 
     /// 会话标题端部的渐隐条：base 为行背景实色（常态 sidebar / 选中 accent），
     /// tint 为悬停叠加层（accent 60%）；叠加后与行背景合成一致，尾端无色差
@@ -167,7 +163,6 @@ impl Sidebar {
             None => fade,
         }
     }
-
 
     /// 会话标题区：横向滚动（悬停跑马灯）+ 两端渐隐。key 为 title_scrolls
     /// 的键：普通会话行用会话 id，置顶区行用 "pinned-{id}"（同一会话在两
@@ -227,6 +222,4 @@ impl Sidebar {
                 this.child(Self::title_fade(false, fade_base, fade_tint))
             })
     }
-
-
 }

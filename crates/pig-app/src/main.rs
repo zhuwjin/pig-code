@@ -356,6 +356,7 @@ impl AppView {
                     }
                     SettingsEvent::TestProvider(id) => this.agent.test_provider(id.clone()),
                     SettingsEvent::LookupModel(id) => this.agent.model_lookup(id.clone()),
+                    SettingsEvent::RefreshMcp => this.refresh_mcp(cx),
                     SettingsEvent::Close => {
                         this.settings_open = false;
                         cx.notify();
@@ -383,7 +384,6 @@ impl AppView {
         app
     }
 
-
     fn spawn_event_pump(&mut self, events: async_channel::Receiver<Event>, cx: &mut Context<Self>) {
         cx.spawn(async move |this: WeakEntity<AppView>, cx| {
             while let Ok(event) = events.recv().await {
@@ -399,7 +399,6 @@ impl AppView {
         })
         .detach();
     }
-
 
     /// 模拟重启：关旧 manager、清内存视图、重 spawn（自测用）。
     fn restart_agent(&mut self, cx: &mut Context<Self>) {
@@ -417,7 +416,6 @@ impl AppView {
         cx.notify();
     }
 
-
     /// 当前会话的工作目录（SessionMeta.cwd）
     fn current_cwd(&self) -> Option<PathBuf> {
         let sid = self.current.as_ref()?;
@@ -426,7 +424,6 @@ impl AppView {
             .find(|m| &m.id == sid)
             .map(|m| m.cwd.clone())
     }
-
 
     fn ensure_views(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self.views.contains_key(session_id) {
@@ -487,7 +484,6 @@ impl AppView {
             .insert(session_id.to_string(), SessionViews { thread, review });
     }
 
-
     /// 模型 chip 显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id
     /// 从 config 取模型的思考等级列表
     fn model_reasoning_levels(&self, provider_id: &str, model_id: &str) -> Vec<String> {
@@ -498,7 +494,6 @@ impl AppView {
             .map(|m| m.reasoning_levels.clone())
             .unwrap_or_default()
     }
-
 
     /// 模型配置的默认思考等级（已校验仍在等级表内才返回）
     fn model_default_reasoning_level(&self, provider_id: &str, model_id: &str) -> Option<String> {
@@ -512,7 +507,6 @@ impl AppView {
                     .filter(|lv| m.reasoning_levels.contains(lv))
             })
     }
-
 
     /// 切换模型后当前等级不可用时的落点：high 优先（多数等级表的中间档），
     /// 否则首个非关档，再否则首档；无等级 = 关（None）
@@ -530,7 +524,6 @@ impl AppView {
             .or_else(|| levels.first().cloned())
     }
 
-
     fn model_display_label(&self, provider_id: &str, model_id: &str) -> String {
         let pname = self
             .config
@@ -544,7 +537,6 @@ impl AppView {
             format!("{pname}/{model_id}")
         }
     }
-
 
     fn pick_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -579,7 +571,6 @@ impl AppView {
         .detach();
     }
 
-
     fn on_execute_plan(&mut self, cx: &mut Context<Self>) {
         let Some(sid) = self.current.clone() else {
             return;
@@ -608,7 +599,6 @@ impl AppView {
         );
     }
 
-
     /// 同步更新 metas 缓存中当前会话的条目（与 core 写穿保持一致；
     /// core 的 Set* 写穿不再发 SessionList，缓存不更新会导致切会话读到旧值）
     fn update_current_meta(&mut self, f: impl FnOnce(&mut SessionMeta)) {
@@ -618,7 +608,6 @@ impl AppView {
             f(meta);
         }
     }
-
 
     /// 应用执行模式：本地缓存 + core 下发 + composer 勾选态（直接选中路径是幂等重设，
     /// Yolo 确认框路径靠它补上——拦截时 composer 的下标没动过）
@@ -632,12 +621,10 @@ impl AppView {
         }
     }
 
-
     /// 自测用。
     pub fn debug_config(&self) -> Option<&pig_protocol::AppConfig> {
         self.config.as_ref()
     }
-
 
     /// 自测用：当前激活的「子代理」tab 的 (标题, 已加载 items 数)；
     /// 无激活子代理 tab 或内容未加载为 None
@@ -648,7 +635,6 @@ impl AppView {
         self.subagent_tabs.get(agent_id)?.read(cx).debug_state()
     }
 
-
     /// 自测用：指定 agent_id 的「子代理」tab 的 (running, 行数含缓冲, 累计活动项数)；
     /// 无 tab 为 None
     pub fn debug_subagent_live(&self, agent_id: &str, cx: &App) -> Option<(bool, usize, usize)> {
@@ -657,14 +643,12 @@ impl AppView {
             .map(|panel| panel.read(cx).debug_live())
     }
 
-
     /// 自测用：指定 agent_id 的「子代理」tab 的 (following, at_bottom)；无 tab 为 None
     pub fn debug_subagent_scroll(&self, agent_id: &str, cx: &App) -> Option<(bool, bool)> {
         self.subagent_tabs
             .get(agent_id)
             .map(|panel| panel.read(cx).debug_scroll())
     }
-
 
     /// 中心区内容（dock center 面板调用）：hero / 会话列 / 空提示 + 换页动画
     fn render_center(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -710,8 +694,6 @@ impl AppView {
             .child(center)
             .into_any_element()
     }
-
-
 }
 
 impl Render for AppView {
@@ -858,7 +840,6 @@ impl Render for AppView {
             })
     }
 }
-
 
 fn main() {
     // PIG_NET_TEST=1：不开窗口，用真实配置逐个测试供应商连通性（网络排障用）

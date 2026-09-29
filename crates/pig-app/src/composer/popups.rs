@@ -80,7 +80,6 @@ impl Composer {
         )
     }
 
-
     pub(crate) fn popup_query(&self, cx: &App) -> Option<(Popup, usize, String)> {
         let (kind, start) = self.popup?;
         match kind {
@@ -96,8 +95,12 @@ impl Composer {
         }
     }
 
-
-    pub(crate) fn insert_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn insert_file(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((Popup::Mention, start)) = self.popup else {
             return;
         };
@@ -124,8 +127,12 @@ impl Composer {
         cx.notify();
     }
 
-
-    pub(crate) fn run_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_command(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some((Popup::Slash, start)) = self.popup {
             let caret = self.input.read(cx).selected_range().start;
             self.input.update(cx, |input, cx| {
@@ -142,7 +149,6 @@ impl Composer {
         }
         cx.notify();
     }
-
 
     pub(crate) fn render_list_item(
         &self,
@@ -178,7 +184,6 @@ impl Composer {
             })
             .into_any_element()
     }
-
 
     pub(crate) fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (kind, _start, query) = self.popup_query(cx)?;
@@ -281,7 +286,6 @@ impl Composer {
         )
     }
 
-
     /// 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
     /// `anchor` 为 Center 时弹层水平中线对齐芯片中线（定宽 360）；
     /// 其余弹层宽度按内容伸缩（160 ~ 360）。
@@ -345,7 +349,6 @@ impl Composer {
             .into_any_element()
     }
 
-
     /// Command 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
     pub(crate) fn command_popup_shell(
         &self,
@@ -364,14 +367,12 @@ impl Composer {
         )
     }
 
-
     /// 面板确认/取消的通用收尾：关闭弹层并回焦输入框。
     pub(crate) fn close_command_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.popup = None;
         self.input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
-
 
     /// 芯片点击开合弹层：弹层打开时点击芯片会先触发弹层的 on_mouse_down_out 把它
     /// 关掉（中间隔着一次重渲染，渲染时捕获的开合状态不可靠），这里按「同一次按压
@@ -407,6 +408,4 @@ impl Composer {
             cx.notify();
         }
     }
-
-
 }

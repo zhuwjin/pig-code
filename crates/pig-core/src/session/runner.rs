@@ -19,6 +19,9 @@ struct SessionEntry {
         Vec<pig_protocol::PendingImage>,
         ExecMode,
     )>,
+    /// MCP 连接清单缓存：回合收尾/设置页查询时从 Session 的 manager 刷新
+    ///（None = 尚未懒连接；回合进行中 Session 不在手边时按此缓存应答）
+    mcp_status: Option<Vec<String>>,
 }
 type TurnFuture = std::pin::Pin<Box<dyn Future<Output = (String, Session)>>>;
 fn start_turn(
@@ -173,7 +176,7 @@ pub async fn agent_loop(
                                 session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
                                 let selection = meta_to_selection(&meta);
                                 let state = session.state.clone();
-                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: selection.clone(), reasoning_level: meta.reasoning_level.clone(), last_mode: meta.exec_mode, queue: Default::default() });
+                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: selection.clone(), reasoning_level: meta.reasoning_level.clone(), last_mode: meta.exec_mode, queue: Default::default(), mcp_status: None });
                                 store.lock().expect("store lock").upsert_session(&meta);
                                 let (model, provider_name) = model_label!(selection.as_ref());
                                 emit_global!(Event::SessionConfigured {
@@ -272,6 +275,7 @@ pub async fn agent_loop(
                                     reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
                                     last_mode: meta.as_ref().map(|m| m.exec_mode).unwrap_or_default(),
                                     queue: Default::default(),
+                                    mcp_status: None,
                                 });
                                 let (model, provider_name) = model_label!(selection.as_ref());
                                 emit_global!(Event::SessionConfigured {
@@ -808,6 +812,29 @@ pub async fn agent_loop(
                             }).await;
                         });
                     }
+                    Op::ListMcpServers { session_id } => {
+                        let connected = match sessions.get_mut(&session_id) {
+                            Some(entry) => {
+                                // 回合进行中（session=None）读不到 manager：回缓存清单
+                                if let Some(names) = entry
+                                    .session
+                                    .as_ref()
+                                    .and_then(|session| session.mcp.as_ref())
+                                    .map(|mcp| {
+                                        mcp.server_names()
+                                            .into_iter()
+                                            .map(str::to_string)
+                                            .collect::<Vec<_>>()
+                                    })
+                                {
+                                    entry.mcp_status = Some(names);
+                                }
+                                entry.mcp_status.clone()
+                            }
+                            None => None,
+                        };
+                        emit_global!(Event::McpServerList { session_id, connected });
+                    }
                     Op::Shutdown => break,
                 }
             }
@@ -841,6 +868,13 @@ pub async fn agent_loop(
                     continue;
                 }
                 if let Some(entry) = sessions.get_mut(&session_id) {
+                    // 回合收尾刷新 MCP 清单缓存（懒连接发生在回合内）
+                    entry.mcp_status = session.mcp.as_ref().map(|mcp| {
+                        mcp.server_names()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect()
+                    });
                     entry.session = Some(session);
                     entry.cancel = None;
                     // 回合结束（含中止/出错）后自动取出队首继续

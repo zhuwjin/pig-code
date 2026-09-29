@@ -120,7 +120,10 @@ impl Tool for ReadFile {
                     )
                 } else if column_offset > 0 {
                     let taken: String = line.chars().skip(column_offset).collect();
-                    format!("{taken} [本行第 {}-{line_chars} 字符（共 {line_chars}）]", column_offset + 1)
+                    format!(
+                        "{taken} [本行第 {}-{line_chars} 字符（共 {line_chars}）]",
+                        column_offset + 1
+                    )
                 } else {
                     (*line).to_string()
                 };
@@ -153,13 +156,7 @@ impl Tool for ReadFile {
             }
             // ZCode 口径：只有被预算截断的「整读」才算 partial；显式分页读不算
             let paged = args.get("offset").is_some() || args.get("limit").is_some();
-            record_read_state(
-                ctx.state,
-                &full,
-                &bytes,
-                !paged && end < total,
-                Some(view),
-            );
+            record_read_state(ctx.state, &full, &bytes, !paged && end < total, Some(view));
             Ok(ToolEffect::plain(out))
         })
     }
@@ -261,4 +258,3 @@ pub(crate) fn check_fresh(
     }
     Err("文件自上次 Read 后已被外部修改，请先重新 Read 再改（避免覆盖他人改动）".to_string())
 }
-

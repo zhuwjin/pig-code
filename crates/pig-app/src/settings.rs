@@ -25,16 +25,20 @@ pub enum SettingsEvent {
     TestProvider(String),
     /// 模型 ID 输入完成（回车/失焦），查 models.dev 元数据
     LookupModel(String),
+    /// MCP 页刷新：AppView 重读 mcp.json 并向 core 查询连接清单
+    RefreshMcp,
     Close,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
 mod dialog;
+mod mcp;
 mod pages;
 mod providers;
 
 pub(crate) use dialog::*;
+pub(crate) use mcp::{McpConfigSnapshot, load_mcp_snapshot};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -43,6 +47,7 @@ pub enum SettingsPage {
     Models,
     BrowserControl,
     ComputerControl,
+    WebSearch,
     Shortcuts,
     Memory,
     Subagents,
@@ -70,6 +75,7 @@ const NAV: &[(&str, &[(SettingsPage, IconName, &str)])] = &[
         &[
             (SettingsPage::BrowserControl, IconName::Globe, "浏览器控制"),
             (SettingsPage::ComputerControl, IconName::Cpu, "电脑控制"),
+            (SettingsPage::WebSearch, IconName::Search, "网络搜索"),
             (SettingsPage::Shortcuts, IconName::Menu, "键盘快捷键"),
             (SettingsPage::Memory, IconName::MemoryStick, "记忆"),
             (SettingsPage::Subagents, IconName::Bot, "子智能体"),
@@ -114,6 +120,13 @@ pub struct SettingsView {
     format_outside_close: Option<Point<Pixels>>,
     test_results: std::collections::HashMap<String, (bool, String)>,
     model_dialog: Option<ModelDialog>,
+    /// MCP 页配置快照（AppView 经 RefreshMcp 事件喂入；None = 尚未读取）
+    mcp_snapshot: Option<McpConfigSnapshot>,
+    /// 连接状态对应的会话（None = 未打开会话：只展示配置不展示状态）
+    mcp_session: Option<String>,
+    /// 连接查询状态：None = 等待回包；Some(None) = 会话尚未发起懒连接；
+    /// Some(Some(names)) = 已连接清单（空 = 全部连接失败/无配置）
+    mcp_connection: Option<Option<Vec<String>>>,
     save_generation: u64,
     form_dirty: bool,
     _subscriptions: Vec<Subscription>,
@@ -150,12 +163,14 @@ impl SettingsView {
             format_outside_close: None,
             test_results: Default::default(),
             model_dialog: None,
+            mcp_snapshot: None,
+            mcp_session: None,
+            mcp_connection: None,
             save_generation: 0,
             form_dirty: true,
             _subscriptions,
         }
     }
-
 
     pub fn set_config(&mut self, config: AppConfig, cx: &mut Context<Self>) {
         self.config = config;
@@ -165,7 +180,6 @@ impl SettingsView {
         self.form_dirty = true;
         cx.notify();
     }
-
 
     pub fn set_test_result(
         &mut self,
@@ -179,17 +193,33 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// MCP 页数据喂入（AppView 刷新时调用）：重置换页/刷新前的连接查询结果
+    pub fn set_mcp_config(
+        &mut self,
+        session_id: Option<String>,
+        snapshot: McpConfigSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.mcp_session = session_id;
+        self.mcp_snapshot = Some(snapshot);
+        self.mcp_connection = None;
+        cx.notify();
+    }
+
+    /// core 的 McpServerList 回包（AppView 已按当前会话过滤）
+    pub fn set_mcp_connected(&mut self, connected: Option<Vec<String>>, cx: &mut Context<Self>) {
+        self.mcp_connection = Some(connected);
+        cx.notify();
+    }
 
     #[allow(dead_code)]
     pub fn config(&self) -> &AppConfig {
         &self.config
     }
 
-
     fn selected_provider(&self) -> Option<&ProviderConfig> {
         self.config.providers.get(self.selected?)
     }
-
 
     /// 表单回填需要 window（set_value），标记后到 render 时应用
     fn sync_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -216,7 +246,6 @@ impl SettingsView {
         });
     }
 
-
     /// 表单变更 500ms 防抖后自动保存
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.save_generation += 1;
@@ -234,7 +263,6 @@ impl SettingsView {
         .detach();
     }
 
-
     /// 把表单值写回 config 并发 Save。
     fn save_now(&mut self, cx: &mut Context<Self>) {
         let Some(ix) = self.selected else { return };
@@ -250,7 +278,6 @@ impl SettingsView {
         provider.api_key = api_key;
         cx.emit(SettingsEvent::Save(self.config.clone()));
     }
-
 
     fn add_provider(&mut self, cx: &mut Context<Self>) {
         // id 必须全库唯一：按「数量+1」生成会在删除过供应商后与存量撞车
@@ -280,14 +307,12 @@ impl SettingsView {
         cx.notify();
     }
 
-
     fn select_provider(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.selected = Some(ix);
         self.delete_armed = false;
         self.form_dirty = true;
         cx.notify();
     }
-
 
     fn format_ctx(context_window: u64) -> String {
         if context_window >= 1_000_000 {
@@ -298,8 +323,6 @@ impl SettingsView {
     }
 
     // ---------- 模型弹窗 ----------
-
-
 }
 
 impl Render for SettingsView {
@@ -355,6 +378,50 @@ impl Render for SettingsView {
                 .gap_4()
                 .child(div().text_2xl().font_semibold().child("外观"))
                 .child(self.render_appearance(cx))
+                .into_any_element(),
+            SettingsPage::Mcp => v_flex()
+                .gap_4()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .gap_1()
+                                .child(div().text_2xl().font_semibold().child("MCP 服务器"))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("用户级与项目级 mcp.json 的配置，以及当前会话的连接状态。"),
+                                ),
+                        )
+                        .child(
+                            Button::new("refresh-mcp")
+                                .outline()
+                                .icon(IconName::RotateCw)
+                                .label("刷新")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_mcp(cx);
+                                })),
+                        ),
+                )
+                .child(self.render_mcp(cx))
+                .into_any_element(),
+            SettingsPage::WebSearch => v_flex()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_2xl().font_semibold().child("网络搜索"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("WebSearch 工具的搜索后端状态，经环境变量配置。"),
+                        ),
+                )
+                .child(self.render_websearch(cx))
                 .into_any_element(),
             other => v_flex()
                 .size_full()

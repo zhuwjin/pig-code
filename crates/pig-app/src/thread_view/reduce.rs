@@ -80,8 +80,7 @@ impl ThreadView {
                     expanded: false,
                     edit: None,
                     live_note: None,
-                    agent_card: None,
-                    agent_finished: false,
+                    agent_cards: vec![],
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
@@ -106,8 +105,7 @@ impl ThreadView {
                     expanded: false,
                     edit: None,
                     live_note: None,
-                    agent_card: None,
-                    agent_finished: false,
+                    agent_cards: vec![],
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall {
@@ -175,18 +173,29 @@ impl ThreadView {
                 background,
                 ..
             } => {
-                // 代理卡元信息：先于 ToolCallEnd 到达（回放时紧挨 Begin 重发）；
-                // 乱序防御允许补写已 done 的卡
+                // 代理卡：先于 ToolCallEnd 到达（回放时紧挨 Begin 重发）；同一工具卡
+                // 可有多张（AgentSwarm 每个子代理一张，同 agent_id 去重更新——
+                // 乱序/重复防御允许补写已 done 的卡，运行态字段保留）
                 if let Some(&six) = self.item_index.get(&item_id)
-                    && let Some(Segment::ToolCall { agent_card, .. }) = self.current_segment(six)
+                    && let Some(Segment::ToolCall { agent_cards, .. }) = self.current_segment(six)
                 {
-                    *agent_card = Some(AgentCardMeta {
-                        agent_id,
-                        profile,
-                        description,
-                        model,
-                        background,
-                    });
+                    match agent_cards.iter_mut().find(|c| c.agent_id == agent_id) {
+                        Some(existing) => {
+                            existing.profile = profile;
+                            existing.description = description;
+                            existing.model = model;
+                            existing.background = background;
+                        }
+                        None => agent_cards.push(AgentCardMeta {
+                            agent_id,
+                            profile,
+                            description,
+                            model,
+                            background,
+                            finished: false,
+                            live_note: None,
+                        }),
+                    }
                 }
             }
             Event::SubagentActivity {
@@ -195,8 +204,9 @@ impl ThreadView {
                 finished,
                 ..
             } => {
-                // 后台代理卡的运行态由子代理真实生命周期驱动：找最后一张匹配的
-                // 后台代理卡（item 更新进度行；finished 落终态）。前台卡的进度走
+                // 后台代理卡的运行态由子代理真实生命周期驱动：找最近一张匹配的
+                // 后台代理卡（item 更新该卡进度行；finished 落该卡终态）——同一
+                // 工具卡可有多张（后台 AgentSwarm），逐卡独立。前台卡的进度走
                 // SubagentProgress、运行态跟 done 走，这里一律不动它
                 let target = self
                     .messages
@@ -204,21 +214,17 @@ impl ThreadView {
                     .rev()
                     .flat_map(|m| m.segments.iter_mut().rev())
                     .find_map(|s| match s {
-                        Segment::ToolCall {
-                            agent_card: Some(card),
-                            live_note,
-                            agent_finished,
-                            ..
-                        } if card.agent_id == agent_id && card.background => {
-                            Some((live_note, agent_finished))
-                        }
+                        Segment::ToolCall { agent_cards, .. } => agent_cards
+                            .iter_mut()
+                            .rev()
+                            .find(|c| c.agent_id == agent_id && c.background),
                         _ => None,
                     });
                 // 找不到卡（面板独占/回放外的迟到事件）忽略
-                if let Some((live_note, finished_slot)) = target {
+                if let Some(card) = target {
                     if finished {
-                        *finished_slot = true;
-                        *live_note = None;
+                        card.finished = true;
+                        card.live_note = None;
                         self.auto_scroll();
                     } else if let Some(item) = item {
                         // 活动项 → 进度行文本：tool → "工具名 摘要"；assistant → 正文首行；
@@ -236,7 +242,7 @@ impl ThreadView {
                         .filter(|n| !n.is_empty());
                         if let Some(note) = note {
                             let note: String = note.chars().take(60).collect();
-                            *live_note = Some(note);
+                            card.live_note = Some(note);
                             self.auto_scroll();
                         }
                     }
@@ -365,6 +371,7 @@ impl ThreadView {
             | Event::GitDiff { .. }
             | Event::ConfigSnapshot { .. }
             | Event::TestResult { .. }
+            | Event::McpServerList { .. }
             | Event::ModelInfo { .. }
             | Event::WorkspaceList { .. } => {}
             Event::Error { message, .. } => {
@@ -377,7 +384,6 @@ impl ThreadView {
         }
         cx.notify();
     }
-
 
     /// 收尾当前消息里还在计时的思考段，定格用时。
     /// 回放重建的回合没有真实时钟（事件在一瞬间到达），保持 None 显示「持续了几秒」。
@@ -398,9 +404,12 @@ impl ThreadView {
         }
     }
 
-
     /// 在当前助手消息里按 item_id 找 segment，找不到则用 `create` 追加。
-    pub(crate) fn find_or_create(&mut self, item_id: &str, create: impl FnOnce() -> Segment) -> usize {
+    pub(crate) fn find_or_create(
+        &mut self,
+        item_id: &str,
+        create: impl FnOnce() -> Segment,
+    ) -> usize {
         if let Some(&six) = self.item_index.get(item_id) {
             return six;
         }
@@ -418,10 +427,7 @@ impl ThreadView {
         six
     }
 
-
     pub(crate) fn current_segment(&mut self, six: usize) -> Option<&mut Segment> {
         self.messages.last_mut()?.segments.get_mut(six)
     }
-
-
 }

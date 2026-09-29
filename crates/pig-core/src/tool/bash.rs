@@ -206,4 +206,3 @@ impl Tool for Bash {
         })
     }
 }
-

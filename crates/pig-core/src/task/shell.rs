@@ -31,8 +31,8 @@ pub(crate) fn detect_git_bash() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .collect();
+    let dirs: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
     for dir in &dirs {
         let candidate = dir.join("bash.exe");
         if candidate.is_file() {
@@ -89,7 +89,10 @@ pub(crate) fn git_bash_candidates(git_exe: &Path) -> Vec<PathBuf> {
     let Some(root) = parent.parent() else {
         return Vec::new();
     };
-    vec![root.join("bin").join("bash.exe"), root.join("usr").join("bash.exe")]
+    vec![
+        root.join("bin").join("bash.exe"),
+        root.join("usr").join("bash.exe"),
+    ]
 }
 
 /// `git --exec-path` 输出 → 安装根：…/Git/mingw64/libexec/git-core → …/Git。

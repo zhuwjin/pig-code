@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// resolve_checked 的核心：纯路径解析 + 边界/符号链接检查，结构化返回越界形态。
 fn resolve_core(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, BoundFailure> {
     let raw = Path::new(path);
@@ -210,4 +209,3 @@ pub(crate) fn sensitive_file_error(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string());
     format!("已拒绝访问敏感文件: {name}（.env / 私钥 / 云凭据不会进入模型上下文）")
 }
-

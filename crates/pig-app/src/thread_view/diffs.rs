@@ -164,7 +164,6 @@ impl ThreadView {
             .into_any_element()
     }
 
-
     /// 每轮改动面板（ZCode turn 头部「文件更改」同款）：一行汇总
     /// 「N 个文件已更改 +A -D」（箭头悬停显示），展开后逐文件行（路径 + +N/-N），
     /// 文件行再展开为内联 diff 卡（复用编辑卡的渲染）。
@@ -350,6 +349,4 @@ impl ThreadView {
             .when(open, |this| this.children(file_rows))
             .into_any_element()
     }
-
-
 }

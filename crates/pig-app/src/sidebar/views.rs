@@ -97,7 +97,6 @@ impl Sidebar {
             .into_any_element()
     }
 
-
     pub(crate) fn render_session_row(
         &self,
         window: &Window,
@@ -222,8 +221,11 @@ impl Sidebar {
         row.context_menu(menu).into_any_element()
     }
 
-
-    pub(crate) fn render_group_view(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn render_group_view(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let query = self.query(cx);
         let filtered: Vec<usize> = self
             .sessions
@@ -308,7 +310,6 @@ impl Sidebar {
         }
         out
     }
-
 
     /// 工作区视图置顶区的会话行：标题 + 时间一行，所属工作区一行（置顶会话
     /// 跨工作区集中展示，需标注归属）
@@ -416,34 +417,34 @@ impl Sidebar {
                 }
             }))
             .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(line1)
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Icon::new(IconName::FolderClosed)
-                                    .size_3()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(workspace_name),
-                            ),
-                    ),
+                v_flex().gap_0p5().child(line1).child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::FolderClosed)
+                                .size_3()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(workspace_name),
+                        ),
+                ),
             );
         // 右键菜单：重命名 / 置顶 / 归档 / 删除
         let menu = Self::session_menu(&cx.entity().downgrade(), session);
         row.context_menu(menu).into_any_element()
     }
 
-
-    pub(crate) fn render_workspace_view(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn render_workspace_view(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let query = self.query(cx);
         let mut out: Vec<AnyElement> = vec![];
 
@@ -601,15 +602,11 @@ impl Sidebar {
                                                     .ghost()
                                                     .xsmall()
                                                     .icon(IconName::Plus)
-                                                    .on_click(cx.listener(
-                                                        move |_, _, _, cx| {
-                                                            cx.emit(
-                                                                SidebarEvent::NewTaskInWorkspace(
-                                                                    new_task_path.clone(),
-                                                                ),
-                                                            );
-                                                        },
-                                                    )),
+                                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                                        cx.emit(SidebarEvent::NewTaskInWorkspace(
+                                                            new_task_path.clone(),
+                                                        ));
+                                                    })),
                                             ),
                                     ),
                                 ),
@@ -695,5 +692,4 @@ impl Sidebar {
         }
         out
     }
-
 }

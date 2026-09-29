@@ -65,7 +65,6 @@ reasoning_levels = ["high", "max"]
     }
 }
 
-
 /// PIG_SELFTEST=1：会话A完整修改链 → 会话B并行对话 → 切回A → 模拟重启 resume → @搜索。
 pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     use std::time::Duration;
@@ -698,7 +697,10 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
         app.close_right_tab(RightTab::Changes, cx);
     });
     let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
-    assert!(!open && active.is_none(), "关尽最后一个 tab 后面板应自动收起");
+    assert!(
+        !open && active.is_none(),
+        "关尽最后一个 tab 后面板应自动收起"
+    );
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
     println!("[selftest] 右侧面板开合 OK");
 

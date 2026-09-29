@@ -190,6 +190,7 @@ impl ThreadView {
     /// 等宽输出，输出限高内部滚动。运行中不用 spinner，工具名扫光（ZCode 的取舍：
     /// 流式期间工具多，持续动画耗渲染资源）。
     /// `approval_pending`：该工具正在等待批准（行尾显示黄色「等待批准」）。
+    /// `agent_cards`：SubagentCard 写入的代理卡列表（Agent 一张、AgentSwarm 多张）。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_tool_card(
         &self,
@@ -204,27 +205,33 @@ impl ThreadView {
         expanded: bool,
         approval_pending: bool,
         edit: Option<&EditDiff>,
-        agent_card: Option<&AgentCardMeta>,
-        agent_finished: bool,
+        agent_cards: &[AgentCardMeta],
         body_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent 工具卡
-        // 升级为描述卡（bot 图标 + 任务标题 + profile · model），点击开右侧子代理
-        // 对话 tab；卡体不再提供展开区（完整结果与过程见右侧「子代理」tab）。
-        // 无元信息（live 中 SubagentCard 事件到达前的瞬时态）回落下方标准工具卡渲染。
-        if let Some(card) = agent_card {
-            return self.render_agent_card(
-                message_ix,
-                segment_ix,
-                card,
-                done,
-                is_error,
-                agent_finished,
-                live_note,
-                approval_pending,
-                cx,
-            );
+        // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent/
+        // AgentSwarm 工具卡升级为描述卡（bot 图标 + 任务标题 + profile · model），
+        // 点击开右侧子代理对话 tab；卡体不再提供展开区（完整结果与过程见右侧
+        // 「子代理」tab）。多张（swarm 每个子代理一张）纵向叠放，逐卡独立运行态。
+        // 无卡（live 中 SubagentCard 事件到达前的瞬时态）回落下方标准工具卡渲染。
+        if !agent_cards.is_empty() {
+            return v_flex()
+                .w_full()
+                .gap_1()
+                .children(agent_cards.iter().enumerate().map(|(card_ix, card)| {
+                    self.render_agent_card(
+                        message_ix,
+                        segment_ix,
+                        card_ix,
+                        card,
+                        done,
+                        is_error,
+                        live_note,
+                        approval_pending,
+                        cx,
+                    )
+                }))
+                .into_any_element();
         }
         // ZCode 三级文字层级：正文 > subtle(60%) > subtlest(30~40%)，靠层级而非边框/色彩造信息密度
         let subtle = cx.theme().muted_foreground;
@@ -516,19 +523,21 @@ impl ThreadView {
             .into_any_element()
     }
 
-
-    /// 代理卡：子代理 Agent 工具卡的升级样式（A3c，kimi-code 同款气质）——
+    /// 代理卡：子代理 Agent/AgentSwarm 工具卡的升级样式（A3c，kimi-code 同款气质）——
     /// 圆角卡 + bot 图标方块 + 任务描述标题 + `{profile} · {model}` 副标题；
-    /// 前台运行中多一行实时进度（live_note）；右侧状态：等待批准/Spinner/成功勾/失败词。
+    /// 前台运行中多一行实时进度（段级 live_note；后台卡用卡级 live_note）；
+    /// 右侧状态：等待批准/Spinner/成功勾/失败词。
     /// 点击卡体开右侧子代理对话 tab（完整结果与过程在那里看，故不提供展开区）。
+    /// `card_ix`：同一工具卡里的第几张（swarm 多卡叠放时区分元素 id）。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_agent_card(
         &self,
         message_ix: usize,
         segment_ix: usize,
+        card_ix: usize,
         card: &AgentCardMeta,
         done: bool,
         is_error: bool,
-        agent_finished: bool,
         live_note: Option<&str>,
         approval_pending: bool,
         cx: &mut Context<Self>,
@@ -537,11 +546,18 @@ impl ThreadView {
         let subtlest = subtle.opacity(0.6);
         // 运行态真值表：前台卡跟工具调用同生命周期（!done；等审批暂停转圈）；
         // 后台卡的工具调用立即收尾（running 回执），真实运行态由子代理生命周期
-        // 驱动（SubagentActivity finished 置 agent_finished；回放由 core 补发）
+        // 驱动（SubagentActivity finished 置卡级 finished；回放由 core 补发）
         let running = if card.background {
-            !agent_finished
+            !card.finished
         } else {
             !done && !approval_pending
+        };
+        // 后台卡的实时进度在卡级 live_note（SubagentActivity 按 agent_id 写入）；
+        // 前台卡走段级 live_note（SubagentProgress 按 item_id 写入）
+        let progress_note = if card.background {
+            card.live_note.as_deref()
+        } else {
+            live_note
         };
         let failed = done && is_error;
         let title = if card.description.is_empty() {
@@ -559,7 +575,10 @@ impl ThreadView {
         let agent_id = card.agent_id.clone();
         let title_click = title.clone();
         h_flex()
-            .id(("agent-card", message_ix * 1024 + segment_ix))
+            .id((
+                "agent-card",
+                (message_ix * 1024 + segment_ix) * 256 + card_ix,
+            ))
             .w_full()
             .items_center()
             .gap_2()
@@ -620,11 +639,11 @@ impl ThreadView {
                             .text_color(if failed { cx.theme().danger } else { subtle })
                             .child(subtitle),
                     )
-                    // 前台运行中的实时进度行（挪进卡里， spinner + 单行省略）
+                    // 运行中的实时进度行（挪进卡里， spinner + 单行省略）
                     .when(
-                        running && live_note.is_some_and(|note| !note.is_empty()),
+                        running && progress_note.is_some_and(|note| !note.is_empty()),
                         |this| {
-                            let note = live_note
+                            let note = progress_note
                                 .unwrap_or_default()
                                 .split_whitespace()
                                 .collect::<Vec<_>>()
@@ -679,7 +698,6 @@ impl ThreadView {
             .into_any_element()
     }
 
-
     /// 给圆角卡片补四角：填充每个角落的"R×R 方形 − 半径 R 的四分之一圆"区域
     /// （圆角缺口）。gpui 的 ContentMask 只有矩形裁剪，行底色/色条/滚动条
     /// 都会越过圆角描边；用卡片**背后**的颜色补上缺口后，内容在视觉上
@@ -720,6 +738,4 @@ impl ThreadView {
             window.paint_path(path, color);
         }
     }
-
-
 }

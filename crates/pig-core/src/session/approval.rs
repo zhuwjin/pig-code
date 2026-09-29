@@ -12,6 +12,8 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> GatedToolOutcome {
+        // MCP 工具清单随会话持有（懒连接于 run_step 首步）；子代理门控不走本封装
+        let mcp_tools = self.mcp.as_ref().map(|mcp| mcp.tools()).unwrap_or_default();
         let mut gate = GateCtx {
             cwd: &self.cwd,
             mode: self.mode,
@@ -23,11 +25,10 @@ impl Session {
             session_id: &self.id,
             seq: &self.seq,
             store: &self.store,
+            extra_tools: &mcp_tools,
         };
         exec_tool_gated_ctx(&mut gate, call, tool, item_id, turn_id, tx, cancel).await
     }
-
-
 }
 
 /// 模式中文名（工具结果文案用；与 app 侧 EXEC_MODES 的标签一致）

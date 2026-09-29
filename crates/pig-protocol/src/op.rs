@@ -138,5 +138,9 @@ pub enum Op {
     Compact {
         session_id: String,
     },
+    /// 查询会话的 MCP server 连接清单（设置页展示用）；回 Event::McpServerList
+    ListMcpServers {
+        session_id: String,
+    },
     Shutdown,
 }

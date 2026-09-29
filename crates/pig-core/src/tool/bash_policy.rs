@@ -21,8 +21,8 @@ pub fn is_readonly_command(command: &str, cwd: &Path) -> bool {
         return readonly_dump_command(first, &tokens[1..], cwd);
     }
     const READONLY: &[&str] = &[
-        "ls", "pwd", "echo", "find", "grep", "rg", "wc", "file", "stat", "which", "whoami",
-        "date", "uname", "hostname", "tree", "du", "df", "diff",
+        "ls", "pwd", "echo", "find", "grep", "rg", "wc", "file", "stat", "which", "whoami", "date",
+        "uname", "hostname", "tree", "du", "df", "diff",
     ];
     if READONLY.contains(&first) {
         return true;
@@ -83,7 +83,10 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
             let takes_value = matches!(
                 (cmd, name),
                 ("head" | "tail", "lines" | "bytes")
-                    | ("sort", "key" | "field-separator" | "buffer-size" | "temporary-directory")
+                    | (
+                        "sort",
+                        "key" | "field-separator" | "buffer-size" | "temporary-directory"
+                    )
                     | ("uniq", "skip-fields" | "skip-chars" | "check-chars")
             );
             if takes_value && !long.contains('=') {
@@ -98,15 +101,14 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
         };
         let attached_value = chars.next().is_some();
         // tail -f/-F 跟随输出长驻；sort -o 写输出文件
-        if matches!(
-            (cmd, first),
-            ("tail", 'f') | ("tail", 'F') | ("sort", 'o')
-        ) {
+        if matches!((cmd, first), ("tail", 'f') | ("tail", 'F') | ("sort", 'o')) {
             return false;
         }
         let takes_value = matches!(
             (cmd, first),
-            ("head" | "tail", 'n' | 'c') | ("sort", 'k' | 't' | 'S' | 'T') | ("uniq", 'f' | 's' | 'w')
+            ("head" | "tail", 'n' | 'c')
+                | ("sort", 'k' | 't' | 'S' | 'T')
+                | ("uniq", 'f' | 's' | 'w')
         );
         if takes_value && !attached_value {
             i += 1;
@@ -122,9 +124,8 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
     files.iter().all(|file| {
         !file.contains(['*', '?', '['])
             && !file.starts_with('/')
-            && normalize_within(cwd, file).is_some_and(|resolved| {
-                resolved.starts_with(cwd) && !is_sensitive_file(&resolved)
-            })
+            && normalize_within(cwd, file)
+                .is_some_and(|resolved| resolved.starts_with(cwd) && !is_sensitive_file(&resolved))
     })
 }
 
@@ -153,4 +154,3 @@ fn normalize_within(cwd: &Path, arg: &str) -> Option<PathBuf> {
     }
     Some(stack.into_iter().collect())
 }
-

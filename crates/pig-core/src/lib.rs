@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod config;
 pub mod git;
+pub mod mcp;
 pub mod mock;
 pub mod models_registry;
 pub mod paths;

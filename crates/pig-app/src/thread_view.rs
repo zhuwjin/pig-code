@@ -33,8 +33,8 @@ mod search;
 
 use lightbox::*;
 use messages::*;
-use model::*;
 use model::Role;
+use model::*;
 
 #[derive(Clone)]
 pub enum ThreadEvent {
@@ -177,24 +177,20 @@ impl ThreadView {
         }
     }
 
-
     /// 绑定会话媒体目录（ensure_views 创建时调用）：图片附件缩略图的文件来源
     pub fn set_media_dir(&mut self, dir: std::path::PathBuf) {
         self.media_dir = Some(dir);
     }
-
 
     fn set_streaming(&mut self, streaming: bool, _cx: &mut Context<Self>) {
         self.streaming = streaming;
         self.turn_started = streaming.then(std::time::Instant::now);
     }
 
-
     /// 当前是否已在底部（offset.y ∈ [-max.y, 0]，距底 = offset.y + max.y）
     fn at_bottom(&self) -> bool {
         self.scroll_handle.offset().y + self.scroll_handle.max_offset().y <= px(2.)
     }
-
 
     /// 输出期自动滚动：仅跟随模式贴底；用户上翻后不打扰
     fn auto_scroll(&mut self) {
@@ -203,33 +199,27 @@ impl ThreadView {
         }
     }
 
-
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
-
 
     /// 自测用。
     pub fn debug_queued(&self) -> &[String] {
         &self.queued
     }
 
-
     pub fn is_streaming(&self) -> bool {
         self.streaming
     }
-
 
     pub fn set_plan_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
         self.plan_pending = pending;
         cx.notify();
     }
 
-
     pub fn is_plan_pending(&self) -> bool {
         self.plan_pending
     }
-
 
     /// 与点击「执行计划」按钮相同的路径（自测用）。
     pub fn trigger_execute_plan(&mut self, cx: &mut Context<Self>) {
@@ -242,7 +232,6 @@ impl ThreadView {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
-
 
     pub fn append_user_message(
         &mut self,
@@ -269,7 +258,6 @@ impl ThreadView {
         self.auto_scroll();
         cx.notify();
     }
-
 
     /// 按序号加载媒体文件 `{N}.{ext}` → 缩略图数据；丢失/坏字节 → thumb None（降级 chip）
     fn load_user_image(&self, n: u32) -> UserImage {
@@ -307,7 +295,6 @@ impl ThreadView {
         }
     }
 
-
     /// 自测用：turn 导航条可见条件——（用户消息数, 消息面板宽度 px）
     pub fn debug_nav_state(&self) -> (usize, f32) {
         let turns = self
@@ -317,7 +304,6 @@ impl ThreadView {
             .count();
         (turns, f32::from(self.scroll_handle.bounds().size.width))
     }
-
 
     /// 自测用：导航条活动项排查——（nav_last_active, offset_y, max_offset_y,
     /// 容器高, 各用户消息行的 [top, bottom) 内容坐标）
@@ -344,7 +330,6 @@ impl ThreadView {
         )
     }
 
-
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         self.item_index.clear();
@@ -363,13 +348,11 @@ impl ThreadView {
         cx.notify();
     }
 
-
     pub fn add_system_note(&mut self, text: &str, cx: &mut Context<Self>) {
         self.messages.push(ChatMessage::system(text.to_string()));
         self.auto_scroll();
         cx.notify();
     }
-
 
     /// 供自测断言用：所有系统提示条文本。
     pub fn debug_system_notes(&self) -> Vec<String> {
@@ -379,7 +362,6 @@ impl ThreadView {
             .map(|m| m.text.clone())
             .collect()
     }
-
 
     /// 供自测断言用。
     pub fn debug_last_assistant(&self) -> (bool, String, String, String) {
@@ -414,7 +396,6 @@ impl ThreadView {
         (tool_done, text, thinking, tool_output)
     }
 
-
     /// 任意消息中是否出现过某工具的工具卡（自测用）。
     pub fn debug_has_tool_call(&self, tool: &str) -> bool {
         self.messages.iter().any(|m| {
@@ -425,8 +406,7 @@ impl ThreadView {
         })
     }
 
-
-    /// 首张 Agent 工具卡片的 (summary, live_note, done)（自测用）。
+    /// 首张 Agent/AgentSwarm 工具卡片的 (summary, live_note, done)（自测用）。
     pub fn debug_agent_card(&self) -> Option<(String, Option<String>, bool)> {
         self.messages
             .iter()
@@ -438,11 +418,12 @@ impl ThreadView {
                     live_note,
                     done,
                     ..
-                } if tool == "Agent" => Some((summary.clone(), live_note.clone(), *done)),
+                } if tool == "Agent" || tool == "AgentSwarm" => {
+                    Some((summary.clone(), live_note.clone(), *done))
+                }
                 _ => None,
             })
     }
-
 
     /// 是否出现过后台子代理的合成通知用户消息（自测用）。
     pub fn debug_has_task_notification(&self) -> bool {
@@ -450,7 +431,6 @@ impl ThreadView {
             .iter()
             .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
     }
-
 
     /// 最近一条后台子代理通知的 (agent_id, 标题, 耗时毫秒, 记录路径, 结果路径)
     ///（自测用；无通知/通知缺 agent_id 为 None）。标题 = description（缺省回退
@@ -477,7 +457,6 @@ impl ThreadView {
         })
     }
 
-
     /// 首张代理卡的 (agent_id, 副标题文本)（自测用；无 SubagentCard 元信息为 None）。
     /// 副标题 = `{profile} · {model}`，与代理卡渲染同口径。
     pub fn debug_agent_card_meta(&self) -> Option<(String, String)> {
@@ -485,19 +464,17 @@ impl ThreadView {
             .iter()
             .flat_map(|m| &m.segments)
             .find_map(|s| match s {
-                Segment::ToolCall {
-                    agent_card: Some(card),
-                    ..
-                } => Some((
-                    card.agent_id.clone(),
-                    format!("{} · {}", card.profile, card.model),
-                )),
+                Segment::ToolCall { agent_cards, .. } => agent_cards.first().map(|card| {
+                    (
+                        card.agent_id.clone(),
+                        format!("{} · {}", card.profile, card.model),
+                    )
+                }),
                 _ => None,
             })
     }
 
-
-    /// 最近一张代理卡的 (agent_id, done, agent_finished)（自测用：验证后台卡
+    /// 最近一张代理卡的 (agent_id, done, finished)（自测用：验证后台卡
     /// 运行态机——工具收尾≠子代理结束）。无代理卡为 None。
     pub fn debug_agent_card_state(&self) -> Option<(String, bool, bool)> {
         self.messages
@@ -506,15 +483,13 @@ impl ThreadView {
             .flat_map(|m| m.segments.iter().rev())
             .find_map(|s| match s {
                 Segment::ToolCall {
-                    agent_card: Some(card),
-                    done,
-                    agent_finished,
-                    ..
-                } => Some((card.agent_id.clone(), *done, *agent_finished)),
+                    agent_cards, done, ..
+                } => agent_cards
+                    .last()
+                    .map(|card| (card.agent_id.clone(), *done, card.finished)),
                 _ => None,
             })
     }
-
 
     /// 当前待审批的 request_id（自测用）。
     pub fn pending_approval(&self) -> Option<String> {
@@ -530,7 +505,6 @@ impl ThreadView {
         })
     }
 
-
     /// 走与点击按钮相同的路径对待决议的审批卡做出决定（自测用）。
     pub fn decide_pending(&mut self, decision: ApprovalDecision, cx: &mut Context<Self>) -> bool {
         let found = self.messages.iter().enumerate().rev().find_map(|(mix, m)| {
@@ -545,7 +519,6 @@ impl ThreadView {
         self.decide_approval(mix, six, decision, cx);
         true
     }
-
 
     fn decide_approval(
         &mut self,
@@ -571,8 +544,6 @@ impl ThreadView {
         }
         cx.notify();
     }
-
-
 }
 
 impl Render for ThreadView {
@@ -895,7 +866,6 @@ impl Render for ThreadView {
             })
     }
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -175,24 +175,59 @@ pub fn system_prompt(
 /// 单测保证清单与 tool::all() 注册表同步（新增工具必须同步补一行）。
 fn tool_summaries() -> &'static [(&'static str, &'static str)] {
     &[
-        ("Read", "读取工作区文件，输出带行号；offset/limit 分页，超长行 column_offset 续读"),
-        ("ReadMediaFile", "读取图片（PNG/JPEG/GIF/WebP），自动缩放，region 可裁剪局部"),
+        (
+            "Read",
+            "读取工作区文件，输出带行号；offset/limit 分页，超长行 column_offset 续读",
+        ),
+        (
+            "ReadMediaFile",
+            "读取图片（PNG/JPEG/GIF/WebP），自动缩放，region 可裁剪局部",
+        ),
         ("Write", "写入整个文件（自动创建父目录）"),
-        ("Edit", "精确替换文本片段（old_string 唯一定位；replace_all 全替换；行号/引号/转义容错）"),
-        ("Glob", "按模式匹配文件名（尊重 .gitignore，mtime 降序；head_limit/offset 分页）"),
-        ("Grep", "正则搜索内容，输出 文件:行号: 内容；支持上下文行、files/count 模式与分页"),
-        ("Bash", "执行 shell 命令（按 env 块 Shell 标注选方言）；timeout 超时自动转后台，长输出落盘"),
-        ("TodoList", "管理会话级待办清单（省略参数读取，提供 todos 整体替换）"),
+        (
+            "Edit",
+            "精确替换文本片段（old_string 唯一定位；replace_all 全替换；行号/引号/转义容错）",
+        ),
+        (
+            "Glob",
+            "按模式匹配文件名（尊重 .gitignore，mtime 降序；head_limit/offset 分页）",
+        ),
+        (
+            "Grep",
+            "正则搜索内容，输出 文件:行号: 内容；支持上下文行、files/count 模式与分页",
+        ),
+        (
+            "Bash",
+            "执行 shell 命令（按 env 块 Shell 标注选方言）；timeout 超时自动转后台，长输出落盘",
+        ),
+        (
+            "TodoList",
+            "管理会话级待办清单（省略参数读取，提供 todos 整体替换）",
+        ),
         ("FetchURL", "抓取公开网页并提取正文（不支持需登录页面）"),
+        (
+            "WebSearch",
+            "联网搜索标题/URL/摘要（需配置 TAVILY_API_KEY 或 BRAVE_API_KEY）",
+        ),
         ("TaskList", "列出后台 Bash 任务（id、状态、耗时）"),
         ("TaskOutput", "查看后台任务输出（尾部节选）"),
         ("TaskStop", "停止仍在运行的后台任务"),
-        ("AskUserQuestion", "需要用户决策时给出 1-4 个结构化问题（每题 2-4 选项）"),
-        ("EnterPlanMode", "任务复杂或改动范围大时进入计划模式，只读调研后出计划"),
+        (
+            "AskUserQuestion",
+            "需要用户决策时给出 1-4 个结构化问题（每题 2-4 选项）",
+        ),
+        (
+            "EnterPlanMode",
+            "任务复杂或改动范围大时进入计划模式，只读调研后出计划",
+        ),
         ("ExitPlanMode", "计划写好后请用户确认并退出计划模式"),
         (
             "Agent",
             "委派子代理处理独立子任务（中间过程不占本会话上下文）；prompt 必须自包含，run_in_background 可后台",
+        ),
+        (
+            "AgentSwarm",
+            "批量并行子代理（prompt 模板 × N 个 item，{{item}} 占位展开，全局并发上限内并发，聚合返回）；run_in_background 可后台逐个送达",
         ),
     ]
 }
@@ -317,8 +352,9 @@ mod tests {
         }
     }
 
-    /// 工具清单必须与注册表（tool::all() + 根会话的 Agent）一一对应，
+    /// 工具清单必须与注册表（tool::all() + 根会话的 Agent/AgentSwarm）一一对应，
     /// 防止提示词清单与实际可用工具漂移——新增工具忘了补一句话简介会在这里报错。
+    /// MCP 工具是运行时动态注入，不在此静态清单内。
     #[test]
     fn tool_summaries_match_registry() {
         let listed: BTreeSet<String> = super::tool_summaries()
@@ -329,6 +365,7 @@ mod tests {
             .iter()
             .map(|tool| tool.name().to_string())
             .chain(std::iter::once("Agent".to_string()))
+            .chain(std::iter::once("AgentSwarm".to_string()))
             .collect();
         assert_eq!(listed, registered);
     }

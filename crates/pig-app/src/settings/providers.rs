@@ -97,7 +97,6 @@ impl SettingsView {
         cx.notify();
     }
 
-
     pub(crate) fn save_model_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.model_dialog.take() else {
             return;
@@ -174,7 +173,6 @@ impl SettingsView {
     }
 }
 impl SettingsView {
-
     pub(crate) fn render_provider_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let provider = &self.config.providers[ix];
         let selected = self.selected == Some(ix);
@@ -204,7 +202,6 @@ impl SettingsView {
             .into_any_element()
     }
 
-
     /// 模型 ID 输入完成：非空且与上次查询不同才发起 models.dev 查询。
     /// overwrite=true 为「重置表单」语义（查询结果完全覆盖 + 缺字段回落默认值）
     pub(crate) fn maybe_lookup_model(&mut self, overwrite: bool, cx: &mut Context<Self>) {
@@ -224,7 +221,6 @@ impl SettingsView {
         dialog.lookup_overwrite = overwrite;
         cx.emit(SettingsEvent::LookupModel(id));
     }
-
 
     /// models.dev 查询结果回填弹窗。只在事件对应弹窗当前编辑的 ID 时应用。
     /// 重置触发的查询（lookup_overwrite）：字段 = 数据源值 ?? 新建默认值，参数 JSON 无条件重生成；
@@ -329,7 +325,6 @@ impl SettingsView {
         }
         cx.notify();
     }
-
 
     pub(crate) fn render_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(p_ix) = self.selected else {
@@ -595,7 +590,6 @@ impl SettingsView {
 }
 
 impl SettingsView {
-
     /// API 格式下拉：deferred 到窗口层绘制，`Positioner::side(Bottom)` 锚定按钮正下方
     /// （与 main.rs 标签页 "+" 菜单同一模式）。详情列在 overflow_y_scroll 容器内，
     /// absolute 弹层会被滚动区裁剪，且后续表单兄弟（API Key 输入框等带背景元素）
@@ -656,7 +650,6 @@ impl SettingsView {
         .with_priority(1)
         .into_any_element()
     }
-
 
     pub(crate) fn render_model_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(dialog) = &self.model_dialog else {
@@ -1003,6 +996,4 @@ impl SettingsView {
     }
 }
 
-impl SettingsView {
-
-}
+impl SettingsView {}

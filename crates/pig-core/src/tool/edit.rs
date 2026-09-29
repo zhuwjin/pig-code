@@ -196,7 +196,6 @@ pub fn compute_edit(
     })
 }
 
-
 /// 手动扫描替换（不用 String::replace，实现 ZCode 同款删除优化）：
 /// new 为空、old 不以 \n 结尾、且匹配位置后紧跟 \n 时，连这个 \n 一起删，不留空行。
 /// 返回 (替换后文本, 替换处数)。
@@ -361,4 +360,3 @@ fn follow_quote_style(new_string: &str, original_segment: &str) -> String {
     }
     out
 }
-

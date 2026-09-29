@@ -84,7 +84,6 @@ impl Tool for TodoListTool {
     }
 }
 
-
 fn task_status_label(status: pig_protocol::TaskStatus) -> String {
     match status {
         pig_protocol::TaskStatus::Running => "运行中".to_string(),
@@ -376,6 +375,7 @@ impl Tool for AgentTool {
              好处：子代理的中间过程（大量文件读取/搜索）不进本会话上下文，你只收到它最后的结论。\n\
              - 查找类任务给确切路径或命令；调查类任务给问题，不给死步骤。\n\
              - 不要委派一两步就能完成的琐事；子代理运行中不要并行重做它的工作，也不要中途抛弃它自己手动完成。\n\
+             - 同一任务要批量作用于多个对象（一个模板 × N 个 item 的 fan-out）时用 AgentSwarm，一次铺开并发执行。\n\
              - 子代理的结果只有你能看到（用户看不到），需要时自己转述。\n\
              - run_in_background=true 立即返回（带 task_id）；完成后你会收到通知，**结果全文在通知给出的文件里，用 Read 读取**，不要轮询。优先用 resume 继续已有子代理而不是新起实例。\n\
              可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
@@ -410,6 +410,237 @@ impl Tool for AgentTool {
         // 防御：正常路径在 session.rs 工具循环拦截（run_subagent），不会走到这里
         Box::pin(async move { Err("Agent 由会话层处理".to_string()) })
     }
+}
+
+/// AgentSwarm：批量并行子代理（一个 prompt 模板 × N 个 item）。schema-only，
+/// 会话层在工具循环拦截后走 swarm 并发执行（agent/swarm.rs 准备 + task.rs
+/// 全局并发槽），工具实现只注册 schema 与描述。
+pub struct AgentSwarmTool {
+    /// 可用子代理类型清单（agent_description_list 结果），拼进 description
+    profiles_summary: String,
+}
+
+impl AgentSwarmTool {
+    pub fn new(profiles: &[crate::agent::AgentProfile]) -> Self {
+        Self {
+            profiles_summary: crate::agent::agent_description_list(profiles),
+        }
+    }
+}
+
+impl Tool for AgentSwarmTool {
+    fn name(&self) -> &'static str {
+        "AgentSwarm"
+    }
+
+    /// 非只读：让 Plan 硬拒语义成立（子代理可能修改文件）
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    fn is_shell(&self) -> bool {
+        false
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        let description = format!(
+            "批量并行子代理：一个 prompt 模板 × N 个 item——模板里的 {{{{item}}}} 占位符被每个 item 替换后各启动一个子代理，全部并发执行（全局并发上限，超限自动排队）。\n\
+             - 适用「同一任务批量作用于多个对象」（逐个审查这些文件/逐个迁移这些模块）；item 只放变化的部分（路径/名字/参数），背景与要求在模板里说全（子代理看不到本会话任何消息，prompt 必须自包含）。\n\
+             - 互不相同的一两个任务请改用 Agent；展开后的 prompt 两两不得相同；items 上限 {MAX_SWARM_ITEMS}。\n\
+             - resume_agent_ids 续跑已有子代理（已有 agent_id → 追加 prompt），可与 items 同用；纯续跑时 subagent_type 无意义。\n\
+             - 默认前台：阻塞至全部完成，返回聚合结果（失败项带错误原因；每项结果全文在聚合结果给出的 result.md 文件里，用 Read 读取），期间取消会取消全部子代理。\n\
+             - run_in_background=true 立即返回逐项回执（agent_id/task_id/状态），子代理群后台运行：每项完成或失败都会以 <task-notification> 逐个送达（结果全文在通知给出的文件里，用 Read 读取），不要轮询；后台子代理不随本会话回合取消，可用 TaskStop 逐个停止。\n\
+             可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
+             {}",
+            self.profiles_summary
+        );
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "AgentSwarm",
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt_template": { "type": "string", "description": "任务模板：{{item}} 占位符会被每个 item 替换；背景/要求/输出格式在这里说全" },
+                        "items": {
+                            "type": "array",
+                            "description": "批量对象清单：每个 item 启动一个子代理（纯 items 时至少 2 个）",
+                            "items": { "type": "string" }
+                        },
+                        "resume_agent_ids": {
+                            "type": "object",
+                            "description": "可选：已有 agent_id → 追加 prompt（续跑已有子代理，可与 items 同用）",
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "subagent_type": { "type": "string", "description": "子代理类型，省略默认 general-purpose；仅作用于 items 新起的子代理" },
+                        "run_in_background": { "type": "boolean", "description": "true 立即返回（逐项列出 agent_id/task_id），子代理群后台运行；每项完成/失败都会以 <task-notification> 逐个送达，结果全文在通知给出的文件里（用 Read 读取），不要轮询" }
+                    },
+                    "required": ["prompt_template"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _args: serde_json::Value,
+        _ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        // 防御：正常路径在 session.rs 工具循环拦截（run_swarm），不会走到这里
+        Box::pin(async move { Err("AgentSwarm 由会话层处理".to_string()) })
+    }
+}
+
+/// AgentSwarm items 上限（展开后每个 item 一个子代理）
+pub const MAX_SWARM_ITEMS: usize = 128;
+
+/// AgentSwarm 展开后的一个子任务
+#[derive(Debug)]
+pub struct SwarmTask {
+    /// 续跑目标（已有 agent_id）；None = 新起
+    pub resume: Option<String>,
+    /// 子代理卡显示用的简述（item / 追加 prompt 的首行截断）
+    pub description: String,
+    /// 最终 prompt：items 路径已展开 {{item}}；resume 路径为追加 prompt 原文
+    pub prompt: String,
+}
+
+/// AgentSwarm 解析结果（执行前的完整计划）
+#[derive(Debug)]
+pub struct SwarmPlan {
+    pub tasks: Vec<SwarmTask>,
+    /// 新起子代理的档案查询名（缺省 general-purpose；纯续跑时无意义，校验已拒）
+    pub subagent_type: String,
+}
+
+impl SwarmPlan {
+    /// 新起子任务数（items 展开；resume 条目不算）
+    pub fn item_count(&self) -> usize {
+        self.tasks.iter().filter(|t| t.resume.is_none()).count()
+    }
+}
+
+/// 解析并校验 AgentSwarm 参数（纯函数以便单测；会话层拦截后执行）：
+/// items 与 resume_agent_ids 至少给一类；纯 items 时 ≥2 个；items 上限
+/// MAX_SWARM_ITEMS；模板必须含 {{item}} 占位符；展开后的 prompt 两两不得相同。
+pub fn parse_swarm_args(args: &serde_json::Value) -> Result<SwarmPlan, String> {
+    let template = args["prompt_template"]
+        .as_str()
+        .ok_or("缺少参数 prompt_template（含 {{item}} 占位符的任务模板）")?
+        .trim()
+        .to_string();
+    // items：可选字符串数组；空白/非字符串元素报错（静默丢弃会让模型误判并发数）
+    let mut items: Vec<String> = Vec::new();
+    if !args["items"].is_null() {
+        let array = args["items"]
+            .as_array()
+            .ok_or("参数 items 须为字符串数组")?;
+        for (ix, item) in array.iter().enumerate() {
+            let item = item
+                .as_str()
+                .ok_or_else(|| format!("items 第 {} 个元素须为字符串", ix + 1))?
+                .trim();
+            if item.is_empty() {
+                return Err(format!("items 第 {} 个元素不能为空", ix + 1));
+            }
+            items.push(item.to_string());
+        }
+    }
+    // resume_agent_ids：可选对象 map（agent_id → 追加 prompt）；下方显式按键排序，
+    // 任务顺序确定（serde_json Map 迭代序受 preserve_order feature 影响，不可依赖）
+    let mut resumes: Vec<(String, String)> = Vec::new();
+    if !args["resume_agent_ids"].is_null() {
+        let map = args["resume_agent_ids"]
+            .as_object()
+            .ok_or("参数 resume_agent_ids 须为对象（agent_id → 追加 prompt）")?;
+        // serde_json Map 的迭代序受 preserve_order feature 影响（workspace 统一编译时
+        // 可能是插入序而非键序）——显式排序，保证任务顺序确定
+        let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+        entries.sort_by_key(|(agent_id, _)| agent_id.as_str());
+        for (agent_id, prompt) in entries {
+            let agent_id = agent_id.trim();
+            let prompt = prompt
+                .as_str()
+                .ok_or_else(|| format!("resume_agent_ids[\"{agent_id}\"] 须为字符串"))?
+                .trim();
+            if agent_id.is_empty() {
+                return Err("resume_agent_ids 存在空 agent_id 键".to_string());
+            }
+            if prompt.is_empty() {
+                return Err(format!(
+                    "resume_agent_ids[\"{agent_id}\"] 的追加 prompt 不能为空"
+                ));
+            }
+            resumes.push((agent_id.to_string(), prompt.to_string()));
+        }
+    }
+    if items.is_empty() && resumes.is_empty() {
+        return Err("items 与 resume_agent_ids 至少给一类".to_string());
+    }
+    if resumes.is_empty() && items.len() < 2 {
+        return Err("纯 items 批量至少 2 个 item（单个任务请用 Agent 工具）".to_string());
+    }
+    if items.len() > MAX_SWARM_ITEMS {
+        return Err(format!(
+            "items 总数上限 {MAX_SWARM_ITEMS}（收到 {}）",
+            items.len()
+        ));
+    }
+    let subagent_type = args["subagent_type"].as_str().unwrap_or("").trim();
+    if items.is_empty() && !subagent_type.is_empty() {
+        return Err(
+            "纯 resume 续跑时 subagent_type 无意义（续跑按各自档案现状重解析）".to_string(),
+        );
+    }
+    let mut tasks: Vec<SwarmTask> = Vec::new();
+    if !items.is_empty() {
+        if template.is_empty() {
+            return Err("prompt_template 不能为空".to_string());
+        }
+        if !template.contains("{{item}}") {
+            return Err(
+                "prompt_template 缺少 {{item}} 占位符（每个 item 会替换进模板）".to_string(),
+            );
+        }
+        // 展开后两两去重：重复 prompt = 重复 item（占位符存在性已在上方校验）
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            let prompt = template.replace("{{item}}", item);
+            if !seen.insert(prompt.clone()) {
+                return Err(format!(
+                    "展开后的 prompt 重复：item \"{}\" 与其他 item 展开结果相同（检查是否有重复 item）",
+                    item.chars().take(60).collect::<String>()
+                ));
+            }
+            tasks.push(SwarmTask {
+                resume: None,
+                description: swarm_task_description(item),
+                prompt,
+            });
+        }
+    }
+    for (agent_id, prompt) in resumes {
+        tasks.push(SwarmTask {
+            resume: Some(agent_id),
+            description: swarm_task_description(&prompt),
+            prompt,
+        });
+    }
+    Ok(SwarmPlan {
+        tasks,
+        subagent_type: if subagent_type.is_empty() {
+            "general-purpose".to_string()
+        } else {
+            subagent_type.to_string()
+        },
+    })
+}
+
+/// 子代理卡简述：首行截断 60 字符（item / 追加 prompt 可能很长）
+fn swarm_task_description(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    first_line.chars().take(60).collect()
 }
 
 /// 解析并校验 AskUserQuestion 参数：1-4 题；每题 question 非空、options 2-4 项、
@@ -527,5 +758,210 @@ impl Tool for AskUserQuestionTool {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
         Box::pin(async move { Err("AskUserQuestion 由会话层处理".to_string()) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- parse_swarm_args ----------
+
+    #[test]
+    fn swarm_expand_items() {
+        let plan = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "审查 {{item}}，输出问题清单",
+            "items": ["src/a.rs", "src/b.rs"]
+        }))
+        .expect("合法调用");
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(plan.tasks[0].prompt, "审查 src/a.rs，输出问题清单");
+        assert_eq!(plan.tasks[1].prompt, "审查 src/b.rs，输出问题清单");
+        assert!(
+            plan.tasks.iter().all(|t| t.resume.is_none()),
+            "items 路径不带 resume"
+        );
+        assert_eq!(plan.subagent_type, "general-purpose", "缺省档案");
+        assert_eq!(plan.item_count(), 2);
+        // 多处占位符全部替换
+        let plan = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "读 {{item}} 并比对 {{item}} 的调用方",
+            "items": ["a", "b"]
+        }))
+        .expect("多占位符");
+        assert_eq!(plan.tasks[0].prompt, "读 a 并比对 a 的调用方");
+    }
+
+    #[test]
+    fn swarm_missing_placeholder_err() {
+        let err = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "审查这些文件",
+            "items": ["a", "b"]
+        }))
+        .unwrap_err();
+        assert!(err.contains("{{item}}"), "应点名缺占位符: {err}");
+    }
+
+    #[test]
+    fn swarm_duplicate_expansion_err() {
+        let err = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "审查 {{item}}",
+            "items": ["a.rs", "a.rs"]
+        }))
+        .unwrap_err();
+        assert!(err.contains("重复"), "重复 item 应拒绝: {err}");
+        // item 首尾空白 trim 后展开相同，同样算重复
+        let err = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "审查 {{item}}",
+            "items": ["a.rs", "  a.rs  "]
+        }))
+        .unwrap_err();
+        assert!(err.contains("重复"), "trim 后重复也应拒绝: {err}");
+    }
+
+    #[test]
+    fn swarm_items_limit() {
+        let items: Vec<String> = (0..MAX_SWARM_ITEMS).map(|i| format!("f{i}")).collect();
+        let plan = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "处理 {{item}}",
+            "items": items
+        }))
+        .expect("恰好上限应通过");
+        assert_eq!(plan.tasks.len(), MAX_SWARM_ITEMS);
+        let items: Vec<String> = (0..=MAX_SWARM_ITEMS).map(|i| format!("f{i}")).collect();
+        let err = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "处理 {{item}}",
+            "items": items
+        }))
+        .unwrap_err();
+        assert!(err.contains("上限"), "超上限应报错: {err}");
+    }
+
+    #[test]
+    fn swarm_shape_rules() {
+        // 两类都不给
+        let err =
+            parse_swarm_args(&serde_json::json!({"prompt_template": "x {{item}}"})).unwrap_err();
+        assert!(err.contains("至少给一类"), "{err}");
+        // 纯 items 单元素
+        let err = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "x {{item}}",
+            "items": ["only"]
+        }))
+        .unwrap_err();
+        assert!(err.contains("至少 2"), "{err}");
+        // 空 item / 非字符串 item
+        assert!(
+            parse_swarm_args(&serde_json::json!({
+                "prompt_template": "x {{item}}",
+                "items": ["a", "  "]
+            }))
+            .is_err(),
+            "空白 item 应拒绝"
+        );
+        assert!(
+            parse_swarm_args(&serde_json::json!({
+                "prompt_template": "x {{item}}",
+                "items": ["a", 1]
+            }))
+            .is_err(),
+            "非字符串 item 应拒绝"
+        );
+        // 空模板 + items
+        assert!(
+            parse_swarm_args(&serde_json::json!({
+                "prompt_template": "  ",
+                "items": ["a", "b"]
+            }))
+            .is_err(),
+            "空模板应拒绝"
+        );
+    }
+
+    #[test]
+    fn swarm_resume_rules() {
+        // 纯 resume 合法（prompt_template schema 必填，此处被忽略）
+        let plan = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "",
+            "resume_agent_ids": {"a2": "再查一下", "a1": "继续"}
+        }))
+        .expect("纯 resume");
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(
+            plan.tasks[0].resume.as_deref(),
+            Some("a1"),
+            "对象 map 按键序迭代"
+        );
+        assert_eq!(plan.item_count(), 0);
+        // 纯 resume + subagent_type → 报错
+        assert!(
+            parse_swarm_args(&serde_json::json!({
+                "prompt_template": "",
+                "resume_agent_ids": {"a1": "继续"},
+                "subagent_type": "explore"
+            }))
+            .is_err(),
+            "纯续跑给 subagent_type 应拒绝"
+        );
+        // items + resume 混用：单 item 合法，items 排前
+        let plan = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "处理 {{item}}",
+            "items": ["one"],
+            "resume_agent_ids": {"a1": "继续"},
+            "subagent_type": "explore"
+        }))
+        .expect("混用单 item");
+        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.tasks[0].resume.is_none(), "items 子任务排前");
+        assert_eq!(plan.tasks[1].resume.as_deref(), Some("a1"));
+        assert_eq!(plan.subagent_type, "explore");
+        // 空追加 prompt
+        assert!(
+            parse_swarm_args(&serde_json::json!({
+                "prompt_template": "",
+                "resume_agent_ids": {"a1": "  "}
+            }))
+            .is_err(),
+            "空追加 prompt 应拒绝"
+        );
+    }
+
+    #[test]
+    fn swarm_description_first_line_truncated() {
+        let long = format!("{}\n第二行不要", "字".repeat(100));
+        let plan = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "处理 {{item}}",
+            "items": [long, "短"]
+        }))
+        .expect("长 item");
+        assert_eq!(
+            plan.tasks[0].description.chars().count(),
+            60,
+            "简述取首行截 60 字符"
+        );
+        assert_eq!(plan.tasks[1].description, "短");
+    }
+
+    #[test]
+    fn swarm_run_in_background_not_in_plan() {
+        // run_in_background 是执行方式开关，不进 SwarmPlan（校验规则不受影响）
+        let with = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "审查 {{item}}",
+            "items": ["a.rs", "b.rs"],
+            "run_in_background": true
+        }))
+        .expect("带后台开关的合法调用");
+        let without = parse_swarm_args(&serde_json::json!({
+            "prompt_template": "审查 {{item}}",
+            "items": ["a.rs", "b.rs"]
+        }))
+        .expect("不带后台开关的合法调用");
+        assert_eq!(with.tasks.len(), without.tasks.len());
+        for (a, b) in with.tasks.iter().zip(without.tasks.iter()) {
+            assert_eq!(a.prompt, b.prompt);
+            assert_eq!(a.description, b.description);
+            assert_eq!(a.resume, b.resume);
+        }
+        assert_eq!(with.subagent_type, without.subagent_type);
     }
 }
