@@ -116,6 +116,9 @@ pub struct Session {
     rollout: Option<Rollout>,
     store: Arc<Mutex<Store>>,
     data_dir: PathBuf,
+    /// 会话开始时的 git 快照（分支+dirty），env 块复用——每回合实时查询会让
+    /// 系统提示词前缀缓存随第一次编辑/提交来回翻转失效
+    git_snapshot: Option<String>,
     last_total_tokens: Option<u64>,
     /// 当前回合累计的 token 用量（回合结束写入 turn_usage 表）
     turn_input: u64,
@@ -469,6 +472,7 @@ impl Session {
             rollout: Some(rollout),
             store,
             data_dir,
+            git_snapshot: prompt::git_snapshot(&meta.cwd),
             last_total_tokens: None,
             turn_input: 0,
             turn_cache_read: 0,
@@ -502,7 +506,8 @@ impl Session {
         };
         let history = rebuild_history(
             &records,
-            prompt::system_prompt(cwd, true, ExecMode::ConfirmBeforeEdit, &data_dir),
+            // 占位系统提示词：首轮 run_turn 会用当前模型与 git 快照整体覆盖
+            prompt::system_prompt(cwd, true, ExecMode::ConfirmBeforeEdit, &data_dir, "", None),
         );
         let originals = store
             .lock()
@@ -539,6 +544,7 @@ impl Session {
             rollout: Some(rollout),
             store,
             data_dir,
+            git_snapshot: prompt::git_snapshot(cwd),
             last_total_tokens: None,
             turn_input: 0,
             turn_cache_read: 0,
@@ -984,28 +990,24 @@ impl Session {
             None => None,
         };
 
+        let changed_note = if changed.is_empty() {
+            "期间无文件变更。".to_string()
+        } else {
+            format!("期间修改的文件: {}", changed.join(", "))
+        };
         let note = match &summary {
             Some(summary) => format!(
                 "[前文已压缩{}·模型摘要] 省略 {omitted} 条消息。
 
 {summary}
 
-{}",
+使用说明：这份摘要是对前文对话的忠实记录——其中已完成的工作不要重做，其中已有的信息不要向用户重复询问；后台任务、文件内容等实时状态可能已变化，需要时用工具重新确认，不要凭摘要推断。{changed_note}",
                 if automatic { "（自动）" } else { "" },
-                if changed.is_empty() {
-                    "期间无文件变更。".to_string()
-                } else {
-                    format!("期间修改的文件: {}", changed.join(", "))
-                }
             ),
             None => format!(
-                "[前文已压缩{}] 共 {omitted} 条消息被省略。{}",
+                "[前文已压缩{}] 共 {omitted} 条消息被省略（摘要生成失败，已直接截断）。\
+                 被省略的内容已不在上下文中，需要细节时用 Read/Grep 重新查证，不要凭印象推断。{changed_note}",
                 if automatic { "（自动）" } else { "" },
-                if changed.is_empty() {
-                    "期间无文件变更。".to_string()
-                } else {
-                    format!("期间修改的文件: {}", changed.join(", "))
-                }
             ),
         };
 
@@ -1097,6 +1099,8 @@ impl Session {
             true,
             self.mode,
             &self.data_dir,
+            &config.model,
+            self.git_snapshot.as_deref(),
         ));
         if self.history.is_empty() {
             self.history.push(system);
@@ -2033,6 +2037,7 @@ impl Session {
                     &profile,
                     &self.cwd,
                     &self.data_dir,
+                    self.git_snapshot.as_deref(),
                 )),
                 ChatMsg::user(prompt_text.to_string()),
             ];
@@ -3036,7 +3041,16 @@ fn spawn_title_generation(
 
 fn compaction_prompt(history: &[ChatMsg]) -> String {
     let mut out = format!(
-        "{COMPACTION_MARKER} 请将以下编程助手对话历史压缩为摘要，必须保留：用户目标、已完成的工作、         文件变更（路径+简述）、关键决策、待办事项。用中文，分点列出，控制在 500 字以内。
+        "{COMPACTION_MARKER} 请把以下编程助手对话历史压缩成一份交接摘要，供同一助手在压缩后的上下文里继续工作。用中文，按以下分节输出（无内容的节略过）：
+
+1. 用户目标：用户要做什么，明确提过的要求与偏好。
+2. 已完成：已做完的工作与已验证的结论。
+3. 文件变更：动过的文件（路径 + 一句话改动说明）。
+4. 关键决策：技术选型与理由、用户否决过或纠正过的方向。
+5. 进行中与待办：未完成的步骤、下一步计划、已知阻塞。
+6. 重要上下文：正在跑的命令/后台任务、关键报错原文、环境要点。
+
+只保留继续工作所需的信息；文件路径、命令、报错原文等硬信息原样保留，不要臆测补充。全文控制在 1200 字以内。
 
 "
     );

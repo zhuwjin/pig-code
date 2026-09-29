@@ -1415,18 +1415,22 @@ unknown: 忽略我
         std::fs::write(cwd.join("AGENTS.md"), "项目规则").unwrap();
         let mut profile = subagent(None, None);
         profile.system_prompt = "档案正文。".into();
-        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0);
+        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0, None);
         assert!(prompt.contains("<env>"), "应含 env 块");
         assert!(
             prompt.contains("工作区 AGENTS.md"),
             "inject_agents_md=true 应注入"
         );
         assert!(prompt.contains("项目规则"));
-        assert!(prompt.ends_with("档案正文。"), "档案正文收尾");
+        assert!(prompt.ends_with("</env>"), "env 块收尾（易变内容放最后）");
+        assert!(
+            prompt.contains("档案正文。"),
+            "档案正文保留在 env 之前"
+        );
         // 关闭注入后不再有 AGENTS.md 段
         profile.inject_agents_md = false;
-        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0);
+        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0, None);
         assert!(!prompt.contains("AGENTS.md"));
-        assert!(prompt.ends_with("档案正文。"));
+        assert!(prompt.ends_with("</env>"));
     }
 }

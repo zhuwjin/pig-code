@@ -517,8 +517,10 @@ async fn subagent_background_full_link() {
         notification.contains("duration_ms=\""),
         "开标签应带 duration_ms: {notification}"
     );
+    // record 路径来自 Path::display()，分隔符随平台（Windows 是 \）
+    let agents_sep = format!(".agents{}", std::path::MAIN_SEPARATOR);
     assert!(
-        notification.contains("record=\"") && notification.contains(".agents/"),
+        notification.contains("record=\"") && notification.contains(&agents_sep),
         "开标签应带子代理上下文路径: {notification}"
     );
     // 结果全文路径属性 + 正文 Read 引导 + 文件内容为完整子结论
