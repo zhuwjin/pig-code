@@ -346,6 +346,8 @@ async fn dangerous_command_not_blocked_at_execute_layer() {
 
 #[test]
 fn readonly_command_whitelist() {
+    let dir = temp_dir("readonly");
+    // 简单命令:白名单 + git 子命令
     for cmd in [
         "ls",
         "ls -la src",
@@ -360,15 +362,49 @@ fn readonly_command_whitelist() {
         "wc -l f.txt",
         "echo hello",
     ] {
-        assert!(tool::is_readonly_command(cmd), "{cmd} 应放行");
+        assert!(tool::is_readonly_command(cmd, &dir), "{cmd} 应放行");
+    }
+    // 吐文件类命令(参数级判定):工作区内普通文件放行
+    for cmd in [
+        "cat Cargo.toml",
+        "cat src/a.rs src/b.rs",
+        "cat .env.example", // 模板类豁免(is_sensitive_file 同口径)
+        "head -20 a.rs",
+        "head -n 50 app.log",
+        "head --lines=5 log",
+        "tail -n 50 app.log",
+        "tail --lines 5 log",
+        "sort names.txt",
+        "sort -u names.txt",
+        "uniq dedup.txt",
+    ] {
+        assert!(tool::is_readonly_command(cmd, &dir), "{cmd} 应放行");
     }
     for cmd in [
-        "ls > files.txt",        // 重定向
-        "cat a | grep x",        // 管道
-        "ls && pwd",             // 链式
-        "ls; pwd",               // 分号
-        "echo `date`",           // 反引号命令替换
-        "echo $(date)",          // $(…) 命令替换
+        // 形态门
+        "ls > files.txt", // 重定向
+        "cat a | grep x", // 管道
+        "ls && pwd",      // 链式
+        "ls; pwd",        // 分号
+        "echo `date`",    // 反引号命令替换
+        "echo $(date)",   // $(…) 命令替换
+        "ls\npwd",        // 多行
+        // 吐文件类:敏感 / 越界 / glob / stdin / follow / 写输出 → 拒绝
+        "cat .env",
+        "cat config/.env.local",
+        "cat .ssh/id_rsa",
+        "cat ../outside.txt",
+        "cat /etc/hosts", // 绝对路径区外(Windows 下 MSYS /x 直接拒)
+        "head -20 src/*.rs",
+        "cat",        // 无文件参数 = stdin
+        "cat -",      // stdin
+        "head -n .env", // 敏感路径落进选项值位也因「无文件参数」被拒
+        "tail -f app.log",
+        "tail --follow log",
+        "sort in.txt -o out.txt",
+        "sort --output=out.txt in.txt",
+        "uniq in.txt out.txt", // 第二位置参数是输出文件
+        // git / 其余命令
         "git branch -D feature", // 带参子命令（删除分支）
         "git push",              // 非只读子命令
         "git checkout main",     //
@@ -376,12 +412,8 @@ fn readonly_command_whitelist() {
         "npm install",           //
         "rm -rf node_modules",   //
         "make",                  //
-        "ls\npwd",               // 多行
-        "cat Cargo.toml",        // 吐文件全文的命令免审批会绕过敏感过滤（cat .env）
-        "head -20 a.rs",         //
-        "tail -n 50 app.log",    //
     ] {
-        assert!(!tool::is_readonly_command(cmd), "{cmd} 不应放行");
+        assert!(!tool::is_readonly_command(cmd, &dir), "{cmd} 不应放行");
     }
 }
 

@@ -223,11 +223,12 @@ pub(crate) async fn exec_tool_gated_ctx(
     } else {
         bash_command.as_deref().and_then(tool::is_dangerous_command)
     };
-    // AutoEdit 直通保守白名单的只读命令（ls/git status 这类）；危险判定在上方优先
+    // AutoEdit 直通保守白名单的只读命令（ls/git status 这类）；危险判定在上方优先。
+    // 吐文件类命令（cat 等）在此做参数级判定：敏感/越界目标不放行
     let readonly_bash = ctx.mode == ExecMode::AutoEdit
         && bash_command
             .as_deref()
-            .is_some_and(tool::is_readonly_command);
+            .is_some_and(|command| tool::is_readonly_command(command, ctx.cwd));
     // 「本会话内始终允许」细化到 (工具, subject)：Bash=命令首词，Write/Edit=路径
     let approval_key = (call.name.clone(), tool::approval_subject(call));
 
