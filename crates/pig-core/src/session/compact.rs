@@ -90,8 +90,6 @@ impl Session {
         self.touch_index();
         true
     }
-
-
 }
 
 pub const COMPACTION_MARKER: &str = "[COMPACTION]";

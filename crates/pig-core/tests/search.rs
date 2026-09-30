@@ -370,7 +370,8 @@ async fn grep_decodes_gbk_and_utf16_files() {
     }
     std::fs::write(dir.join("u16.txt"), utf16).unwrap();
 
-    let (out, is_error, ..) = run_tool(&dir, "Grep", serde_json::json!({"pattern": "needle"})).await;
+    let (out, is_error, ..) =
+        run_tool(&dir, "Grep", serde_json::json!({"pattern": "needle"})).await;
     assert!(!is_error, "{out}");
     assert!(
         out.contains("gbk.txt:1: 中文 needle tail"),
@@ -392,7 +393,8 @@ async fn grep_reports_skipped_files_by_reason() {
     drop(f);
     std::fs::write(dir.join("ok.txt"), "needle fine\n").unwrap();
 
-    let (out, is_error, ..) = run_tool(&dir, "Grep", serde_json::json!({"pattern": "needle"})).await;
+    let (out, is_error, ..) =
+        run_tool(&dir, "Grep", serde_json::json!({"pattern": "needle"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("ok.txt:1: needle fine"), "{out}");
     assert!(out.contains("敏感 1"), "{out}");

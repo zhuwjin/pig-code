@@ -63,9 +63,13 @@ impl Composer {
         }
     }
 
-
     /// 图片进附件列表（chip 条）：超上限只提示不附加；TIFF 在这里规范化为 PNG。
-    pub(crate) fn attach_image(&mut self, mut bytes: Vec<u8>, mut mime: &str, cx: &mut Context<Self>) {
+    pub(crate) fn attach_image(
+        &mut self,
+        mut bytes: Vec<u8>,
+        mut mime: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self.pasted_images.len() >= MAX_PASTED_IMAGES {
             eprintln!(
                 "[clipboard] attach_image skipped: already at max={} images",
@@ -116,7 +120,6 @@ impl Composer {
         );
         cx.notify();
     }
-
 
     /// 图片附件条：官方 AttachmentGroup（每图一个 Attachment：缩略图 + 尺寸/体积 +
     /// 悬停删除钮）；paste_note 警告行跟在 Group 之后（样式不变）。
@@ -173,17 +176,10 @@ impl Composer {
                 )
             })
             .when_some(self.paste_note.clone(), |this, note| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child(note),
-                )
+                this.child(div().text_xs().text_color(cx.theme().warning).child(note))
             })
             .into_any_element()
     }
-
-
 }
 
 /// 剪贴板图片附件（chip 条展示；发送时转 PendingImage 下发）

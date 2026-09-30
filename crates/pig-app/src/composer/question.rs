@@ -55,10 +55,7 @@ impl Composer {
                 }
                 // 翻页：镜像当前页题号
                 QuestionnaireEvent::CurrentItemChanged { current, .. } => {
-                    if let Some(ix) = current
-                        .as_ref()
-                        .and_then(|name| name.parse::<usize>().ok())
-                    {
+                    if let Some(ix) = current.as_ref().and_then(|name| name.parse::<usize>().ok()) {
                         this.question_current = ix;
                     }
                     cx.notify();
@@ -71,7 +68,6 @@ impl Composer {
         self.question_current = 0;
         self.questionnaire = Some((state, sub));
     }
-
 
     /// 问卷提交：按题序收集答案（选中 label 按选项定义序 + 非空「其他」文本 trim 后
     /// 追加为一个 label），发 QuestionReply、清问题态与问卷实体、焦点还回输入框。
@@ -109,7 +105,6 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 放弃：回复 None（core 按「用户选择不回答」继续，不算错误）。
     pub(crate) fn skip_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(question) = self.question.take() {
@@ -124,7 +119,6 @@ impl Composer {
         }
     }
 
-
     /// 自测用：问题条是否在显示（返回当前页题干）。
     pub fn debug_question(&self) -> Option<String> {
         let question = self.question.as_ref()?;
@@ -134,7 +128,6 @@ impl Composer {
             .min(question.questions.len().saturating_sub(1));
         question.questions.get(qix).map(|q| q.question.clone())
     }
-
 
     /// 自测用：等价点「下一题」（受当前题已作答门控；go_next 需要 Window，取首窗口）。
     pub fn debug_next_question_page(&mut self, cx: &mut Context<Self>) {
@@ -151,7 +144,6 @@ impl Composer {
         });
         cx.notify();
     }
-
 
     /// 自测用：选中某题某选项（等价点击选项按钮；不管焦点与「其他」输入）。
     pub fn debug_select_question_option(&mut self, qix: usize, oix: usize, cx: &mut Context<Self>) {
@@ -174,7 +166,6 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 自测用：等价点「提交」（问卷校验全过才经事件订阅发 QuestionReply，门控与原实现一致）。
     pub fn debug_submit_question(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.questionnaire.as_ref().map(|(state, _)| state.clone()) else {
@@ -190,7 +181,6 @@ impl Composer {
         });
         cx.notify();
     }
-
 
     /// 问题条（gpui-kit Questionnaire 官方组件，向导分页一次一题）：Progress（题号/总数）→
     /// 当前题 Item（Title 题干 / Description 放可选 header / Choices 选项卡 / Input「其他」/
@@ -246,10 +236,11 @@ impl Composer {
                 Questionnaire::new(state)
                     // 输入区是紧凑条形：整体小一号贴现状（行距/题干字重沿用 part 默认）
                     .with_size(Size::Small)
-                    .child(
-                        QuestionnaireProgress::new(state)
-                            .child(format!("{}/{}", progress.current(), progress.total())),
-                    )
+                    .child(QuestionnaireProgress::new(state).child(format!(
+                        "{}/{}",
+                        progress.current(),
+                        progress.total()
+                    )))
                     .children(item_parts)
                     .child(
                         QuestionnaireActions::new(state)
@@ -270,5 +261,4 @@ impl Composer {
             )
             .into_any_element()
     }
-
 }

@@ -10,7 +10,6 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 自测用：(「后台 Bash」chip 可见, 「后台 Agent」chip 可见)——
     /// chip 显隐由任务快照按 agent_id 类型分派
     pub fn debug_task_chips(&self) -> (bool, bool) {
@@ -20,7 +19,6 @@ impl Composer {
         )
     }
 
-
     /// 自测用：Agent 任务行的 agent_id 列表
     pub fn debug_agent_task_ids(&self) -> Vec<String> {
         self.tasks
@@ -28,7 +26,6 @@ impl Composer {
             .filter_map(|t| t.agent_id.clone())
             .collect()
     }
-
 
     /// 自测用：模拟点开「后台 Agent」chip 弹层（复现 palette_open 漏 AgentTasks
     /// 导致 render_popup 踩 unreachable 的崩溃路径）；返回弹层是否打开
@@ -38,13 +35,11 @@ impl Composer {
         matches!(self.popup, Some((Popup::AgentTasks, _)))
     }
 
-
     /// 自测用：收起任意弹层
     pub fn debug_close_popup(&mut self, cx: &mut Context<Self>) {
         self.popup = None;
         cx.notify();
     }
-
 
     pub fn set_tasks(&mut self, tasks: Vec<TaskSummary>, cx: &mut Context<Self>) {
         // 对应类别的任务清空时收起对应弹层（chip 按 agent_id 拆分后各自判定）
@@ -62,7 +57,6 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 改动统计 + 文件列表（ReviewPanel 快照）
     pub fn set_changes(
         &mut self,
@@ -76,12 +70,10 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 自测用：返回 (used, total)。
     pub fn debug_context_usage(&self) -> Option<(u64, u64)> {
         self.context_usage.map(|(used, total, _, _)| (used, total))
     }
-
 
     /// 底部工具栏芯片：图标 + 文本 + 下拉箭头，样式与 hero 区工作区/分支芯片一致。
     /// `color` 非 None 时图标与文本着色（模式芯片按危险程度着色用），箭头保持 muted。
@@ -124,7 +116,6 @@ impl Composer {
                     .text_color(cx.theme().muted_foreground),
             )
     }
-
 
     pub(crate) fn render_todos_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let done = self
@@ -185,11 +176,14 @@ impl Composer {
         )
     }
 
-
     /// 后台任务弹层（按 kind 拆成「后台 Bash / 后台 Agent」两个独立面板）：
     /// Bash 行点击展开输出尾部（现状）；Agent 行点击开右侧子代理对话 tab
     ///（收起弹层 + ComposerEvent::OpenSubagent 上冒给 AppView）
-    pub(crate) fn render_tasks_panel(&self, kind: TaskChipKind, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_tasks_panel(
+        &self,
+        kind: TaskChipKind,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let running = self
             .tasks
             .iter()
@@ -384,6 +378,4 @@ impl Composer {
             cx,
         )
     }
-
-
 }

@@ -145,6 +145,7 @@ mod paths;
 mod read;
 mod search;
 mod tracker;
+mod websearch;
 mod write;
 pub(crate) use write::atomic_write;
 
@@ -156,19 +157,20 @@ pub(crate) use misc::*;
 pub(crate) use paths::*;
 pub(crate) use read::*;
 pub(crate) use tracker::*;
+pub(crate) use websearch::*;
 
 pub use bash::is_dangerous_command;
 pub use bash_policy::is_readonly_command;
-pub use edit::{compute_edit, EditMatchError, EditOutcome};
+pub use edit::{EditMatchError, EditOutcome, compute_edit};
 pub use fetch::{check_fetch_url, extract_text, is_private_host, is_private_ip};
 pub use media::{
     base64_encode, compress_image_for_model, convert_tiff_to_png, decode_image_check,
     encode_image_for_model, image_dimensions, sniff_image,
 };
-pub use misc::{parse_questions, AgentTool};
+pub use misc::{AgentSwarmTool, AgentTool, parse_questions, parse_swarm_args};
 pub use paths::{is_sensitive_file, resolve_checked, resolve_with_access};
 pub use search::search_files;
-pub use tracker::{snapshot_from_store, snapshot_to_store, ChangeTracker};
+pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
 
 pub use pig_protocol::{TodoItem, TodoStatus};
 
@@ -208,6 +210,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(Bash),
         Box::new(TodoListTool),
         Box::new(FetchUrl),
+        Box::new(WebSearch),
         Box::new(TaskList),
         Box::new(TaskOutput),
         Box::new(TaskStop),
@@ -222,12 +225,12 @@ pub fn schemas() -> Vec<serde_json::Value> {
     all().iter().map(|tool| tool.schema()).collect()
 }
 
-/// 根会话工具集 = 全部内置工具 + Agent（子代理循环用 all()，天然无 Agent 防嵌套）
+/// 根会话工具集 = 全部内置工具 + Agent/AgentSwarm（子代理循环用 all()，天然无 Agent 防嵌套）
 pub fn all_root(cwd: &Path, data_dir: &Path) -> Vec<Box<dyn Tool>> {
     let mut tools = all();
-    tools.push(Box::new(AgentTool::new(&crate::agent::load_profiles(
-        cwd, data_dir,
-    ))));
+    let profiles = crate::agent::load_profiles(cwd, data_dir);
+    tools.push(Box::new(AgentTool::new(&profiles)));
+    tools.push(Box::new(AgentSwarmTool::new(&profiles)));
     tools
 }
 
@@ -242,16 +245,20 @@ pub fn schemas_root(cwd: &Path, data_dir: &Path) -> Vec<serde_json::Value> {
 /// 审批判定：Plan 模式在更早处拦截（直接拒绝），这里只管其余档。
 /// Yolo 与 FullAccess 都不审批（危险命令强制弹窗在 session 层，Yolo 在那里也跳过）。
 pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
-    // Agent 一律免审批：子代理内部每个写操作会自己走审批门，
-    // 不对 Agent 调用本身二次审批（弹窗文案也没法描述整个子任务）
-    if tool.name() == "Agent" {
+    // Agent/AgentSwarm 一律免审批：子代理内部每个写操作会自己走审批门，
+    // 不对委派调用本身二次审批（弹窗文案也没法描述整个子任务）
+    if tool.name() == "Agent" || tool.name() == "AgentSwarm" {
         return false;
     }
     match mode {
         ExecMode::FullAccess | ExecMode::Yolo => false,
         ExecMode::Plan => false,
         ExecMode::ConfirmBeforeEdit => !tool.read_only(),
-        ExecMode::AutoEdit => tool.is_shell(),
+        // MCP 工具无 annotations 时按非只读保守处理：AutoEdit 下也弹审批
+        //（is_shell 只覆盖 Bash，挡不住 MCP 写工具直通）
+        ExecMode::AutoEdit => {
+            tool.is_shell() || (tool.name().starts_with("mcp__") && !tool.read_only())
+        }
     }
 }
 
@@ -269,6 +276,7 @@ pub fn summarize(call: &ToolCall) -> String {
             .map(|items| format!("更新待办（{} 项）", items.len()))
             .unwrap_or_else(|| "查看待办".to_string()),
         "FetchURL" => args["url"].as_str().unwrap_or("?").to_string(),
+        "WebSearch" => args["query"].as_str().unwrap_or("?").to_string(),
         "TaskList" => "列出后台任务".to_string(),
         "TaskOutput" | "TaskStop" => args["task_id"].as_str().unwrap_or("?").to_string(),
         "AskUserQuestion" => args["questions"][0]["question"]
@@ -285,6 +293,14 @@ pub fn summarize(call: &ToolCall) -> String {
                 .unwrap_or("general-purpose"),
             args["description"].as_str().unwrap_or("?")
         ),
+        "AgentSwarm" => format!(
+            "子代理群（{} 项）",
+            args["items"].as_array().map(|a| a.len()).unwrap_or(0)
+                + args["resume_agent_ids"]
+                    .as_object()
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+        ),
         _ => args.to_string(),
     };
     // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
@@ -292,6 +308,7 @@ pub fn summarize(call: &ToolCall) -> String {
     raw
 }
 
+/// 兼容入口：仅内置工具（集成测试用）；运行时路径（门控/并发只读段）走 execute_with_extra
 pub async fn execute(
     call: &ToolCall,
     ctx: ToolContext<'_>,
@@ -302,9 +319,28 @@ pub async fn execute(
     Option<pig_protocol::EditDiff>,
     Vec<ToolImage>,
 ) {
+    execute_with_extra(call, ctx, &[]).await
+}
+
+pub async fn execute_with_extra(
+    call: &ToolCall,
+    ctx: ToolContext<'_>,
+    // 内置以外的运行时工具（MCP）：按名查找的兜底清单
+    extra: &[Box<dyn Tool>],
+) -> (
+    String,
+    bool,
+    Option<FileChange>,
+    Option<pig_protocol::EditDiff>,
+    Vec<ToolImage>,
+) {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     let tools = all();
-    let Some(tool) = tools.iter().find(|tool| tool.name() == call.name) else {
+    let Some(tool) = tools
+        .iter()
+        .chain(extra.iter())
+        .find(|tool| tool.name() == call.name)
+    else {
         return (format!("未知工具: {}", call.name), true, None, None, vec![]);
     };
     match tool.execute(args, ctx).await {
@@ -341,7 +377,6 @@ struct Glob;
 struct Grep;
 struct Bash;
 
-
 pub fn approval_subject(call: &ToolCall) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     match call.name.as_str() {
@@ -354,4 +389,3 @@ pub fn approval_subject(call: &ToolCall) -> String {
         _ => String::new(),
     }
 }
-

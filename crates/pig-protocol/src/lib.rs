@@ -67,7 +67,6 @@ pub enum ApiFormat {
     AnthropicMessages,
 }
 
-
 /// 工作区条目（store.sqlite workspaces 表持久化）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceMeta {
@@ -165,7 +164,6 @@ pub struct QuestionItem {
     pub multi_select: bool,
     pub options: Vec<QuestionOption>,
 }
-
 
 /// 子代理对话的只读展示行（Event::SubagentHistory 载荷）
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -15,8 +15,13 @@ use crate::provider::ResolvedModel;
 pub const DEFAULT_MAX_TURNS: usize = 20;
 
 /// 子代理强制剔除的工具（防嵌套委派/计划模式死锁/阻塞父 turn 提问）
-pub const FORBIDDEN_CHILD_TOOLS: [&str; 4] =
-    ["Agent", "EnterPlanMode", "ExitPlanMode", "AskUserQuestion"];
+pub const FORBIDDEN_CHILD_TOOLS: [&str; 5] = [
+    "Agent",
+    "AgentSwarm",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "AskUserQuestion",
+];
 
 /// 子代理档案
 #[derive(Clone, Debug)]
@@ -51,12 +56,14 @@ mod parse;
 mod profiles;
 mod records;
 mod store;
+mod swarm;
 
 pub(crate) use parse::*;
 pub(crate) use profiles::*;
 pub(crate) use records::*;
-pub(crate) use store::*;
 pub use store::set_model_override;
+pub(crate) use store::*;
+pub(crate) use swarm::*;
 
 /// 按名字找档案：精确匹配 → 归一匹配；多个命中报错列候选，零命中报错列全部可用名。
 pub fn find_profile<'a>(
@@ -110,6 +117,17 @@ pub fn child_tool_set(
         .filter(|name| input_image || name.as_str() != "ReadMediaFile")
         .cloned()
         .collect()
+}
+
+/// 子代理 MCP 工具继承判定：收窄后的内置工具集含写工具（Write/Edit）→ 继承全部
+/// 已连接 MCP 工具；否则（只读档案，如 explore）只继承 readOnlyHint 的 MCP 工具。
+/// 注意 Bash 不作判别：explore 收窄后含 Bash 但属只读档案——写面判别只看
+/// 纯文件变更工具（Bash 调用本身仍过审批门/规则门）。
+/// 入参是 child_tool_set 收窄后的内置工具名（MCP 工具不在其中，mcp__ 前缀天然不撞名）。
+pub fn child_inherits_all_mcp(child_tool_names: &[String]) -> bool {
+    child_tool_names
+        .iter()
+        .any(|name| name == "Write" || name == "Edit")
 }
 
 /// 「providerId/modelId」全集（仅启用供应商），报错提示用
@@ -233,7 +251,6 @@ pub fn agent_description_list(profiles: &[AgentProfile]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -804,6 +821,7 @@ unknown: 忽略我
             "Write",
             "Edit",
             "Agent",
+            "AgentSwarm",
             "AskUserQuestion",
             "EnterPlanMode",
             "ExitPlanMode",
@@ -823,6 +841,10 @@ unknown: 忽略我
         assert!(tools.contains(&"Bash".to_string()), "全部工具应含 Bash");
         assert!(tools.contains(&"Write".to_string()), "全部工具应含 Write");
         assert!(!tools.contains(&"Agent".to_string()), "Agent 永远剔除");
+        assert!(
+            !tools.contains(&"AgentSwarm".to_string()),
+            "AgentSwarm 永远剔除"
+        );
         assert!(!tools.contains(&"AskUserQuestion".to_string()));
         assert!(!tools.contains(&"EnterPlanMode".to_string()));
         assert!(!tools.contains(&"ExitPlanMode".to_string()));
@@ -836,6 +858,7 @@ unknown: 忽略我
             "Read".into(),
             "NotExist".into(),
             "Agent".into(),
+            "AgentSwarm".into(),
             "Bash".into(),
         ]);
         let tools = child_tool_set(&profile, &all_tool_names(), true);
@@ -848,6 +871,10 @@ unknown: 忽略我
         assert!(
             !tools.contains(&"Agent".to_string()),
             "显式列出 Agent 也要剔除"
+        );
+        assert!(
+            !tools.contains(&"AgentSwarm".to_string()),
+            "显式列出 AgentSwarm 也要剔除"
         );
         assert!(!tools.contains(&"Write".to_string()), "不在列表里的不给");
     }
@@ -874,6 +901,33 @@ unknown: 忽略我
             !without.contains(&"ReadMediaFile".to_string()),
             "不支持图片时剔除"
         );
+    }
+
+    // ---------- child_inherits_all_mcp ----------
+
+    #[test]
+    fn mcp_inherit_all_for_full_profile() {
+        // general-purpose（tools=None → 全部内置收窄）：含 Write/Edit → 继承全部 MCP
+        let general = &builtin_profiles()[0];
+        let keep = child_tool_set(general, &all_tool_names(), true);
+        assert!(child_inherits_all_mcp(&keep), "全工具档案继承全部 MCP 工具");
+    }
+
+    #[test]
+    fn mcp_inherit_readonly_for_readonly_profile() {
+        // explore 收窄后不含 Write/Edit（含 Bash 不影响判定）→ 只继承 readOnlyHint
+        let explore = &builtin_profiles()[1];
+        let keep = child_tool_set(explore, &all_tool_names(), true);
+        assert!(keep.contains(&"Bash".to_string()), "explore 含 Bash");
+        assert!(
+            !child_inherits_all_mcp(&keep),
+            "只读档案只继承 readOnlyHint 的 MCP 工具"
+        );
+        // 显式列表给了 Write 的自定义档案 → 全继承
+        let mut writer = subagent(None, None);
+        writer.tools = Some(vec!["Read".into(), "Write".into()]);
+        let keep = child_tool_set(&writer, &all_tool_names(), true);
+        assert!(child_inherits_all_mcp(&keep));
     }
 
     // ---------- 其他 ----------
@@ -917,10 +971,7 @@ unknown: 忽略我
         );
         assert!(prompt.contains("项目规则"));
         assert!(prompt.ends_with("</env>"), "env 块收尾（易变内容放最后）");
-        assert!(
-            prompt.contains("档案正文。"),
-            "档案正文保留在 env 之前"
-        );
+        assert!(prompt.contains("档案正文。"), "档案正文保留在 env 之前");
         // 关闭注入后不再有 AGENTS.md 段
         profile.inject_agents_md = false;
         let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0, None);

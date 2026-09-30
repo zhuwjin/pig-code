@@ -273,6 +273,56 @@ pub fn register_agent_task(
     id
 }
 
+/// 子代理全局并发上限（后台 Agent 与 AgentSwarm 展开的子代理共享的信号量槽数）。
+/// 配置项需要动 pig-protocol 的 AppConfig（跨 crate），v1 先常量。
+pub const MAX_CONCURRENT_SUBAGENTS: usize = 8;
+
+/// 子代理全局并发槽：进程级静态（跨会话共享），超限在 acquire 处排队。
+static SUBAGENT_SLOTS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_SUBAGENTS);
+
+/// 当前空闲并发槽数（排队提示用；瞬时值，与随后的 acquire 结果可能有出入）
+pub fn subagent_slots_available() -> usize {
+    SUBAGENT_SLOTS.available_permits()
+}
+
+/// 申领一个子代理并发槽：超限排队；等待中 cancel 触发返回 None（排队即放弃，不占槽）。
+/// permit 是 RAII 守卫：drop 即还槽。
+pub async fn acquire_subagent_slot(
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<tokio::sync::SemaphorePermit<'static>> {
+    tokio::select! {
+        permit = SUBAGENT_SLOTS.acquire() => permit.ok(),
+        _ = cancel.cancelled() => None,
+    }
+}
+
+/// 注册「排队中」的子代理任务：与 register_agent_task 同规格，command 带
+/// 「排队中 · 」前缀（TaskStatus 无 Pending 变体、协议不动——TaskList/面板经
+/// command 文本可见排队态）；并发槽到手后 mark_agent_task_started 摘前缀。
+pub fn register_agent_task_queued(
+    state: &SessionToolState,
+    command: String,
+    cancel: tokio_util::sync::CancellationToken,
+    agent_id: String,
+) -> String {
+    register_agent_task(state, format!("排队中 · {command}"), cancel, agent_id)
+}
+
+/// 并发槽到手：摘掉「排队中 · 」前缀并 notify 刷新面板（started_at 不动，
+/// 耗时含排队——排队多久本来就是等待成本）。
+pub fn mark_agent_task_started(state: &SessionToolState, task_id: &str) {
+    {
+        let mut tasks = state.tasks.lock().expect("task registry lock");
+        if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id)
+            && let Some(rest) = entry.command.strip_prefix("排队中 · ")
+        {
+            entry.command = rest.to_string();
+        }
+    }
+    let _ = state.task_notify.send(state.session_id.clone());
+}
+
 /// 任务输出累计计量（stdout/stderr 两个读者共享）：越过总量上限只触发一次强停。
 #[derive(Default)]
 struct OutputMeter {
@@ -365,8 +415,8 @@ async fn read_into<R: tokio::io::AsyncRead + Unpin>(
 
 mod shell;
 
-pub use shell::{shell_label, windows_shell, WindowsShell};
 pub(crate) use shell::*;
+pub use shell::{WindowsShell, shell_label, windows_shell};
 
 /// watcher：等子进程退出 + 排空两个读者 → 仅当状态仍是 Running 才置 Exited
 ///（避免覆写 stop_task 先置的 Killed）→ task_notify 发 session_id。
@@ -669,13 +719,68 @@ pub fn stop_task(
 mod tests {
     use super::*;
 
+    /// 排队注册：command 带前缀；槽到手摘前缀；未知 task_id 不 panic
+    #[test]
+    fn queued_registration_marks_pending() {
+        let state = SessionToolState::for_test();
+        let task_id = register_agent_task_queued(
+            &state,
+            "子代理 explore: 查问题".to_string(),
+            tokio_util::sync::CancellationToken::new(),
+            "a1-1".to_string(),
+        );
+        {
+            let tasks = state.tasks.lock().expect("task registry lock");
+            let entry = tasks.iter().find(|t| t.id == task_id).expect("条目存在");
+            assert!(
+                entry.command.starts_with("排队中 · "),
+                "排队态经 command 前缀呈现: {}",
+                entry.command
+            );
+            assert!(matches!(entry.status, TaskStatus::Running));
+        }
+        mark_agent_task_started(&state, &task_id);
+        {
+            let tasks = state.tasks.lock().expect("task registry lock");
+            let entry = tasks.iter().find(|t| t.id == task_id).expect("条目存在");
+            assert_eq!(entry.command, "子代理 explore: 查问题", "开始后摘前缀");
+        }
+        mark_agent_task_started(&state, "b999");
+    }
+
+    /// 并发槽：空槽立即可得、drop 还槽；占满时已取消的 token 排队即放弃不占槽。
+    ///（静态信号量全进程共享，整个测试套件只有这一个用例碰它，无并发干扰）
+    #[tokio::test]
+    async fn subagent_slot_acquire_and_cancel() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let permit = acquire_subagent_slot(&cancel)
+            .await
+            .expect("空槽应立即可得");
+        assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS - 1);
+        drop(permit);
+        assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS);
+        // 占满：已取消 token 的 acquire 立即返回 None
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_SUBAGENTS {
+            held.push(
+                acquire_subagent_slot(&cancel)
+                    .await
+                    .expect("占满前都应可得"),
+            );
+        }
+        assert_eq!(subagent_slots_available(), 0);
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        cancelled.cancel();
+        assert!(acquire_subagent_slot(&cancelled).await.is_none());
+        drop(held);
+        assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS);
+    }
+
     /// `git --exec-path` 输出 → 安装根：MINGW 段定位（git 输出正斜杠路径）。
     #[test]
     fn exec_path_root_inference() {
-        let root = root_from_exec_path_text(
-            "C:/Program Files/Git/mingw64/libexec/git-core\n",
-        )
-        .expect("常规布局应命中");
+        let root = root_from_exec_path_text("C:/Program Files/Git/mingw64/libexec/git-core\n")
+            .expect("常规布局应命中");
         assert_eq!(root, PathBuf::from("C:\\Program Files\\Git"));
 
         let root = root_from_exec_path_text("C:/Git/ucrt64/libexec/git-core").unwrap();
@@ -714,10 +819,7 @@ mod tests {
             rewrite_nul_redirects("ipconfig > NUL 2>&1 && echo ok"),
             "ipconfig > /dev/null 2>&1 && echo ok"
         );
-        assert_eq!(
-            rewrite_nul_redirects("dir >>nul"),
-            "dir >>/dev/null"
-        );
+        assert_eq!(rewrite_nul_redirects("dir >>nul"), "dir >>/dev/null");
         assert_eq!(
             rewrite_nul_redirects("echo NUL is a word"),
             "echo NUL is a word"

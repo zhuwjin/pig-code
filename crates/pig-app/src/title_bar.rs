@@ -145,7 +145,6 @@ impl AppView {
             })
     }
 
-
     /// 标题栏分支切换菜单：deferred 到窗口层，锚定分支 chip 正下方
     /// （与标签页 "+" 菜单同一模式）。当前分支高亮，点击其他分支 checkout。
     pub(crate) fn render_branch_menu(&self, cx: &mut Context<Self>) -> AnyElement {

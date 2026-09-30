@@ -102,6 +102,18 @@ impl AppView {
                     settings.set_test_result(provider_id, *ok, message.clone(), cx);
                 });
             }
+            Event::McpServerList {
+                session_id,
+                connected,
+            } => {
+                // 设置页 MCP 连接状态回包：只采纳当前活动会话的应答
+                if self.current.as_deref() == Some(session_id.as_str()) {
+                    let connected = connected.clone();
+                    self.settings.update(cx, |settings, cx| {
+                        settings.set_mcp_connected(connected, cx);
+                    });
+                }
+            }
             Event::WorkspaceList { workspaces } => {
                 self.workspaces = workspaces
                     .iter()
@@ -478,7 +490,6 @@ impl AppView {
         cx.notify();
     }
 
-
     pub(crate) fn on_composer_event(
         &mut self,
         event: &ComposerEvent,
@@ -676,7 +687,6 @@ impl AppView {
         }
     }
 
-
     pub(crate) fn on_sidebar_event(
         &mut self,
         event: &SidebarEvent,
@@ -707,8 +717,6 @@ impl AppView {
             SidebarEvent::OpenSettings => self.open_settings(cx),
         }
     }
-
-
 }
 
 pub(crate) fn event_session_id(event: &Event) -> Option<String> {
@@ -748,6 +756,7 @@ pub(crate) fn event_session_id(event: &Event) -> Option<String> {
         | Event::ConfigSnapshot { .. }
         | Event::TestResult { .. }
         | Event::ModelInfo { .. }
+        | Event::McpServerList { .. }
         | Event::WorkspaceList { .. } => None,
         Event::Error { session_id, .. } => session_id.clone(),
     }

@@ -43,6 +43,12 @@ pub enum Event {
         id: String,
         info: Option<ModelRegistryInfo>,
     },
+    /// Op::ListMcpServers 的应答：该会话已连接的 MCP server 名清单
+    ///（None = 会话不存在或尚未发起懒连接——MCP 在首个回合采样前才连）
+    McpServerList {
+        session_id: String,
+        connected: Option<Vec<String>>,
+    },
     FileSearchResults {
         session_id: String,
         query: String,

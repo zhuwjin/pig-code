@@ -18,12 +18,10 @@ impl ThreadView {
         self.search_input = Some((input, subscription));
     }
 
-
     /// 搜索输入框实体（仅首开以后存在）
     pub(crate) fn search_input(&self) -> Option<&Entity<InputState>> {
         self.search_input.as_ref().map(|(input, _)| input)
     }
-
 
     /// 打开搜索条并聚焦输入框；已有 query 时重跑一次（内容可能已流式更新）
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -37,7 +35,6 @@ impl ThreadView {
         }
         cx.notify();
     }
-
 
     /// 关闭搜索条：清 query、清所有段高亮、清命中、复位活动下标。
     /// set_value 不发 Change（上游 emit_events=false），这里全部显式复位
@@ -53,7 +50,6 @@ impl ThreadView {
         self.active_match = 0;
         cx.notify();
     }
-
 
     /// 会话内搜索：大小写不敏感地命中所有 Markdown 段（rendered_text 与
     /// query 都小写化后做字节级 match_indices）。无大小写的文字（中文等）
@@ -87,9 +83,7 @@ impl ThreadView {
                     let id = state.entity_id();
                     let text = state.read(cx).rendered_text();
                     let ranges = match self.search_cache.get(&id) {
-                        Some(cache) if same_query && cache.snapshot == text => {
-                            cache.ranges.clone()
-                        }
+                        Some(cache) if same_query && cache.snapshot == text => cache.ranges.clone(),
                         _ => text
                             .as_str()
                             .to_lowercase()
@@ -105,10 +99,13 @@ impl ThreadView {
                             range: range.clone(),
                         }));
                     }
-                    new_cache.insert(id, SearchSegmentCache {
-                        snapshot: text,
-                        ranges,
-                    });
+                    new_cache.insert(
+                        id,
+                        SearchSegmentCache {
+                            snapshot: text,
+                            ranges,
+                        },
+                    );
                 }
             }
         }
@@ -129,7 +126,6 @@ impl ThreadView {
         }
         cx.notify();
     }
-
 
     /// 重打某段的搜索高亮：活动命中更深的 accent 0.5，其余 0.25；无命中则清。
     /// set_range_highlights 整批校验区间、任一非法整批拒绝——Err 忽略，
@@ -169,7 +165,6 @@ impl ThreadView {
         });
     }
 
-
     /// 清掉所有 Markdown 段的搜索高亮（段上没有高亮时上游是 no-op）
     pub(crate) fn clear_search_highlights(&mut self, cx: &mut Context<Self>) {
         for message in &self.messages {
@@ -180,7 +175,6 @@ impl ThreadView {
             }
         }
     }
-
 
     /// 跳到下一个/上一个命中（回绕）：旧/新活动命中所在段重打高亮换色，
     /// 目标行 reveal 进可视区。跳转 = 离开底部，暂停跟随；reveal 的滚动
@@ -215,7 +209,6 @@ impl ThreadView {
         }
         cx.notify();
     }
-
 
     /// 会话内搜索条：输入框 + 命中计数 + 上/下一个 + 关闭（消息列表之上的
     /// 固定行）。key_context("thread-search") 让 Esc → CloseThreadSearch
@@ -266,12 +259,9 @@ impl ThreadView {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Close)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.close_search(window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
                 )
                 .into_any_element(),
         )
     }
 }
-

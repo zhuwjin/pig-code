@@ -350,4 +350,3 @@ fn encode_jpeg(image: &image::DynamicImage) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("图片编码失败: {e}"))?;
     Ok(buf.into_inner())
 }
-

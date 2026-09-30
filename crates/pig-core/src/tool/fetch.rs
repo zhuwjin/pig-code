@@ -334,4 +334,3 @@ fn sniff_html_charset(body: &[u8]) -> Option<String> {
     let label = &rest[..end];
     (!label.is_empty()).then(|| label.to_string())
 }
-

@@ -286,10 +286,10 @@ mod anthropic;
 mod openai;
 mod sidecar;
 
-pub(crate) use anthropic::*;
 pub use anthropic::anthropic_web_search_tool;
-pub(crate) use openai::*;
+pub(crate) use anthropic::*;
 pub use openai::openai_web_search_tool;
+pub(crate) use openai::*;
 pub use sidecar::{complete_text, net_test_blocking, test_provider};
 
 fn finish(tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>, tool_calls: &mut Vec<ToolCall>) {
@@ -316,7 +316,6 @@ fn merge_reasoning_params(body: &mut serde_json::Value, config: &ResolvedModel) 
 }
 
 // ---------------- Anthropic Messages ----------------
-
 
 #[cfg(test)]
 mod tests {

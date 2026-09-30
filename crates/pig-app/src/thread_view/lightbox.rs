@@ -35,12 +35,10 @@ impl ThreadView {
         cx.notify();
     }
 
-
     pub(crate) fn close_lightbox(&mut self, cx: &mut Context<Self>) {
         self.lightbox = None;
         cx.notify();
     }
-
 
     pub(crate) fn lightbox_positions(&self) -> Vec<(usize, usize)> {
         let Some(message_ix) = self.lightbox.as_ref().map(|lightbox| lightbox.position.0) else {
@@ -55,7 +53,6 @@ impl ThreadView {
         )
     }
 
-
     pub(crate) fn current_lightbox_position(&self) -> Option<(usize, usize)> {
         let position = self.lightbox.as_ref()?.position;
         let positions = self.lightbox_positions();
@@ -64,7 +61,6 @@ impl ThreadView {
             .position(|candidate| *candidate == position)?;
         Some((index, positions.len()))
     }
-
 
     pub(crate) fn navigate_lightbox(&mut self, direction: isize, cx: &mut Context<Self>) {
         let Some(current) = self.lightbox.as_ref().map(|lightbox| lightbox.position) else {
@@ -99,7 +95,6 @@ impl ThreadView {
         cx.notify();
     }
 
-
     pub(crate) fn reset_lightbox_view(&mut self, cx: &mut Context<Self>) {
         if let Some(lightbox) = self.lightbox.as_mut() {
             lightbox.zoom = 1.0;
@@ -110,7 +105,6 @@ impl ThreadView {
         }
         cx.notify();
     }
-
 
     pub(crate) fn adjust_lightbox_zoom(
         &mut self,
@@ -148,8 +142,12 @@ impl ThreadView {
         cx.notify();
     }
 
-
-    pub(crate) fn move_lightbox(&mut self, pan: (f32, f32), window: &Window, cx: &mut Context<Self>) {
+    pub(crate) fn move_lightbox(
+        &mut self,
+        pan: (f32, f32),
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let (_, viewport) = lightbox_viewport(&self.scroll_handle, window);
         let Some(lightbox) = self.lightbox.as_mut() else {
             return;
@@ -161,7 +159,6 @@ impl ThreadView {
         );
         cx.notify();
     }
-
 
     /// 图片灯箱覆盖消息区：支持拖动、滚轮/触控板缩放、双击适配和工具栏控制。
     pub(crate) fn render_lightbox(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -465,8 +462,6 @@ impl ThreadView {
             )
             .into_any_element()
     }
-
-
 }
 
 pub(crate) fn message_image_number(image_ix: usize) -> usize {
@@ -484,7 +479,11 @@ pub(crate) fn collect_lightbox_positions(
         .collect()
 }
 
-pub(crate) fn adjacent_image_index(current: usize, count: usize, direction: isize) -> Option<usize> {
+pub(crate) fn adjacent_image_index(
+    current: usize,
+    count: usize,
+    direction: isize,
+) -> Option<usize> {
     let next = current.checked_add_signed(direction)?;
     (next < count).then_some(next)
 }
@@ -493,7 +492,10 @@ const LIGHTBOX_MIN_ZOOM: f32 = 0.1;
 const LIGHTBOX_MAX_ZOOM: f32 = 8.0;
 const LIGHTBOX_FRAME_INSET: f32 = 5.0;
 
-pub(crate) fn lightbox_viewport(handle: &ScrollHandle, window: &Window) -> ((f32, f32), (f32, f32)) {
+pub(crate) fn lightbox_viewport(
+    handle: &ScrollHandle,
+    window: &Window,
+) -> ((f32, f32), (f32, f32)) {
     let bounds = handle.bounds();
     let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if size.0 > 0.0 && size.1 > 0.0 {
@@ -516,7 +518,11 @@ pub(crate) fn lightbox_fit_scale(dims: (u32, u32), viewport: (f32, f32)) -> f32 
     (available_width * 0.9 / dims.0 as f32).min(available_height * 0.9 / dims.1 as f32)
 }
 
-pub(crate) fn lightbox_display_size(dims: (u32, u32), viewport: (f32, f32), zoom: f32) -> (f32, f32) {
+pub(crate) fn lightbox_display_size(
+    dims: (u32, u32),
+    viewport: (f32, f32),
+    zoom: f32,
+) -> (f32, f32) {
     let scale =
         lightbox_fit_scale(dims, viewport) * zoom.clamp(LIGHTBOX_MIN_ZOOM, LIGHTBOX_MAX_ZOOM);
     (
@@ -554,7 +560,11 @@ pub(crate) fn lightbox_pan_after_zoom(
     )
 }
 
-pub(crate) fn clamp_lightbox_pan(pan: (f32, f32), frame: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
+pub(crate) fn clamp_lightbox_pan(
+    pan: (f32, f32),
+    frame: (f32, f32),
+    viewport: (f32, f32),
+) -> (f32, f32) {
     let max_x = ((frame.0 - viewport.0) * 0.5).max(0.0);
     let max_y = ((frame.1 - viewport.1) * 0.5).max(0.0);
     (pan.0.clamp(-max_x, max_x), pan.1.clamp(-max_y, max_y))

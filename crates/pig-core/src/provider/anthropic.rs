@@ -165,7 +165,6 @@ pub fn anthropic_web_search_tool(config: &ResolvedModel) -> Option<serde_json::V
     ))
 }
 
-
 pub(crate) async fn stream_anthropic(
     config: &ResolvedModel,
     messages: Vec<ChatMsg>,

@@ -253,7 +253,6 @@ pub(crate) struct OpenAiPromptDetails {
     cached_tokens: Option<u64>,
 }
 
-
 /// OpenAI 兼容端点：无服务端搜索标准，只有显式配置 web_search_tool 才注入
 ///（如智谱 {"type":"web_search","web_search":{"enable":true,"search_result":true}}）。
 pub fn openai_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Value> {

@@ -177,6 +177,11 @@ impl AgentClient {
         self.send(Op::Compact { session_id });
     }
 
+    /// 查询会话已连接的 MCP server 名清单（设置页展示用）
+    pub fn list_mcp_servers(&self, session_id: String) {
+        self.send(Op::ListMcpServers { session_id });
+    }
+
     pub fn cancel_queued(&self, session_id: String, text: String) {
         self.send(Op::CancelQueued { session_id, text });
     }

@@ -47,6 +47,10 @@ impl SettingsView {
                         .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.page = *page;
+                            // 进入 MCP 页即刷新：重读配置 + 重新查询连接状态
+                            if *page == SettingsPage::Mcp {
+                                this.refresh_mcp(cx);
+                            }
                             cx.notify();
                         }))
                         .child(
@@ -59,7 +63,6 @@ impl SettingsView {
         }
         nav.into_any_element()
     }
-
 
     pub(crate) fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let follow_system = cx
@@ -131,7 +134,6 @@ impl SettingsView {
             .into_any_element()
     }
 
-
     pub(crate) fn render_placeholder(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -143,5 +145,4 @@ impl SettingsView {
             .child(div().text_sm().child("即将推出"))
             .into_any_element()
     }
-
 }

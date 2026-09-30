@@ -13,7 +13,6 @@ impl AppView {
         });
     }
 
-
     /// 工作区列表 = 可见手动工作区 ∪ 会话 cwd（排除已移除/隐藏的工作区）；
     /// 按最近活跃/添加时间倒序。
     pub(crate) fn compute_workspaces(&self) -> Vec<String> {
@@ -33,7 +32,6 @@ impl AppView {
         all.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
         all.into_iter().map(|(path, _)| path).collect()
     }
-
 
     pub(crate) fn refresh_sidebar(&self, cx: &mut Context<Self>) {
         let sessions: Vec<SidebarSession> = self
@@ -57,7 +55,6 @@ impl AppView {
             sidebar.set_state(sessions, workspaces, aliases, active, cx);
         });
     }
-
 
     pub(crate) fn switch_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         if self.views.contains_key(&session_id) {
@@ -103,7 +100,6 @@ impl AppView {
         }
     }
 
-
     /// 手动重命名会话：本地缓存即时更新（侧栏立刻生效），
     /// core 落库（置 title_custom，自动命名不再覆盖）后发 SessionList 再同步
     pub(crate) fn rename_session(&mut self, id: &str, title: &str, cx: &mut Context<Self>) {
@@ -114,7 +110,6 @@ impl AppView {
         self.refresh_sidebar(cx);
         cx.notify();
     }
-
 
     /// 删除会话：本地视图/缓存清理 + 通知 core 清库与 rollout 文件。
     /// 删的是当前会话时切到最近的未归档会话，没有则回 hero
@@ -140,7 +135,6 @@ impl AppView {
         cx.notify();
     }
 
-
     /// 标题栏分支：cwd=None（hero 态）或非 git 目录时不显示。
     /// 一次查齐当前分支 + 本地分支列表（切换菜单用）
     pub(crate) fn refresh_git_branch(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -160,7 +154,6 @@ impl AppView {
         })
         .detach();
     }
-
 
     /// ConfigSnapshot → composer 模型列表（启用供应商的启用模型，按供应商分组平铺）
     pub(crate) fn apply_config_to_composer(&self, cx: &mut Context<Self>) {
@@ -199,12 +192,23 @@ impl AppView {
             .update(cx, |composer, cx| composer.set_models(models, cx));
     }
 
-
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = true;
         self.agent.get_config();
+        self.refresh_mcp(cx);
         cx.notify();
     }
 
-
+    /// 设置页 MCP 数据刷新：重读两份 mcp.json 喂给设置页，并查询当前会话的连接清单
+    ///（无活动会话时不查询，页面只展示配置）
+    pub(crate) fn refresh_mcp(&mut self, cx: &mut Context<Self>) {
+        let session_id = self.current.clone();
+        let snapshot = crate::settings::load_mcp_snapshot(self.current_cwd().as_deref());
+        self.settings.update(cx, |settings, cx| {
+            settings.set_mcp_config(session_id.clone(), snapshot, cx);
+        });
+        if let Some(session_id) = session_id {
+            self.agent.list_mcp_servers(session_id);
+        }
+    }
 }

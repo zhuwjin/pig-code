@@ -67,7 +67,6 @@ impl Composer {
         )
     }
 
-
     /// 分支选择面板：Command 面板（搜索框 + 分支列表），锚定在分支芯片正上方。
     pub(crate) fn render_branch_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
@@ -111,7 +110,6 @@ impl Composer {
             cx,
         )
     }
-
 
     /// 执行模式面板：Command 单选模式列表（键盘导航保持可用）。
     /// 「工作区外访问」开关区放在 Command 的 footer 槽：模式（单选）与开关（多选）
@@ -229,7 +227,6 @@ impl Composer {
         )
     }
 
-
     /// 模型面板：搜索框 + 按供应商分组的模型列表 + 「管理模型」操作行。
     pub(crate) fn render_model_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
@@ -318,7 +315,6 @@ impl Composer {
         )
     }
 
-
     /// 思考等级面板：无搜索框，「关闭」+ 等级列表，当前等级勾选。
     /// levels 为 (id, 显示名)；界面展示显示名，确认回传 id。
     pub(crate) fn render_reasoning_popup(
@@ -373,6 +369,4 @@ impl Composer {
             cx,
         )
     }
-
-
 }

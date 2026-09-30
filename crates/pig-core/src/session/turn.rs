@@ -208,7 +208,6 @@ impl Session {
         }
     }
 
-
     async fn run_step(
         &mut self,
         turn_id: String,
@@ -217,6 +216,13 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> StepOutcome {
+        // MCP 懒连接（每会话一次）：读 .pigcode/mcp.json + data_dir/mcp.json，
+        // 无配置时得到空 manager，开销可忽略；单 server 失败不影响其他
+        if self.mcp.is_none() {
+            self.mcp = Some(Arc::new(
+                crate::mcp::McpManager::connect_all(&self.cwd, &self.data_dir).await,
+            ));
+        }
         // 采样前检查水位：超过 context_window - max_output_tokens - 13k 缓冲就先自动 compact
         if let Some(used) = self.last_total_tokens {
             let threshold = config
@@ -236,8 +242,8 @@ impl Session {
         let provider_task = tokio::spawn(provider::stream_chat(
             config.clone(),
             self.history.clone(),
-            // 根会话工具集 = 内置 + Agent（每步重建：档案文件可在回合间增改）
-            tool::schemas_root(&self.cwd, &self.data_dir),
+            // 根会话工具集 = 内置 + Agent/AgentSwarm + MCP（每步重建：档案与 MCP 工具可增改）
+            self.root_schemas(),
             event_tx,
             cancel.clone(),
         ));
@@ -378,8 +384,36 @@ impl Session {
             return StepOutcome::TextOnly;
         }
 
-        let tools = tool::all();
+        let tools = self.root_tools();
+        // P0 分组并发：连续「可安全并发」的只读调用切成并发组（JoinSet，上限 8）；
+        // 不可并发的调用是同步点——前面的组排干后走下方原有串行路径（拦截语义不变）
+        let mask = parallel_mask(
+            &tool_calls,
+            &tools,
+            self.mode,
+            config.input_image,
+            &self.permissions,
+        );
+        let mut next_ix = 0usize;
         for (call_ix, call) in tool_calls.iter().enumerate() {
+            if call_ix < next_ix {
+                continue; // 已随前面的并发组执行完毕
+            }
+            if mask[call_ix] {
+                let mut group_end = call_ix + 1;
+                while group_end < tool_calls.len() && mask[group_end] {
+                    group_end += 1;
+                }
+                next_ix = group_end;
+                // 取消收尾（补回执 + TurnAborted）在组内完成，false 即回合终止
+                if !self
+                    .run_parallel_group(&tool_calls, call_ix, group_end, &turn_id, tx, cancel)
+                    .await
+                {
+                    return StepOutcome::Ended;
+                }
+                continue;
+            }
             let item_id = format!("{}-tool-{}", turn_id, call.id);
             let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
@@ -439,6 +473,7 @@ impl Session {
                                     item_id: &item_id,
                                     rest: &tool_calls[call_ix + 1..],
                                     card: None,
+                                    cards: vec![],
                                 },
                                 tx,
                             );
@@ -492,6 +527,7 @@ impl Session {
                     is_error,
                     edit: None,
                     agent_card: None,
+                    agent_cards: vec![],
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -546,6 +582,7 @@ impl Session {
                     is_error,
                     edit: None,
                     agent_card: None,
+                    agent_cards: vec![],
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -574,6 +611,7 @@ impl Session {
                         note,
                         is_error,
                         card,
+                        cards,
                     } => {
                         self.history
                             .push(ChatMsg::tool_result(&call.id, note.clone()));
@@ -586,6 +624,7 @@ impl Session {
                             edit: None,
                             // 代理卡元信息随记录持久化：回放经它重建代理卡
                             agent_card: card,
+                            agent_cards: cards,
                         });
                         self.emit(
                             |session_id, seq| Event::ToolCallEnd {
@@ -600,7 +639,7 @@ impl Session {
                         );
                         continue;
                     }
-                    SubagentOutcome::Cancelled { card } => {
+                    SubagentOutcome::Cancelled { card, cards } => {
                         self.settle_cancelled_tool(
                             CancelledTool {
                                 call,
@@ -608,6 +647,62 @@ impl Session {
                                 item_id: &item_id,
                                 rest: &tool_calls[call_ix + 1..],
                                 card,
+                                cards,
+                            },
+                            tx,
+                        );
+                        self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
+                        return StepOutcome::Ended;
+                    }
+                }
+            }
+
+            // AgentSwarm：批量并行子代理。默认前台阻塞至全部完成；run_in_background
+            // 时逐个后台派发、立即返回回执（完成经 <task-notification> 逐个唤醒）。
+            // 与 Agent 同点拦截——Plan 拒绝文案由 run_swarm 内部给出；
+            // 各子代理的写操作仍各自过审批门。
+            if call.name == "AgentSwarm" {
+                match self.run_swarm(call, &item_id, config, tx, cancel).await {
+                    SubagentOutcome::Finished {
+                        note,
+                        is_error,
+                        card,
+                        cards,
+                    } => {
+                        self.history
+                            .push(ChatMsg::tool_result(&call.id, note.clone()));
+                        self.record(&RolloutRecord::ToolCall {
+                            tool: call.name.clone(),
+                            summary,
+                            arguments: call.arguments.clone(),
+                            output: note.clone(),
+                            is_error,
+                            edit: None,
+                            agent_card: card,
+                            agent_cards: cards,
+                        });
+                        self.emit(
+                            |session_id, seq| Event::ToolCallEnd {
+                                session_id,
+                                seq,
+                                item_id,
+                                output: note,
+                                is_error,
+                                edit: None,
+                            },
+                            tx,
+                        );
+                        continue;
+                    }
+                    SubagentOutcome::Cancelled { card, cards } => {
+                        self.settle_cancelled_tool(
+                            CancelledTool {
+                                call,
+                                summary,
+                                item_id: &item_id,
+                                rest: &tool_calls[call_ix + 1..],
+                                card,
+                                cards,
                             },
                             tx,
                         );
@@ -632,6 +727,7 @@ impl Session {
                     is_error: true,
                     edit: None,
                     agent_card: None,
+                    agent_cards: vec![],
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -660,6 +756,7 @@ impl Session {
                     is_error: true,
                     edit: None,
                     agent_card: None,
+                    agent_cards: vec![],
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -694,6 +791,7 @@ impl Session {
                             is_error: true,
                             edit: None,
                             agent_card: None,
+                            agent_cards: vec![],
                         });
                         self.emit(
                             |session_id, seq| Event::ToolCallEnd {
@@ -739,6 +837,7 @@ impl Session {
                                 item_id: &item_id,
                                 rest: &tool_calls[call_ix + 1..],
                                 card: None,
+                                cards: vec![],
                             },
                             tx,
                         );
@@ -776,6 +875,7 @@ impl Session {
                     is_error: false,
                     edit: None,
                     agent_card: None,
+                    agent_cards: vec![],
                 });
                 self.emit(
                     |session_id, seq| Event::ToolCallEnd {
@@ -816,6 +916,7 @@ impl Session {
                         is_error: true,
                         edit: None,
                         agent_card: None,
+                        agent_cards: vec![],
                     });
                     self.emit(
                         |session_id, seq| Event::ToolCallEnd {
@@ -837,6 +938,7 @@ impl Session {
                             item_id: &item_id,
                             rest: &tool_calls[call_ix + 1..],
                             card: None,
+                            cards: vec![],
                         },
                         tx,
                     );
@@ -864,6 +966,7 @@ impl Session {
                         is_error,
                         edit: edit.clone(),
                         agent_card: None,
+                        agent_cards: vec![],
                     });
                     self.emit(
                         |session_id, seq| Event::ToolCallEnd {
@@ -882,7 +985,262 @@ impl Session {
         StepOutcome::ToolsExecuted
     }
 
+    /// 并发只读组执行（P0）：组内调用经 parallel_mask 判定为只读、当前模式免审批、
+    /// 无会话层拦截（Agent/AskUserQuestion/计划模式切换等同步点都在串行路径）。
+    /// ToolCallBegin 按原序先发（卡片顺序 = 原始顺序）；ToolCallEnd 随完成即达
+    ///（item_id 寻址，TUI find_or_create 容忍乱序，回放由 rollout 记录序重建）；
+    /// history/rollout 在组排干后按原 index 补齐，tool_result 配对顺序不乱。
+    /// 返回 false = 被取消：在跑任务已 abort 排干、未完成的调用已补「已停止」回执、
+    /// 组后剩余调用已补历史回执、TurnAborted 已发（调用方直接 Ended）。
+    async fn run_parallel_group(
+        &mut self,
+        tool_calls: &[ToolCall],
+        start: usize,
+        end: usize,
+        turn_id: &str,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> bool {
+        /// 并发组内同时执行的调用数上限
+        const MAX_PARALLEL: usize = 8;
 
+        // 全组成员按原序发 Begin 并预计算卡片信息（summary 随 rollout 持久化）
+        let group = &tool_calls[start..end];
+        let mut cards: Vec<ParallelCall> = Vec::with_capacity(group.len());
+        for call in group {
+            let item_id = format!("{turn_id}-tool-{}", call.id);
+            let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                .unwrap_or_else(|_| call.arguments.clone());
+            let summary = tool::summarize(call);
+            self.emit(
+                |session_id, seq| Event::ToolCallBegin {
+                    session_id,
+                    seq,
+                    item_id: item_id.clone(),
+                    tool: call.name.clone(),
+                    input_summary: summary.clone(),
+                    detail,
+                },
+                tx,
+            );
+            cards.push(ParallelCall {
+                call: call.clone(),
+                item_id,
+                summary,
+            });
+        }
+
+        // 并发执行：只读工具不触碰 ChangeTracker（各任务持一次性实例，debug 断言兜底）；
+        // 会话共享态（read_states/todos/tasks）全是 Arc<Mutex>/atomic，本就为前后台共享设计，
+        // 并发读安全；写互斥由分组保证（写工具是同步点，组排干后才会执行）。
+        // MCP 工具：mask 已保证只读+免审批+无 deny 命中；任务内 clone Arc<McpManager>
+        // 按名现取（McpTool clone 即 Arc 克隆，便宜），经 execute_with_extra 执行
+        let mut set: tokio::task::JoinSet<(usize, ParallelOutput)> = tokio::task::JoinSet::new();
+        let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
+        slots.resize_with(cards.len(), || None);
+        let mut next = 0usize;
+        let cancelled = loop {
+            while next < cards.len() && set.len() < MAX_PARALLEL {
+                let index = next;
+                let call = cards[index].call.clone();
+                let cwd = self.cwd.clone();
+                let state = self.state.clone();
+                let mcp = self.mcp.clone();
+                set.spawn(async move {
+                    let mut tracker = ChangeTracker::default();
+                    let ctx = ToolContext {
+                        cwd: &cwd,
+                        tracker: &mut tracker,
+                        state: &state,
+                    };
+                    let extra: Vec<Box<dyn tool::Tool>> = match &mcp {
+                        Some(mcp) if call.name.starts_with("mcp__") => {
+                            mcp.tool_named(&call.name).into_iter().collect()
+                        }
+                        _ => vec![],
+                    };
+                    let (output, is_error, file_change, edit, images) =
+                        tool::execute_with_extra(&call, ctx, &extra).await;
+                    debug_assert!(
+                        file_change.is_none() && tracker.take_dirty().is_empty(),
+                        "并发只读段不产生文件改动: {}",
+                        call.name
+                    );
+                    let images = tool_images_to_chat(&call.arguments, images);
+                    (
+                        index,
+                        ParallelOutput {
+                            output,
+                            is_error,
+                            edit,
+                            images,
+                            file_change,
+                        },
+                    )
+                });
+                next += 1;
+            }
+            if set.is_empty() {
+                break false;
+            }
+            tokio::select! {
+                joined = set.join_next() => {
+                    match joined {
+                        Some(Ok((index, out))) => {
+                            self.emit(
+                                |session_id, seq| Event::ToolCallEnd {
+                                    session_id,
+                                    seq,
+                                    item_id: cards[index].item_id.clone(),
+                                    output: out.output.clone(),
+                                    is_error: out.is_error,
+                                    edit: out.edit.clone(),
+                                },
+                                tx,
+                            );
+                            slots[index] = Some(out);
+                        }
+                        // panic/abort：槽位留空，下方收尾统一兜底
+                        Some(Err(_)) => {}
+                        None => break false,
+                    }
+                }
+                _ = cancel.cancelled() => break true,
+            }
+        };
+
+        if cancelled {
+            // 中止在跑任务并排干：阻塞读会跑完当前 fs 调用后在下一让出点退出，
+            // JoinSet 析构兜底 abort，不留孤儿；排干窗口内刚好完成的按正常完成落定
+            set.abort_all();
+            while let Some(joined) = set.join_next().await {
+                if let Ok((index, out)) = joined {
+                    self.emit(
+                        |session_id, seq| Event::ToolCallEnd {
+                            session_id,
+                            seq,
+                            item_id: cards[index].item_id.clone(),
+                            output: out.output.clone(),
+                            is_error: out.is_error,
+                            edit: out.edit.clone(),
+                        },
+                        tx,
+                    );
+                    slots[index] = Some(out);
+                }
+            }
+        }
+
+        // 统一收尾（严格原序）：history 与 rollout 按原 index 补齐
+        for (index, card) in cards.iter().enumerate() {
+            match slots[index].take() {
+                Some(out) => {
+                    let ParallelOutput {
+                        output,
+                        is_error,
+                        edit,
+                        images,
+                        file_change,
+                    } = out;
+                    self.history.push(ChatMsg::tool_result_with_images(
+                        &card.call.id,
+                        output.clone(),
+                        images,
+                    ));
+                    self.record(&RolloutRecord::ToolCall {
+                        tool: card.call.name.clone(),
+                        summary: card.summary.clone(),
+                        arguments: card.call.arguments.clone(),
+                        output,
+                        is_error,
+                        edit,
+                        agent_card: None,
+                        agent_cards: vec![],
+                    });
+                    // 防御：分类保证只读无改动；未来误标 read_only 的变更工具不丢数据
+                    if let Some(change) = file_change {
+                        {
+                            let store = self.store.lock().expect("store lock");
+                            if change.additions == 0 && change.deletions == 0 {
+                                store.delete_file_change(&self.id, &change.path);
+                            } else {
+                                store.upsert_file_change(
+                                    &self.id,
+                                    &change.path,
+                                    &change.unified_diff,
+                                    change.additions,
+                                    change.deletions,
+                                );
+                            }
+                        }
+                        self.emit(
+                            |session_id, seq| Event::FileChanged {
+                                session_id,
+                                seq,
+                                path: change.path,
+                                unified_diff: change.unified_diff,
+                                additions: change.additions,
+                                deletions: change.deletions,
+                            },
+                            tx,
+                        );
+                    }
+                }
+                None if cancelled => {
+                    // 取消：组内成员都发过 Begin，逐卡落定「已停止」（rest 语义在下方统一处理）
+                    self.settle_cancelled_tool(
+                        CancelledTool {
+                            call: &card.call,
+                            summary: card.summary.clone(),
+                            item_id: &card.item_id,
+                            rest: &[],
+                            card: None,
+                            cards: vec![],
+                        },
+                        tx,
+                    );
+                }
+                None => {
+                    // 正常路径的空槽 = 任务 panic：补错误回执保持 tool_use 配对完整
+                    let note = "工具执行内部错误（任务异常终止）".to_string();
+                    self.history
+                        .push(ChatMsg::tool_result(&card.call.id, note.clone()));
+                    self.record(&RolloutRecord::ToolCall {
+                        tool: card.call.name.clone(),
+                        summary: card.summary.clone(),
+                        arguments: card.call.arguments.clone(),
+                        output: note.clone(),
+                        is_error: true,
+                        edit: None,
+                        agent_card: None,
+                        agent_cards: vec![],
+                    });
+                    self.emit(
+                        |session_id, seq| Event::ToolCallEnd {
+                            session_id,
+                            seq,
+                            item_id: card.item_id.clone(),
+                            output: note,
+                            is_error: true,
+                            edit: None,
+                        },
+                        tx,
+                    );
+                }
+            }
+        }
+
+        if cancelled {
+            // 组后剩余调用没发过 Begin：只补历史回执保持配对（settle 的 rest 语义）
+            for rest in &tool_calls[end..] {
+                self.history
+                    .push(ChatMsg::tool_result(&rest.id, "已停止".to_string()));
+            }
+            self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
+        }
+        !cancelled
+    }
 }
 
 /// @文件引用展开：内容注入 <file> 块；单文件 20KB、总计 100KB 上限。
@@ -910,4 +1268,259 @@ fn expand_file_references(cwd: &Path, content: &str, files: &[String]) -> String
         text.push_str(&block);
     }
     text
+}
+
+/// 并发只读组内一个调用的预计算卡片信息（Begin 先发，End 随完成即达）
+struct ParallelCall {
+    call: ToolCall,
+    item_id: String,
+    summary: String,
+}
+
+/// 并发只读组单个调用的执行产物（与 GatedToolOutcome::Executed 同构，
+/// 外加 file_change 防御通道——分类保证只读恒为 None，误标时不丢数据）
+struct ParallelOutput {
+    output: String,
+    is_error: bool,
+    edit: Option<pig_protocol::EditDiff>,
+    images: Vec<crate::provider::ChatImage>,
+    file_change: Option<tool::FileChange>,
+}
+
+/// 并发只读段排除名单：虽声明 read_only() 但有会话副作用或会话层拦截语义，
+/// 一律落回串行同步点。AskUserQuestion/EnterPlanMode/ExitPlanMode/Agent 的
+/// 拦截逻辑在 run_step 串行体内，语义不变（天然同步点）。
+const PARALLEL_EXCLUDED: &[&str] = &[
+    "TodoList",        // 写变体改 todos 并落库推事件
+    "TaskStop",        // 停止后台任务，是变更操作
+    "AskUserQuestion", // 会话层弹窗拦截
+    "EnterPlanMode",   // 模式切换拦截
+    "ExitPlanMode",    // 模式切换拦截（带审批弹窗）
+    "Agent",           // 子代理委派拦截
+];
+
+/// 单调用并发安全判定（保守原则，全部满足才可并发）：
+/// 已知工具、read_only、当前模式免审批（read_only 工具在现有审批矩阵下全模式免审批，
+/// 仍走 requires_approval 同一判定防矩阵变更后回归）。工作区外访问在本代码库是
+/// 硬错误/会话开关门控（resolve_with_access），不产生审批弹窗，敏感文件在工具内部
+/// 无条件硬拒——审批弹窗只会来自危险命令/requires_approval 分支，并发组成员按此
+/// 分类永远不会进入那两个分支，因此不可能出现两个审批弹窗并发。
+/// ReadMediaFile 在模型不支持图片输入时被会话层能力门控拦截，不可并发。
+/// MCP 工具：read_only（readOnlyHint）+ 免审批之外还要过项目 deny 规则预检——
+/// 并发路径不走 exec_tool_gated_ctx，串行门控里的 deny 判定在此补齐
+/// （subject 口径与串行一致 = 工具全名）。McpClient 请求多路复用已核实并发安全
+///（stdio：AtomicU64 id + Mutex pending map + stdin 写锁；http：每请求独立 POST）。
+fn parallel_safe(
+    call: &ToolCall,
+    tools: &[Box<dyn tool::Tool>],
+    mode: ExecMode,
+    input_image: bool,
+    permissions: &crate::permissions::PermissionRules,
+) -> bool {
+    if PARALLEL_EXCLUDED.contains(&call.name.as_str()) {
+        return false;
+    }
+    if call.name == "ReadMediaFile" && !input_image {
+        return false;
+    }
+    let Some(tool_ref) = tools.iter().find(|t| t.name() == call.name) else {
+        return false;
+    };
+    if !tool_ref.read_only() || tool::requires_approval(tool_ref.as_ref(), mode) {
+        return false;
+    }
+    // MCP 工具的项目 deny 预检（命中 → 落回串行同步点，走完整门控给出拒绝文案）
+    if call.name.starts_with("mcp__") && permissions.deny_hit(&call.name, &call.name).is_some() {
+        return false;
+    }
+    true
+}
+
+/// 把一个 step 的 tool_calls 切成并发段掩码：true = 可进并发只读组；
+/// false = 同步点（写/壳/需审批/会话层拦截/未知工具/deny 命中的 MCP），
+/// 排干前组后单独串行执行。
+fn parallel_mask(
+    calls: &[ToolCall],
+    tools: &[Box<dyn tool::Tool>],
+    mode: ExecMode,
+    input_image: bool,
+    permissions: &crate::permissions::PermissionRules,
+) -> Vec<bool> {
+    calls
+        .iter()
+        .map(|call| parallel_safe(call, tools, mode, input_image, permissions))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mask_of(names: &[&str], mode: ExecMode, input_image: bool) -> Vec<bool> {
+        mask_with(names, &tool::all(), mode, input_image, "无规则")
+    }
+
+    /// 带工具集与权限规则的掩码：rules 为 permissions.toml 文本（"无规则" 特例 = 空规则）
+    fn mask_with(
+        names: &[&str],
+        tools: &[Box<dyn tool::Tool>],
+        mode: ExecMode,
+        input_image: bool,
+        rules_toml: &str,
+    ) -> Vec<bool> {
+        let calls: Vec<ToolCall> = names
+            .iter()
+            .map(|name| ToolCall {
+                id: format!("id-{name}"),
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            })
+            .collect();
+        let permissions = if rules_toml == "无规则" {
+            crate::permissions::PermissionRules::default()
+        } else {
+            crate::permissions::PermissionRules::parse(rules_toml).expect("规则合法")
+        };
+        parallel_mask(&calls, tools, mode, input_image, &permissions)
+    }
+
+    /// 造一个 MCP 工具（for_test 假连接，只关心 name/read_only 判定）
+    fn mcp_tool(tool_name: &str, read_only: bool) -> Box<dyn tool::Tool> {
+        let spec = crate::mcp::McpToolSpec {
+            name: tool_name.to_string(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: crate::mcp::McpToolAnnotations {
+                read_only_hint: Some(read_only),
+                ..Default::default()
+            },
+        };
+        Box::new(crate::mcp::McpTool::new(
+            "srv",
+            spec,
+            crate::mcp::McpClient::for_test("srv"),
+        ))
+    }
+
+    #[test]
+    fn readonly_calls_parallel_safe_in_all_modes() {
+        for mode in [
+            ExecMode::ConfirmBeforeEdit,
+            ExecMode::AutoEdit,
+            ExecMode::Plan,
+            ExecMode::FullAccess,
+            ExecMode::Yolo,
+        ] {
+            let mask = mask_of(
+                &["Read", "Grep", "Glob", "FetchURL", "TaskList", "TaskOutput"],
+                mode,
+                false,
+            );
+            assert!(mask.iter().all(|m| *m), "{mode:?}: {mask:?}");
+        }
+    }
+
+    #[test]
+    fn writes_shell_and_intercepted_tools_are_sync_points() {
+        let mask = mask_of(
+            &[
+                "Write",
+                "Edit",
+                "Bash",
+                "TodoList",
+                "TaskStop",
+                "Agent",
+                "AskUserQuestion",
+                "EnterPlanMode",
+                "ExitPlanMode",
+                "NoSuchTool",
+            ],
+            ExecMode::Yolo,
+            true,
+        );
+        assert!(mask.iter().all(|m| !*m), "{mask:?}");
+    }
+
+    #[test]
+    fn read_media_file_needs_image_capability() {
+        assert_eq!(
+            mask_of(&["ReadMediaFile"], ExecMode::FullAccess, true),
+            [true]
+        );
+        assert_eq!(
+            mask_of(&["ReadMediaFile"], ExecMode::FullAccess, false),
+            [false]
+        );
+    }
+
+    #[test]
+    fn segments_split_on_sync_points() {
+        // Read Read | Write | Grep Glob | Bash | Read —— 写/壳把段切开
+        let mask = mask_of(
+            &["Read", "Read", "Write", "Grep", "Glob", "Bash", "Read"],
+            ExecMode::AutoEdit,
+            false,
+        );
+        assert_eq!(mask, [true, true, false, true, true, false, true]);
+    }
+
+    #[test]
+    fn plan_mode_keeps_reads_parallel() {
+        let mask = mask_of(&["Read", "Write"], ExecMode::Plan, false);
+        assert_eq!(mask, [true, false]);
+    }
+
+    // ---------- MCP 工具进并发组 ----------
+
+    #[test]
+    fn mcp_readonly_parallel_safe_in_all_modes() {
+        let tools: Vec<Box<dyn tool::Tool>> = tool::all()
+            .into_iter()
+            .chain(vec![mcp_tool("read", true), mcp_tool("write", false)])
+            .collect();
+        for mode in [
+            ExecMode::ConfirmBeforeEdit,
+            ExecMode::AutoEdit,
+            ExecMode::Plan,
+            ExecMode::FullAccess,
+            ExecMode::Yolo,
+        ] {
+            let mask = mask_with(
+                &["mcp__srv__read", "mcp__srv__write"],
+                &tools,
+                mode,
+                false,
+                "无规则",
+            );
+            assert_eq!(
+                mask,
+                [true, false],
+                "{mode:?}: 只读 MCP 可并发，写 MCP 同步点"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_denied_by_project_rule_falls_back_to_serial() {
+        let tools: Vec<Box<dyn tool::Tool>> = tool::all()
+            .into_iter()
+            .chain(vec![mcp_tool("read", true)])
+            .collect();
+        // deny 规则命中（工具全名 subject，与串行门控同口径）→ 回串行
+        let mask = mask_with(
+            &["mcp__srv__read"],
+            &tools,
+            ExecMode::Yolo,
+            false,
+            "deny = [\"mcp__srv__read(*)\"]",
+        );
+        assert_eq!(mask, [false], "deny 命中的 MCP 工具不可并发");
+    }
+
+    #[test]
+    fn mcp_unknown_tool_not_parallel() {
+        // 工具集里查不到的 mcp__ 名（未连接/未继承）→ 同步点
+        let mask = mask_of(&["mcp__ghost__read"], ExecMode::Yolo, false);
+        assert_eq!(mask, [false]);
+    }
 }

@@ -114,7 +114,6 @@ impl Composer {
         chips.into_any_element()
     }
 
-
     pub(crate) fn render_aux_chip(
         &self,
         id: &'static str,
@@ -144,7 +143,6 @@ impl Composer {
             .child(div().text_sm().child(label))
     }
 
-
     /// 面板内容外壳：弹层内衬（rounded_xl + popover 背景 + 边框），观感与其他弹层一致。
     pub(crate) fn aux_panel_shell(&self, content: Div, cx: &mut Context<Self>) -> Div {
         content
@@ -156,7 +154,6 @@ impl Composer {
             .border_1()
             .border_color(cx.theme().border)
     }
-
 
     /// 审批条（kimi 同款）：审批期间替换输入区。橙色圆点 + 标题，深色内嵌块
     /// 展示命令/diff，底部 本会话内批准(Ctrl+⏎) / 拒绝(Esc) / 批准(⏎)。
@@ -258,6 +255,4 @@ impl Composer {
             )
             .into_any_element()
     }
-
-
 }

@@ -77,7 +77,6 @@ impl ThreadView {
             .into_any_element()
     }
 
-
     /// 后台子代理的合成通知块（A3d，kimi-code 同款）：
     /// 右对齐「✓ 由后台发送（Agent）」小标签 + 用户气泡同款底色的限宽气泡
     ///（标题 / 已完成·耗时 / 结果文件行 / 默认折叠的原始 payload）。
@@ -312,7 +311,6 @@ impl ThreadView {
             .into_any_element()
     }
 
-
     /// 用户消息的单张图片附件：缩略图（最长边 72px，等比不放大，圆角），
     /// 点击开灯箱看大图；文件丢失/解码失败 → 「[图片 N（已失效）]」文本 chip（不可点）
     pub(crate) fn render_user_image(
@@ -367,7 +365,6 @@ impl ThreadView {
                 .into_any_element(),
         }
     }
-
 
     pub(crate) fn render_message(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let message = &self.messages[ix];
@@ -455,8 +452,7 @@ impl ThreadView {
                             expanded,
                             edit,
                             live_note,
-                            agent_card,
-                            agent_finished,
+                            agent_cards,
                             body_scroll,
                         } => {
                             let approval_pending = matches!(
@@ -475,8 +471,7 @@ impl ThreadView {
                                 *expanded,
                                 approval_pending,
                                 edit.as_ref(),
-                                agent_card.as_ref(),
-                                *agent_finished,
+                                agent_cards,
                                 body_scroll,
                                 cx,
                             )
@@ -543,7 +538,6 @@ impl ThreadView {
             }
         }
     }
-
 
     /// turn 导航条（ZCode ConversationTurnNavigator 同款）：消息流左缘的竖排
     /// 小横条，一条用户消息一根。悬停时目标与相邻横条山峰式加宽；悬停稳定
@@ -765,7 +759,6 @@ impl ThreadView {
             .into_any_element()
     }
 
-
     /// 导航预览卡的助手摘要：该用户消息之后第一条助手消息的 Markdown 文本拼接
     ///（对齐 ZCode：assistantTextRows 合并、最多 2 段 220 字符）。
     /// 无文本时按流式状态给占位文案；返回的 bool 表示是否为真实回复文本。
@@ -798,8 +791,6 @@ impl ThreadView {
         }
         (nav_preview_text(&texts, "（暂无文本回复）"), true)
     }
-
-
 }
 
 /// 拆成 (目录部分含结尾分隔符, 文件名)；无分隔符时目录为空

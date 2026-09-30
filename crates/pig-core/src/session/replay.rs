@@ -94,6 +94,7 @@ impl Session {
                     is_error,
                     edit,
                     agent_card,
+                    agent_cards,
                 } => {
                     if !in_assistant {
                         replay_turns += 1;
@@ -136,10 +137,11 @@ impl Session {
                         tx,
                     );
                     // 代理卡元信息随记录回放重建（紧挨 ToolCallBegin、同一个回放合成
-                    // item_id）；后台代理的 agent_id 收集起来，回放结束后统一补
-                    // finished——后台任务不随进程存活，重开后一律视为已终结，
-                    // 否则回放的代理卡永转圈
-                    if let Some(card) = agent_card {
+                    // item_id）：agent_card 是 Agent 单卡槽位，agent_cards 是
+                    // AgentSwarm 批量卡（每张都重建）。后台代理的 agent_id 收集起来，
+                    // 回放结束后统一补 finished——后台任务不随进程存活，重开后一律
+                    // 视为已终结，否则回放的代理卡永转圈
+                    for card in agent_card.iter().chain(agent_cards.iter()) {
                         if card.background
                             && !replay_bg_agents.iter().any(|id| id == &card.agent_id)
                         {
@@ -285,6 +287,4 @@ impl Session {
             );
         }
     }
-
-
 }

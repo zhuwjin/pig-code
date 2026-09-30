@@ -76,6 +76,9 @@ pub fn user_display_text(text: &str, image_refs: &[ImageRef]) -> String {
     format!("{}\n\n{}", text, links.join(" "))
 }
 
+// 持久化格式以可读/可演进为先：ToolCall 变体（含批量代理卡列表）比其余变体大
+// 数百字节属预期，记录是瞬态序列化单元，不为省内存拆 Box
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RolloutRecord {
@@ -108,6 +111,10 @@ pub enum RolloutRecord {
         edit: Option<pig_protocol::EditDiff>,
         /// Agent 工具卡的代理卡元信息（回放重建代理卡）
         agent_card: Option<AgentCardRecord>,
+        /// AgentSwarm 工具卡的批量代理卡元信息（每个子代理一张，回放全部重建）；
+        /// #[serde(default)] 向后兼容：旧 JSONL 无此字段读为空列表
+        #[serde(default)]
+        agent_cards: Vec<AgentCardRecord>,
     },
     /// 一轮的文件改动（回放恢复消息流里的每轮改动面板）
     TurnChanges {
@@ -304,4 +311,58 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧格式（无 agent_cards 字段）的 ToolCall 行可读，agent_cards 落为空列表
+    #[test]
+    fn tool_call_without_agent_cards_reads_as_empty() {
+        let line = r#"{"type":"tool_call","tool":"AgentSwarm","summary":"子代理群（2 项）","arguments":"{}","output":"子代理群执行完成","is_error":false,"edit":null,"agent_card":null}"#;
+        let record: RolloutRecord = serde_json::from_str(line).expect("旧 JSONL 行可读");
+        let RolloutRecord::ToolCall {
+            tool,
+            agent_card,
+            agent_cards,
+            ..
+        } = record
+        else {
+            panic!("应为 ToolCall 记录");
+        };
+        assert_eq!(tool, "AgentSwarm");
+        assert!(agent_card.is_none(), "单卡槽位保持 None");
+        assert!(agent_cards.is_empty(), "缺省字段读为空列表");
+    }
+
+    /// 批量卡随记录序列化/回读（swarm 回放重建的数据源）
+    #[test]
+    fn tool_call_agent_cards_roundtrip() {
+        let card = |n: u32| AgentCardRecord {
+            agent_id: format!("a1-{n}"),
+            profile: "explore".into(),
+            description: format!("任务 {n}"),
+            model: "p · m".into(),
+            background: true,
+        };
+        let record = RolloutRecord::ToolCall {
+            tool: "AgentSwarm".into(),
+            summary: "子代理群（2 项）".into(),
+            arguments: "{}".into(),
+            output: "回执".into(),
+            is_error: false,
+            edit: None,
+            agent_card: None,
+            agent_cards: vec![card(1), card(2)],
+        };
+        let line = serde_json::to_string(&record).expect("序列化");
+        let back: RolloutRecord = serde_json::from_str(&line).expect("回读");
+        let RolloutRecord::ToolCall { agent_cards, .. } = back else {
+            panic!("应为 ToolCall 记录");
+        };
+        assert_eq!(agent_cards.len(), 2);
+        assert_eq!(agent_cards[0].agent_id, "a1-1");
+        assert!(agent_cards[1].background, "background 标志随记录保留");
+    }
 }

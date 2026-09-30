@@ -811,6 +811,169 @@ async fn subagent_background_approval_gate() {
     agent.shutdown();
 }
 
+/// 后台 swarm（run_in_background）：立即回执逐项列出 agent_id/task_id/status +
+/// 「不轮询」提示；live 两张 SubagentCard（background=true）；每个子代理完成各自
+/// 唤醒父会话（两条 <task-notification>）；rollout 的 ToolCall 记录带 agent_cards
+///（2 张）；模拟重启回放重建两张卡（同 item_id）并各补 finished 落终态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn swarm_background_receipt_and_cards_replayed() {
+    let (config_path, cwd, data_dir) = setup("subagent-swarm-bg");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let sid = new_session(&agent, cwd.clone()).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid.clone(),
+            content: format!("{} SWARMBG", mock::SUBAGENT_TRIGGER),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    // 等两条完成通知（每个子代理各唤醒一次）
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut notifications = 0usize;
+    let mut swarm_output: Option<String> = None;
+    let mut live_cards: Vec<(String, String, bool)> = Vec::new();
+    while notifications < 2 {
+        assert!(Instant::now() < deadline, "等两条完成通知超时");
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), agent.events.recv()).await
+        else {
+            continue;
+        };
+        match &event {
+            Event::UserMessage { text, .. } if text.contains("<task-notification") => {
+                notifications += 1;
+            }
+            Event::ToolCallEnd {
+                item_id, output, ..
+            } if item_id.contains("call_swarm_bg") => {
+                swarm_output = Some(output.clone());
+            }
+            Event::SubagentCard {
+                item_id,
+                agent_id,
+                background,
+                ..
+            } => live_cards.push((item_id.clone(), agent_id.clone(), *background)),
+            _ => {}
+        }
+    }
+    // 即时回执：头部统计 + 逐项 agent_id/task_id/status + 不轮询提示
+    let output = swarm_output.expect("应有 AgentSwarm ToolCallEnd");
+    assert!(output.contains("共 2 个"), "{output}");
+    assert_eq!(
+        output.matches("agent_id: ").count(),
+        2,
+        "逐项列出: {output}"
+    );
+    assert_eq!(output.matches("task_id: ").count(), 2, "{output}");
+    assert!(output.contains("status: running"), "{output}");
+    assert!(
+        output.contains("<task-notification>") && output.contains("不要轮询"),
+        "回执应告知通知语义: {output}"
+    );
+    // live：两张后台卡挂同一工具卡（item_id 相同），agent_id 各异
+    assert_eq!(live_cards.len(), 2, "live 两张卡: {live_cards:?}");
+    assert!(live_cards.iter().all(|c| c.2), "background 均为 true");
+    assert_ne!(live_cards[0].1, live_cards[1].1, "agent_id 各异");
+    assert_eq!(live_cards[0].0, live_cards[1].0, "同挂一张工具卡");
+    agent.shutdown();
+
+    // rollout：AgentSwarm 的 ToolCall 记录带 2 张 agent_cards（background=true）
+    let rollout_path = data_dir.join("sessions").join(format!("{sid}.jsonl"));
+    let content = std::fs::read_to_string(&rollout_path).expect("rollout 可读");
+    let swarm_record = content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["type"] == "tool_call" && record["tool"] == "AgentSwarm")
+        .expect("rollout 应有 AgentSwarm 工具记录");
+    let agent_cards = swarm_record["agent_cards"]
+        .as_array()
+        .expect("agent_cards 字段应为数组");
+    assert_eq!(agent_cards.len(), 2, "批量卡落盘: {swarm_record}");
+    assert!(
+        agent_cards
+            .iter()
+            .all(|card| card["background"] == true && card["agent_id"].is_string()),
+        "卡元信息齐全: {agent_cards:?}"
+    );
+    assert_eq!(
+        swarm_record["agent_card"],
+        serde_json::Value::Null,
+        "单卡槽位不动"
+    );
+
+    // 模拟重启重开会话：回放重建两张子代理卡，并各补 finished 落终态
+    let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    let events2 = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut collected = Vec::new();
+    let mut finished_ids = std::collections::HashSet::new();
+    while finished_ids.len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "回放应为两个后台子代理各补 finished: {collected:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events2.recv()).await
+        else {
+            continue;
+        };
+        if let Event::SubagentActivity {
+            agent_id,
+            finished: true,
+            ..
+        } = &event
+        {
+            finished_ids.insert(agent_id.clone());
+        }
+        collected.push(event);
+    }
+    let replay_cards: Vec<(String, String, bool)> = collected
+        .iter()
+        .filter_map(|e| match e {
+            Event::SubagentCard {
+                item_id,
+                agent_id,
+                background,
+                ..
+            } => Some((item_id.clone(), agent_id.clone(), *background)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replay_cards.len(), 2, "回放重建两张卡: {replay_cards:?}");
+    assert!(replay_cards.iter().all(|c| c.2), "回放卡 background=true");
+    assert_eq!(
+        replay_cards[0].0, replay_cards[1].0,
+        "两张回放卡同挂一张 AgentSwarm 工具卡"
+    );
+    // 回放卡的 agent_id 与 live 一致，finished 指向同一批 agent_id
+    for (_, agent_id, _) in &replay_cards {
+        assert!(
+            finished_ids.contains(agent_id),
+            "{agent_id} 应有 finished 收尾"
+        );
+        assert!(
+            live_cards.iter().any(|c| &c.1 == agent_id),
+            "回放卡应与 live 卡同 agent_id: {agent_id}"
+        );
+    }
+    agent2.shutdown();
+}
+
 /// 代理卡元信息随 rollout 持久化与回放重建（A3e）：跑一次后台子代理 → 模拟重启
 /// OpenSession 回放 → 事件流应有 SubagentCard（meta 齐全、background=true），
 /// 且其后有该 agent_id 的 SubagentActivity finished（后台任务不随进程存活，

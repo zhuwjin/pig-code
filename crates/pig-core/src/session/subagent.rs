@@ -22,6 +22,7 @@ impl Session {
             is_error: true,
             // 参数/档案/模型解析失败的早退没有 agent_id，不建代理卡
             card: None,
+            cards: vec![],
         };
         let description = args["description"].as_str().unwrap_or("").trim();
         if description.is_empty() {
@@ -141,14 +142,20 @@ impl Session {
             None => parent_config.clone(),
         };
 
-        // ---- 工具收窄：子代理循环用 all()（天然无 Agent 防嵌套）----
+        // ---- 工具收窄：子代理循环用 all()（天然无 Agent 防嵌套）+ MCP 继承 ----
         let all_tools = tool::all();
         let all_names: Vec<String> = all_tools.iter().map(|t| t.name().to_string()).collect();
         let keep = crate::agent::child_tool_set(&profile, &all_names, child_config.input_image);
-        let child_tools: Vec<Box<dyn tool::Tool>> = all_tools
+        let mut child_tools: Vec<Box<dyn tool::Tool>> = all_tools
             .into_iter()
             .filter(|t| keep.iter().any(|name| name == t.name()))
             .collect();
+        // MCP 继承：全工具档案（收窄后含 Write/Edit）继承全部已连接 MCP 工具；
+        // 只读档案（如 explore）只继承 readOnlyHint 的。schemas 同步进子代理采样
+        let mcp_inherits_all = crate::agent::child_inherits_all_mcp(&keep);
+        if let Some(mcp) = &self.mcp {
+            child_tools.extend(mcp.child_tools(mcp_inherits_all));
+        }
         let child_schemas: Vec<serde_json::Value> =
             child_tools.iter().map(|t| t.schema()).collect();
 
@@ -185,23 +192,18 @@ impl Session {
             jsonl,
             max_turns,
             description: description.to_string(),
+            mcp: self.mcp.clone(),
+            mcp_inherits_all,
         };
 
         // 代理卡元信息：agent_id 分配 + child_config 解析完成后即组好——
         // live 经 SubagentCard 事件直发，并随 RolloutRecord::ToolCall 持久化
         //（回放经记录重建）；前台/后台/resume 同路（profile/model 按本次重解析结果）
-        let mut card_model = format!(
-            "{} · {}",
-            drive.child_config.provider_name, drive.child_config.model
-        );
-        if let Some(level) = &drive.profile.thought_level {
-            card_model = format!("{card_model} · {level}");
-        }
         let card_record = crate::rollout::AgentCardRecord {
             agent_id: drive.agent_id.clone(),
             profile: drive.profile.name.clone(),
             description: drive.description.clone(),
-            model: card_model,
+            model: agent_card_model(&drive),
             background,
         };
         self.emit(
@@ -225,6 +227,8 @@ impl Session {
 
         // ---- 前台：借 Session 字段组 GateCtx 同步驱动 ----
         let result = {
+            // 子代理继承的 MCP 工具（门控执行段的按名查找兜底；规则按档案收窄）
+            let mcp_extra = drive.extra_tools();
             let mut gate = GateCtx {
                 cwd: &self.cwd,
                 mode: self.mode,
@@ -236,6 +240,7 @@ impl Session {
                 session_id: &self.id,
                 seq: &self.seq,
                 store: &self.store,
+                extra_tools: &mcp_extra,
             };
             drive_subagent(
                 &mut gate,
@@ -262,6 +267,7 @@ impl Session {
         if result.cancelled {
             return SubagentOutcome::Cancelled {
                 card: Some(card_record),
+                cards: vec![],
             };
         }
         // 子代理成本计入父回合统计（不记 StepUsage/不更新水位）
@@ -285,9 +291,386 @@ impl Session {
             note,
             is_error: result.is_error,
             card: Some(card_record),
+            cards: vec![],
+        }
+    }
+    /// AgentSwarm 工具入口：parse_swarm_args 校验 → prepare_swarm_children 批量准备
+    ///（与 run_subagent 同管线）→ 全部并发驱动（全局并发槽上限，超限排队）。
+    /// 默认前台：阻塞至全部完成，聚合结果作为单个工具结果；turn 取消 → 取消全部子代理。
+    /// run_in_background=true：逐个注册后台任务 + spawn 独立驱动（与后台 Agent 同
+    /// 生命周期：TaskStop 可停、完成经 wake 通道逐个唤醒父会话），立即返回逐项回执。
+    pub(crate) async fn run_swarm(
+        &mut self,
+        call: &ToolCall,
+        parent_item_id: &str,
+        parent_config: &ResolvedModel,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> SubagentOutcome {
+        let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+        let fail = |note: String| SubagentOutcome::Finished {
+            note,
+            is_error: true,
+            // 参数/档案/模型解析失败的早退没有 agent_id，不建代理卡
+            card: None,
+            cards: vec![],
+        };
+        let plan = match tool::parse_swarm_args(&args) {
+            Ok(plan) => plan,
+            Err(error) => return fail(error),
+        };
+        // 计划模式硬拒（与 run_subagent 同口径）：子代理可能修改文件——前台/后台同拒
+        if self.mode == ExecMode::Plan {
+            return fail(
+                "计划模式下不可委派子代理（子代理可能修改文件）。请先用只读工具自行调研并输出计划，或退出计划模式后再委派。"
+                    .to_string(),
+            );
+        }
+        let background = args["run_in_background"].as_bool().unwrap_or(false);
+        let preps = match crate::agent::prepare_swarm_children(
+            &crate::agent::SwarmPrepCtx {
+                cwd: &self.cwd,
+                data_dir: &self.data_dir,
+                git_snapshot: self.git_snapshot.as_deref(),
+                app_config: self.app_config.as_ref(),
+                parent_config,
+                session_id: &self.id,
+                tasks: &self.state.tasks,
+                mcp: self.mcp.as_ref(),
+            },
+            &plan,
+            &mut self.agent_seq,
+        ) {
+            Ok(preps) => preps,
+            Err(error) => return fail(error),
+        };
+
+        // ---- 后台：逐个派发独立后台驱动（不 join），立即返回逐项回执 ----
+        if background {
+            return self.dispatch_swarm_background(preps, parent_item_id, tx);
+        }
+
+        // ---- 前台：全部并发驱动，阻塞至全部完成 ----
+        // 每个子代理的卡元信息逐张收集（live 经 SubagentCard 事件直发；随 rollout
+        // ToolCall 记录的 agent_cards 持久化，回放重建全部子代理卡）
+        let mut cards: Vec<crate::rollout::AgentCardRecord> = Vec::new();
+        // slots 保持 plan 顺序（准备失败的条目原地落 Failed，spawn 结果按 ix 回填）
+        let mut slots: Vec<Option<crate::agent::SwarmChildResult>> =
+            (0..preps.len()).map(|_| None).collect();
+        let mut handles = Vec::new();
+        let mut tokens = Vec::new();
+        for (ix, prep) in preps.into_iter().enumerate() {
+            let prep = match prep {
+                crate::agent::SwarmPrep::Ready(prep) => prep,
+                // 准备阶段失败：不启动，聚合里记为失败项（部分失败不影响其他）
+                crate::agent::SwarmPrep::Failed { description, error } => {
+                    slots[ix] = Some(crate::agent::SwarmChildResult {
+                        description,
+                        agent_id: None,
+                        status: crate::agent::SwarmChildStatus::Failed,
+                        turns: 0,
+                        result_path: None,
+                        result_text: error,
+                        queued: false,
+                        usage: (0, 0, 0),
+                    });
+                    continue;
+                }
+            };
+            let drive = SubagentDrive::from(*prep);
+            // 代理卡（与 run_subagent 同口径；批量前台 background=false）
+            let card = crate::rollout::AgentCardRecord {
+                agent_id: drive.agent_id.clone(),
+                profile: drive.profile.name.clone(),
+                description: drive.description.clone(),
+                model: agent_card_model(&drive),
+                background: false,
+            };
+            self.emit(
+                |session_id, seq| Event::SubagentCard {
+                    session_id,
+                    seq,
+                    item_id: parent_item_id.to_string(),
+                    agent_id: card.agent_id.clone(),
+                    profile: card.profile.clone(),
+                    description: card.description.clone(),
+                    model: card.model.clone(),
+                    background: card.background,
+                },
+                tx,
+            );
+            cards.push(card);
+            // 排队中也注册（command 带「排队中 · 」前缀），TaskList/面板可见可停
+            let child_cancel = CancellationToken::new();
+            let command = format!("子代理 {}: {}", drive.profile.name, drive.description);
+            let task_id = crate::task::register_agent_task_queued(
+                &self.state,
+                command,
+                child_cancel.clone(),
+                drive.agent_id.clone(),
+            );
+            // 全 owned 上下文（与 spawn_subagent_background 同清单）
+            let cwd = self.cwd.clone();
+            let mode = self.mode;
+            let permissions = self.permissions.clone();
+            let mut always_allowed = self.always_allowed.clone();
+            let state = self.state.clone();
+            let pending = self.pending.clone();
+            let store = self.store.clone();
+            let seq = self.seq.clone();
+            let session_id = self.id.clone();
+            let tx_bg = tx.clone();
+            let result_path = agent_result_path(&drive.jsonl, &drive.agent_id);
+            let description = drive.description.clone();
+            let agent_id = drive.agent_id.clone();
+            let task_id_bg = task_id.clone();
+            tokens.push(child_cancel.clone());
+            handles.push(tokio::spawn(async move {
+                // 全局并发槽：超限排队（排队中也可被 TaskStop/父取消打断）
+                let queued = crate::task::subagent_slots_available() == 0;
+                if queued {
+                    crate::task::note_output(
+                        &state.tasks,
+                        &task_id_bg,
+                        "排队中：子代理全局并发槽已满，等待空槽…\n",
+                    );
+                }
+                let Some(_permit) = crate::task::acquire_subagent_slot(&child_cancel).await else {
+                    // 排队中被取消：stop_task 已置 Killed，注册表无需收尾
+                    return (
+                        ix,
+                        crate::agent::SwarmChildResult {
+                            description,
+                            agent_id: Some(agent_id),
+                            status: crate::agent::SwarmChildStatus::Cancelled,
+                            turns: 0,
+                            result_path: None,
+                            result_text: String::new(),
+                            queued,
+                            usage: (0, 0, 0),
+                        },
+                    );
+                };
+                crate::task::mark_agent_task_started(&state, &task_id_bg);
+                let mut tracker = ChangeTracker::default();
+                let result = {
+                    // 子代理继承的 MCP 工具（owned：闭包内现取，规则快照在 drive 上）
+                    let mcp_extra = drive.extra_tools();
+                    let mut gate = GateCtx {
+                        cwd: &cwd,
+                        mode,
+                        tracker: &mut tracker,
+                        state: &state,
+                        pending: &pending,
+                        permissions: &permissions,
+                        always_allowed: &mut always_allowed,
+                        session_id: &session_id,
+                        seq: &seq,
+                        store: &store,
+                        extra_tools: &mcp_extra,
+                    };
+                    let mut drive = drive;
+                    drive_subagent(
+                        &mut gate,
+                        &mut drive,
+                        &ProgressSink::Background {
+                            task_id: task_id_bg.clone(),
+                        },
+                        &tx_bg,
+                        &child_cancel,
+                    )
+                    .await
+                };
+                // 实时面板收尾（含父取消/TaskStop）
+                emit_bg(&session_id, &seq, &tx_bg, |sid, seq| {
+                    Event::SubagentActivity {
+                        session_id: sid,
+                        seq,
+                        agent_id: agent_id.clone(),
+                        item: None,
+                        finished: true,
+                    }
+                });
+                // 注册表收尾：TaskStop 已置 Killed 的不覆写；父取消记 Killed
+                {
+                    let mut tasks = state.tasks.lock().expect("task registry lock");
+                    if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id_bg)
+                        && matches!(entry.status, pig_protocol::TaskStatus::Running)
+                    {
+                        entry.status = if result.cancelled {
+                            pig_protocol::TaskStatus::Killed
+                        } else if result.is_error {
+                            pig_protocol::TaskStatus::Exited(-1)
+                        } else {
+                            pig_protocol::TaskStatus::Exited(0)
+                        };
+                        entry.ended_at = Some(crate::rollout::now_secs());
+                    }
+                }
+                crate::task::note_output(
+                    &state.tasks,
+                    &task_id_bg,
+                    &format!("[{}]\n{}\n", result.status_line, result.result_text),
+                );
+                let _ = state.task_notify.send(session_id.clone());
+                (
+                    ix,
+                    crate::agent::SwarmChildResult {
+                        description,
+                        agent_id: Some(agent_id),
+                        status: if result.cancelled {
+                            crate::agent::SwarmChildStatus::Cancelled
+                        } else if result.is_error {
+                            crate::agent::SwarmChildStatus::Failed
+                        } else {
+                            crate::agent::SwarmChildStatus::Completed
+                        },
+                        turns: result.turns,
+                        result_path: if result.cancelled {
+                            None
+                        } else {
+                            std::fs::metadata(&result_path).ok().map(|_| result_path)
+                        },
+                        result_text: result.result_text,
+                        queued,
+                        usage: result.usage,
+                    },
+                )
+            }));
+        }
+
+        // 全部并发；父取消 → 取消全部子代理并等收尾（Cancelled 语义与前台 Agent
+        // 一致：部分结果不进聚合，工具卡落定「已停止」）
+        let joined = tokio::select! {
+            joined = futures_util::future::join_all(&mut handles) => Some(joined),
+            _ = cancel.cancelled() => {
+                for token in &tokens {
+                    token.cancel();
+                }
+                let _ = futures_util::future::join_all(&mut handles).await;
+                None
+            }
+        };
+        let Some(joined) = joined else {
+            return SubagentOutcome::Cancelled { card: None, cards };
+        };
+        for item in joined {
+            match item {
+                Ok((ix, child)) => slots[ix] = Some(child),
+                Err(error) => eprintln!("[agent] swarm 子代理任务异常终止: {error}"),
+            }
+        }
+        let children: Vec<crate::agent::SwarmChildResult> = slots.into_iter().flatten().collect();
+        // 子代理成本计入父回合统计（前台口径；不记 StepUsage/不更新水位）
+        for child in &children {
+            self.turn_input += child.usage.0;
+            self.turn_cache_read += child.usage.1;
+            self.turn_output += child.usage.2;
+        }
+        let is_error = children
+            .iter()
+            .any(|c| c.status != crate::agent::SwarmChildStatus::Completed);
+        SubagentOutcome::Finished {
+            note: crate::agent::format_swarm_result(&children),
+            is_error,
+            // 批量代理卡：每个子代理一张（live 已逐张经 SubagentCard 事件发出），
+            // 随 rollout ToolCall 记录的 agent_cards 持久化，回放重建全部子代理卡
+            card: None,
+            cards,
         }
     }
 
+    /// 后台 swarm 分支：每个 Ready 子代理发 SubagentCard（background=true）+ 注册
+    /// 「排队中」任务 + spawn 独立后台驱动（drive_subagent_detached，与后台 Agent
+    /// 共用：并发槽排队/注册表收尾/结果落盘/完成经 wake 通道逐个唤醒父会话）；
+    /// 不 join，立即返回逐项回执（准备阶段失败项同样列出）。usage 不进父回合
+    /// 统计（与后台 Agent 同口径：驱动体内丢弃）；父 turn 继续运行/结束都不
+    /// 波及子代理，父 turn 取消也不取消它们（只认各自注册表里的 TaskStop）。
+    fn dispatch_swarm_background(
+        &mut self,
+        preps: Vec<crate::agent::SwarmPrep>,
+        parent_item_id: &str,
+        tx: &async_channel::Sender<Event>,
+    ) -> SubagentOutcome {
+        let mut cards: Vec<crate::rollout::AgentCardRecord> = Vec::new();
+        let mut receipt: Vec<crate::agent::SwarmReceiptChild> = Vec::new();
+        // 回执的 running/queued 按组装瞬间的空闲槽估算（瞬时值；真实排队态以
+        // TaskList/面板的「排队中 · 」前缀为准，槽到手 mark_agent_task_started 摘前缀）
+        let slots_available = crate::task::subagent_slots_available();
+        for prep in preps {
+            let prep = match prep {
+                crate::agent::SwarmPrep::Ready(prep) => prep,
+                // 准备阶段失败：不启动，回执里记为失败项（部分失败不影响其他）
+                crate::agent::SwarmPrep::Failed { description, error } => {
+                    receipt.push(crate::agent::SwarmReceiptChild {
+                        description,
+                        agent_id: None,
+                        task_id: None,
+                        queued: false,
+                        error: Some(error),
+                    });
+                    continue;
+                }
+            };
+            let drive = SubagentDrive::from(*prep);
+            // 代理卡（与 run_subagent 同口径；后台批量 background=true）
+            let card = crate::rollout::AgentCardRecord {
+                agent_id: drive.agent_id.clone(),
+                profile: drive.profile.name.clone(),
+                description: drive.description.clone(),
+                model: agent_card_model(&drive),
+                background: true,
+            };
+            self.emit(
+                |session_id, seq| Event::SubagentCard {
+                    session_id,
+                    seq,
+                    item_id: parent_item_id.to_string(),
+                    agent_id: card.agent_id.clone(),
+                    profile: card.profile.clone(),
+                    description: card.description.clone(),
+                    model: card.model.clone(),
+                    background: card.background,
+                },
+                tx,
+            );
+            let description = drive.description.clone();
+            let agent_id = drive.agent_id.clone();
+            // 排队中也注册（command 带「排队中 · 」前缀），TaskList/面板可见可停
+            let child_cancel = CancellationToken::new();
+            let command = format!("子代理 {}: {}", drive.profile.name, drive.description);
+            let task_id = crate::task::register_agent_task_queued(
+                &self.state,
+                command,
+                child_cancel.clone(),
+                agent_id.clone(),
+            );
+            let queued = cards.len() >= slots_available;
+            tokio::spawn(drive_subagent_detached(
+                self.detached_gate_ctx(),
+                drive,
+                task_id.clone(),
+                child_cancel,
+                tx.clone(),
+                std::time::Instant::now(),
+            ));
+            cards.push(card);
+            receipt.push(crate::agent::SwarmReceiptChild {
+                description,
+                agent_id: Some(agent_id),
+                task_id: Some(task_id),
+                queued,
+                error: None,
+            });
+        }
+        SubagentOutcome::Finished {
+            note: crate::agent::format_swarm_receipt(&receipt),
+            // 无一派发成功（全部准备阶段失败）才算调用级失败；部分失败在回执里列出
+            is_error: cards.is_empty(),
+            card: None,
+            cards,
+        }
+    }
 
     /// 后台子代理：注册任务条目后 tokio::spawn 驱动（全 owned 上下文），完成时更新
     /// 注册表 + notify + 经 wake 通道唤醒父会话（TaskStop 杀的不唤醒）。立即返回 running。
@@ -299,161 +682,222 @@ impl Session {
     ) -> SubagentOutcome {
         let bg_cancel = CancellationToken::new();
         let command = format!("子代理 {}: {}", drive.profile.name, drive.description);
-        let task_id = crate::task::register_agent_task(
+        // 排队中也注册（command 带「排队中 · 」前缀），TaskList/面板可见可停；
+        // 并发槽到手后 mark_agent_task_started 摘前缀
+        let task_id = crate::task::register_agent_task_queued(
             &self.state,
             command,
             bg_cancel.clone(),
             drive.agent_id.clone(),
         );
-        // 全 owned 上下文：共享 Arc 克隆 + 值快照；独立 ChangeTracker——后台子代理的
-        // 改动不进父「本轮改动」面板（git 口径的 review 面板仍可见）
-        let cwd = self.cwd.clone();
-        let mode = self.mode;
-        let permissions = self.permissions.clone();
-        let mut always_allowed = self.always_allowed.clone();
-        let state = self.state.clone();
-        let pending = self.pending.clone();
-        let store = self.store.clone();
-        let seq = self.seq.clone();
-        let session_id = self.id.clone();
-        let tx_bg = tx.clone();
         let agent_id = drive.agent_id.clone();
-        let profile_name = drive.profile.name.clone();
-        let task_id_bg = task_id.clone();
-        // 通知开标签的结构化属性（UI 紧凑卡用；正文保持逐字不变）
-        let description_attr = sanitize_notification_attr(&drive.description, 60);
-        let model_attr = format!(
-            "{} · {}",
-            drive.child_config.provider_name, drive.child_config.model
-        );
-        // 记录文件路径（子代理上下文 JSONL 绝对路径，过同样的属性消毒）
-        let record_attr = sanitize_notification_attr(&drive.jsonl.display().to_string(), 512);
-        // 结果全文路径（drive_subagent 收尾落盘；通知正文给指针 + Read 引导，
-        // kimi output.log 同款——不内联全文）
-        let result_path = agent_result_path(&drive.jsonl, &drive.agent_id);
-        let result_attr = sanitize_notification_attr(&result_path.display().to_string(), 512);
         let started_at = std::time::Instant::now();
-        // 给父模型的即时回执（不依赖任务结果，先组好）
+        // 给父模型的即时回执（不依赖任务结果，先组好）；并发槽已满时说明排队
+        let queue_hint = if crate::task::subagent_slots_available() == 0 {
+            "\n当前子代理全局并发槽已满（上限 8），本任务排队等待空槽，完成后照常通知。"
+        } else {
+            ""
+        };
         let running_note = format!(
-            "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\n子代理已在后台运行，完成后结果会以 <task-notification> 通知送达——不要轮询。\n可用 TaskOutput 看进度、TaskStop 停止、Agent(resume=\"{agent_id}\", prompt=\"...\") 续跑。"
+            "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\n子代理已在后台运行，完成后结果会以 <task-notification> 通知送达——不要轮询。\n可用 TaskOutput 看进度、TaskStop 停止、Agent(resume=\"{agent_id}\", prompt=\"...\") 续跑。{queue_hint}"
         );
-        tokio::spawn(async move {
-            let mut tracker = ChangeTracker::default();
-            let result = {
-                let mut gate = GateCtx {
-                    cwd: &cwd,
-                    mode,
-                    tracker: &mut tracker,
-                    state: &state,
-                    pending: &pending,
-                    permissions: &permissions,
-                    always_allowed: &mut always_allowed,
-                    session_id: &session_id,
-                    seq: &seq,
-                    store: &store,
-                };
-                let mut drive = drive;
-                drive_subagent(
-                    &mut gate,
-                    &mut drive,
-                    &ProgressSink::Background {
-                        task_id: task_id_bg.clone(),
-                    },
-                    &tx_bg,
-                    &bg_cancel,
-                )
-                .await
-            };
-            // 实时面板收尾（含 TaskStop 被杀/父取消）：右侧「子代理」tab 关「运行中」指示
-            emit_bg(&session_id, &seq, &tx_bg, |sid, seq| {
-                Event::SubagentActivity {
-                    session_id: sid,
-                    seq,
-                    agent_id: agent_id.clone(),
-                    item: None,
-                    finished: true,
-                }
-            });
-            // 注册表收尾：TaskStop 已置 Killed 的不覆写（cancelled 情形）
-            {
-                let mut tasks = state.tasks.lock().expect("task registry lock");
-                if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id_bg)
-                    && matches!(entry.status, pig_protocol::TaskStatus::Running)
-                {
-                    entry.status = if result.is_error {
-                        pig_protocol::TaskStatus::Exited(-1)
-                    } else {
-                        pig_protocol::TaskStatus::Exited(0)
-                    };
-                    entry.ended_at = Some(crate::rollout::now_secs());
-                }
-            }
-            crate::task::note_output(
-                &state.tasks,
-                &task_id_bg,
-                &format!("[{}]\n{}\n", result.status_line, result.result_text),
-            );
-            let _ = state.task_notify.send(session_id.clone());
-            // 被 TaskStop 杀掉的不唤醒父会话
-            if !result.cancelled {
-                // 通知正文对齐 kimi-code：状态行 + 结果文件路径 + Read 引导，
-                // 不内联结果全文（全文在 result.md——sessions/ 子树在
-                // extra_read_roots 白名单内，模型需要时自己 Read）。
-                // 开标签的结构化属性不动（UI 紧凑卡数据源）。
-                let duration_ms = started_at.elapsed().as_millis() as u64;
-                let duration = human_duration(duration_ms);
-                let written_size = std::fs::metadata(&result_path).ok().map(|m| m.len());
-                let body = if result.is_error {
-                    match written_size {
-                        Some(bytes) => format!(
-                            "后台子代理 {agent_id}（{profile_name}）失败：{}（耗时 {duration}）。\n详细输出已写入 {}（{}），可用 Read 查看。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续（子代理保留全部上文，续跑时让它重做没拿到结果的那步）。",
-                            result.result_text,
-                            result_path.display(),
-                            human_size(bytes)
-                        ),
-                        // 落盘失败降级：无文件可指，原因内联
-                        None => format!(
-                            "后台子代理 {agent_id}（{profile_name}）失败：{}（耗时 {duration}）。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续（子代理保留全部上文，续跑时让它重做没拿到结果的那步）。",
-                            result.result_text
-                        ),
-                    }
-                } else {
-                    match written_size {
-                        Some(bytes) => format!(
-                            "后台子代理 {agent_id}（{profile_name}）已完成（{} 步，耗时 {duration}）。\n结果已写入 {}（{}），需要内容请用 Read 读取该文件。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。",
-                            result.turns,
-                            result_path.display(),
-                            human_size(bytes)
-                        ),
-                        // 落盘失败降级：无文件可指，内联 ≤3000 字符预览（kimi 同款兜底）
-                        None => format!(
-                            "后台子代理 {agent_id}（{profile_name}）已完成（{} 步，耗时 {duration}）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。",
-                            result.turns,
-                            result.result_text.chars().take(3000).collect::<String>()
-                        ),
-                    }
-                };
-                let notification = if result.is_error {
-                    format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n{body}\n</task-notification>",
-                        result.turns
-                    )
-                } else {
-                    format!(
-                        "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n{body}\n</task-notification>",
-                        result.turns
-                    )
-                };
-                let _ = state.wake_notify.send((session_id, notification));
-            }
-        });
+        tokio::spawn(drive_subagent_detached(
+            self.detached_gate_ctx(),
+            drive,
+            task_id,
+            bg_cancel,
+            tx.clone(),
+            started_at,
+        ));
         SubagentOutcome::Finished {
             note: running_note,
             is_error: false,
             card: Some(card),
+            cards: vec![],
         }
     }
 
+    /// 后台子代理驱动的 owned 门控上下文（全 owned：共享 Arc 克隆 + 值快照），
+    /// spawn_subagent_background 与后台 swarm 派发共用同一份清单
+    fn detached_gate_ctx(&self) -> DetachedGateCtx {
+        DetachedGateCtx {
+            cwd: self.cwd.clone(),
+            mode: self.mode,
+            permissions: self.permissions.clone(),
+            always_allowed: self.always_allowed.clone(),
+            state: self.state.clone(),
+            pending: self.pending.clone(),
+            store: self.store.clone(),
+            seq: self.seq.clone(),
+            session_id: self.id.clone(),
+        }
+    }
+}
+
+/// 后台子代理驱动的 owned 门控上下文（Session::detached_gate_ctx 组装）：
+/// 共享 Arc 克隆 + 值快照；独立 ChangeTracker 在驱动体内建——后台子代理的
+/// 改动不进父「本轮改动」面板（git 口径的 review 面板仍可见）
+struct DetachedGateCtx {
+    cwd: PathBuf,
+    mode: ExecMode,
+    permissions: crate::permissions::PermissionRules,
+    always_allowed: HashSet<(String, String)>,
+    state: crate::task::SessionToolState,
+    pending: PendingApprovals,
+    store: Arc<Mutex<Store>>,
+    seq: Arc<std::sync::atomic::AtomicU64>,
+    session_id: String,
+}
+
+/// 后台子代理驱动体（spawn_subagent_background 与后台 swarm 共用）：全局并发槽
+/// 排队（排队中可被 TaskStop 取消，注册表已是 Killed 直接退出）→ 驱动 → 实时面板/
+/// 注册表收尾 → note_output → task_notify；未被取消的组 <task-notification> 经
+/// wake 通道唤醒父会话（正文给 result.md 指针 + Read 引导，不内联全文——
+/// sessions/ 子树在 extra_read_roots 白名单内，模型需要时自己 Read）。
+/// usage 在此丢弃：后台子代理成本不计入父回合统计。
+async fn drive_subagent_detached(
+    mut ctx: DetachedGateCtx,
+    drive: SubagentDrive,
+    task_id: String,
+    cancel: CancellationToken,
+    tx: async_channel::Sender<Event>,
+    started_at: std::time::Instant,
+) {
+    let agent_id = drive.agent_id.clone();
+    let profile_name = drive.profile.name.clone();
+    // 通知开标签的结构化属性（UI 紧凑卡用；正文保持逐字不变）
+    let description_attr = sanitize_notification_attr(&drive.description, 60);
+    let model_attr = format!(
+        "{} · {}",
+        drive.child_config.provider_name, drive.child_config.model
+    );
+    // 记录文件路径（子代理上下文 JSONL 绝对路径，过同样的属性消毒）
+    let record_attr = sanitize_notification_attr(&drive.jsonl.display().to_string(), 512);
+    // 结果全文路径（drive_subagent 收尾落盘；通知正文给指针 + Read 引导）
+    let result_path = agent_result_path(&drive.jsonl, &drive.agent_id);
+    let result_attr = sanitize_notification_attr(&result_path.display().to_string(), 512);
+    // 全局并发槽：超限排队
+    if crate::task::subagent_slots_available() == 0 {
+        crate::task::note_output(
+            &ctx.state.tasks,
+            &task_id,
+            "排队中：子代理全局并发槽已满，等待空槽…\n",
+        );
+    }
+    let Some(_permit) = crate::task::acquire_subagent_slot(&cancel).await else {
+        return;
+    };
+    crate::task::mark_agent_task_started(&ctx.state, &task_id);
+    let mut tracker = ChangeTracker::default();
+    let result = {
+        // 子代理继承的 MCP 工具（owned：闭包内现取，规则快照在 drive 上）
+        let mcp_extra = drive.extra_tools();
+        let mut gate = GateCtx {
+            cwd: &ctx.cwd,
+            mode: ctx.mode,
+            tracker: &mut tracker,
+            state: &ctx.state,
+            pending: &ctx.pending,
+            permissions: &ctx.permissions,
+            always_allowed: &mut ctx.always_allowed,
+            session_id: &ctx.session_id,
+            seq: &ctx.seq,
+            store: &ctx.store,
+            extra_tools: &mcp_extra,
+        };
+        let mut drive = drive;
+        drive_subagent(
+            &mut gate,
+            &mut drive,
+            &ProgressSink::Background {
+                task_id: task_id.clone(),
+            },
+            &tx,
+            &cancel,
+        )
+        .await
+    };
+    // 实时面板收尾（含 TaskStop 被杀）：右侧「子代理」tab 关「运行中」指示
+    emit_bg(&ctx.session_id, &ctx.seq, &tx, |sid, seq| {
+        Event::SubagentActivity {
+            session_id: sid,
+            seq,
+            agent_id: agent_id.clone(),
+            item: None,
+            finished: true,
+        }
+    });
+    // 注册表收尾：TaskStop 已置 Killed 的不覆写（cancelled 情形）
+    {
+        let mut tasks = ctx.state.tasks.lock().expect("task registry lock");
+        if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id)
+            && matches!(entry.status, pig_protocol::TaskStatus::Running)
+        {
+            entry.status = if result.is_error {
+                pig_protocol::TaskStatus::Exited(-1)
+            } else {
+                pig_protocol::TaskStatus::Exited(0)
+            };
+            entry.ended_at = Some(crate::rollout::now_secs());
+        }
+    }
+    crate::task::note_output(
+        &ctx.state.tasks,
+        &task_id,
+        &format!("[{}]\n{}\n", result.status_line, result.result_text),
+    );
+    let _ = ctx.state.task_notify.send(ctx.session_id.clone());
+    // 被 TaskStop 杀掉的不唤醒父会话
+    if result.cancelled {
+        return;
+    }
+    // 开标签的结构化属性不动（UI 紧凑卡数据源）；正文对齐 kimi-code：
+    // 状态行 + 结果文件路径 + Read 引导
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let duration = human_duration(duration_ms);
+    let written_size = std::fs::metadata(&result_path).ok().map(|m| m.len());
+    let body = if result.is_error {
+        match written_size {
+            Some(bytes) => format!(
+                "后台子代理 {agent_id}（{profile_name}）失败：{}（耗时 {duration}）。\n详细输出已写入 {}（{}），可用 Read 查看。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续（子代理保留全部上文，续跑时让它重做没拿到结果的那步）。",
+                result.result_text,
+                result_path.display(),
+                human_size(bytes)
+            ),
+            // 落盘失败降级：无文件可指，原因内联
+            None => format!(
+                "后台子代理 {agent_id}（{profile_name}）失败：{}（耗时 {duration}）。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续（子代理保留全部上文，续跑时让它重做没拿到结果的那步）。",
+                result.result_text
+            ),
+        }
+    } else {
+        match written_size {
+            Some(bytes) => format!(
+                "后台子代理 {agent_id}（{profile_name}）已完成（{} 步，耗时 {duration}）。\n结果已写入 {}（{}），需要内容请用 Read 读取该文件。\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。",
+                result.turns,
+                result_path.display(),
+                human_size(bytes)
+            ),
+            // 落盘失败降级：无文件可指，内联 ≤3000 字符预览（kimi 同款兜底）
+            None => format!(
+                "后台子代理 {agent_id}（{profile_name}）已完成（{} 步，耗时 {duration}）。\n\n{}\n\n用 Agent(resume=\"{agent_id}\", prompt=\"...\") 可继续该子代理。",
+                result.turns,
+                result.result_text.chars().take(3000).collect::<String>()
+            ),
+        }
+    };
+    let notification = if result.is_error {
+        format!(
+            "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"failed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n{body}\n</task-notification>",
+            result.turns
+        )
+    } else {
+        format!(
+            "<task-notification agent_id=\"{agent_id}\" profile=\"{profile_name}\" status=\"completed\" turns=\"{}\" model=\"{model_attr}\" description=\"{description_attr}\" duration_ms=\"{duration_ms}\" record=\"{record_attr}\" result=\"{result_attr}\">\n{body}\n</task-notification>",
+            result.turns
+        )
+    };
+    let _ = ctx.state.wake_notify.send((ctx.session_id, notification));
 }
 
 /// 子代理驱动（前台/后台共用）：步循环 + 收窄工具门控 + 上下文持久化。
@@ -468,6 +912,53 @@ struct SubagentDrive {
     jsonl: PathBuf,
     max_turns: usize,
     description: String,
+    /// 会话 MCP 句柄（None = 未连接）：后台/闭包在 GateCtx 组装点现取继承工具
+    mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
+    /// 继承规则快照（准备时按档案收窄结果判定）：true = 继承全部已连接 MCP 工具；
+    /// false = 只读档案，只继承 readOnlyHint 的
+    mcp_inherits_all: bool,
+}
+
+impl SubagentDrive {
+    /// 门控执行段的 extra_tools：按继承规则从 MCP 句柄现取（McpTool clone 很便宜）
+    fn extra_tools(&self) -> Vec<Box<dyn tool::Tool>> {
+        self.mcp
+            .as_ref()
+            .map(|mcp| mcp.child_tools(self.mcp_inherits_all))
+            .unwrap_or_default()
+    }
+}
+
+/// 代理卡副标题的模型段："{provider_name} · {model}"（可带思考档后缀）
+fn agent_card_model(drive: &SubagentDrive) -> String {
+    let mut model = format!(
+        "{} · {}",
+        drive.child_config.provider_name, drive.child_config.model
+    );
+    if let Some(level) = &drive.profile.thought_level {
+        model = format!("{model} · {level}");
+    }
+    model
+}
+
+/// SwarmChildPrep → SubagentDrive：字段一一对应，准备侧与驱动侧的结构映射收口在这里
+///（run_swarm 前台/后台两分支共用）
+impl From<crate::agent::SwarmChildPrep> for SubagentDrive {
+    fn from(prep: crate::agent::SwarmChildPrep) -> Self {
+        Self {
+            agent_id: prep.agent_id,
+            profile: prep.profile,
+            child_config: prep.child_config,
+            tools: prep.tools,
+            schemas: prep.schemas,
+            history: prep.history,
+            jsonl: prep.jsonl,
+            max_turns: prep.max_turns,
+            description: prep.description,
+            mcp: prep.mcp,
+            mcp_inherits_all: prep.mcp_inherits_all,
+        }
+    }
 }
 /// 子代理进度上报出口
 enum ProgressSink {

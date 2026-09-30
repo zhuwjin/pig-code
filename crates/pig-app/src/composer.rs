@@ -440,18 +440,15 @@ impl Composer {
         }
     }
 
-
     pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
         self.streaming = streaming;
         cx.notify();
     }
 
-
     pub fn set_hero_mode(&mut self, hero: bool, cx: &mut Context<Self>) {
         self.hero_mode = hero;
         cx.notify();
     }
-
 
     #[allow(clippy::too_many_arguments)]
     pub fn set_hero_info(
@@ -473,7 +470,6 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 建议芯片：填入引导文本（不发送）。
     pub fn fill_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| {
@@ -482,24 +478,20 @@ impl Composer {
         });
     }
 
-
     pub fn set_model_name(&mut self, model: String, cx: &mut Context<Self>) {
         self.model = model;
         cx.notify();
     }
-
 
     pub fn set_models(&mut self, models: Vec<ModelOption>, cx: &mut Context<Self>) {
         self.models = models;
         cx.notify();
     }
 
-
     /// 自测用。
     pub fn debug_model_count(&self) -> usize {
         self.models.len()
     }
-
 
     /// 自测用。
     #[allow(dead_code)]
@@ -507,13 +499,11 @@ impl Composer {
         self.reasoning_level.clone()
     }
 
-
     /// 待审批操作：Some 时输入区隐藏，显示审批条；None 恢复输入。
     pub fn set_approval(&mut self, approval: Option<PendingApproval>, cx: &mut Context<Self>) {
         self.approval = approval;
         cx.notify();
     }
-
 
     /// 审批条决议：清空审批态、发事件、焦点还回输入框。
     fn decide_approval(
@@ -528,7 +518,6 @@ impl Composer {
             cx.notify();
         }
     }
-
 
     /// 待回答提问：Some 时显示问题条；None 清除（提交/放弃/回合结束后）。
     /// request_id 变化（或清空）时问卷实体一并释放（render 惰性重建）；同一提问的
@@ -546,7 +535,6 @@ impl Composer {
         self.question = question;
         cx.notify();
     }
-
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
@@ -586,7 +574,6 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 从光标前的文本检测 @ 或 / 触发符，返回触发位置和查询串。
     fn detect_trigger(head: &str) -> Option<(Popup, usize)> {
         for (ix, ch) in head.char_indices().rev() {
@@ -601,7 +588,6 @@ impl Composer {
         None
     }
 
-
     fn update_suggestion(&mut self, input: &Entity<TextareaState>, cx: &mut Context<Self>) {
         let value = input.read(cx).value();
         let caret = input.read(cx).selected_range().start.min(value.len());
@@ -613,18 +599,15 @@ impl Composer {
         cx.notify();
     }
 
-
     pub fn set_mention_results(&mut self, results: Vec<String>, cx: &mut Context<Self>) {
         self.mention_results = results;
         cx.notify();
     }
 
-
     /// 自测用。
     pub fn debug_mention_results(&self) -> &[String] {
         &self.mention_results
     }
-
 
     pub fn set_context_usage(
         &mut self,
@@ -638,14 +621,12 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 切换会话/回 hero 时清掉上一个会话的水位（新会话的 ContextUsage 到达前不显示）
     pub fn clear_context_usage(&mut self, cx: &mut Context<Self>) {
         if self.context_usage.take().is_some() {
             cx.notify();
         }
     }
-
 
     pub fn set_exec_mode(&mut self, mode: ExecMode, cx: &mut Context<Self>) {
         if let Some(ix) = EXEC_MODES.iter().position(|(_, _, m)| *m == mode) {
@@ -654,12 +635,10 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 回焦输入框（对话框/弹层关闭后由 AppView 调用）
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
-
 
     /// 恢复会话持久化的区外读写开关（会话切换/新建/回放时由 meta 同步）
     pub fn set_fs_access(
@@ -673,19 +652,16 @@ impl Composer {
         cx.notify();
     }
 
-
     /// 恢复会话持久化的思考等级（会话切换时由 SessionConfigured 同步）
     pub fn set_reasoning_level(&mut self, level: Option<String>, cx: &mut Context<Self>) {
         self.reasoning_level = level;
         cx.notify();
     }
 
-
     /// 自测用。
     pub fn debug_exec_mode(&self) -> ExecMode {
         EXEC_MODES[self.exec_mode].2
     }
-
 
     /// token 数自动单位：<1k 原样；k/M 级整除显示整数、否则一位小数
     fn format_tokens_compact(n: u64) -> String {
@@ -707,8 +683,6 @@ impl Composer {
             }
         }
     }
-
-
 }
 
 impl Render for Composer {

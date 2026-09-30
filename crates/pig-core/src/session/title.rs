@@ -177,53 +177,53 @@ pub(crate) fn spawn_title_generation(
 
 #[cfg(test)]
 mod tests {
-        use super::*;
-        #[test]
-        fn clean_title_from_plain_json() {
-            assert_eq!(
-                clean_generated_title("{\"title\":\"修复登录超时\"}"),
-                Some("修复登录超时".to_string())
-            );
-        }
-        #[test]
-        fn clean_title_from_fenced_json_and_think() {
-            let raw = "<think>用户想改标题</think>\n```json\n{\"title\":\"重构侧栏布局\"}\n```";
-            assert_eq!(clean_generated_title(raw), Some("重构侧栏布局".to_string()));
-        }
-        #[test]
-        fn clean_title_falls_back_to_first_line_and_strips_noise() {
-            assert_eq!(
-                clean_generated_title("## 优化构建速度。\n\n解释……"),
-                Some("优化构建速度".to_string())
-            );
-            assert_eq!(
-                clean_generated_title("“读取 Cargo.toml 总结”，"),
-                Some("读取 Cargo.toml 总结".to_string())
-            );
-        }
-        #[test]
-        fn clean_title_rejects_junk_and_truncates() {
-            assert_eq!(clean_generated_title("   \n"), None, "空白");
-            assert_eq!(
-                clean_generated_title("{\"title\":\"!!!\"}"),
-                None,
-                "无文字数字"
-            );
-            let long: String = "字".repeat(150);
-            let cleaned = clean_generated_title(&format!("{{\"title\":\"{long}\"}}")).unwrap();
-            assert!(cleaned.chars().count() <= TITLE_MAX_CHARS);
-            assert!(cleaned.ends_with('…'), "超长截断应带省略号: {cleaned}");
-        }
-        #[test]
-        fn normalize_input_collapses_and_truncates() {
-            assert_eq!(
-                normalize_title_input("  hello   world \n next "),
-                "hello world next"
-            );
-            let long: String = "a".repeat(TITLE_INPUT_MAX_CHARS + 50);
-            assert_eq!(
-                normalize_title_input(&long).chars().count(),
-                TITLE_INPUT_MAX_CHARS
-            );
-        }
+    use super::*;
+    #[test]
+    fn clean_title_from_plain_json() {
+        assert_eq!(
+            clean_generated_title("{\"title\":\"修复登录超时\"}"),
+            Some("修复登录超时".to_string())
+        );
+    }
+    #[test]
+    fn clean_title_from_fenced_json_and_think() {
+        let raw = "<think>用户想改标题</think>\n```json\n{\"title\":\"重构侧栏布局\"}\n```";
+        assert_eq!(clean_generated_title(raw), Some("重构侧栏布局".to_string()));
+    }
+    #[test]
+    fn clean_title_falls_back_to_first_line_and_strips_noise() {
+        assert_eq!(
+            clean_generated_title("## 优化构建速度。\n\n解释……"),
+            Some("优化构建速度".to_string())
+        );
+        assert_eq!(
+            clean_generated_title("“读取 Cargo.toml 总结”，"),
+            Some("读取 Cargo.toml 总结".to_string())
+        );
+    }
+    #[test]
+    fn clean_title_rejects_junk_and_truncates() {
+        assert_eq!(clean_generated_title("   \n"), None, "空白");
+        assert_eq!(
+            clean_generated_title("{\"title\":\"!!!\"}"),
+            None,
+            "无文字数字"
+        );
+        let long: String = "字".repeat(150);
+        let cleaned = clean_generated_title(&format!("{{\"title\":\"{long}\"}}")).unwrap();
+        assert!(cleaned.chars().count() <= TITLE_MAX_CHARS);
+        assert!(cleaned.ends_with('…'), "超长截断应带省略号: {cleaned}");
+    }
+    #[test]
+    fn normalize_input_collapses_and_truncates() {
+        assert_eq!(
+            normalize_title_input("  hello   world \n next "),
+            "hello world next"
+        );
+        let long: String = "a".repeat(TITLE_INPUT_MAX_CHARS + 50);
+        assert_eq!(
+            normalize_title_input(&long).chars().count(),
+            TITLE_INPUT_MAX_CHARS
+        );
+    }
 }

@@ -7,9 +7,9 @@ pub enum Role {
     System,
 }
 
-/// 代理卡元信息（`Event::SubagentCard` 写入 Agent 工具卡；live 直发 +
-/// rollout 持久化回放重建。无元信息时（live 中 SubagentCard 事件到达前的
-/// 瞬时态）回落标准工具卡样式）
+/// 代理卡（`Event::SubagentCard` 写入 Agent/AgentSwarm 工具卡；live 直发 +
+/// rollout 持久化回放重建）：元信息 + 后台运行态。无卡时（live 中 SubagentCard
+/// 事件到达前的瞬时态）回落标准工具卡样式
 #[derive(Clone)]
 pub struct AgentCardMeta {
     pub agent_id: String,
@@ -17,9 +17,15 @@ pub struct AgentCardMeta {
     pub description: String,
     /// "{provider_name} · {model}"（可带思考档后缀）
     pub model: String,
-    /// 本次运行为后台：运行态由子代理真实生命周期（SubagentActivity finished）
-    /// 驱动——后台 Agent 工具调用立即返回 running 回执，done 不代表子代理结束
+    /// 本次运行为后台：后台 Agent/AgentSwarm 的工具调用立即返回回执，done 不代表
+    /// 子代理结束——运行态由子代理真实生命周期（SubagentActivity）驱动
     pub background: bool,
+    /// 后台子代理已结束（SubagentActivity finished 置位；回放由 core 补发）；
+    /// 前台卡不看它——前台运行态跟工具调用 done 走
+    pub finished: bool,
+    /// 后台子代理的实时进度行（SubagentActivity item 写入，finished 时清空）；
+    /// 前台卡的进度走 SubagentProgress 写在段级 live_note，不用这个字段
+    pub live_note: Option<String>,
 }
 
 pub enum Segment {
@@ -54,12 +60,10 @@ pub enum Segment {
         /// 独立字段而非覆盖 summary：运行中原摘要（「子代理 explore: …」）要保留。
         /// 回放没有该事件，恒为 None
         live_note: Option<String>,
-        /// 代理卡元信息（SubagentCard 事件写入；Some 时按代理卡样式渲染，
-        /// 点击开右侧子代理对话 tab；live 直发 + 回放经 rollout 记录重建）
-        agent_card: Option<AgentCardMeta>,
-        /// 后台子代理已结束（SubagentActivity finished 置位；前台卡不看它——
-        /// 前台运行态跟工具调用 done 走）
-        agent_finished: bool,
+        /// 代理卡列表（SubagentCard 事件按 item_id 追加：Agent 一张、AgentSwarm
+        /// 每个子代理一张；非空时按代理卡样式渲染，点击开右侧子代理对话 tab；
+        /// live 直发 + 回放经 rollout 记录重建）
+        agent_cards: Vec<AgentCardMeta>,
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
     },

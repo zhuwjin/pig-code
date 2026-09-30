@@ -15,7 +15,6 @@ impl AppView {
         cx.notify();
     }
 
-
     /// 打开并激活右侧 tab（菜单点击用，纯打开不带收起语义）
     pub(crate) fn open_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         if !self.right_tabs.contains(&tab) {
@@ -25,7 +24,6 @@ impl AppView {
         self.right_open = true;
         cx.notify();
     }
-
 
     /// 关闭右侧 tab：关掉激活 tab 时切到剩余最后一个；关掉的是最后一个 tab
     /// 时面板没有内容可显示，自动收起（经 step_dock_anim 走收起动画）。
@@ -43,7 +41,6 @@ impl AppView {
         }
         cx.notify();
     }
-
 
     /// 打开/聚焦「子代理」tab（通知卡点击）：未开则建面板实体并发加载请求；
     /// 已开（同 agent_id）只聚焦，不重复加载。
@@ -68,7 +65,6 @@ impl AppView {
         cx.notify();
     }
 
-
     /// 开关标签页栏 "+" 的加面板菜单。
     pub(crate) fn toggle_right_menu(&mut self, click: &ClickEvent, cx: &mut Context<Self>) {
         // 菜单打开时点按钮：按下先触发菜单的 outside-close（记录按下位置），
@@ -87,7 +83,6 @@ impl AppView {
         self.right_menu_open = !self.right_menu_open;
         cx.notify();
     }
-
 
     /// 右侧面板菜单项：(名称, 图标, 快捷键 action, 占位禁用, 点击打开的 tab)。
     /// 浏览器/终端/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
@@ -123,7 +118,6 @@ impl AppView {
             ),
         ]
     }
-
 
     /// 快捷键芯片组（ZCode 样式：每个键一个小芯片；未绑键时不显示）。
     /// page = 面板首页：带边框的大号键帽，macOS 修饰键符号逐键拆分；
@@ -195,7 +189,6 @@ impl AppView {
         )
     }
 
-
     /// 菜单行：图标 + 名称 + 快捷键芯片；disabled 为占位项（不可点）。
     /// page = 面板首页：整列居中、带边框键帽；否则（「+」下拉菜单）：
     /// 紧凑行。两种模式快捷键都贴行右缘。
@@ -249,12 +242,15 @@ impl AppView {
             .into_any_element()
     }
 
-
     /// 面板首页（菜单页）：展开面板但没有打开的 tab 时显示——
     /// 改动/浏览器/终端/侧边聊天四项（ZCode 同款，相当于面板的首页）。
     /// 宽松大行整列居中：行宽上限 320、名称贴左键帽贴右；上限固定，
     /// 面板拖宽时行不晃。
-    pub(crate) fn render_right_menu_page(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_right_menu_page(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         v_flex()
             .size_full()
             .justify_center()
@@ -270,12 +266,15 @@ impl AppView {
             .into_any_element()
     }
 
-
     /// 标签页栏 "+" 的加面板菜单：deferred 到窗口层绘制，`Positioner::side(Bottom)`
     /// 锚定 "+" 按钮正下方（gpui-kit 的 dropdown_menu 走 corner 锚定，BottomRight
     /// 会把菜单弹到按钮上方、超出窗口顶部；且弹层盖住标题栏 HTCAPTION 拖拽区时
     /// 点击会被系统的窗口移动模态循环吞掉——故自绘，与 turn 导航条预览卡同一模式）。
-    pub(crate) fn render_right_menu_dropdown(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_right_menu_dropdown(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let bounds = self.tab_add_btn_bounds.get();
         deferred(
             Positioner::side(bounds)
@@ -307,7 +306,6 @@ impl AppView {
         .with_priority(1)
         .into_any_element()
     }
-
 
     /// 右侧标签页栏的单个 tab：图标 + 名称 + 关闭按钮（点击激活，× 关闭）
     pub(crate) fn render_right_tab(&self, tab: RightTab, cx: &mut Context<Self>) -> AnyElement {
@@ -374,7 +372,6 @@ impl AppView {
             .into_any_element()
     }
 
-
     /// 右侧面板顶部的标签页栏：tab 列表 + 末尾 "+"（加 tab 菜单）与收起按钮
     pub(crate) fn render_right_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
@@ -420,7 +417,6 @@ impl AppView {
                     })),
             )
     }
-
 
     /// 右 dock 面板内容：tab 栏 +（有激活 tab 显示其内容，没有则显示面板首页/菜单页）
     pub(crate) fn render_right_dock_content(
@@ -474,6 +470,4 @@ impl AppView {
             )
             .into_any_element()
     }
-
-
 }

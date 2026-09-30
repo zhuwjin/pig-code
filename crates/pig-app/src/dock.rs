@@ -43,7 +43,6 @@ impl AppView {
         });
     }
 
-
     /// dock 开合补间的渲染侧：开合标志位（sidebar_collapsed / right_open）是
     /// 唯一事实源，翻转后登记一段宽度补间（见 [`DockSizeAnim`]），逐帧步进由
     /// [`Self::schedule_dock_anim_frames`] 的 on_next_frame 链驱动——动画帧只
@@ -144,7 +143,6 @@ impl AppView {
         Some(anim)
     }
 
-
     /// 挂边缘段覆盖层并起收尾定时器（+20ms 余量保证 with_animation 先走完，
     /// 早收尾会在透明层下露出双重内容）：展开段到点开 dock（下限宽）、接中
     /// 段补间（from=下限读回实际值），收起段到点仅清层。定时器按代次与标志
@@ -165,8 +163,8 @@ impl AppView {
             width,
             generation,
         });
-        let expiry =
-            DOCK_ANIM_DURATION.mul_f32(DOCK_ANIM_MIN_W / width.max(1.)) + std::time::Duration::from_millis(20);
+        let expiry = DOCK_ANIM_DURATION.mul_f32(DOCK_ANIM_MIN_W / width.max(1.))
+            + std::time::Duration::from_millis(20);
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(expiry).await;
             let _ = cx.update(|window, cx| {
@@ -215,7 +213,6 @@ impl AppView {
         })
         .detach();
     }
-
 
     /// 边缘段覆盖层：容器固定在下限宽（100px）、贴窗口边，内容按目标宽、
     /// 从「贴分隔线的交接位」向窗口外滑动（展开）/从窗外滑到交接位（收起），
@@ -288,10 +285,13 @@ impl AppView {
         )
     }
 
-
     /// 注册 dock 开合动画的下一帧回调（on_next_frame 链）：回调里步进补间、
     /// 按需自续。标记位防重复排队（左右两栏同帧起步 + 链自续都走这里）。
-    pub(crate) fn schedule_dock_anim_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_dock_anim_frames(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.dock_anim_frames_scheduled {
             return;
         }
@@ -309,13 +309,16 @@ impl AppView {
         });
     }
 
-
     /// 补间步进一帧（左右两栏一起）：到点落终态并 notify AppView 一次（动画
     /// 期间 AppView 树冻结，落定帧让树按终态重排）；否则匀速插值写 dock 宽——
     /// 目标宽超出单帧步长封顶时按封顶走（掉帧不追帧），并取整像素（小数宽
     /// 让分界线与内容抗锯齿发虚）。只 notify dock。返回是否还有活动补间
     ///（false = 链终止）。
-    pub(crate) fn step_dock_anims_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn step_dock_anims_frame(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let mut active = false;
         for placement in [DockPlacement::Left, DockPlacement::Right] {
             let anim = match placement {
@@ -376,7 +379,6 @@ impl AppView {
         active
     }
 
-
     /// 把一侧 dock 直接落到开合标志位对应的终态（跳过动画）：补间收尾、
     /// reduce_motion 共用。
     pub(crate) fn apply_dock_flags(
@@ -408,15 +410,12 @@ impl AppView {
         });
     }
 
-
     /// 右侧面板开关（标题栏面板按钮）：展开/收起，tab 状态保留。
     /// 展开后没有激活 tab 时内容区显示面板首页（菜单页）。
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.right_open = !self.right_open;
         cx.notify();
     }
-
-
 }
 
 /// 三栏最小宽度（px）：侧栏 / 中心区 / 右面板。三者之和 = 窗口最小宽 960，
@@ -525,7 +524,6 @@ pub(crate) struct DockRightPanel {
     pub(crate) focus_handle: FocusHandle,
     _app_observer: Subscription,
 }
-
 
 impl Render for DockCenterPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

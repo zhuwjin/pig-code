@@ -509,6 +509,7 @@ fn child_prompt(behavior: &str) -> String {
 /// 子代理场景（父侧）：按行为令牌推进状态机——
 /// 普通令牌：call_agent_1（前台）→ 结果回 → 文本收尾；
 /// BG/BASHBG：call_agent_bg（run_in_background）→ running 回执 → 文本收尾；
+/// SWARMBG：call_swarm_bg（AgentSwarm run_in_background，2 个 item）→ 回执 → 文本收尾；
 /// BGSTOP：后台 LOOP → running 回执 → TaskStop → 文本收尾；
 /// RESUME：首条消息前台 GREP（call_agent_1），第二条消息 resume 原 id（call_agent_2）；
 /// RESUME_UNKNOWN：直接 resume 一个不存在的 id（call_agent_2）；
@@ -527,6 +528,22 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
     let behavior = tokens.next().unwrap_or("GREP");
     let profile_arg = tokens.next();
     match behavior {
+        "SWARMBG" => {
+            if tool_answered(body, "call_swarm_bg") {
+                return subagent_parent_done();
+            }
+            tool_call_chunks(
+                "call_swarm_bg",
+                "AgentSwarm",
+                &serde_json::json!({
+                    "prompt_template": format!("{SUBAGENT_CHILD_PREFIX}GREP 处理 {{{{item}}}}"),
+                    "items": ["甲", "乙"],
+                    "run_in_background": true,
+                })
+                .to_string(),
+                None,
+            )
+        }
         "BG" | "BASHBG" => {
             if tool_answered(body, "call_agent_bg") {
                 return subagent_parent_done();
