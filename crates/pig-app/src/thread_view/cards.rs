@@ -3,7 +3,7 @@ use super::*;
 impl ThreadView {
     /// 思考折叠块（ZCode reasoning.tsx 同款）：无边框的一行 header（大脑图标 + 文案），
     /// 进行中文案为扫光「正在思考」，后随 `·` + 滚动输出行（累计思考全文的最后一个非空
-    /// 行，单行钉尾显示最新内容、左缘渐隐遮罩；纵向滚轮冒泡给外层消息列表）；箭头悬停/
+    /// 行压单行，钉尾显示最新内容、左缘渐隐遮罩；纵向滚轮冒泡给外层消息列表）；箭头悬停/
     /// 展开时才显示；展开后正文以左侧竖线缩进展示，超高内部滚动。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_thinking(
@@ -26,9 +26,16 @@ impl ThreadView {
             // 回放重建的历史段没有真实时钟
             None => "思考 · 持续了几秒".to_string(),
         };
-        // 滚动输出行 = 累计思考全文的最后一个非空行（折叠且进行中才显示）
+        // 滚动输出行 = 累计思考全文的最后一个非空行压成的单行（折叠且进行中才显示）。
+        // 逐行语义是设计意图：模型输出换行后，滚动行换成新行从头开始展示。
+        // lines() 只按 \n 切行：裸回车 \r（后无 \n）会留在行内，渲染层却按换行
+        // 断行，滚动行被拆成多行——所有制表/回车类空白压成单空格
         let ticker_line = if in_progress && !open {
-            text.lines().rev().map(str::trim).find(|l| !l.is_empty())
+            text.lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         } else {
             None
         };
@@ -82,9 +89,10 @@ impl ThreadView {
                         .child(
                             div()
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .text_sm()
                                 .text_color(ticker_color)
-                                .child(line.to_string()),
+                                .child(line),
                         ),
                 )
                 // 滚轮接管：横向滚动由本行消费，纵向滚轮冒泡给外层消息列表
