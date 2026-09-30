@@ -690,17 +690,21 @@ impl SettingsView {
                 cx.notify();
             }))
             .child(
-                // 用户级
+                // 用户级：选中不打高亮，行尾打勾（ZCode 同款）；hover 圆角描边高亮
                 h_flex()
                     .id("mcp-scope-user")
                     .gap_2()
-                    .px_3()
+                    .mx_1()
+                    .px_2()
                     .py_1()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(gpui_kit::black().opacity(0.))
                     .cursor_pointer()
-                    .when(self.mcp_scope == McpScope::User, |this| {
+                    .hover(|this| {
                         this.bg(cx.theme().accent)
+                            .border_color(cx.theme().border)
                     })
-                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_mcp_scope(McpScope::User, cx);
                     }))
@@ -722,7 +726,15 @@ impl SettingsView {
                                     .truncate()
                                     .child("全局配置，对所有工作区生效"),
                             ),
-                    ),
+                    )
+                    .when(self.mcp_scope == McpScope::User, |this| {
+                        this.child(
+                            Icon::new(IconName::Check)
+                                .size_4()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().primary),
+                        )
+                    }),
             );
         if !self.mcp_workspaces.is_empty() {
             popup = popup.child(
@@ -742,11 +754,17 @@ impl SettingsView {
                     h_flex()
                         .id(gpui_kit::SharedString::from(path_text.clone()))
                         .gap_2()
-                        .px_3()
+                        .mx_1()
+                        .px_2()
                         .py_1()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(gpui_kit::black().opacity(0.))
                         .cursor_pointer()
-                        .when(selected, |this| this.bg(cx.theme().accent))
-                        .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                        .hover(|this| {
+                            this.bg(cx.theme().accent)
+                                .border_color(cx.theme().border)
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_mcp_scope(McpScope::Workspace(path.clone()), cx);
                         }))
@@ -790,7 +808,15 @@ impl SettingsView {
                                         .truncate()
                                         .child(path_text),
                                 ),
-                        ),
+                        )
+                        .when(selected, |this| {
+                            this.child(
+                                Icon::new(IconName::Check)
+                                    .size_4()
+                                    .flex_shrink_0()
+                                    .text_color(cx.theme().primary),
+                            )
+                        }),
                 );
             }
         }
