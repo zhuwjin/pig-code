@@ -23,6 +23,9 @@ pub struct AgentCardMeta {
     /// 后台子代理已结束（SubagentActivity finished 置位；回放由 core 补发）；
     /// 前台卡不看它——前台运行态跟工具调用 done 走
     pub finished: bool,
+    /// 完成次序号（SubagentActivity finished 到达顺序）：Swarm 面板按它把已结束的
+    /// 子代理排在前面（先完成的在前）；回放没有该事件，恒 None → 保持发起序
+    pub finished_seq: Option<u64>,
     /// 后台子代理的实时进度行（SubagentActivity item 写入，finished 时清空）；
     /// 前台卡的进度走 SubagentProgress 写在段级 live_note，不用这个字段
     pub live_note: Option<String>,

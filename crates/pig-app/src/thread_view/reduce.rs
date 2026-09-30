@@ -77,7 +77,8 @@ impl ThreadView {
                     output: String::new(),
                     is_error: false,
                     done: false,
-                    expanded: false,
+                    // Swarm 面板的折叠态也用这个字段（代理卡无输出展开区），默认展开
+                    expanded: tool == "AgentSwarm",
                     edit: None,
                     live_note: None,
                     agent_cards: vec![],
@@ -193,6 +194,7 @@ impl ThreadView {
                             model,
                             background,
                             finished: false,
+                            finished_seq: None,
                             live_note: None,
                         }),
                     }
@@ -224,6 +226,11 @@ impl ThreadView {
                 // 找不到卡（面板独占/回放外的迟到事件）忽略
                 if let Some(card) = target {
                     if finished {
+                        // 记录完成次序（Swarm 面板完成优先排序用；回放无此事件，
+                        // 保持 None 落回发起序）。agent_finish_seq 与 messages 是
+                        // 不相交字段，card 借用存活期间可直接自增
+                        self.agent_finish_seq += 1;
+                        card.finished_seq = Some(self.agent_finish_seq);
                         card.finished = true;
                         card.live_note = None;
                         self.auto_scroll();

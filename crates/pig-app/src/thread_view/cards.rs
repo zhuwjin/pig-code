@@ -209,10 +209,27 @@ impl ThreadView {
         body_scroll: &ScrollHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent/
-        // AgentSwarm 工具卡升级为描述卡（bot 图标 + 任务标题 + profile · model），
+        // AgentSwarm 工具卡升级为 Swarm 面板（kimi-code 同款）：可折叠汇总行
+        //（分支图标 + 「Swarm」+ 任务标题 + 完成计数 + 箭头），展开后是母卡
+        //（bot 图标方块 + 标题 + model 副标题 + 蓝色计数）+ 子代理列表（完成
+        // 优先排序、行号、逐行点击开右侧子代理 tab）。无卡（live 中 SubagentCard
+        // 事件到达前的瞬时态）回落下方标准工具卡渲染
+        if tool == "AgentSwarm" && !agent_cards.is_empty() {
+            return self.render_swarm_panel(
+                message_ix,
+                segment_ix,
+                summary,
+                live_note,
+                done,
+                expanded,
+                agent_cards,
+                cx,
+            );
+        }
+        // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent
+        // 工具卡升级为描述卡（bot 图标 + 任务标题 + profile · model），
         // 点击开右侧子代理对话 tab；卡体不再提供展开区（完整结果与过程见右侧
-        // 「子代理」tab）。多张（swarm 每个子代理一张）纵向叠放，逐卡独立运行态。
+        // 「子代理」tab）。
         // 无卡（live 中 SubagentCard 事件到达前的瞬时态）回落下方标准工具卡渲染。
         if !agent_cards.is_empty() {
             return v_flex()
@@ -523,12 +540,13 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 代理卡：子代理 Agent/AgentSwarm 工具卡的升级样式（A3c，kimi-code 同款气质）——
+    /// 代理卡：子代理 Agent 工具卡的升级样式（A3c，kimi-code 同款气质）——
     /// 圆角卡 + bot 图标方块 + 任务描述标题 + `{profile} · {model}` 副标题；
     /// 前台运行中多一行实时进度（段级 live_note；后台卡用卡级 live_note）；
     /// 右侧状态：等待批准/Spinner/成功勾/失败词。
     /// 点击卡体开右侧子代理对话 tab（完整结果与过程在那里看，故不提供展开区）。
-    /// `card_ix`：同一工具卡里的第几张（swarm 多卡叠放时区分元素 id）。
+    /// `card_ix`：同一工具卡里的第几张（防御多卡；Agent 恒为 0，AgentSwarm
+    /// 走 render_swarm_panel 不到这里）。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_agent_card(
         &self,
@@ -696,6 +714,357 @@ impl ThreadView {
                     .size_4()
                     .text_color(subtlest),
             )
+            .into_any_element()
+    }
+
+    /// Swarm 面板：AgentSwarm 工具卡的升级样式（kimi-code 同款）——
+    /// 可折叠汇总行（分支图标 + 「Swarm」+ 任务标题 + `{完成}/{总数}` + 箭头）；
+    /// 展开后（折叠态复用段级 `expanded`，Swarm 卡默认展开）是母卡（bot 图标
+    /// 方块 + 任务标题 + model 副标题 + 蓝色完成计数，点击同样折叠）+ 子代理
+    /// 列表（圆角描边容器，逐行「{子代理名} ({profile})」+ 状态 + 两位行号 +
+    /// 箭头；名字里的 #n 是发起方命名，UI 不追加序号）。子代理按完成先后排序
+    /// （finished_seq；回放无此事件落回发起序），行号跟随显示序。
+    /// 点击子行开右侧子代理对话 tab。
+    /// 标题/副标题取首张子代理卡（同一 swarm 的子代理同 template/profile/model，
+    /// 首卡即代表）；运行中汇总行标签扫光（与工具行同 idiom）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_swarm_panel(
+        &self,
+        message_ix: usize,
+        segment_ix: usize,
+        summary: &str,
+        live_note: Option<&str>,
+        done: bool,
+        open: bool,
+        cards: &[AgentCardMeta],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subtle = cx.theme().muted_foreground;
+        let subtlest = subtle.opacity(0.6);
+        let key = message_ix * 1024 + segment_ix;
+        // 行级终态：后台卡看子代理真实生命周期（card.finished）；前台卡随工具
+        // 调用收尾全体落终态（done；逐卡 finished 由 SubagentActivity 提前落位）
+        let row_done = |card: &AgentCardMeta| card.finished || (done && !card.background);
+        let finished_count = cards.iter().filter(|card| row_done(card)).count();
+        let total = cards.len();
+        let count_text = format!("{finished_count} / {total}");
+        let running = finished_count < total;
+        // 标题/副标题取首卡为代表（同质 swarm 全卡同值）；空描述回退工具摘要
+        let first = &cards[0];
+        let title = if first.description.is_empty() {
+            summary.to_string()
+        } else {
+            first.description.clone()
+        };
+        let subtitle = if first.model.is_empty() {
+            first.profile.clone()
+        } else {
+            first.model.clone()
+        };
+        // 显示序：已结束的按完成次序在前，未完成的保持发起序在后；
+        // 回放没有 finished_seq（全 None）→ 稳定保持发起序
+        let mut order: Vec<usize> = (0..total).collect();
+        order.sort_by_key(|&ix| match cards[ix].finished_seq {
+            Some(seq) => (0, seq),
+            None => (1, ix as u64),
+        });
+        // 汇总行/母卡共用同一个折叠开关（写段级 expanded）；listener 返回值不
+        // 可 Clone，两处各写一份
+        let header = h_flex()
+            .id(("swarm-header", key))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .py_1()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(Segment::ToolCall { expanded, .. }) = this
+                    .messages
+                    .get_mut(message_ix)
+                    .and_then(|m| m.segments.get_mut(segment_ix))
+                {
+                    *expanded = !*expanded;
+                }
+                cx.notify();
+            }))
+            .child(
+                Icon::new(AssetIconName::Share2)
+                    .size_4()
+                    .text_color(subtlest),
+            )
+            // 运行中：标签 shimmer 扫光（与工具行同 idiom），收尾回静态文本
+            .child(if running {
+                ShimmerText::new("Swarm")
+                    .id(("swarm-label-shimmer", key))
+                    .text_sm()
+                    .text_color(subtle)
+                    .into_any_element()
+            } else {
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(subtle)
+                    .child("Swarm")
+                    .into_any_element()
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .text_color(subtle)
+                    .child(title.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(subtlest)
+                    .child(count_text.clone()),
+            )
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size_4()
+                .text_color(subtlest),
+            );
+
+        // 母卡：bot 图标方块 + 标题/model 副标题 + 蓝色完成计数（点击折叠）。
+        // 底色之外再描边：group_box 与页面底色接近的主题下只靠填充卡面会「隐身」
+        let parent = h_flex()
+            .id(("swarm-parent", key))
+            .w_full()
+            .items_center()
+            .gap_3()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().group_box)
+            .cursor_pointer()
+            .hover(|this| this.bg(cx.theme().accent))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(Segment::ToolCall { expanded, .. }) = this
+                    .messages
+                    .get_mut(message_ix)
+                    .and_then(|m| m.segments.get_mut(segment_ix))
+                {
+                    *expanded = !*expanded;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w_10()
+                    .h_10()
+                    .rounded_md()
+                    .bg(cx.theme().accent)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::Bot)
+                            .size_5()
+                            .text_color(cx.theme().foreground),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(cx.theme().foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(subtle)
+                            .child(subtitle),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(cx.theme().info)
+                    .child(count_text),
+            );
+
+        // 子代理列表：圆角描边容器（行悬停底色越角处由补丁收住，与 diff 卡同款），
+        // 逐行「{子代理名} ({profile})」+ 状态 + 两位行号 + 箭头
+        let border = cx.theme().border;
+        // 列表背后 = 页面底色（消息区自身透明，与 Root 的 tokens.background 同值）
+        let behind = cx.theme().background;
+        let rows: Vec<AnyElement> = order
+            .iter()
+            .enumerate()
+            .map(|(row_ix, &ix)| {
+                let card = &cards[ix];
+                let card_done = row_done(card);
+                // 运行中的进度行：后台卡用卡级 live_note（SubagentActivity 写入），
+                // 前台卡共用段级 live_note（SubagentProgress 按 item_id 写入）
+                let note = if card.background {
+                    card.live_note.as_deref()
+                } else {
+                    live_note
+                };
+                let base_title = if card.description.is_empty() {
+                    "子代理".to_string()
+                } else {
+                    card.description.clone()
+                };
+                // 标题即子代理名（名里带不带 #n 由发起方决定，UI 不追加序号）
+                let row_title = format!("{base_title} ({})", card.profile);
+                let tab_title = base_title.clone();
+                let agent_id = card.agent_id.clone();
+                h_flex()
+                    .id(("swarm-row", key * 256 + ix))
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py(px(5.))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(ThreadEvent::OpenSubagent {
+                            agent_id: agent_id.clone(),
+                            title: tab_title.clone(),
+                        });
+                    }))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .child(row_title),
+                    )
+                    // 右侧状态：已结束 = 绿勾 + 词；运行中 = Spinner + 进度行
+                    // （无进度回退「运行中」）。SubagentActivity finished 不带成败，
+                    // 勾仅代表「跑完」（子代理失败由通知气泡呈现）
+                    .child(if card_done {
+                        h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::CircleCheck)
+                                    .size_4()
+                                    .text_color(cx.theme().success),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(subtle)
+                                    .child("已结束"),
+                            )
+                            .into_any_element()
+                    } else {
+                        let note = note
+                            .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+                            .filter(|n| !n.is_empty());
+                        h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1()
+                            .child(Spinner::new().small().color(subtlest))
+                            .child(
+                                div()
+                                    .max_w(px(240.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .text_color(subtle)
+                                    .child(note.unwrap_or_else(|| "运行中".to_string())),
+                            )
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w_5()
+                            .text_right()
+                            .text_xs()
+                            .text_color(subtlest)
+                            .child(format!("{:02}", row_ix + 1)),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .size_4()
+                            .text_color(subtlest),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let list = div()
+            .relative()
+            .w_full()
+            .child(
+                v_flex()
+                    .w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border)
+                    .py_1()
+                    .children(rows),
+            )
+            .child(
+                canvas(
+                    |bounds, window, _| (bounds, rems(0.5).to_pixels(window.rem_size())),
+                    move |bounds, (_, radius), window, _| {
+                        Self::paint_rounded_corner_patches(bounds, radius, behind, window);
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            // 补丁盖住了角上的描边，重描一遍圆角边框
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border),
+            );
+
+        v_flex()
+            .w_full()
+            .child(header)
+            .when(open, |this| {
+                this.child(
+                    // 缩进用 padding 而非 margin：w_full 子级不会因外边距溢出
+                    div()
+                        .w_full()
+                        .pl(px(24.))
+                        .pt_1()
+                        .child(v_flex().w_full().gap_2().child(parent).child(list)),
+                )
+            })
             .into_any_element()
     }
 

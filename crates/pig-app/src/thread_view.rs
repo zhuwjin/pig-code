@@ -96,6 +96,9 @@ pub struct ThreadView {
     nav_rail_scroll: ScrollHandle,
     /// 上一帧的活动导航项；活动项变化时让 rail 滚动到可见
     nav_last_active: Option<usize>,
+    /// 子代理完成次序计数器（SubagentActivity finished 逐个 +1，写入代理卡的
+    /// finished_seq；Swarm 面板按完成先后排序用）。随 clear 重置
+    agent_finish_seq: u64,
     /// 导航点击后抑制一次「回到底部自动恢复跟随」：跳转滚动在 prepaint 才生效，
     /// 生效前 offset 仍是旧值，贴着底会被误判成用户滚回了底部
     nav_jump: bool,
@@ -163,6 +166,7 @@ impl ThreadView {
             nav_bar_bounds: RefCell::new(HashMap::new()),
             nav_rail_scroll: ScrollHandle::new(),
             nav_last_active: None,
+            agent_finish_seq: 0,
             nav_jump: false,
             media_dir: None,
             lightbox: None,
@@ -339,6 +343,7 @@ impl ThreadView {
         self.nav_bar_bounds.borrow_mut().clear();
         self.nav_last_active = None;
         self.nav_jump = false;
+        self.agent_finish_seq = 0;
         self.lightbox = None;
         // 搜索命中/缓存随消息一并失效（高亮挂在段上，随段释放）；
         // 搜索条本身与 query 保留，回放重建经 TextDone 重跑
