@@ -204,10 +204,11 @@ impl ThreadView {
                 finished,
                 ..
             } => {
-                // 后台代理卡的运行态由子代理真实生命周期驱动：找最近一张匹配的
-                // 后台代理卡（item 更新该卡进度行；finished 落该卡终态）——同一
-                // 工具卡可有多张（后台 AgentSwarm），逐卡独立。前台卡的进度走
-                // SubagentProgress、运行态跟 done 走，这里一律不动它
+                // 代理卡的运行态由子代理真实生命周期驱动：找最近一张匹配的
+                // 代理卡——finished 落卡终态（前台/后台都收：前台 Swarm 每个
+                // 子代理独立完成，单卡到点即落终态，不等整批工具调用收尾）；
+                // 活动项进度行只写后台卡（前台进度走段级 SubagentProgress）。
+                // 同一工具卡可有多张（AgentSwarm），逐卡独立
                 let target = self
                     .messages
                     .iter_mut()
@@ -217,7 +218,7 @@ impl ThreadView {
                         Segment::ToolCall { agent_cards, .. } => agent_cards
                             .iter_mut()
                             .rev()
-                            .find(|c| c.agent_id == agent_id && c.background),
+                            .find(|c| c.agent_id == agent_id && (finished || c.background)),
                         _ => None,
                     });
                 // 找不到卡（面板独占/回放外的迟到事件）忽略

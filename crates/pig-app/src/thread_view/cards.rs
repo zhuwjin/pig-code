@@ -544,13 +544,14 @@ impl ThreadView {
     ) -> AnyElement {
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
-        // 运行态真值表：前台卡跟工具调用同生命周期（!done；等审批暂停转圈）；
-        // 后台卡的工具调用立即收尾（running 回执），真实运行态由子代理生命周期
-        // 驱动（SubagentActivity finished 置卡级 finished；回放由 core 补发）
+        // 运行态真值表：后台卡的工具调用立即收尾（running 回执），真实运行态由
+        // 子代理生命周期驱动（SubagentActivity finished 置卡级 finished；回放由
+        // core 补发）；前台卡跟工具调用同生命周期（!done；等审批暂停转圈）——
+        // 前台 Swarm 的单卡同样由 finished 提前落终态（先完成的子代理不等整批）
         let running = if card.background {
             !card.finished
         } else {
-            !done && !approval_pending
+            !done && !card.finished && !approval_pending
         };
         // 后台卡的实时进度在卡级 live_note（SubagentActivity 按 agent_id 写入）；
         // 前台卡走段级 live_note（SubagentProgress 按 item_id 写入）
