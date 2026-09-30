@@ -337,9 +337,7 @@ impl Render for SubagentPanel {
                         // 用户上翻：暂停跟随并浮出「最新消息」按钮（不吞这次事件，
                         // 列表照常滚动）。内容没超高（不可滚动）时上翻不暂停——
                         // 否则短面板里滚一下也会浮出按钮
-                        if delta.y > px(0.)
-                            && this.following
-                            && this.scroll.max_offset().y > px(0.)
+                        if delta.y > px(0.) && this.following && this.scroll.max_offset().y > px(0.)
                         {
                             this.following = false;
                             cx.notify();

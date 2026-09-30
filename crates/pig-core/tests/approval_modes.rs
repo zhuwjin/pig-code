@@ -1042,7 +1042,7 @@ async fn enter_plan_mode_idempotent_when_already_plan() {
 /// 同键等待者随一笔 Allow 一起放行，不同命令/危险位不同/无键（计划确认）不受波及。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn approval_reply_fans_out_same_coalesce_key() {
-    use pig_core::session::{resolve_approval, PendingApprovals};
+    use pig_core::session::{PendingApprovals, resolve_approval};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
@@ -1053,10 +1053,26 @@ async fn approval_reply_fans_out_same_coalesce_key() {
         pending.lock().unwrap().insert(id.to_string(), (tx, key));
         rx
     };
-    let mut sleep_a = park(&pending, "req-sleep-a", Some(("Bash".into(), "sleep 5".into(), false)));
-    let mut sleep_b = park(&pending, "req-sleep-b", Some(("Bash".into(), "sleep 5".into(), false)));
-    let mut echo = park(&pending, "req-echo", Some(("Bash".into(), "echo hi".into(), false)));
-    let mut danger = park(&pending, "req-sleep-danger", Some(("Bash".into(), "sleep 5".into(), true)));
+    let mut sleep_a = park(
+        &pending,
+        "req-sleep-a",
+        Some(("Bash".into(), "sleep 5".into(), false)),
+    );
+    let mut sleep_b = park(
+        &pending,
+        "req-sleep-b",
+        Some(("Bash".into(), "sleep 5".into(), false)),
+    );
+    let mut echo = park(
+        &pending,
+        "req-echo",
+        Some(("Bash".into(), "echo hi".into(), false)),
+    );
+    let mut danger = park(
+        &pending,
+        "req-sleep-danger",
+        Some(("Bash".into(), "sleep 5".into(), true)),
+    );
     let mut plan = park(&pending, "req-plan", None);
 
     // 只答复其中一个 sleep 5：另一个同键等待者应被一并唤醒

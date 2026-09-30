@@ -169,9 +169,9 @@ pub use media::{
     encode_image_for_model, image_dimensions, sniff_image,
 };
 pub use misc::{AgentSwarmTool, AgentTool, parse_questions, parse_swarm_args};
-pub(crate) use skill::SkillTool;
 pub use paths::{is_sensitive_file, resolve_checked, resolve_with_access};
 pub use search::search_files;
+pub(crate) use skill::SkillTool;
 pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
 
 pub use pig_protocol::{TodoItem, TodoStatus};
@@ -234,7 +234,11 @@ pub fn schemas() -> Vec<serde_json::Value> {
 /// （tools 在缓存前缀最前面，变了从第 0 字节起全量失效；kimi
 /// frozenCatalogProfiles / ZCode 启动装配同款取舍）。spawn 执行时另走
 /// load_profiles 现读，清单过期由"档案不存在"报错自愈
-pub fn all_root(cwd: &Path, data_dir: &Path, profiles: &[crate::agent::AgentProfile]) -> Vec<Box<dyn Tool>> {
+pub fn all_root(
+    cwd: &Path,
+    data_dir: &Path,
+    profiles: &[crate::agent::AgentProfile],
+) -> Vec<Box<dyn Tool>> {
     let mut tools = all();
     tools.push(Box::new(AgentTool::new(profiles)));
     tools.push(Box::new(AgentSwarmTool::new(profiles)));

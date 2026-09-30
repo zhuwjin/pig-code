@@ -4,9 +4,9 @@
 //! 覆盖用户级。目录布局与 agent 档案同款双层：`{data_dir}/skills/`（用户级）
 //! + `{cwd}/.pigcode/skills/`（项目级）。
 
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use serde::Deserialize;
 
 /// 技能文件名（目录内必须含它才算一个技能）
 pub const SKILL_FILE: &str = "SKILL.md";
@@ -262,9 +262,7 @@ fn assign(fm: &mut SkillFrontmatter, key: &str, value: &str, _raw: String) {
         "name" => fm.name = owned,
         "description" => fm.description = owned,
         "when_to_use" | "whenToUse" => fm.when_to_use = owned,
-        _ => fm
-            .extra
-            .push((key.to_string(), value.trim().to_string())),
+        _ => fm.extra.push((key.to_string(), value.trim().to_string())),
     }
 }
 
@@ -309,7 +307,10 @@ pub fn render_skill_markdown(
         out.push_str(&format!("when_to_use: {}\n", scalar(when)));
     }
     for (key, value) in extra {
-        if matches!(key.as_str(), "name" | "description" | "when_to_use" | "whenToUse") {
+        if matches!(
+            key.as_str(),
+            "name" | "description" | "when_to_use" | "whenToUse"
+        ) {
             continue;
         }
         out.push_str(&format!("{key}: {}\n", scalar(value)));
@@ -360,14 +361,17 @@ pub fn load_disabled_map(data_dir: &Path) -> std::collections::HashSet<String> {
 
 /// 启停一个技能：enabled=true 删除条目（回默认），false 写入。
 /// 读-改-写整文件（agents-state 同款）
-pub fn set_skill_enabled(data_dir: &Path, skill_md_path: &Path, enabled: bool) -> Result<(), String> {
+pub fn set_skill_enabled(
+    data_dir: &Path,
+    skill_md_path: &Path,
+    enabled: bool,
+) -> Result<(), String> {
     let path = state_path(data_dir);
-    let mut raw: serde_json::Map<String, serde_json::Value> =
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|v| v.get("skills").and_then(|s| s.as_object()).cloned())
-            .unwrap_or_default();
+    let mut raw: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("skills").and_then(|s| s.as_object()).cloned())
+        .unwrap_or_default();
     let key = normalize_key(skill_md_path);
     if enabled {
         raw.remove(&key);
@@ -393,14 +397,21 @@ pub fn skills_section(cwd: &Path, data_dir: &Path) -> String {
     }
     let entry = |skill: &Skill| {
         let mut desc = skill.description.trim().to_string();
-        if let Some(when) = skill.when_to_use.as_deref().filter(|w| !w.trim().is_empty()) {
+        if let Some(when) = skill
+            .when_to_use
+            .as_deref()
+            .filter(|w| !w.trim().is_empty())
+        {
             if !desc.is_empty() {
                 desc.push_str(" - ");
             }
             desc.push_str(when.trim());
         }
         if desc.chars().count() > LISTING_DESC_CHARS {
-            desc = format!("{}...", desc.chars().take(LISTING_DESC_CHARS).collect::<String>());
+            desc = format!(
+                "{}...",
+                desc.chars().take(LISTING_DESC_CHARS).collect::<String>()
+            );
         }
         let path = skill.path.display().to_string();
         if desc.is_empty() {
@@ -465,7 +476,10 @@ pub fn load_skill_output(cwd: &Path, data_dir: &Path, name: &str) -> Result<Stri
     }
     Ok(format!(
         "<skill_content name=\"{}\">\n\n# Skill: {}\n\n{}\n\n技能目录: {}\n正文中的相对路径都相对该目录。\n</skill_content>",
-        skill.name, skill.name, body.trim(), dir
+        skill.name,
+        skill.name,
+        body.trim(),
+        dir
     ))
 }
 
@@ -511,23 +525,20 @@ mod tests {
 
     #[test]
     fn parse_quoted_and_multiline_description() {
-        let parsed = parse_skill_markdown(
-            "---\nname: x\ndescription: \"带: 冒号的描述\"\n---\n正文",
-        );
+        let parsed =
+            parse_skill_markdown("---\nname: x\ndescription: \"带: 冒号的描述\"\n---\n正文");
         let fm = parsed.frontmatter.unwrap();
         assert_eq!(fm.description.as_deref(), Some("带: 冒号的描述"));
 
-        let folded = parse_skill_markdown(
-            "---\nname: x\ndescription: >\n  第一行\n  第二行\n---\n正文",
-        );
+        let folded =
+            parse_skill_markdown("---\nname: x\ndescription: >\n  第一行\n  第二行\n---\n正文");
         assert_eq!(
             folded.frontmatter.unwrap().description.as_deref(),
             Some("第一行 第二行")
         );
 
-        let literal = parse_skill_markdown(
-            "---\nname: x\ndescription: |-\n  第一行\n  第二行\n---\n正文",
-        );
+        let literal =
+            parse_skill_markdown("---\nname: x\ndescription: |-\n  第一行\n  第二行\n---\n正文");
         assert_eq!(
             literal.frontmatter.unwrap().description.as_deref(),
             Some("第一行\n第二行")
@@ -573,11 +584,7 @@ mod tests {
             "pdf",
             "---\nname: pdf\ndescription: 用户级 PDF\n---\n用户级正文",
         );
-        write_skill(
-            &user_root(&data),
-            "plain",
-            "没有 frontmatter 的技能正文",
-        );
+        write_skill(&user_root(&data), "plain", "没有 frontmatter 的技能正文");
         write_skill(
             &project_root(&ws),
             "pdf",
@@ -686,14 +693,7 @@ mod tests {
         let frozen = skills_section(&ws, &data);
         // 冻结后删除技能目录：提示词仍用冻结快照（不重扫）
         std::fs::remove_dir_all(user_root(&data)).unwrap();
-        let prompt = crate::prompt::system_prompt(
-            &ws,
-            true,
-            None,
-            "2026-09-30",
-            "",
-            &frozen,
-        );
+        let prompt = crate::prompt::system_prompt(&ws, true, None, "2026-09-30", "", &frozen);
         assert!(prompt.contains("## 可用技能"), "系统提示词应含冻结清单");
         assert!(prompt.contains("- pdf: PDF 工具箱"));
         // 重扫已无技能：验证冻结段与现扫描确实解耦

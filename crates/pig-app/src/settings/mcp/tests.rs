@@ -1,7 +1,6 @@
 use super::{
-    McpSource, McpTransport, api_key_configured, delete_mcp_server, format_timeout,
-    merge_servers, parse_object_json, parse_servers, pretty_object, set_mcp_disabled,
-    upsert_mcp_server,
+    McpSource, McpTransport, api_key_configured, delete_mcp_server, format_timeout, merge_servers,
+    parse_object_json, parse_servers, pretty_object, set_mcp_disabled, upsert_mcp_server,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -59,14 +58,28 @@ fn invalid_entries_kept_with_reason() {
         assert!(server.transport.is_none());
     }
     let badurl = servers.iter().find(|s| s.name == "badurl").expect("badurl");
-    assert!(badurl.invalid_reason.as_deref().is_some_and(|r| r.contains("http")));
+    assert!(
+        badurl
+            .invalid_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("http"))
+    );
     let sse = servers.iter().find(|s| s.name == "sse").expect("sse");
-    assert!(sse.invalid_reason.as_deref().is_some_and(|r| r.contains("SSE")));
+    assert!(
+        sse.invalid_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("SSE"))
+    );
     let unknown = servers
         .iter()
         .find(|s| s.name == "unknowntype")
         .expect("unknowntype");
-    assert!(unknown.invalid_reason.as_deref().is_some_and(|r| r.contains("grpc")));
+    assert!(
+        unknown
+            .invalid_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("grpc"))
+    );
     assert!(parse_servers("not json", McpSource::User).is_empty());
     assert!(parse_servers("{}", McpSource::User).is_empty());
 }
@@ -171,7 +184,12 @@ fn upsert_disable_delete_roundtrip() {
     assert_eq!(servers[0].raw.get("disabled"), None);
 
     // 追加远程条目 + 删除第一个
-    upsert_mcp_server(&path, "remote", json!({"url": "https://mcp.example.com/mcp"})).unwrap();
+    upsert_mcp_server(
+        &path,
+        "remote",
+        json!({"url": "https://mcp.example.com/mcp"}),
+    )
+    .unwrap();
     let servers = parse_servers(&std::fs::read_to_string(&path).unwrap(), McpSource::User);
     assert_eq!(servers.len(), 2);
     delete_mcp_server(&path, "fs").unwrap();

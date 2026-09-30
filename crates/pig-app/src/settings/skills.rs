@@ -133,7 +133,11 @@ pub(crate) fn sanitize_dir_name(name: &str) -> Option<String> {
 }
 
 /// 新建技能：建目录 + 写 SKILL.md，返回目录路径。目录已存在时报错（不覆盖）
-pub(crate) fn create_skill_dir(root: &Path, dir_name: &str, markdown: &str) -> Result<PathBuf, String> {
+pub(crate) fn create_skill_dir(
+    root: &Path,
+    dir_name: &str,
+    markdown: &str,
+) -> Result<PathBuf, String> {
     let dir = root.join(dir_name);
     if dir.exists() {
         return Err(format!("目录已存在: {}", dir.display()));
@@ -153,13 +157,10 @@ pub(crate) fn write_skill_md(directory: &Path, markdown: &str) -> Result<(), Str
 }
 
 /// 删除技能目录。仅允许删两个受控根的直接子目录（root 自身/越界路径拒绝）
-pub(crate) fn delete_skill_dir(
-    directory: &Path,
-    roots: &[&Path],
-) -> Result<(), String> {
-    let inside = roots.iter().any(|root| {
-        directory.parent().is_some_and(|parent| parent == *root) && directory != *root
-    });
+pub(crate) fn delete_skill_dir(directory: &Path, roots: &[&Path]) -> Result<(), String> {
+    let inside = roots
+        .iter()
+        .any(|root| directory.parent().is_some_and(|parent| parent == *root) && directory != *root);
     if !inside {
         return Err(format!(
             "拒绝删除 {}: 不在受控的技能目录（skills/ 的直接子目录）内",
@@ -182,11 +183,7 @@ impl SettingsView {
     }
 
     /// 快照喂入（AppView 刷新时调用）
-    pub(crate) fn set_skills_config(
-        &mut self,
-        snapshot: SkillsSnapshot,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_skills_config(&mut self, snapshot: SkillsSnapshot, cx: &mut Context<Self>) {
         self.skills_snapshot = Some(snapshot);
         cx.notify();
     }
@@ -224,9 +221,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let snapshot = self.skills_snapshot.as_ref();
-        let existing = name.and_then(|n| {
-            snapshot.and_then(|s| s.skills.iter().find(|skill| skill.name == n))
-        });
+        let existing =
+            name.and_then(|n| snapshot.and_then(|s| s.skills.iter().find(|skill| skill.name == n)));
         let scope = existing
             .map(|skill| skill.source)
             .unwrap_or(skill_core::SkillSource::User);
@@ -312,7 +308,10 @@ impl SettingsView {
             cx.notify();
             return;
         }
-        if !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+        if !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
             self.set_skills_dialog_error("技能名只允许字母、数字、- 和 _（将作为目录名与调用名）");
             cx.notify();
             return;
@@ -321,12 +320,7 @@ impl SettingsView {
             return;
         };
         let description = dialog.description.read(cx).value().trim().to_string();
-        let when_to_use = dialog
-            .when_to_use
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
+        let when_to_use = dialog.when_to_use.read(cx).value().trim().to_string();
         let when_to_use = (!when_to_use.is_empty()).then_some(when_to_use);
         let body = dialog.body.read(cx).value().to_string();
         let markdown = skill_core::render_skill_markdown(
@@ -453,7 +447,10 @@ impl SettingsView {
                     .iter()
                     .find(|(p, _)| p == path)
                     .map(|(_, name)| name.clone());
-                (IconName::Folder, workspace_display_name(path, alias.as_deref()))
+                (
+                    IconName::Folder,
+                    workspace_display_name(path, alias.as_deref()),
+                )
             }
         };
         div()
@@ -467,24 +464,22 @@ impl SettingsView {
                     .small()
                     .icon(icon)
                     .label(label)
-                    .on_click(cx.listener(
-                        |this, event: &ClickEvent, _, cx| {
-                            // 弹层打开时点按钮：outside-close 先关掉，同按压的 click 按位置吞掉
-                            let down_pos = match event {
-                                ClickEvent::Mouse(e) => Some(e.down.position),
-                                _ => None,
-                            };
-                            if this
-                                .skills_scope_outside_close
-                                .take()
-                                .is_some_and(|pos| Some(pos) == down_pos)
-                            {
-                                return;
-                            }
-                            this.skills_scope_popup = !this.skills_scope_popup;
-                            cx.notify();
-                        },
-                    )),
+                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                        // 弹层打开时点按钮：outside-close 先关掉，同按压的 click 按位置吞掉
+                        let down_pos = match event {
+                            ClickEvent::Mouse(e) => Some(e.down.position),
+                            _ => None,
+                        };
+                        if this
+                            .skills_scope_outside_close
+                            .take()
+                            .is_some_and(|pos| Some(pos) == down_pos)
+                        {
+                            return;
+                        }
+                        this.skills_scope_popup = !this.skills_scope_popup;
+                        cx.notify();
+                    })),
             )
             .when(self.skills_scope_popup, |this| {
                 this.child(self.render_skills_scope_popup(cx))
@@ -521,10 +516,7 @@ impl SettingsView {
                     .border_1()
                     .border_color(gpui_kit::black().opacity(0.))
                     .cursor_pointer()
-                    .hover(|this| {
-                        this.bg(cx.theme().accent)
-                            .border_color(cx.theme().border)
-                    })
+                    .hover(|this| this.bg(cx.theme().accent).border_color(cx.theme().border))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_skills_scope(McpScope::User, cx);
                     }))
@@ -580,10 +572,7 @@ impl SettingsView {
                         .border_1()
                         .border_color(gpui_kit::black().opacity(0.))
                         .cursor_pointer()
-                        .hover(|this| {
-                            this.bg(cx.theme().accent)
-                                .border_color(cx.theme().border)
-                        })
+                        .hover(|this| this.bg(cx.theme().accent).border_color(cx.theme().border))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_skills_scope(McpScope::Workspace(path.clone()), cx);
                         }))
@@ -602,12 +591,7 @@ impl SettingsView {
                                         .gap_2()
                                         .items_center()
                                         .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .truncate()
-                                                .child(display.clone()),
-                                        )
+                                        .child(div().text_sm().truncate().child(display.clone()))
                                         .when(is_session_ws, |this| {
                                             this.child(
                                                 div()
@@ -686,9 +670,13 @@ impl SettingsView {
                     .child(error.clone()),
             );
         }
-        page = page.child(h_flex().w_full().gap_2().items_center().child(
-            self.render_skills_scope(cx),
-        ));
+        page = page.child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .child(self.render_skills_scope(cx)),
+        );
         if snapshot.skills.is_empty() {
             page = page.child(self.render_skills_empty(cx));
         } else if filtered.is_empty() {
@@ -717,13 +705,10 @@ impl SettingsView {
         }
         // 目录来源挪到列表下方（路径作次要信息）
         page = page.child(
-            v_flex().gap_1().child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .child("技能目录"),
-            )
-            .child(self.render_skill_sources(snapshot, cx)),
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().font_semibold().child("技能目录"))
+                .child(self.render_skill_sources(snapshot, cx)),
         );
         page.into_any_element()
     }
@@ -1010,19 +995,11 @@ impl SettingsView {
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(if editing {
-                                format!(
-                                    "编辑技能「{}」",
-                                    dialog.editing.clone().expect("editing")
-                                )
-                            } else {
-                                "新建技能".to_string()
-                            }),
-                    )
+                    .child(div().text_lg().font_semibold().child(if editing {
+                        format!("编辑技能「{}」", dialog.editing.clone().expect("editing"))
+                    } else {
+                        "新建技能".to_string()
+                    }))
                     .child(form)
                     .when_some(dialog.error.clone(), |this, error| {
                         this.child(div().text_xs().text_color(cx.theme().danger).child(error))

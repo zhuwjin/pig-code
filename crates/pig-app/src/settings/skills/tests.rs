@@ -50,8 +50,14 @@ fn snapshot_merges_scopes_and_state() {
         "pdf",
         "---\nname: pdf\ndescription: 项目级 PDF\n---\n正文",
     );
-    write_skill(&skill_core::user_root(&data), "plain", "无 frontmatter 正文");
-    let off_path = skill_core::user_root(&data).join("plain").join(skill_core::SKILL_FILE);
+    write_skill(
+        &skill_core::user_root(&data),
+        "plain",
+        "无 frontmatter 正文",
+    );
+    let off_path = skill_core::user_root(&data)
+        .join("plain")
+        .join(skill_core::SKILL_FILE);
     skill_core::set_skill_enabled(&data, &off_path, false).unwrap();
 
     let snapshot: SkillsSnapshot = load_skills_from(&data, Some(&ws));
@@ -100,7 +106,10 @@ fn dir_name_sanitizing() {
         sanitize_dir_name("Commit Helper").as_deref(),
         Some("commit-helper")
     );
-    assert_eq!(sanitize_dir_name("My_Skill 2").as_deref(), Some("my-skill-2"));
+    assert_eq!(
+        sanitize_dir_name("My_Skill 2").as_deref(),
+        Some("my-skill-2")
+    );
     assert_eq!(sanitize_dir_name("pdf").as_deref(), Some("pdf"));
     assert_eq!(sanitize_dir_name("--pdf--").as_deref(), Some("pdf"));
     assert_eq!(sanitize_dir_name("中文技能"), None, "无 ASCII 字符应失败");

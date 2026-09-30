@@ -17,7 +17,8 @@ fn main_loop_requests(log: &[String]) -> Vec<serde_json::Value> {
     log.iter()
         .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
         .filter(|req| {
-            req.get("tools").is_some_and(|t| t.as_array().is_some_and(|a| !a.is_empty()))
+            req.get("tools")
+                .is_some_and(|t| t.as_array().is_some_and(|a| !a.is_empty()))
                 && req["messages"][0]["role"] == "system"
                 && req["messages"][0]["content"]
                     .as_str()
@@ -101,10 +102,23 @@ max_output_tokens = 8192
     let turn1_messages = messages_of(&turn1);
     let turn1_len = turn1_messages.len();
     // 系统 prompt 应含冻结的环境段；首条用户消息带模式 reminder
-    assert!(turn1_messages[0]["content"].as_str().unwrap().contains("原始 AGENTS 规则"));
-    assert!(turn1_messages[0]["content"].as_str().unwrap().contains("- demo: 演示技能"));
     assert!(
-        turn1_messages[1]["content"].as_str().unwrap().contains("当前执行模式"),
+        turn1_messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("原始 AGENTS 规则")
+    );
+    assert!(
+        turn1_messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("- demo: 演示技能")
+    );
+    assert!(
+        turn1_messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("当前执行模式"),
         "回合 1 用户消息前应有模式 reminder"
     );
 
@@ -157,8 +171,7 @@ max_output_tokens = 8192
     );
     for (i, msg) in turn1_messages.iter().enumerate() {
         assert_eq!(
-            msg,
-            &turn2_messages[i],
+            msg, &turn2_messages[i],
             "旧消息[{i}]被改写：缓存前缀从该处失效"
         );
     }
@@ -168,9 +181,7 @@ max_output_tokens = 8192
     let new_user = turn2_messages
         .iter()
         .rev()
-        .find(|m| {
-            m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.ends_with("继续"))
-        })
+        .find(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.ends_with("继续")))
         .and_then(|m| m["content"].as_str())
         .expect("回合 2 的新用户消息");
     assert!(
@@ -179,7 +190,10 @@ max_output_tokens = 8192
     );
     assert!(new_user.contains("当前执行模式"));
     assert!(new_user.contains("AGENTS.md 内容有更新"));
-    assert!(new_user.contains("全新的 AGENTS 规则"), "reminder 应携带最新 AGENTS.md 内容");
+    assert!(
+        new_user.contains("全新的 AGENTS 规则"),
+        "reminder 应携带最新 AGENTS.md 内容"
+    );
     assert!(new_user.ends_with("继续"), "原文保持在 reminder 之后");
     // 新技能/新档案不进冻结段（对 system 的断言已隐含），也不进 tools（上面已断言）
 

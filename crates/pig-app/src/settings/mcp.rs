@@ -169,11 +169,7 @@ fn parse_servers(raw: &str, source: McpSource) -> Vec<McpServerInfo> {
         .collect()
 }
 
-fn parse_server_entry(
-    name: &str,
-    value: &serde_json::Value,
-    source: McpSource,
-) -> McpServerInfo {
+fn parse_server_entry(name: &str, value: &serde_json::Value, source: McpSource) -> McpServerInfo {
     let non_empty = |key: &str| {
         value
             .get(key)
@@ -229,10 +225,7 @@ fn stdio_projection(value: &serde_json::Value) -> (Option<McpTransport>, Option<
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
     else {
-        return (
-            None,
-            Some("stdio 形态缺少 command".to_string()),
-        );
+        return (None, Some("stdio 形态缺少 command".to_string()));
     };
     let args = value
         .get("args")
@@ -375,7 +368,10 @@ fn pretty_object(value: Option<&serde_json::Value>) -> String {
 }
 
 /// 环境变量/请求头草稿文本 → JSON 对象（空文本/空对象 → 空 map）
-fn parse_object_json(raw: &str, label: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+fn parse_object_json(
+    raw: &str,
+    label: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(Default::default());
@@ -399,9 +395,7 @@ fn entry_from_form(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::
     } else {
         serde_json::json!({})
     };
-    let map = entry
-        .as_object_mut()
-        .expect("base 为对象或空对象");
+    let map = entry.as_object_mut().expect("base 为对象或空对象");
     // command/url 二选一即可推断，去掉残留 type 避免与表单选择冲突
     map.remove("type");
     match dialog.kind {
@@ -553,11 +547,15 @@ fn refill_mcp_form(
         McpTransportKind::Stdio => dialog.env_draft.clone(),
         McpTransportKind::Http => dialog.headers_draft.clone(),
     };
-    dialog.name.update(cx, |i, cx| i.set_value(name.to_string(), window, cx));
+    dialog
+        .name
+        .update(cx, |i, cx| i.set_value(name.to_string(), window, cx));
     dialog
         .command
         .update(cx, |i, cx| i.set_value(command, window, cx));
-    dialog.args.update(cx, |i, cx| i.set_value(args, window, cx));
+    dialog
+        .args
+        .update(cx, |i, cx| i.set_value(args, window, cx));
     dialog.url.update(cx, |i, cx| i.set_value(url, window, cx));
     dialog
         .timeout
@@ -633,7 +631,10 @@ impl SettingsView {
                     .iter()
                     .find(|(p, _)| p == path)
                     .map(|(_, name)| name.clone());
-                (IconName::Folder, workspace_display_name(path, alias.as_deref()))
+                (
+                    IconName::Folder,
+                    workspace_display_name(path, alias.as_deref()),
+                )
             }
         };
         div()
@@ -701,10 +702,7 @@ impl SettingsView {
                     .border_1()
                     .border_color(gpui_kit::black().opacity(0.))
                     .cursor_pointer()
-                    .hover(|this| {
-                        this.bg(cx.theme().accent)
-                            .border_color(cx.theme().border)
-                    })
+                    .hover(|this| this.bg(cx.theme().accent).border_color(cx.theme().border))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_mcp_scope(McpScope::User, cx);
                     }))
@@ -747,8 +745,7 @@ impl SettingsView {
             );
             for (path, display) in self.scope_workspaces.clone() {
                 let selected = self.mcp_scope == McpScope::Workspace(path.clone());
-                let is_session_ws =
-                    self.session_cwd.as_deref() == Some(path.as_path());
+                let is_session_ws = self.session_cwd.as_deref() == Some(path.as_path());
                 let path_text = path.display().to_string();
                 popup = popup.child(
                     h_flex()
@@ -761,10 +758,7 @@ impl SettingsView {
                         .border_1()
                         .border_color(gpui_kit::black().opacity(0.))
                         .cursor_pointer()
-                        .hover(|this| {
-                            this.bg(cx.theme().accent)
-                                .border_color(cx.theme().border)
-                        })
+                        .hover(|this| this.bg(cx.theme().accent).border_color(cx.theme().border))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_mcp_scope(McpScope::Workspace(path.clone()), cx);
                         }))
@@ -783,12 +777,7 @@ impl SettingsView {
                                         .gap_2()
                                         .items_center()
                                         .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .truncate()
-                                                .child(display.clone()),
-                                        )
+                                        .child(div().text_sm().truncate().child(display.clone()))
                                         .when(is_session_ws, |this| {
                                             this.child(
                                                 div()
@@ -843,7 +832,13 @@ impl SettingsView {
     }
 
     /// 启停开关：把 disabled 写进条目所在文件，然后整页刷新
-    fn toggle_mcp_server(&mut self, name: &str, source: McpSource, enabled: bool, cx: &mut Context<Self>) {
+    fn toggle_mcp_server(
+        &mut self,
+        name: &str,
+        source: McpSource,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(snapshot) = &self.mcp_snapshot else {
             return;
         };
@@ -871,9 +866,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let snapshot = self.mcp_snapshot.as_ref();
-        let existing = name.and_then(|n| {
-            snapshot.and_then(|s| s.servers.iter().find(|server| server.name == n))
-        });
+        let existing = name
+            .and_then(|n| snapshot.and_then(|s| s.servers.iter().find(|server| server.name == n)));
         let scope = existing
             .map(|server| server.source)
             .unwrap_or(McpSource::User);
@@ -885,9 +879,7 @@ impl SettingsView {
             .map(McpTransport::kind)
             .unwrap_or(McpTransportKind::Stdio);
         let (command, args) = match existing.and_then(|server| server.transport.as_ref()) {
-            Some(McpTransport::Stdio { command, args }) => {
-                (command.clone(), args.join(" "))
-            }
+            Some(McpTransport::Stdio { command, args }) => (command.clone(), args.join(" ")),
             _ => (String::new(), String::new()),
         };
         let url = match existing.and_then(|server| server.transport.as_ref()) {
@@ -905,13 +897,13 @@ impl SettingsView {
             .and_then(|p| p.parent())
             .map(Path::to_path_buf);
         let project_workspace = project_root.map(|root| {
-                let alias = self
-                    .scope_workspaces
-                    .iter()
-                    .find(|(path, _)| *path == root)
-                    .map(|(_, name)| name.clone());
-                workspace_display_name(&root, alias.as_deref())
-            });
+            let alias = self
+                .scope_workspaces
+                .iter()
+                .find(|(path, _)| *path == root)
+                .map(|(_, name)| name.clone());
+            workspace_display_name(&root, alias.as_deref())
+        });
         let env_draft = pretty_object(base.get("env"));
         let headers_draft = pretty_object(base.get("headers"));
         let env_headers_default = match kind {
@@ -1102,7 +1094,12 @@ impl SettingsView {
     }
 
     /// 切换传输类型：当前编辑框内容存回草稿，再换另一份草稿显示
-    fn set_mcp_dialog_kind(&mut self, kind: McpTransportKind, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_mcp_dialog_kind(
+        &mut self,
+        kind: McpTransportKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(dialog) = self.mcp_dialog.as_mut() else {
             return;
         };
@@ -1163,8 +1160,8 @@ impl SettingsView {
             let entry = entry_from_form(dialog, cx)
                 .map(|(_, entry)| entry)
                 .unwrap_or_else(|_| dialog.base.clone());
-            let text =
-                serde_json::to_string_pretty(&serde_json::json!({ name: entry })).unwrap_or_default();
+            let text = serde_json::to_string_pretty(&serde_json::json!({ name: entry }))
+                .unwrap_or_default();
             dialog.json_mode = true;
             dialog
                 .json_text
@@ -1257,10 +1254,10 @@ impl SettingsView {
         } else {
             page = page
                 .child(
-                    div().text_sm().font_semibold().child(format!(
-                        "服务器（{}）",
-                        snapshot.servers.len()
-                    )),
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .child(format!("服务器（{}）", snapshot.servers.len())),
                 )
                 .children(
                     filtered
@@ -1276,13 +1273,10 @@ impl SettingsView {
         }
         // 配置文件来源挪到列表下方（列表/编辑入口优先，路径作次要信息）
         page = page.child(
-            v_flex().gap_1().child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .child("配置文件"),
-            )
-            .child(self.render_mcp_sources(snapshot, cx)),
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().font_semibold().child("配置文件"))
+                .child(self.render_mcp_sources(snapshot, cx)),
         );
         page.into_any_element()
     }
@@ -1302,11 +1296,9 @@ impl SettingsView {
                 .items_center()
                 .child(Icon::new(IconName::Info).size_3p5().text_color(muted))
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .truncate()
-                        .child("正在查看其他工作区的项目级配置；连接状态仅对当前会话的工作区显示。"),
+                    div().text_xs().text_color(muted).truncate().child(
+                        "正在查看其他工作区的项目级配置；连接状态仅对当前会话的工作区显示。",
+                    ),
                 )
                 .into_any_element();
         }
@@ -1563,14 +1555,10 @@ impl SettingsView {
                     )
                     .when_some(
                         status.filter(|s| s.connected && s.tool_count > 0),
-                        |this, s| {
-                            this.child(chip(&format!("{} 个工具", s.tool_count), cx))
-                        },
+                        |this, s| this.child(chip(&format!("{} 个工具", s.tool_count), cx)),
                     )
                     .child(chip(server.source.label(), cx))
-                    .when_some(transport_chip, |this, label| {
-                        this.child(chip(label, cx))
-                    })
+                    .when_some(transport_chip, |this, label| this.child(chip(label, cx)))
                     .when(server.overrides_user, |this| {
                         this.child(
                             div()
@@ -1595,13 +1583,11 @@ impl SettingsView {
                                 this.open_mcp_dialog(Some(&edit_name), window, cx);
                             })),
                     )
-                    .child(
-                        Switch::new(("mcp-enabled", ix))
-                            .checked(enabled)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.toggle_mcp_server(&name, source, *checked, cx);
-                            })),
-                    ),
+                    .child(Switch::new(("mcp-enabled", ix)).checked(enabled).on_click(
+                        cx.listener(move |this, checked: &bool, _, cx| {
+                            this.toggle_mcp_server(&name, source, *checked, cx);
+                        }),
+                    )),
             )
             .child(
                 div()
@@ -1611,12 +1597,7 @@ impl SettingsView {
                     .child(summary),
             )
             .when_some(error_line, |this, line| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(line),
-                )
+                this.child(div().text_xs().text_color(cx.theme().danger).child(line))
             })
             .into_any_element()
     }
@@ -1632,17 +1613,35 @@ impl SettingsView {
         let form = v_flex()
             .gap_3()
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("名称"))
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("名称"),
+                    )
                     .child(Input::new(&dialog.name).disabled(editing))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                        .child("工具名前缀 mcp__<名称>__<工具>；编辑时不可改名（删除后重建）")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .opacity(0.7)
+                            .child("工具名前缀 mcp__<名称>__<工具>；编辑时不可改名（删除后重建）"),
+                    ),
             )
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("作用域"))
+                v_flex()
+                    .gap_1()
                     .child(
-                        h_flex().gap_1()
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("作用域"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
                             .child(
                                 Button::new("mcp-scope-user")
                                     .small()
@@ -1670,61 +1669,120 @@ impl SettingsView {
                             ),
                     )
                     .when(!dialog.project_available, |this| {
-                        this.child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                            .child("用户级视图只写用户级；在列表上方切换到具体工作区后可写项目级"))
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .opacity(0.7)
+                                .child(
+                                    "用户级视图只写用户级；在列表上方切换到具体工作区后可写项目级",
+                                ),
+                        )
                     }),
             )
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("类型"))
+                v_flex()
+                    .gap_1()
                     .child(
-                        h_flex().gap_1()
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("类型"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
                             .child(
                                 Button::new("mcp-kind-stdio")
                                     .small()
-                                    .when(dialog.kind == McpTransportKind::Stdio, |this| this.primary())
-                                    .when(dialog.kind != McpTransportKind::Stdio, |this| this.outline())
+                                    .when(dialog.kind == McpTransportKind::Stdio, |this| {
+                                        this.primary()
+                                    })
+                                    .when(dialog.kind != McpTransportKind::Stdio, |this| {
+                                        this.outline()
+                                    })
                                     .label(McpTransportKind::Stdio.label())
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_mcp_dialog_kind(McpTransportKind::Stdio, window, cx);
+                                        this.set_mcp_dialog_kind(
+                                            McpTransportKind::Stdio,
+                                            window,
+                                            cx,
+                                        );
                                     })),
                             )
                             .child(
                                 Button::new("mcp-kind-http")
                                     .small()
-                                    .when(dialog.kind == McpTransportKind::Http, |this| this.primary())
-                                    .when(dialog.kind != McpTransportKind::Http, |this| this.outline())
+                                    .when(dialog.kind == McpTransportKind::Http, |this| {
+                                        this.primary()
+                                    })
+                                    .when(dialog.kind != McpTransportKind::Http, |this| {
+                                        this.outline()
+                                    })
                                     .label(McpTransportKind::Http.label())
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_mcp_dialog_kind(McpTransportKind::Http, window, cx);
+                                        this.set_mcp_dialog_kind(
+                                            McpTransportKind::Http,
+                                            window,
+                                            cx,
+                                        );
                                     })),
                             ),
                     ),
             )
             .when(dialog.kind == McpTransportKind::Stdio, |this| {
                 this.child(
-                    v_flex().gap_1()
-                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child("命令"))
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("命令"),
+                        )
                         .child(Input::new(&dialog.command)),
                 )
                 .child(
-                    v_flex().gap_1()
-                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child("参数（空格分隔）"))
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("参数（空格分隔）"),
+                        )
                         .child(Input::new(&dialog.args))
-                        .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                            .child("含空格的参数请用 JSON 模式填写 args 数组")),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .opacity(0.7)
+                                .child("含空格的参数请用 JSON 模式填写 args 数组"),
+                        ),
                 )
             })
             .when(dialog.kind == McpTransportKind::Http, |this| {
                 this.child(
-                    v_flex().gap_1()
-                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child("URL"))
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("URL"),
+                        )
                         .child(Input::new(&dialog.url)),
                 )
             })
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("超时（毫秒）"))
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("超时（毫秒）"),
+                    )
                     .child(Input::new(&dialog.timeout)),
             )
             .child(
@@ -1750,22 +1808,30 @@ impl SettingsView {
                                 .size_4()
                                 .text_color(cx.theme().muted_foreground),
                             )
-                            .child(
-                                div().text_sm().child(match dialog.kind {
-                                    McpTransportKind::Stdio => "环境变量（可选，JSON）",
-                                    McpTransportKind::Http => "请求头（可选，JSON）",
-                                }),
-                            ),
+                            .child(div().text_sm().child(match dialog.kind {
+                                McpTransportKind::Stdio => "环境变量（可选，JSON）",
+                                McpTransportKind::Http => "请求头（可选，JSON）",
+                            })),
                     )
                     .when(dialog.advanced_open, |this| {
                         this.child(
-                            v_flex().gap_1()
+                            v_flex()
+                                .gap_1()
                                 .child(Textarea::new(&dialog.env_headers))
-                                .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                                    .child(match dialog.kind {
-                                        McpTransportKind::Stdio => "如 {\"MY_API_KEY\": \"your-key\"}",
-                                        McpTransportKind::Http => "如 {\"Authorization\": \"Bearer your-token\"}",
-                                    })),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .opacity(0.7)
+                                        .child(match dialog.kind {
+                                            McpTransportKind::Stdio => {
+                                                "如 {\"MY_API_KEY\": \"your-key\"}"
+                                            }
+                                            McpTransportKind::Http => {
+                                                "如 {\"Authorization\": \"Bearer your-token\"}"
+                                            }
+                                        }),
+                                ),
                         )
                     }),
             );
@@ -1800,18 +1866,17 @@ impl SettingsView {
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
+                    .child(div().text_lg().font_semibold().child(if editing {
+                        format!(
+                            "编辑 MCP 服务器「{}」",
+                            dialog.editing.clone().expect("editing")
+                        )
+                    } else {
+                        "新建 MCP 服务器".to_string()
+                    }))
                     .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(if editing {
-                                format!("编辑 MCP 服务器「{}」", dialog.editing.clone().expect("editing"))
-                            } else {
-                                "新建 MCP 服务器".to_string()
-                            }),
-                    )
-                    .child(
-                        h_flex().gap_1()
+                        h_flex()
+                            .gap_1()
                             .child(
                                 Button::new("mcp-mode-form")
                                     .small()
@@ -1833,11 +1898,7 @@ impl SettingsView {
                                     })),
                             ),
                     )
-                    .child(if dialog.json_mode {
-                        json_view
-                    } else {
-                        form
-                    })
+                    .child(if dialog.json_mode { json_view } else { form })
                     .when_some(dialog.error.clone(), |this, error| {
                         this.child(div().text_xs().text_color(cx.theme().danger).child(error))
                     })

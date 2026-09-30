@@ -134,7 +134,7 @@ pub fn system_prompt(
          - 项目已有测试就为改动补测试；没有就别自建测试/脚手架文件，除非用户要求。\n\
          - 改动后把仍描述旧行为的注释/文档一并更新。\n\
          - 宣布完成前先验证：跑项目的构建/测试，确认用户场景真实走通。测试失败就带上输出如实报告；\
-         未能验证的部分明说，不要把未验证的工作说成已完成。\n"
+         未能验证的部分明说，不要把未验证的工作说成已完成。\n",
     );
     if has_tools {
         prompt.push_str("\n可用工具:\n");
@@ -204,7 +204,10 @@ pub(crate) fn turn_reminder(
         ));
         *date_reminded = today;
     }
-    if !agents_fresh.is_empty() && agents_fresh != agents_frozen && agents_fresh != agents_reminded.as_str() {
+    if !agents_fresh.is_empty()
+        && agents_fresh != agents_frozen
+        && agents_fresh != agents_reminded.as_str()
+    {
         lines.push(format!(
             "AGENTS.md 内容有更新，以下为最新内容（系统提示词中的旧版本作废）：\n{agents_fresh}"
         ));

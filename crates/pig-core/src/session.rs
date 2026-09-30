@@ -27,17 +27,22 @@ use pig_protocol::AppConfig;
 pub type ApprovalCoalesceKey = (String, String, bool);
 /// 审批等待表：request_id → (回复通道, 合并键)；键为 None 的请求（ExitPlanMode
 /// 计划确认）不参与合并，只按自身 request_id 决议。
-pub type PendingApprovals =
-    Arc<Mutex<HashMap<String, (oneshot::Sender<ApprovalDecision>, Option<ApprovalCoalesceKey>)>>>;
+pub type PendingApprovals = Arc<
+    Mutex<
+        HashMap<
+            String,
+            (
+                oneshot::Sender<ApprovalDecision>,
+                Option<ApprovalCoalesceKey>,
+            ),
+        >,
+    >,
+>;
 
 /// 决议一笔审批：唤醒该 request_id 的等待者，并把同合并键的并发等待者一并
 /// 唤醒（Op::ApprovalReply 的处理路径）。UI 审批条同时只能显示一笔，Swarm
 /// 多个子代理同命令并发等审批时，不扇出的话被顶掉的等待者永远无人应答。
-pub fn resolve_approval(
-    pending: &PendingApprovals,
-    request_id: &str,
-    decision: ApprovalDecision,
-) {
+pub fn resolve_approval(pending: &PendingApprovals, request_id: &str, decision: ApprovalDecision) {
     let mut pending = pending.lock().expect("pending lock");
     let coalesce = pending.get(request_id).and_then(|(_, key)| key.clone());
     if let Some((reply, _)) = pending.remove(request_id) {

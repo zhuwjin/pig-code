@@ -1031,7 +1031,11 @@ async fn fetch_url_allows_local_http_and_decodes_gbk() {
             "FetchURL",
             serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     handle.join().unwrap();
@@ -1066,7 +1070,11 @@ async fn write_and_edit_leave_no_temp_files() {
             "Write",
             serde_json::json!({"path": "a.txt", "content": "hello\nworld\n"}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -1075,7 +1083,11 @@ async fn write_and_edit_leave_no_temp_files() {
             "Edit",
             serde_json::json!({"path": "a.txt", "old_string": "world", "new_string": "pig"}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(!is_error);
@@ -1104,7 +1116,11 @@ async fn edit_not_unique_reports_line_numbers() {
     let state = SessionToolState::for_test();
     let (_, ..) = tool::execute(
         &call("Read", serde_json::json!({"path": "dup.txt"})),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     let (out, is_error, ..) = tool::execute(
@@ -1112,7 +1128,11 @@ async fn edit_not_unique_reports_line_numbers() {
             "Edit",
             serde_json::json!({"path": "dup.txt", "old_string": "dup", "new_string": "x"}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext {
+            cwd: &dir,
+            tracker: &mut tracker,
+            state: &state,
+        },
     )
     .await;
     assert!(is_error, "{out}");

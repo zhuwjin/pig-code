@@ -325,8 +325,7 @@ fn resolve_program(
         return None;
     }
     let path = PathBuf::from(trimmed);
-    let explicit =
-        path.is_absolute() || trimmed.contains('/') || trimmed.contains('\\');
+    let explicit = path.is_absolute() || trimmed.contains('/') || trimmed.contains('\\');
     if explicit {
         return try_variants(&path);
     }
@@ -739,10 +738,7 @@ mod tests {
         let bare = dir.join("npx").to_string_lossy().into_owned();
         assert_eq!(resolve_program(&dirs, &bare), Some(dir.join("npx.cmd")));
         let full = dir.join("tool.exe").to_string_lossy().into_owned();
-        assert_eq!(
-            resolve_program(&dirs, &full),
-            Some(dir.join("tool.exe"))
-        );
+        assert_eq!(resolve_program(&dirs, &full), Some(dir.join("tool.exe")));
         let absent = dir.join("nope.exe").to_string_lossy().into_owned();
         assert_eq!(resolve_program(&dirs, &absent), None);
 

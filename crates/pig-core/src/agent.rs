@@ -964,8 +964,7 @@ unknown: 忽略我
         let mut profile = subagent(None, None);
         profile.system_prompt = "档案正文。".into();
         let agents = crate::prompt::agents_md(&tmp.0, &cwd);
-        let prompt =
-            crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
+        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
         assert!(prompt.contains("<env>"), "应含 env 块");
         assert!(
             prompt.contains("工作区 AGENTS.md"),
@@ -976,8 +975,7 @@ unknown: 忽略我
         assert!(prompt.contains("档案正文。"), "档案正文保留在 env 之前");
         // 关闭注入后不再有 AGENTS.md 段
         profile.inject_agents_md = false;
-        let prompt =
-            crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
+        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
         assert!(!prompt.contains("AGENTS.md"));
         assert!(prompt.ends_with("</env>"));
     }

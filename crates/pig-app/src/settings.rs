@@ -288,7 +288,11 @@ impl SettingsView {
     }
 
     /// core 的 McpServerList 回包（AppView 已按当前会话过滤）
-    pub fn set_mcp_status(&mut self, servers: Option<Vec<McpServerStatus>>, cx: &mut Context<Self>) {
+    pub fn set_mcp_status(
+        &mut self,
+        servers: Option<Vec<McpServerStatus>>,
+        cx: &mut Context<Self>,
+    ) {
         self.mcp_connection = Some(servers);
         cx.notify();
     }
@@ -581,12 +585,7 @@ impl Render for SettingsView {
                 )
             })
             .when(self.mcp_dialog.is_some(), |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(self.render_mcp_dialog(cx)),
-                )
+                this.child(div().absolute().inset_0().child(self.render_mcp_dialog(cx)))
             })
             .when(self.skills_dialog.is_some(), |this| {
                 this.child(

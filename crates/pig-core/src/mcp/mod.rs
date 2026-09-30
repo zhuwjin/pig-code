@@ -183,16 +183,13 @@ mod tests {
 
     #[test]
     fn statuses_merges_connected_and_failures_sorted_by_name() {
-        let manager = McpManager::for_test(
-            "zeta",
-            vec![spec("a"), spec("b"), spec("c")],
-        )
-        .with_failures(vec![pig_protocol::McpServerStatus {
-            name: "alpha-failed".to_string(),
-            connected: false,
-            tool_count: 0,
-            error: Some("spawn 失败".to_string()),
-        }]);
+        let manager = McpManager::for_test("zeta", vec![spec("a"), spec("b"), spec("c")])
+            .with_failures(vec![pig_protocol::McpServerStatus {
+                name: "alpha-failed".to_string(),
+                connected: false,
+                tool_count: 0,
+                error: Some("spawn 失败".to_string()),
+            }]);
         let statuses = manager.statuses();
         let names: Vec<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
         // 失败与已连接合并后按名字排序

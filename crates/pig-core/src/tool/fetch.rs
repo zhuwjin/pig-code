@@ -303,9 +303,13 @@ pub fn check_fetch_url(url: &reqwest::Url) -> Result<(), String> {
 /// UTF-8 有损兜底；encoding_rs 覆盖 GBK/GB18030/Big5/Shift-JIS/EUC-KR 等标签，
 /// BOM 由对应 Encoding::decode 处理。前置 BOM 字符顺手剥掉。
 fn decode_body(body: &[u8], charset_param: Option<&str>, is_html: bool) -> String {
-    let label = charset_param
-        .map(str::to_string)
-        .or_else(|| if is_html { sniff_html_charset(body) } else { None });
+    let label = charset_param.map(str::to_string).or_else(|| {
+        if is_html {
+            sniff_html_charset(body)
+        } else {
+            None
+        }
+    });
     let text = match label
         .as_deref()
         .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
@@ -316,9 +320,7 @@ fn decode_body(body: &[u8], charset_param: Option<&str>, is_html: bool) -> Strin
         }
         None => String::from_utf8_lossy(body).into_owned(),
     };
-    text.strip_prefix('\u{feff}')
-        .unwrap_or(&text)
-        .to_string()
+    text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
 }
 
 /// HTML 头部 meta charset 嗅探：找第一个 `charset` 出现处，取其后的标签词
