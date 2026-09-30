@@ -406,7 +406,12 @@ impl AppView {
                     self.pending_approvals.remove(sid);
                     self.pending_questions.remove(sid);
                 }
-                Event::ApprovalRequested { tool, detail, .. } => {
+                Event::ApprovalRequested {
+                    request_id,
+                    tool,
+                    detail,
+                    ..
+                } => {
                     self.approval_pending.insert(sid.clone());
                     let cwd = self
                         .metas
@@ -414,14 +419,17 @@ impl AppView {
                         .find(|m| &m.id == sid)
                         .map(|m| m.cwd.display().to_string())
                         .unwrap_or_default();
-                    self.pending_approvals.insert(
-                        sid.clone(),
-                        PendingApproval {
+                    // 入队而非覆盖单槽：并发审批（如 Swarm 多个子代理）各留一笔，
+                    // 审批条逐笔显示、逐笔答复；同 request_id 重复事件幂等跳过
+                    let queue = self.pending_approvals.entry(sid.clone()).or_default();
+                    if !queue.iter().any(|p| p.request_id == *request_id) {
+                        queue.push_back(PendingApproval {
+                            request_id: request_id.clone(),
                             tool: tool.clone(),
                             detail: detail.clone(),
                             cwd,
-                        },
-                    );
+                        });
+                    }
                 }
                 Event::QuestionRequested {
                     request_id,
@@ -645,15 +653,20 @@ impl AppView {
                 }
             }
             ComposerEvent::OpenSettings => self.open_settings(cx),
-            ComposerEvent::DecideApproval(decision) => {
-                // 走 ThreadView::decide_pending 单一路径：更新线程内审批卡状态并
-                // 经 ThreadEvent::ApprovalReply 回复 core（那里同时清掉待审批态）
+            ComposerEvent::DecideApproval {
+                request_id,
+                decision,
+            } => {
+                // 走 ThreadView 单一路径：按审批条携带的 request_id 定向更新线程内
+                // 审批卡状态，并经 ThreadEvent::ApprovalReply 回复 core（那里同时
+                // 从队列摘掉这笔）
                 if let Some(sid) = &self.current
                     && let Some(views) = self.views.get(sid)
                 {
+                    let request_id = request_id.clone();
                     let decision = *decision;
                     views.thread.update(cx, |thread, cx| {
-                        thread.decide_pending(decision, cx);
+                        thread.decide_approval_by_id(&request_id, decision, cx);
                     });
                 }
             }

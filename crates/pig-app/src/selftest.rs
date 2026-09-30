@@ -1328,7 +1328,7 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     assert!(duration_ms.is_some(), "通知应带 duration_ms");
     let record = record.expect("通知应带 record 记录路径");
     assert!(
-        record.contains(".agents/"),
+        record.contains(".agents/") || record.contains(".agents\\"),
         "record 应为子代理上下文 JSONL: {record}"
     );
     let result_path = result.expect("通知应带 result 结果路径");

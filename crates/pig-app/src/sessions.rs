@@ -4,7 +4,11 @@ impl AppView {
     pub(crate) fn sync_composer_state(&self, cx: &mut Context<Self>) {
         let Some(sid) = &self.current else { return };
         let streaming = self.running.contains(sid);
-        let approval = self.pending_approvals.get(sid).cloned();
+        // 审批条显示队首那笔：并发审批按到达顺序逐笔答复
+        let approval = self
+            .pending_approvals
+            .get(sid)
+            .and_then(|queue| queue.front().cloned());
         let question = self.pending_questions.get(sid).cloned();
         self.composer.update(cx, |composer, cx| {
             composer.set_streaming(streaming, cx);

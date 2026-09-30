@@ -21,7 +21,40 @@ use pig_protocol::AppConfig;
 
 /// 等待中的审批：request_id → 回执通道。manager 与各 session 共享；
 /// request_id 带 session_id 前缀，全局唯一。
-pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>;
+/// 审批合并键：(工具名, 完整命令/路径, 是否危险弹窗)。并发等待者里键相同的
+/// 共享一笔决议（Swarm 十个子代理同跑 `sleep 5` 只答一次）；完整命令入键而非
+/// 首词，避免放行 `sleep 5` 连带放行 `sleep 100` 这类同首词不同命令。
+pub type ApprovalCoalesceKey = (String, String, bool);
+/// 审批等待表：request_id → (回复通道, 合并键)；键为 None 的请求（ExitPlanMode
+/// 计划确认）不参与合并，只按自身 request_id 决议。
+pub type PendingApprovals =
+    Arc<Mutex<HashMap<String, (oneshot::Sender<ApprovalDecision>, Option<ApprovalCoalesceKey>)>>>;
+
+/// 决议一笔审批：唤醒该 request_id 的等待者，并把同合并键的并发等待者一并
+/// 唤醒（Op::ApprovalReply 的处理路径）。UI 审批条同时只能显示一笔，Swarm
+/// 多个子代理同命令并发等审批时，不扇出的话被顶掉的等待者永远无人应答。
+pub fn resolve_approval(
+    pending: &PendingApprovals,
+    request_id: &str,
+    decision: ApprovalDecision,
+) {
+    let mut pending = pending.lock().expect("pending lock");
+    let coalesce = pending.get(request_id).and_then(|(_, key)| key.clone());
+    if let Some((reply, _)) = pending.remove(request_id) {
+        let _ = reply.send(decision);
+    }
+    let Some(key) = coalesce else { return };
+    let same_key: Vec<String> = pending
+        .iter()
+        .filter(|(_, (_, other))| other.as_ref() == Some(&key))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in same_key {
+        if let Some((reply, _)) = pending.remove(&id) {
+            let _ = reply.send(decision);
+        }
+    }
+}
 
 /// 等待中的结构化提问：request_id → 回执通道。None = 用户跳过；
 /// 外层按题、内层为该题选中标签（"其他"自由文本作为标签原样放入）。
@@ -249,11 +282,16 @@ pub(crate) async fn exec_tool_gated_ctx(
     {
         let request_id = format!("{}-{turn_id}-approval-{item_id}", ctx.session_id);
         let detail_text = approval_detail(call, ctx.cwd, danger_reason);
+        // 合并键复用 perm_subject（Bash=完整命令，Write/Edit=路径，MCP=工具名）；
+        // 无 subject 的工具不合并（保守），危险位入键——普通弹窗不串到危险弹窗
+        let coalesce_key = perm_subject
+            .clone()
+            .map(|subject| (call.name.clone(), subject, danger_reason.is_some()));
         let (reply_tx, reply_rx) = oneshot::channel();
         ctx.pending
             .lock()
             .expect("pending lock")
-            .insert(request_id.clone(), reply_tx);
+            .insert(request_id.clone(), (reply_tx, coalesce_key));
         emit_bg(ctx.session_id, ctx.seq, tx, |session_id, seq| {
             Event::ApprovalRequested {
                 session_id,

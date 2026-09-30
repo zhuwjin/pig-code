@@ -159,6 +159,8 @@ pub type ModelOption = (String, String, String, Vec<(String, String)>);
 /// 待审批的操作：审批期间输入框隐藏，显示审批条。
 #[derive(Clone)]
 pub struct PendingApproval {
+    /// 这笔审批在 core 侧的等待 id（决议定向回复用）
+    pub request_id: String,
     pub tool: String,
     /// Bash 是命令原文；Write/Edit 是 diff 预览
     pub detail: String,
@@ -260,8 +262,12 @@ pub enum ComposerEvent {
     ClearCwd,
     /// hero：切换 git 分支
     CheckoutBranch(String),
-    /// 审批条：批准 / 本会话内批准 / 拒绝
-    DecideApproval(ApprovalDecision),
+    /// 审批条：批准 / 本会话内批准 / 拒绝（定向到条上挂的 request_id——
+    /// 并发审批排队时各笔请求各答各的，不能笼统答「最后一个」）
+    DecideApproval {
+        request_id: String,
+        decision: ApprovalDecision,
+    },
     /// 问题条：提交（Some=各题选中标签）/ 跳过（None）
     QuestionReply {
         request_id: String,
@@ -505,15 +511,18 @@ impl Composer {
         cx.notify();
     }
 
-    /// 审批条决议：清空审批态、发事件、焦点还回输入框。
+    /// 审批条决议：清空审批态、发事件（带本条 request_id 定向）、焦点还回输入框。
     fn decide_approval(
         &mut self,
         decision: ApprovalDecision,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.approval.take().is_some() {
-            cx.emit(ComposerEvent::DecideApproval(decision));
+        if let Some(approval) = self.approval.take() {
+            cx.emit(ComposerEvent::DecideApproval {
+                request_id: approval.request_id,
+                decision,
+            });
             self.input.update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
         }

@@ -580,9 +580,8 @@ pub async fn agent_loop(
                         }
                     }
                     Op::ApprovalReply { request_id, decision } => {
-                        if let Some(reply) = pending.lock().expect("pending lock").remove(&request_id) {
-                            let _ = reply.send(decision);
-                        }
+                        // 决议同时唤醒同合并键的并发等待者（见 resolve_approval）
+                        super::resolve_approval(&pending, &request_id, decision);
                     }
                     Op::QuestionReply { request_id, answers } => {
                         if let Some(reply) = pending_questions.lock().expect("pending questions lock").remove(&request_id) {

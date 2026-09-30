@@ -447,10 +447,11 @@ impl Session {
                 } else {
                     let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.id);
                     let (reply_tx, reply_rx) = oneshot::channel();
+                    // 计划确认是一次性弹窗，不参与同键合并决议
                     self.pending
                         .lock()
                         .expect("pending lock")
-                        .insert(request_id.clone(), reply_tx);
+                        .insert(request_id.clone(), (reply_tx, None));
                     let plan_preview: String = plan.chars().take(500).collect();
                     self.emit(
                         |session_id, seq| Event::ApprovalRequested {

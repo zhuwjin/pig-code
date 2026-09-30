@@ -1037,3 +1037,46 @@ async fn enter_plan_mode_idempotent_when_already_plan() {
     assert_eq!(details.len(), 1, "只有 ExitPlanMode 一次弹窗: {details:?}");
     agent.shutdown();
 }
+
+/// 同合并键的并发审批一笔决议全部唤醒（Swarm 子代理同命令并发等审批的回归）：
+/// 同键等待者随一笔 Allow 一起放行，不同命令/危险位不同/无键（计划确认）不受波及。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_reply_fans_out_same_coalesce_key() {
+    use pig_core::session::{resolve_approval, PendingApprovals};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+    let park = |pending: &PendingApprovals, id: &str, key: Option<(String, String, bool)>| {
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert(id.to_string(), (tx, key));
+        rx
+    };
+    let mut sleep_a = park(&pending, "req-sleep-a", Some(("Bash".into(), "sleep 5".into(), false)));
+    let mut sleep_b = park(&pending, "req-sleep-b", Some(("Bash".into(), "sleep 5".into(), false)));
+    let mut echo = park(&pending, "req-echo", Some(("Bash".into(), "echo hi".into(), false)));
+    let mut danger = park(&pending, "req-sleep-danger", Some(("Bash".into(), "sleep 5".into(), true)));
+    let mut plan = park(&pending, "req-plan", None);
+
+    // 只答复其中一个 sleep 5：另一个同键等待者应被一并唤醒
+    resolve_approval(&pending, "req-sleep-a", ApprovalDecision::Allow);
+
+    assert_eq!(sleep_a.try_recv(), Ok(ApprovalDecision::Allow));
+    assert_eq!(sleep_b.try_recv(), Ok(ApprovalDecision::Allow));
+    // 不同命令、危险位不同的同命令、计划确认：都不受波及，仍挂在等待表
+    assert!(echo.try_recv().is_err());
+    assert!(danger.try_recv().is_err());
+    assert!(plan.try_recv().is_err());
+    {
+        let left = pending.lock().unwrap();
+        assert_eq!(left.len(), 3, "只剩不同键/无键的三笔: {left:?}");
+        assert!(left.contains_key("req-echo"));
+        assert!(left.contains_key("req-sleep-danger"));
+        assert!(left.contains_key("req-plan"));
+    }
+
+    // 不存在的 request_id（迟到/重复的 UI 回复）：无操作不 panic
+    resolve_approval(&pending, "req-missing", ApprovalDecision::Reject);
+    assert_eq!(pending.lock().unwrap().len(), 3);
+}

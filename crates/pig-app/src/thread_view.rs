@@ -520,6 +520,30 @@ impl ThreadView {
         true
     }
 
+    /// 按 request_id 定向决议审批卡（审批条路径）：并发审批排队时各笔
+    /// 各答各的，不受到达顺序影响；id 不在（已决议/迟到事件）则无操作。
+    pub fn decide_approval_by_id(
+        &mut self,
+        request_id: &str,
+        decision: ApprovalDecision,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let found = self.messages.iter().enumerate().find_map(|(mix, m)| {
+            m.segments.iter().enumerate().find_map(|(six, s)| match s {
+                Segment::Approval {
+                    request_id: id,
+                    decision: None,
+                } if id == request_id => Some((mix, six)),
+                _ => None,
+            })
+        });
+        let Some((mix, six)) = found else {
+            return false;
+        };
+        self.decide_approval(mix, six, decision, cx);
+        true
+    }
+
     fn decide_approval(
         &mut self,
         message_ix: usize,

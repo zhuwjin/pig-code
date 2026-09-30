@@ -8,7 +8,7 @@ mod subagent_panel;
 mod thread_view;
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -176,8 +176,9 @@ struct AppView {
     /// 已删除的会话 id：迟到事件过滤用（id 含时间戳不复用，无需清理）
     deleted_sessions: HashSet<String>,
     approval_pending: HashSet<String>,
-    /// 待审批详情（审批条内容）：决议/回合结束时清除
-    pending_approvals: HashMap<String, PendingApproval>,
+    /// 各会话的待审批队列（审批条显示队首；并发审批逐笔答复逐笔出队，
+    /// 后到的请求不再顶掉先到的——同会话多个子代理同时等审批也不会丢）
+    pending_approvals: HashMap<String, VecDeque<PendingApproval>>,
     /// 待回答的结构化提问（问题条内容）：提交/跳过/回合结束时清除
     pending_questions: HashMap<String, PendingQuestion>,
     /// 各会话的 TodoList/后台任务快照（core 推送缓存，切会话时同步给 composer）
@@ -446,9 +447,17 @@ impl AppView {
                     decision,
                 } => {
                     this.agent.approval_reply(request_id.clone(), *decision);
-                    // 决议后立即撤掉审批条（不等回合结束），恢复输入框
-                    this.approval_pending.remove(&sid);
-                    this.pending_approvals.remove(&sid);
+                    // 只摘掉答复的这笔，队列里还有下一笔就接着显示；全答完
+                    // 才撤审批态恢复输入框（core 侧会把同合并键的等待者一并唤醒）
+                    let mut answered_all = true;
+                    if let Some(queue) = this.pending_approvals.get_mut(&sid) {
+                        queue.retain(|p| p.request_id != *request_id);
+                        answered_all = queue.is_empty();
+                    }
+                    if answered_all {
+                        this.approval_pending.remove(&sid);
+                        this.pending_approvals.remove(&sid);
+                    }
                     this.sync_composer_state(cx);
                 }
                 ThreadEvent::ExecutePlan => {
