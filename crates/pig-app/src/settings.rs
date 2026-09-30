@@ -30,6 +30,8 @@ pub enum SettingsEvent {
     LookupModel(String),
     /// MCP 页刷新：AppView 重读 mcp.json 并向 core 查询连接清单
     RefreshMcp,
+    /// 技能页刷新：AppView 重读技能目录
+    RefreshSkills,
     Close,
 }
 
@@ -39,12 +41,14 @@ mod dialog;
 mod mcp;
 mod pages;
 mod providers;
+mod skills;
 
 pub(crate) use dialog::*;
 pub(crate) use mcp::{
     McpConfigSnapshot, McpScope, McpSource, McpTransportKind, load_mcp_snapshot,
     workspace_display_name,
 };
+pub(crate) use skills::{SkillsSnapshot, load_skills_snapshot};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -141,16 +145,31 @@ pub struct SettingsView {
     mcp_write_error: Option<String>,
     /// MCP 页作用域：用户级（默认）/ 指定工作区（AppView 按此加载快照）
     mcp_scope: McpScope,
-    /// 当前会话的工作区（连接状态适用性：仅当与查看的工作区一致才显示状态）
-    mcp_status_cwd: Option<PathBuf>,
-    /// 可选工作区清单（路径 + 显示名，侧栏同口径：可见工作区 ∪ 会话 cwd）
-    mcp_workspaces: Vec<(PathBuf, String)>,
+    /// 当前会话的工作区（MCP 连接状态适用性与两页作用域下拉的「当前会话」标记）
+    session_cwd: Option<PathBuf>,
+    /// 可选工作区清单（路径 + 显示名，侧栏同口径：可见工作区 ∪ 会话 cwd；
+    /// MCP/技能两页作用域下拉共用）
+    scope_workspaces: Vec<(PathBuf, String)>,
     /// 作用域下拉弹层开合
     mcp_scope_popup: bool,
     /// 作用域按钮位置（deferred 弹层锚定用，每次 prepaint 更新）
     mcp_scope_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// 弹层 outside-close 时的按下位置（同一次按压的 click 按位置吞掉）
     mcp_scope_outside_close: Option<Point<Pixels>>,
+    /// 技能页快照（AppView 经 RefreshSkills 事件喂入；None = 尚未读取）
+    skills_snapshot: Option<SkillsSnapshot>,
+    /// 技能页搜索框（按名称/描述过滤）
+    skills_search: Entity<InputState>,
+    /// 技能新建/编辑对话框（None = 关闭）
+    skills_dialog: Option<SkillDialog>,
+    /// 技能目录写入失败提示（成功写入或下次刷新前保留）
+    skills_write_error: Option<String>,
+    /// 技能页作用域：用户级（默认）/ 指定工作区
+    skills_scope: McpScope,
+    /// 技能页作用域下拉弹层三件套（同 mcp_scope_*）
+    skills_scope_popup: bool,
+    skills_scope_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
+    skills_scope_outside_close: Option<Point<Pixels>>,
     save_generation: u64,
     form_dirty: bool,
     _subscriptions: Vec<Subscription>,
@@ -182,6 +201,15 @@ impl SettingsView {
                 cx.notify();
             },
         ));
+        // 技能搜索框：内容变化即重过滤列表
+        let skills_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索技能…"));
+        _subscriptions.push(cx.subscribe_in(
+            &skills_search,
+            window,
+            |_: &mut Self, _, _: &gpui_kit::component::input::InputEvent, _, cx| {
+                cx.notify();
+            },
+        ));
         Self {
             page: SettingsPage::Models,
             config: AppConfig::default(),
@@ -203,11 +231,19 @@ impl SettingsView {
             mcp_dialog: None,
             mcp_write_error: None,
             mcp_scope: McpScope::User,
-            mcp_status_cwd: None,
-            mcp_workspaces: vec![],
+            session_cwd: None,
+            scope_workspaces: vec![],
             mcp_scope_popup: false,
             mcp_scope_btn_bounds: Rc::new(Cell::new(Bounds::default())),
             mcp_scope_outside_close: None,
+            skills_snapshot: None,
+            skills_search,
+            skills_dialog: None,
+            skills_write_error: None,
+            skills_scope: McpScope::User,
+            skills_scope_popup: false,
+            skills_scope_btn_bounds: Rc::new(Cell::new(Bounds::default())),
+            skills_scope_outside_close: None,
             save_generation: 0,
             form_dirty: true,
             _subscriptions,
@@ -245,7 +281,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.mcp_session = session_id;
-        self.mcp_status_cwd = session_cwd;
+        self.session_cwd = session_cwd;
         self.mcp_snapshot = Some(snapshot);
         self.mcp_connection = None;
         cx.notify();
@@ -477,7 +513,38 @@ impl Render for SettingsView {
                                 .child("WebSearch 工具的搜索后端状态，经环境变量配置。"),
                         ),
                 )
-                .child(self.render_websearch(cx))
+                        .child(self.render_websearch(cx))
+                        .into_any_element(),
+            SettingsPage::Skills => v_flex()
+                .gap_4()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .gap_1()
+                                .child(div().text_2xl().font_semibold().child("技能"))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("管理用户级与项目级技能（SKILL.md）；清单注入系统提示词，正文由 Skill 工具按需加载，改动对新建会话生效（会话内清单冻结保缓存）。"),
+                                ),
+                        )
+                        .child(div().w(px(180.)).child(Input::new(&self.skills_search)))
+                        .child(
+                            Button::new("new-skill")
+                                .primary()
+                                .icon(IconName::Plus)
+                                .label("新建技能")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_skills_dialog(None, window, cx);
+                                })),
+                        ),
+                )
+                .child(self.render_skills(cx))
                 .into_any_element(),
             other => v_flex()
                 .size_full()
@@ -519,6 +586,14 @@ impl Render for SettingsView {
                         .absolute()
                         .inset_0()
                         .child(self.render_mcp_dialog(cx)),
+                )
+            })
+            .when(self.skills_dialog.is_some(), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(self.render_skills_dialog(cx)),
                 )
             })
     }

@@ -77,3 +77,29 @@ pub(crate) struct McpDialog {
     /// 校验错误（保存/切换模式失败时填写，显示在页脚上方）
     pub(crate) error: Option<String>,
 }
+
+/// 技能新建/编辑对话框（表单编辑 SKILL.md 的 frontmatter + 正文）
+pub(crate) struct SkillDialog {
+    /// 正在编辑的技能目录名（None = 新建；编辑中名称与作用域锁定）
+    pub(crate) editing: Option<String>,
+    /// 编辑目标目录（保存原目录重写；新建时 None）
+    pub(crate) target_dir: Option<PathBuf>,
+    /// 新建时的写入目标层级
+    pub(crate) scope: pig_core::skills::SkillSource,
+    /// 项目级是否可选（未选工作区时项目级路径未知，不可用）
+    pub(crate) project_available: bool,
+    /// 项目级目标的工作区显示名（作用域按钮展示「项目级（xxx）」；None = 未知）
+    pub(crate) project_workspace: Option<String>,
+    pub(crate) name: Entity<InputState>,
+    pub(crate) description: Entity<TextareaState>,
+    /// frontmatter when_to_use（可选）
+    pub(crate) when_to_use: Entity<InputState>,
+    /// SKILL.md 正文
+    pub(crate) body: Entity<TextareaState>,
+    /// 保真回写的额外 frontmatter 键（license 等，来自编辑底稿）
+    pub(crate) extra_frontmatter: Vec<(String, String)>,
+    /// 删除两步确认
+    pub(crate) delete_armed: bool,
+    /// 校验错误（保存失败时填写，显示在页脚上方）
+    pub(crate) error: Option<String>,
+}

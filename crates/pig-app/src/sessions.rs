@@ -199,13 +199,14 @@ impl AppView {
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = true;
         self.agent.get_config();
-        self.sync_mcp_workspaces(cx);
+        self.sync_scope_workspaces(cx);
         self.refresh_mcp(cx);
+        self.refresh_skills(cx);
         cx.notify();
     }
 
-    /// 把侧栏同口径的工作区清单喂给设置页（MCP 页作用域选择器的候选）
-    pub(crate) fn sync_mcp_workspaces(&mut self, cx: &mut Context<Self>) {
+    /// 把侧栏同口径的工作区清单喂给设置页（MCP/技能两页作用域选择器的候选）
+    pub(crate) fn sync_scope_workspaces(&mut self, cx: &mut Context<Self>) {
         let aliases = self.workspace_aliases.clone();
         let entries: Vec<(std::path::PathBuf, String)> = self
             .compute_workspaces()
@@ -219,7 +220,7 @@ impl AppView {
             })
             .collect();
         self.settings.update(cx, |settings, cx| {
-            settings.set_mcp_workspaces(entries, cx);
+            settings.set_scope_workspaces(entries, cx);
         });
     }
 
@@ -240,5 +241,18 @@ impl AppView {
         if let Some(session_id) = session_id {
             self.agent.list_mcp_servers(session_id);
         }
+    }
+
+    /// 设置页技能数据刷新：按设置页作用域（用户级 / 指定工作区）重读技能目录。
+    /// 技能是静态文件（无连接态），不需要向 core 查询
+    pub(crate) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        let workspace = match self.settings.read(cx).skills_scope().clone() {
+            crate::settings::McpScope::User => None,
+            crate::settings::McpScope::Workspace(path) => Some(path),
+        };
+        let snapshot = crate::settings::load_skills_snapshot(workspace.as_deref());
+        self.settings.update(cx, |settings, cx| {
+            settings.set_skills_config(snapshot, cx);
+        });
     }
 }

@@ -12,8 +12,10 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> GatedToolOutcome {
-        // MCP 工具清单随会话持有（懒连接于 run_step 首步）；子代理门控不走本封装
-        let mcp_tools = self.mcp.as_ref().map(|mcp| mcp.tools()).unwrap_or_default();
+        // MCP 工具清单随会话持有（懒连接于 run_step 首步）；子代理门控不走本封装。
+        // Skill 走 extra 通道（与 MCP 同款：不在 all() 静态表里，按名兜底查找）
+        let mut extra = self.mcp.as_ref().map(|mcp| mcp.tools()).unwrap_or_default();
+        extra.push(Box::new(tool::SkillTool::new(&self.cwd, &self.data_dir)));
         let mut gate = GateCtx {
             cwd: &self.cwd,
             mode: self.mode,
@@ -25,7 +27,7 @@ impl Session {
             session_id: &self.id,
             seq: &self.seq,
             store: &self.store,
-            extra_tools: &mcp_tools,
+            extra_tools: &extra,
         };
         exec_tool_gated_ctx(&mut gate, call, tool, item_id, turn_id, tx, cancel).await
     }

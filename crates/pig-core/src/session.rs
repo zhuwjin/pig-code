@@ -152,6 +152,24 @@ pub struct Session {
     /// 会话开始时的 git 快照（分支+dirty），env 块复用——每回合实时查询会让
     /// 系统提示词前缀缓存随第一次编辑/提交来回翻转失效
     git_snapshot: Option<String>,
+    /// 会话开始时冻结的 AGENTS.md 段（系统提示词注入用）。中途变更经
+    /// turn_reminder 推送新内容，冻结版不回写——保前缀缓存（kimi
+    /// agentsMdReminder 同款取舍）
+    agents_prompt: String,
+    /// 会话开始时冻结的技能清单段（系统提示词注入用；正文仍由 Skill 工具
+    /// 按需现读）。每回合重扫会让设置页增删改技能打断前缀缓存（kimi-code
+    /// frozenSkillListing 同款取舍），代价是改动只对新会话生效
+    skills_prompt: String,
+    /// 会话开始时冻结的日期（env 块展示用）；跨天经 turn_reminder 更正
+    date_frozen: String,
+    /// 上次已提醒的日期/AGENTS.md 内容（turn_reminder 去重：与冻结值不同
+    /// 才提醒，同内容不重复注入）
+    date_reminded: String,
+    agents_reminded: String,
+    /// 会话开始时冻结的子代理档案快照（Agent/AgentSwarm 工具 description
+    /// 内嵌档案清单用——每步重扫会让编辑档案打断 tools 前缀缓存；spawn
+    /// 执行时另走 load_profiles 现读，清单过期由报错自愈）
+    profiles_snapshot: Vec<crate::agent::AgentProfile>,
     last_total_tokens: Option<u64>,
     /// 当前回合累计的 token 用量（回合结束写入 turn_usage 表）
     turn_input: u64,
@@ -507,6 +525,11 @@ impl Session {
         app_config: Option<&AppConfig>,
     ) -> Result<Self, String> {
         let rollout = Rollout::create(sessions_dir, &meta)?;
+        // 字面量里 data_dir 会被 move，冻结快照先算局部（创建时刻目录现状）
+        let skills_prompt = crate::skills::skills_section(&meta.cwd, &data_dir);
+        let agents_prompt = prompt::agents_md(&data_dir, &meta.cwd);
+        let profiles_snapshot = crate::agent::load_profiles(&meta.cwd, &data_dir);
+        let today = prompt::today();
         Ok(Self {
             id: meta.id.clone(),
             cwd: meta.cwd.clone(),
@@ -532,6 +555,12 @@ impl Session {
             store,
             data_dir,
             git_snapshot: prompt::git_snapshot(&meta.cwd),
+            agents_prompt: agents_prompt.clone(),
+            skills_prompt,
+            date_frozen: today.clone(),
+            date_reminded: today,
+            agents_reminded: agents_prompt,
+            profiles_snapshot,
             last_total_tokens: None,
             turn_input: 0,
             turn_cache_read: 0,
@@ -564,10 +593,15 @@ impl Session {
         let Some(RolloutRecord::Meta { cwd, .. }) = records.first() else {
             return Err(format!("rollout 缺少 meta 行: {id}"));
         };
+        // 恢复会话重新冻结技能清单/AGENTS.md/日期/子代理档案（以恢复时刻目录现状为准）
+        let skills_prompt = crate::skills::skills_section(cwd, &data_dir);
+        let agents_prompt = prompt::agents_md(&data_dir, cwd);
+        let profiles_snapshot = crate::agent::load_profiles(cwd, &data_dir);
+        let today = prompt::today();
         let history = rebuild_history(
             &records,
-            // 占位系统提示词：首轮 run_turn 会用当前模型与 git 快照整体覆盖
-            prompt::system_prompt(cwd, true, ExecMode::ConfirmBeforeEdit, &data_dir, "", None),
+            // 占位系统提示词：首轮 run_turn 会用冻结快照整体覆盖
+            prompt::system_prompt(cwd, true, None, &today, &agents_prompt, &skills_prompt),
         );
         let originals = store
             .lock()
@@ -605,6 +639,12 @@ impl Session {
             store,
             data_dir,
             git_snapshot: prompt::git_snapshot(cwd),
+            agents_prompt: agents_prompt.clone(),
+            skills_prompt,
+            date_frozen: today.clone(),
+            date_reminded: today,
+            agents_reminded: agents_prompt,
+            profiles_snapshot,
             last_total_tokens: None,
             turn_input: 0,
             turn_cache_read: 0,
@@ -621,10 +661,11 @@ impl Session {
         Ok((session, records))
     }
 
-    /// 根会话工具集：内置 + Agent/AgentSwarm + MCP（子代理循环用 tool::all() 收窄
-    /// + MCP 继承规则，天然无 Agent/AgentSwarm 防嵌套；档案与 MCP 清单每次调用重建）
+    /// 根会话工具集：内置 + Agent/AgentSwarm + MCP。子代理循环用 tool::all()
+    /// 收窄 + MCP 继承规则，天然无 Agent/AgentSwarm 防嵌套；档案用会话冻结
+    /// 快照、MCP 清单随懒连接快照——tools 在缓存前缀最前面，会话内字节稳定
     pub(crate) fn root_tools(&self) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = tool::all_root(&self.cwd, &self.data_dir);
+        let mut tools = tool::all_root(&self.cwd, &self.data_dir, &self.profiles_snapshot);
         if let Some(mcp) = &self.mcp {
             tools.extend(mcp.tools());
         }

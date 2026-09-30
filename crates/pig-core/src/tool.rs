@@ -144,6 +144,7 @@ mod misc;
 mod paths;
 mod read;
 mod search;
+mod skill;
 mod tracker;
 mod websearch;
 mod write;
@@ -168,6 +169,7 @@ pub use media::{
     encode_image_for_model, image_dimensions, sniff_image,
 };
 pub use misc::{AgentSwarmTool, AgentTool, parse_questions, parse_swarm_args};
+pub(crate) use skill::SkillTool;
 pub use paths::{is_sensitive_file, resolve_checked, resolve_with_access};
 pub use search::search_files;
 pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
@@ -225,18 +227,28 @@ pub fn schemas() -> Vec<serde_json::Value> {
     all().iter().map(|tool| tool.schema()).collect()
 }
 
-/// 根会话工具集 = 全部内置工具 + Agent/AgentSwarm（子代理循环用 all()，天然无 Agent 防嵌套）
-pub fn all_root(cwd: &Path, data_dir: &Path) -> Vec<Box<dyn Tool>> {
+/// 根会话工具集 = 全部内置工具 + Agent/AgentSwarm + Skill（子代理循环用
+/// all() 收窄后在 spawn 点单独补 Skill，天然无 Agent 防嵌套）。
+/// profiles 由调用方传**会话冻结快照**：档案清单内嵌在 Agent/AgentSwarm 的
+/// description 里，每步重扫磁盘会让编辑子代理档案打断 tools 前缀缓存
+/// （tools 在缓存前缀最前面，变了从第 0 字节起全量失效；kimi
+/// frozenCatalogProfiles / ZCode 启动装配同款取舍）。spawn 执行时另走
+/// load_profiles 现读，清单过期由"档案不存在"报错自愈
+pub fn all_root(cwd: &Path, data_dir: &Path, profiles: &[crate::agent::AgentProfile]) -> Vec<Box<dyn Tool>> {
     let mut tools = all();
-    let profiles = crate::agent::load_profiles(cwd, data_dir);
-    tools.push(Box::new(AgentTool::new(&profiles)));
-    tools.push(Box::new(AgentSwarmTool::new(&profiles)));
+    tools.push(Box::new(AgentTool::new(profiles)));
+    tools.push(Box::new(AgentSwarmTool::new(profiles)));
+    tools.push(Box::new(SkillTool::new(cwd, data_dir)));
     tools
 }
 
-/// 根会话工具 schema 集（含 Agent）；run_step 采样用
-pub fn schemas_root(cwd: &Path, data_dir: &Path) -> Vec<serde_json::Value> {
-    all_root(cwd, data_dir)
+/// 根会话工具 schema 集（含 Agent）；入参口径与 all_root 一致
+pub fn schemas_root(
+    cwd: &Path,
+    data_dir: &Path,
+    profiles: &[crate::agent::AgentProfile],
+) -> Vec<serde_json::Value> {
+    all_root(cwd, data_dir, profiles)
         .iter()
         .map(|tool| tool.schema())
         .collect()
@@ -277,6 +289,7 @@ pub fn summarize(call: &ToolCall) -> String {
             .unwrap_or_else(|| "查看待办".to_string()),
         "FetchURL" => args["url"].as_str().unwrap_or("?").to_string(),
         "WebSearch" => args["query"].as_str().unwrap_or("?").to_string(),
+        "Skill" => args["skill"].as_str().unwrap_or("?").to_string(),
         "TaskList" => "列出后台任务".to_string(),
         "TaskOutput" | "TaskStop" => args["task_id"].as_str().unwrap_or("?").to_string(),
         "AskUserQuestion" => args["questions"][0]["question"]

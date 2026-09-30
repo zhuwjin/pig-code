@@ -65,8 +65,9 @@ impl Session {
                 ChatMsg::system(crate::prompt::subagent_system_prompt(
                     &profile,
                     &self.cwd,
-                    &self.data_dir,
                     self.git_snapshot.as_deref(),
+                    &self.agents_prompt,
+                    &self.skills_prompt,
                 )),
                 ChatMsg::user(prompt_text.to_string()),
             ];
@@ -156,6 +157,9 @@ impl Session {
         if let Some(mcp) = &self.mcp {
             child_tools.extend(mcp.child_tools(mcp_inherits_all));
         }
+        // Skill 补给所有子代理（只读，MCP 继承同款越档案默认）：技能正文按需加载，
+        // 子代理系统提示同样注入技能清单
+        child_tools.push(Box::new(tool::SkillTool::new(&self.cwd, &self.data_dir)));
         let child_schemas: Vec<serde_json::Value> =
             child_tools.iter().map(|t| t.schema()).collect();
 
@@ -184,6 +188,8 @@ impl Session {
         let max_turns = profile.max_turns.unwrap_or(crate::agent::DEFAULT_MAX_TURNS);
         let mut drive = SubagentDrive {
             agent_id,
+            cwd: self.cwd.clone(),
+            data_dir: self.data_dir.clone(),
             profile,
             child_config,
             tools: child_tools,
@@ -332,6 +338,8 @@ impl Session {
                 cwd: &self.cwd,
                 data_dir: &self.data_dir,
                 git_snapshot: self.git_snapshot.as_deref(),
+                skills_prompt: &self.skills_prompt,
+                agents_prompt: &self.agents_prompt,
                 app_config: self.app_config.as_ref(),
                 parent_config,
                 session_id: &self.id,
@@ -904,6 +912,8 @@ async fn drive_subagent_detached(
 /// 全 owned：前台借 Session 字段组 GateCtx，后台连 GateCtx 也全 owned。
 struct SubagentDrive {
     agent_id: String,
+    cwd: PathBuf,
+    data_dir: PathBuf,
     profile: crate::agent::AgentProfile,
     child_config: ResolvedModel,
     tools: Vec<Box<dyn tool::Tool>>,
@@ -921,11 +931,15 @@ struct SubagentDrive {
 
 impl SubagentDrive {
     /// 门控执行段的 extra_tools：按继承规则从 MCP 句柄现取（McpTool clone 很便宜）
+    /// + Skill（不在 all() 静态表里，经 extra 按名兜底）
     fn extra_tools(&self) -> Vec<Box<dyn tool::Tool>> {
-        self.mcp
+        let mut extra = self
+            .mcp
             .as_ref()
             .map(|mcp| mcp.child_tools(self.mcp_inherits_all))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        extra.push(Box::new(tool::SkillTool::new(&self.cwd, &self.data_dir)));
+        extra
     }
 }
 
@@ -947,6 +961,8 @@ impl From<crate::agent::SwarmChildPrep> for SubagentDrive {
     fn from(prep: crate::agent::SwarmChildPrep) -> Self {
         Self {
             agent_id: prep.agent_id,
+            cwd: prep.cwd,
+            data_dir: prep.data_dir,
             profile: prep.profile,
             child_config: prep.child_config,
             tools: prep.tools,

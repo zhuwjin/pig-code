@@ -28,20 +28,35 @@ impl Session {
             tx,
         );
 
+        // 系统提示词全部用会话冻结快照（git/AGENTS.md/技能/日期），模式已移入
+        // turn_reminder——会话内字节稳定，前缀缓存最大化
         let system = ChatMsg::system(prompt::system_prompt(
             &self.cwd,
             true,
-            self.mode,
-            &self.data_dir,
-            &config.model,
             self.git_snapshot.as_deref(),
+            &self.date_frozen,
+            &self.agents_prompt,
+            &self.skills_prompt,
         ));
         if self.history.is_empty() {
             self.history.push(system);
         } else if self.history[0].role == "system" {
             self.history[0] = system;
         }
+        // 回合边界 reminder（执行模式/日期跨天/AGENTS.md 变更）：prepend 到用户
+        // 消息前——尾部注入不打断 system+历史的前缀缓存，也插不进工具配对中间；
+        // 不落 rollout（恢复会话由重新冻结 + 首轮提醒自愈）
+        let fresh_agents = prompt::agents_md(&self.data_dir, &self.cwd);
+        let reminder = prompt::turn_reminder(
+            self.mode,
+            &self.date_frozen,
+            &mut self.date_reminded,
+            &self.agents_prompt,
+            &fresh_agents,
+            &mut self.agents_reminded,
+        );
         let mut user_text = expand_file_references(&self.cwd, &content, &files);
+        user_text = format!("{reminder}\n\n{user_text}");
         if self.history.len() == 1 {
             // 首条消息：种标题（首 30 字符兜底），并异步生成模型标题；
             // 手动重命名过（title_custom）两者都不覆盖
@@ -1046,6 +1061,7 @@ impl Session {
                 let index = next;
                 let call = cards[index].call.clone();
                 let cwd = self.cwd.clone();
+                let data_dir = self.data_dir.clone();
                 let state = self.state.clone();
                 let mcp = self.mcp.clone();
                 set.spawn(async move {
@@ -1055,12 +1071,16 @@ impl Session {
                         tracker: &mut tracker,
                         state: &state,
                     };
-                    let extra: Vec<Box<dyn tool::Tool>> = match &mcp {
+                    let mut extra: Vec<Box<dyn tool::Tool>> = match &mcp {
                         Some(mcp) if call.name.starts_with("mcp__") => {
                             mcp.tool_named(&call.name).into_iter().collect()
                         }
                         _ => vec![],
                     };
+                    // Skill 只读可并发，走 extra 通道（串行门控同款）
+                    if call.name == "Skill" {
+                        extra.push(Box::new(tool::SkillTool::new(&cwd, &data_dir)));
+                    }
                     let (output, is_error, file_change, edit, images) =
                         tool::execute_with_extra(&call, ctx, &extra).await;
                     debug_assert!(

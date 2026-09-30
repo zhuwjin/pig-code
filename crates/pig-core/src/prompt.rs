@@ -96,21 +96,19 @@ fn git_root(cwd: &Path) -> Option<PathBuf> {
     (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
+/// 系统提示词：全部易变内容不在此处——AGENTS.md/技能清单/日期由调用方传
+/// 会话冻结快照，执行模式走每回合 turn_reminder。提示词会话内字节稳定，
+/// 前缀缓存最大化（kimi-code frozenSkillListing / ZCode 分段冻结同款取舍）。
 pub fn system_prompt(
     cwd: &Path,
     has_tools: bool,
-    mode: ExecMode,
-    data_dir: &Path,
-    model_name: &str,
     git: Option<&str>,
+    date_frozen: &str,
+    agents_section: &str,
+    skills_section: &str,
 ) -> String {
-    let powered = if model_name.trim().is_empty() {
-        String::new()
-    } else {
-        format!("，由 {model_name} 模型驱动")
-    };
-    let mut prompt = format!(
-        "你是 pig-code，一个运行在用户工作区里的 AI 编程助手{powered}。\n\n\
+    let mut prompt = String::from(
+        "你是 pig-code，一个运行在用户工作区里的 AI 编程助手。\n\n\
          注意：协助授权范围内的安全测试、防御性安全、CTF 挑战与教学场景；\
          拒绝破坏性攻击、DoS、大规模目标扫描、供应链投毒及为恶意目的规避检测的请求。\
          双用途安全工具（C2 框架、凭据爆破、漏洞利用开发）需要明确的授权背景：\
@@ -145,32 +143,77 @@ pub fn system_prompt(
         }
         prompt.push_str("需要了解文件内容或验证改动时主动调用工具，拿到结果后再回答。\n");
     }
-    let agents = agents_md(data_dir, cwd);
-    if !agents.is_empty() {
+    // AGENTS.md / 技能清单：会话开始时冻结的快照（中途变更经 turn_reminder
+    // 推送新内容，冻结版不更新——保前缀缓存）
+    if !agents_section.is_empty() {
         prompt.push('\n');
-        prompt.push_str(&agents);
+        prompt.push_str(agents_section);
     }
-    prompt.push_str(match mode {
+    if !skills_section.is_empty() {
+        prompt.push('\n');
+        prompt.push_str(skills_section);
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(&env_block(cwd, git, date_frozen));
+    prompt
+}
+
+/// 执行模式说明（原系统提示词的模式段；现每回合经 turn_reminder 注入，
+/// 模型需要时刻知道当前模式，但模式切换不该打断系统提示词前缀缓存）
+pub(crate) fn mode_line(mode: ExecMode) -> &'static str {
+    match mode {
         ExecMode::ConfirmBeforeEdit => {
-            "\n当前执行模式: 变更前确认。修改文件或执行命令前会先请用户审批，审批通过才会执行。\n"
+            "当前执行模式: 变更前确认。修改文件或执行命令前会先请用户审批，审批通过才会执行。"
         }
         ExecMode::AutoEdit => {
-            "\n当前执行模式: 自动编辑。可以直接修改文件；只读命令直接执行，其余命令执行前会弹窗请用户确认。\n"
+            "当前执行模式: 自动编辑。可以直接修改文件；只读命令直接执行，其余命令执行前会弹窗请用户确认。"
         }
         ExecMode::Plan => {
-            "\n当前执行模式: 计划模式。你是只读的：不要调用 Write/Edit/Bash 等修改类工具，\
-             只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。计划写好后调用 ExitPlanMode 工具请用户确认执行。\n"
+            "当前执行模式: 计划模式。你是只读的：不要调用 Write/Edit/Bash 等修改类工具，\
+             只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。计划写好后调用 ExitPlanMode 工具请用户确认执行。"
         }
         ExecMode::FullAccess => {
-            "\n当前执行模式: 完全访问。所有工具直接执行，无需审批；命中高风险命令时会弹窗请用户确认。\n"
+            "当前执行模式: 完全访问。所有工具直接执行，无需审批；命中高风险命令时会弹窗请用户确认。"
         }
         ExecMode::Yolo => {
-            "\n当前执行模式: 无管制（Yolo）。所有工具直接执行，无审批也无危险命令拦截；敏感文件（.env/私钥/凭据）仍然不可读写。\n"
+            "当前执行模式: 无管制（Yolo）。所有工具直接执行，无审批也无危险命令拦截；敏感文件（.env/私钥/凭据）仍然不可读写。"
         }
-    });
-    prompt.push_str("\n\n");
-    prompt.push_str(&env_block(cwd, git));
-    prompt
+    }
+}
+
+/// 回合边界 reminder：系统提示词冻结后的易变内容经此注入对话尾部（prepend
+/// 到本回合用户消息前）——尾部追加不打断 system+历史的前缀缓存，也不会插在
+/// 工具调用配对中间。ZCode runtime_mode/date_change、kimi agentsMdReminder
+/// 同款思路。
+/// 执行模式每回合都在（模型需要时刻知道）；日期/AGENTS.md 只在与已提醒内容
+/// 不一致时提醒一次（reminded 状态去重，同内容不重复注入；冻结版不回写，
+/// 系统提示词里的旧值由提醒文案声明作废）。
+pub(crate) fn turn_reminder(
+    mode: ExecMode,
+    date_frozen: &str,
+    date_reminded: &mut String,
+    agents_frozen: &str,
+    agents_fresh: &str,
+    agents_reminded: &mut String,
+) -> String {
+    let mut lines: Vec<String> = vec![mode_line(mode).to_string()];
+    let today = today();
+    if today != *date_reminded {
+        lines.push(format!(
+            "日期已变更：今天是 {today}（系统提示词中的日期「{date_frozen}」是会话开始时的，以本条为准，不必向用户提及）。"
+        ));
+        *date_reminded = today;
+    }
+    if !agents_fresh.is_empty() && agents_fresh != agents_frozen && agents_fresh != agents_reminded.as_str() {
+        lines.push(format!(
+            "AGENTS.md 内容有更新，以下为最新内容（系统提示词中的旧版本作废）：\n{agents_fresh}"
+        ));
+        *agents_reminded = agents_fresh.to_string();
+    }
+    format!(
+        "<system-reminder>\n{}\n</system-reminder>",
+        lines.join("\n")
+    )
 }
 
 /// 系统提示词里的工具一句话清单。完整参数与细节在工具 schema 里（避免双份长文维护漂移）；
@@ -224,6 +267,10 @@ fn tool_summaries() -> &'static [(&'static str, &'static str)] {
         ),
         ("ExitPlanMode", "计划写好后请用户确认并退出计划模式"),
         (
+            "Skill",
+            "加载技能完整说明（技能=领域能力/工作流，清单在系统提示词；任务匹配时先加载再执行）",
+        ),
+        (
             "Agent",
             "委派子代理处理独立子任务（中间过程不占本会话上下文）；prompt 必须自包含，run_in_background 可后台",
         ),
@@ -234,15 +281,16 @@ fn tool_summaries() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// <env> 块：工作目录/平台/日期/git 快照/沙箱提示。放在提示词最末——日期按天变、
-/// 其余稳定，变化只打断尾部缓存而不是整段前缀。主代理与子代理的系统提示共用。
-fn env_block(cwd: &Path, git: Option<&str>) -> String {
+/// <env> 块：工作目录/平台/git 快照/日期（会话冻结值，跨天经 turn_reminder
+/// 更正）/沙箱提示。放在提示词最末——git 与日期都取冻结值，会话内字节稳定。
+/// 主代理与子代理的系统提示共用（子代理传 spawn 时刻的日期，其生命周期内稳定）
+fn env_block(cwd: &Path, git: Option<&str>, date: &str) -> String {
     format!(
         "<env>\n\
          工作目录: {}\n\
          平台: {}-{}\n\
          Shell: {}\n\
-         日期: {}\n\
+         日期: {date}\n\
          {}\
          你的命令与文件修改会立即在用户机器上生效，没有沙箱兜底；文件访问范围受工作区限制。\n\
          </env>",
@@ -250,37 +298,40 @@ fn env_block(cwd: &Path, git: Option<&str>) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH,
         crate::task::shell_label(),
-        today(),
         git.map(|g| format!("git: {g}（会话开始时快照）\n"))
             .unwrap_or_default(),
     )
 }
 
-/// 子代理系统提示：可选 AGENTS.md 注入 + 档案正文 + env 块收尾。
-/// 自包含：不拼行为准则/执行模式段/工具清单（子代理没有计划模式与提问能力，
-/// 交付要求已写在档案正文里）。
+/// 子代理系统提示：冻结的 AGENTS.md/技能段 + 档案正文 + env 块收尾。
+/// 自包含：不拼行为准则/执行模式/工具清单（子代理没有计划模式与提问能力，
+/// 交付要求已写在档案正文里）。AGENTS.md/技能用主会话同一份冻结快照；
+/// 日期取 spawn 时刻（子代理生命周期短，天然稳定）。
 pub fn subagent_system_prompt(
     profile: &crate::agent::AgentProfile,
     cwd: &Path,
-    data_dir: &Path,
     git: Option<&str>,
+    agents_section: &str,
+    skills_section: &str,
 ) -> String {
     let mut prompt = String::new();
-    if profile.inject_agents_md {
-        let agents = agents_md(data_dir, cwd);
-        if !agents.is_empty() {
-            prompt.push_str(&agents);
-            prompt.push_str("\n\n");
-        }
+    if profile.inject_agents_md && !agents_section.is_empty() {
+        prompt.push_str(agents_section);
+        prompt.push_str("\n\n");
+    }
+    if !skills_section.is_empty() {
+        prompt.push_str(skills_section);
+        prompt.push_str("\n\n");
     }
     prompt.push_str(&profile.system_prompt);
     prompt.push_str("\n\n");
-    prompt.push_str(&env_block(cwd, git));
+    prompt.push_str(&env_block(cwd, git, &today()));
     prompt
 }
 
 /// 今天日期（YYYY-MM-DD，UTC）。std 无日期格式化，用 civil-from-days 算法。
-fn today() -> String {
+/// 会话冻结日期与 turn_reminder 的跨天检测共用
+pub(crate) fn today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -370,6 +421,7 @@ mod tests {
             .map(|tool| tool.name().to_string())
             .chain(std::iter::once("Agent".to_string()))
             .chain(std::iter::once("AgentSwarm".to_string()))
+            .chain(std::iter::once("Skill".to_string()))
             .collect();
         assert_eq!(listed, registered);
     }
@@ -414,7 +466,7 @@ mod tests {
         assert!(out.contains("不是特权指令通道"));
     }
 
-    /// 系统提示词：模型驱动标注、env 收尾（缓存顺序）、执行模式段都在。
+    /// 系统提示词：env 收尾（缓存顺序）、冻结段注入；模式与模型名不再出现
     #[test]
     fn system_prompt_structure() {
         let tmp = TempDir::new("sys");
@@ -423,13 +475,16 @@ mod tests {
         let prompt = super::system_prompt(
             &cwd,
             true,
-            pig_protocol::ExecMode::AutoEdit,
-            tmp.path(),
-            "glm-4.7",
             Some("main (有未提交变更)"),
+            "2026-09-30",
+            "## AGENTS.md 指令\n冻结段",
+            "## 可用技能\n- demo: 示例",
         );
-        assert!(prompt.contains("由 glm-4.7 模型驱动"));
-        assert!(prompt.contains("当前执行模式: 自动编辑"));
+        assert!(!prompt.contains("模型驱动"), "模型名不再进系统提示词");
+        assert!(
+            !prompt.contains("当前执行模式: "),
+            "执行模式移入 turn_reminder，不再进系统提示词（行为准则里的泛指措辞除外）"
+        );
         assert!(prompt.contains("可用工具:"));
         assert!(prompt.contains("- EnterPlanMode:"));
         assert!(prompt.contains("- ExitPlanMode:"));
@@ -439,11 +494,89 @@ mod tests {
             prompt.contains("绝不用 shell 命令读取"),
             "行为准则应含敏感文件 shell 旁路约束"
         );
+        assert!(prompt.contains("冻结段"), "AGENTS.md 冻结段注入");
+        assert!(prompt.contains("- demo: 示例"), "技能冻结段注入");
+        assert!(prompt.contains("日期: 2026-09-30"), "env 块含冻结日期");
         assert!(prompt.contains("git: main (有未提交变更)（会话开始时快照）"));
         assert!(
             prompt.ends_with("</env>"),
             "env 块应收尾：易变内容放最后，前缀缓存不被日期/git 翻转打断"
         );
         assert!(prompt.contains("工作目录"), "env 块仍在");
+    }
+
+    /// turn_reminder：模式每回合都在；日期/AGENTS.md 变更提醒一次即去重；
+    /// 恢复到与冻结一致时不提醒
+    #[test]
+    fn turn_reminder_dedup_and_composition() {
+        let today = super::today();
+        let mut date_reminded = today.clone();
+        let mut agents_reminded = String::new();
+        // 无变更：只有模式行
+        let r = super::turn_reminder(
+            pig_protocol::ExecMode::AutoEdit,
+            &today,
+            &mut date_reminded,
+            "",
+            "",
+            &mut agents_reminded,
+        );
+        assert!(r.starts_with("<system-reminder>"));
+        assert!(r.contains("当前执行模式: 自动编辑"));
+        assert!(!r.contains("日期已变更"));
+        assert!(!r.contains("AGENTS.md"));
+        assert!(r.ends_with("</system-reminder>"));
+        // AGENTS.md 变更：提醒一次，同内容重复调用去重
+        let fresh = "## AGENTS.md 指令\n新版规则";
+        let r1 = super::turn_reminder(
+            pig_protocol::ExecMode::AutoEdit,
+            &today,
+            &mut date_reminded,
+            "",
+            fresh,
+            &mut agents_reminded,
+        );
+        assert!(r1.contains("AGENTS.md 内容有更新"));
+        assert!(r1.contains("新版规则"));
+        let r2 = super::turn_reminder(
+            pig_protocol::ExecMode::AutoEdit,
+            &today,
+            &mut date_reminded,
+            "",
+            fresh,
+            &mut agents_reminded,
+        );
+        assert!(!r2.contains("AGENTS.md"), "同内容不应重复提醒");
+        // AGENTS.md 改回与冻结版一致：不再提醒
+        let r3 = super::turn_reminder(
+            pig_protocol::ExecMode::AutoEdit,
+            &today,
+            &mut date_reminded,
+            fresh,
+            fresh,
+            &mut agents_reminded,
+        );
+        assert!(!r3.contains("AGENTS.md"), "与冻结一致无需提醒");
+        // 日期跨天：提醒一次并去重（模拟昨天已提醒）
+        date_reminded = "2000-01-01".to_string();
+        let r4 = super::turn_reminder(
+            pig_protocol::ExecMode::Plan,
+            "2000-01-01",
+            &mut date_reminded,
+            "",
+            "",
+            &mut agents_reminded,
+        );
+        assert!(r4.contains("当前执行模式: 计划模式"));
+        assert!(r4.contains("日期已变更"));
+        let r5 = super::turn_reminder(
+            pig_protocol::ExecMode::Plan,
+            "2000-01-01",
+            &mut date_reminded,
+            "",
+            "",
+            &mut agents_reminded,
+        );
+        assert!(!r5.contains("日期已变更"), "同日期不应重复提醒");
     }
 }

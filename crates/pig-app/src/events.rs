@@ -134,7 +134,7 @@ impl AppView {
                     })
                     .collect();
                 // 工作区清单变化同步给设置页（MCP 页作用域选择器的候选）
-                self.sync_mcp_workspaces(cx);
+                self.sync_scope_workspaces(cx);
             }
             Event::SessionList { sessions } => {
                 self.metas = sessions.clone();

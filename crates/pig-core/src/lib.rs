@@ -13,6 +13,7 @@ mod prompt;
 pub mod provider;
 pub mod rollout;
 pub mod session;
+pub mod skills;
 pub mod store;
 pub mod task;
 pub mod text;

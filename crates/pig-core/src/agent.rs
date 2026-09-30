@@ -963,7 +963,9 @@ unknown: 忽略我
         std::fs::write(cwd.join("AGENTS.md"), "项目规则").unwrap();
         let mut profile = subagent(None, None);
         profile.system_prompt = "档案正文。".into();
-        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0, None);
+        let agents = crate::prompt::agents_md(&tmp.0, &cwd);
+        let prompt =
+            crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
         assert!(prompt.contains("<env>"), "应含 env 块");
         assert!(
             prompt.contains("工作区 AGENTS.md"),
@@ -974,8 +976,41 @@ unknown: 忽略我
         assert!(prompt.contains("档案正文。"), "档案正文保留在 env 之前");
         // 关闭注入后不再有 AGENTS.md 段
         profile.inject_agents_md = false;
-        let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, &tmp.0, None);
+        let prompt =
+            crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
         assert!(!prompt.contains("AGENTS.md"));
         assert!(prompt.ends_with("</env>"));
+    }
+
+    /// 工具 schema 的档案清单会话冻结：Agent/AgentSwarm 的 description 内嵌
+    /// 档案清单，tools 在缓存前缀最前面——同一份快照下磁盘档案再变，
+    /// schema 字节也不变（新会话的新快照才反映变化）
+    #[test]
+    fn all_root_schema_freezes_profiles() {
+        let tmp = TempDir::new("freeze");
+        let agents_dir = tmp.0.join("ws").join(".pigcode").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("extra.md"),
+            "---\nname: extra\ndescription: 测试档案\n---\n档案正文。",
+        )
+        .unwrap();
+        let ws = tmp.0.join("ws");
+        let snapshot = load_profiles(&ws, &tmp.0);
+        assert!(
+            snapshot.iter().any(|p| p.name == "extra"),
+            "项目级档案应进快照"
+        );
+        let schemas = |profiles: &[AgentProfile]| {
+            serde_json::to_string(&crate::tool::schemas_root(&ws, &tmp.0, profiles)).unwrap()
+        };
+        let frozen = schemas(&snapshot);
+        // 冻结后磁盘增删档案：同一份快照产出的 schema 字节不变
+        std::fs::remove_file(agents_dir.join("extra.md")).unwrap();
+        assert_eq!(frozen, schemas(&snapshot), "快照未变则 tools 前缀字节稳定");
+        // 新会话的新快照才会反映变化
+        let fresh = load_profiles(&ws, &tmp.0);
+        assert!(!fresh.iter().any(|p| p.name == "extra"));
+        assert_ne!(frozen, schemas(&fresh));
     }
 }

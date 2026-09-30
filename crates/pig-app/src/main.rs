@@ -362,6 +362,7 @@ impl AppView {
                     SettingsEvent::TestProvider(id) => this.agent.test_provider(id.clone()),
                     SettingsEvent::LookupModel(id) => this.agent.model_lookup(id.clone()),
                     SettingsEvent::RefreshMcp => this.refresh_mcp(cx),
+                    SettingsEvent::RefreshSkills => this.refresh_skills(cx),
                     SettingsEvent::Close => {
                         this.settings_open = false;
                         cx.notify();

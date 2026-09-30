@@ -161,6 +161,8 @@ fn child_pointer_line(child: &SwarmChildResult) -> String {
 /// 一个子代理的完整执行准备（SubagentDrive 的全部原料，session 层组装驱动）
 pub struct SwarmChildPrep {
     pub agent_id: String,
+    pub cwd: PathBuf,
+    pub data_dir: PathBuf,
     pub profile: AgentProfile,
     pub child_config: ResolvedModel,
     pub tools: Vec<Box<dyn crate::tool::Tool>>,
@@ -237,6 +239,9 @@ pub struct SwarmPrepCtx<'a> {
     pub cwd: &'a Path,
     pub data_dir: &'a Path,
     pub git_snapshot: Option<&'a str>,
+    /// 会话冻结的技能/AGENTS.md 段（子代理系统提示注入用，与主代理同一份）
+    pub skills_prompt: &'a str,
+    pub agents_prompt: &'a str,
     pub app_config: Option<&'a AppConfig>,
     pub parent_config: &'a ResolvedModel,
     pub session_id: &'a str,
@@ -279,8 +284,9 @@ pub fn prepare_swarm_children(
                     ChatMsg::system(crate::prompt::subagent_system_prompt(
                         &profile,
                         ctx.cwd,
-                        ctx.data_dir,
                         ctx.git_snapshot,
+                        ctx.agents_prompt,
+                        ctx.skills_prompt,
                     )),
                     ChatMsg::user(task.prompt.clone()),
                 ];
@@ -307,7 +313,7 @@ pub fn prepare_swarm_children(
                     history,
                     jsonl,
                     task.description.clone(),
-                    ctx.mcp,
+                    ctx,
                 ))));
             }
             Some(resume_id) => match prepare_resume(ctx, &profiles, &agents_dir, resume_id, task) {
@@ -384,7 +390,7 @@ fn prepare_resume(
         history,
         jsonl,
         task.description.clone(),
-        ctx.mcp,
+        ctx,
     ))
 }
 
@@ -412,7 +418,7 @@ fn assemble_prep(
     history: Vec<ChatMsg>,
     jsonl: PathBuf,
     description: String,
-    mcp: Option<&std::sync::Arc<crate::mcp::McpManager>>,
+    ctx: &SwarmPrepCtx<'_>,
 ) -> SwarmChildPrep {
     let all_tools = crate::tool::all();
     let all_names: Vec<String> = all_tools.iter().map(|t| t.name().to_string()).collect();
@@ -422,13 +428,17 @@ fn assemble_prep(
         .filter(|t| keep.iter().any(|name| name == t.name()))
         .collect();
     let mcp_inherits_all = child_inherits_all_mcp(&keep);
-    if let Some(mcp) = mcp {
+    if let Some(mcp) = ctx.mcp {
         tools.extend(mcp.child_tools(mcp_inherits_all));
     }
+    // Skill 补给全部 swarm 子代理（与 run_subagent 同口径：只读、越档案默认）
+    tools.push(Box::new(crate::tool::SkillTool::new(ctx.cwd, ctx.data_dir)));
     let schemas: Vec<serde_json::Value> = tools.iter().map(|t| t.schema()).collect();
     SwarmChildPrep {
         max_turns: profile.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
         agent_id,
+        cwd: ctx.cwd.to_path_buf(),
+        data_dir: ctx.data_dir.to_path_buf(),
         profile,
         child_config,
         tools,
@@ -436,7 +446,7 @@ fn assemble_prep(
         history,
         jsonl,
         description,
-        mcp: mcp.cloned(),
+        mcp: ctx.mcp.cloned(),
         mcp_inherits_all,
     }
 }
@@ -510,6 +520,8 @@ mod tests {
             cwd: &tmp.0,
             data_dir: &tmp.0,
             git_snapshot: None,
+            skills_prompt: "",
+            agents_prompt: "",
             app_config: None,
             parent_config: parent,
             session_id: "s-test",

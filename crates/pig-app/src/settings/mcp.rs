@@ -594,12 +594,12 @@ impl SettingsView {
     }
 
     /// 工作区清单喂入（侧栏同口径：可见工作区 ∪ 会话 cwd，含显示名）
-    pub(crate) fn set_mcp_workspaces(
+    pub(crate) fn set_scope_workspaces(
         &mut self,
         workspaces: Vec<(PathBuf, String)>,
         cx: &mut Context<Self>,
     ) {
-        self.mcp_workspaces = workspaces;
+        self.scope_workspaces = workspaces;
         cx.notify();
     }
 
@@ -608,7 +608,7 @@ impl SettingsView {
         match &self.mcp_scope {
             // 用户级条目参与会话连接（session 连的是 用户级+会话工作区 的合并）
             McpScope::User => true,
-            McpScope::Workspace(path) => self.mcp_status_cwd.as_deref() == Some(path.as_path()),
+            McpScope::Workspace(path) => self.session_cwd.as_deref() == Some(path.as_path()),
         }
     }
 
@@ -629,7 +629,7 @@ impl SettingsView {
             McpScope::User => (IconName::User, "用户级".to_string()),
             McpScope::Workspace(path) => {
                 let alias = self
-                    .mcp_workspaces
+                    .scope_workspaces
                     .iter()
                     .find(|(p, _)| p == path)
                     .map(|(_, name)| name.clone());
@@ -736,7 +736,7 @@ impl SettingsView {
                         )
                     }),
             );
-        if !self.mcp_workspaces.is_empty() {
+        if !self.scope_workspaces.is_empty() {
             popup = popup.child(
                 div()
                     .px_3()
@@ -745,10 +745,10 @@ impl SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child("工作区"),
             );
-            for (path, display) in self.mcp_workspaces.clone() {
+            for (path, display) in self.scope_workspaces.clone() {
                 let selected = self.mcp_scope == McpScope::Workspace(path.clone());
                 let is_session_ws =
-                    self.mcp_status_cwd.as_deref() == Some(path.as_path());
+                    self.session_cwd.as_deref() == Some(path.as_path());
                 let path_text = path.display().to_string();
                 popup = popup.child(
                     h_flex()
@@ -906,7 +906,7 @@ impl SettingsView {
             .map(Path::to_path_buf);
         let project_workspace = project_root.map(|root| {
                 let alias = self
-                    .mcp_workspaces
+                    .scope_workspaces
                     .iter()
                     .find(|(path, _)| *path == root)
                     .map(|(_, name)| name.clone());

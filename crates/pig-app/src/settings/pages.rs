@@ -47,9 +47,12 @@ impl SettingsView {
                         .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.page = *page;
-                            // 进入 MCP 页即刷新：重读配置 + 重新查询连接状态
+                            // 进入 MCP/技能页即刷新：重读配置与目录
                             if *page == SettingsPage::Mcp {
                                 this.refresh_mcp(cx);
+                            }
+                            if *page == SettingsPage::Skills {
+                                this.refresh_skills(cx);
                             }
                             cx.notify();
                         }))
