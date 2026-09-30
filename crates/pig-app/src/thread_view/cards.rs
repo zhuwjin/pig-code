@@ -323,15 +323,22 @@ impl ThreadView {
                         cx.notify();
                     }))
                     .child(Icon::new(tool_icon).size_4().text_color(subtlest))
-                    // 工具运行中：工具名 shimmer 扫光（等批准/已结束回静态文本）
+                    // 工具运行中：工具名 shimmer 扫光（等批准/已结束回静态文本）。
+                    // 两个分支都禁收缩+禁折行：flex 收缩按基准宽比例分摊，长命令行会
+                    // 把标签挤窄几 px；中文任意字间断行，min-content 仅 1 字宽，
+                    // 「终端」会被挤成两行（截断只应发生在摘要上）
                     .child(if running {
                         ShimmerText::new(kind_label)
                             .id(("tool-label-shimmer", message_ix * 1024 + segment_ix))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
                             .text_sm()
                             .text_color(subtlest)
                             .into_any_element()
                     } else {
                         div()
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(subtlest)
@@ -404,6 +411,8 @@ impl ThreadView {
                     .when(approval_pending, |this| {
                         this.child(
                             div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
                                 .text_xs()
                                 .text_color(cx.theme().warning)
                                 .child("等待批准"),
