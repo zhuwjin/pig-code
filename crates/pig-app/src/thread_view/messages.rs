@@ -366,7 +366,12 @@ impl ThreadView {
         }
     }
 
-    pub(crate) fn render_message(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_message(
+        &self,
+        ix: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let message = &self.messages[ix];
         match message.role {
             Role::User => self.render_user_message(ix, message, cx),
@@ -390,6 +395,7 @@ impl ThreadView {
                             text,
                             open,
                             duration,
+                            ticker,
                             body_scroll,
                             ticker_scroll,
                             ..
@@ -399,8 +405,10 @@ impl ThreadView {
                             text,
                             *open,
                             *duration,
+                            ticker,
                             body_scroll,
                             ticker_scroll,
+                            window,
                             cx,
                         ),
                         Segment::Markdown { state, .. } => {

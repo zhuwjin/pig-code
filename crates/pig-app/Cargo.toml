@@ -14,3 +14,6 @@ pig-core = { path = "../pig-core" }
 async-channel = "2"
 time = { version = "0.3", features = ["local-offset"] }
 serde_json = "1"
+
+[dev-dependencies]
+gpui-kit = { version = "0.7", features = ["test-support"] }

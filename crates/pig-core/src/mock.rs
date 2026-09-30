@@ -20,6 +20,12 @@ pub const SCENARIO_B_FILE: &str = "src/hello.txt";
 pub const SCENARIO_B_CONTENT: &str = "hello\nline2\nline3\n";
 pub const SCENARIO_B_BASH_MARKER: &str = "MOCK_BASH_OK";
 
+/// 思考滚动行演示场景：含此标记时直接流式输出**变速**多行思考（无工具调用）——
+/// 慢速长行（看钉尾横滚/渐隐）→ 快速连发短行（看纵滚排队/跳播）→ 匀速收尾
+/// （看逐行纵滚节奏）→ 文本含 marker。不走统一 50ms 写循环（每片自带延迟）。
+pub const SCENARIO_TICKER_TRIGGER: &str = "TICKER_SCENARIO";
+pub const TICKER_MARKER: &str = "MOCK_TICKER_DONE";
+
 /// TodoList 场景：含此标记时走 TodoList 写入 → 文本（测待办持久化用）。
 pub const TODO_SCENARIO_TRIGGER: &str = "TODO_SCENARIO";
 pub const TODO_SCENARIO_MARKER: &str = "MOCK_TODO_OK";
@@ -202,6 +208,92 @@ fn tool_call_response() -> Vec<String> {
         Some((60, 10, 70)),
     ));
     chunks
+}
+
+/// 思考滚动行演示场景的变速脚本：返回（片前延迟 ms，思考片）序列。
+/// 节奏设计（配合 UI 纵滚状态机的 800ms 间隔）：
+/// - 慢速长行：逐片看同行原位刷新；第二行故意超长，看钉尾横滚与左缘渐隐出现
+/// - 快速连发短行（间隔 <800ms）：看排队节流与中间条跳播
+/// - 匀速收尾：每行间隔 >800ms，逐行看清纵滚
+fn ticker_scenario_script() -> Vec<(u64, String)> {
+    // 慢速滴出：text 按每片 size 个字符切（字符边界，防切到多字节字符中间）
+    fn drip(pieces: &mut Vec<(u64, String)>, text: &str, size: usize, ms: u64, newline: bool) {
+        let chars: Vec<char> = text.chars().collect();
+        for piece in chars.chunks(size) {
+            pieces.push((ms, piece.iter().collect()));
+        }
+        if newline {
+            pieces.push((0, "\n".to_string()));
+        }
+    }
+    let mut pieces: Vec<(u64, String)> = Vec::new();
+    drip(
+        &mut pieces,
+        "先理解需求：用户想看到思考过程逐行滚动展示的效果，我先把问题拆开，从渲染节奏和节流两头看。",
+        4,
+        130,
+        true,
+    );
+    drip(
+        &mut pieces,
+        "这一行故意写得特别特别长，用来验证滚动行钉尾之后旧内容向左移出、左缘渐隐遮罩随之出现，横滚与纵滚叠在一起时互不打架，CJK 与标点混排也顺便过一遍，再继续加长一截确保任何窗口宽度下都能溢出，尾部再补一段长尾说明文字，让横向溢出在任何主题下都看得清清楚楚。",
+        5,
+        100,
+        true,
+    );
+    // 快速连发六行（每行一整片，间隔约 180ms，全部落在停留期内 → 排队/跳播）
+    for word in [
+        "快速行一",
+        "快速行二",
+        "快速行三",
+        "快速行四",
+        "快速行五",
+        "快速行六",
+    ] {
+        pieces.push((180, format!("{word}\n")));
+    }
+    // 匀速收尾：三行各滴出约 1s，行间隔 >800ms，逐行看清纵滚
+    for line in [
+        "连发结束，恢复逐行停留的节奏。",
+        "再滚一行，确认节奏稳定。",
+        "收尾前再确认一次：纵滚、钉尾、渐隐都正常。",
+    ] {
+        drip(&mut pieces, line, 3, 120, true);
+        pieces.push((900, String::new()));
+    }
+    pieces
+}
+
+/// 思考滚动行演示场景（TICKER_SCENARIO）：不走统一 50ms 写循环——
+/// 思考片按脚本自带延迟写出，正文回复回到正常节奏。
+async fn write_ticker_scenario(stream: &mut tokio::net::TcpStream) {
+    for (ms, piece) in ticker_scenario_script() {
+        if ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        // 行间隔占位片不产出内容（纯延迟）
+        if piece.is_empty() {
+            continue;
+        }
+        let chunk = sse_chunk(serde_json::json!({"reasoning_content": piece}), None);
+        if stream.write_all(chunk.as_bytes()).await.is_err() {
+            return;
+        }
+    }
+    let reply = format!("思考滚动演示完成：{TICKER_MARKER}。");
+    let chars: Vec<char> = reply.chars().collect();
+    for piece in chars.chunks(6) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let delta: String = piece.iter().collect();
+        let chunk = sse_chunk(serde_json::json!({"content": delta}), None);
+        if stream.write_all(chunk.as_bytes()).await.is_err() {
+            return;
+        }
+    }
+    let stop = sse_chunk(serde_json::json!({}), Some("stop"));
+    let _ = stream.write_all(stop.as_bytes()).await;
+    let _ = stream.write_all(b"data: [DONE]\n\n").await;
+    let _ = stream.shutdown().await;
 }
 
 /// 回显消息数（测试 resume 后历史重建用）：用户消息含 ECHO_HISTORY 时触发。
@@ -1043,6 +1135,11 @@ async fn handle_connection(
     let response_head =
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
     if stream.write_all(response_head.as_bytes()).await.is_err() {
+        return;
+    }
+    // 思考滚动行演示场景：变速吐字（每片自带延迟），不进统一 50ms 写循环
+    if !anthropic && body.contains(SCENARIO_TICKER_TRIGGER) {
+        write_ticker_scenario(&mut stream).await;
         return;
     }
     let chunks = if anthropic {

@@ -1,9 +1,11 @@
+use super::cards::{measure_ticker_width, ticker_roll_content};
 use super::{
-    adjacent_image_index, as_task_notification, clamp_lightbox_pan, collect_lightbox_positions,
-    elide_record_path, format_file_size, format_notification_duration, lightbox_display_size,
-    lightbox_fit_scale, lightbox_pan_after_zoom, message_image_number, parse_image_link,
-    split_image_links,
+    TickerRoll, adjacent_image_index, as_task_notification, clamp_lightbox_pan,
+    collect_lightbox_positions, elide_record_path, format_file_size, format_notification_duration,
+    lightbox_display_size, lightbox_fit_scale, lightbox_pan_after_zoom, message_image_number,
+    parse_image_link, split_image_links, ticker_target_line,
 };
+use std::time::{Duration, Instant};
 
 #[test]
 fn task_notification_strips_outer_tags() {
@@ -227,4 +229,193 @@ fn split_image_links_leaves_non_links_untouched() {
     // 其它协议/形态 → 不算
     assert_eq!(parse_image_link("[图片 1](https://x.com/m1)"), None);
     assert!(parse_image_link("[图片 12](pig-code-composer://attachments/m12)").is_some());
+}
+
+#[test]
+fn ticker_target_line_picks_last_non_empty_line() {
+    assert_eq!(ticker_target_line(""), None);
+    assert_eq!(ticker_target_line("  \n\t\n"), None);
+    // 最后一个非空行，行号是原文行下标（纵滚的 key）
+    assert_eq!(
+        ticker_target_line("第一行\n\n第二行\n\n"),
+        Some((2, "第二行".to_string()))
+    );
+    // 裸 \r 与制表符压成单空格（渲染层把 \r 当换行，滚动行必须保持单行）
+    assert_eq!(
+        ticker_target_line("第一行\n第 二\t行\r尾"),
+        Some((1, "第 二 行 尾".to_string()))
+    );
+    // 行号稳定：同行追加不换 key
+    assert_eq!(ticker_target_line("abc"), Some((0, "abc".to_string())));
+    assert_eq!(
+        ticker_target_line("abc def"),
+        Some((0, "abc def".to_string()))
+    );
+}
+
+#[test]
+fn ticker_roll_first_line_shows_without_animation() {
+    let mut roll = TickerRoll::default();
+    // 首行直接显示：不触发滚动（无定时器）、无退场行、不播入场动画
+    assert!(!roll.feed((0, "第一行".to_string())));
+    assert_eq!(roll.displayed, Some((0, "第一行".to_string())));
+    assert!(!roll.rolled_in);
+    assert!(roll.exiting.is_none());
+}
+
+#[test]
+fn ticker_roll_refreshes_same_line_in_place() {
+    let mut roll = TickerRoll::default();
+    roll.feed((0, "想".to_string()));
+    // 同行号追加：原位刷新，不滚动
+    assert!(!roll.feed((0, "想更多".to_string())));
+    assert_eq!(roll.displayed, Some((0, "想更多".to_string())));
+    assert!(roll.exiting.is_none());
+    assert!(!roll.rolling);
+}
+
+#[test]
+fn ticker_roll_promotes_new_line_and_queues_during_hold() {
+    let mut roll = TickerRoll::default();
+    roll.feed((0, "a".to_string()));
+    // 行号变且不在停留期：立即滚动
+    assert!(roll.feed((1, "b".to_string())));
+    assert_eq!(roll.displayed, Some((1, "b".to_string())));
+    assert_eq!(roll.exiting, Some((0, "a".to_string())));
+    assert!(roll.rolled_in);
+    assert!(roll.rolling);
+    // 停留期内：第一条排队保位，第二条占第二格，再来的替换第二格
+    assert!(!roll.feed((2, "c".to_string())));
+    assert!(!roll.feed((3, "d".to_string())));
+    assert!(!roll.feed((4, "e".to_string())));
+    assert_eq!(roll.queue, vec![(2, "c".to_string()), (4, "e".to_string())]);
+    // 同 key 覆盖排队中的条目（文本原位更新，不新增条目）
+    assert!(!roll.feed((4, "e+".to_string())));
+    assert_eq!(
+        roll.queue,
+        vec![(2, "c".to_string()), (4, "e+".to_string())]
+    );
+    // 滚动中的当前行同行号追加仍是原位刷新
+    assert!(!roll.feed((1, "b+".to_string())));
+    assert_eq!(roll.displayed, Some((1, "b+".to_string())));
+}
+
+#[test]
+fn ticker_roll_fire_promotes_next_and_stops_when_drained() {
+    let mut roll = TickerRoll::default();
+    roll.feed((0, "a".to_string()));
+    roll.feed((1, "b".to_string()));
+    let generation = roll.generation;
+    // 代次不符的旧定时器直接作废
+    assert!(!roll.fire(generation + 1, Instant::now()));
+    // 空队列：收尾（清退场行、退出停留期），不续期
+    assert!(!roll.fire(generation, Instant::now()));
+    assert!(!roll.rolling);
+    assert!(roll.exiting.is_none());
+    // 有新行排队时：滚入队首并续期
+    assert!(roll.feed((2, "c".to_string())));
+    roll.feed((3, "d".to_string()));
+    let generation = roll.generation;
+    assert!(roll.fire(generation, Instant::now()));
+    assert_eq!(roll.displayed, Some((3, "d".to_string())));
+    assert_eq!(roll.exiting, Some((2, "c".to_string())));
+    assert!(roll.queue.is_empty());
+}
+
+#[test]
+fn ticker_roll_fire_skips_stale_queue_on_timer_drift() {
+    let mut roll = TickerRoll::default();
+    roll.feed((0, "a".to_string()));
+    roll.feed((1, "b".to_string()));
+    roll.feed((2, "c".to_string()));
+    roll.feed((3, "d".to_string()));
+    // 模拟主线程繁忙：定时器晚到 >250ms（回填上次滚动时刻）
+    roll.promoted_at = Some(Instant::now() - Duration::from_secs(2));
+    let generation = roll.generation;
+    assert!(roll.fire(generation, Instant::now()));
+    // 跳过中间条 c，直接播最新 d
+    assert_eq!(roll.displayed, Some((3, "d".to_string())));
+    assert!(roll.queue.is_empty());
+}
+
+#[test]
+fn ticker_roll_reset_invalidates_pending_timer() {
+    let mut roll = TickerRoll::default();
+    roll.feed((0, "a".to_string()));
+    roll.feed((1, "b".to_string()));
+    roll.feed((2, "c".to_string()));
+    let generation = roll.generation;
+    // 展开/收起：重置到最新行，无退场、无排队、无入场动画
+    roll.reset_to(ticker_target_line("a\nb\nc"));
+    assert_eq!(roll.displayed, Some((2, "c".to_string())));
+    assert!(roll.exiting.is_none());
+    assert!(roll.queue.is_empty());
+    assert!(!roll.rolled_in);
+    assert!(!roll.rolling);
+    // reset 前起的定时器到点不动作（代次已作废）
+    assert!(!roll.fire(generation, Instant::now()));
+    assert_eq!(roll.displayed, Some((2, "c".to_string())));
+}
+
+/// 横向钉尾回归：纵滚容器的内容必须保持自然宽度溢出视口，ScrollHandle 才能感知
+/// 横向可滚（钉尾 `set_offset(-max_offset)` 依赖它）。回归史：滚动容器内的文本
+/// 宽度会被布局钳进可用空间（max_offset 恒 0 → 内容停在开头，2026-09-30 实测），
+/// 修复 = 显式量宽设给容器（measure_ticker_width，sidebar 跑马灯同款）。
+#[gpui_kit::test]
+fn ticker_roll_content_overflows_viewport(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AppContext as _, InteractiveElement as _, ParentElement as _,
+        StatefulInteractiveElement as _, Styled as _,
+    };
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        scroll: gpui_kit::ScrollHandle,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            // 与 render_thinking 相同的嵌套：限宽外层 + 滚动 viewport + 纵滚容器
+            let line = "纵滚回归探针".repeat(40);
+            let width = measure_ticker_width(&line, window, cx);
+            gpui_kit::div().size_full().child(
+                gpui_kit::div().w(gpui_kit::px(200.)).child(
+                    gpui_kit::div()
+                        .id("ticker-viewport")
+                        .w_full()
+                        .overflow_x_scroll()
+                        .track_scroll(&self.scroll)
+                        .child(ticker_roll_content(
+                            0,
+                            0,
+                            width,
+                            line,
+                            None,
+                            false,
+                            gpui_kit::hsla(0., 0., 0., 1.),
+                        )),
+                ),
+            )
+        }
+    }
+
+    let scroll = gpui_kit::ScrollHandle::new();
+    let window = cx.open_window(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)), {
+        let scroll = scroll.clone();
+        move |_window, _cx| Probe {
+            scroll: scroll.clone(),
+        }
+    });
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let max = scroll.max_offset().x;
+    assert!(
+        max > gpui_kit::px(1.),
+        "滚动行内容应溢出视口（钉尾依赖 max_offset），实际 {max:?}"
+    );
 }

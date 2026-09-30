@@ -604,7 +604,7 @@ impl Render for ThreadView {
         }
         let mut items = Vec::with_capacity(self.messages.len());
         for ix in 0..self.messages.len() {
-            items.push(self.render_message(ix, cx));
+            items.push(self.render_message(ix, window, cx));
         }
 
         let working_secs = self

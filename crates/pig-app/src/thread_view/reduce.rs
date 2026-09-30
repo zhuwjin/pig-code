@@ -26,9 +26,29 @@ impl ThreadView {
                     duration: None,
                     body_scroll: ScrollHandle::new(),
                     ticker_scroll: ScrollHandle::new(),
+                    ticker: TickerRoll::default(),
                 });
-                if let Some(Segment::Thinking { text, .. }) = self.current_segment(six) {
+                let mut roll_promoted = false;
+                let replay = self.replay_turn;
+                if let Some(Segment::Thinking {
+                    text,
+                    duration,
+                    ticker,
+                    ..
+                }) = self.current_segment(six)
+                {
                     text.push_str(&delta);
+                    // 纵滚状态机只喂进行中的段：回放/已收尾的段不显示滚动行，
+                    // 喂了也只会白起定时器
+                    if duration.is_none()
+                        && !replay
+                        && let Some(target) = ticker_target_line(text)
+                    {
+                        roll_promoted = ticker.feed(target);
+                    }
+                }
+                if roll_promoted {
+                    self.spawn_ticker_timer(six, cx);
                 }
                 self.auto_scroll();
             }
@@ -437,5 +457,33 @@ impl ThreadView {
 
     pub(crate) fn current_segment(&mut self, six: usize) -> Option<&mut Segment> {
         self.messages.last_mut()?.segments.get_mut(six)
+    }
+
+    /// 思考滚动行的滚动间隔定时器（ZCode QueuedSummaryContent 的 promote 定时器）：
+    /// 到点滚入下一条排队行，还有排队则续期。代次不符（段已 reset/又滚过）的
+    /// 旧定时器直接作废。在播思考段恒在最后一条消息里，current_segment 够用；
+    /// 找不到说明段已收尾/不属于当前轮，定时器链自然终止。
+    fn spawn_ticker_timer(&mut self, six: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Thinking { ticker, .. }) = self.current_segment(six) else {
+            return;
+        };
+        let generation = ticker.generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TICKER_ROLL_INTERVAL).await;
+            this.update(cx, |this, cx| {
+                let again =
+                    if let Some(Segment::Thinking { ticker, .. }) = this.current_segment(six) {
+                        ticker.fire(generation, std::time::Instant::now())
+                    } else {
+                        false
+                    };
+                if again {
+                    this.spawn_ticker_timer(six, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }

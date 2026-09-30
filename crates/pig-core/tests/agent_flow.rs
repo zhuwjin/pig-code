@@ -414,3 +414,63 @@ async fn interrupt_during_tool_persists_stopped_card() {
     );
     agent.shutdown();
 }
+
+/// 思考滚动行演示场景（TICKER_SCENARIO）：多行变速思考流完整到达引擎——
+/// 思考全文含超长行/快速连发行/收尾行，正文带 marker，回合正常收尾。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ticker_scenario_streams_multiline_reasoning() {
+    let (config_path, cwd, data_dir) = setup("ticker-scenario");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: format!("{} 演示思考滚动行", mock::SCENARIO_TICKER_TRIGGER),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    // 场景脚本全长约 15s（故意慢速），留足余量
+    let events = recv_until(&events, Duration::from_secs(60), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+
+    let reasoning: String = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ReasoningDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    // 多行：快速连发六行与三行收尾都到了
+    assert!(reasoning.lines().count() >= 10, "思考应有多行: {reasoning}");
+    for word in [
+        "快速行一",
+        "快速行二",
+        "快速行三",
+        "快速行四",
+        "快速行五",
+        "快速行六",
+    ] {
+        assert!(reasoning.contains(word), "思考应含 {word}: {reasoning}");
+    }
+    // 超长行原样到达（钉尾横滚的素材）
+    assert!(
+        reasoning.lines().any(|line| line.chars().count() > 100),
+        "应有超长思考行: {reasoning}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::TextDone { full_text, .. } if full_text.contains(mock::TICKER_MARKER)
+        )),
+        "正文应含 marker: {events:#?}"
+    );
+    agent.shutdown();
+}

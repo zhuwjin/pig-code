@@ -2,9 +2,9 @@ use super::*;
 
 impl ThreadView {
     /// 思考折叠块（ZCode reasoning.tsx 同款）：无边框的一行 header（大脑图标 + 文案），
-    /// 进行中文案为扫光「正在思考」，后随 `·` + 滚动输出行（累计思考全文的最后一个非空
-    /// 行压单行，钉尾显示最新内容、左缘渐隐遮罩；纵向滚轮冒泡给外层消息列表）；箭头悬停/
-    /// 展开时才显示；展开后正文以左侧竖线缩进展示，超高内部滚动。
+    /// 进行中文案为扫光「正在思考」，后随 `·` + 滚动输出行（纵滚状态机提供：换行时旧行
+    /// 向上滚出、新行从下方滚入，钉尾显示最新内容、左缘渐隐遮罩；纵向滚轮冒泡给外层
+    /// 消息列表）；箭头悬停/展开时才显示；展开后正文以左侧竖线缩进展示，超高内部滚动。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_thinking(
         &self,
@@ -13,8 +13,10 @@ impl ThreadView {
         text: &str,
         open: bool,
         duration: Option<std::time::Duration>,
+        ticker: &TickerRoll,
         body_scroll: &ScrollHandle,
         ticker_scroll: &ScrollHandle,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let secs = |d: std::time::Duration| (d.as_secs_f64().ceil() as u64).max(1);
@@ -26,16 +28,9 @@ impl ThreadView {
             // 回放重建的历史段没有真实时钟
             None => "思考 · 持续了几秒".to_string(),
         };
-        // 滚动输出行 = 累计思考全文的最后一个非空行压成的单行（折叠且进行中才显示）。
-        // 逐行语义是设计意图：模型输出换行后，滚动行换成新行从头开始展示。
-        // lines() 只按 \n 切行：裸回车 \r（后无 \n）会留在行内，渲染层却按换行
-        // 断行，滚动行被拆成多行——所有制表/回车类空白压成单空格
+        // 滚动输出行由段内纵滚状态机提供（TickerRoll，见 model.rs），折叠且进行中才显示
         let ticker_line = if in_progress && !open {
-            text.lines()
-                .rev()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            ticker.displayed.clone()
         } else {
             None
         };
@@ -50,7 +45,7 @@ impl ThreadView {
             let max = ticker_scroll.max_offset();
             ticker_scroll.set_offset(point(-max.x, px(0.)));
         }
-        let ticker = ticker_line.map(|line| {
+        let ticker = ticker_line.map(|(line_ix, line)| {
             let bg = cx.theme().background;
             let max = ticker_scroll.max_offset().x;
             let offset = ticker_scroll.offset().x;
@@ -76,6 +71,20 @@ impl ThreadView {
                         linear_color_stop(to, 1.),
                     ))
             };
+            // 纵滚容器（ZCode QueuedSummaryContent 同款）：单行高、纵向裁切；退场行
+            // absolute 不参与布局（popLayout 同款）。构造抽成自由函数供布局回归测试复用，
+            // 语义见 ticker_roll_content
+            let roll = ticker_roll_content(
+                ticker_key,
+                line_ix,
+                // 显式量宽：不显式给宽时滚动容器内的文本宽度被钳进可用空间，
+                // ScrollHandle 感知不到溢出（max_offset 恒 0），横向钉尾失效
+                measure_ticker_width(&line, window, cx),
+                line,
+                ticker.exiting.as_ref(),
+                ticker.rolled_in,
+                ticker_color,
+            );
             div()
                 .relative()
                 .flex_1()
@@ -86,14 +95,7 @@ impl ThreadView {
                         .w_full()
                         .overflow_x_scroll()
                         .track_scroll(ticker_scroll)
-                        .child(
-                            div()
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .text_sm()
-                                .text_color(ticker_color)
-                                .child(line),
-                        ),
+                        .child(roll),
                 )
                 // 滚轮接管：横向滚动由本行消费，纵向滚轮冒泡给外层消息列表
                 .child(
@@ -115,13 +117,22 @@ impl ThreadView {
                     .py_1()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(Segment::Thinking { open, pinned, .. }) = this
+                        if let Some(Segment::Thinking {
+                            open,
+                            pinned,
+                            text,
+                            ticker,
+                            ..
+                        }) = this
                             .messages
                             .get_mut(message_ix)
                             .and_then(|m| m.segments.get_mut(segment_ix))
                         {
                             *open = !*open;
                             *pinned = true;
+                            // 展开/收起都把滚动行重置到最新行（ZCode：展开时滚动行卸载，
+                            // 回折叠时以最新行重新挂载，不重播滚动）
+                            ticker.reset_to(ticker_target_line(text));
                         }
                         cx.notify();
                     }))
@@ -983,12 +994,7 @@ impl ThreadView {
                                     .size_4()
                                     .text_color(cx.theme().success),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(subtle)
-                                    .child("已结束"),
-                            )
+                            .child(div().text_xs().text_color(subtle).child("已结束"))
                             .into_any_element()
                     } else {
                         let note = note
@@ -1116,4 +1122,125 @@ impl ThreadView {
             window.paint_path(path, color);
         }
     }
+}
+
+/// 思考滚动行的纵滚容器（从 render_thinking 抽出，布局回归测试复用同一构造）。
+/// 单行高、纵向裁切：滚入行自下方 +0.8em 起、滚出行向上 -0.8em 止，超高部分由
+/// 外层 viewport 的滚动 mask 裁掉（overflow 任一轴非 visible 即按 bounds 双轴裁剪，
+/// 见 gpui style::overflow_mask；容器自身不设 overflow，也不依赖它裁切）。
+/// 退场行 absolute 不参与布局（ZCode popLayout 同款）。
+/// 动画 id 含行号：换行号才重播，同行追加（同 id）原位刷新不重启动画。
+///
+/// `width` 必须是调用方量出的文本自然宽（measure_ticker_width）：不显式给宽时，
+/// 滚动容器内的内容会被布局钳到视口宽，ScrollHandle 感知不到溢出（max_offset
+/// 恒 0），横向钉尾失效（sidebar 跑马灯同款坑，2026-09-30 在滚动行上重现）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ticker_roll_content(
+    ticker_key: usize,
+    line_ix: usize,
+    width: Pixels,
+    line: String,
+    exiting: Option<&(usize, String)>,
+    rolled_in: bool,
+    color: Hsla,
+) -> AnyElement {
+    let mut roll = div()
+        .flex_none()
+        .relative()
+        .w(width)
+        .whitespace_nowrap()
+        .text_sm();
+    if let Some((exit_ix, exit_line)) = exiting {
+        roll = roll.child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .text_color(color)
+                .child(exit_line.clone())
+                .with_animation(
+                    format!("thinking-ticker-exit-{ticker_key}-{exit_ix}"),
+                    Animation::new(TICKER_ROLL_TRANSITION).with_easing(ticker_roll_easing),
+                    |el, delta| {
+                        el.top(px(-TICKER_ROLL_OFFSET_PX * delta))
+                            .opacity(1.0 - delta)
+                    },
+                ),
+        );
+    }
+    let entering = div().text_color(color).child(line);
+    roll.child(if rolled_in {
+        entering
+            .with_animation(
+                format!("thinking-ticker-enter-{ticker_key}-{line_ix}"),
+                Animation::new(TICKER_ROLL_TRANSITION).with_easing(ticker_roll_easing),
+                |el, delta| {
+                    el.top(px(TICKER_ROLL_OFFSET_PX * (1.0 - delta)))
+                        .opacity(delta)
+                },
+            )
+            .into_any_element()
+    } else {
+        entering.into_any_element()
+    })
+    .into_any_element()
+}
+
+/// 用文本系统量出思考滚动行的自然单行宽度（sidebar 跑马灯 `measure_title_width`
+/// 同款）：不显式量宽时，滚动容器内的文本宽度会被布局钳进可用空间，ScrollHandle
+/// 感知不到溢出（max_offset 恒 0），横向钉尾失效。text_sm = 0.875rem；+2px 防
+/// 字宽取整误差
+pub(crate) fn measure_ticker_width(text: &str, window: &Window, cx: &App) -> Pixels {
+    let font_size = rems(0.875).to_pixels(window.rem_size());
+    let font = Font {
+        family: cx.theme().font_family.clone(),
+        ..Font::default()
+    };
+    window
+        .text_system()
+        .shape_line(
+            SharedString::from(text.to_string()),
+            font_size,
+            &[TextRun {
+                len: text.len(),
+                font,
+                color: black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        )
+        .width
+        + px(2.)
+}
+
+/// 思考滚动行的纵滚缓动：ZCode QueuedSummaryContent 的 CSS cubic-bezier(0.4, 0, 0.2, 1)。
+/// gpui 无内置 cubic_bezier，这里按 CSS 语义实现：Newton-Raphson 解 x(t) = 输入进度，
+/// 再取对应 y(t)
+fn ticker_roll_easing(x: f32) -> f32 {
+    const X1: f32 = 0.4;
+    const Y1: f32 = 0.0;
+    const X2: f32 = 0.2;
+    const Y2: f32 = 1.0;
+    fn curve(t: f32, a1: f32, a2: f32) -> f32 {
+        let u = 1.0 - t;
+        3.0 * u * u * t * a1 + 3.0 * u * t * t * a2 + t * t * t
+    }
+    let x = x.clamp(0.0, 1.0);
+    let mut t = x;
+    for _ in 0..8 {
+        let err = curve(t, X1, X2) - x;
+        if err.abs() < 1e-4 {
+            break;
+        }
+        let d = 3.0 * (1.0 - t) * (1.0 - t) * X1
+            + 6.0 * (1.0 - t) * t * (X2 - X1)
+            + 3.0 * t * t * (1.0 - X2);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        t = (t - err / d).clamp(0.0, 1.0);
+    }
+    curve(t, Y1, Y2)
 }

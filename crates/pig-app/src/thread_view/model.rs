@@ -45,6 +45,8 @@ pub enum Segment {
         body_scroll: ScrollHandle,
         /// 进行中 header 滚动输出行的横向滚动句柄（钉尾显示最新内容）
         ticker_scroll: ScrollHandle,
+        /// 滚动输出行的纵滚状态机（换行时旧行向上滚出、新行从下方滚入）
+        ticker: TickerRoll,
     },
     Markdown {
         state: Entity<TextViewState>,
@@ -76,6 +78,140 @@ pub enum Segment {
         request_id: String,
         decision: Option<ApprovalDecision>,
     },
+}
+
+/// 思考滚动行的纵滚时序（ZCode QueuedSummaryContent 常量）：300ms 滚动 + 500ms 停留
+pub(crate) const TICKER_ROLL_TRANSITION: std::time::Duration =
+    std::time::Duration::from_millis(300);
+/// 两次滚动的最小间隔（滚动 300 + 停留 500）
+pub(crate) const TICKER_ROLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(800);
+/// 定时器晚到超过该值时，队列里过期的中间条被跳过，只播最新一条
+pub(crate) const TICKER_ROLL_DRIFT_SKIP: std::time::Duration =
+    std::time::Duration::from_millis(250);
+/// 纵滚位移 ≈ 0.8em（text_sm 14px）
+pub(crate) const TICKER_ROLL_OFFSET_PX: f32 = 11.0;
+
+/// 思考滚动行的纵滚状态机（ZCode QueuedSummaryContent 同款）：
+/// 滚动行 = 累计思考全文最后一个非空行，行号是滚动的 key。行号不变 → 原位刷新
+/// 文本；行号变 → 纵滚（旧行向上滚出、新行从下方滚入，300ms），之后至少停留
+/// 500ms 才滚下一条；停留期间连发的新行排队（最多 2 条：下一条 + 可替换的
+/// 最新条），定时器漂移超阈值时跳过中间条直接播最新。
+#[derive(Default)]
+pub(crate) struct TickerRoll {
+    /// 当前显示行（行号, 压单行的文本）
+    pub displayed: Option<(usize, String)>,
+    /// 退场中的上一行（滚入后 300ms 内叠渲染）
+    pub exiting: Option<(usize, String)>,
+    /// 待滚队列：[0] = 下一条（不可覆盖），[1] = 可插队条（新的覆盖旧的）
+    pub(crate) queue: Vec<(usize, String)>,
+    /// 距上次滚入不足一个间隔（800ms 定时器在跑）
+    pub(crate) rolling: bool,
+    /// 定时器代次：promote/reset 各 +1，作废在途旧定时器
+    pub(crate) generation: u64,
+    /// 上次滚入的墙钟时刻（定时器漂移检测）
+    pub(crate) promoted_at: Option<std::time::Instant>,
+    /// 当前显示行是否经滚动入场（首行直接出现，无动画）
+    pub rolled_in: bool,
+}
+
+impl TickerRoll {
+    /// 喂入最新目标行；返回 true = 发生了立即滚动（调用方需起滚动间隔定时器）
+    pub(crate) fn feed(&mut self, target: (usize, String)) -> bool {
+        match &mut self.displayed {
+            // 首行直接显示，不播入场动画（ZCode AnimatePresence initial={false}）
+            None => {
+                self.displayed = Some(target);
+                false
+            }
+            // 同一行号：同行追加，原位刷新文本
+            Some((ix, text)) if *ix == target.0 => {
+                *text = target.1;
+                false
+            }
+            _ => {
+                if self.rolling {
+                    // 停留期内入队：同 key 覆盖；否则保第一条，新条占/换第二格
+                    if let Some(slot) = self.queue.iter_mut().find(|(ix, _)| *ix == target.0) {
+                        *slot = target;
+                    } else if self.queue.len() < 2 {
+                        self.queue.push(target);
+                    } else {
+                        self.queue[1] = target;
+                    }
+                    false
+                } else {
+                    self.promote(target);
+                    true
+                }
+            }
+        }
+    }
+
+    /// 滚动间隔定时器到点：清退场行，按漂移裁剪队列后滚入下一条；
+    /// 返回 true = 滚了新行（调用方续期定时器）
+    pub(crate) fn fire(&mut self, generation: u64, now: std::time::Instant) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.exiting = None;
+        self.rolling = false;
+        // 主线程繁忙时定时器晚到：继续逐条补播过期行会让用户在卡顿恢复后看到
+        // 一串过期状态，体感更卡——跳过中间条直接播最新
+        let drifted = self
+            .promoted_at
+            .is_some_and(|t| now.duration_since(t) > TICKER_ROLL_INTERVAL + TICKER_ROLL_DRIFT_SKIP);
+        if drifted && self.queue.len() > 1 {
+            let last = self.queue.pop().expect("len > 1");
+            self.queue.clear();
+            self.queue.push(last);
+        }
+        if self.queue.is_empty() {
+            return false;
+        }
+        let next = self.queue.remove(0);
+        self.promote(next);
+        true
+    }
+
+    /// 展开/收起切换时重置到最新行（ZCode：滚动行随展开卸载、回折叠时以最新行
+    /// 重新挂载，不重播滚动）；代次 +1 作废在途定时器
+    pub(crate) fn reset_to(&mut self, target: Option<(usize, String)>) {
+        self.displayed = target;
+        self.exiting = None;
+        self.queue.clear();
+        self.rolling = false;
+        self.promoted_at = None;
+        self.rolled_in = false;
+        self.generation += 1;
+    }
+
+    fn promote(&mut self, next: (usize, String)) {
+        self.exiting = self.displayed.take();
+        self.displayed = Some(next);
+        self.rolled_in = true;
+        self.rolling = true;
+        self.promoted_at = Some(std::time::Instant::now());
+        self.generation += 1;
+    }
+}
+
+/// 滚动行目标行：累计思考全文的最后一个非空 trimmed 行压成单行，返回（行号, 文本）
+/// ——行号是纵滚的 key（ZCode resolveReasoningStreamingSummary 同款）。
+/// lines() 只按 \n 切行：裸回车 \r（后无 \n）会留在行内，渲染层却按换行断行，
+/// 滚动行被拆成多行——所有制表/回车类空白压成单空格
+pub(crate) fn ticker_target_line(text: &str) -> Option<(usize, String)> {
+    // Lines 是双端迭代器但 enumerate 后不再是，先数总行数再从尾部找
+    let total = text.lines().count();
+    text.lines()
+        .rev()
+        .enumerate()
+        .find(|(_, l)| !l.trim().is_empty())
+        .map(|(back, l)| {
+            (
+                total - 1 - back,
+                l.split_whitespace().collect::<Vec<_>>().join(" "),
+            )
+        })
 }
 
 /// 每轮改动面板里的单文件行
