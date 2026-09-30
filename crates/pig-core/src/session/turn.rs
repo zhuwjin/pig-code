@@ -243,10 +243,8 @@ impl Session {
             let threshold = config
                 .context_window
                 .saturating_sub(config.max_output_tokens + 13_000);
-            if used > threshold {
-                if !self.run_compact(Some(config), true, tx, cancel).await {
-                    return StepOutcome::Ended;
-                }
+            if used > threshold && !self.run_compact(Some(config), true, tx, cancel).await {
+                return StepOutcome::Ended;
             }
         }
 

@@ -65,15 +65,14 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
         // dd 写块设备（of=/dev/…，字符设备白名单放行）
         if base == "dd" {
             for t in &tokens[i + 1..] {
-                if let Some(target) = t.strip_prefix("of=") {
-                    if target.starts_with("/dev/")
-                        && !matches!(
-                            target,
-                            "/dev/null" | "/dev/zero" | "/dev/random" | "/dev/urandom"
-                        )
-                    {
-                        return Some("dd 写入块设备");
-                    }
+                if let Some(target) = t.strip_prefix("of=")
+                    && target.starts_with("/dev/")
+                    && !matches!(
+                        target,
+                        "/dev/null" | "/dev/zero" | "/dev/random" | "/dev/urandom"
+                    )
+                {
+                    return Some("dd 写入块设备");
                 }
             }
         }
@@ -100,8 +99,8 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
             let recursive = tokens[i + 1..]
                 .iter()
                 .any(|t| t.starts_with('-') && t.trim_start_matches('-').contains('R'));
-            let root_target = tokens[i + 1..].iter().any(|t| *t == "/");
-            let is_777 = tokens[i + 1..].iter().any(|t| *t == "777");
+            let root_target = tokens[i + 1..].contains(&"/");
+            let is_777 = tokens[i + 1..].contains(&"777");
             if recursive && root_target && (base == "chown" || is_777) {
                 return Some("递归改权/改属根目录");
             }

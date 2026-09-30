@@ -1114,7 +1114,7 @@ async fn edit_not_unique_reports_line_numbers() {
     std::fs::write(dir.join("dup.txt"), body).unwrap();
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    let (_, ..) = tool::execute(
+    let (..) = tool::execute(
         &call("Read", serde_json::json!({"path": "dup.txt"})),
         ToolContext {
             cwd: &dir,

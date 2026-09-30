@@ -69,15 +69,15 @@ impl AppView {
         // 并交接补间），方向相反撤段硬切。注意本函数每 render 对两侧各跑一
         // 遍，动作必须限定在本侧确实要转换的分支里，否则会把刚起步的动画
         // 在下一帧杀掉
-        if let Some(edge) = self.dock_edge {
-            if edge.placement == placement {
-                if edge.opening == flag_open {
-                    return None;
-                }
-                self.dock_edge = None;
-                self.apply_dock_flags(placement, window, cx);
+        if let Some(edge) = self.dock_edge
+            && edge.placement == placement
+        {
+            if edge.opening == flag_open {
                 return None;
             }
+            self.dock_edge = None;
+            self.apply_dock_flags(placement, window, cx);
+            return None;
         }
         let (dock_open, current) = {
             let dock = self.dock.read(cx);

@@ -439,11 +439,11 @@ fn spawn_watcher(
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         {
             let mut tasks = registry.lock().expect("task registry lock");
-            if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) {
-                if matches!(entry.status, TaskStatus::Running) {
-                    entry.status = TaskStatus::Exited(code);
-                    entry.ended_at = Some(now_secs());
-                }
+            if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id)
+                && matches!(entry.status, TaskStatus::Running)
+            {
+                entry.status = TaskStatus::Exited(code);
+                entry.ended_at = Some(now_secs());
             }
         }
         let _ = notify.send(session_id);

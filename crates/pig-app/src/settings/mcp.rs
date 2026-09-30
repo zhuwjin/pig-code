@@ -485,10 +485,10 @@ fn entry_from_json(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::
     if !entry.is_object() {
         return Err("server 配置必须是对象".to_string());
     }
-    if let Some(editing) = &dialog.editing {
-        if name != *editing {
-            return Err(format!("编辑时不能改名（JSON 键必须是 \"{editing}\"）"));
-        }
+    if let Some(editing) = &dialog.editing
+        && name != *editing
+    {
+        return Err(format!("编辑时不能改名（JSON 键必须是 \"{editing}\"）"));
     }
     let has = |key: &str| {
         entry

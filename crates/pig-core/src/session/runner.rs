@@ -24,6 +24,7 @@ struct SessionEntry {
     mcp_status: Option<Vec<pig_protocol::McpServerStatus>>,
 }
 type TurnFuture = std::pin::Pin<Box<dyn Future<Output = (String, Session)>>>;
+#[allow(clippy::too_many_arguments)]
 fn start_turn(
     entry: &mut SessionEntry,
     session_id: String,
@@ -293,11 +294,10 @@ pub async fn agent_loop(
                                 // 重新打开的会话无持久化面板状态：空快照重置
                                 emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items: vec![] });
                                 emit_global!(Event::TaskListChanged { session_id: session_id.clone(), seq, tasks: vec![] });
-                                if let Some(entry) = sessions.get_mut(&session_id) {
-                                    if let Some(session) = entry.session.as_mut() {
+                                if let Some(entry) = sessions.get_mut(&session_id)
+                                    && let Some(session) = entry.session.as_mut() {
                                         session.replay(&records, &event_tx);
                                     }
-                                }
                                 // 回放已恢复水位与累计：补发上下文容量，重开 app 不必
                                 // 等下一条消息即显示（模型未配置则跳过，无窗口可报）
                                 if let Some(entry) = sessions.get(&session_id)
@@ -424,11 +424,10 @@ pub async fn agent_loop(
                         start_turn(entry, session_id, content, files, images, mode, &resolved, &event_tx, &turns);
                     }
                     Op::CancelQueued { session_id, text } => {
-                        if let Some(entry) = sessions.get_mut(&session_id) {
-                            if let Some(pos) = entry.queue.iter().position(|(t, _, _, _)| t == &text) {
+                        if let Some(entry) = sessions.get_mut(&session_id)
+                            && let Some(pos) = entry.queue.iter().position(|(t, _, _, _)| t == &text) {
                                 entry.queue.remove(pos);
                             }
-                        }
                     }
                     Op::GitInfo { cwd } => {
                         let tx = event_tx.clone();
@@ -870,11 +869,10 @@ pub async fn agent_loop(
                     entry.session = Some(session);
                     entry.cancel = None;
                     // 回合结束（含中止/出错）后自动取出队首继续
-                    if let Some((content, files, images, mode)) = entry.queue.pop_front() {
-                        if let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) {
+                    if let Some((content, files, images, mode)) = entry.queue.pop_front()
+                        && let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) {
                             start_turn(entry, session_id.clone(), content, files, images, mode, &resolved, &event_tx, &turns);
                         }
-                    }
                 }
             }
         }

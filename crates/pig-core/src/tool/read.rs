@@ -166,21 +166,21 @@ impl Tool for ReadFile {
 pub(crate) fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
         let mut message = format!("文件不存在: {path}");
-        if let Some(parent) = full.parent() {
-            if let Ok(entries) = std::fs::read_dir(parent) {
-                let mut names: Vec<String> = entries
-                    .flatten()
-                    .map(|entry| entry.file_name().to_string_lossy().to_string())
-                    .collect();
-                names.sort();
-                names.truncate(20);
-                if !names.is_empty() {
-                    message.push_str(&format!(
-                        "。目录 {} 下有: {}",
-                        parent.display(),
-                        names.join(", ")
-                    ));
-                }
+        if let Some(parent) = full.parent()
+            && let Ok(entries) = std::fs::read_dir(parent)
+        {
+            let mut names: Vec<String> = entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            names.truncate(20);
+            if !names.is_empty() {
+                message.push_str(&format!(
+                    "。目录 {} 下有: {}",
+                    parent.display(),
+                    names.join(", ")
+                ));
             }
         }
         message

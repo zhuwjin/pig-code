@@ -187,17 +187,18 @@ fn gbk_roundtrip(bytes: &[u8]) -> bool {
 
 /// u16 单元按端序组装；失败降级 lossy，奇数尾字节丢弃。返回 (text, lossy)。
 fn decode_utf16(body: &[u8], little_endian: bool) -> (String, bool) {
-    let mut chunks = body.chunks_exact(2);
-    let units: Vec<u16> = (&mut chunks)
+    let (chunks, remainder) = body.as_chunks::<2>();
+    let units: Vec<u16> = chunks
+        .iter()
         .map(|pair| {
             if little_endian {
-                u16::from_le_bytes([pair[0], pair[1]])
+                u16::from_le_bytes(*pair)
             } else {
-                u16::from_be_bytes([pair[0], pair[1]])
+                u16::from_be_bytes(*pair)
             }
         })
         .collect();
-    let trailing_odd = !chunks.remainder().is_empty();
+    let trailing_odd = !remainder.is_empty();
     match String::from_utf16(&units) {
         Ok(text) => (text, trailing_odd),
         Err(_) => (String::from_utf16_lossy(&units), true),

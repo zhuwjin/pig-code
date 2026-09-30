@@ -518,6 +518,7 @@ struct CancelledTool<'a> {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         meta: SessionMeta,
         pending: PendingApprovals,
@@ -583,6 +584,7 @@ impl Session {
 
     /// 从 rollout 重建。diff 基线从 file_originals 表恢复到 ChangeTracker：
     /// resume 后改动仍以「会话首次快照 → 当前」计算，revert 跨重启可用。
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         id: &str,
         sessions_dir: &Path,
@@ -634,7 +636,7 @@ impl Session {
                 vec![data_dir.join("sessions")],
             ),
             always_allowed: HashSet::new(),
-            permissions: load_permissions(&cwd),
+            permissions: load_permissions(cwd),
             pre_plan_mode: None,
             pending,
             pending_questions,

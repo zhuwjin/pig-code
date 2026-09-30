@@ -1,5 +1,14 @@
 use super::*;
 
+/// 右侧面板菜单项：(名称, 图标, 快捷键 action, 占位禁用, 点击打开的 tab)
+pub(crate) type RightMenuItem = (
+    &'static str,
+    AssetsIconName,
+    Option<&'static dyn Action>,
+    bool,
+    Option<RightTab>,
+);
+
 impl AppView {
     /// 右侧面板 tab 开关（快捷键用）：已激活时再次触发 = 收起面板；否则打开并激活该 tab。
     pub(crate) fn toggle_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
@@ -84,15 +93,8 @@ impl AppView {
         cx.notify();
     }
 
-    /// 右侧面板菜单项：(名称, 图标, 快捷键 action, 占位禁用, 点击打开的 tab)。
     /// 浏览器/终端/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
-    pub(crate) fn right_menu_items() -> [(
-        &'static str,
-        AssetsIconName,
-        Option<&'static dyn Action>,
-        bool,
-        Option<RightTab>,
-    ); 4] {
+    pub(crate) fn right_menu_items() -> [RightMenuItem; 4] {
         [
             (
                 "改动",

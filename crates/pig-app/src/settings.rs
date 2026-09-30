@@ -70,8 +70,11 @@ pub enum SettingsPage {
     Onboarding,
 }
 
-/// (分组, [(页面, 图标, 名称)])——加页面只改这一处
-const NAV: &[(&str, &[(SettingsPage, IconName, &str)])] = &[
+/// (页面, 图标, 名称)
+type NavItem = (SettingsPage, IconName, &'static str);
+
+/// (分组, [NavItem])——加页面只改这一处
+const NAV: &[(&str, &[NavItem])] = &[
     (
         "基础设置",
         &[

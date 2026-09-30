@@ -206,10 +206,10 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let session_b = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
-        if let Some(id) = current {
-            if id != session_a {
-                break id;
-            }
+        if let Some(id) = current
+            && id != session_a
+        {
+            break id;
         }
     };
     println!("[selftest] 会话 B 就绪: {session_b}");
@@ -402,10 +402,10 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let session_c = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
-        if let Some(id) = current {
-            if id != session_a {
-                break id;
-            }
+        if let Some(id) = current
+            && id != session_a
+        {
+            break id;
         }
     };
     app!(|app: &mut AppView, _| {
@@ -510,10 +510,11 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let session_d = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
-        if let Some(id) = current {
-            if id != session_a && id != session_b {
-                break id;
-            }
+        if let Some(id) = current
+            && id != session_a
+            && id != session_b
+        {
+            break id;
         }
     };
     app!(|app: &mut AppView, _| {
@@ -577,10 +578,13 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let session_e = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
-        if let Some(id) = current {
-            if id != session_a && id != session_b && id != session_c && id != session_d {
-                break id;
-            }
+        if let Some(id) = current
+            && id != session_a
+            && id != session_b
+            && id != session_c
+            && id != session_d
+        {
+            break id;
         }
     };
     app!(|app: &mut AppView, _| {
@@ -1203,8 +1207,10 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let session_c = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
-        if current.is_some() && current != before_current {
-            break current.expect("已判 Some");
+        if let Some(cur) = current
+            && Some(&cur) != before_current.as_ref()
+        {
+            break cur;
         }
     };
     app!(|app: &mut AppView, _| {
@@ -1315,8 +1321,8 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
                 let views = app.views.get(&session_c)?;
                 views.thread.read(cx).debug_task_notification_meta()
             });
-            if found.is_some() {
-                break found.expect("已判 Some");
+            if let Some(meta) = found {
+                break meta;
             }
         }
     };
@@ -1371,8 +1377,10 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let session_d = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
-        if current.is_some() && current != before_current {
-            break current.expect("已判 Some");
+        if let Some(cur) = current
+            && Some(&cur) != before_current.as_ref()
+        {
+            break cur;
         }
     };
     app!(|app: &mut AppView, _| {

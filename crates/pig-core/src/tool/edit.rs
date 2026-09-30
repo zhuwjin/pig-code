@@ -314,9 +314,7 @@ fn strip_line_number_prefixes(s: &str) -> Option<String> {
     for line in body.split('\n') {
         let digit_len = line.bytes().take_while(|b| b.is_ascii_digit()).count();
         let rest = &line[digit_len..];
-        let stripped = if digit_len > 0 && rest.starts_with('\t') {
-            &rest[1..]
-        } else if digit_len > 0 && rest.starts_with(':') {
+        let stripped = if digit_len > 0 && (rest.starts_with('\t') || rest.starts_with(':')) {
             &rest[1..]
         } else {
             return None;

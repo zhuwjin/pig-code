@@ -176,14 +176,13 @@ pub fn is_sensitive_file(path: &Path) -> bool {
             if lower == prefix {
                 return true;
             }
-            if let Some(rest) = lower.strip_prefix(prefix) {
-                if rest
+            if let Some(rest) = lower.strip_prefix(prefix)
+                && rest
                     .chars()
                     .next()
                     .is_some_and(|c| matches!(c, '-' | '_' | '.'))
-                {
-                    return true;
-                }
+            {
+                return true;
             }
         }
     }

@@ -48,17 +48,17 @@ async fn run_scenario_b(
         else {
             continue;
         };
-        if let Event::ApprovalRequested { request_id, .. } = &event {
-            if let Some(decision) = approval {
-                agent
-                    .ops
-                    .send(Op::ApprovalReply {
-                        request_id: request_id.clone(),
-                        decision,
-                    })
-                    .await
-                    .unwrap();
-            }
+        if let Event::ApprovalRequested { request_id, .. } = &event
+            && let Some(decision) = approval
+        {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision,
+                })
+                .await
+                .unwrap();
         }
         let done = matches!(
             event,
@@ -640,17 +640,17 @@ async fn run_trigger(
         else {
             continue;
         };
-        if let Event::ApprovalRequested { request_id, .. } = &event {
-            if let Some(decision) = decision {
-                agent
-                    .ops
-                    .send(Op::ApprovalReply {
-                        request_id: request_id.clone(),
-                        decision,
-                    })
-                    .await
-                    .unwrap();
-            }
+        if let Event::ApprovalRequested { request_id, .. } = &event
+            && let Some(decision) = decision
+        {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision,
+                })
+                .await
+                .unwrap();
         }
         let done = matches!(
             event,

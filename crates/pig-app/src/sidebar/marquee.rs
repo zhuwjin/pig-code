@@ -46,10 +46,10 @@ impl Sidebar {
         {
             self.marquee = None;
         }
-        if let Some(handle) = self.title_scrolls.borrow().get(session_id) {
-            if handle.offset().x != px(0.) {
-                handle.set_offset(point(px(0.), px(0.)));
-            }
+        if let Some(handle) = self.title_scrolls.borrow().get(session_id)
+            && handle.offset().x != px(0.)
+        {
+            handle.set_offset(point(px(0.), px(0.)));
         }
         cx.notify();
     }
@@ -167,6 +167,7 @@ impl Sidebar {
     /// 会话标题区：横向滚动（悬停跑马灯）+ 两端渐隐。key 为 title_scrolls
     /// 的键：普通会话行用会话 id，置顶区行用 "pinned-{id}"（同一会话在两
     /// 种行的滚动状态互不干扰）
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_title_scroll(
         &self,
         key: &str,
@@ -181,7 +182,7 @@ impl Sidebar {
             .title_scrolls
             .borrow_mut()
             .entry(key.to_string())
-            .or_insert_with(ScrollHandle::new)
+            .or_default()
             .clone();
         let hover_key = key.to_string();
         // 显式真实宽度（+2px 余量防字宽取整误差），把溢出撑给 ScrollHandle

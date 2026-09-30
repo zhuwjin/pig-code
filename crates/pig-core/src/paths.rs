@@ -35,10 +35,10 @@ fn expand_tilde(path: &Path) -> PathBuf {
         if let Some(home) = home_dir() {
             return home;
         }
-    } else if let Some(rest) = text.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(rest);
-        }
+    } else if let Some(rest) = text.strip_prefix("~/")
+        && let Some(home) = home_dir()
+    {
+        return home.join(rest);
     }
     path.to_path_buf()
 }

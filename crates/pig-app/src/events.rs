@@ -138,10 +138,11 @@ impl AppView {
             }
             Event::SessionList { sessions } => {
                 self.metas = sessions.clone();
-                if self.current.is_none() && !self.metas.is_empty() {
-                    if let Some(meta) = self.metas.iter().find(|s| !s.archived) {
-                        self.agent.open_session(meta.id.clone());
-                    }
+                if self.current.is_none()
+                    && !self.metas.is_empty()
+                    && let Some(meta) = self.metas.iter().find(|s| !s.archived)
+                {
+                    self.agent.open_session(meta.id.clone());
                 }
                 self.push_hero_info(cx);
             }
@@ -554,10 +555,10 @@ impl AppView {
                 }
             }
             ComposerEvent::Clear => {
-                if let Some(sid) = &self.current {
-                    if let Some(views) = self.views.get(sid) {
-                        views.thread.update(cx, |thread, cx| thread.clear(cx));
-                    }
+                if let Some(sid) = &self.current
+                    && let Some(views) = self.views.get(sid)
+                {
+                    views.thread.update(cx, |thread, cx| thread.clear(cx));
                 }
             }
             ComposerEvent::Compact => {

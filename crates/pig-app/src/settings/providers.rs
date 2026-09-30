@@ -82,9 +82,9 @@ impl SettingsView {
                             .as_mut()
                             .is_some_and(|d| d.lookup_state != LookupState::Idle);
                         if dirty {
-                            this.model_dialog
-                                .as_mut()
-                                .map(|d| d.lookup_state = LookupState::Idle);
+                            if let Some(d) = this.model_dialog.as_mut() {
+                                d.lookup_state = LookupState::Idle;
+                            }
                             cx.notify();
                         }
                     }

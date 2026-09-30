@@ -283,10 +283,10 @@ impl ThreadView {
                 self.replay_turn = false;
                 if let Some(message) = self.messages.last_mut() {
                     for segment in &mut message.segments {
-                        if let Segment::Thinking { open, pinned, .. } = segment {
-                            if !*pinned {
-                                *open = false;
-                            }
+                        if let Segment::Thinking { open, pinned, .. } = segment
+                            && !*pinned
+                        {
+                            *open = false;
                         }
                     }
                 }

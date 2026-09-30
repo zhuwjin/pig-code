@@ -131,6 +131,13 @@ pub struct ThreadView {
 
 impl EventEmitter<ThreadEvent> for ThreadView {}
 
+/// 自测用：导航条活动项排查数据（nav_last_active, offset_y, max_offset_y,
+/// 容器高, 各用户消息行的 [top, bottom) 内容坐标）
+type NavActiveDetail = (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>);
+
+/// 自测用：后台子代理通知 meta（agent_id, 标题, 耗时毫秒, 记录路径, 结果路径）
+type TaskNotificationMeta = (String, String, Option<u64>, Option<String>, Option<String>);
+
 impl ThreadView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         // 每秒 tick：驱动"工作中 N 秒"计时刷新
@@ -309,11 +316,8 @@ impl ThreadView {
         (turns, f32::from(self.scroll_handle.bounds().size.width))
     }
 
-    /// 自测用：导航条活动项排查——（nav_last_active, offset_y, max_offset_y,
-    /// 容器高, 各用户消息行的 [top, bottom) 内容坐标）
-    pub fn debug_nav_active_detail(
-        &self,
-    ) -> (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>) {
+    /// 自测用：导航条活动项排查（字段见 [`NavActiveDetail`]）
+    pub fn debug_nav_active_detail(&self) -> NavActiveDetail {
         let user_rows = self
             .messages
             .iter()
@@ -437,12 +441,10 @@ impl ThreadView {
             .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
     }
 
-    /// 最近一条后台子代理通知的 (agent_id, 标题, 耗时毫秒, 记录路径, 结果路径)
-    ///（自测用；无通知/通知缺 agent_id 为 None）。标题 = description（缺省回退
-    ///「后台子代理」），与气泡渲染同口径。
-    pub fn debug_task_notification_meta(
-        &self,
-    ) -> Option<(String, String, Option<u64>, Option<String>, Option<String>)> {
+    /// 最近一条后台子代理通知的 meta（字段见 [`TaskNotificationMeta`]；自测用，
+    /// 无通知/通知缺 agent_id 为 None）。标题 = description（缺省回退「后台子代理」），
+    /// 与气泡渲染同口径。
+    pub fn debug_task_notification_meta(&self) -> Option<TaskNotificationMeta> {
         self.messages.iter().rev().find_map(|m| {
             if m.role != Role::User {
                 return None;

@@ -363,7 +363,6 @@ fn ticker_roll_reset_invalidates_pending_timer() {
 /// 修复 = 显式量宽设给容器（measure_ticker_width，sidebar 跑马灯同款）。
 #[gpui_kit::test]
 fn ticker_roll_content_overflows_viewport(cx: &mut gpui_kit::TestAppContext) {
-    use gpui_kit::component::ActiveTheme as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         AppContext as _, InteractiveElement as _, ParentElement as _,

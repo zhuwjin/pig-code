@@ -77,6 +77,7 @@ impl Composer {
 
     /// 底部工具栏芯片：图标 + 文本 + 下拉箭头，样式与 hero 区工作区/分支芯片一致。
     /// `color` 非 None 时图标与文本着色（模式芯片按危险程度着色用），箭头保持 muted。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_bar_chip(
         &self,
         id: &'static str,

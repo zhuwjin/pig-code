@@ -435,7 +435,7 @@ impl AppView {
         if self.views.contains_key(session_id) {
             return;
         }
-        let thread = cx.new(|cx| ThreadView::new(cx));
+        let thread = cx.new(ThreadView::new);
         // 用户消息图片附件的缩略图源：{data}/sessions/{id}.media（与 core 同源解析）
         thread.update(cx, |thread, _| {
             thread.set_media_dir(pig_core::rollout::media_dir(
@@ -443,7 +443,7 @@ impl AppView {
                 session_id,
             ));
         });
-        let review = cx.new(|cx| ReviewPanel::new(cx));
+        let review = cx.new(ReviewPanel::new);
         let sid = session_id.to_string();
         self._subscriptions.push(
             cx.subscribe(&thread, move |this, _, event, cx| match event {

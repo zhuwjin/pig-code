@@ -142,13 +142,13 @@ pub(crate) fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_
 pub(crate) fn to_anthropic_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
     tools
         .iter()
-        .filter_map(|tool| {
+        .map(|tool| {
             let function = &tool["function"];
-            Some(serde_json::json!({
+            serde_json::json!({
                 "name": function["name"],
                 "description": function["description"],
                 "input_schema": function["parameters"],
-            }))
+            })
         })
         .collect()
 }
@@ -273,17 +273,17 @@ pub(crate) async fn stream_anthropic(
                     let delta = &json["delta"];
                     match delta["type"].as_str() {
                         Some("text_delta") => {
-                            if let Some(text) = delta["text"].as_str() {
-                                if !text.is_empty() {
-                                    let _ = tx.send(ProviderEvent::Text(text.to_string()));
-                                }
+                            if let Some(text) = delta["text"].as_str()
+                                && !text.is_empty()
+                            {
+                                let _ = tx.send(ProviderEvent::Text(text.to_string()));
                             }
                         }
                         Some("thinking_delta") => {
-                            if let Some(thinking) = delta["thinking"].as_str() {
-                                if !thinking.is_empty() {
-                                    let _ = tx.send(ProviderEvent::Reasoning(thinking.to_string()));
-                                }
+                            if let Some(thinking) = delta["thinking"].as_str()
+                                && !thinking.is_empty()
+                            {
+                                let _ = tx.send(ProviderEvent::Reasoning(thinking.to_string()));
                             }
                         }
                         Some("input_json_delta") => {

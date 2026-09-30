@@ -41,7 +41,7 @@ pub async fn complete_text(
                     .post(format!("{}/chat/completions", config.base_url))
                     .bearer_auth(&config.api_key)
                     .json(&body)
-                    .send() => result.map_err(|e| net_err(e))?,
+                    .send() => result.map_err(net_err)?,
                 _ = cancel.cancelled() => return Err("已取消".to_string()),
             };
             let status = response.status();
@@ -75,7 +75,7 @@ pub async fn complete_text(
                     .header("x-api-key", &config.api_key)
                     .header("anthropic-version", "2023-06-01")
                     .json(&body)
-                    .send() => result.map_err(|e| net_err(e))?,
+                    .send() => result.map_err(net_err)?,
                 _ = cancel.cancelled() => return Err("已取消".to_string()),
             };
             let status = response.status();
@@ -142,7 +142,7 @@ pub async fn test_provider(
     let response = tokio::time::timeout(std::time::Duration::from_secs(10), send)
         .await
         .map_err(|_| "连接超时（10s）".to_string())?
-        .map_err(|e| net_err(e))?;
+        .map_err(net_err)?;
     let status = response.status();
     if status.is_success() {
         Ok(format!("连接成功（HTTP {status}）"))

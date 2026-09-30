@@ -306,11 +306,11 @@ fn finish(tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>, tool_calls: &m
 }
 
 fn merge_reasoning_params(body: &mut serde_json::Value, config: &ResolvedModel) {
-    if let (serde_json::Value::Object(map), Some(params)) = (body, &config.reasoning_params) {
-        if let serde_json::Value::Object(extra) = params {
-            for (key, value) in extra {
-                map.insert(key.clone(), value.clone());
-            }
+    if let (serde_json::Value::Object(map), Some(params)) = (body, &config.reasoning_params)
+        && let serde_json::Value::Object(extra) = params
+    {
+        for (key, value) in extra {
+            map.insert(key.clone(), value.clone());
         }
     }
 }

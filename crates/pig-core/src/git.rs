@@ -177,7 +177,7 @@ fn untracked_diff(cwd: &Path, path: &str) -> Option<String> {
     let full = root.join(path);
     let meta = std::fs::metadata(&full).ok()?;
     if meta.len() > UNTRACKED_STAT_MAX_BYTES {
-        return Some(format!("（文件超过 1MB，无文本 diff）"));
+        return Some("（文件超过 1MB，无文本 diff）".to_string());
     }
     let bytes = std::fs::read(&full).ok()?;
     if bytes.contains(&0) {
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn parse_numstat_handles_rename_binary_and_normal() {
-        let out = "3\t1\t\0old.txt\0new.txt\0-\t-\tbin.png\010\t2\tplain.txt\0";
+        let out = "3\t1\t\0old.txt\0new.txt\0-\t-\tbin.png\x0010\t2\tplain.txt\0";
         let map = parse_numstat(out);
         assert_eq!(map.get("new.txt"), Some(&(3, 1)));
         assert_eq!(map.get("bin.png"), Some(&(0, 0)));

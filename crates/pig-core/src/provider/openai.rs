@@ -162,15 +162,15 @@ pub(crate) async fn stream_openai(
                 continue;
             };
             if let Some(delta) = choice.delta {
-                if let Some(reasoning) = delta.reasoning_content {
-                    if !reasoning.is_empty() {
-                        let _ = tx.send(ProviderEvent::Reasoning(reasoning));
-                    }
+                if let Some(reasoning) = delta.reasoning_content
+                    && !reasoning.is_empty()
+                {
+                    let _ = tx.send(ProviderEvent::Reasoning(reasoning));
                 }
-                if let Some(text) = delta.content {
-                    if !text.is_empty() {
-                        let _ = tx.send(ProviderEvent::Text(text));
-                    }
+                if let Some(text) = delta.content
+                    && !text.is_empty()
+                {
+                    let _ = tx.send(ProviderEvent::Text(text));
                 }
                 if let Some(chunks) = delta.tool_calls {
                     for part in chunks {

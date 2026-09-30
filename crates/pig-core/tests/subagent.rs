@@ -39,17 +39,17 @@ async fn run_turn(
         else {
             continue;
         };
-        if let Event::ApprovalRequested { request_id, .. } = &event {
-            if let Some(decision) = approve {
-                agent
-                    .ops
-                    .send(Op::ApprovalReply {
-                        request_id: request_id.clone(),
-                        decision,
-                    })
-                    .await
-                    .unwrap();
-            }
+        if let Event::ApprovalRequested { request_id, .. } = &event
+            && let Some(decision) = approve
+        {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision,
+                })
+                .await
+                .unwrap();
         }
         let done = matches!(
             event,
