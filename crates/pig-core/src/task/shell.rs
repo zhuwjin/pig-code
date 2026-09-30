@@ -99,6 +99,7 @@ pub(crate) fn git_bash_candidates(git_exe: &Path) -> Vec<PathBuf> {
 /// Scoop/Chocolatey/WinGet 的 shim 不在 cmd/bin 布局里，靠这一步定位真实安装根。
 pub(crate) fn git_root_from_exec_path(git_exe: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new(git_exe)
+        .no_console()
         .arg("--exec-path")
         .output()
         .ok()?;
@@ -188,6 +189,7 @@ pub(crate) fn spawn_shell(cwd: &Path, command: &str) -> std::io::Result<tokio::p
         shell
     };
     shell
+        .no_console()
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

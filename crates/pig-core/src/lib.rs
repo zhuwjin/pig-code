@@ -37,6 +37,46 @@ pub fn data_dir() -> PathBuf {
         })
 }
 
+/// Windows release 是 GUI 子系统（无控制台）：每个控制台子程序（git/cmd/bash/
+/// npx.cmd…）spawn 时都会各弹一个控制台窗口——git 高频调用时表现为疯狂闪窗。
+/// 所有子进程统一经 `.no_console()` 加 CREATE_NO_WINDOW；非 Windows 为 no-op。
+#[cfg(windows)]
+pub(crate) trait NoConsoleExt {
+    fn no_console(&mut self) -> &mut Self;
+}
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+impl NoConsoleExt for std::process::Command {
+    fn no_console(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt as _;
+        self.creation_flags(CREATE_NO_WINDOW);
+        self
+    }
+}
+
+#[cfg(windows)]
+impl NoConsoleExt for tokio::process::Command {
+    fn no_console(&mut self) -> &mut Self {
+        self.creation_flags(CREATE_NO_WINDOW);
+        self
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) trait NoConsoleExt {
+    fn no_console(&mut self) -> &mut Self;
+}
+
+#[cfg(not(windows))]
+impl<T> NoConsoleExt for T {
+    fn no_console(&mut self) -> &mut Self {
+        self
+    }
+}
+
 pub struct AgentHandle {
     pub ops: async_channel::Sender<Op>,
     pub events: async_channel::Receiver<Event>,

@@ -1,3 +1,4 @@
+use crate::NoConsoleExt as _;
 use std::path::Path;
 
 use pig_protocol::GitFileChange;
@@ -9,6 +10,7 @@ const DIFF_MAX_BYTES: usize = 1024 * 1024;
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
+        .no_console()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -20,6 +22,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
 /// 查询目录的 git 信息：当前分支 + 本地分支列表。非 git 仓库返回 (None, vec![])。
 pub fn git_info(cwd: &Path) -> (Option<String>, Vec<String>) {
     let current = std::process::Command::new("git")
+        .no_console()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
         .output()
@@ -29,6 +32,7 @@ pub fn git_info(cwd: &Path) -> (Option<String>, Vec<String>) {
         .filter(|name| !name.is_empty());
 
     let branches = std::process::Command::new("git")
+        .no_console()
         .args(["branch", "--format=%(refname:short)"])
         .current_dir(cwd)
         .output()
@@ -49,6 +53,7 @@ pub fn git_info(cwd: &Path) -> (Option<String>, Vec<String>) {
 /// 切换分支；失败透传 git stderr。
 pub fn checkout(cwd: &Path, branch: &str) -> Result<(), String> {
     let output = std::process::Command::new("git")
+        .no_console()
         .args(["checkout", branch])
         .current_dir(cwd)
         .output()

@@ -1,3 +1,7 @@
+// release 下隐藏控制台窗口（debug 保留，便于看日志）。GUI 子系统下无控制台时
+// stdout/stderr 写入由 std 静默忽略（已实测不 panic），pig-core 的 eprintln 安全
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod agent_client;
 mod clipboard;
 mod composer;

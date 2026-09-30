@@ -3,6 +3,7 @@
 //! 前台超时自动转后台继续跑；spill 文件（.pigcode/tool-results/{id}.log）保存全量输出。
 //! 前台执行中的条目对快照隐藏（普通命令不是后台任务），超时转后台时翻转 foreground 才上屏。
 
+use crate::NoConsoleExt as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -365,6 +366,7 @@ fn cap_kill(registry: &TaskRegistry, task_id: &str) {
 fn kill_process_tree(pid: u32) {
     if cfg!(target_os = "windows") {
         let _ = std::process::Command::new("taskkill")
+            .no_console()
             .args(["/PID", &pid.to_string(), "/F", "/T"])
             .output();
     } else {

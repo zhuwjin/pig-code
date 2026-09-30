@@ -14,6 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
+use crate::NoConsoleExt as _;
 use crate::mcp::config::{McpServerConfig, McpStdioConfig, McpTransport};
 use crate::mcp::tool::McpToolAnnotations;
 
@@ -358,6 +359,7 @@ impl StdioTransport {
         #[cfg(not(windows))]
         let program = std::path::PathBuf::from(&config.command);
         let mut command = tokio::process::Command::new(&program);
+        command.no_console();
         command
             .args(&config.args)
             .envs(&config.env)

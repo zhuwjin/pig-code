@@ -1,3 +1,4 @@
+use crate::NoConsoleExt as _;
 use pig_protocol::ExecMode;
 use std::path::{Path, PathBuf};
 
@@ -83,6 +84,7 @@ fn agents_md_chain(cwd: &Path) -> Vec<(String, PathBuf)> {
 /// git 仓库根（rev-parse --show-toplevel）；非仓库或命令失败返回 None。
 fn git_root(cwd: &Path) -> Option<PathBuf> {
     let out = std::process::Command::new("git")
+        .no_console()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()
@@ -301,6 +303,7 @@ fn today() -> String {
 /// 实时 dirty 会让系统提示词前缀缓存随第一次编辑/提交来回翻转失效。
 pub fn git_snapshot(cwd: &Path) -> Option<String> {
     let branch = std::process::Command::new("git")
+        .no_console()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
         .output()
@@ -313,6 +316,7 @@ pub fn git_snapshot(cwd: &Path) -> Option<String> {
         return None;
     }
     let dirty = std::process::Command::new("git")
+        .no_console()
         .args(["status", "--porcelain"])
         .current_dir(cwd)
         .output()
