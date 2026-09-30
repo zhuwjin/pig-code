@@ -19,9 +19,9 @@ struct SessionEntry {
         Vec<pig_protocol::PendingImage>,
         ExecMode,
     )>,
-    /// MCP 连接清单缓存：回合收尾/设置页查询时从 Session 的 manager 刷新
+    /// MCP 状态缓存：回合收尾/设置页查询时从 Session 的 manager 刷新
     ///（None = 尚未懒连接；回合进行中 Session 不在手边时按此缓存应答）
-    mcp_status: Option<Vec<String>>,
+    mcp_status: Option<Vec<pig_protocol::McpServerStatus>>,
 }
 type TurnFuture = std::pin::Pin<Box<dyn Future<Output = (String, Session)>>>;
 fn start_turn(
@@ -812,27 +812,22 @@ pub async fn agent_loop(
                         });
                     }
                     Op::ListMcpServers { session_id } => {
-                        let connected = match sessions.get_mut(&session_id) {
+                        let servers = match sessions.get_mut(&session_id) {
                             Some(entry) => {
                                 // 回合进行中（session=None）读不到 manager：回缓存清单
-                                if let Some(names) = entry
+                                if let Some(statuses) = entry
                                     .session
                                     .as_ref()
                                     .and_then(|session| session.mcp.as_ref())
-                                    .map(|mcp| {
-                                        mcp.server_names()
-                                            .into_iter()
-                                            .map(str::to_string)
-                                            .collect::<Vec<_>>()
-                                    })
+                                    .map(|mcp| mcp.statuses())
                                 {
-                                    entry.mcp_status = Some(names);
+                                    entry.mcp_status = Some(statuses);
                                 }
                                 entry.mcp_status.clone()
                             }
                             None => None,
                         };
-                        emit_global!(Event::McpServerList { session_id, connected });
+                        emit_global!(Event::McpServerList { session_id, servers });
                     }
                     Op::Shutdown => break,
                 }
@@ -867,13 +862,11 @@ pub async fn agent_loop(
                     continue;
                 }
                 if let Some(entry) = sessions.get_mut(&session_id) {
-                    // 回合收尾刷新 MCP 清单缓存（懒连接发生在回合内）
-                    entry.mcp_status = session.mcp.as_ref().map(|mcp| {
-                        mcp.server_names()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect()
-                    });
+                    // 回合收尾刷新 MCP 状态缓存（懒连接发生在回合内）
+                    entry.mcp_status = session
+                        .mcp
+                        .as_ref()
+                        .map(|mcp| mcp.statuses());
                     entry.session = Some(session);
                     entry.cancel = None;
                     // 回合结束（含中止/出错）后自动取出队首继续

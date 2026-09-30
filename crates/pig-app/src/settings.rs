@@ -11,8 +11,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use pig_protocol::{ApiFormat, AppConfig, ModelConfig, ProviderConfig, default_reasoning_params};
+use pig_protocol::{
+    ApiFormat, AppConfig, McpServerStatus, ModelConfig, ProviderConfig, default_reasoning_params,
+};
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 /// 新建模型的默认上下文/输出上限：自动填充时数据源缺字段也回落到这组值
@@ -38,7 +41,10 @@ mod pages;
 mod providers;
 
 pub(crate) use dialog::*;
-pub(crate) use mcp::{McpConfigSnapshot, load_mcp_snapshot};
+pub(crate) use mcp::{
+    McpConfigSnapshot, McpScope, McpSource, McpTransportKind, load_mcp_snapshot,
+    workspace_display_name,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -124,9 +130,27 @@ pub struct SettingsView {
     mcp_snapshot: Option<McpConfigSnapshot>,
     /// 连接状态对应的会话（None = 未打开会话：只展示配置不展示状态）
     mcp_session: Option<String>,
-    /// 连接查询状态：None = 等待回包；Some(None) = 会话尚未发起懒连接；
-    /// Some(Some(names)) = 已连接清单（空 = 全部连接失败/无配置）
-    mcp_connection: Option<Option<Vec<String>>>,
+    /// 状态查询进度：None = 等待回包；Some(None) = 会话尚未发起懒连接；
+    /// Some(Some(statuses)) = 各 server 状态（含工具数与失败原因）
+    mcp_connection: Option<Option<Vec<McpServerStatus>>>,
+    /// MCP 页搜索框（按名称/命令/URL 过滤）
+    mcp_search: Entity<InputState>,
+    /// MCP 新建/编辑对话框（None = 关闭）
+    mcp_dialog: Option<McpDialog>,
+    /// mcp.json 写入失败提示（成功写入或下次刷新前保留）
+    mcp_write_error: Option<String>,
+    /// MCP 页作用域：用户级（默认）/ 指定工作区（AppView 按此加载快照）
+    mcp_scope: McpScope,
+    /// 当前会话的工作区（连接状态适用性：仅当与查看的工作区一致才显示状态）
+    mcp_status_cwd: Option<PathBuf>,
+    /// 可选工作区清单（路径 + 显示名，侧栏同口径：可见工作区 ∪ 会话 cwd）
+    mcp_workspaces: Vec<(PathBuf, String)>,
+    /// 作用域下拉弹层开合
+    mcp_scope_popup: bool,
+    /// 作用域按钮位置（deferred 弹层锚定用，每次 prepaint 更新）
+    mcp_scope_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 弹层 outside-close 时的按下位置（同一次按压的 click 按位置吞掉）
+    mcp_scope_outside_close: Option<Point<Pixels>>,
     save_generation: u64,
     form_dirty: bool,
     _subscriptions: Vec<Subscription>,
@@ -149,6 +173,15 @@ impl SettingsView {
                 },
             ));
         }
+        // MCP 搜索框：内容变化即重过滤列表
+        let mcp_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索服务器…"));
+        _subscriptions.push(cx.subscribe_in(
+            &mcp_search,
+            window,
+            |_: &mut Self, _, _: &gpui_kit::component::input::InputEvent, _, cx| {
+                cx.notify();
+            },
+        ));
         Self {
             page: SettingsPage::Models,
             config: AppConfig::default(),
@@ -166,6 +199,15 @@ impl SettingsView {
             mcp_snapshot: None,
             mcp_session: None,
             mcp_connection: None,
+            mcp_search,
+            mcp_dialog: None,
+            mcp_write_error: None,
+            mcp_scope: McpScope::User,
+            mcp_status_cwd: None,
+            mcp_workspaces: vec![],
+            mcp_scope_popup: false,
+            mcp_scope_btn_bounds: Rc::new(Cell::new(Bounds::default())),
+            mcp_scope_outside_close: None,
             save_generation: 0,
             form_dirty: true,
             _subscriptions,
@@ -193,22 +235,25 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// MCP 页数据喂入（AppView 刷新时调用）：重置换页/刷新前的连接查询结果
+    /// MCP 页数据喂入（AppView 刷新时调用）：重置换页/刷新前的连接查询结果；
+    /// session_cwd 用于判断「查看的工作区 ≠ 会话工作区」时隐藏连接状态
     pub fn set_mcp_config(
         &mut self,
         session_id: Option<String>,
+        session_cwd: Option<PathBuf>,
         snapshot: McpConfigSnapshot,
         cx: &mut Context<Self>,
     ) {
         self.mcp_session = session_id;
+        self.mcp_status_cwd = session_cwd;
         self.mcp_snapshot = Some(snapshot);
         self.mcp_connection = None;
         cx.notify();
     }
 
     /// core 的 McpServerList 回包（AppView 已按当前会话过滤）
-    pub fn set_mcp_connected(&mut self, connected: Option<Vec<String>>, cx: &mut Context<Self>) {
-        self.mcp_connection = Some(connected);
+    pub fn set_mcp_status(&mut self, servers: Option<Vec<McpServerStatus>>, cx: &mut Context<Self>) {
+        self.mcp_connection = Some(servers);
         cx.notify();
     }
 
@@ -384,6 +429,7 @@ impl Render for SettingsView {
                 .child(
                     h_flex()
                         .w_full()
+                        .gap_2()
                         .child(
                             v_flex()
                                 .flex_1()
@@ -393,8 +439,18 @@ impl Render for SettingsView {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("用户级与项目级 mcp.json 的配置，以及当前会话的连接状态。"),
+                                        .child("管理用户级与项目级 mcp.json；服务器在每个会话首个回合后按需连接。"),
                                 ),
+                        )
+                        .child(div().w(px(180.)).child(Input::new(&self.mcp_search)))
+                        .child(
+                            Button::new("new-mcp")
+                                .primary()
+                                .icon(IconName::Plus)
+                                .label("新建服务器")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_mcp_dialog(None, window, cx);
+                                })),
                         )
                         .child(
                             Button::new("refresh-mcp")
@@ -455,6 +511,14 @@ impl Render for SettingsView {
                         .absolute()
                         .inset_0()
                         .child(self.render_model_dialog(cx)),
+                )
+            })
+            .when(self.mcp_dialog.is_some(), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(self.render_mcp_dialog(cx)),
                 )
             })
     }

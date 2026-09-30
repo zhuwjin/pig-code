@@ -690,6 +690,7 @@ mod tests {
                 headers: HashMap::from([("Authorization".to_string(), "Bearer t".to_string())]),
             }),
             timeout: Duration::from_secs(10),
+            disabled: false,
         }
     }
 

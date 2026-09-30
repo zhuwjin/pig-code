@@ -199,17 +199,43 @@ impl AppView {
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = true;
         self.agent.get_config();
+        self.sync_mcp_workspaces(cx);
         self.refresh_mcp(cx);
         cx.notify();
     }
 
-    /// 设置页 MCP 数据刷新：重读两份 mcp.json 喂给设置页，并查询当前会话的连接清单
-    ///（无活动会话时不查询，页面只展示配置）
+    /// 把侧栏同口径的工作区清单喂给设置页（MCP 页作用域选择器的候选）
+    pub(crate) fn sync_mcp_workspaces(&mut self, cx: &mut Context<Self>) {
+        let aliases = self.workspace_aliases.clone();
+        let entries: Vec<(std::path::PathBuf, String)> = self
+            .compute_workspaces()
+            .into_iter()
+            .map(|path| {
+                let display = crate::settings::workspace_display_name(
+                    std::path::Path::new(&path),
+                    aliases.get(&path).map(String::as_str),
+                );
+                (std::path::PathBuf::from(path), display)
+            })
+            .collect();
+        self.settings.update(cx, |settings, cx| {
+            settings.set_mcp_workspaces(entries, cx);
+        });
+    }
+
+    /// 设置页 MCP 数据刷新：按设置页作用域（用户级 / 指定工作区）重读 mcp.json，
+    /// 并查询当前会话的连接状态（无活动会话时不查询，页面只展示配置）
     pub(crate) fn refresh_mcp(&mut self, cx: &mut Context<Self>) {
         let session_id = self.current.clone();
-        let snapshot = crate::settings::load_mcp_snapshot(self.current_cwd().as_deref());
+        let session_cwd = self.current_cwd();
+        let workspace = match self.settings.read(cx).mcp_scope().clone() {
+            // 用户级：不参与项目合并（页面只列用户级条目）
+            crate::settings::McpScope::User => None,
+            crate::settings::McpScope::Workspace(path) => Some(path),
+        };
+        let snapshot = crate::settings::load_mcp_snapshot(workspace.as_deref());
         self.settings.update(cx, |settings, cx| {
-            settings.set_mcp_config(session_id.clone(), snapshot, cx);
+            settings.set_mcp_config(session_id.clone(), session_cwd.clone(), snapshot, cx);
         });
         if let Some(session_id) = session_id {
             self.agent.list_mcp_servers(session_id);

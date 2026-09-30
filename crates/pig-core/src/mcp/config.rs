@@ -4,6 +4,7 @@
 //! `type` 字段可省略：有 `url` 按远程、有 `command` 按 stdio 推断；
 //! 显式 `"type": "stdio" | "http"` 时按声明校验。`"type": "sse"`（2024-11-05
 //! legacy HTTP+SSE）暂不支持，记录后跳过。
+//! `"disabled": true` 停用条目：解析保留、合并（覆盖同名）后过滤，不参与连接。
 //! 用户级 `<data_dir>/mcp.json` 为底，项目级 `<workspace>/.pigcode/mcp.json` 覆盖同名。
 
 use std::collections::HashMap;
@@ -18,6 +19,9 @@ pub struct McpServerConfig {
     pub name: String,
     pub transport: McpTransport,
     pub timeout: Duration,
+    /// `disabled: true` 停用：解析/合并保留该条（项目级可停用用户级同名条目），
+    /// 连接阶段整体过滤
+    pub disabled: bool,
 }
 
 /// 传输配置：stdio 子进程 / streamable HTTP 远程端点
@@ -55,13 +59,27 @@ struct RawServer {
     headers: HashMap<String, String>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    disabled: bool,
 }
 
-/// 加载并合并两个来源；文件缺失/非法不 panic，记录后跳过
+/// 加载并合并两个来源；文件缺失/非法不 panic，记录后跳过；
+/// `disabled` 停用在覆盖合并后生效（项目级停用用户级同名条目）
 pub fn load(workspace_root: &Path, data_dir: &Path) -> Vec<McpServerConfig> {
     let user = load_file(&data_dir.join("mcp.json"));
     let project = load_file(&workspace_root.join(".pigcode").join("mcp.json"));
+    merged_enabled(user, project)
+}
+
+/// 合并同名覆盖后过滤停用条目（load 的主体，单测直击）
+fn merged_enabled(
+    user: Vec<McpServerConfig>,
+    project: Vec<McpServerConfig>,
+) -> Vec<McpServerConfig> {
     merge(user, project)
+        .into_iter()
+        .filter(|server| !server.disabled)
+        .collect()
 }
 
 /// 用户级为底、项目级覆盖同名；输出按名字排序（连接顺序稳定）
@@ -104,10 +122,11 @@ fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
     let mut out = Vec::new();
     for (name, value) in servers {
         match parse_server(value.clone()) {
-            Ok((transport, timeout)) => out.push(McpServerConfig {
+            Ok((transport, timeout, disabled)) => out.push(McpServerConfig {
                 name: name.clone(),
                 transport,
                 timeout,
+                disabled,
             }),
             Err(e) => eprintln!(
                 "[mcp] {} 中 server {name} 配置非法，已跳过: {e}",
@@ -118,9 +137,10 @@ fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
     out
 }
 
-/// 单条 server 配置 → 传输形态 + 超时：显式 type 优先，否则按 url/command 推断
-fn parse_server(value: serde_json::Value) -> Result<(McpTransport, Duration), String> {
+/// 单条 server 配置 → 传输形态 + 超时 + 停用标记：显式 type 优先，否则按 url/command 推断
+fn parse_server(value: serde_json::Value) -> Result<(McpTransport, Duration, bool), String> {
     let raw: RawServer = serde_json::from_value(value).map_err(|e| format!("配置非法: {e}"))?;
+    let disabled = raw.disabled;
     let timeout = raw
         .timeout_ms
         .filter(|&ms| ms > 0)
@@ -148,7 +168,7 @@ fn parse_server(value: serde_json::Value) -> Result<(McpTransport, Duration), St
             }
         }
     }?;
-    Ok((transport, timeout))
+    Ok((transport, timeout, disabled))
 }
 
 fn stdio_transport(raw: RawServer) -> Result<McpTransport, String> {
@@ -289,5 +309,27 @@ mod tests {
         assert!(matches!(b.transport, McpTransport::Http(_)));
         assert_eq!(stdio_of(&merged, "a").command, "ua");
         assert_eq!(stdio_of(&merged, "c").command, "pc");
+    }
+
+    #[test]
+    fn disabled_filtered_after_merge() {
+        let user = parse_file(
+            r#"{"mcpServers": {
+                "a": {"command": "ua"},
+                "b": {"command": "ub", "disabled": true},
+                "d": {"command": "ud", "disabled": false}
+            }}"#,
+            Path::new("user/mcp.json"),
+        );
+        let project = parse_file(
+            r#"{"mcpServers": {"a": {"command": "pa", "disabled": true}}}"#,
+            Path::new("proj/.pigcode/mcp.json"),
+        );
+        // 解析保留停用条目（供覆盖合并）；load 语义 = merged_enabled
+        assert_eq!(user.iter().filter(|s| s.disabled).count(), 1);
+        let enabled = merged_enabled(user, project);
+        let names: Vec<&str> = enabled.iter().map(|s| s.name.as_str()).collect();
+        // a 被项目级停用覆盖、b 用户级停用；d 的 disabled:false 显式启用
+        assert_eq!(names, vec!["d"]);
     }
 }

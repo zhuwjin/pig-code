@@ -30,32 +30,62 @@ struct McpServer {
 /// MCP 连接管理器：读配置、并发连接全部 server；单 server 失败不影响其他
 pub struct McpManager {
     servers: Vec<McpServer>,
+    /// 连接失败的 server（含原因）：设置页展示用
+    failures: Vec<pig_protocol::McpServerStatus>,
 }
 
 impl McpManager {
-    /// 读配置并并发连接所有 server；失败逐个记录并跳过（不致命）
+    /// 读配置并并发连接所有 server；失败逐个记录并跳过（不致命），原因保留供设置页展示
     pub async fn connect_all(workspace_root: &Path, data_dir: &Path) -> Self {
         let configs = config::load(workspace_root, data_dir);
-        let servers =
+        let results =
             futures_util::future::join_all(configs.into_iter().map(|config| async move {
-                let (client, specs) = match client::McpClient::connect(&config).await {
-                    Ok(connected) => connected,
+                match client::McpClient::connect(&config).await {
+                    Ok((client, specs)) => {
+                        let tools = specs
+                            .into_iter()
+                            .map(|spec| Arc::new(McpTool::new(&config.name, spec, client.clone())))
+                            .collect();
+                        Ok(McpServer { client, tools })
+                    }
                     Err(e) => {
                         eprintln!("[mcp] 连接 {} 失败，已跳过: {e}", config.name);
-                        return None;
+                        Err(pig_protocol::McpServerStatus {
+                            name: config.name,
+                            connected: false,
+                            tool_count: 0,
+                            error: Some(e.to_string()),
+                        })
                     }
-                };
-                let tools = specs
-                    .into_iter()
-                    .map(|spec| Arc::new(McpTool::new(&config.name, spec, client.clone())))
-                    .collect();
-                Some(McpServer { client, tools })
+                }
             }))
-            .await
-            .into_iter()
-            .flatten()
+            .await;
+        let mut servers = Vec::new();
+        let mut failures = Vec::new();
+        for result in results {
+            match result {
+                Ok(server) => servers.push(server),
+                Err(failure) => failures.push(failure),
+            }
+        }
+        Self { servers, failures }
+    }
+
+    /// 全部 server 状态快照（连接成功带工具数、失败带原因；按名字排序，设置页展示用）
+    pub fn statuses(&self) -> Vec<pig_protocol::McpServerStatus> {
+        let mut out: Vec<_> = self
+            .servers
+            .iter()
+            .map(|server| pig_protocol::McpServerStatus {
+                name: server.client.name().to_string(),
+                connected: true,
+                tool_count: server.tools.len(),
+                error: None,
+            })
             .collect();
-        Self { servers }
+        out.extend(self.failures.iter().cloned());
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     /// 全部 MCP 工具（Box<dyn Tool>，与 tool::all() 同形态，直接 extend 进工具集）
@@ -123,6 +153,53 @@ impl McpManager {
             .collect();
         Self {
             servers: vec![McpServer { client, tools }],
+            failures: Vec::new(),
         }
+    }
+
+    /// 测试用：注入连接失败记录（statuses() 的失败分支）
+    #[cfg(test)]
+    pub(crate) fn with_failures(mut self, failures: Vec<pig_protocol::McpServerStatus>) -> Self {
+        self.failures = failures;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(name: &str) -> McpToolSpec {
+        McpToolSpec {
+            name: name.to_string(),
+            description: None,
+            input_schema: serde_json::json!({}),
+            annotations: McpToolAnnotations::default(),
+        }
+    }
+
+    #[test]
+    fn statuses_merges_connected_and_failures_sorted_by_name() {
+        let manager = McpManager::for_test(
+            "zeta",
+            vec![spec("a"), spec("b"), spec("c")],
+        )
+        .with_failures(vec![pig_protocol::McpServerStatus {
+            name: "alpha-failed".to_string(),
+            connected: false,
+            tool_count: 0,
+            error: Some("spawn 失败".to_string()),
+        }]);
+        let statuses = manager.statuses();
+        let names: Vec<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
+        // 失败与已连接合并后按名字排序
+        assert_eq!(names, vec!["alpha-failed", "zeta"]);
+        let zeta = &statuses[1];
+        assert!(zeta.connected);
+        assert_eq!(zeta.tool_count, 3);
+        assert!(zeta.error.is_none());
+        let failed = &statuses[0];
+        assert!(!failed.connected);
+        assert_eq!(failed.error.as_deref(), Some("spawn 失败"));
     }
 }

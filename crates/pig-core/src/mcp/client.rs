@@ -619,6 +619,7 @@ mod tests {
                 env: HashMap::from([("PIG_MCP_FAKE_SERVER".to_string(), "1".to_string())]),
             }),
             timeout: Duration::from_secs(10),
+            disabled: false,
         }
     }
 

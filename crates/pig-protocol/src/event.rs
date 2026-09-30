@@ -1,5 +1,15 @@
 use super::*;
 
+/// 单个 MCP server 的连接状态快照（设置页展示用）：
+/// 连接成功带工具数；连接失败 connected=false 且 error 为原因
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub connected: bool,
+    pub tool_count: usize,
+    pub error: Option<String>,
+}
+
 /// core → UI 事件
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
@@ -43,11 +53,11 @@ pub enum Event {
         id: String,
         info: Option<ModelRegistryInfo>,
     },
-    /// Op::ListMcpServers 的应答：该会话已连接的 MCP server 名清单
+    /// Op::ListMcpServers 的应答：该会话的 MCP server 状态清单
     ///（None = 会话不存在或尚未发起懒连接——MCP 在首个回合采样前才连）
     McpServerList {
         session_id: String,
-        connected: Option<Vec<String>>,
+        servers: Option<Vec<McpServerStatus>>,
     },
     FileSearchResults {
         session_id: String,

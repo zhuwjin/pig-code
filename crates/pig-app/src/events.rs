@@ -104,13 +104,13 @@ impl AppView {
             }
             Event::McpServerList {
                 session_id,
-                connected,
+                servers,
             } => {
-                // 设置页 MCP 连接状态回包：只采纳当前活动会话的应答
+                // 设置页 MCP 状态回包：只采纳当前活动会话的应答
                 if self.current.as_deref() == Some(session_id.as_str()) {
-                    let connected = connected.clone();
+                    let servers = servers.clone();
                     self.settings.update(cx, |settings, cx| {
-                        settings.set_mcp_connected(connected, cx);
+                        settings.set_mcp_status(servers, cx);
                     });
                 }
             }
@@ -133,6 +133,8 @@ impl AppView {
                             .map(|alias| (p.path.display().to_string(), alias))
                     })
                     .collect();
+                // 工作区清单变化同步给设置页（MCP 页作用域选择器的候选）
+                self.sync_mcp_workspaces(cx);
             }
             Event::SessionList { sessions } => {
                 self.metas = sessions.clone();

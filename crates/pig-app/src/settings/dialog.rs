@@ -42,3 +42,38 @@ pub(crate) enum LookupState {
     /// 查询完成但未收录（网络失败同样落这里，回车可重试）
     NotFound,
 }
+
+/// MCP 新建/编辑对话框（表单/JSON 双模式，对齐 ZCode 的编辑器形态）
+pub(crate) struct McpDialog {
+    /// 正在编辑的 server 名（None = 新建；编辑中名称与作用域锁定）
+    pub(crate) editing: Option<String>,
+    /// 写入目标文件层级
+    pub(crate) scope: McpSource,
+    /// 项目级是否可选（未打开会话时项目级路径未知，不可用）
+    pub(crate) project_available: bool,
+    /// 传输类型（stdio 本地命令 / HTTP 远程端点）
+    pub(crate) kind: McpTransportKind,
+    pub(crate) name: Entity<InputState>,
+    pub(crate) command: Entity<InputState>,
+    /// stdio 参数（空格分隔；含空格的参数请走 JSON 模式）
+    pub(crate) args: Entity<InputState>,
+    pub(crate) url: Entity<InputState>,
+    /// 超时毫秒（空 = 默认 30s）
+    pub(crate) timeout: Entity<InputState>,
+    /// 项目级目标的工作区显示名（作用域按钮展示「项目级（xxx）」；None = 未知
+    pub(crate) project_workspace: Option<String>,
+    pub(crate) advanced_open: bool,
+    /// 环境变量（stdio）/ 请求头（HTTP）的 JSON 编辑框
+    pub(crate) env_headers: Entity<TextareaState>,
+    /// env/headers 各留一份草稿：切换传输类型时交换编辑框内容
+    pub(crate) env_draft: String,
+    pub(crate) headers_draft: String,
+    pub(crate) json_mode: bool,
+    pub(crate) json_text: Entity<TextareaState>,
+    /// 删除两步确认
+    pub(crate) delete_armed: bool,
+    /// 编辑底稿：原条目 JSON，保存以其为底覆盖表单字段（oauth 等未知字段保真回写）
+    pub(crate) base: serde_json::Value,
+    /// 校验错误（保存/切换模式失败时填写，显示在页脚上方）
+    pub(crate) error: Option<String>,
+}
