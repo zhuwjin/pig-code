@@ -91,6 +91,101 @@ async fn glob_respects_gitignore_includes_hidden_skips_vcs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn glob_brace_expansion() {
+    let dir = temp_dir("glob-brace");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(dir.join("README.md"), "# t\n").unwrap();
+    std::fs::write(dir.join("notes.txt"), "x\n").unwrap();
+
+    // 花括号交替：一次命中多个扩展名（glob crate 原生不支持，靠展开子模式）
+    let (out, is_error, _, _, _) = run_tool(
+        &dir,
+        "Glob",
+        serde_json::json!({"pattern": "**/*.{rs,toml,md}"}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("src/a.rs"), "{out}");
+    assert!(out.contains("Cargo.toml"), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+    assert!(!out.contains("notes.txt"), "{out}");
+
+    // 不含 / 的花括号 pattern 仍只比文件名（嵌套文件命中）
+    let (out, _, _, _, _) =
+        run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.{toml,md}"})).await;
+    assert!(out.contains("Cargo.toml"), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+    assert!(!out.contains("a.rs"), "{out}");
+
+    // 嵌套花括号
+    std::fs::write(dir.join("icon.svg"), "<svg/>\n").unwrap();
+    let (out, _, _, _, _) = run_tool(
+        &dir,
+        "Glob",
+        serde_json::json!({"pattern": "**/*.{rs,{svg,toml}}"}),
+    )
+    .await;
+    assert!(out.contains("src/a.rs"), "{out}");
+    assert!(out.contains("icon.svg"), "{out}");
+    assert!(out.contains("Cargo.toml"), "{out}");
+    assert!(!out.contains("README.md"), "{out}");
+
+    // 未闭合的 { 是解析错误（globset UnclosedAlternates）：显式报错而非静默无匹配
+    let (out, is_error, _, _, _) =
+        run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.{rs"})).await;
+    assert!(is_error, "{out}");
+    assert!(out.contains("无效 glob 模式"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn glob_star_does_not_cross_separator() {
+    let dir = temp_dir("glob-sep");
+    std::fs::create_dir_all(dir.join("src/deep")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("src/deep/b.rs"), "fn b() {}\n").unwrap();
+    std::fs::write(dir.join("c.rs"), "fn c() {}\n").unwrap();
+
+    // gitignore 语义（ripgrep --glob/kimi-code 同款）：* 不跨 /，只命中直接子级
+    let (out, is_error, _, _, _) =
+        run_tool(&dir, "Glob", serde_json::json!({"pattern": "src/*.rs"})).await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("src/a.rs"), "{out}");
+    assert!(!out.contains("deep/b.rs"), "* 不跨 /: {out}");
+    assert!(!out.contains("c.rs"), "{out}");
+
+    // 跨层要用 **；**/ 前缀可覆盖零层目录
+    let (out, _, _, _, _) = run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.rs"})).await;
+    assert!(out.contains("src/deep/b.rs"), "{out}");
+    assert!(out.contains("c.rs"), "{out}");
+
+    // 不含 / 的 pattern 匹配任意深度文件名
+    let (out, _, _, _, _) = run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.rs"})).await;
+    assert!(out.contains("src/deep/b.rs"), "{out}");
+    assert!(out.contains("c.rs"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_include_brace_expansion() {
+    let dir = temp_dir("grep-include-brace");
+    std::fs::write(dir.join("a.rs"), "hello rust\n").unwrap();
+    std::fs::write(dir.join("b.toml"), "hello toml\n").unwrap();
+    std::fs::write(dir.join("c.txt"), "hello txt\n").unwrap();
+
+    let (out, is_error, _, _, _) = run_tool(
+        &dir,
+        "Grep",
+        serde_json::json!({"pattern": "hello", "include": "*.{rs,toml}"}),
+    )
+    .await;
+    assert!(!is_error, "{out}");
+    assert!(out.contains("a.rs"), "{out}");
+    assert!(out.contains("b.toml"), "{out}");
+    assert!(!out.contains("c.txt"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn glob_sorts_by_mtime_desc() {
     let dir = temp_dir("glob-mtime");
     std::fs::write(dir.join("old.rs"), "old\n").unwrap();

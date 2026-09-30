@@ -1,5 +1,23 @@
 use super::*;
 
+/// 白名单 glob（ripgrep `-g` / gitignore 语义，与 kimi-code 的 rg --glob 一致）：
+/// 支持 `{a,b}` 花括号（可嵌套）、`**` 跨层级、`*` 不跨 `/`、`!` 前缀黑名单；
+/// 不含 `/` 的模式匹配任意深度的文件名。未闭合的 `{`/`[` 是解析错误。
+/// err_prefix 区分调用方报错文案。
+fn build_overrides(
+    root: &Path,
+    pattern: &str,
+    err_prefix: &str,
+) -> Result<ignore::overrides::Override, String> {
+    let mut builder = ignore::overrides::OverrideBuilder::new(root);
+    builder
+        .add(pattern)
+        .map_err(|e| format!("{err_prefix} {pattern}: {e}"))?;
+    builder
+        .build()
+        .map_err(|e| format!("{err_prefix} {pattern}: {e}"))
+}
+
 impl Tool for Glob {
     fn name(&self) -> &'static str {
         "Glob"
@@ -18,7 +36,7 @@ impl Tool for Glob {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "glob 模式；含 / 时按相对路径匹配，不含 / 时只匹配文件名" },
+                        "pattern": { "type": "string", "description": "glob 模式（gitignore 语法，同 ripgrep --glob）：支持 {a,b} 花括号（可嵌套）、** 跨层级、! 前缀排除；* 不跨 /；含 / 时按相对搜索根的路径匹配，不含 / 时匹配任意深度的文件名" },
                         "path": { "type": "string", "description": "搜索根目录（相对工作目录），默认为工作目录" },
                         "head_limit": { "type": "integer", "description": "最多返回多少个文件，默认 200；0 = 不限条数（仍有字符预算兜底）" },
                         "offset": { "type": "integer", "description": "跳过前 N 个结果（分页续读），默认 0" }
@@ -36,8 +54,6 @@ impl Tool for Glob {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
-            let glob_pattern = glob::Pattern::new(pattern)
-                .map_err(|e| format!("无效 glob 模式 {pattern}: {e}"))?;
             let head_limit = args["head_limit"]
                 .as_u64()
                 .unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
@@ -46,9 +62,10 @@ impl Tool for Glob {
                 Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
                 None => ctx.cwd.to_path_buf(),
             };
-            let mut files = walk_workspace(&root);
+            // 遍历期过滤（Override 白名单）：不匹配的文件不进结果集，也省掉 mtime stat
+            let overrides = build_overrides(&root, pattern, "无效 glob 模式")?;
+            let mut files = walk_workspace(&root, Some(overrides));
             sort_by_mtime_desc(&mut files);
-            let match_by_path = pattern.contains('/');
             // 分页状态机（Grep 同款）：want 多探 1 个确认下一页
             let want = if head_limit == 0 {
                 usize::MAX
@@ -62,21 +79,6 @@ impl Tool for Glob {
             let mut results: Vec<String> = Vec::new();
             let mut filtered_sensitive = 0usize;
             for file in files {
-                // 含 / 的模式匹配相对 root 的完整路径；不含 / 只比文件名
-                let relative = file
-                    .strip_prefix(&root)
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|_| file.clone());
-                let matched = if match_by_path {
-                    glob_pattern.matches_path(&relative)
-                } else {
-                    file.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|name| glob_pattern.matches(name))
-                };
-                if !matched {
-                    continue;
-                }
                 if is_sensitive_file(&file) {
                     filtered_sensitive += 1;
                     continue;
@@ -159,7 +161,7 @@ impl Tool for Grep {
                     "properties": {
                         "pattern": { "type": "string", "description": "正则表达式" },
                         "path": { "type": "string", "description": "搜索目录或单文件（相对工作目录），默认工作目录" },
-                        "include": { "type": "string", "description": "文件名过滤 glob（如 *.rs）" },
+                        "include": { "type": "string", "description": "文件名过滤 glob（如 *.rs 或 *.{rs,toml}）" },
                         "ignore_case": { "type": "boolean", "description": "true 时忽略大小写（默认 false）" },
                         "head_limit": { "type": "integer", "description": "最多返回多少个命中（content 按命中行、其余按文件），默认 200；0 = 不限条数（仍有字符预算兜底）" },
                         "offset": { "type": "integer", "description": "跳过前 N 个命中（分页续读），默认 0" },
@@ -186,7 +188,11 @@ impl Tool for Grep {
                 .case_insensitive(ignore_case)
                 .build()
                 .map_err(|e| format!("无效正则 {pattern}: {e}"))?;
-            let include = args["include"].as_str().map(|s| s.to_string());
+            let include = args["include"].as_str();
+            let include_ov = match include {
+                Some(inc) => Some(build_overrides(ctx.cwd, inc, "无效 include 模式")?),
+                None => None,
+            };
             let output_mode = args["output_mode"].as_str().unwrap_or("content");
             let head_limit = args["head_limit"]
                 .as_u64()
@@ -217,7 +223,7 @@ impl Tool for Grep {
             if root.is_file() {
                 files.push(root);
             } else {
-                files = walk_workspace(&root);
+                files = walk_workspace(&root, None);
                 sort_by_mtime_desc(&mut files);
             }
 
@@ -242,11 +248,10 @@ impl Tool for Grep {
                     skipped_sensitive += 1;
                     continue;
                 }
-                if let Some(include) = &include {
-                    let name = file.file_name().unwrap_or_default().to_string_lossy();
-                    let glob_pattern = glob::Pattern::new(include)
-                        .map_err(|e| format!("无效 include 模式 {include}: {e}"))?;
-                    if !glob_pattern.matches(&name) {
+                // include 只比文件名（gitignore 无 / 模式的 basename 语义正好等价）
+                if let Some(ov) = &include_ov {
+                    let name = file.file_name().unwrap_or_default();
+                    if !ov.matched(Path::new(name), false).is_whitelist() {
                         continue;
                     }
                 }
@@ -461,10 +466,15 @@ impl Tool for Grep {
 
 /// 工作区遍历（ripgrep 同款 ignore 引擎）：尊重 .gitignore/.ignore/.git exclude，
 /// 包含隐藏文件，但始终跳过 VCS 目录（.git/.svn/.hg/.bzr/.jj/.sl）与 .pigcode。
-/// 只收集文件路径。
-pub(crate) fn walk_workspace(root: &Path) -> Vec<PathBuf> {
+/// 只收集文件路径。`overrides` 为白名单 glob 时（Glob 工具），不匹配的文件
+/// 在遍历期就被排除。
+pub(crate) fn walk_workspace(
+    root: &Path,
+    overrides: Option<ignore::overrides::Override>,
+) -> Vec<PathBuf> {
     const SKIP_DIRS: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl", ".pigcode"];
-    ignore::WalkBuilder::new(root)
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
@@ -478,7 +488,11 @@ pub(crate) fn walk_workspace(root: &Path) -> Vec<PathBuf> {
                     .file_name()
                     .to_str()
                     .is_some_and(|name| SKIP_DIRS.contains(&name)))
-        })
+        });
+    if let Some(overrides) = overrides {
+        builder.overrides(overrides);
+    }
+    builder
         .build()
         .flatten()
         .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
@@ -508,7 +522,7 @@ fn sort_by_mtime_desc(files: &mut Vec<PathBuf>) {
 
 /// @ 文件搜索：遍历工作区（尊重 .gitignore、含隐藏文件、跳过 VCS 目录），按子串匹配打分排序。
 pub fn search_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
-    let files = walk_workspace(cwd);
+    let files = walk_workspace(cwd, None);
     let query = query.to_lowercase();
     let mut scored: Vec<(u64, String)> = files
         .iter()
