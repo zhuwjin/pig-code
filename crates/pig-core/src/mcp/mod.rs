@@ -35,12 +35,14 @@ pub struct McpManager {
 }
 
 impl McpManager {
-    /// 读配置并并发连接所有 server；失败逐个记录并跳过（不致命），原因保留供设置页展示
+    /// 读配置并并发连接所有 server；失败逐个记录并跳过（不致命），原因保留供设置页展示。
+    /// stdio 子进程的工作目录 = workspace_root（args 相对路径按工作区根解析）
     pub async fn connect_all(workspace_root: &Path, data_dir: &Path) -> Self {
         let configs = config::load(workspace_root, data_dir);
-        let results =
-            futures_util::future::join_all(configs.into_iter().map(|config| async move {
-                match client::McpClient::connect(&config).await {
+        let results = futures_util::future::join_all(configs.into_iter().map(|config| {
+            let workspace_root = workspace_root.to_path_buf();
+            async move {
+                match client::McpClient::connect(&config, &workspace_root).await {
                     Ok((client, specs)) => {
                         let tools = specs
                             .into_iter()
@@ -58,8 +60,9 @@ impl McpManager {
                         })
                     }
                 }
-            }))
-            .await;
+            }
+        }))
+        .await;
         let mut servers = Vec::new();
         let mut failures = Vec::new();
         for result in results {

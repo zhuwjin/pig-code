@@ -4,6 +4,7 @@
 //! 握手/分页/超时口径在 McpClient 统一。连接断开时全部 pending 请求以错误返回。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -114,14 +115,17 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// 建立连接 + initialize 握手 + tools/list；失败由调用方记录并跳过该 server
+    /// 建立连接 + initialize 握手 + tools/list；失败由调用方记录并跳过该 server。
+    /// workspace_root 作为 stdio 子进程的工作目录（args 里的相对路径按工作区根解析，
+    /// 与 Claude Code 同语义；http 传输不使用）
     pub async fn connect(
         config: &McpServerConfig,
+        workspace_root: &Path,
     ) -> Result<(Arc<Self>, Vec<McpToolSpec>), String> {
         let transport = match &config.transport {
-            McpTransport::Stdio(stdio) => {
-                Transport::Stdio(StdioTransport::spawn(&config.name, stdio, config.timeout).await?)
-            }
+            McpTransport::Stdio(stdio) => Transport::Stdio(
+                StdioTransport::spawn(&config.name, stdio, config.timeout, workspace_root).await?,
+            ),
             McpTransport::Http(http) => Transport::Http(super::http::HttpTransport::new(
                 &config.name,
                 http,
@@ -291,13 +295,73 @@ struct StdioTransport {
     stderr_tail: Arc<Mutex<String>>,
 }
 
+/// Windows 程序解析：在目录列表（通常为 PATH）中按「原名 → .exe → .cmd → .bat」
+/// 找到真实文件。npm 系工具是 .cmd 垫片，CreateProcess 只自动补 .exe 故直接
+/// spawn 裸名会 NotFound；解析为全路径后 std 会经 cmd.exe 启动并转义参数
+///（CVE-2024-24576 修复后的行为）。显式带扩展名但文件不存在的不再猜。
+#[cfg(windows)]
+fn resolve_program(
+    search_dirs: &[std::path::PathBuf],
+    command: &str,
+) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    fn try_variants(base: &Path) -> Option<PathBuf> {
+        if base.extension().is_some_and(|ext| !ext.is_empty()) {
+            return base.is_file().then(|| base.to_path_buf());
+        }
+        // 无扩展名：先按 Windows 可执行候选（exe/cmd/bat）。npm/fnm/scoop 的垫片
+        // 目录里同名无扩展文件是 POSIX sh 脚本，直接启动会「不是有效的 Win32 应用程序」
+        ["exe", "cmd", "bat"]
+            .into_iter()
+            .map(|ext| base.with_extension(ext))
+            .find(|candidate| candidate.is_file())
+            .or_else(|| base.is_file().then(|| base.to_path_buf()))
+    }
+
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    let explicit =
+        path.is_absolute() || trimmed.contains('/') || trimmed.contains('\\');
+    if explicit {
+        return try_variants(&path);
+    }
+    search_dirs
+        .iter()
+        .map(|dir| dir.join(trimmed))
+        .find_map(|candidate| try_variants(&candidate))
+}
+
 impl StdioTransport {
-    /// spawn 子进程 + 读写泵；握手由 McpClient 统一做
-    async fn spawn(name: &str, config: &McpStdioConfig, timeout: Duration) -> Result<Self, String> {
-        let mut command = tokio::process::Command::new(&config.command);
+    /// spawn 子进程 + 读写泵；握手由 McpClient 统一做。
+    /// 工作目录 = 会话工作区根（相对路径 args 如 `.dbhub/dbhub.toml` 按工作区解析；
+    /// 不设置则继承应用进程的启动目录，相对路径会落错位置）
+    async fn spawn(
+        name: &str,
+        config: &McpStdioConfig,
+        timeout: Duration,
+        workspace_root: &Path,
+    ) -> Result<Self, String> {
+        // Windows：CreateProcess 只自动补 .exe，npm 系工具（npx/pnpm/bunx…）实为
+        // .cmd/.bat 垫片，须按 PATH + 候选扩展解析出真实路径再启动
+        #[cfg(windows)]
+        let program = {
+            let dirs = std::env::var_os("PATH")
+                .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+                .unwrap_or_default();
+            resolve_program(&dirs, &config.command)
+                .unwrap_or_else(|| std::path::PathBuf::from(&config.command))
+        };
+        #[cfg(not(windows))]
+        let program = std::path::PathBuf::from(&config.command);
+        let mut command = tokio::process::Command::new(&program);
         command
             .args(&config.args)
             .envs(&config.env)
+            .current_dir(workspace_root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -626,7 +690,7 @@ mod tests {
     /// 端到端：真子进程 stdio 握手 → tools/list → tools/call → ping → shutdown
     #[tokio::test]
     async fn stdio_echo_server_roundtrip() {
-        let (client, specs) = McpClient::connect(&fake_server_config())
+        let (client, specs) = McpClient::connect(&fake_server_config(), std::path::Path::new("."))
             .await
             .expect("connect");
         assert_eq!(specs.len(), 1);
@@ -650,11 +714,44 @@ mod tests {
         client.shutdown().await;
     }
 
+    /// Windows 程序解析：.cmd 垫片 / .exe / 显式路径补扩展 / 裸名搜目录列表
+    #[cfg(windows)]
+    #[test]
+    fn resolve_program_finds_cmd_shim_and_exe() {
+        let dir = std::env::temp_dir().join(format!("pig-mcp-prog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // npm/fnm 式垫片目录：同名无扩展 sh 脚本 + .cmd 垫片并存，必须选 .cmd
+        std::fs::write(dir.join("npx"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("npx.cmd"), "@echo off\r\n").unwrap();
+        std::fs::write(dir.join("tool.exe"), b"").unwrap();
+        let dirs = vec![dir.clone()];
+
+        // 裸名按 exe→cmd→bat 优先于无扩展原名解析
+        assert_eq!(resolve_program(&dirs, "npx"), Some(dir.join("npx.cmd")));
+        assert_eq!(resolve_program(&dirs, "tool"), Some(dir.join("tool.exe")));
+        assert_eq!(resolve_program(&dirs, "missing"), None);
+        assert_eq!(resolve_program(&dirs, "  "), None);
+
+        // 显式路径同样补扩展；带扩展名但不存在则不猜
+        let bare = dir.join("npx").to_string_lossy().into_owned();
+        assert_eq!(resolve_program(&dirs, &bare), Some(dir.join("npx.cmd")));
+        let full = dir.join("tool.exe").to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_program(&dirs, &full),
+            Some(dir.join("tool.exe"))
+        );
+        let absent = dir.join("nope.exe").to_string_lossy().into_owned();
+        assert_eq!(resolve_program(&dirs, &absent), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 并发安全核实：同一连接上并发 tools/call 多路复用——
     /// 两个并发调用各自拿到与自己参数匹配的回显（id 配对不错串）
     #[tokio::test]
     async fn stdio_concurrent_calls_multiplexed() {
-        let (client, _) = McpClient::connect(&fake_server_config())
+        let (client, _) = McpClient::connect(&fake_server_config(), std::path::Path::new("."))
             .await
             .expect("connect");
         let (a, b) = tokio::join!(

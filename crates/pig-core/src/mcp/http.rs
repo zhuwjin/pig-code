@@ -698,7 +698,7 @@ mod tests {
     /// tools/list → tools/call → ping → shutdown（DELETE 尽力）
     async fn roundtrip(shape: Shape) {
         let (url, seen) = spawn_fake_server(shape).await;
-        let (client, specs) = McpClient::connect(&http_config(url))
+        let (client, specs) = McpClient::connect(&http_config(url), std::path::Path::new("."))
             .await
             .expect("connect");
         assert_eq!(specs.len(), 1);
