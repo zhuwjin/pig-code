@@ -22,7 +22,25 @@ impl AppView {
             })
             .child(
                 TitleBar::new()
-                    .child(
+                    .child(if self.settings_open {
+                        // 设置模式：左区换「返回工作区」（与其他标题栏按钮同款样式，
+                        // 替代在设置侧栏里叠加返回按钮的方案）
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("back-to-workspace")
+                                    .ghost()
+                                    .small()
+                                    .occlude()
+                                    .icon(IconName::ArrowLeft)
+                                    .label("返回工作区")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(div().text_sm().font_semibold().child("设置"))
+                    } else {
                         h_flex()
                             .gap_2()
                             .child(
@@ -41,8 +59,8 @@ impl AppView {
                                     .text_sm()
                                     .font_semibold()
                                     .child(format!("pig-code · {title}")),
-                            ),
-                    )
+                            )
+                    })
                     .child(
                         h_flex()
                             .gap_1()

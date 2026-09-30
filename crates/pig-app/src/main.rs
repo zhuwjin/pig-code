@@ -5,6 +5,7 @@
 mod agent_client;
 mod clipboard;
 mod composer;
+mod font;
 mod review_panel;
 mod settings;
 mod sidebar;
@@ -879,6 +880,8 @@ fn main() {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            // 记录平台默认字体（字体设置「系统默认」档的恢复值）
+            font::capture_defaults(cx);
             cx.set_global(ThemeFollowSystem(true));
 
             cx.bind_keys([

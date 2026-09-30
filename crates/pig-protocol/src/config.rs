@@ -218,4 +218,12 @@ pub struct AppConfig {
     pub providers: Vec<ProviderConfig>,
     pub default_provider: String,
     pub default_model: String,
+    /// 界面字体家族名（GPUI 字体名，如 "PingFang SC"）；
+    /// None = 系统默认（.SystemUIFont），未安装的字体按默认处理（防 GPUI panic）
+    #[serde(default)]
+    pub ui_font: Option<String>,
+    /// 等宽字体家族名（代码块/diff/命令行，如 "JetBrains Mono"）；None = 平台默认
+    /// （macOS Menlo / Windows Consolas / Linux DejaVu Sans Mono，缺装时上游自动换备选）
+    #[serde(default)]
+    pub mono_font: Option<String>,
 }

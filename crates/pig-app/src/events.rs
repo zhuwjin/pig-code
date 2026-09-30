@@ -88,6 +88,8 @@ impl AppView {
             }
             Event::ConfigSnapshot { config } => {
                 self.config = Some(config.clone());
+                // 启动加载与每次保存后都会到达：把配置里的字体应用到全局主题（幂等）
+                font::apply_config_fonts(config, cx);
                 let config = config.clone();
                 self.settings
                     .update(cx, |settings, cx| settings.set_config(config, cx));

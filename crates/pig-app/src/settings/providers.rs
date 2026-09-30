@@ -92,7 +92,6 @@ impl SettingsView {
                 }
             },
         ));
-        self.format_popup = false;
         self.model_dialog = Some(dialog);
         cx.notify();
     }
@@ -126,7 +125,6 @@ impl SettingsView {
         if let Some(error) = error {
             let mut dialog = dialog;
             dialog.params_error = Some(error);
-            self.format_popup = false;
             self.model_dialog = Some(dialog);
             cx.notify();
             return;
@@ -173,6 +171,7 @@ impl SettingsView {
     }
 }
 impl SettingsView {
+    /// 左列供应商行：边框行卡，选中 primary 描边 + hover accent 半透明
     pub(crate) fn render_provider_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let provider = &self.config.providers[ix];
         let selected = self.selected == Some(ix);
@@ -183,6 +182,7 @@ impl SettingsView {
         };
         h_flex()
             .id(("provider", ix))
+            .items_center()
             .gap_2()
             .px_3()
             .py_2()
@@ -193,12 +193,20 @@ impl SettingsView {
             } else {
                 cx.theme().border
             })
+            .cursor_pointer()
             .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_provider(ix, cx);
             }))
-            .child(div().size_2().rounded_full().bg(dot_color))
-            .child(div().text_sm().flex_1().child(provider.name.clone()))
+            .child(div().size_2().flex_none().rounded_full().bg(dot_color))
+            .child(
+                div()
+                    .text_sm()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(provider.name.clone()),
+            )
             .into_any_element()
     }
 
@@ -328,15 +336,20 @@ impl SettingsView {
 
     pub(crate) fn render_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(p_ix) = self.selected else {
-            return div()
-                .flex_1()
-                .child("选择或添加一个供应商")
+            // 空态（对齐 ZCode PresetProviderPlaceholderCard：居中 muted 提示）
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::Bot).size_8())
+                .child(div().text_sm().child("选择或添加一个供应商"))
                 .into_any_element();
         };
         let provider = self.config.providers[p_ix].clone();
         let provider_id = provider.id.clone();
         let enabled = provider.enabled;
-        let is_anthropic = provider.api_format == ApiFormat::AnthropicMessages;
         let test_result = self.test_results.get(&provider_id).cloned();
 
         v_flex()
@@ -390,7 +403,7 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("名称"),
                     )
@@ -401,7 +414,7 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("Base URL"),
                     )
@@ -412,47 +425,15 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("API 格式"),
                     )
+                    // Select 与输入框同款触发器（Button 默认 16px 居中，与表单不协调）
                     .child(
-                        div()
-                            .on_prepaint({
-                                let cell = self.format_btn_bounds.clone();
-                                move |bounds, _, _| cell.set(bounds)
-                            })
-                            .child(
-                                Button::new("api-format")
-                                    .outline()
-                                    .w_full()
-                                    .label(if is_anthropic {
-                                        "Anthropic Messages (/v1/messages)"
-                                    } else {
-                                        "OpenAI Chat Completions (/v1/chat/completions)"
-                                    })
-                                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                                        // 弹层打开时点按钮：按下先触发弹层的 outside-close
-                                        // （记录按下位置），紧随的 click 按同一位置吞掉，
-                                        // 避免收起又马上弹开（main.rs 右侧面板菜单同款处理）
-                                        let down_pos = match event {
-                                            ClickEvent::Mouse(e) => Some(e.down.position),
-                                            _ => None,
-                                        };
-                                        if this
-                                            .format_outside_close
-                                            .take()
-                                            .is_some_and(|pos| Some(pos) == down_pos)
-                                        {
-                                            return;
-                                        }
-                                        this.format_popup = !this.format_popup;
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(self.format_popup, |this| {
-                                this.child(self.render_format_popup(p_ix, cx))
-                            }),
+                        Select::new(&self.format_select)
+                            .w_full()
+                            .menu_width(px(360.)),
                     ),
             )
             .child(
@@ -460,7 +441,7 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("API Key"),
                     )
@@ -504,10 +485,17 @@ impl SettingsView {
                 h_flex()
                     .w_full()
                     .mt_2()
-                    .child(div().text_sm().font_semibold().flex_1().child("模型列表"))
+                    .mb_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("模型"),
+                    )
                     .child(
                         Button::new("add-model")
-                            .ghost()
+                            .secondary()
                             .small()
                             .icon(IconName::Plus)
                             .label("添加模型")
@@ -516,141 +504,106 @@ impl SettingsView {
                             })),
                     ),
             )
-            .children(provider.models.iter().enumerate().map(|(m_ix, model)| {
-                let provider_id = provider_id.clone();
+            // 模型列表（对齐 ZCode：一个圆角容器多行、行间分隔线、空态虚线框）
+            .child(if provider.models.is_empty() {
                 h_flex()
-                    .id(("model", m_ix))
+                    .h_12()
+                    .items_center()
                     .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded(cx.theme().radius)
+                    .px_4()
+                    .rounded_lg()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_sm().child(model.id.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .px_1()
-                            .rounded_sm()
-                            .bg(cx.theme().accent)
-                            .child(Self::format_ctx(model.context_window)),
-                    )
-                    .when(model.input_image, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .px_1()
-                                .rounded_sm()
-                                .bg(cx.theme().accent)
-                                .child("视觉"),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(("test", m_ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Globe)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(SettingsEvent::TestProvider(provider_id.clone()));
-                            })),
-                    )
-                    .child(
-                        Button::new(("edit-model", m_ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Settings2)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_model_dialog(Some(m_ix), window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(("del-model", m_ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Delete)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.config.providers[p_ix].models.remove(m_ix);
-                                cx.emit(SettingsEvent::Save(this.config.clone()));
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Switch::new(("model-enabled", m_ix))
-                            .checked(model.enabled)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.config.providers[p_ix].models[m_ix].enabled = *checked;
-                                cx.emit(SettingsEvent::Save(this.config.clone()));
-                                cx.notify();
-                            })),
-                    )
-            }))
+                    .border_dashed()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Info).size_4())
+                    .child(div().child("暂无模型，点击「添加模型」创建"))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    // 与输入框同色阶（官方 input_background），避免背景色块断层
+                    .bg(cx.theme().input_background())
+                    .children(provider.models.iter().enumerate().map(|(m_ix, model)| {
+                        let provider_id = provider_id.clone();
+                        h_flex()
+                            .id(("model", m_ix))
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .when(m_ix > 0, |this| {
+                                this.border_t_1().border_color(cx.theme().border)
+                            })
+                            .child(div().text_sm().child(model.id.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(cx.theme().accent)
+                                    .child(Self::format_ctx(model.context_window)),
+                            )
+                            .when(model.input_image, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(cx.theme().accent)
+                                        .child("视觉"),
+                                )
+                            })
+                            .child(div().flex_1())
+                            .child(
+                                Button::new(("test", m_ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Globe)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(SettingsEvent::TestProvider(provider_id.clone()));
+                                    })),
+                            )
+                            .child(
+                                Button::new(("edit-model", m_ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Settings2)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_model_dialog(Some(m_ix), window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("del-model", m_ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.config.providers[p_ix].models.remove(m_ix);
+                                        cx.emit(SettingsEvent::Save(this.config.clone()));
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Switch::new(("model-enabled", m_ix))
+                                    .checked(model.enabled)
+                                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                        this.config.providers[p_ix].models[m_ix].enabled = *checked;
+                                        cx.emit(SettingsEvent::Save(this.config.clone()));
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
+                    .into_any_element()
+            })
             .into_any_element()
     }
 }
 
 impl SettingsView {
-    /// API 格式下拉：deferred 到窗口层绘制，`Positioner::side(Bottom)` 锚定按钮正下方
-    /// （与 main.rs 标签页 "+" 菜单同一模式）。详情列在 overflow_y_scroll 容器内，
-    /// absolute 弹层会被滚动区裁剪，且后续表单兄弟（API Key 输入框等带背景元素）
-    /// 按文档序画在其上，看起来就是弹层没有背景。
-    pub(crate) fn render_format_popup(&self, p_ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        deferred(
-            Positioner::side(self.format_btn_bounds.get())
-                .placement(Placement::Bottom)
-                .align(Align::Start)
-                .offset(px(4.))
-                .margin(px(8.))
-                .occlude()
-                .child(
-                    v_flex()
-                        .id("format-popup")
-                        .w(px(360.))
-                        .py_1()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().popover)
-                        .shadow_lg()
-                        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                            this.format_popup = false;
-                            this.format_outside_close = Some(event.position);
-                            cx.notify();
-                        }))
-                        .children(
-                            [
-                                (
-                                    "OpenAI Chat Completions (/v1/chat/completions)",
-                                    ApiFormat::OpenAiChat,
-                                ),
-                                (
-                                    "Anthropic Messages (/v1/messages)",
-                                    ApiFormat::AnthropicMessages,
-                                ),
-                            ]
-                            .map(|(label, format)| {
-                                div()
-                                    .id(gpui_kit::SharedString::from(label.to_string()))
-                                    .px_3()
-                                    .py_1()
-                                    .text_sm()
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(cx.theme().accent))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.config.providers[p_ix].api_format = format;
-                                        this.format_popup = false;
-                                        cx.emit(SettingsEvent::Save(this.config.clone()));
-                                        cx.notify();
-                                    }))
-                                    .child(label)
-                            }),
-                        ),
-                ),
-        )
-        .with_priority(1)
-        .into_any_element()
-    }
-
     pub(crate) fn render_model_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(dialog) = &self.model_dialog else {
             return div().into_any_element();

@@ -619,6 +619,8 @@ unknown: 忽略我
             ],
             default_provider: "p1".into(),
             default_model: "m1".into(),
+            ui_font: None,
+            mono_font: None,
         }
     }
 

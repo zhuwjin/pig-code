@@ -202,6 +202,11 @@ impl AppView {
         self.sync_scope_workspaces(cx);
         self.refresh_mcp(cx);
         self.refresh_skills(cx);
+        // 主题模式可能在设置页关闭期间被系统外观改变，打开时重新同步下拉
+        self.settings.update(cx, |settings, cx| {
+            settings.appearance_dirty = true;
+            cx.notify();
+        });
         cx.notify();
     }
 

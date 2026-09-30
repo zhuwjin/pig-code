@@ -1411,7 +1411,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    pub(crate) fn render_websearch(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_websearch(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let (tavily, brave) = websearch_backends();
         let active = if tavily {
             Some("Tavily")
