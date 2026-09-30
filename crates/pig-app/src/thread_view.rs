@@ -716,11 +716,16 @@ impl Render for ThreadView {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll_handle)
-                            // 用户上翻：暂停跟随并浮出「最新消息」按钮（不吞事件，列表照常滚动）
+                            // 用户上翻：暂停跟随并浮出「最新消息」按钮（不吞事件，列表照常滚动）。
+                            // 内容没超高（max_offset=0，不可滚动）时上翻无意义——保持跟随，
+                            // 否则短会话里滚一下也会浮出按钮
                             .on_scroll_wheel(cx.listener(
                                 |this, event: &ScrollWheelEvent, window, cx| {
                                     let delta = event.delta.pixel_delta(window.line_height());
-                                    if delta.y > px(0.) && this.follow_bottom {
+                                    if delta.y > px(0.)
+                                        && this.follow_bottom
+                                        && this.scroll_handle.max_offset().y > px(0.)
+                                    {
                                         this.follow_bottom = false;
                                         cx.notify();
                                     }
@@ -823,6 +828,9 @@ impl Render for ThreadView {
                                         .border_1()
                                         .border_color(cx.theme().border)
                                         .shadow_md()
+                                        // 默认 hitbox 不拦下层：点击会穿透到下面的
+                                        // 工具卡/滚动区——挡掉穿透，滚轮仍透传给列表
+                                        .block_mouse_except_scroll()
                                         .child(
                                             Icon::new(AssetIconName::ArrowDown)
                                                 .size_4()

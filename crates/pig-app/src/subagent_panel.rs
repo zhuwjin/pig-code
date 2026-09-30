@@ -334,9 +334,13 @@ impl Render for SubagentPanel {
                     .track_scroll(&self.scroll)
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                         let delta = event.delta.pixel_delta(window.line_height());
-                        // 用户上翻：暂停跟随并浮出「最新消息」按钮
-                        //（不吞这次事件，列表照常滚动）
-                        if delta.y > px(0.) && this.following {
+                        // 用户上翻：暂停跟随并浮出「最新消息」按钮（不吞这次事件，
+                        // 列表照常滚动）。内容没超高（不可滚动）时上翻不暂停——
+                        // 否则短面板里滚一下也会浮出按钮
+                        if delta.y > px(0.)
+                            && this.following
+                            && this.scroll.max_offset().y > px(0.)
+                        {
                             this.following = false;
                             cx.notify();
                         }
@@ -363,6 +367,9 @@ impl Render for SubagentPanel {
                             .border_color(cx.theme().border)
                             .shadow_md()
                             .cursor_pointer()
+                            // 默认 hitbox 不拦下层：点击会穿透到面板内容——
+                            // 挡掉穿透，滚轮仍透传给列表
+                            .block_mouse_except_scroll()
                             .child(
                                 Icon::new(AssetsIconName::ArrowDown)
                                     .size_3p5()
