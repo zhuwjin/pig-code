@@ -20,6 +20,19 @@ pub(crate) fn detect_windows_shell() -> WindowsShell {
     detect_git_bash().map_or(WindowsShell::Cmd, WindowsShell::GitBash)
 }
 
+/// Unix shell 探测（kimi-code environmentProbe 同款）：优先原生 bash——bashism
+///（`[[ ]]`/数组/进程替换）在 dash 系的 sh 下直接报错，行为不该取决于用户
+/// 发行版；候选路径都找不到回退 sh。进程级缓存（stat 结果进程内不变）。
+pub(crate) fn unix_shell() -> &'static str {
+    static UNIX_SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    UNIX_SHELL.get_or_init(|| {
+        ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+            .into_iter()
+            .find(|candidate| Path::new(candidate).is_file())
+            .unwrap_or("sh")
+    })
+}
+
 /// Git Bash 探测链（kimi-code 同款）：
 /// PIGCODE_SHELL_PATH 显式指定 → PATH 上的 bash.exe → PATH 上的 git.exe 反推
 /// 安装根（常规 cmd/bin 布局取上级；包管理器 shim 用 `git --exec-path` 穿透）
@@ -148,7 +161,7 @@ pub fn shell_label() -> String {
             WindowsShell::Cmd => "cmd /C（Windows 语法）".to_string(),
         }
     } else {
-        "sh -c（Unix 语法）".to_string()
+        format!("{} -c（Unix 语法）", unix_shell())
     }
 }
 
@@ -163,8 +176,8 @@ pub(crate) fn rewrite_nul_redirects(command: &str) -> String {
 }
 
 /// 统一起 shell：Windows 优先 Git Bash（bash -c，探测见 windows_shell）、
-/// 回退 cmd /C；其余平台 sh -c。工作目录、stdin null、stdout/stderr piped、
-/// kill_on_drop。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0
+/// 回退 cmd /C；Unix 优先原生 bash、回退 sh（探测见 unix_shell）。
+/// 工作目录、stdin null、stdout/stderr piped、kill_on_drop。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0
 ///（防 git 交互提问挂死）+ PYTHONIOENCODING/PYTHONUTF8=1（Python 子进程强制
 /// UTF-8 输出，ZCode 同款）；LANG 未设时补 C.UTF-8。
 /// unix 上 process_group(0) 让子进程自成进程组组长，stop_task 才能整组树杀。
@@ -184,7 +197,7 @@ pub(crate) fn spawn_shell(cwd: &Path, command: &str) -> std::io::Result<tokio::p
             }
         }
     } else {
-        let mut shell = tokio::process::Command::new("sh");
+        let mut shell = tokio::process::Command::new(unix_shell());
         shell.arg("-c").arg(command);
         shell
     };

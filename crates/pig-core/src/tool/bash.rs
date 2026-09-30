@@ -124,7 +124,7 @@ impl Tool for Bash {
             "type": "function",
             "function": {
                 "name": "Bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。高风险命令会弹窗请用户确认。Windows 下优先用 Git Bash（Unix 语法），未安装时回退 cmd /C——以系统提示 env 块的 Shell 标注为准。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览，累计超 16MiB 强制停止。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
+                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。高风险命令会弹窗请用户确认。Shell 选择：Unix 优先原生 bash（无则 sh），Windows 优先 Git Bash（Unix 语法）、未安装回退 cmd /C——以系统提示 env 块的 Shell 标注为准。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览，累计超 16MiB 强制停止。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
                 "parameters": {
                     "type": "object",
                     "properties": {

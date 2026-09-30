@@ -779,6 +779,9 @@ mod tests {
     }
 
     /// `git --exec-path` 输出 → 安装根：MINGW 段定位（git 输出正斜杠路径）。
+    /// Windows 版：断言原生反斜杠形态（Path 相等按组件比较，`C:\...` 与函数
+    /// 返回的正斜杠 collect 结果组件一致）。
+    #[cfg(windows)]
     #[test]
     fn exec_path_root_inference() {
         let root = root_from_exec_path_text("C:/Program Files/Git/mingw64/libexec/git-core\n")
@@ -795,6 +798,29 @@ mod tests {
         // 无 MINGW 段：往上两级兜底（libexec/git-core → 根）
         let root = root_from_exec_path_text("C:/x/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("C:\\x"));
+
+        assert!(root_from_exec_path_text("").is_none());
+    }
+
+    /// Unix 版：同逻辑用原生 Unix 路径验证（生产上此函数只在 Windows 探测链
+    /// 调用，这里保逻辑回归覆盖）。
+    #[cfg(not(windows))]
+    #[test]
+    fn exec_path_root_inference() {
+        let root = root_from_exec_path_text("/opt/Git/mingw64/libexec/git-core\n")
+            .expect("常规布局应命中");
+        assert_eq!(root, PathBuf::from("/opt/Git"));
+
+        let root = root_from_exec_path_text("/opt/Git/ucrt64/libexec/git-core").unwrap();
+        assert_eq!(root, PathBuf::from("/opt/Git"));
+
+        // shim 布局：mingw 段紧随根也能取到根
+        let root = root_from_exec_path_text("/mingw64/libexec/git-core").unwrap();
+        assert_eq!(root, PathBuf::from("/"));
+
+        // 无 MINGW 段：往上两级兜底（libexec/git-core → 根）
+        let root = root_from_exec_path_text("/opt/x/libexec/git-core").unwrap();
+        assert_eq!(root, PathBuf::from("/opt/x"));
 
         assert!(root_from_exec_path_text("").is_none());
     }
@@ -828,7 +854,21 @@ mod tests {
         );
     }
 
+    /// Unix shell 探测：命中首个存在的 bash 候选路径，全无则回退 sh。
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shell_prefers_bash_falls_back_to_sh() {
+        let expected = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+            .into_iter()
+            .find(|candidate| Path::new(candidate).is_file())
+            .unwrap_or("sh");
+        assert_eq!(unix_shell(), expected);
+    }
+
     /// 本机有 git 时（pig-code 硬依赖），探测必须找到 Git Bash。
+    /// Windows-only：探测链找的是 .exe/ProgramFiles 布局，Unix 上 spawn 直接走
+    /// sh 不经此链（在此跑必然失败，不是回归信号）。
+    #[cfg(windows)]
     #[test]
     fn detection_finds_bash_when_git_present() {
         let git_on_path = std::process::Command::new("git")
