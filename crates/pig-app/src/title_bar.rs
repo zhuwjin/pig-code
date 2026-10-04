@@ -208,13 +208,23 @@ impl AppView {
             })
     }
 
-    /// 标题栏会话菜单（三个点弹层）：锚定按钮正下方，点外部收起。
-    /// 首项「查看调用轨迹」，后续会话级操作加在这里
+    /// 标题栏会话菜单（三个点弹层）：锚定按钮下方、左对齐（菜单向右展开），点外部收起。
+    /// 置顶/归档/重命名与侧栏右键菜单同链路；末项「查看调用轨迹」
     pub(crate) fn render_session_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let meta = self
+            .current
+            .as_ref()
+            .and_then(|id| self.metas.iter().find(|m| &m.id == id));
+        let pinned = meta.is_some_and(|m| m.pinned);
+        let archived = meta.is_some_and(|m| m.archived);
+        let pin_id = self.current.clone().unwrap_or_default();
+        let archive_id = pin_id.clone();
+        let rename_id = pin_id.clone();
+        let rename_title = meta.map(|m| m.title.clone()).unwrap_or_default();
         deferred(
             Positioner::side(self.session_menu_btn_bounds.get())
                 .placement(Placement::Bottom)
-                .align(Align::End)
+                .align(Align::Start)
                 .offset(px(6.))
                 .margin(px(8.))
                 .occlude()
@@ -233,6 +243,88 @@ impl AppView {
                             this.session_menu_outside_close = Some(event.position);
                             cx.notify();
                         }))
+                        .child(
+                            h_flex()
+                                .id("menu-toggle-pin")
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
+                                .child(
+                                    Icon::new(if pinned {
+                                        IconName::StarFill
+                                    } else {
+                                        IconName::Star
+                                    })
+                                    .size_4(),
+                                )
+                                .child(div().child(if pinned { "取消置顶" } else { "置顶" }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.session_menu_open = false;
+                                    this.agent.set_pinned(&pin_id, !pinned);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            h_flex()
+                                .id("menu-toggle-archive")
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
+                                .child(
+                                    Icon::new(if archived {
+                                        IconName::Undo2
+                                    } else {
+                                        IconName::Inbox
+                                    })
+                                    .size_4(),
+                                )
+                                .child(div().child(if archived {
+                                    "取消归档"
+                                } else {
+                                    "归档"
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.session_menu_open = false;
+                                    this.agent.set_archived(&archive_id, !archived);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            h_flex()
+                                .id("menu-rename-session")
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
+                                .child(Icon::new(AssetsIconName::SquarePen).size_4())
+                                .child(div().child("重命名"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.session_menu_open = false;
+                                    // 行内重命名输入框画在侧栏会话行上：收起态先展开侧栏
+                                    this.sidebar_collapsed = false;
+                                    this.sidebar.update(cx, |sidebar, cx| {
+                                        sidebar.start_session_rename(
+                                            rename_id.clone(),
+                                            rename_title.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                        .child(div().h(px(1.)).my_1().bg(cx.theme().border))
                         .child(
                             h_flex()
                                 .id("menu-view-trajectory")
