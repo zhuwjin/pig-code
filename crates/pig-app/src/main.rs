@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_client;
+mod assets;
 mod clipboard;
 mod composer;
 mod font;
@@ -81,17 +82,19 @@ use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
 use crate::subagent_panel::SubagentPanel;
 use crate::thread_view::{ThreadEvent, ThreadView};
+use crate::trajectory::TrajectoryState;
 
 struct SessionViews {
     thread: Entity<ThreadView>,
     review: Entity<ReviewPanel>,
 }
 
-/// 右侧面板 tab：「改动」为内置页；「子代理」每个 agent_id 一个（通知卡点击打开）。
-/// 浏览器/终端/侧边聊天后续加。
+/// 右侧面板 tab：「改动」「调用轨迹」为内置页；「子代理」每个 agent_id 一个
+/// （通知卡点击打开）。浏览器/终端/侧边聊天后续加。
 #[derive(Clone, PartialEq, Eq)]
 enum RightTab {
     Changes,
+    Trajectory,
     Subagent { agent_id: String },
 }
 
@@ -100,6 +103,7 @@ impl RightTab {
     fn key(&self) -> String {
         match self {
             Self::Changes => "changes".to_string(),
+            Self::Trajectory => "trajectory".to_string(),
             Self::Subagent { agent_id } => format!("subagent-{agent_id}"),
         }
     }
@@ -123,6 +127,7 @@ mod right_panel;
 mod selftest;
 mod sessions;
 mod title_bar;
+mod trajectory;
 
 use dock::*;
 use selftest::{run_selftest, setup_selftest};
@@ -202,6 +207,12 @@ struct AppView {
     title_branch_outside_close: Option<Point<Pixels>>,
     /// 分支 chip 的 bounds（on_prepaint 记录，菜单锚定用）
     title_branch_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 标题栏会话菜单（三个点）开合；三件套与分支菜单同模式
+    session_menu_open: bool,
+    session_menu_outside_close: Option<Point<Pixels>>,
+    session_menu_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 调用轨迹弹窗（None = 关闭）：当前会话的 model-io 落盘记录
+    trajectory: Option<TrajectoryState>,
     /// hero 页选择的工作区目录；None = 未选择（显示"选择工作区"，发送时回落到启动目录）
     hero_cwd: Option<PathBuf>,
     hero_branch: Option<String>,
@@ -309,6 +320,10 @@ impl AppView {
             title_branch_menu_open: false,
             title_branch_outside_close: None,
             title_branch_btn_bounds: Rc::new(Cell::new(Bounds::default())),
+            session_menu_open: false,
+            session_menu_outside_close: None,
+            session_menu_btn_bounds: Rc::new(Cell::new(Bounds::default())),
+            trajectory: None,
             hero_branch: None,
             hero_branches: vec![],
             hero_is_git: false,
@@ -849,6 +864,10 @@ impl Render for AppView {
             .when(self.right_menu_open, |this| {
                 this.child(self.render_right_menu_dropdown(window, cx))
             })
+            // 标题栏三个点的会话菜单（deferred 弹层）
+            .when(self.session_menu_open, |this| {
+                this.child(self.render_session_menu(cx))
+            })
             // Yolo 确认框：最后渲染 = 最顶层（覆盖 settings/dock/hero 全部内容）
             .when(self.yolo_confirm_open, |this| {
                 this.child(self.render_yolo_confirm(cx))
@@ -877,7 +896,8 @@ fn main() {
     let config_path = setup.map(|s| s.config_path);
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        // 先查 pig 自带资产（供应商图标），未命中回落 gpui-kit 官方组件资产
+        .with_assets(crate::assets::ChainedAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             // 记录平台默认字体（字体设置「系统默认」档的恢复值）

@@ -703,14 +703,91 @@ impl SettingsView {
                         .collect::<Vec<_>>(),
                 );
         }
-        // 目录来源挪到列表下方（路径作次要信息）
-        page = page.child(
-            v_flex()
-                .gap_1()
-                .child(div().text_sm().font_semibold().child("技能目录"))
-                .child(self.render_skill_sources(snapshot, cx)),
-        );
         page.into_any_element()
+    }
+
+    /// 帮助弹窗：SKILL.md 格式 + 技能目录路径 + 生效时机
+    ///（页头信息按钮弹出；目录未加载时省略路径段只显示格式说明）
+    pub(crate) fn render_skills_help_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui_kit::black().opacity(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                v_flex()
+                    .id("skills-help-dialog")
+                    .w(px(560.))
+                    .max_h(px(640.))
+                    .overflow_y_scroll()
+                    .gap_3()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(div().text_lg().font_semibold().child("技能说明"))
+                    .when_some(self.skills_snapshot.as_ref(), |this, snapshot| {
+                        this.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .child("技能目录"),
+                                )
+                                .child(self.render_skill_sources(snapshot, cx)),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().font_semibold().child("手动编写"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("每个技能是一个目录，内含 SKILL.md（frontmatter 写 name/description）；项目级覆盖用户级同名技能："),
+                            )
+                            .child(
+                                div()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .px_3()
+                                    .py_2()
+                                    .text_xs()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SKILL_EXAMPLE),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("技能清单注入系统提示词（仅名称+描述，会话开始时冻结），正文由 Skill 工具按需加载；改动对新建会话生效。"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("close-skills-help")
+                                    .primary()
+                                    .small()
+                                    .label("关闭")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skills_help_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// 无技能时的引导：新建入口 + 示例 SKILL.md
@@ -738,31 +815,6 @@ impl SettingsView {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_skills_dialog(None, window, cx);
                     })),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("每个技能是一个目录，内含 SKILL.md（frontmatter 写 name/description）；项目级覆盖用户级同名技能："),
-            )
-            .child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().group_box)
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SKILL_EXAMPLE),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("技能清单注入系统提示词（仅名称+描述，会话开始时冻结），正文由 Skill 工具按需加载；改动对新建会话生效。"),
             )
             .into_any_element()
     }

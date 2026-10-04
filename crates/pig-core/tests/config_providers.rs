@@ -69,6 +69,7 @@ async fn config_v2_snapshot_and_save() {
         api_format: ApiFormat::AnthropicMessages,
         enabled: true,
         models: vec![ModelConfig::new("claude-mock", 200_000, 8_192)],
+        key_url: None,
     });
     agent
         .ops

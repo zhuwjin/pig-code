@@ -92,6 +92,7 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 
 mod dialog;
 mod mcp;
+mod presets;
 mod providers;
 mod skills;
 
@@ -114,6 +115,8 @@ pub struct SettingsView {
     format_select: Entity<TextSelectState>,
     test_results: std::collections::HashMap<String, (bool, String)>,
     model_dialog: Option<ModelDialog>,
+    /// 添加供应商的预设选择弹窗开合
+    preset_picker_open: bool,
     /// MCP 页配置快照（AppView 经 RefreshMcp 事件喂入；None = 尚未读取）
     mcp_snapshot: Option<McpConfigSnapshot>,
     /// 连接状态对应的会话（None = 未打开会话：只展示配置不展示状态）
@@ -127,6 +130,8 @@ pub struct SettingsView {
     mcp_dialog: Option<McpDialog>,
     /// mcp.json 写入失败提示（成功写入或下次刷新前保留）
     mcp_write_error: Option<String>,
+    /// MCP 页帮助卡（手动编辑格式 + 配置文件路径）开合；默认收起
+    mcp_help_open: bool,
     /// MCP 页作用域：用户级（默认）/ 指定工作区（AppView 按此加载快照）
     mcp_scope: McpScope,
     /// 当前会话的工作区（MCP 连接状态适用性与两页作用域下拉的「当前会话」标记）
@@ -148,6 +153,8 @@ pub struct SettingsView {
     skills_dialog: Option<SkillDialog>,
     /// 技能目录写入失败提示（成功写入或下次刷新前保留）
     skills_write_error: Option<String>,
+    /// 技能页帮助弹窗（SKILL.md 格式 + 技能目录路径）开合；默认收起
+    skills_help_open: bool,
     /// 技能页作用域：用户级（默认）/ 指定工作区
     skills_scope: McpScope,
     /// 技能页作用域下拉弹层三件套（同 mcp_scope_*）
@@ -275,12 +282,14 @@ impl SettingsView {
             format_select,
             test_results: Default::default(),
             model_dialog: None,
+            preset_picker_open: false,
             mcp_snapshot: None,
             mcp_session: None,
             mcp_connection: None,
             mcp_search,
             mcp_dialog: None,
             mcp_write_error: None,
+            mcp_help_open: false,
             mcp_scope: McpScope::User,
             session_cwd: None,
             scope_workspaces: vec![],
@@ -291,6 +300,7 @@ impl SettingsView {
             skills_search,
             skills_dialog: None,
             skills_write_error: None,
+            skills_help_open: false,
             skills_scope: McpScope::User,
             skills_scope_popup: false,
             skills_scope_btn_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -532,18 +542,21 @@ impl SettingsView {
         cx.emit(SettingsEvent::Save(self.config.clone()));
     }
 
-    fn add_provider(&mut self, cx: &mut Context<Self>) {
-        // id 必须全库唯一：按「数量+1」生成会在删除过供应商后与存量撞车
-        //（撞车后所有按 id 的查找都命中第一个：模型解析落到错误供应商的
-        // 兜底模型、label 张冠李戴、会话 meta 混乱）
+    /// 生成不与存量撞车的供应商 id（按「数量+1」会在删除后与存量撞车：
+    /// 撞车后所有按 id 的查找都命中第一个，模型解析/label/会话 meta 全乱）
+    fn next_provider_id(&self) -> String {
         let mut n = 1usize;
-        let id = loop {
+        loop {
             let candidate = format!("custom-{n}");
             if !self.config.providers.iter().any(|p| p.id == candidate) {
-                break candidate;
+                return candidate;
             }
             n += 1;
-        };
+        }
+    }
+
+    fn add_provider(&mut self, cx: &mut Context<Self>) {
+        let id = self.next_provider_id();
         let ix = self.config.providers.len();
         self.config.providers.push(ProviderConfig {
             id,
@@ -553,6 +566,7 @@ impl SettingsView {
             api_format: ApiFormat::OpenAiChat,
             enabled: true,
             models: vec![],
+            key_url: None,
         });
         self.selected = Some(ix);
         self.form_dirty = true;
@@ -664,6 +678,14 @@ impl Render for SettingsView {
                 cx.emit(SettingsEvent::Close);
             }))
             .child(settings)
+            .when(self.preset_picker_open, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(self.render_preset_picker(cx)),
+                )
+            })
             .when(self.model_dialog.is_some(), |this| {
                 this.child(
                     div()
@@ -675,12 +697,28 @@ impl Render for SettingsView {
             .when(self.mcp_dialog.is_some(), |this| {
                 this.child(div().absolute().inset_0().child(self.render_mcp_dialog(cx)))
             })
+            .when(self.mcp_help_open, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(self.render_mcp_help_dialog(cx)),
+                )
+            })
             .when(self.skills_dialog.is_some(), |this| {
                 this.child(
                     div()
                         .absolute()
                         .inset_0()
                         .child(self.render_skills_dialog(cx)),
+                )
+            })
+            .when(self.skills_help_open, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(self.render_skills_help_dialog(cx)),
                 )
             })
     }
@@ -767,7 +805,8 @@ impl SettingsView {
                             .icon(IconName::Plus)
                             .label("添加供应商")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.add_provider(cx);
+                                this.preset_picker_open = true;
+                                cx.notify();
                             })),
                     )
                     .children(
@@ -800,10 +839,16 @@ impl SettingsView {
                             .text_color(cx.theme().muted_foreground)
                             .child("用户级与项目级条目合并展示，同名项目级覆盖。"),
                     )
-                    .child(div().w(px(180.)).child(Input::new(&self.mcp_search)))
+                    // 页头控件统一 small 档，避免默认档下主按钮视觉盖过相邻控件
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .child(Input::new(&self.mcp_search).small()),
+                    )
                     .child(
                         Button::new("new-mcp")
                             .primary()
+                            .small()
                             .icon(IconName::Plus)
                             .label("新建服务器")
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -813,10 +858,22 @@ impl SettingsView {
                     .child(
                         Button::new("refresh-mcp")
                             .outline()
+                            .small()
                             .icon(IconName::RotateCw)
                             .label("刷新")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_mcp(cx);
+                            })),
+                    )
+                    // 帮助开关：手动编辑格式与配置文件路径按需展开（主页不常驻）
+                    .child(
+                        Button::new("mcp-help")
+                            .outline()
+                            .small()
+                            .icon(IconName::Info)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.mcp_help_open = !this.mcp_help_open;
+                                cx.notify();
                             })),
                     ),
             )
@@ -839,14 +896,30 @@ impl SettingsView {
                             .text_color(cx.theme().muted_foreground)
                             .child("清单注入系统提示词，正文按需加载；改动对新建会话生效。"),
                     )
-                    .child(div().w(px(180.)).child(Input::new(&self.skills_search)))
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .child(Input::new(&self.skills_search).small()),
+                    )
                     .child(
                         Button::new("new-skill")
                             .primary()
+                            .small()
                             .icon(IconName::Plus)
                             .label("新建技能")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_skills_dialog(None, window, cx);
+                            })),
+                    )
+                    // 帮助开关：SKILL.md 格式与技能目录路径按需弹出（主页不常驻）
+                    .child(
+                        Button::new("skills-help")
+                            .outline()
+                            .small()
+                            .icon(IconName::Info)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.skills_help_open = !this.skills_help_open;
+                                cx.notify();
                             })),
                     ),
             )

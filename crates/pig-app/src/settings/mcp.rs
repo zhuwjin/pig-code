@@ -1271,14 +1271,83 @@ impl SettingsView {
                         .collect::<Vec<_>>(),
                 );
         }
-        // 配置文件来源挪到列表下方（列表/编辑入口优先，路径作次要信息）
-        page = page.child(
-            v_flex()
-                .gap_1()
-                .child(div().text_sm().font_semibold().child("配置文件"))
-                .child(self.render_mcp_sources(snapshot, cx)),
-        );
         page.into_any_element()
+    }
+
+    /// 帮助弹窗：手动编辑示例 + 配置文件路径 + 生效时机
+    ///（页头信息按钮弹出；配置未加载时省略路径段只显示格式说明）
+    pub(crate) fn render_mcp_help_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui_kit::black().opacity(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                v_flex()
+                    .id("mcp-help-dialog")
+                    .w(px(560.))
+                    .max_h(px(640.))
+                    .overflow_y_scroll()
+                    .gap_3()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(div().text_lg().font_semibold().child("MCP 配置说明"))
+                    .when_some(self.mcp_snapshot.as_ref(), |this, snapshot| {
+                        this.child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_sm().font_semibold().child("配置文件"))
+                                .child(self.render_mcp_sources(snapshot, cx)),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().font_semibold().child("手动编辑"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("参考以下格式（项目级覆盖用户级同名条目）："),
+                            )
+                            .child(
+                                div()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .px_3()
+                                    .py_2()
+                                    .text_xs()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(MCP_EXAMPLE),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("配置对之后新建的会话生效（会话级懒连接，首个回合时连接）。"),
+                    )
+                    .child(
+                        h_flex().gap_2().child(div().flex_1()).child(
+                            Button::new("close-mcp-help")
+                                .primary()
+                                .small()
+                                .label("关闭")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.mcp_help_open = false;
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// 连接状态摘要行：其他工作区/无会话/查询中/未发起懒连接/已连接计数
@@ -1382,31 +1451,6 @@ impl SettingsView {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_mcp_dialog(None, window, cx);
                     })),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("手动编辑文件时参考以下格式（项目级覆盖用户级同名条目）："),
-            )
-            .child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().group_box)
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_color(cx.theme().muted_foreground)
-                    .child(MCP_EXAMPLE),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("配置对之后新建的会话生效（会话级懒连接，首个回合时连接）。"),
             )
             .into_any_element()
     }

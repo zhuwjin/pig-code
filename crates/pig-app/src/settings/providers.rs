@@ -440,10 +440,35 @@ impl SettingsView {
                 v_flex()
                     .gap_1()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("API Key"),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("API Key"),
+                            )
+                            // 预设供应商带入的密钥管理页（自定义供应商无此入口）
+                            .when_some(
+                                provider.key_url.clone().filter(|u| !u.is_empty()),
+                                |this, url| {
+                                    this.child(div().flex_1()).child(
+                                        // 文字与图标横向排布（块级 div 会把图标挤到下一行）
+                                        h_flex()
+                                            .id("get-api-key")
+                                            .gap_0p5()
+                                            .text_xs()
+                                            .text_color(cx.theme().primary)
+                                            .cursor_pointer()
+                                            .hover(|this| this.underline())
+                                            .child("获取密钥")
+                                            .child(Icon::new(IconName::ExternalLink).size_3())
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.open_url(&url);
+                                            })),
+                                    )
+                                },
+                            ),
                     )
                     .child(
                         h_flex()

@@ -252,6 +252,12 @@ impl Session {
         let reasoning_item = format!("{turn_id}-reason-{step}");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let api_started = Instant::now();
+        // 调用轨迹输入投影：请求前拍快照（图片只记张数，长内容截断）。
+        // 落盘只存增量：与上一条的完整投影取公共前缀，offset + delta（对齐
+        // ZCode model-io，避免同一会话完整上下文梯度逐条重复）
+        let io_input_full = crate::model_io::project_input(&self.history);
+        let io_offset = crate::model_io::common_prefix_len(&io_input_full, &self.io_last_input);
+        let io_input: Vec<_> = io_input_full[io_offset..].to_vec();
         let provider_task = tokio::spawn(provider::stream_chat(
             config.clone(),
             self.history.clone(),
@@ -267,6 +273,9 @@ impl Session {
         let mut provider_failed = false;
         // 首个输出 token（思考/正文增量）到达时刻：TTFT = 该时刻 - 请求发出
         let mut first_token_at: Option<Instant> = None;
+        // 本步用量与失败原因（轨迹落盘用）
+        let mut step_usage = crate::model_io::ModelIoUsage::default();
+        let mut step_error: Option<String> = None;
 
         loop {
             let event = tokio::select! {
@@ -314,6 +323,13 @@ impl Session {
                     self.input_total += input;
                     self.cache_read_total += cache_read;
                     self.last_total_tokens = Some(used);
+                    step_usage = crate::model_io::ModelIoUsage {
+                        input,
+                        cache_read,
+                        output,
+                        used,
+                        total,
+                    };
                     // 每次请求的用量即时落盘（durable 先于事件），回放用最后一条恢复水位
                     self.record(&RolloutRecord::StepUsage {
                         input,
@@ -340,10 +356,11 @@ impl Session {
                         |session_id, seq| Event::Error {
                             session_id: Some(session_id),
                             seq,
-                            message: error,
+                            message: error.clone(),
                         },
                         tx,
                     );
+                    step_error = Some(error);
                     provider_failed = true;
                     break;
                 }
@@ -354,10 +371,47 @@ impl Session {
         let api_elapsed = api_started.elapsed();
         self.turn_api_ms += api_elapsed.as_millis() as u64;
         self.turn_api_steps += 1;
-        self.turn_ttft_ms += first_token_at
+        let step_ttft_ms = first_token_at
             .map(|at| at.duration_since(api_started).as_millis() as u64)
             .unwrap_or(0)
             .min(api_elapsed.as_millis() as u64);
+        self.turn_ttft_ms += step_ttft_ms;
+
+        // 调用轨迹落盘（失败/取消也记）：UI「查看调用轨迹」直读该文件；
+        // 写失败非致命（与 rollout.append 同口径，eprintln 走 core 惯例）
+        let io_finish = if provider_failed {
+            "error"
+        } else if cancel.is_cancelled() {
+            "cancelled"
+        } else if !tool_calls.is_empty() {
+            "tool_calls"
+        } else {
+            "stop"
+        };
+        let io_record = crate::model_io::ModelIoRecord {
+            ts_ms: crate::model_io::now_ms(),
+            turn: format!("{turn_id}-s{step}"),
+            source: "main".into(),
+            provider: config.provider_name.clone(),
+            model: config.model.clone(),
+            duration_ms: api_elapsed.as_millis() as u64,
+            ttft_ms: step_ttft_ms,
+            usage: step_usage,
+            finish: io_finish.into(),
+            error: step_error,
+            reasoning: reasoning.clone(),
+            text: text.clone(),
+            tool_calls: crate::model_io::project_tool_calls(&tool_calls),
+            input_offset: io_offset,
+            input: io_input,
+        };
+        if let Err(e) =
+            crate::model_io::append(&self.data_dir.join("sessions"), &self.id, &io_record)
+        {
+            eprintln!("写入调用轨迹失败（忽略）: {e}");
+        }
+        // 本条完整投影成为下一条的增量基准
+        self.io_last_input = io_input_full;
 
         if provider_failed {
             provider_task.abort();

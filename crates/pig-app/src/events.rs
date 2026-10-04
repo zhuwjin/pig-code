@@ -28,6 +28,10 @@ impl AppView {
                 );
                 self.ensure_views(&session_id, cx);
                 self.current = Some(session_id.clone());
+                // 换会话：调用轨迹 tab 若开着，重读新会话的落盘记录
+                if self.right_tabs.contains(&RightTab::Trajectory) {
+                    self.reload_trajectory();
+                }
                 // 换了会话：先清掉上一个会话的上下文水位（有数据的会话随后会收到补发）
                 self.composer.update(cx, |composer, cx| {
                     composer.clear_context_usage(cx);
@@ -315,6 +319,10 @@ impl AppView {
                 duration_ms,
                 ..
             } => {
+                // 回合结束且轨迹 tab 在前台：重读落盘记录（本回合的新调用已写入）
+                if *duration_ms > 0 && self.right_active.as_ref() == Some(&RightTab::Trajectory) {
+                    self.reload_trajectory();
+                }
                 // duration_ms=0 是会话回放，不触发计划模式待执行标记
                 if *duration_ms > 0 && self.exec_mode == pig_protocol::ExecMode::Plan {
                     let session_id = session_id.clone();

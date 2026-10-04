@@ -136,6 +136,9 @@ pub struct Session {
     pub id: String,
     pub cwd: PathBuf,
     history: Vec<ChatMsg>,
+    /// 上一条调用轨迹的完整输入投影（增量落盘的前缀基准；resume 后为空，
+    /// 首条自动退回全量，自愈）
+    io_last_input: Vec<crate::model_io::ModelIoMessage>,
     /// 事件序号（Arc 共享：后台子代理任务经 emit_bg 用同一计数器发事件）
     seq: Arc<std::sync::atomic::AtomicU64>,
     turn_counter: u64,
@@ -540,6 +543,7 @@ impl Session {
             id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             history: Vec::new(),
+            io_last_input: Vec::new(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_counter: 0,
             tracker: ChangeTracker::default(),
@@ -625,6 +629,7 @@ impl Session {
             id: id.to_string(),
             cwd: cwd.clone(),
             history,
+            io_last_input: Vec::new(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_counter: 0,
             tracker,

@@ -60,6 +60,48 @@ impl AppView {
                                     .font_semibold()
                                     .child(format!("pig-code · {title}")),
                             )
+                            // 会话操作菜单（三个点）：有活动会话才显示
+                            .when(self.current.is_some(), |this| {
+                                this.child(
+                                    div()
+                                        .on_prepaint({
+                                            let cell = self.session_menu_btn_bounds.clone();
+                                            move |bounds, _, _| cell.set(bounds)
+                                        })
+                                        .child(
+                                            Button::new("session-menu")
+                                                .ghost()
+                                                .small()
+                                                .occlude()
+                                                .icon(IconName::Ellipsis)
+                                                .on_click(cx.listener(
+                                                    |this, event: &ClickEvent, _, cx| {
+                                                        // 与分支 chip 同款：菜单打开时点按钮，
+                                                        // 按下先 outside-close（记位置），同一次
+                                                        // 按压的 click 按位置吞掉防收起又弹开
+                                                        let down_pos = match event {
+                                                            ClickEvent::Mouse(e) => {
+                                                                Some(e.down.position)
+                                                            }
+                                                            _ => None,
+                                                        };
+                                                        if this
+                                                            .session_menu_outside_close
+                                                            .take()
+                                                            .is_some_and(|pos| {
+                                                                Some(pos) == down_pos
+                                                            })
+                                                        {
+                                                            return;
+                                                        }
+                                                        this.session_menu_open =
+                                                            !this.session_menu_open;
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        ),
+                                )
+                            })
                     })
                     .child(
                         h_flex()
@@ -161,6 +203,57 @@ impl AppView {
             .when(self.title_branch_menu_open, |this| {
                 this.child(self.render_branch_menu(cx))
             })
+            .when(self.session_menu_open, |this| {
+                this.child(self.render_session_menu(cx))
+            })
+    }
+
+    /// 标题栏会话菜单（三个点弹层）：锚定按钮正下方，点外部收起。
+    /// 首项「查看调用轨迹」，后续会话级操作加在这里
+    pub(crate) fn render_session_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        deferred(
+            Positioner::side(self.session_menu_btn_bounds.get())
+                .placement(Placement::Bottom)
+                .align(Align::End)
+                .offset(px(6.))
+                .margin(px(8.))
+                .occlude()
+                .child(
+                    v_flex()
+                        .id("title-session-menu")
+                        .w(px(220.))
+                        .p_1()
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.session_menu_open = false;
+                            this.session_menu_outside_close = Some(event.position);
+                            cx.notify();
+                        }))
+                        .child(
+                            h_flex()
+                                .id("menu-view-trajectory")
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
+                                .child(Icon::new(IconName::FileText).size_4())
+                                .child(div().child("查看调用轨迹"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session_menu_open = false;
+                                    this.open_trajectory(cx);
+                                })),
+                        ),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     /// 标题栏分支切换菜单：deferred 到窗口层，锚定分支 chip 正下方

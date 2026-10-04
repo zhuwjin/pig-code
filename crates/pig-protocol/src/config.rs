@@ -76,6 +76,9 @@ pub struct ProviderConfig {
     pub api_format: ApiFormat,
     pub enabled: bool,
     pub models: Vec<ModelConfig>,
+    /// 密钥管理页地址（预设供应商带入；设置页展示「获取密钥」入口用，不参与请求）
+    #[serde(default)]
+    pub key_url: Option<String>,
 }
 
 /// 回合 token 用量：input = 未缓存命中的输入，cache_read = 缓存命中的输入
@@ -174,6 +177,18 @@ pub fn default_reasoning_params(
 #[cfg(test)]
 mod reasoning_params_tests {
     use super::*;
+
+    #[test]
+    fn provider_config_deserializes_legacy_json_without_key_url() {
+        // key_url 为后加字段：存量 config.toml/rollout 里没有它，必须能读回
+        let legacy = r#"{
+            "id": "p1", "name": "旧供应商", "base_url": "http://p1.local",
+            "api_key": "k", "api_format": "OpenAiChat", "enabled": true,
+            "models": []
+        }"#;
+        let provider: ProviderConfig = serde_json::from_str(legacy).expect("旧格式必须兼容");
+        assert_eq!(provider.key_url, None);
+    }
 
     #[test]
     fn openai_params_pass_level_through_with_compat_fields() {

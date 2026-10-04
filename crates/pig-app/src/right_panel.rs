@@ -24,10 +24,14 @@ impl AppView {
         cx.notify();
     }
 
-    /// 打开并激活右侧 tab（菜单点击用，纯打开不带收起语义）
+    /// 打开并激活右侧 tab（菜单点击用，纯打开不带收起语义）；
+    /// 「调用轨迹」打开时按当前会话重读落盘记录
     pub(crate) fn open_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         if !self.right_tabs.contains(&tab) {
             self.right_tabs.push(tab.clone());
+        }
+        if tab == RightTab::Trajectory {
+            self.reload_trajectory();
         }
         self.right_active = Some(tab);
         self.right_open = true;
@@ -94,7 +98,7 @@ impl AppView {
     }
 
     /// 浏览器/终端/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
-    pub(crate) fn right_menu_items() -> [RightMenuItem; 4] {
+    pub(crate) fn right_menu_items() -> [RightMenuItem; 5] {
         [
             (
                 "改动",
@@ -102,6 +106,13 @@ impl AppView {
                 Some(&ToggleChanges),
                 false,
                 Some(RightTab::Changes),
+            ),
+            (
+                "调用轨迹",
+                AssetsIconName::FileText,
+                None,
+                false,
+                Some(RightTab::Trajectory),
             ),
             (
                 "浏览器",
@@ -263,7 +274,7 @@ impl AppView {
                     .max_w(px(280.))
                     .px_2()
                     .gap_1()
-                    .children((0..4).map(|ix| self.render_right_menu_row(ix, true, window, cx))),
+                    .children((0..5).map(|ix| self.render_right_menu_row(ix, true, window, cx))),
             )
             .into_any_element()
     }
@@ -301,7 +312,7 @@ impl AppView {
                             cx.notify();
                         }))
                         .children(
-                            (0..4).map(|ix| self.render_right_menu_row(ix, false, window, cx)),
+                            (0..5).map(|ix| self.render_right_menu_row(ix, false, window, cx)),
                         ),
                 ),
         )
@@ -312,13 +323,19 @@ impl AppView {
     /// 右侧标签页栏的单个 tab：图标 + 名称 + 关闭按钮（点击激活，× 关闭）
     pub(crate) fn render_right_tab(&self, tab: RightTab, cx: &mut Context<Self>) -> AnyElement {
         let active = self.right_active.as_ref() == Some(&tab);
-        // 「子代理」tab：Bot 图标 + 面板标题（description 截断）；「改动」为内置页
+        // 「子代理」tab：Bot 图标 + 面板标题（description 截断）；「改动」「调用轨迹」为内置页
         let (icon, label) = match &tab {
             RightTab::Changes => (
                 Icon::new(AssetsIconName::GitBranch)
                     .size_3p5()
                     .into_any_element(),
                 "改动".to_string(),
+            ),
+            RightTab::Trajectory => (
+                Icon::new(AssetsIconName::FileText)
+                    .size_3p5()
+                    .into_any_element(),
+                "调用轨迹".to_string(),
             ),
             RightTab::Subagent { agent_id } => {
                 let title = self
@@ -369,6 +386,10 @@ impl AppView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_active = Some(tab.clone());
                 this.right_open = true;
+                // 调用轨迹 tab 激活时重读（切会话/新回合后数据可能已变）
+                if tab == RightTab::Trajectory {
+                    this.reload_trajectory();
+                }
                 cx.notify();
             }))
             .into_any_element()
@@ -442,6 +463,7 @@ impl AppView {
                     )
                     .into_any_element(),
             },
+            Some(RightTab::Trajectory) => self.render_trajectory_panel(cx),
             Some(RightTab::Subagent { agent_id }) => match self.subagent_tabs.get(agent_id) {
                 Some(panel) => panel.clone().into_any_element(),
                 None => self.render_right_menu_page(window, cx),

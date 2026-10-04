@@ -6,6 +6,7 @@ pub mod config;
 pub mod git;
 pub mod mcp;
 pub mod mock;
+pub mod model_io;
 pub mod models_registry;
 pub mod paths;
 pub mod permissions;

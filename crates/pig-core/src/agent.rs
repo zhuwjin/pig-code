@@ -606,6 +606,7 @@ unknown: 忽略我
                     api_format: ApiFormat::OpenAiChat,
                     enabled: true,
                     models: vec![m1],
+                    key_url: None,
                 },
                 ProviderConfig {
                     id: "p2".into(),
@@ -615,6 +616,7 @@ unknown: 忽略我
                     api_format: ApiFormat::AnthropicMessages,
                     enabled: true,
                     models: vec![m2],
+                    key_url: None,
                 },
             ],
             default_provider: "p1".into(),
