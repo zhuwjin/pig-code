@@ -22,9 +22,10 @@ use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName as AssetsIconName;
 use gpui_kit::base::GlobalState;
 use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::dock::{DockPlacement, panel_handle};
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
     TitleBar, h_flex, v_flex,
@@ -211,6 +212,9 @@ struct AppView {
     session_menu_open: bool,
     session_menu_outside_close: Option<Point<Pixels>>,
     session_menu_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// 「在访达中打开」按钮的真实访达图标（macOS 后台取 NSWorkspace 图标，
+    /// 完成前/其余平台 None → 用 Lucide 文件夹兜底）
+    fm_icon: Option<std::sync::Arc<Image>>,
     /// 调用轨迹弹窗（None = 关闭）：当前会话的 model-io 落盘记录
     trajectory: Option<TrajectoryState>,
     /// hero 页选择的工作区目录；None = 未选择（显示"选择工作区"，发送时回落到启动目录）
@@ -323,6 +327,7 @@ impl AppView {
             session_menu_open: false,
             session_menu_outside_close: None,
             session_menu_btn_bounds: Rc::new(Cell::new(Bounds::default())),
+            fm_icon: None,
             trajectory: None,
             hero_branch: None,
             hero_branches: vec![],
@@ -403,6 +408,25 @@ impl AppView {
         }
         app.push_hero_info(cx);
         app.refresh_git_branch(None, cx);
+        // macOS：后台取访达真实图标（NSWorkspace，线程安全），完成前用 Lucide 文件夹兜底
+        #[cfg(target_os = "macos")]
+        {
+            let task = cx
+                .background_executor()
+                .spawn(async move { pig_core::files::finder_icon_png() });
+            cx.spawn(async move |this: WeakEntity<AppView>, cx| {
+                if let Some(png) = task.await {
+                    let _ = this.update(cx, |app, cx| {
+                        app.fm_icon = Some(std::sync::Arc::new(Image::from_bytes(
+                            ImageFormat::Png,
+                            png,
+                        )));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
         app
     }
 

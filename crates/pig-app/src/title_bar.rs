@@ -107,6 +107,62 @@ impl AppView {
                         h_flex()
                             .gap_1()
                             .px_2()
+                            // 「在访达/文件管理器中打开」split 按钮：主钮直接打开当前
+                            // 工作区，chevron 出菜单（后续在终端/编辑器打开等挂同一菜单）
+                            .when(self.current.is_some(), |this| {
+                                let fm_label =
+                                    format!("在{}中打开", pig_core::files::file_manager_name());
+                                // 彩色图标不能走 Icon（svg 按文字色渲成单色）：
+                                // macOS 用 NSWorkspace 取的真实访达图标（img 保色），
+                                // 取到前/其余平台回退 Lucide 文件夹
+                                let fm_icon_el: AnyElement = match &self.fm_icon {
+                                    Some(icon) => img(icon.clone()).size_4().into_any_element(),
+                                    None => Icon::new(AssetsIconName::FolderOpen)
+                                        .size_4()
+                                        .into_any_element(),
+                                };
+                                let view = cx.entity().downgrade();
+                                let menu_icon = self.fm_icon.clone();
+                                let menu_label = fm_label.clone();
+                                this.child(
+                                    DropdownButton::new("fm-split")
+                                        .outline()
+                                        .small()
+                                        .button(
+                                            Button::new("fm-open")
+                                                .occlude()
+                                                .tooltip(fm_label.clone())
+                                                .child(fm_icon_el)
+                                                .on_click(cx.listener(|this, _, _, _| {
+                                                    this.open_current_in_file_manager();
+                                                })),
+                                        )
+                                        .dropdown_menu(move |menu, _, _| {
+                                            let view = view.clone();
+                                            let label = menu_label.clone();
+                                            // 有真图就用 ElementItem 自绘「图标+文字」行
+                                            //（icon 槽只收单色 Icon，彩图得走 img）；
+                                            // 无真图（非 mac/未取到）退化为纯文字项
+                                            let item = match menu_icon.clone() {
+                                                Some(icon) => {
+                                                    PopupMenuItem::element(move |_, _| {
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(img(icon.clone()).size_4())
+                                                            .child(label.clone())
+                                                    })
+                                                }
+                                                None => PopupMenuItem::new(menu_label.clone()),
+                                            };
+                                            menu.item(item.on_click(move |_, _, cx| {
+                                                let _ = view.update(cx, |this, _| {
+                                                    this.open_current_in_file_manager();
+                                                });
+                                            }))
+                                        }),
+                                )
+                            })
                             .when(self.git_branch.is_some(), |this| {
                                 this.child(
                                     div()
@@ -346,6 +402,21 @@ impl AppView {
         )
         .with_priority(1)
         .into_any_element()
+    }
+
+    /// 当前会话的工作区在系统文件管理器中打开（macOS 访达 / Windows 资源管理器 /
+    /// Linux xdg-open；detached spawn，启动失败只记日志）
+    pub(crate) fn open_current_in_file_manager(&self) {
+        let Some(cwd) = self.current_cwd() else {
+            return;
+        };
+        if let Err(err) = pig_core::files::open_in_file_manager(&cwd) {
+            eprintln!(
+                "[fm] 打开{}失败 {}: {err}",
+                pig_core::files::file_manager_name(),
+                cwd.display()
+            );
+        }
     }
 
     /// 标题栏分支切换菜单：deferred 到窗口层，锚定分支 chip 正下方

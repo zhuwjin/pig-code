@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod files;
 pub mod git;
 pub mod mcp;
 pub mod mock;
