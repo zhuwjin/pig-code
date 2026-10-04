@@ -15,6 +15,14 @@ async-channel = "2"
 time = { version = "0.3", features = ["local-offset"] }
 serde_json = "1"
 rust-embed = "8"
+# 内嵌终端：PTY + VT 解析（参考 tty7，均走 crates.io，不碰 zed git 依赖红线）
+portable-pty = "0.9"
+alacritty_terminal = "0.26"
+unicode-segmentation = "1"
+
+# unix 默认 shell 解析（getpwuid/access，与 portable-pty new_default_prog 同链）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7", features = ["test-support"] }

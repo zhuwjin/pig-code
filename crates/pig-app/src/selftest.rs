@@ -73,7 +73,11 @@ reasoning_levels = ["high", "max"]
 }
 
 /// PIG_SELFTEST=1：会话A完整修改链 → 会话B并行对话 → 切回A → 模拟重启 resume → @搜索。
-pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
+pub(crate) async fn run_selftest(
+    view: Entity<AppView>,
+    window_handle: AnyWindowHandle,
+    cx: &mut AsyncApp,
+) {
     use std::time::Duration;
     macro_rules! timer {
         ($ms:expr) => {
@@ -736,6 +740,44 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     );
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
     println!("[selftest] 右侧面板开合 OK");
+
+    // 底部终端面板：默认收起 → 展开（真 PTY spawn + TerminalElement 渲染链路）
+    // → 再触发收起（tab/进程保留，面板仅隐藏）。开关要 &mut Window（焦点/创建视图），
+    // 经 update_window 回到窗口上下文驱动。
+    let terminal_initial = app!(|app: &mut AppView, _| app.terminal_open);
+    assert!(!terminal_initial, "终端面板默认应收起");
+    cx.update_window(window_handle, |_, window, cx| {
+        view.update(cx, |app, cx| app.toggle_terminal_panel(window, cx));
+    })
+    .expect("selftest 窗口应可用");
+    // 等 PTY spawn、zsh 提示符进 grid、若干渲染帧（prepaint/paint 全链路跑到）
+    timer!(600).await;
+    let (open, tabs) = app!(|app: &mut AppView, cx| {
+        (
+            app.terminal_open,
+            app.terminal
+                .as_ref()
+                .map(|p| p.read(cx).debug_tab_count())
+                .unwrap_or(0),
+        )
+    });
+    assert!(open && tabs >= 1, "终端面板应展开且至少一个 tab");
+    cx.update_window(window_handle, |_, window, cx| {
+        view.update(cx, |app, cx| app.toggle_terminal_panel(window, cx));
+    })
+    .expect("selftest 窗口应可用");
+    let (closed, kept) = app!(|app: &mut AppView, cx| {
+        (
+            !app.terminal_open,
+            app.terminal
+                .as_ref()
+                .map(|p| p.read(cx).debug_tab_count())
+                .unwrap_or(0)
+                >= 1,
+        )
+    });
+    assert!(closed && kept, "再触发应收起终端面板且 tab 保留");
+    println!("[selftest] 终端面板开合 OK");
 
     // 加面板菜单（标签页栏 "+"）：点开打开、再点收起
     app!(|app: &mut AppView, cx| {

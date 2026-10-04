@@ -241,4 +241,9 @@ pub struct AppConfig {
     /// （macOS Menlo / Windows Consolas / Linux DejaVu Sans Mono，缺装时上游自动换备选）
     #[serde(default)]
     pub mono_font: Option<String>,
+    /// 内嵌终端启动的 shell 路径（如 "/bin/zsh"、"/opt/homebrew/bin/fish"）；
+    /// None = 系统默认 shell（$SHELL → passwd 登录 shell / Windows pwsh→powershell→cmd）。
+    /// 对之后新建的终端标签生效
+    #[serde(default)]
+    pub terminal_shell: Option<String>,
 }

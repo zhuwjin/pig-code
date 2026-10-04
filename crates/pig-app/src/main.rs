@@ -11,6 +11,7 @@ mod review_panel;
 mod settings;
 mod sidebar;
 mod subagent_panel;
+mod terminal;
 mod thread_view;
 
 use std::cell::Cell;
@@ -46,7 +47,8 @@ gpui_kit::actions!(
         ToggleSidebar,
         ToggleChanges,
         ToggleBrowser,
-        ToggleSideChat
+        ToggleSideChat,
+        ToggleTerminal
     ]
 );
 
@@ -82,6 +84,7 @@ use crate::review_panel::{ReviewEvent, ReviewPanel};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
 use crate::subagent_panel::SubagentPanel;
+use crate::terminal::{TerminalPanel, TerminalPanelEvent};
 use crate::thread_view::{ThreadEvent, ThreadView};
 use crate::trajectory::TrajectoryState;
 
@@ -176,6 +179,11 @@ macro_rules! impl_dock_panel {
 
 impl_dock_panel!(DockCenterPanel, "center");
 impl_dock_panel!(DockRightPanel, "right-dock");
+impl_dock_panel!(DockBottomPanel, "bottom-dock");
+
+/// 底部终端面板的默认高度（px）；用户可经 dock 把手拖拽调整（上游钳制
+/// [PANEL_MIN_SIZE, 区域高-100]），开合补间在 0↔当前高度间插值
+pub(crate) const TERMINAL_PANEL_DEFAULT_H: f32 = 300.;
 
 struct AppView {
     sidebar: Entity<Sidebar>,
@@ -267,6 +275,17 @@ struct AppView {
     right_active: Option<RightTab>,
     /// 「子代理」tab 的内容面板（agent_id → 面板实体；tab 关闭时移除）
     subagent_tabs: HashMap<String, Entity<SubagentPanel>>,
+    /// 底部终端面板是否展开（默认收起）
+    terminal_open: bool,
+    /// 终端面板实体（懒创建；收起仅隐藏，tab 与 shell 进程保留）
+    terminal: Option<Entity<TerminalPanel>>,
+    /// 用户选定的面板高度（dock 把手拖拽后由稳态 render 同步实高；默认 300，收起时保留）
+    terminal_h: f32,
+    /// 底部 dock 的开合补间（与左右 dock 同一 step_dock_anim 体系）
+    bottom_dock_anim: Option<DockSizeAnim>,
+    /// 底部 dock 的面板实体（install_dock 创建并常驻；底部 dock 全隐=移除，
+    /// 展开时才挂回，故面板实体不能随 dock 生灭）
+    dock_bottom_panel: Option<Entity<DockBottomPanel>>,
     /// 标签页栏 "+" 的加面板菜单是否打开
     right_menu_open: bool,
     /// 菜单因点击外部收起时的按下位置：吞掉同一次按压触发的按钮 click，避免收起又弹开
@@ -355,6 +374,11 @@ impl AppView {
             right_tabs: vec![],
             right_active: None,
             subagent_tabs: HashMap::new(),
+            terminal_open: false,
+            terminal: None,
+            terminal_h: TERMINAL_PANEL_DEFAULT_H,
+            bottom_dock_anim: None,
+            dock_bottom_panel: None,
             right_menu_open: false,
             right_menu_outside_close: None,
             tab_add_btn_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -704,6 +728,58 @@ impl AppView {
             .map(|panel| panel.read(cx).debug_scroll())
     }
 
+    /// 焦点还给输入框（终端面板收起时调用）。
+    /// 经 Entity::update 走，避免 read 借用与 &mut App 冲突
+    fn refocus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let composer = self.composer.clone();
+        composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+    }
+
+    /// 底部终端面板开关（标题栏按钮 / ctrl-`）：展开/收起，tab 与 shell 进程保留。
+    /// 懒创建；新 tab 的工作目录取当前会话 cwd（无会话回落启动目录）；
+    /// 展开时焦点进终端（新建在 TerminalPanel::new 内 focus_active，重开在此补焦），
+    /// 收起时还给输入框。开合动画由 step_dock_anim(Bottom) 在 render 里登记/步进。
+    pub(crate) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_open {
+            // 关闭前同步 dock 实高：把手拖过的高度重开时不丢
+            if let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Bottom) {
+                self.terminal_h = f32::from(size).round();
+            }
+            self.terminal_open = false;
+            self.refocus_composer(window, cx);
+        } else {
+            self.terminal_open = true;
+            let cwd = self.current_cwd().unwrap_or_else(|| self.cwd.clone());
+            let shell = self.config.as_ref().and_then(|c| c.terminal_shell.clone());
+            match &self.terminal {
+                Some(panel) => panel.update(cx, |panel, cx| {
+                    panel.set_cwd(cwd.clone(), cx);
+                    panel.set_shell(shell, cx);
+                    panel.focus_active(window, cx);
+                }),
+                None => {
+                    let panel = cx.new(|cx| TerminalPanel::new(cwd, shell, window, cx));
+                    // 标签页栏折叠钮：收起面板，焦点还输入框
+                    self._subscriptions.push(cx.subscribe_in(
+                        &panel,
+                        window,
+                        |this, _, _: &TerminalPanelEvent, window, cx| {
+                            if let Some(size) = this.dock.read(cx).dock_size(DockPlacement::Bottom)
+                            {
+                                this.terminal_h = f32::from(size).round();
+                            }
+                            this.terminal_open = false;
+                            this.refocus_composer(window, cx);
+                            cx.notify();
+                        },
+                    ));
+                    self.terminal = Some(panel);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// 中心区内容（dock center 面板调用）：hero / 会话列 / 空提示 + 换页动画
     fn render_center(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let hero = self.is_hero(cx) && self.pending_first_send.is_none();
@@ -712,6 +788,8 @@ impl AppView {
         let center: AnyElement = if hero {
             self.render_hero(cx)
         } else if let Some(views) = current_views {
+            // 底部终端面板已迁入底部 dock（render_bottom_dock_content），
+            // 不在中心区 v_flex 里挂载
             v_flex()
                 .size_full()
                 .child(div().flex_1().min_h_0().child(views.thread.clone()))
@@ -758,6 +836,9 @@ impl Render for AppView {
             self.step_dock_anim(DockPlacement::Left, self.left_dock_anim, window, cx);
         self.right_dock_anim =
             self.step_dock_anim(DockPlacement::Right, self.right_dock_anim, window, cx);
+        // 底部终端 dock 开合补间（与左右 dock 同一体系）
+        self.bottom_dock_anim =
+            self.step_dock_anim(DockPlacement::Bottom, self.bottom_dock_anim, window, cx);
 
         // 上游把手拖宽不经过 AppView：稳态（无补间/边缘段）render 先把目标宽
         // 副本对齐 dock 实宽，拖拽结果才不会被下面的补钳写回冲掉；补间/边缘段
@@ -774,6 +855,15 @@ impl Render for AppView {
                 && size > px(0.)
             {
                 self.right_w = f32::from(size).round();
+            }
+            // 底部终端 dock 实高同步（官方把手拖高不经过 AppView）：无补间时
+            // 副本对齐实高，拖拽结果才不会被下次开合补间用旧目标高冲掉
+            if self.bottom_dock_anim.is_none()
+                && self.dock.read(cx).is_dock_open(DockPlacement::Bottom)
+                && let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Bottom)
+                && size > px(0.)
+            {
+                self.terminal_h = f32::from(size).round();
             }
         }
 
@@ -864,6 +954,9 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| {
                 this.toggle_right_tab(RightTab::Changes, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.toggle_terminal_panel(window, cx);
+            }))
             // 自愈兜底：选择手势的结束依赖收到 MouseUpEvent，而某些系统级按压
             // （HTCAPTION、边框缩放）收不到。未按键的移动说明手势早已结束。
             .on_mouse_move(cx.listener(|_, event: &MouseMoveEvent, window, cx| {
@@ -939,6 +1032,8 @@ fn main() {
                 KeyBinding::new("ctrl-shift-g", ToggleChanges, None),
                 KeyBinding::new("ctrl-t", ToggleBrowser, None),
                 KeyBinding::new("alt-ctrl-b", ToggleSideChat, None),
+                // 底部终端面板（对标终端类应用的 ctrl-` 惯例）
+                KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("escape", CloseSearch, Some("search")),
                 KeyBinding::new("escape", CloseThreadSearch, Some("thread-search")),
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
@@ -997,8 +1092,11 @@ fn main() {
                     view.update(cx, |app, cx| app.install_dock(window, cx));
                     if selftest {
                         let view = view.clone();
+                        // 终端面板开关需要 &mut Window（spawn PTY/焦点），把窗口句柄
+                        // 带进自测协程，经 update_window 回到窗口上下文
+                        let window_handle = window.window_handle();
                         cx.spawn(async move |cx| {
-                            run_selftest(view, cx).await;
+                            run_selftest(view, window_handle, cx).await;
                         })
                         .detach();
                     }

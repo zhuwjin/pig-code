@@ -97,8 +97,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// 浏览器/终端/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
-    pub(crate) fn right_menu_items() -> [RightMenuItem; 5] {
+    /// 浏览器/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
+    /// （终端已落地为底部面板：标题栏按钮 / ctrl-`，见 terminal/，不在此菜单）
+    pub(crate) fn right_menu_items() -> [RightMenuItem; 4] {
         [
             (
                 "改动",
@@ -121,7 +122,6 @@ impl AppView {
                 true,
                 None,
             ),
-            ("终端", AssetsIconName::SquareTerminal, None, true, None),
             (
                 "侧边聊天",
                 AssetsIconName::MessageCircle,
@@ -269,12 +269,10 @@ impl AppView {
             .justify_center()
             .items_center()
             .child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(280.))
-                    .px_2()
-                    .gap_1()
-                    .children((0..5).map(|ix| self.render_right_menu_row(ix, true, window, cx))),
+                v_flex().w_full().max_w(px(280.)).px_2().gap_1().children(
+                    (0..Self::right_menu_items().len())
+                        .map(|ix| self.render_right_menu_row(ix, true, window, cx)),
+                ),
             )
             .into_any_element()
     }
@@ -312,7 +310,8 @@ impl AppView {
                             cx.notify();
                         }))
                         .children(
-                            (0..5).map(|ix| self.render_right_menu_row(ix, false, window, cx)),
+                            (0..Self::right_menu_items().len())
+                                .map(|ix| self.render_right_menu_row(ix, false, window, cx)),
                         ),
                 ),
         )

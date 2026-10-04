@@ -17,6 +17,13 @@ impl AppView {
             focus_handle: cx.focus_handle(),
             _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
         });
+        // 底部 dock（终端）面板实体常驻 AppView：dock 全隐=移除，展开时
+        //（apply_dock_flags / mount_dock_edge）才把它挂回
+        self.dock_bottom_panel = Some(cx.new(|cx| DockBottomPanel {
+            app: app.clone(),
+            focus_handle: cx.focus_handle(),
+            _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
+        }));
         self.dock.update(cx, |dock, cx| {
             dock.set_center(
                 DockLayout::tabs().panel_view(panel_handle(center), cx),
@@ -43,6 +50,12 @@ impl AppView {
         });
     }
 
+    /// 终端面板是否处于可见上下文（仅会话态；hero/无会话/设置页不挂底部 dock）。
+    /// 底部 dock 的开合标志位 = terminal_open && terminal_visible
+    pub(crate) fn terminal_visible(&self, cx: &App) -> bool {
+        !self.is_hero(cx) && self.current.is_some()
+    }
+
     /// dock 开合补间的渲染侧：开合标志位（sidebar_collapsed / right_open）是
     /// 唯一事实源，翻转后登记一段宽度补间（见 [`DockSizeAnim`]），逐帧步进由
     /// [`Self::schedule_dock_anim_frames`] 的 on_next_frame 链驱动——动画帧只
@@ -63,6 +76,11 @@ impl AppView {
         let (flag_open, target_w) = match placement {
             DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
             DockPlacement::Right => (self.right_open, self.right_w),
+            // 底部 dock = 终端面板：全隐语义（关闭即移除），且只在会话态可见
+            DockPlacement::Bottom => (
+                self.terminal_open && self.terminal_visible(cx),
+                self.terminal_h,
+            ),
             _ => return None,
         };
         // 本侧边缘段进行中：方向一致等待其定时器收尾（展开段收尾会开 dock
@@ -180,18 +198,45 @@ impl AppView {
                         // 标志位中途被反向则就此打住（dock 保持关闭 = 稳态）
                         let flag_open_now = match edge.placement {
                             DockPlacement::Left => !this.sidebar_collapsed,
-                            _ => this.right_open,
+                            DockPlacement::Right => this.right_open,
+                            DockPlacement::Bottom => {
+                                this.terminal_open && this.terminal_visible(cx)
+                            }
+                            _ => unreachable!("edge 只产生于 Left/Right/Bottom"),
                         };
                         if !flag_open_now {
                             cx.notify();
                             return;
                         }
                         // 开 dock（下限宽）并接中段补间，交接帧与覆盖层内容
-                        // 像素一致
-                        this.dock.update(cx, |dock, cx| {
-                            dock.set_dock_size(edge.placement, px(DOCK_ANIM_MIN_W), window, cx);
-                            dock.toggle_dock(edge.placement, window, cx);
-                        });
+                        // 像素一致。底部 dock 关闭即移除，需先挂回
+                        if edge.placement == DockPlacement::Bottom
+                            && !this.dock.read(cx).has_dock(edge.placement)
+                        {
+                            use gpui_kit::component::dock::DockLayout;
+                            if let Some(panel) = this.dock_bottom_panel.clone() {
+                                this.dock.update(cx, |dock, cx| {
+                                    dock.set_dock(
+                                        edge.placement,
+                                        DockLayout::tabs().panel_view(panel_handle(panel), cx),
+                                        window,
+                                        cx,
+                                    );
+                                    dock.set_dock_collapsible(edge.placement, false, window, cx);
+                                    dock.set_dock_size(
+                                        edge.placement,
+                                        px(DOCK_ANIM_MIN_W),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        } else {
+                            this.dock.update(cx, |dock, cx| {
+                                dock.set_dock_size(edge.placement, px(DOCK_ANIM_MIN_W), window, cx);
+                                dock.toggle_dock(edge.placement, window, cx);
+                            });
+                        }
                         let anim = DockSizeAnim {
                             from: DOCK_ANIM_MIN_W,
                             to: edge.width,
@@ -203,6 +248,7 @@ impl AppView {
                         match edge.placement {
                             DockPlacement::Left => this.left_dock_anim = Some(anim),
                             DockPlacement::Right => this.right_dock_anim = Some(anim),
+                            DockPlacement::Bottom => this.bottom_dock_anim = Some(anim),
                             _ => {}
                         }
                         this.schedule_dock_anim_frames(window, cx);
@@ -226,6 +272,10 @@ impl AppView {
         let placement = edge.placement;
         let width = edge.width;
         let opening = edge.opening;
+        // 底部 dock 走垂直滑动版（容器在中央列底部横带，不跨左右 dock）
+        if placement == DockPlacement::Bottom {
+            return Some(self.render_bottom_dock_edge(width, opening, window, cx));
+        }
         let w = px(width);
         // 内容实体只在覆盖层出现一次：边缘段两种时序下真实 dock 都不渲染它。
         // 左=侧栏（自带 sidebar 底色）；右=面板内容（dock 皮肤平时铺的
@@ -285,6 +335,87 @@ impl AppView {
         )
     }
 
+    /// 底部 dock 面板内容（终端面板）。
+    /// 开合补间/边缘段：内容固定目标高锚顶，dock 帧/覆盖层只裁剪（终端网格
+    /// 零 resize，防逐帧 SIGWINCH 重绘）；稳态（含官方把手拖拽）：填满 dock
+    /// 帧，终端跟随实时重排（真实终端的拖拽语义）
+    pub(crate) fn render_bottom_dock_content(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(panel) = self.terminal.clone() else {
+            return div().into_any_element();
+        };
+        let animating = self.bottom_dock_anim.is_some()
+            || matches!(self.dock_edge, Some(e) if e.placement == DockPlacement::Bottom);
+        if animating {
+            div()
+                .size_full()
+                .child(div().w_full().h(px(self.terminal_h)).child(panel))
+                .into_any_element()
+        } else {
+            div().size_full().child(panel).into_any_element()
+        }
+    }
+
+    /// 底部 dock 的边缘段覆盖层（垂直版）：容器 = 中央列底部 100px 横带
+    ///（让开左右 dock 当前占位），内容（终端面板，固定目标高）从窗底向
+    /// 交接位垂直滑动，与水平版同匀速同时长分摊。上缘带 1px 分隔线
+    fn render_bottom_dock_edge(
+        &mut self,
+        target_h: f32,
+        opening: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // 左右 inset 取左右 dock 当前实际占位（其补间/边缘段期间是过渡值，近似即可）
+        let (left_inset, right_inset) = {
+            let dock = self.dock.read(cx);
+            let inset = |p: DockPlacement| {
+                if dock.is_dock_open(p) {
+                    dock.dock_size(p).map(f32::from).unwrap_or(0.)
+                } else {
+                    0.
+                }
+            };
+            (inset(DockPlacement::Left), inset(DockPlacement::Right))
+        };
+        let duration = DOCK_ANIM_DURATION.mul_f32(DOCK_ANIM_MIN_W / target_h.max(1.));
+        let content = self.render_bottom_dock_content(window, cx);
+        div()
+            .absolute()
+            .bottom_0()
+            .left(px(left_inset))
+            .right(px(right_inset))
+            .h(px(DOCK_ANIM_MIN_W))
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_0()
+                    .h(px(target_h))
+                    .bg(cx.theme().background)
+                    // 滑动边 = 虚拟分隔线（边缘段期间 dock 未挂，无把手线）
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    // 默认 linear 缓动：与中段补间同匀速
+                    .with_animation(
+                        ("dock-edge-slide", DockPlacement::Bottom as usize),
+                        Animation::new(duration),
+                        move |el, delta| {
+                            // d = 内容从「完全出窗」到「交接位」的进度
+                            let d = if opening { delta } else { 1. - delta };
+                            el.top(px(DOCK_ANIM_MIN_W * (1. - d)))
+                        },
+                    )
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
     /// 注册 dock 开合动画的下一帧回调（on_next_frame 链）：回调里步进补间、
     /// 按需自续。标记位防重复排队（左右两栏同帧起步 + 链自续都走这里）。
     pub(crate) fn schedule_dock_anim_frames(
@@ -320,10 +451,15 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> bool {
         let mut active = false;
-        for placement in [DockPlacement::Left, DockPlacement::Right] {
+        for placement in [
+            DockPlacement::Left,
+            DockPlacement::Right,
+            DockPlacement::Bottom,
+        ] {
             let anim = match placement {
                 DockPlacement::Left => self.left_dock_anim,
                 DockPlacement::Right => self.right_dock_anim,
+                DockPlacement::Bottom => self.bottom_dock_anim,
                 _ => continue,
             };
             let Some(anim) = anim else {
@@ -333,12 +469,18 @@ impl AppView {
             if cx.reduce_motion() || t >= 1. {
                 let (flag_open, target_w) = match placement {
                     DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
-                    _ => (self.right_open, self.right_w),
+                    DockPlacement::Right => (self.right_open, self.right_w),
+                    DockPlacement::Bottom => (
+                        self.terminal_open && self.terminal_visible(cx),
+                        self.terminal_h,
+                    ),
+                    _ => continue,
                 };
                 self.apply_dock_flags(placement, window, cx);
                 match placement {
                     DockPlacement::Left => self.left_dock_anim = None,
                     DockPlacement::Right => self.right_dock_anim = None,
+                    DockPlacement::Bottom => self.bottom_dock_anim = None,
                     _ => {}
                 }
                 // 收起后段：dock 已真正关闭（中心区瞬时补宽），剩余下限宽内
@@ -387,14 +529,39 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        use gpui_kit::component::dock::DockLayout;
         let (flag_open, target_w) = match placement {
             DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
             DockPlacement::Right => (self.right_open, self.right_w),
+            DockPlacement::Bottom => (
+                self.terminal_open && self.terminal_visible(cx),
+                self.terminal_h,
+            ),
             _ => return,
         };
         let dock_open = self.dock.read(cx).is_dock_open(placement);
+        let bottom_panel = self.dock_bottom_panel.clone();
         self.dock.update(cx, |dock, cx| {
             if flag_open {
+                if placement == DockPlacement::Bottom {
+                    // 底部 dock 全隐语义：关闭 = 移除，展开要先挂回（面板实体常驻
+                    // AppView，同一帧内 set_dock + set_size 不闪旧高）
+                    if !dock.has_dock(placement) {
+                        let Some(panel) = bottom_panel else {
+                            return;
+                        };
+                        dock.set_dock(
+                            placement,
+                            DockLayout::tabs().panel_view(panel_handle(panel), cx),
+                            window,
+                            cx,
+                        );
+                        // 上游「拖到最小即收起到 29px 条」的手势与全隐模型冲突，禁用
+                        dock.set_dock_collapsible(placement, false, window, cx);
+                    }
+                    dock.set_dock_size(placement, px(target_w), window, cx);
+                    return;
+                }
                 if !dock_open {
                     // 先归零再 open：避免以旧宽先闪一帧
                     dock.set_dock_size(placement, px(0.), window, cx);
@@ -402,6 +569,11 @@ impl AppView {
                 }
                 // 精确落目标宽：补间最后一步按时间采样可能差几像素
                 dock.set_dock_size(placement, px(target_w), window, cx);
+            } else if placement == DockPlacement::Bottom {
+                if dock.has_dock(placement) {
+                    // 全隐 = 移除（不用 toggle：closed 底部 dock 会留 29px 收起条）
+                    dock.remove_dock(placement, window, cx);
+                }
             } else if dock_open {
                 dock.toggle_dock(placement, window, cx);
                 // 关闭态宽度不参与布局，写回存储值供下次展开作目标
@@ -525,6 +697,16 @@ pub(crate) struct DockRightPanel {
     _app_observer: Subscription,
 }
 
+/// dock 底部 dock 面板：终端面板容器，同样回读 AppView。
+/// 与左右 dock 不同，底部 dock 采用「全隐」语义——关闭即 remove_dock
+///（上游 toggle 关闭会留 29px 收起条，与标题栏按钮的开合模型不符），
+/// 因此面板实体常驻 AppView，只在展开时挂进 dock
+pub(crate) struct DockBottomPanel {
+    app: WeakEntity<AppView>,
+    pub(crate) focus_handle: FocusHandle,
+    _app_observer: Subscription,
+}
+
 impl Render for DockCenterPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.app
@@ -538,5 +720,210 @@ impl Render for DockRightPanel {
         self.app
             .update(cx, |app, cx| app.render_right_dock_content(window, cx))
             .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
+impl Render for DockBottomPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.app
+            .update(cx, |app, cx| app.render_bottom_dock_content(window, cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // 注意：不能 `use super::*`——super 链会把 gpui 的 `test` 宏导进来，
+    // 遮蔽内置 #[test] 导致其展开递归（本文件顶部的 use super::* 同理，
+    // 故本模块全部显式导入）
+    use gpui_kit::component::dock::{
+        BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
+    };
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+        ParentElement as _, Render, Styled as _, Window, div, px,
+    };
+
+    /// 复现「底部 dock 把手拖不动」的最小面板（chrome 全关，同 impl_dock_panel）
+    struct DummyPanel {
+        focus_handle: FocusHandle,
+    }
+
+    impl Render for DummyPanel {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("dummy")
+        }
+    }
+
+    impl Focusable for DummyPanel {
+        fn focus_handle(&self, _: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl EventEmitter<PanelEvent> for DummyPanel {}
+
+    impl BasePanel for DummyPanel {
+        fn panel_name(&self) -> &'static str {
+            "dummy"
+        }
+    }
+
+    impl Panel for DummyPanel {
+        fn title_bar(&self, _: &App) -> bool {
+            false
+        }
+
+        fn inner_padding(&self, _: &App) -> bool {
+            false
+        }
+    }
+
+    /// 与 AppView 完全一致的底部 dock 安装参数（locked + collapsible(false)）
+    fn build_dock(window: &mut Window, cx: &mut App) -> Entity<DockArea> {
+        let (dock, _skin) = DockSkin::dock_area("test-dock", None, window, cx);
+        let center = cx.new(|cx| DummyPanel {
+            focus_handle: cx.focus_handle(),
+        });
+        let left = cx.new(|cx| DummyPanel {
+            focus_handle: cx.focus_handle(),
+        });
+        let bottom = cx.new(|cx| DummyPanel {
+            focus_handle: cx.focus_handle(),
+        });
+        dock.update(cx, |dock, cx| {
+            dock.set_center(
+                DockLayout::tabs().panel_view(panel_handle(center), cx),
+                window,
+                cx,
+            );
+            // 左 dock 作对照（侧栏把手在 App 里是可拖的）
+            dock.set_dock(
+                DockPlacement::Left,
+                DockLayout::tabs().panel_view(panel_handle(left), cx),
+                window,
+                cx,
+            );
+            dock.set_dock_size(DockPlacement::Left, px(220.), window, cx);
+            dock.set_dock(
+                DockPlacement::Bottom,
+                DockLayout::tabs().panel_view(panel_handle(bottom), cx),
+                window,
+                cx,
+            );
+            dock.set_dock_size(DockPlacement::Bottom, px(300.), window, cx);
+            // 与 AppView 一致：锁布局 + 底部禁用「拖到最小即收起」
+            dock.set_locked(true, window, cx);
+            dock.set_dock_collapsible(DockPlacement::Bottom, false, window, cx);
+        });
+        dock
+    }
+
+    /// 窗口根视图：持有 dock 实体（TestAppContext::open_window 要求闭包返回
+    /// Render 值，不能直接给 Entity）
+    struct DockProbe {
+        dock: Entity<DockArea>,
+    }
+
+    impl Render for DockProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.dock.clone()
+        }
+    }
+
+    /// 贴近 App 形态：dock 套在「标题栏 + flex_1 容器」里且底部 dock 在首帧后
+    /// 才懒挂载（模拟终端首次展开），把手仍应可拖
+    #[test]
+    fn bottom_dock_handle_drags_when_mounted_late() {
+        let cx = &mut gpui_kit::TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(gpui_kit::size(px(800.), px(600.)), |window, cx| {
+            let (dock, _skin) = DockSkin::dock_area("test-dock-late", None, window, cx);
+            let center = cx.new(|cx| DummyPanel {
+                focus_handle: cx.focus_handle(),
+            });
+            dock.update(cx, |dock, cx| {
+                dock.set_center(
+                    DockLayout::tabs().panel_view(panel_handle(center), cx),
+                    window,
+                    cx,
+                );
+                dock.set_locked(true, window, cx);
+            });
+            DockProbe { dock }
+        });
+        let dock = window
+            .update(cx, |probe, _, _| probe.dock.clone())
+            .expect("window alive");
+        // 首帧：无底部 dock
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("window alive");
+        // 懒挂载底部 dock（同 App 首次展开的路径）+ 禁可收起
+        cx.update_window(window.into(), |_, window, cx| {
+            let panel = cx.new(|cx| DummyPanel {
+                focus_handle: cx.focus_handle(),
+            });
+            dock.update(cx, |dock, cx| {
+                dock.set_dock(
+                    DockPlacement::Bottom,
+                    DockLayout::tabs().panel_view(panel_handle(panel), cx),
+                    window,
+                    cx,
+                );
+                dock.set_dock_collapsible(DockPlacement::Bottom, false, window, cx);
+                dock.set_dock_size(DockPlacement::Bottom, px(300.), window, cx);
+            });
+            window.render_frame(cx);
+            let before = dock.read(cx).dock_size(DockPlacement::Bottom);
+            assert!(before.is_some(), "底部 dock 应已挂载");
+            // 窗口 600 高，dock 区域贴满窗口（无标题栏），底部 dock 300 占
+            // [300,600]，把手吸顶 5px 带在其顶缘。从带内向上拖 80px
+            window.drag(
+                gpui_kit::point(px(400.), px(302.)),
+                gpui_kit::point(px(400.), px(222.)),
+                cx,
+            );
+            let after = dock.read(cx).dock_size(DockPlacement::Bottom);
+            assert!(
+                after > before,
+                "懒挂载后拖拽仍应改高度：{before:?} → {after:?}"
+            );
+        })
+        .expect("window alive");
+    }
+
+    /// 验证官方把手拖拽能改 dock 高度（复现「底部 dock 把手拖不动」）。
+    /// 不用 #[gpui_kit::test] 宏：本模块若经 glob 导入 gpui 的 test 宏会遮蔽
+    /// 内置 #[test]，展开递归（见模块头注释），故手动驱动 TestAppContext
+    #[test]
+    fn bottom_dock_handle_drags() {
+        let cx = &mut gpui_kit::TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(gpui_kit::size(px(800.), px(600.)), |window, cx| DockProbe {
+            dock: build_dock(window, cx),
+        });
+        let dock = window
+            .update(cx, |probe, _, _| probe.dock.clone())
+            .expect("window alive");
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let before = dock.read(cx).dock_size(DockPlacement::Bottom);
+            // 底部 dock 高 300 占窗口 [300,600]，把手吸顶 5px 带在其顶缘。
+            // 从带内 (400,302) 向上拖 80px：dock 应变高（从窗底量起）
+            window.drag(
+                gpui_kit::point(px(400.), px(302.)),
+                gpui_kit::point(px(400.), px(222.)),
+                cx,
+            );
+            let after = dock.read(cx).dock_size(DockPlacement::Bottom);
+            assert!(
+                after > before,
+                "拖拽后 dock 高度应增加：{before:?} → {after:?}"
+            );
+        })
+        .expect("window alive");
     }
 }

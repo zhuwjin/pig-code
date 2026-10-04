@@ -162,6 +162,8 @@ pub struct SettingsView {
     skills_scope_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
     skills_scope_outside_close: Option<Point<Pixels>>,
     save_generation: u64,
+    /// 终端 shell 输入的防抖代次（与供应商表单分开，互不顶掉）
+    shell_save_generation: u64,
     form_dirty: bool,
     /// 主题模式可能与全局状态脱节（设置页关闭期间系统外观被切），
     /// 打开设置页时置位，render 前同步主题模式下拉
@@ -306,6 +308,7 @@ impl SettingsView {
             skills_scope_btn_bounds: Rc::new(Cell::new(Bounds::default())),
             skills_scope_outside_close: None,
             save_generation: 0,
+            shell_save_generation: 0,
             form_dirty: true,
             appearance_dirty: true,
             ui_font_select,
@@ -542,6 +545,75 @@ impl SettingsView {
         cx.emit(SettingsEvent::Save(self.config.clone()));
     }
 
+    /// 终端 shell 路径确认：trim 后空白归一为 None，写回配置并防抖保存
+    ///（立即生效于之后新建的终端标签；已开的 tab 不变）
+    fn set_shell(&mut self, value: &str, cx: &mut Context<Self>) {
+        let value = value.trim();
+        let resolved = (!value.is_empty()).then(|| value.to_string());
+        if self.config.terminal_shell == resolved {
+            return;
+        }
+        self.config.terminal_shell = resolved;
+        self.schedule_shell_save(cx);
+    }
+
+    /// shell 变更 500ms 防抖后自动保存（与供应商表单分开的防抖代次）
+    fn schedule_shell_save(&mut self, cx: &mut Context<Self>) {
+        self.shell_save_generation += 1;
+        let generation = self.shell_save_generation;
+        cx.spawn(async move |this: WeakEntity<SettingsView>, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.shell_save_generation == generation {
+                    cx.emit(SettingsEvent::Save(this.config.clone()));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 终端页：shell 路径（留空 = 系统默认）。官方 input 字段 getter 直读
+    /// config（外部变更自动回填，无需 sync_form 通道）；setter 只给 &mut App，
+    /// 经 WeakEntity 回到本视图写配置 + 防抖保存
+    fn terminal_page(weak: &WeakEntity<Self>) -> SettingPage {
+        let get = {
+            let weak = weak.clone();
+            move |cx: &App| {
+                weak.upgrade()
+                    .map(|this| {
+                        this.read(cx)
+                            .config
+                            .terminal_shell
+                            .clone()
+                            .unwrap_or_default()
+                            .into()
+                    })
+                    .unwrap_or_default()
+            }
+        };
+        let set = {
+            let weak = weak.clone();
+            move |value: SharedString, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| this.set_shell(&value, cx));
+            }
+        };
+        SettingPage::new("终端")
+            .icon(IconName::SquareTerminal)
+            .description("内嵌终端的启动 shell。")
+            .group(
+                SettingGroup::new().title("Shell").item(
+                    SettingItem::new("Shell 路径", SettingField::input(get, set))
+                        .description(
+                            "启动终端使用的 shell（如 /bin/zsh、/opt/homebrew/bin/fish）；\
+                             留空 = 系统默认 shell。对之后新建的终端标签生效。",
+                        )
+                        .keywords(["terminal", "shell", "终端"]),
+                ),
+            )
+    }
+
     /// 生成不与存量撞车的供应商 id（按「数量+1」会在删除后与存量撞车：
     /// 撞车后所有按 id 的查找都命中第一个，模型解析/label/会话 meta 全乱）
     fn next_provider_id(&self) -> String {
@@ -643,6 +715,7 @@ impl Render for SettingsView {
                 &weak,
                 Self::render_models_page,
             ),
+            Self::terminal_page(&weak),
             Self::content_page(
                 "MCP 服务器",
                 IconName::Network,

@@ -94,6 +94,11 @@ impl AppView {
                 self.config = Some(config.clone());
                 // 启动加载与每次保存后都会到达：把配置里的字体应用到全局主题（幂等）
                 font::apply_config_fonts(config, cx);
+                // 终端面板已存在时同步 shell 配置（已开的 tab 不变，之后新建生效）
+                if let Some(panel) = &self.terminal {
+                    let shell = config.terminal_shell.clone();
+                    panel.update(cx, |panel, cx| panel.set_shell(shell, cx));
+                }
                 let config = config.clone();
                 self.settings
                     .update(cx, |settings, cx| settings.set_config(config, cx));

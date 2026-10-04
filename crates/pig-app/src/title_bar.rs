@@ -241,6 +241,16 @@ impl AppView {
                                     })),
                             )
                             .child(
+                                Button::new("toggle-terminal")
+                                    .ghost()
+                                    .small()
+                                    .occlude()
+                                    .icon(IconName::SquareTerminal)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_terminal_panel(window, cx);
+                                    })),
+                            )
+                            .child(
                                 Button::new("right-panel-menu")
                                     .ghost()
                                     .small()
