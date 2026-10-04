@@ -16,7 +16,14 @@ pub(crate) fn setup_selftest() -> SelftestEnv {
         pig_core::mock::MOCK_FILE_CONTENT,
     )
     .expect("write mock file");
-    let data_dir = dir.join("data");
+    // 数据目录必须在工作区**外面**（对齐生产 ~/.pigcode）：放在工作区内会被
+    // Grep/Glob 工具搜到——rollout/model-io 落盘里存着历轮用户消息原文，
+    // 子代理 grep 工作区会把其中的 mock 触发词（ECHO_HISTORY 等）带回请求体，
+    // 抢先命中 mock 的内容路由分支（selftest 曾因此因子代理结论被
+    // echo_history_response 截胡而挂）
+    let data_dir =
+        std::env::temp_dir().join(format!("pig-app-selftest-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
     std::fs::create_dir_all(&data_dir).expect("create data dir");
     // agent 通过 PIG_DATA_DIR 找到隔离数据目录
     unsafe { std::env::set_var("PIG_DATA_DIR", &data_dir) };
@@ -152,6 +159,28 @@ pub(crate) async fn run_selftest(view: Entity<AppView>, cx: &mut AsyncApp) {
     let is_hero = app!(|app: &mut AppView, cx| app.debug_is_hero(cx));
     assert!(!is_hero, "发送后应进入会话态");
     println!("[selftest] 会话 A 场景 B 完成（审批×3），输入框已沉底");
+
+    // 调用轨迹面板：mock 回合的多步调用应已落 model-io 记录；面板加载、
+    // 折叠/展开两态渲染（构造元素树不 panic 即过）
+    app!(|app: &mut AppView, cx| {
+        app.open_right_tab(RightTab::Trajectory, cx);
+        let records = app.trajectory.as_ref().map(|s| s.records.len());
+        assert!(
+            records.is_some_and(|n| n >= 2),
+            "场景 B 多步调用应落多条 model-io 记录: {records:?}"
+        );
+        let _ = app.render_trajectory_panel(cx);
+    });
+    app!(|app: &mut AppView, cx| {
+        // 逐行展开：模拟点开首条调用的首行，重渲染展开态
+        if let Some(state) = &mut app.trajectory {
+            let key = format!("{}:0", state.records[0].turn);
+            state.expanded.insert(key);
+        }
+        let _ = app.render_trajectory_panel(cx);
+        app.close_right_tab(RightTab::Trajectory, cx);
+    });
+    println!("[selftest] 调用轨迹面板加载/展开渲染 OK");
 
     // 工作区视图：会话 cwd 应出现在工作区列表，且按工作区分组正确
     let cwd_str = app!(|app: &mut AppView, _| app.cwd.display().to_string());

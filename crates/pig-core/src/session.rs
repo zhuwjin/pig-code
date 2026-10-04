@@ -174,6 +174,9 @@ pub struct Session {
     /// 才提醒，同内容不重复注入）
     date_reminded: String,
     agents_reminded: String,
+    /// 上次已提醒的执行模式（turn_reminder 去重：首轮 None 必提醒一次，
+    /// 之后仅模式切换后的下一回合再提醒；不持久化，resume 后首轮自愈）
+    mode_reminded: Option<ExecMode>,
     /// 会话开始时冻结的子代理档案快照（Agent/AgentSwarm 工具 description
     /// 内嵌档案清单用——每步重扫会让编辑档案打断 tools 前缀缓存；spawn
     /// 执行时另走 load_profiles 现读，清单过期由报错自愈）
@@ -570,6 +573,7 @@ impl Session {
             date_frozen: today.clone(),
             date_reminded: today,
             agents_reminded: agents_prompt,
+            mode_reminded: None,
             profiles_snapshot,
             last_total_tokens: None,
             turn_input: 0,
@@ -656,6 +660,7 @@ impl Session {
             date_frozen: today.clone(),
             date_reminded: today,
             agents_reminded: agents_prompt,
+            mode_reminded: None,
             profiles_snapshot,
             last_total_tokens: None,
             turn_input: 0,

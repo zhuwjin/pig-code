@@ -176,7 +176,7 @@ max_output_tokens = 8192
         );
     }
 
-    // ---- 变化只出现在尾部：新用户消息 = reminder（模式 + AGENTS.md 变更推送）+ 原文 ----
+    // ---- 变化只出现在尾部：新用户消息 = reminder（AGENTS.md 变更推送）+ 原文 ----
     // （回合 1 的收尾 assistant 文本也在前缀里，位置索引会漂移，按内容定位）
     let new_user = turn2_messages
         .iter()
@@ -188,7 +188,10 @@ max_output_tokens = 8192
         new_user.starts_with("<system-reminder>"),
         "reminder 应 prepend 到新用户消息，实际: {new_user}"
     );
-    assert!(new_user.contains("当前执行模式"));
+    assert!(
+        !new_user.contains("当前执行模式"),
+        "模式未变不应重复提醒（首轮一次 + 切换时一次），实际: {new_user}"
+    );
     assert!(new_user.contains("AGENTS.md 内容有更新"));
     assert!(
         new_user.contains("全新的 AGENTS 规则"),
@@ -196,6 +199,55 @@ max_output_tokens = 8192
     );
     assert!(new_user.ends_with("继续"), "原文保持在 reminder 之后");
     // 新技能/新档案不进冻结段（对 system 的断言已隐含），也不进 tools（上面已断言）
+
+    // ---- 回合 3：切换执行模式 → 下一回合 reminder 只带新模式行，前缀依旧稳定 ----
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "再总结一次".to_string(),
+            files: vec![],
+            images: vec![],
+            mode: pig_protocol::ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    common::recv_until(&agent.events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    let requests = main_loop_requests(&log.lock().unwrap());
+    let turn3 = requests.last().expect("回合 3 最后一个请求").clone();
+    let turn3_messages = messages_of(&turn3);
+    for (i, msg) in turn2_messages.iter().enumerate() {
+        assert_eq!(
+            msg, &turn3_messages[i],
+            "回合 3 改写了旧消息[{i}]：缓存前缀从该处失效"
+        );
+    }
+    let new_user3 = turn3_messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.ends_with("再总结一次"))
+        })
+        .and_then(|m| m["content"].as_str())
+        .expect("回合 3 的新用户消息");
+    assert!(
+        new_user3.starts_with("<system-reminder>"),
+        "模式切换后应有 reminder，实际: {new_user3}"
+    );
+    assert!(
+        new_user3.contains("当前执行模式: 自动编辑"),
+        "模式切换后应提醒新模式，实际: {new_user3}"
+    );
+    assert!(
+        !new_user3.contains("AGENTS.md 内容有更新"),
+        "AGENTS.md 已提醒过不应重复，实际: {new_user3}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

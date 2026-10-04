@@ -158,8 +158,9 @@ pub fn system_prompt(
     prompt
 }
 
-/// 执行模式说明（原系统提示词的模式段；现每回合经 turn_reminder 注入，
-/// 模型需要时刻知道当前模式，但模式切换不该打断系统提示词前缀缓存）
+/// 执行模式说明（原系统提示词的模式段；现经 turn_reminder 在首轮 + 模式切换
+/// 后的下一回合注入——模式切换不该打断系统提示词前缀缓存，也不值得每回合
+/// 重复提醒。对齐 ZCode runtime_mode / kimi permission_mode 的变更触发口径）
 pub(crate) fn mode_line(mode: ExecMode) -> &'static str {
     match mode {
         ExecMode::ConfirmBeforeEdit => {
@@ -185,18 +186,25 @@ pub(crate) fn mode_line(mode: ExecMode) -> &'static str {
 /// 到本回合用户消息前）——尾部追加不打断 system+历史的前缀缓存，也不会插在
 /// 工具调用配对中间。ZCode runtime_mode/date_change、kimi agentsMdReminder
 /// 同款思路。
-/// 执行模式每回合都在（模型需要时刻知道）；日期/AGENTS.md 只在与已提醒内容
-/// 不一致时提醒一次（reminded 状态去重，同内容不重复注入；冻结版不回写，
-/// 系统提示词里的旧值由提醒文案声明作废）。
+/// 三类内容全部按需触发：执行模式首轮一次 + 切换后下一回合一次
+///（mode_reminded 去重）；日期跨天/AGENTS.md 变更只在与已提醒内容不一致时
+/// 提醒一次（reminded 状态去重，同内容不重复注入；冻结版不回写，系统提示词
+/// 里的旧值由提醒文案声明作废）。无可提醒内容时返回 None——用户消息保持
+/// 干净，不再每回合顶一个空 reminder。
 pub(crate) fn turn_reminder(
     mode: ExecMode,
+    mode_reminded: &mut Option<ExecMode>,
     date_frozen: &str,
     date_reminded: &mut String,
     agents_frozen: &str,
     agents_fresh: &str,
     agents_reminded: &mut String,
-) -> String {
-    let mut lines: Vec<String> = vec![mode_line(mode).to_string()];
+) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if *mode_reminded != Some(mode) {
+        lines.push(mode_line(mode).to_string());
+        *mode_reminded = Some(mode);
+    }
     let today = today();
     if today != *date_reminded {
         lines.push(format!(
@@ -213,10 +221,12 @@ pub(crate) fn turn_reminder(
         ));
         *agents_reminded = agents_fresh.to_string();
     }
-    format!(
-        "<system-reminder>\n{}\n</system-reminder>",
-        lines.join("\n")
-    )
+    (!lines.is_empty()).then(|| {
+        format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            lines.join("\n")
+        )
+    })
 }
 
 /// 系统提示词里的工具一句话清单。完整参数与细节在工具 schema 里（避免双份长文维护漂移）；
@@ -332,25 +342,16 @@ pub fn subagent_system_prompt(
     prompt
 }
 
-/// 今天日期（YYYY-MM-DD，UTC）。std 无日期格式化，用 civil-from-days 算法。
-/// 会话冻结日期与 turn_reminder 的跨天检测共用
+/// 今天日期（YYYY-MM-DD，**本地时区**——对齐 ZCode lastEmittedLocalDate；
+/// 本地时区获取失败回退 UTC）。会话冻结日期与 turn_reminder 的跨天检测共用
 pub(crate) fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (secs / 86_400) as i64;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format!(
+        "{:04}-{:02}-{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day()
+    )
 }
 
 /// 会话开始时的 git 快照（分支 + dirty）。只算一次：env 块每回合重建，
@@ -508,78 +509,125 @@ mod tests {
         assert!(prompt.contains("工作目录"), "env 块仍在");
     }
 
-    /// turn_reminder：模式每回合都在；日期/AGENTS.md 变更提醒一次即去重；
-    /// 恢复到与冻结一致时不提醒
+    /// turn_reminder：执行模式首轮一次 + 切换后一次；日期/AGENTS.md 变更
+    /// 提醒一次即去重；全部无变化时返回 None（用户消息不再顶空 reminder）
     #[test]
     fn turn_reminder_dedup_and_composition() {
         let today = super::today();
+        let mut mode_reminded = None;
         let mut date_reminded = today.clone();
         let mut agents_reminded = String::new();
-        // 无变更：只有模式行
+        // 首轮：只有模式行
         let r = super::turn_reminder(
             pig_protocol::ExecMode::AutoEdit,
+            &mut mode_reminded,
             &today,
             &mut date_reminded,
             "",
             "",
             &mut agents_reminded,
-        );
+        )
+        .expect("首轮应有模式 reminder");
         assert!(r.starts_with("<system-reminder>"));
         assert!(r.contains("当前执行模式: 自动编辑"));
         assert!(!r.contains("日期已变更"));
         assert!(!r.contains("AGENTS.md"));
         assert!(r.ends_with("</system-reminder>"));
-        // AGENTS.md 变更：提醒一次，同内容重复调用去重
+        // 次轮无变更：None（模式行不重复）
+        assert!(
+            super::turn_reminder(
+                pig_protocol::ExecMode::AutoEdit,
+                &mut mode_reminded,
+                &today,
+                &mut date_reminded,
+                "",
+                "",
+                &mut agents_reminded,
+            )
+            .is_none(),
+            "模式未变且无环境变更时不应再有 reminder"
+        );
+        // 模式切换：下一回合再提醒一次新模式
+        let r = super::turn_reminder(
+            pig_protocol::ExecMode::Plan,
+            &mut mode_reminded,
+            &today,
+            &mut date_reminded,
+            "",
+            "",
+            &mut agents_reminded,
+        )
+        .expect("切换后应再提醒模式");
+        assert!(r.contains("当前执行模式: 计划模式"));
+        assert!(!r.contains("自动编辑"));
+        // AGENTS.md 变更：提醒一次，同内容重复调用去重（此时只含 AGENTS.md 行）
         let fresh = "## AGENTS.md 指令\n新版规则";
         let r1 = super::turn_reminder(
-            pig_protocol::ExecMode::AutoEdit,
+            pig_protocol::ExecMode::Plan,
+            &mut mode_reminded,
             &today,
             &mut date_reminded,
             "",
             fresh,
             &mut agents_reminded,
-        );
+        )
+        .expect("AGENTS.md 变更应有 reminder");
         assert!(r1.contains("AGENTS.md 内容有更新"));
         assert!(r1.contains("新版规则"));
-        let r2 = super::turn_reminder(
-            pig_protocol::ExecMode::AutoEdit,
-            &today,
-            &mut date_reminded,
-            "",
-            fresh,
-            &mut agents_reminded,
+        assert!(!r1.contains("当前执行模式"), "模式未变不重复提醒");
+        assert!(
+            super::turn_reminder(
+                pig_protocol::ExecMode::Plan,
+                &mut mode_reminded,
+                &today,
+                &mut date_reminded,
+                "",
+                fresh,
+                &mut agents_reminded,
+            )
+            .is_none(),
+            "同内容不应重复提醒"
         );
-        assert!(!r2.contains("AGENTS.md"), "同内容不应重复提醒");
         // AGENTS.md 改回与冻结版一致：不再提醒
-        let r3 = super::turn_reminder(
-            pig_protocol::ExecMode::AutoEdit,
-            &today,
-            &mut date_reminded,
-            fresh,
-            fresh,
-            &mut agents_reminded,
+        assert!(
+            super::turn_reminder(
+                pig_protocol::ExecMode::Plan,
+                &mut mode_reminded,
+                &today,
+                &mut date_reminded,
+                fresh,
+                fresh,
+                &mut agents_reminded,
+            )
+            .is_none(),
+            "与冻结一致无需提醒"
         );
-        assert!(!r3.contains("AGENTS.md"), "与冻结一致无需提醒");
         // 日期跨天：提醒一次并去重（模拟昨天已提醒）
         date_reminded = "2000-01-01".to_string();
         let r4 = super::turn_reminder(
             pig_protocol::ExecMode::Plan,
+            &mut mode_reminded,
             "2000-01-01",
             &mut date_reminded,
             "",
             "",
             &mut agents_reminded,
-        );
-        assert!(r4.contains("当前执行模式: 计划模式"));
+        )
+        .expect("跨天应有 reminder");
         assert!(r4.contains("日期已变更"));
-        let r5 = super::turn_reminder(
-            pig_protocol::ExecMode::Plan,
-            "2000-01-01",
-            &mut date_reminded,
-            "",
-            "",
-            &mut agents_reminded,
+        assert!(!r4.contains("当前执行模式"), "模式未变不重复提醒");
+        assert!(
+            super::turn_reminder(
+                pig_protocol::ExecMode::Plan,
+                &mut mode_reminded,
+                "2000-01-01",
+                &mut date_reminded,
+                "",
+                "",
+                &mut agents_reminded,
+            )
+            .is_none(),
+            "同日期不应重复提醒"
         );
-        assert!(!r5.contains("日期已变更"), "同日期不应重复提醒");
     }
 }

@@ -43,12 +43,14 @@ impl Session {
         } else if self.history[0].role == "system" {
             self.history[0] = system;
         }
-        // 回合边界 reminder（执行模式/日期跨天/AGENTS.md 变更）：prepend 到用户
-        // 消息前——尾部注入不打断 system+历史的前缀缓存，也插不进工具配对中间；
-        // 不落 rollout（恢复会话由重新冻结 + 首轮提醒自愈）
+        // 回合边界 reminder（执行模式首轮/切换、日期跨天、AGENTS.md 变更）：
+        // prepend 到用户消息前——尾部注入不打断 system+历史的前缀缓存，也插不进
+        // 工具配对中间；无可提醒内容时用户消息保持原样。不落 rollout（恢复会话
+        // 由重新冻结 + 首轮提醒自愈）
         let fresh_agents = prompt::agents_md(&self.data_dir, &self.cwd);
         let reminder = prompt::turn_reminder(
             self.mode,
+            &mut self.mode_reminded,
             &self.date_frozen,
             &mut self.date_reminded,
             &self.agents_prompt,
@@ -56,7 +58,9 @@ impl Session {
             &mut self.agents_reminded,
         );
         let mut user_text = expand_file_references(&self.cwd, &content, &files);
-        user_text = format!("{reminder}\n\n{user_text}");
+        if let Some(reminder) = reminder {
+            user_text = format!("{reminder}\n\n{user_text}");
+        }
         if self.history.len() == 1 {
             // 首条消息：种标题（首 30 字符兜底），并异步生成模型标题；
             // 手动重命名过（title_custom）两者都不覆盖
