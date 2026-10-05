@@ -228,6 +228,10 @@ impl Rollout {
 pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg> {
     let mut history = vec![ChatMsg::system(system)];
     let mut pending_reasoning: Option<String> = None;
+    let meta_cwd = records.iter().find_map(|record| match record {
+        RolloutRecord::Meta { cwd, .. } => Some(cwd.clone()),
+        _ => None,
+    });
     for record in records {
         match record {
             RolloutRecord::Meta { .. } => {}
@@ -242,8 +246,14 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
                 pending_reasoning = None;
                 let mut text = text.clone();
                 if !files.is_empty() {
-                    text.push_str("\n\n引用文件: ");
-                    text.push_str(&files.join(", "));
+                    // 与 live 同一指针形态（路径+大小，不读内容）；旧记录（正文
+                    // 内嵌 <file> 块或「引用文件」后缀）保持原样——历史即消息
+                    if let Some(cwd) = &meta_cwd {
+                        text = crate::session::pointer_file_references(cwd, &text, files);
+                    } else {
+                        text.push_str("\n\n引用文件: ");
+                        text.push_str(&files.join(", "));
+                    }
                 }
                 // 图片按 ImageRef 读回字节重建（ZCode 式 rehydrate）；丢失的文件占位
                 let mut missing = 0usize;

@@ -847,6 +847,7 @@ pub use images::project_images;
 pub use runner::agent_loop;
 pub use title::TITLE_PROMPT_MARKER;
 pub(crate) use title::spawn_title_generation;
+pub(crate) use turn::pointer_file_references;
 
 /// 加载项目级权限规则：文件缺失 = 空规则；解析失败不致命，stderr 提示（
 /// 会话创建/回放路径没有合适的事件通道，不硬建）

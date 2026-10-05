@@ -57,7 +57,9 @@ impl Session {
             &fresh_agents,
             &mut self.agents_reminded,
         );
-        let mut user_text = expand_file_references(&self.cwd, &content, &files);
+        // @引用文件按指针形态注入（kimi-code 同款取舍）：只给路径（+可选行范围），
+        // 内容由模型按需用 Read 现读——永远新鲜、恒定一行、不伤前缀缓存
+        let mut user_text = pointer_file_references(&self.cwd, &content, &files);
         if let Some(reminder) = reminder {
             user_text = format!("{reminder}\n\n{user_text}");
         }
@@ -77,12 +79,9 @@ impl Session {
                 });
             spawn_title_generation(&self.store, &self.id, &content, config, tx);
         }
-        // user_text 含展开后的文件内容；rollout 只记原文
-        let rollout_text = if files.is_empty() {
-            content.clone()
-        } else {
-            format!("{content}\n\n引用文件: {}", files.join(", "))
-        };
+        // rollout 只记原文（files 另存字段；「引用文件」后缀已废除——
+        // UI 用 files 渲染内联 chip，模型侧 resume 经 rebuild_history 转指针行）
+        let rollout_text = content.clone();
         let record_files = files.clone();
         // 粘贴图片（ZCode 式管线）：压缩 → 落会话媒体目录 → rollout 记 ImageRef
         //（不存 base64）+ history 进 ChatImage；压缩失败的图跳过并在文本里记 note。
@@ -1320,31 +1319,49 @@ impl Session {
     }
 }
 
-/// @文件引用展开：内容注入 <file> 块；单文件 20KB、总计 100KB 上限。
-fn expand_file_references(cwd: &Path, content: &str, files: &[String]) -> String {
+/// @引用文件的指针行：只注入路径与大小，不读内容、不带读取指引
+///（kimi-code TUI 的极简形态：@ 是注意力引导；「需要时主动调工具」在系统
+/// 提示词里是常驻指令，工具清单也在，逐条重复提示是噪音）。
+/// 路径仍经 resolve_checked 校验（工作区内、非敏感）；图片只标注类型。
+pub(crate) fn pointer_file_references(cwd: &Path, content: &str, files: &[String]) -> String {
     let mut text = content.to_string();
-    let mut budget = 100 * 1024;
     for file in files {
-        let block = match tool::resolve_checked(cwd, file, false)
-            .and_then(|full| std::fs::read_to_string(&full).map_err(|e| e.to_string()))
-        {
-            Ok(mut file_content) => {
-                if file_content.len() > 20 * 1024 {
-                    file_content.truncate(20 * 1024);
-                    file_content.push_str("\n[文件过大，已截断]");
+        let block = match tool::resolve_checked(cwd, file, false) {
+            Ok(full) => {
+                let size = std::fs::metadata(&full).ok().map(|m| m.len());
+                let kind = if is_image_path(file) { "，图片" } else { "" };
+                match size {
+                    Some(bytes) => {
+                        format!("\n\n[引用文件 {file}（{}{kind}）]", human_size(bytes))
+                    }
+                    None => format!("\n\n[引用文件 {file}{kind}]"),
                 }
-                if file_content.len() > budget {
-                    file_content.truncate(budget);
-                    file_content.push_str("\n[引用总量超限，已截断]");
-                }
-                budget = budget.saturating_sub(file_content.len());
-                format!("\n\n<file path=\"{file}\">\n{file_content}\n</file>")
             }
-            Err(error) => format!("\n\n[无法读取引用文件 {file}: {error}]"),
+            Err(error) => format!("\n\n[无法引用文件 {file}: {error}]"),
         };
         text.push_str(&block);
     }
     text
+}
+
+fn is_image_path(path: &str) -> bool {
+    let Some((_, ext)) = path.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+    )
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// 并发只读组内一个调用的预计算卡片信息（Begin 先发，End 随完成即达）
@@ -1599,5 +1616,43 @@ mod tests {
         // 工具集里查不到的 mcp__ 名（未连接/未继承）→ 同步点
         let mask = mask_of(&["mcp__ghost__read"], ExecMode::Yolo, false);
         assert_eq!(mask, [false]);
+    }
+
+    fn pointer_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pig-pointer-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 指针行：只给路径+大小（图片标注类型），不带读取指引、不读文件内容
+    #[test]
+    fn pointer_references_never_inline_content() {
+        let dir = pointer_test_dir("basic");
+        std::fs::write(dir.join("a.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("big.rs"), "x".repeat(2048)).unwrap();
+        std::fs::write(dir.join("logo.png"), b"\x89PNG").unwrap();
+
+        // 默认：路径 + 大小，无指引、无内容
+        let out = pointer_file_references(&dir, "看下这个", &["a.rs".into()]);
+        assert!(out.contains("[引用文件 a.rs（13 B）]"), "{out}");
+        assert!(!out.contains("Read"), "不带读取指引: {out}");
+        assert!(!out.contains("fn main"), "不得内联内容: {out}");
+
+        // 大文件：同样只给指针（读取由模型用 Read 分页）
+        let out = pointer_file_references(&dir, "看 10000 到 10050 行", &["big.rs".into()]);
+        assert!(out.contains("[引用文件 big.rs（2.0 KB）]"), "{out}");
+        assert!(!out.contains("xxx"), "不得内联内容: {out}");
+
+        // 图片：只标注类型
+        let out = pointer_file_references(&dir, "看图", &["logo.png".into()]);
+        assert!(out.contains("（4 B，图片）]"), "{out}");
+
+        // 工作区外/不存在：报错行
+        let out = pointer_file_references(&dir, "x", &["../etc/passwd".into()]);
+        assert!(out.contains("[无法引用文件 ../etc/passwd"), "{out}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

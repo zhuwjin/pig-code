@@ -1,4 +1,5 @@
 use super::cards::{measure_ticker_width, ticker_roll_content};
+use super::{MentionSegment, split_mention_segments, strip_reference_suffix};
 use super::{
     TickerRoll, adjacent_image_index, as_task_notification, clamp_lightbox_pan,
     collect_lightbox_positions, elide_record_path, format_file_size, format_notification_duration,
@@ -6,6 +7,66 @@ use super::{
     parse_image_link, split_image_links, ticker_target_line,
 };
 use std::time::{Duration, Instant};
+
+#[test]
+fn strip_reference_suffix_only_removes_exact_core_suffix() {
+    let files = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+    // core 旧格式：完整命中即剥
+    assert_eq!(
+        strip_reference_suffix("看看\n\n引用文件: src/a.rs, src/b.rs", &files),
+        "看看"
+    );
+    // 新记录（无后缀）：原样
+    assert_eq!(strip_reference_suffix("看看", &files), "看看");
+    // 手写同形文本（与 files.join 不完全一致）：不动
+    assert_eq!(
+        strip_reference_suffix("看看\n\n引用文件: src/a.rs", &files),
+        "看看\n\n引用文件: src/a.rs"
+    );
+    // 无 files：不动
+    assert_eq!(
+        strip_reference_suffix("看看\n\n引用文件: src/a.rs", &[]),
+        "看看\n\n引用文件: src/a.rs"
+    );
+}
+
+#[test]
+fn split_mention_segments_matches_boundaries_and_longest_first() {
+    // 基本：命中切成 Mention，文本保留原间距
+    let files = vec!["src/a.rs".to_string()];
+    assert_eq!(
+        split_mention_segments("@src/a.rs 帮我看看", &files),
+        vec![
+            MentionSegment::Mention("src/a.rs".into()),
+            MentionSegment::Text(" 帮我看看".into()),
+        ]
+    );
+    // 边界保护：@a.rs2 不误配 @a.rs
+    let files = vec!["a.rs".to_string()];
+    assert_eq!(
+        split_mention_segments("@a.rs2 与 @a.rs", &files),
+        vec![
+            MentionSegment::Text("@a.rs2 与 ".into()),
+            MentionSegment::Mention("a.rs".into()),
+        ]
+    );
+    // 长路径优先：src/a.rs 整颗命中，不被 a.rs 截胡
+    let files = vec!["a.rs".to_string(), "src/a.rs".to_string()];
+    assert_eq!(
+        split_mention_segments("@src/a.rs", &files),
+        vec![MentionSegment::Mention("src/a.rs".into())]
+    );
+    // 多处出现都切；文本中没出现的 files 不产生段（交给回落 chip 行）
+    let files = vec!["x.rs".to_string(), "y.rs".to_string()];
+    assert_eq!(
+        split_mention_segments("@x.rs 和 @x.rs", &files),
+        vec![
+            MentionSegment::Mention("x.rs".into()),
+            MentionSegment::Text(" 和 ".into()),
+            MentionSegment::Mention("x.rs".into()),
+        ]
+    );
+}
 
 #[test]
 fn task_notification_strips_outer_tags() {
@@ -949,4 +1010,81 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
             });
         })
         .unwrap();
+}
+
+/// @提及内联 chip：渲染可见（图标+下划线文件名），点击发 OpenFile 打开文件
+#[gpui_kit::test]
+fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, IntoElement as _};
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    // 事件捕获（订阅须活到测试结束）
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = captured.clone();
+    let mut events_sub = None;
+    window
+        .update(cx, |probe, window, cx| {
+            probe.thread.update(cx, |view, cx| {
+                let entity = cx.entity();
+                events_sub = Some(cx.subscribe_in(
+                    &entity,
+                    window,
+                    move |_, _, event: &super::ThreadEvent, _, _| {
+                        sink.borrow_mut().push(event.clone());
+                    },
+                ));
+                view.append_user_message(
+                    "@src/a.rs 帮我看看这个文件".to_string(),
+                    vec!["src/a.rs".to_string()],
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+    let _events_sub = events_sub;
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    // chip 真实渲染可见（消息 ix=0，Mention 段 six=0）
+    cx.update_window(window.into(), |_, window, _| {
+        let snap = window.find(("user-mention", 0usize));
+        assert!(snap.visible(), "@chip 应可见");
+    })
+    .unwrap();
+
+    // 点击 chip → OpenFile{path, line: None}
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("user-mention", 0usize), cx);
+    })
+    .unwrap();
+    let events = captured.borrow();
+    assert_eq!(events.len(), 1, "应只发一次 OpenFile: {}", events.len());
+    match &events[0] {
+        super::ThreadEvent::OpenFile { path, line } => {
+            assert_eq!(path, "src/a.rs");
+            assert_eq!(*line, None);
+        }
+        other => panic!("应为 OpenFile 事件: {other:?}"),
+    }
 }

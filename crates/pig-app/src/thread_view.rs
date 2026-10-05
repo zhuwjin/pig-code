@@ -44,7 +44,7 @@ use model::Role;
 use model::*;
 use read::*;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ThreadEvent {
     /// 计划模式：用户点了「执行计划」
     ExecutePlan,

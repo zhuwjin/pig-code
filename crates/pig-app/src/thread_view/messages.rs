@@ -22,6 +22,72 @@ pub(crate) fn render_compact_divider(content: AnyElement, cx: &App) -> AnyElemen
         .into_any_element()
 }
 
+/// @提及分段：文本里出现的 @path（files 命中）切成 Mention，其余为 Text。
+/// 长路径优先（防前缀互吃）；命中点后一个字符须是路径终止符（防 @a.rs2 误配 @a.rs）
+#[derive(Debug, PartialEq)]
+pub(crate) enum MentionSegment {
+    Text(String),
+    Mention(String),
+}
+
+/// 旧记录的「引用文件: a, b」后缀（core 曾拼进展示文本；新记录不再写入，
+/// chip 已内联表达）：只在 files 非空且完整命中时剥除，手写同形文本不受影响
+pub(crate) fn strip_reference_suffix(text: &str, files: &[String]) -> String {
+    if files.is_empty() {
+        return text.to_string();
+    }
+    let suffix = format!("\n\n引用文件: {}", files.join(", "));
+    text.replacen(&suffix, "", 1)
+}
+
+pub(crate) fn split_mention_segments(text: &str, files: &[String]) -> Vec<MentionSegment> {
+    let mut segments = vec![MentionSegment::Text(text.to_string())];
+    let mut sorted: Vec<&String> = files.iter().collect();
+    sorted.sort_by_key(|f| std::cmp::Reverse(f.len()));
+    for file in sorted {
+        let needle = format!("@{file}");
+        let mut next = Vec::with_capacity(segments.len() + 1);
+        for segment in segments {
+            let MentionSegment::Text(text) = segment else {
+                next.push(segment);
+                continue;
+            };
+            let mut rest = text.as_str();
+            loop {
+                let Some(pos) = rest.find(&needle) else {
+                    next.push(MentionSegment::Text(rest.to_string()));
+                    break;
+                };
+                let boundary = rest.as_bytes().get(pos + needle.len()).is_none_or(|b| {
+                    !matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'/' | b'.' | b'-')
+                });
+                if !boundary {
+                    let skip = pos + 1;
+                    next.push(MentionSegment::Text(rest[..skip].to_string()));
+                    rest = &rest[skip..];
+                    continue;
+                }
+                if pos > 0 {
+                    next.push(MentionSegment::Text(rest[..pos].to_string()));
+                }
+                next.push(MentionSegment::Mention(file.clone()));
+                rest = &rest[pos + needle.len()..];
+            }
+        }
+        segments = next;
+    }
+    // 相邻 Text 段合并（边界保护跳过失败命中时会留下相邻文本段）
+    let mut merged: Vec<MentionSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        match (merged.last_mut(), &segment) {
+            (Some(MentionSegment::Text(prev)), MentionSegment::Text(text)) => prev.push_str(text),
+            _ => merged.push(segment),
+        }
+    }
+    merged.retain(|s| !matches!(s, MentionSegment::Text(t) if t.is_empty()));
+    merged
+}
+
 /// 导航预览卡本体（打开卡与出场快照共用）：标题 2 行 + 助手摘要 3 行
 fn nav_card_body(data: &NavCardData, cx: &App) -> Div {
     let (_, _, user_preview, assistant_preview, is_text) = data;
@@ -68,12 +134,31 @@ impl ThreadView {
         if let Some(note) = as_task_notification(&message.text) {
             return self.render_task_notification(ix, &note, message, cx);
         }
+        // 展示文本与 @提及分段（剥旧记录后缀 + 内联 chip）；文本里没出现的
+        // files（程序化附件等）回落到气泡上方的传统 chip 行
+        let display_text = strip_reference_suffix(&message.text, &message.files);
+        let segments = split_mention_segments(&display_text, &message.files);
+        let unmatched: Vec<String> = {
+            let inline: std::collections::HashSet<&str> = segments
+                .iter()
+                .filter_map(|s| match s {
+                    MentionSegment::Mention(path) => Some(path.as_str()),
+                    _ => None,
+                })
+                .collect();
+            message
+                .files
+                .iter()
+                .filter(|f| !inline.contains(f.as_str()))
+                .cloned()
+                .collect()
+        };
         v_flex()
             .w_full()
             .items_end()
             .gap_1()
-            .when(!message.files.is_empty(), |this| {
-                this.child(h_flex().gap_1().children(message.files.iter().map(|file| {
+            .when(!unmatched.is_empty(), |this| {
+                this.child(h_flex().gap_1().children(unmatched.iter().map(|file| {
                     h_flex()
                         .gap_1()
                         .px_2()
@@ -112,22 +197,69 @@ impl ThreadView {
                             }),
                         ))
                     })
-                    // 纯文本原文渲染 + 窗口级选择（拖拽/双击选词/Ctrl+C 复制）；
-                    // 显式 handle + refresh_window_on_change 让拖动过程实时高亮
-                    .when(!message.text.is_empty(), |this| {
-                        this.child(
-                            SelectableText::with_handle(
-                                ("user-msg-text", ix),
-                                message
-                                    .selection
-                                    .as_ref()
-                                    .expect("render 时已惰性创建选择 handle")
-                                    .0
-                                    .clone(),
-                                message.text.clone(),
+                    // @提及内联渲染：文本段保持窗口级选择（共享 handle + 阅读序），
+                    // chip = 文件图标 + 下划线文件名，点击在右侧面板打开文件
+                    .when(!display_text.is_empty(), |this| {
+                        let handle = message
+                            .selection
+                            .as_ref()
+                            .expect("render 时已惰性创建选择 handle")
+                            .0
+                            .clone();
+                        if segments
+                            .iter()
+                            .any(|s| matches!(s, MentionSegment::Mention(_)))
+                        {
+                            this.child(h_flex().flex_wrap().items_center().children(
+                                segments.iter().enumerate().map(|(six, segment)| {
+                                    match segment {
+                                        MentionSegment::Text(text) => SelectableText::with_handle(
+                                            ("user-msg-text", ix * 1024 + six),
+                                            handle.clone(),
+                                            text.clone(),
+                                        )
+                                        .document_order(six as u64)
+                                        .into_any_element(),
+                                        MentionSegment::Mention(path) => {
+                                            let file_name =
+                                                path.rsplit('/').next().unwrap_or(path).to_string();
+                                            let open_path = path.clone();
+                                            h_flex()
+                                                .id(("user-mention", ix * 1024 + six))
+                                                .test_support()
+                                                .gap_1()
+                                                .cursor_pointer()
+                                                .rounded(cx.theme().radius)
+                                                .hover(|this| {
+                                                    this.bg(cx.theme().accent.opacity(0.6))
+                                                })
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(ThreadEvent::OpenFile {
+                                                        path: open_path.clone(),
+                                                        line: None,
+                                                    });
+                                                }))
+                                                .child(
+                                                    Icon::new(IconName::FileText)
+                                                        .size_3p5()
+                                                        .text_color(cx.theme().muted_foreground),
+                                                )
+                                                .child(div().text_sm().underline().child(file_name))
+                                                .into_any_element()
+                                        }
+                                    }
+                                }),
+                            ))
+                        } else {
+                            this.child(
+                                SelectableText::with_handle(
+                                    ("user-msg-text", ix),
+                                    handle,
+                                    display_text.clone(),
+                                )
+                                .document_order(ix as u64),
                             )
-                            .document_order(ix as u64),
-                        )
+                        }
                     }),
             )
             .into_any_element()
