@@ -153,6 +153,19 @@ pub(crate) fn to_anthropic_tools(tools: &[serde_json::Value]) -> Vec<serde_json:
         .collect()
 }
 
+/// 请求级工具清单组装（流式/非流式共用，防两处漂移）：
+/// OpenAI 线格式 → Anthropic 形态 + 能力开启时的服务端搜索工具。
+pub(crate) fn anthropic_request_tools(
+    config: &ResolvedModel,
+    tools: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut out = to_anthropic_tools(tools);
+    if let Some(tool) = anthropic_web_search_tool(config) {
+        out.push(tool);
+    }
+    out
+}
+
 /// Anthropic 端点：能力开启时注入服务端搜索工具（web_search_tool 可自定义，
 /// 缺省 web_search_20250305）。服务端产出的 web_search_tool_result block 由
 /// SSE 解析器 fallthrough 忽略。
@@ -173,10 +186,7 @@ pub(crate) async fn stream_anthropic(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     let (system, messages) = to_anthropic_messages(&messages);
-    let mut anthropic_tools = to_anthropic_tools(&tools);
-    if let Some(tool) = anthropic_web_search_tool(config) {
-        anthropic_tools.push(tool);
-    }
+    let anthropic_tools = anthropic_request_tools(config, &tools);
     let mut body = serde_json::json!({
         "model": config.model,
         "max_tokens": config.max_output_tokens,

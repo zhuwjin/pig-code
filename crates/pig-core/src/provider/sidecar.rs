@@ -14,11 +14,16 @@ pub(crate) struct CompleteChoice {
 #[derive(Deserialize)]
 pub(crate) struct CompleteMessage {
     content: Option<String>,
+    /// 有值 = 模型在摘要时试图调用工具（摘要指令禁止），调用方应落回截断路径
+    tool_calls: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct CompleteBlock {
     text: Option<String>,
+    /// 块类型：tool_use = 模型在摘要时试图调用工具（同上）
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// 非流式一次性请求（compaction 摘要）。
@@ -91,6 +96,111 @@ pub async fn complete_text(
             parsed
                 .content
                 .and_then(|blocks| blocks.into_iter().find_map(|b| b.text))
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| "响应无内容".to_string())
+        }
+    }
+}
+
+/// 非流式一次性请求（compaction 摘要）多消息形态：完整消息列表 + 工具清单。
+/// 与会话请求同一份 system/tools/历史字节 → OpenAI 系自动前缀缓存命中上次
+/// 回合写入的缓存（ZCode 同管线投影 / kimi-code 同 history 数组的同款取舍）。
+/// 模型若在摘要时返回工具调用（指令禁止），按失败处理，调用方落回截断路径。
+pub async fn complete_messages(
+    config: &ResolvedModel,
+    messages: &[ChatMsg],
+    tools: &[serde_json::Value],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<String, String> {
+    let client = http_client();
+    match config.api_format {
+        ApiFormat::OpenAiChat => {
+            // 与流式路径同一套工具组装（服务端搜索工具按能力注入），缓存前缀才对齐
+            let tools = openai_request_tools(config, tools);
+            let mut body = serde_json::json!({
+                "model": config.model,
+                "messages": to_openai_messages(messages),
+                "stream": false,
+                "max_tokens": config.max_output_tokens,
+            });
+            if !tools.is_empty() {
+                body["tools"] = serde_json::Value::Array(tools);
+            }
+            let response = tokio::select! {
+                result = client
+                    .post(format!("{}/chat/completions", config.base_url))
+                    .bearer_auth(&config.api_key)
+                    .json(&body)
+                    .send() => result.map_err(net_err)?,
+                _ = cancel.cancelled() => return Err("已取消".to_string()),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                let detail: String = detail.chars().take(300).collect();
+                return Err(format!("HTTP {status}: {detail}"));
+            }
+            let parsed: CompleteResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("解析响应失败: {e}"))?;
+            let message = parsed
+                .choices
+                .and_then(|mut c| c.pop())
+                .and_then(|c| c.message)
+                .ok_or_else(|| "响应无消息".to_string())?;
+            if message.tool_calls.is_some() {
+                return Err("摘要响应包含工具调用".to_string());
+            }
+            message
+                .content
+                .filter(|content| !content.is_empty())
+                .ok_or_else(|| "响应无内容".to_string())
+        }
+        ApiFormat::AnthropicMessages => {
+            let (system, msgs) = to_anthropic_messages(messages);
+            // 与流式路径同一套工具组装（OpenAI 线格式 → Anthropic 形态 +
+            // 能力开启时的服务端搜索工具）。直接透传 root_schemas 的 OpenAI
+            // 线格式会被 Anthropic 兼容端点 422 拒绝（实测 Kimi 报错）
+            let anthropic_tools = anthropic_request_tools(config, tools);
+            let mut body = serde_json::json!({
+                "model": config.model,
+                "max_tokens": config.max_output_tokens,
+                "stream": false,
+                "messages": msgs,
+            });
+            if !system.is_empty() {
+                body["system"] = serde_json::Value::String(system);
+            }
+            if !anthropic_tools.is_empty() {
+                body["tools"] = serde_json::Value::Array(anthropic_tools);
+            }
+            let response = tokio::select! {
+                result = client
+                    .post(anthropic_url(&config.base_url))
+                    .header("x-api-key", &config.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send() => result.map_err(net_err)?,
+                _ = cancel.cancelled() => return Err("已取消".to_string()),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                let detail: String = detail.chars().take(300).collect();
+                return Err(format!("HTTP {status}: {detail}"));
+            }
+            let parsed: CompleteResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("解析响应失败: {e}"))?;
+            let blocks = parsed.content.ok_or_else(|| "响应无内容".to_string())?;
+            if blocks.iter().any(|b| b.kind.as_deref() == Some("tool_use")) {
+                return Err("摘要响应包含工具调用".to_string());
+            }
+            blocks
+                .into_iter()
+                .find_map(|b| b.text)
                 .filter(|text| !text.is_empty())
                 .ok_or_else(|| "响应无内容".to_string())
         }

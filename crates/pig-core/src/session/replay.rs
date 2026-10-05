@@ -174,7 +174,29 @@ impl Session {
                         tx,
                     );
                 }
-                RolloutRecord::Compact { .. } => {}
+                RolloutRecord::Compact {
+                    note,
+                    omitted,
+                    automatic,
+                    used_after,
+                } => {
+                    // 回放恢复压缩点的水位（used_after 是压缩后历史的估算值）并
+                    // 补发事件：UI 在消息流同一位置重建「上下文已压缩」分隔条
+                    if let Some(used) = used_after {
+                        self.last_total_tokens = Some(*used);
+                    }
+                    let (note, omitted, automatic) = (note.clone(), *omitted, *automatic);
+                    self.emit(
+                        |session_id, seq| Event::ContextCompacted {
+                            session_id,
+                            seq,
+                            omitted,
+                            note,
+                            automatic,
+                        },
+                        tx,
+                    );
+                }
                 RolloutRecord::TurnStats {
                     input,
                     cache_read,

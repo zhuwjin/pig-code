@@ -66,6 +66,20 @@ async fn model_summary_compact() {
         matches!(e, Event::ContextCompacted { .. })
     })
     .await;
+    // CompactStarted 必须先于 ContextCompacted 到达（UI「正在压缩」态配对）
+    let started_pos = collected.iter().position(|e| {
+        matches!(
+            e,
+            Event::CompactStarted {
+                automatic: false,
+                ..
+            }
+        )
+    });
+    assert!(
+        started_pos.is_some() && started_pos < collected.len().checked_sub(1),
+        "CompactStarted 应在 ContextCompacted 之前: {collected:#?}"
+    );
     let Some(Event::ContextCompacted {
         omitted,
         note,
@@ -75,7 +89,8 @@ async fn model_summary_compact() {
     else {
         panic!("应有 ContextCompacted")
     };
-    assert_eq!(*omitted, 2);
+    // 尾部切到 user 边界后保留 2 条（窗口 [T,A,u,A] 裁掉前两条）
+    assert_eq!(*omitted, 4);
     assert!(!automatic, "手动 compact");
     assert!(note.contains("模型摘要"), "应走模型摘要: {note}");
     assert!(note.contains(mock::SUMMARY_MARKER), "应含摘要文本: {note}");
@@ -85,8 +100,9 @@ async fn model_summary_compact() {
         std::fs::read_to_string(data_dir.join("sessions").join(format!("{sid}.jsonl"))).unwrap();
     assert!(rollout.contains("\"type\":\"compact\""), "{rollout}");
     assert!(rollout.contains(mock::SUMMARY_MARKER));
+    assert!(rollout.contains("\"used_after\""), "{rollout}");
 
-    // compact 后历史 = system + 摘要 + 裁边后3条 + 新 user = 6
+    // compact 后历史 = system + 摘要 + user 边界后 2 条 + 新 user = 5
     send(&events, &agent, &sid, "ECHO_HISTORY");
     let collected = wait_turn(&events).await;
     let count = collected.iter().find_map(|e| match e {
@@ -95,7 +111,7 @@ async fn model_summary_compact() {
             .and_then(|n| n.parse::<usize>().ok()),
         _ => None,
     });
-    assert_eq!(count, Some(6), "{collected:#?}");
+    assert_eq!(count, Some(5), "{collected:#?}");
     agent.shutdown();
 }
 
@@ -126,6 +142,98 @@ async fn auto_compact_on_high_usage() {
     assert!(compact_pos.is_some(), "应自动 compact: {collected:#?}");
     assert!(compact_pos < complete_pos, "compact 应在 TurnComplete 之前");
     agent.shutdown();
+}
+
+/// 压缩后水位重置：ContextUsage 立即降为估算值；下一回合不再因旧高水位
+/// 触发重复自动压缩；重启回放补发压缩条与新水位。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_usage_resets_and_replays() {
+    let (config_path, cwd, data_dir) = setup("m5-usage-reset");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let events = agent.events.clone();
+    let sid = new_session(&agent, cwd.clone()).await;
+
+    send(&events, &agent, &sid, "读一下 mock 文件并总结");
+    wait_turn(&events).await;
+    // mock 报告 usage=120000（阈值 106808 之上），水位抬高
+    send(&events, &agent, &sid, "ECHO_USAGE 120000");
+    let high = wait_turn(&events).await;
+    assert!(
+        high.iter()
+            .any(|e| matches!(e, Event::ContextUsage { used: 120000, .. })),
+        "高水位应已生效: {high:#?}"
+    );
+
+    agent
+        .ops
+        .send(Op::Compact {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(10), |e| {
+        matches!(e, Event::ContextCompacted { .. })
+    })
+    .await;
+    // 压缩后应立即补发估算水位（远小于 120000）
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::ContextUsage { used, .. } if *used < 120000)),
+        "压缩后应补发估算水位: {collected:#?}"
+    );
+
+    // 下一回合：水位已重置，不得再触发自动压缩（旧逻辑会拿 120000 再压一次，
+    // 历史 ≤5 条时早退并多发一条「历史很短」ContextCompacted）
+    send(&events, &agent, &sid, "ECHO_HISTORY");
+    let collected = wait_turn(&events).await;
+    assert!(
+        !collected
+            .iter()
+            .any(|e| matches!(e, Event::ContextCompacted { .. })),
+        "水位重置后不得重复自动压缩: {collected:#?}"
+    );
+    // 本回合的真实用量 = 回放后的最终水位（压缩后的 step_usage 覆盖 used_after，
+    // 更近的真实值优先）
+    let Some(last_used) = collected.iter().find_map(|e| match e {
+        Event::ContextUsage { used, .. } => Some(*used),
+        _ => None,
+    }) else {
+        panic!("回合应有 ContextUsage: {collected:#?}")
+    };
+    agent.shutdown();
+
+    // 模拟重启：回放应补发「上下文已压缩」分隔条事件与压缩后的水位
+    let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    let events2 = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    let replay = recv_until(&events2, Duration::from_secs(10), |e| {
+        matches!(e, Event::ContextUsage { .. })
+    })
+    .await;
+    assert!(
+        replay
+            .iter()
+            .any(|e| matches!(e, Event::ContextCompacted { omitted: 4, .. })),
+        "回放应含压缩条事件: {replay:#?}"
+    );
+    assert!(
+        replay
+            .iter()
+            .any(|e| matches!(e, Event::ContextUsage { used, .. } if *used == last_used)),
+        "回放后水位应为压缩后回合的真实值 {last_used}（而非压缩前的 120000）: {replay:#?}"
+    );
+    agent2.shutdown();
 }
 
 /// 摘要请求失败 → 回退朴素截断，会话不挂。

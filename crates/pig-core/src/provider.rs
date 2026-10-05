@@ -290,7 +290,7 @@ pub use anthropic::anthropic_web_search_tool;
 pub(crate) use anthropic::*;
 pub use openai::openai_web_search_tool;
 pub(crate) use openai::*;
-pub use sidecar::{complete_text, net_test_blocking, test_provider};
+pub use sidecar::{complete_messages, complete_text, net_test_blocking, test_provider};
 
 fn finish(tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>, tool_calls: &mut Vec<ToolCall>) {
     // 模型偶尔发出无名 tool_use（name: null）：过滤掉，避免产生「未知工具」空调用；
@@ -540,5 +540,48 @@ mod tests {
             openai_web_search_tool(&search_model(true, Some(custom.clone()))).unwrap(),
             custom
         );
+    }
+
+    /// 请求级工具组装（流式/非流式共用）：Anthropic 形态必须是
+    /// name/description/input_schema——残留 OpenAI 线格式会被兼容端点 422
+    #[test]
+    fn anthropic_request_tools_converts_openai_wire_shape() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "Read", "description": "读文件", "parameters": {"type": "object"}}
+        })];
+        let out = anthropic_request_tools(&search_model(false, None), &tools);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], "Read");
+        assert_eq!(out[0]["description"], "读文件");
+        assert_eq!(out[0]["input_schema"]["type"], "object");
+        assert!(
+            out[0].get("function").is_none(),
+            "不得残留 OpenAI 线格式: {out:?}"
+        );
+        assert!(
+            out[0].get("type").is_none(),
+            "custom 工具不带 type: {out:?}"
+        );
+        // cap 开 → 追加服务端搜索工具（与流式路径同一组装）
+        let out = anthropic_request_tools(&search_model(true, None), &tools);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1]["type"], "web_search_20250305");
+    }
+
+    /// OpenAI 侧：原样透传线格式，cap+自定义时才追加服务端搜索工具
+    #[test]
+    fn openai_request_tools_keeps_wire_shape() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "Read", "description": "d", "parameters": {}}
+        })];
+        let out = openai_request_tools(&search_model(false, None), &tools);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["type"], "function");
+        let custom = serde_json::json!({"type": "web_search", "web_search": {"enable": true}});
+        let out = openai_request_tools(&search_model(true, Some(custom)), &tools);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1]["type"], "web_search");
     }
 }

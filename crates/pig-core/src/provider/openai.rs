@@ -61,6 +61,19 @@ pub(crate) struct StreamOptions {
     include_usage: bool,
 }
 
+/// 请求级工具清单组装（流式/非流式共用，防两处漂移）：
+/// 原样 OpenAI 线格式 + 显式配置时的服务端搜索工具。
+pub(crate) fn openai_request_tools(
+    config: &ResolvedModel,
+    tools: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut out = tools.to_vec();
+    if let Some(tool) = openai_web_search_tool(config) {
+        out.push(tool);
+    }
+    out
+}
+
 pub(crate) async fn stream_openai(
     config: &ResolvedModel,
     messages: Vec<ChatMsg>,
@@ -69,10 +82,7 @@ pub(crate) async fn stream_openai(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
     let client = http_client();
-    let mut tools = tools;
-    if let Some(tool) = openai_web_search_tool(config) {
-        tools.push(tool);
-    }
+    let tools = openai_request_tools(config, &tools);
     let messages_json = to_openai_messages(&messages);
     let mut body = serde_json::to_value(ChatRequest {
         model: &config.model,

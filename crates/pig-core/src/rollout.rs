@@ -145,6 +145,13 @@ pub enum RolloutRecord {
     Compact {
         note: String,
         omitted: usize,
+        /// true = 采样前水位自动触发；false = 用户手动 /compact（仅回放展示用）
+        #[serde(default)]
+        automatic: bool,
+        /// 压缩后历史的估算 token 水位（回放恢复 last_total_tokens，避免
+        /// 重开后水位检查拿压缩前的旧高值立刻又触发一次自动压缩）
+        #[serde(default)]
+        used_after: Option<u64>,
     },
 }
 
