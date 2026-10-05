@@ -1,5 +1,21 @@
 use super::*;
 
+fn tag_for(kind: Popup) -> &'static str {
+    match kind {
+        Popup::Mention => "mention",
+        Popup::Slash => "slash",
+        Popup::ExecMode => "exec",
+        Popup::Model => "model",
+        Popup::Reasoning => "reasoning",
+        Popup::Cwd => "cwd",
+        Popup::Branch => "branch",
+        Popup::Context => "context",
+        Popup::Todos => "todos",
+        Popup::Tasks => "tasks",
+        Popup::AgentTasks => "agent-tasks",
+    }
+}
+
 impl Composer {
     /// 上下文容量面板：标题 + 用量/占比 + 进度条 + 平均缓存命中率，
     /// 居中锚定在指示器芯片正上方（悬停展示）。
@@ -127,35 +143,14 @@ impl Composer {
         cx.notify();
     }
 
-    pub(crate) fn run_command(
-        &mut self,
-        command: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some((Popup::Slash, start)) = self.popup {
-            let caret = self.input.read(cx).selected_range().start;
-            self.input.update(cx, |input, cx| {
-                input.set_selected_range(start..caret, cx);
-                input.replace("", window, cx);
-                input.focus(window, cx);
-            });
-        }
-        self.popup = None;
-        match command {
-            "/clear" => cx.emit(ComposerEvent::Clear),
-            "/compact" => cx.emit(ComposerEvent::Compact),
-            _ => {}
-        }
-        cx.notify();
-    }
-
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_list_item(
         &self,
         id: impl Into<ElementId>,
         icon: IconName,
         label: String,
         detail: Option<String>,
+        selected: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -166,6 +161,8 @@ impl Composer {
             .px_3()
             .py_1()
             .cursor_pointer()
+            .rounded(cx.theme().radius)
+            .when(selected, |this| this.bg(cx.theme().accent))
             .hover(|this| this.bg(cx.theme().accent))
             .on_click(on_click)
             .child(
@@ -200,6 +197,7 @@ impl Composer {
                             IconName::FileText,
                             path.clone(),
                             None,
+                            ix == self.popup_sel,
                             cx.listener(move |this, _, window, cx| {
                                 this.insert_file(path.clone(), window, cx);
                             }),
@@ -208,9 +206,7 @@ impl Composer {
                     })
                     .collect()
             }
-            Popup::Slash => SLASH_COMMANDS
-                .iter()
-                .filter(|(name, _)| name[1..].contains(query.as_str()))
+            Popup::Slash => Self::slash_filtered(&query)
                 .enumerate()
                 .map(|(ix, (name, desc))| {
                     self.render_list_item(
@@ -218,8 +214,9 @@ impl Composer {
                         IconName::SquareTerminal,
                         name.to_string(),
                         Some(desc.to_string()),
+                        ix == self.popup_sel,
                         cx.listener(move |this, _, window, cx| {
-                            this.run_command(name, window, cx);
+                            this.stage_command(name, window, cx);
                         }),
                         cx,
                     )
@@ -243,29 +240,16 @@ impl Composer {
             return None;
         }
 
-        let tag: &'static str = match kind {
-            Popup::Mention => "mention",
-            Popup::Slash => "slash",
-            Popup::ExecMode => "exec",
-            Popup::Model => "model",
-            Popup::Reasoning => "reasoning",
-            Popup::Cwd => "cwd",
-            Popup::Branch => "branch",
-            Popup::Context => "context",
-            Popup::Todos => "todos",
-            Popup::Tasks => "tasks",
-            Popup::AgentTasks => "agent-tasks",
-        };
         Some(
             div()
                 .id("composer-popup")
+                .test_support()
                 .absolute()
                 .bottom_full()
                 .left_0()
+                .right_0()
                 .mb_1()
-                .w(px(320.))
                 .max_h(px(240.))
-                .overflow_y_scroll()
                 .rounded(cx.theme().radius)
                 .border_1()
                 .border_color(cx.theme().border)
@@ -275,12 +259,24 @@ impl Composer {
                     div()
                         .relative()
                         .with_animation(
-                            format!("popup-enter-{tag}"),
+                            format!("popup-enter-{}", tag_for(kind)),
                             Animation::new(std::time::Duration::from_millis(150))
                                 .with_easing(ease_out_quint()),
                             |el, delta| el.top(px(6.0 * (1.0 - delta))).opacity(delta),
                         )
-                        .children(items),
+                        .child(
+                            // 行是滚动容器的直接子元素：选中项才能随键盘导航
+                            // scroll_to_item 滚进视野（与消息列表同机制）。
+                            // overflow_y_scroll/track_scroll 是 StatefulInteractiveElement
+                            // 方法，滚动容器必须有 id；px_1 让选中高亮不贴弹层边框
+                            div()
+                                .id("composer-popup-scroll")
+                                .max_h(px(228.))
+                                .overflow_y_scroll()
+                                .track_scroll(&self.popup_scroll)
+                                .px_1()
+                                .children(items),
+                        ),
                 )
                 .into_any_element(),
         )

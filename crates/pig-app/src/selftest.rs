@@ -97,6 +97,32 @@ pub(crate) async fn run_selftest(
     assert!(is_hero, "启动应进入 hero 态");
     println!("[selftest] hero 态 OK");
 
+    // hero 态 @ 文件搜索：未建会话也要出结果（曾在 current=None 处被丢弃，弹框等不到结果）
+    app!(|app: &mut AppView, cx| {
+        app.composer.update(cx, |_, cx| {
+            cx.emit(crate::composer::ComposerEvent::SearchFiles(
+                "README".to_string(),
+            ));
+        });
+    });
+    let mut waited = 0u64;
+    loop {
+        timer!(200).await;
+        waited += 200;
+        assert!(waited < 10_000, "hero @搜索超时");
+        let found = app!(|app: &mut AppView, cx| {
+            app.composer
+                .read(cx)
+                .debug_mention_results()
+                .iter()
+                .any(|r| r.contains(pig_core::mock::MOCK_FILE_NAME))
+        });
+        if found {
+            break;
+        }
+    }
+    println!("[selftest] hero @搜索 OK");
+
     // hero 发送首条消息 → 自动建会话
     app!(|app: &mut AppView, cx| {
         app.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
@@ -443,7 +469,7 @@ pub(crate) async fn run_selftest(
     // @搜索：真实文件
     app!(|app: &mut AppView, _| {
         app.agent
-            .search_files(session_a.clone(), "hello".to_string());
+            .search_files(session_a.clone(), "hello".to_string(), None);
     });
     let mut waited = 0u64;
     loop {
@@ -464,7 +490,7 @@ pub(crate) async fn run_selftest(
     println!("[selftest] @搜索 OK");
 
     // compact（模型摘要）
-    app!(|app: &mut AppView, _| app.agent.compact(session_a.clone()));
+    app!(|app: &mut AppView, _| app.agent.compact(session_a.clone(), None));
     let mut waited = 0u64;
     loop {
         timer!(200).await;

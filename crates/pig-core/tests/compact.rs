@@ -59,6 +59,7 @@ async fn model_summary_compact() {
         .ops
         .send(Op::Compact {
             session_id: sid.clone(),
+            instruction: None,
         })
         .await
         .unwrap();
@@ -172,6 +173,7 @@ async fn compact_usage_resets_and_replays() {
         .ops
         .send(Op::Compact {
             session_id: sid.clone(),
+            instruction: None,
         })
         .await
         .unwrap();
@@ -254,6 +256,7 @@ async fn compact_failure_falls_back() {
         .ops
         .send(Op::Compact {
             session_id: sid.clone(),
+            instruction: None,
         })
         .await
         .unwrap();

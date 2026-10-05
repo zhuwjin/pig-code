@@ -375,6 +375,7 @@ async fn compact_shortens_history() {
         .ops
         .send(Op::Compact {
             session_id: session_id.clone(),
+            instruction: None,
         })
         .await
         .unwrap();
@@ -431,6 +432,7 @@ async fn search_files_finds_real_files() {
         .send(Op::SearchFiles {
             session_id,
             query: "hello".into(),
+            cwd: None,
         })
         .await
         .unwrap();

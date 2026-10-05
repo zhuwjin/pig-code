@@ -630,9 +630,11 @@ pub async fn agent_loop(
                             }),
                         }
                     }
-                    Op::SearchFiles { session_id, query } => {
-                        let cwd = sessions.get(&session_id)
-                            .and_then(|e| e.session.as_ref().map(|s| s.cwd.clone()))
+                    Op::SearchFiles { session_id, query, cwd } => {
+                        let cwd = cwd
+                            .map(std::path::PathBuf::from)
+                            .or_else(|| sessions.get(&session_id)
+                                .and_then(|e| e.session.as_ref().map(|s| s.cwd.clone())))
                             .unwrap_or_else(|| default_cwd.clone());
                         let tx = event_tx.clone();
                         let query_for_search = query.clone();
@@ -708,7 +710,7 @@ pub async fn agent_loop(
                                 .await;
                         });
                     }
-                    Op::Compact { session_id } => {
+                    Op::Compact { session_id, instruction } => {
                         match sessions.get_mut(&session_id) {
                             Some(entry) if entry.session.is_some() => {
                                 let mut session = entry.session.take().expect("session present");
@@ -718,7 +720,7 @@ pub async fn agent_loop(
                                 entry.cancel = Some(CancellationToken::new());
                                 let cancel = entry.cancel.clone().expect("cancel");
                                 turns.push(Box::pin(async move {
-                                    session.run_compact(resolved.as_ref(), false, &tx, &cancel).await;
+                                    session.run_compact(resolved.as_ref(), false, instruction.as_deref(), &tx, &cancel).await;
                                     (sid, session)
                                 }));
                             }

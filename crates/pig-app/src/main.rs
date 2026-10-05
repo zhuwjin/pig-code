@@ -51,7 +51,12 @@ gpui_kit::actions!(
         ToggleChanges,
         ToggleBrowser,
         ToggleSideChat,
-        ToggleTerminal
+        ToggleTerminal,
+        ComposerNavUp,
+        ComposerNavDown,
+        ComposerNavNext,
+        ComposerNavPrev,
+        ComposerPopupClose
     ]
 );
 
@@ -1069,6 +1074,14 @@ fn main() {
                 KeyBinding::new("escape", CloseSearch, Some("search")),
                 KeyBinding::new("escape", CloseThreadSearch, Some("thread-search")),
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
+                // 输入框 / 和 @ 弹层的键盘导航：与输入框自身绑定同 context、注册在
+                // 后（同深度后注册者优先），弹层关闭时 Composer 的处理器
+                // cx.propagate() 放行回落到输入框原生行为（光标移动/缩进/Esc）
+                KeyBinding::new("up", ComposerNavUp, Some("Input")),
+                KeyBinding::new("down", ComposerNavDown, Some("Input")),
+                KeyBinding::new("tab", ComposerNavNext, Some("Input")),
+                KeyBinding::new("shift-tab", ComposerNavPrev, Some("Input")),
+                KeyBinding::new("escape", ComposerPopupClose, Some("Input")),
             ]);
 
             // 初始窗口不超出显示器可用区域：GPUI 的尺寸是逻辑像素，缩放下

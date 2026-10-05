@@ -169,12 +169,19 @@ impl AgentClient {
         });
     }
 
-    pub fn search_files(&self, session_id: String, query: String) {
-        self.send(Op::SearchFiles { session_id, query });
+    pub fn search_files(&self, session_id: String, query: String, cwd: Option<String>) {
+        self.send(Op::SearchFiles {
+            session_id,
+            query,
+            cwd,
+        });
     }
 
-    pub fn compact(&self, session_id: String) {
-        self.send(Op::Compact { session_id });
+    pub fn compact(&self, session_id: String, instruction: Option<String>) {
+        self.send(Op::Compact {
+            session_id,
+            instruction,
+        });
     }
 
     /// 查询会话已连接的 MCP server 名清单（设置页展示用）

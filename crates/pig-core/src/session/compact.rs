@@ -3,10 +3,12 @@ use super::*;
 impl Session {
     /// compact：优先模型摘要；失败回退朴素截断。返回 false = 被取消。
     /// 历史重建为 system + 摘要消息 + 尾部原样消息（切在 user 边界，最多 4 条）。
+    /// instruction = 用户对本次摘要的特别要求（手动 /compact 续写；自动压缩为 None）
     pub async fn run_compact(
         &mut self,
         config: Option<&ResolvedModel>,
         automatic: bool,
+        instruction: Option<&str>,
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> bool {
@@ -37,7 +39,7 @@ impl Session {
 
         let summary = match config {
             Some(config) => {
-                let messages = build_summary_messages(&self.history, config);
+                let messages = build_summary_messages(&self.history, config, instruction);
                 let tools = self.root_schemas();
                 match provider::complete_messages(config, &messages, &tools, cancel).await {
                     Ok(summary) => Some(summary),
@@ -167,7 +169,11 @@ pub const COMPACTION_MARKER: &str = "[COMPACTION]";
 /// 历史超预算时从头丢整条（kimi-code preShrink 同款），并裁到 user 边界——
 /// 不以 tool 开头（孤儿 tool_result）且 Anthropic 首条必须是 user；
 /// 自动压缩按构造不会超窗（触发点低于窗口减输出预留），这条路径主要护手动。
-fn build_summary_messages(history: &[ChatMsg], config: &ResolvedModel) -> Vec<ChatMsg> {
+fn build_summary_messages(
+    history: &[ChatMsg],
+    config: &ResolvedModel,
+    instruction: Option<&str>,
+) -> Vec<ChatMsg> {
     let budget = config
         .context_window
         .saturating_sub(config.max_output_tokens + 13_000);
@@ -182,11 +188,16 @@ fn build_summary_messages(history: &[ChatMsg], config: &ResolvedModel) -> Vec<Ch
     }
     let mut messages = vec![history[0].clone()];
     messages.extend(middle);
-    messages.push(ChatMsg::user(compaction_instruction()));
+    messages.push(ChatMsg::user(compaction_instruction(instruction)));
     messages
 }
 
-fn compaction_instruction() -> String {
+fn compaction_instruction(instruction: Option<&str>) -> String {
+    let custom = instruction
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("\n另外，用户对本次摘要提出了特别要求，请在摘要中重点体现：{text}\n"))
+        .unwrap_or_default();
     format!(
         "{COMPACTION_MARKER} 请把以上编程助手对话历史压缩成一份交接摘要，供同一助手在压缩后的上下文里继续工作。用中文，按以下分节输出（无内容的节略过）：
 1. 用户目标：用户要做什么，明确提过的要求与偏好。
@@ -195,7 +206,7 @@ fn compaction_instruction() -> String {
 4. 关键决策：技术选型与理由、用户否决过或纠正过的方向。
 5. 进行中与待办：未完成的步骤、下一步计划、已知阻塞。
 6. 重要上下文：正在跑的命令/后台任务、关键报错原文、环境要点。
-只保留继续工作所需的信息；文件路径、命令、报错原文等硬信息原样保留，不要臆测补充。全文控制在 1200 字以内。
+只保留继续工作所需的信息；文件路径、命令、报错原文等硬信息原样保留，不要臆测补充。全文控制在 1200 字以内。{custom}
 不要调用任何工具，直接输出摘要文本。
 "
     )
@@ -342,7 +353,7 @@ mod tests {
             user("u2"),
             assistant_text("a2"),
         ];
-        let messages = build_summary_messages(&history, &test_model(128_000));
+        let messages = build_summary_messages(&history, &test_model(128_000), None);
         assert_eq!(
             roles(&messages),
             [
@@ -385,7 +396,7 @@ mod tests {
             assistant_text("a2"),
         ];
         // 预算极小：只装得下尾部一两条
-        let messages = build_summary_messages(&history, &test_model(1_100));
+        let messages = build_summary_messages(&history, &test_model(1_100), None);
         assert_eq!(messages[0].role, "system");
         assert_eq!(
             messages[1].role,
@@ -407,7 +418,37 @@ mod tests {
             assistant_call("c1"),
             tool("c1"),
         ];
-        let messages = build_summary_messages(&history, &test_model(1_100));
+        let messages = build_summary_messages(&history, &test_model(1_100), None);
         assert_eq!(roles(&messages), ["system", "user"]);
+    }
+
+    /// 自定义指令：/compact 续写的重点说明进摘要请求末尾指令；空白忽略
+    #[test]
+    fn summary_instruction_includes_custom_focus() {
+        let history = vec![
+            ChatMsg::system("s".into()),
+            user("u1"),
+            assistant_text("a1"),
+        ];
+        let messages =
+            build_summary_messages(&history, &test_model(128_000), Some("重点关注 README"));
+        let instruction = messages[messages.len() - 1]
+            .content
+            .as_deref()
+            .unwrap_or_default();
+        assert!(
+            instruction.contains("特别要求") && instruction.contains("重点关注 README"),
+            "自定义重点应进指令: {instruction}"
+        );
+        // 空白 = 无自定义块
+        let messages = build_summary_messages(&history, &test_model(128_000), Some("  "));
+        let instruction = messages[messages.len() - 1]
+            .content
+            .as_deref()
+            .unwrap_or_default();
+        assert!(
+            !instruction.contains("特别要求"),
+            "空白指令应忽略: {instruction}"
+        );
     }
 }

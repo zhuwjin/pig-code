@@ -100,6 +100,9 @@ pub enum Op {
     SearchFiles {
         session_id: String,
         query: String,
+        /// 显式搜索目录（hero 未建会话时传 hero 工作区；None = 按会话/默认目录）
+        #[serde(default)]
+        cwd: Option<String>,
     },
     /// 非会话态：查询目录的 git 信息（hero 分支选择器）
     GitInfo {
@@ -137,6 +140,10 @@ pub enum Op {
     },
     Compact {
         session_id: String,
+        /// 用户对本次摘要的特别要求（/compact 选中后在输入框续写的重点说明；
+        /// 对齐 ZCode 自定义指令 / kimi-code custom_instruction_block）
+        #[serde(default)]
+        instruction: Option<String>,
     },
     /// 查询会话的 MCP server 连接清单（设置页展示用）；回 Event::McpServerList
     ListMcpServers {

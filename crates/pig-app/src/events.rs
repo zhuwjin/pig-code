@@ -593,9 +593,9 @@ impl AppView {
                     views.thread.update(cx, |thread, cx| thread.clear(cx));
                 }
             }
-            ComposerEvent::Compact => {
+            ComposerEvent::Compact { instruction } => {
                 if let Some(sid) = &self.current {
-                    self.agent.compact(sid.clone());
+                    self.agent.compact(sid.clone(), instruction.clone());
                 }
             }
             ComposerEvent::SetModel {
@@ -718,9 +718,22 @@ impl AppView {
                 self.sync_composer_state(cx);
             }
             ComposerEvent::SearchFiles(query) => {
-                if let Some(sid) = &self.current {
-                    self.agent.search_files(sid.clone(), query.clone());
-                }
+                // 会话内按会话目录搜；hero（未建会话）按 hero 工作区搜——
+                // 此前 hero 上 @ 搜索被直接丢弃，弹框永远等不到结果
+                let (sid, cwd) = match &self.current {
+                    Some(sid) => (sid.clone(), None),
+                    None => (
+                        "hero".to_string(),
+                        Some(
+                            self.hero_cwd
+                                .clone()
+                                .unwrap_or_else(|| self.cwd.clone())
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                    ),
+                };
+                self.agent.search_files(sid, query.clone(), cwd);
             }
             ComposerEvent::OpenChanges => {
                 self.open_right_tab(RightTab::Changes, cx);

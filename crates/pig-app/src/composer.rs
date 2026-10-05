@@ -31,6 +31,8 @@ use pig_protocol::{
     TodoStatus,
 };
 
+use crate::{ComposerNavDown, ComposerNavNext, ComposerNavPrev, ComposerNavUp, ComposerPopupClose};
+
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "清空当前会话消息"),
     ("/compact", "压缩上下文（模型摘要）"),
@@ -238,7 +240,10 @@ pub enum ComposerEvent {
     },
     Stop,
     Clear,
-    Compact,
+    Compact {
+        /// 命令分阶时用户在 chip 后续写的重点说明（无 = 普通压缩）
+        instruction: Option<String>,
+    },
     SetModel {
         provider_id: String,
         model_id: String,
@@ -283,7 +288,7 @@ pub enum ComposerEvent {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Popup {
     Mention,
     Slash,
@@ -342,6 +347,10 @@ pub struct Composer {
     question_focus: FocusHandle,
     question_focused: bool,
     mention_results: Vec<String>,
+    /// / 和 @ 弹层的键盘选中项（Tab/↑↓ 切换；弹层开/查询变/结果刷新时归零）
+    popup_sel: usize,
+    /// / 和 @ 弹层列表的滚动句柄（选中项随导航滚进视野）
+    popup_scroll: ScrollHandle,
     context_usage: Option<(u64, u64, u64, u64)>,
     /// 输入区上方芯片：TodoList 进度 / 后台 Bash 任务快照（core 推送），点击弹出只读面板
     todos: Vec<TodoItem>,
@@ -378,6 +387,8 @@ mod images;
 mod popups;
 mod question;
 mod tasks;
+#[cfg(test)]
+mod tests;
 
 use images::*;
 
@@ -394,7 +405,14 @@ impl Composer {
             &input,
             window,
             |this: &mut Self, input, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { shift, .. } if !shift => this.send(window, cx),
+                InputEvent::PressEnter { shift, .. } if !shift => {
+                    // / 和 @ 弹层打开且有候选项：Enter 确认选中项（不发送）
+                    if this.popup_selection_active(cx) {
+                        this.confirm_selection(window, cx);
+                    } else {
+                        this.send(window, cx);
+                    }
+                }
                 InputEvent::Change => this.update_suggestion(input, cx),
                 _ => {}
             },
@@ -420,6 +438,8 @@ impl Composer {
             question_focus: cx.focus_handle(),
             question_focused: false,
             mention_results: Vec::new(),
+            popup_sel: 0,
+            popup_scroll: ScrollHandle::new(),
             context_usage: None,
             todos: Vec::new(),
             tasks: Vec::new(),
@@ -546,6 +566,20 @@ impl Composer {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 命令分阶：命令 token 打头 → 按「命令 + 续写文本」分派，不发聊天消息
+        if let Some((command, args)) = self.command_mode(cx) {
+            self.input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+            self.popup = None;
+            match command.as_str() {
+                "/compact" => cx.emit(ComposerEvent::Compact { instruction: args }),
+                "/clear" => cx.emit(ComposerEvent::Clear),
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         let text = self.input.read(cx).value().trim().to_string();
         // 有图片附件时允许空文本发送
         if text.is_empty() && self.pasted_images.is_empty() {
@@ -601,6 +635,21 @@ impl Composer {
         let value = input.read(cx).value();
         let caret = input.read(cx).selected_range().start.min(value.len());
         self.popup = Self::detect_trigger(&value[..caret]);
+        // 触发位置落在某个 token 范围内 → 不是真触发符：删掉 chip/@token 尾随
+        // 空格后光标紧贴 token 尾，纯文本扫描会把 token 里的 //@ 又当触发符
+        //（命令 chip 与 @提及共有的「弹层复活」坑）
+        if let Some((_kind, start)) = self.popup {
+            let inside_token = input
+                .read(cx)
+                .tokens()
+                .iter()
+                .any(|span| span.range().start <= start && start < span.range().end);
+            if inside_token {
+                self.popup = None;
+            }
+        }
+        // 查询变化即回到首项（与「过滤列表变化」的直觉一致）
+        self.popup_sel = 0;
         if let Some((Popup::Mention, start)) = self.popup {
             let query = value[start + 1..caret].to_string();
             cx.emit(ComposerEvent::SearchFiles(query));
@@ -610,7 +659,141 @@ impl Composer {
 
     pub fn set_mention_results(&mut self, results: Vec<String>, cx: &mut Context<Self>) {
         self.mention_results = results;
+        self.popup_sel = 0;
         cx.notify();
+    }
+
+    /// / 和 @ 弹层当前候选数（导航/确认与渲染共用同一过滤口径）
+    fn popup_nav_count(&self, cx: &App) -> usize {
+        match self.popup_query(cx).map(|(kind, _, query)| (kind, query)) {
+            Some((Popup::Slash, query)) => Self::slash_filtered(&query).count(),
+            Some((Popup::Mention, _)) => self.mention_results.len(),
+            _ => 0,
+        }
+    }
+
+    /// 弹层打开且有候选：Enter 应确认选中项而不是发送
+    fn popup_selection_active(&self, cx: &App) -> bool {
+        matches!(self.popup, Some((Popup::Mention | Popup::Slash, _)))
+            && self.popup_nav_count(cx) > 0
+    }
+
+    fn slash_filtered(query: &str) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+        SLASH_COMMANDS
+            .iter()
+            .filter(move |(name, _)| name[1..].contains(query))
+    }
+
+    /// Tab/↑/↓ 导航：弹层打开且有候选时循环切换并滚进视野；
+    /// 否则 cx.propagate() 放行给输入框原生行为（光标移动/缩进）
+    fn nav_popup(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let count = self.popup_nav_count(cx);
+        if count == 0 {
+            cx.propagate();
+            return;
+        }
+        self.popup_sel = (self.popup_sel as i32 + delta).rem_euclid(count as i32) as usize;
+        self.popup_scroll.scroll_to_item(self.popup_sel);
+        cx.notify();
+    }
+
+    /// Esc（Input context 上的应用层绑定）：/ 和 @ 弹层开着就关掉；
+    /// 其余弹层（Command 面板有自己的 Cancel 链）与无弹层时 propagate 放行
+    fn close_popup_key(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.popup, Some((Popup::Mention | Popup::Slash, _))) {
+            self.popup = None;
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Enter/点击确认当前选中项：Slash 分阶为命令 token（不执行），Mention 插文件 token
+    fn confirm_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((kind, _start, query)) = self.popup_query(cx) else {
+            return;
+        };
+        match kind {
+            Popup::Slash => {
+                let items: Vec<_> = Self::slash_filtered(&query).collect();
+                let Some((name, _)) = items
+                    .get(self.popup_sel.min(items.len().saturating_sub(1)))
+                    .copied()
+                else {
+                    return;
+                };
+                self.stage_command(name, window, cx);
+            }
+            Popup::Mention => {
+                let Some(path) = self
+                    .mention_results
+                    .get(
+                        self.popup_sel
+                            .min(self.mention_results.len().saturating_sub(1)),
+                    )
+                    .cloned()
+                else {
+                    return;
+                };
+                self.insert_file(path, window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// 命令分阶：选中的斜杠命令替换为行首 InlineToken（chip），光标留在 token
+    /// 之后继续输入——发送时才按「命令 + 续写文本」分派，而不是选中即执行
+    ///（对齐 kimi-code 的 /compact 选中后「Compact 重点：xxxx」形态）
+    fn stage_command(
+        &mut self,
+        command: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((Popup::Slash, start)) = self.popup else {
+            return;
+        };
+        let caret = self.input.read(cx).selected_range().start;
+        let label = if command == "/compact" {
+            "Compact"
+        } else {
+            "Clear"
+        };
+        let token = InlineToken::new(command.to_string(), command.to_string()).with_label(label);
+        self.input.update(cx, |input, cx| {
+            if input
+                .replace_range_with_token(start..caret, token, window, cx)
+                .is_ok()
+            {
+                // 同 @提及：token API 不自动加分隔符，补一个尾随空格
+                input.replace(" ", window, cx);
+            } else {
+                input.set_selected_range(start..caret, cx);
+                input.replace(format!("{command} "), window, cx);
+            }
+            input.focus(window, cx);
+        });
+        self.popup = None;
+        cx.notify();
+    }
+
+    /// 命令模式：输入以 /compact 或 /clear 命令 token 打头 → 返回 (命令, 续写文本)
+    fn command_mode(&self, cx: &App) -> Option<(String, Option<String>)> {
+        let value = self.input.read(cx).value();
+        for span in self.input.read(cx).tokens() {
+            let text = span.token().text();
+            if (text == "/compact" || text == "/clear")
+                && span.range().start == 0
+                && value.starts_with(text.as_str())
+            {
+                let args = value[text.len()..].trim();
+                return Some((
+                    text.to_string(),
+                    (!args.is_empty()).then(|| args.to_string()),
+                ));
+            }
+        }
+        None
     }
 
     /// 自测用。
@@ -798,7 +981,19 @@ impl Render for Composer {
         // 外框与内容分层：GPUI 会把元素的边框画在所有子孙之后（style.paint 先画背景，
         // 画完子元素才画边框），边框留在内容容器上的话，上方弹层会被容器顶边穿线；
         // 边框/背景拆成独立的底层兄弟元素先画，弹层就能正常盖住它。
-        div().w_full().p_3().child(
+        div()
+            .w_full()
+            .p_3()
+            // / 和 @ 弹层的键盘导航（动作冒泡自输入框；弹层关闭时处理器
+            // cx.propagate() 放行，回落到输入框原生行为）
+            .on_action(cx.listener(|this, _: &ComposerNavUp, _, cx| this.nav_popup(-1, cx)))
+            .on_action(cx.listener(|this, _: &ComposerNavDown, _, cx| this.nav_popup(1, cx)))
+            .on_action(cx.listener(|this, _: &ComposerNavNext, _, cx| this.nav_popup(1, cx)))
+            .on_action(cx.listener(|this, _: &ComposerNavPrev, _, cx| this.nav_popup(-1, cx)))
+            .on_action(cx.listener(|this, _: &ComposerPopupClose, _, cx| {
+                this.close_popup_key(cx)
+            }))
+            .child(
             div()
                 .relative()
                 .w_full()
@@ -984,9 +1179,13 @@ impl Render for Composer {
                                         Textarea::new(&self.input)
                                             .appearance(false)
                                             .bordered(false)
-                                            // @提及 token 的展示：默认样式加文件图标
+                                            // token 图标：命令 chip 用终端图标，@提及用文件图标
                                             .token(|ctx, _, _| {
-                                                InputToken::new(ctx).icon(IconName::FileText)
+                                                if ctx.token().text().starts_with('/') {
+                                                    InputToken::new(ctx).icon(IconName::SquareTerminal)
+                                                } else {
+                                                    InputToken::new(ctx).icon(IconName::FileText)
+                                                }
                                             })
                                             .on_paste({
                                                 let composer = cx.entity();
