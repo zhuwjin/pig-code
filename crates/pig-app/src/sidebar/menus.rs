@@ -1,6 +1,38 @@
 use super::*;
 
 impl Sidebar {
+    /// 头部「列表管理」菜单：视图二选一（平铺列表 / 按工作区分组），
+    /// 勾选标记在右侧（对齐 ZCode）
+    pub(crate) fn view_menu(
+        view: &WeakEntity<Self>,
+        current: SidebarView,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + Clone + 'static
+    {
+        let view = view.clone();
+        move |menu, _, _| {
+            let item = |label: &'static str, icon: AssetsIconName, target: SidebarView| {
+                let view = view.clone();
+                PopupMenuItem::new(label)
+                    .icon(icon)
+                    .checked(current == target)
+                    .on_click(move |_, _, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.view = target;
+                            cx.notify();
+                        });
+                    })
+            };
+            menu.label("视图")
+                .item(item("平铺列表", AssetsIconName::List, SidebarView::Flat))
+                .item(item(
+                    "按工作区分组",
+                    AssetsIconName::FolderKanban,
+                    SidebarView::Workspace,
+                ))
+                .check_side(Side::Right)
+        }
+    }
+
     /// 会话行的右键菜单：重命名 / 置顶 / 归档 / 删除（清库+rollout，不可恢复）
     pub(crate) fn session_menu(
         view: &WeakEntity<Self>,

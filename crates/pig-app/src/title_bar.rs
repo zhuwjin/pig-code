@@ -363,33 +363,36 @@ impl AppView {
                                     cx.notify();
                                 })),
                         )
-                        .child(
-                            h_flex()
-                                .id("menu-rename-session")
-                                .gap_2()
-                                .px_2()
-                                .py_1()
-                                .rounded(cx.theme().radius)
-                                .text_sm()
-                                .cursor_pointer()
-                                .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
-                                .child(Icon::new(AssetsIconName::SquarePen).size_4())
-                                .child(div().child("重命名"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.session_menu_open = false;
-                                    // 行内重命名输入框画在侧栏会话行上：收起态先展开侧栏
-                                    this.sidebar_collapsed = false;
-                                    this.sidebar.update(cx, |sidebar, cx| {
-                                        sidebar.start_session_rename(
-                                            rename_id.clone(),
-                                            rename_title.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                    cx.notify();
-                                })),
-                        )
+                        // 归档会话不在侧栏渲染（设置页管理），行内重命名无行可承载——隐藏该入口
+                        .when(!archived, |this| {
+                            this.child(
+                                h_flex()
+                                    .id("menu-rename-session")
+                                    .gap_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(cx.theme().radius)
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
+                                    .child(Icon::new(AssetsIconName::SquarePen).size_4())
+                                    .child(div().child("重命名"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.session_menu_open = false;
+                                        // 行内重命名输入框画在侧栏会话行上：收起态先展开侧栏
+                                        this.sidebar_collapsed = false;
+                                        this.sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.start_session_rename(
+                                                rename_id.clone(),
+                                                rename_title.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .child(div().h(px(1.)).my_1().bg(cx.theme().border))
                         .child(
                             h_flex()

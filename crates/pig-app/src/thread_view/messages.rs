@@ -1,5 +1,46 @@
 use super::*;
 
+/// 导航条横条宽度/透明度的弹簧参数：近临界阻尼（ζ≈0.93），
+/// 平滑收拢不拖尾、无明显过冲
+const NAV_BAR_SPRING: SpringConfig = SpringConfig::new(260., 30., 1.);
+
+/// 导航预览卡的进出场动画时长（悬停稳定 120ms 开卡不变，动画只管淡入淡出）
+const NAV_CARD_ANIM_DUR: std::time::Duration = std::time::Duration::from_millis(160);
+
+/// 导航预览卡本体（打开卡与出场快照共用）：标题 2 行 + 助手摘要 3 行
+fn nav_card_body(data: &NavCardData, cx: &App) -> Div {
+    let (_, _, user_preview, assistant_preview, is_text) = data;
+    v_flex()
+        .w(px(320.))
+        .p_3()
+        .gap_2()
+        .bg(cx.theme().popover)
+        .border_1()
+        .border_color(cx.theme().border)
+        .rounded_lg()
+        .shadow_lg()
+        .child(
+            div()
+                .text_sm()
+                .font_medium()
+                .line_clamp(2)
+                .child(user_preview.clone()),
+        )
+        .child(
+            div()
+                .text_sm()
+                // 文本回复 80% 亮度，占位文案最暗档
+                //（对齐 ZCode 的 popover-foreground/80 与 foreground-subtle 分档）
+                .text_color(if *is_text {
+                    cx.theme().foreground.opacity(0.8)
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .line_clamp(3)
+                .child(assistant_preview.clone()),
+        )
+}
+
 impl ThreadView {
     pub(crate) fn render_user_message(
         &self,
@@ -564,7 +605,7 @@ impl ThreadView {
     /// 离开 80ms 关闭）；点击跳转对应消息。
     /// 无悬停时高亮视口顶部所属的 turn；流式中的最后一根保持最低亮度。
     pub(crate) fn render_turn_nav(
-        &self,
+        &mut self,
         user_ixs: &[usize],
         active: Option<usize>,
         cx: &mut Context<Self>,
@@ -592,8 +633,11 @@ impl ThreadView {
         self.nav_bar_bounds
             .borrow_mut()
             .retain(|&ix, _| ix < self.messages.len());
-        // 预览卡内容只给当前打开的那根横条算（不必每帧为全部横条生成预览文本）
-        let card = self.nav_card.and_then(|ix| {
+        // 预览卡内容只给当前打开的那根横条算（不必每帧为全部横条生成预览文本）。
+        // freshly_opened = 上一帧无卡（从关闭态新开）：只有它才播入场淡入，
+        // 横条间切换不重复播
+        let freshly_opened = self.nav_card.is_some() && self.nav_card_last.is_none();
+        let card: Option<NavCardData> = self.nav_card.and_then(|ix| {
             let bounds = self
                 .nav_bar_bounds
                 .borrow()
@@ -604,8 +648,16 @@ impl ThreadView {
             }
             let user_preview = nav_preview_text(&[self.messages[ix].text.as_str()], "（无文本）");
             let (assistant_preview, assistant_is_text) = self.nav_assistant_preview(ix, user_ixs);
-            Some((bounds, user_preview, assistant_preview, assistant_is_text))
+            Some((
+                ix,
+                bounds,
+                user_preview,
+                assistant_preview,
+                assistant_is_text,
+            ))
         });
+        self.nav_card_last = card.clone();
+        let exit_card = self.nav_card_exit.clone();
 
         div()
             .absolute()
@@ -688,15 +740,19 @@ impl ThreadView {
                                         this.nav_hover = None;
                                     }
                                     // 离开 80ms 才关闭（对齐 ZCode closeDelay）；
-                                    // 这期间移到相邻横条会取消关闭
+                                    // 关闭条件 = 打开的横条不再被悬停——离开导航条
+                                    // 与「移到别的横条」都走关闭（ZCode 每根横条
+                                    // 独立 HoverCard：移动即关闭重开，快速扫过不弹）
                                     cx.spawn(async move |this, cx| {
                                         cx.background_executor()
                                             .timer(std::time::Duration::from_millis(80))
                                             .await;
                                         this.update(cx, |this, cx| {
-                                            if this.nav_hover.is_none() {
-                                                this.nav_card = None;
-                                                cx.notify();
+                                            if this
+                                                .nav_card
+                                                .is_some_and(|open| this.nav_hover != Some(open))
+                                            {
+                                                this.close_nav_card(cx);
                                             }
                                         })
                                         .ok();
@@ -714,68 +770,102 @@ impl ThreadView {
                                 cx.notify();
                             }))
                             .child(
+                                // 透明度弹簧（内层：活动/悬停/运行态强调）+ 宽度
+                                // 弹簧（外层：山峰加宽）。元素 id 保持弹簧状态，
+                                // 目标变化平滑接力；颜色是离散两档，仍瞬时切换
                                 div()
                                     .h(px(2.))
-                                    .w(px(12. * scale))
                                     .rounded_full()
                                     .bg(color)
-                                    .opacity(opacity),
+                                    .with_spring(
+                                        ("turn-nav-bar-o", ix),
+                                        SpringAnimation::new(NAV_BAR_SPRING).to(opacity),
+                                        |el, o| el.opacity(o),
+                                    )
+                                    .with_spring(
+                                        ("turn-nav-bar-w", ix),
+                                        SpringAnimation::new(NAV_BAR_SPRING).to(scale),
+                                        |el, s| el.map_element(|d| d.w(px(12. * s))),
+                                    ),
                             )
                             .into_any_element()
                     })),
             )
             // 预览卡：deferred 到窗口层绘制（逃出 rail 的滚动裁剪），锚定横条右侧
             //（ZCode 是 side=right align=start sideOffset=8 的 HoverCard；gpui-kit
-            // 的 HoverCard 只有 corner 锚定、弹不到触发器右侧，故按 Positioner 自绘）
-            .when_some(
-                card,
-                |this, (bounds, user_preview, assistant_preview, is_text)| {
-                    this.child(
-                        deferred(
-                            Positioner::side(bounds)
-                                .placement(Placement::Right)
-                                .align(Align::Start)
-                                .offset(px(8.))
-                                .margin(px(8.))
-                                .occlude()
-                                .child(
-                                    v_flex()
-                                        .w(px(320.))
-                                        .p_3()
-                                        .gap_2()
-                                        .bg(cx.theme().popover)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .rounded_lg()
-                                        .shadow_lg()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_medium()
-                                                .line_clamp(2)
-                                                .child(user_preview),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                // 文本回复 80% 亮度，占位文案最暗档
-                                                //（对齐 ZCode 的 popover-foreground/80
-                                                // 与 foreground-subtle 分档）
-                                                .text_color(if is_text {
-                                                    cx.theme().foreground.opacity(0.8)
-                                                } else {
-                                                    cx.theme().muted_foreground
-                                                })
-                                                .line_clamp(3)
-                                                .child(assistant_preview),
-                                        ),
-                                ),
+            // 的 HoverCard 只有 corner 锚定、弹不到触发器右侧，故按 Positioner 自绘）。
+            // 入场淡入仅「从关闭态新开」时播（freshly_opened），横条间切换不重播
+            .when_some(card, |this, data @ (ix, bounds, _, _, _)| {
+                let body: AnyElement = if freshly_opened {
+                    nav_card_body(&data, cx)
+                        .with_animation(
+                            ("nav-card-enter", ix),
+                            Animation::new(NAV_CARD_ANIM_DUR).with_easing(ease_out_quint()),
+                            |el, d| el.opacity(d),
                         )
-                        .with_priority(1),
+                        .into_any_element()
+                } else {
+                    nav_card_body(&data, cx).into_any_element()
+                };
+                this.child(
+                    deferred(
+                        Positioner::side(bounds)
+                            .placement(Placement::Right)
+                            .align(Align::Start)
+                            .offset(px(8.))
+                            .margin(px(8.))
+                            .occlude()
+                            .child(body),
                     )
-                },
-            )
+                    .with_priority(1),
+                )
+            })
+            // 出场卡：关闭一刻的快照播淡出（160ms），清理计时器按代次作废
+            .when_some(exit_card, |this, data @ (_, bounds, _, _, _)| {
+                let generation = self.nav_card_exit_gen;
+                this.child(
+                    deferred(
+                        Positioner::side(bounds)
+                            .placement(Placement::Right)
+                            .align(Align::Start)
+                            .offset(px(8.))
+                            .margin(px(8.))
+                            .occlude()
+                            .child(nav_card_body(&data, cx).with_animation(
+                                ("nav-card-exit", generation),
+                                Animation::new(NAV_CARD_ANIM_DUR),
+                                |el, d| el.opacity(1.0 - d),
+                            )),
+                    )
+                    .with_priority(1),
+                )
+            })
             .into_any_element()
+    }
+
+    /// 关闭导航预览卡：渲染快照移入出场位播 160ms 淡出（代次进动画 id），
+    /// 清理计时器按代次作废。离开导航条与「移到别的横条」共用此路径
+    pub(crate) fn close_nav_card(&mut self, cx: &mut Context<Self>) {
+        if let Some(data) = self.nav_card_last.take() {
+            self.nav_card_exit_gen += 1;
+            let generation = self.nav_card_exit_gen;
+            self.nav_card_exit = Some(data);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(NAV_CARD_ANIM_DUR + std::time::Duration::from_millis(40))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.nav_card_exit_gen == generation {
+                        this.nav_card_exit = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        self.nav_card = None;
+        cx.notify();
     }
 
     /// 导航预览卡的助手摘要：该用户消息之后第一条助手消息的 Markdown 文本拼接

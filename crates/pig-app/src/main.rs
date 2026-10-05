@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_client;
+mod anim;
 mod assets;
 mod clipboard;
 mod code_view;
@@ -422,6 +423,8 @@ impl AppView {
                     SettingsEvent::LookupModel(id) => this.agent.model_lookup(id.clone()),
                     SettingsEvent::RefreshMcp => this.refresh_mcp(cx),
                     SettingsEvent::RefreshSkills => this.refresh_skills(cx),
+                    SettingsEvent::RestoreSession(id) => this.agent.set_archived(id, false),
+                    SettingsEvent::DeleteSession(id) => this.delete_session(id, cx),
                     SettingsEvent::Close => {
                         this.settings_open = false;
                         cx.notify();

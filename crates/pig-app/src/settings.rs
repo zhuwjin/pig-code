@@ -85,17 +85,23 @@ pub enum SettingsEvent {
     RefreshMcp,
     /// 技能页刷新：AppView 重读技能目录
     RefreshSkills,
+    /// 归档页恢复会话到侧栏列表
+    RestoreSession(String),
+    /// 归档页删除会话（清库 + rollout，不可恢复）
+    DeleteSession(String),
     Close,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
+mod archived;
 mod dialog;
 mod mcp;
 mod presets;
 mod providers;
 mod skills;
 
+pub(crate) use archived::{ArchivedSessionRow, ArchivedSort};
 pub(crate) use dialog::*;
 pub(crate) use mcp::{
     McpConfigSnapshot, McpScope, McpSource, McpTransportKind, load_mcp_snapshot,
@@ -173,6 +179,16 @@ pub struct SettingsView {
     mono_font_select: Entity<TextSelectState>,
     /// 主题模式下拉（跟随系统/暗色/亮色，不可搜索；与字体下拉同款视觉）
     theme_select: Entity<TextSelectState>,
+    /// 「已归档的会话」页：归档会话清单（AppView 推送）
+    archived_sessions: Vec<ArchivedSessionRow>,
+    /// 归档页搜索框（按标题过滤）
+    archived_search: Entity<InputState>,
+    /// 归档页工作区过滤下拉（「所有工作区」哨兵 + scope_workspaces 显示名）
+    archived_workspace: Entity<TextSelectState>,
+    /// 归档页排序（归档时间/创建时间/按字母顺序）
+    archived_sort: ArchivedSort,
+    /// scope_workspaces 变化置位，render 前重建归档页过滤下拉选项
+    archived_ws_dirty: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -209,6 +225,37 @@ impl SettingsView {
             window,
             |_: &mut Self, _, _: &gpui_kit::component::input::InputEvent, _, cx| {
                 cx.notify();
+            },
+        ));
+        // 归档页搜索框：内容变化即重过滤列表
+        let archived_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索已归档会话"));
+        _subscriptions.push(cx.subscribe_in(
+            &archived_search,
+            window,
+            |_: &mut Self, _, _: &gpui_kit::component::input::InputEvent, _, cx| {
+                cx.notify();
+            },
+        ));
+        // 归档页工作区过滤下拉：选项随 scope_workspaces 重建（archived_ws_dirty 同步），
+        // 确认即重过滤列表
+        let archived_workspace = cx.new(|cx| {
+            let mut state = SelectState::new(
+                SearchableVec::new(vec!["所有工作区".to_string()]),
+                None,
+                window,
+                cx,
+            );
+            state.set_selected_value(&"所有工作区".to_string(), window, cx);
+            state
+        });
+        _subscriptions.push(cx.subscribe_in(
+            &archived_workspace,
+            window,
+            |_: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, _, cx| {
+                if matches!(event, SelectEvent::Confirm(_)) {
+                    cx.notify();
+                }
             },
         ));
         // 外观页字体下拉：首项「系统默认」+ 本机已装字体（枚举进程内缓存，仅首次 ~百毫秒）；
@@ -314,6 +361,11 @@ impl SettingsView {
             ui_font_select,
             mono_font_select,
             theme_select,
+            archived_sessions: vec![],
+            archived_search,
+            archived_workspace,
+            archived_sort: ArchivedSort::ArchivedTime,
+            archived_ws_dirty: true,
             _subscriptions,
         }
     }
@@ -674,6 +726,10 @@ impl Render for SettingsView {
             self.appearance_dirty = false;
             self.sync_appearance(window, cx);
         }
+        if self.archived_ws_dirty {
+            self.archived_ws_dirty = false;
+            self.sync_archived_ws_options(window, cx);
+        }
 
         // 官方 Settings 组件：自带侧栏（搜索 + 页导航，选中态按 id 持久）与
         // 页面标题/描述/滚动；字段与自定义内容经 WeakEntity 回到本视图发事件
@@ -739,6 +795,14 @@ impl Render for SettingsView {
                 &["websearch", "搜索"],
                 &weak,
                 Self::render_websearch,
+            ),
+            Self::content_page(
+                "已归档的会话",
+                IconName::Inbox,
+                "查看已归档会话，确认其所属工作区路径、会话名称和归档时间，并可恢复到会话列表。",
+                &["archive", "归档", "会话"],
+                &weak,
+                Self::render_archived_page,
             ),
         ]);
 

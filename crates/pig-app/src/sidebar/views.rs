@@ -61,47 +61,75 @@ impl Sidebar {
                         .child(Input::new(&self.search_input).small()),
                 )
             })
-            .child(
-                // 分段控件：分组 | 工作区
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .mt_1()
-                    .p_0p5()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().accent.opacity(0.4))
-                    .children([SidebarView::Group, SidebarView::Workspace].map(|view| {
-                        let selected = self.view == view;
-                        div()
-                            .id(match view {
-                                SidebarView::Group => "tab-group",
-                                SidebarView::Workspace => "tab-workspace",
-                            })
-                            .flex_1()
-                            .text_center()
-                            .text_xs()
-                            .py_0p5()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .when(selected, |this| this.bg(cx.theme().background))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.view = view;
-                                cx.notify();
-                            }))
-                            .child(match view {
-                                SidebarView::Group => "分组",
-                                SidebarView::Workspace => "工作区",
-                            })
-                    })),
-            )
             .into_any_element()
+    }
+
+    /// 「会话」标题行：折叠/展开全部工作区（仅分组视图）+ 列表管理菜单
+    pub(crate) fn render_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let any_expanded = self.workspaces.iter().any(|w| self.expanded.contains(w));
+        let mut row = h_flex().pl_3().pr_2().py_1().gap_1().child(
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("会话"),
+        );
+        if self.view == SidebarView::Workspace {
+            row = row.child(
+                Button::new("toggle-all-workspaces")
+                    .ghost()
+                    .xsmall()
+                    .icon(if any_expanded {
+                        AssetsIconName::FoldVertical
+                    } else {
+                        AssetsIconName::UnfoldVertical
+                    })
+                    .tooltip(if any_expanded {
+                        "折叠全部工作区"
+                    } else {
+                        "展开全部工作区"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let any_expanded =
+                            this.workspaces.iter().any(|w| this.expanded.contains(w));
+                        if any_expanded {
+                            // 折叠全部：即时卸载（不播动画），并取消进行中的收起态
+                            this.expanded.clear();
+                            for anim in this.expand_anims.values_mut() {
+                                anim.collapsing = false;
+                            }
+                        } else {
+                            // 展开全部：逐个播滑开动画；generation+1 同时作废
+                            // 进行中的收起卸载计时器
+                            for w in &this.workspaces {
+                                this.expanded.insert(w.clone());
+                                let anim = this.expand_anims.entry(w.clone()).or_default();
+                                anim.generation += 1;
+                                anim.collapsing = false;
+                            }
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        row.child(
+            Button::new("list-manage")
+                .ghost()
+                .xsmall()
+                .icon(AssetsIconName::SlidersHorizontal)
+                .tooltip("列表管理")
+                .dropdown_menu_with_anchor(
+                    Anchor::TopRight,
+                    Self::view_menu(&cx.entity().downgrade(), self.view),
+                ),
+        )
+        .into_any_element()
     }
 
     pub(crate) fn render_session_row(
         &self,
         window: &Window,
         ix: usize,
-        show_time: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let session = &self.sessions[ix];
@@ -163,11 +191,7 @@ impl Sidebar {
             .when_some(status_color, |this, color| {
                 this.child(div().size_2().rounded_full().bg(color))
             });
-        if session.running && !show_time {
-            // 分组视图无时间槽：运行中的转圈跟在标题后（原绿点位）
-            row = row.child(Spinner::new().xsmall().color(cx.theme().muted_foreground));
-        }
-        if show_time && !hovered {
+        if !hovered {
             // 悬停时行尾让位给置顶/归档按钮；运行中时间换成转圈
             row = row.child(if session.running {
                 Spinner::new()
@@ -221,99 +245,45 @@ impl Sidebar {
         row.context_menu(menu).into_any_element()
     }
 
-    pub(crate) fn render_group_view(
+    /// 平铺列表：跨工作区的单一时间线，置顶会话在前（无小节头），
+    /// 行内第二行标注所属工作区；归档会话在设置页「已归档的会话」管理
+    pub(crate) fn render_flat_view(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let query = self.query(cx);
-        let filtered: Vec<usize> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| self.matches(&query, &s.title))
-            .map(|(ix, _)| ix)
-            .collect();
-
-        let mut out: Vec<AnyElement> = vec![];
-        let mut section =
-            |pinned: bool, archived: bool, title: &'static str, out: &mut Vec<AnyElement>| {
-                let rows: Vec<AnyElement> = filtered
-                    .iter()
-                    .copied()
-                    .filter(|ix| {
-                        let s = &self.sessions[*ix];
-                        s.pinned == pinned && s.archived == archived
-                    })
-                    .map(|ix| self.render_session_row(window, ix, false, cx))
-                    .collect();
-                if !rows.is_empty() {
-                    out.push(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(title)
-                            .into_any_element(),
-                    );
-                    out.extend(rows);
-                }
-            };
-        section(true, false, "置顶", &mut out);
-        section(false, false, "任务", &mut out);
-
-        let archived_count = filtered
-            .iter()
-            .filter(|ix| self.sessions[**ix].archived)
-            .count();
-        if archived_count > 0 {
-            out.push(
-                h_flex()
-                    .id("archived-toggle")
-                    .mx_2()
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .rounded(cx.theme().radius)
-                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.archived_open = !this.archived_open;
-                        cx.notify();
-                    }))
-                    .child(
-                        Icon::new(if self.archived_open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("已归档（{archived_count}）")),
-                    )
-                    .into_any_element(),
-            );
-            if self.archived_open {
-                out.extend(
-                    filtered
-                        .iter()
-                        .copied()
-                        .filter(|ix| self.sessions[*ix].archived)
-                        .map(|ix| self.render_session_row(window, ix, false, cx)),
-                );
+        let mut pinned: Vec<usize> = vec![];
+        let mut rest: Vec<usize> = vec![];
+        for (ix, s) in self.sessions.iter().enumerate() {
+            if s.archived || !self.matches(&query, &s.title) {
+                continue;
+            }
+            if s.pinned {
+                pinned.push(ix);
+            } else {
+                rest.push(ix);
             }
         }
-        out
+        let by_recency = |a: &usize, b: &usize| {
+            self.sessions[*b]
+                .updated_at
+                .cmp(&self.sessions[*a].updated_at)
+        };
+        pinned.sort_by(by_recency);
+        rest.sort_by(by_recency);
+
+        // 归档会话不在侧栏渲染：设置页「已归档的会话」统一管理
+        pinned
+            .into_iter()
+            .chain(rest)
+            .map(|ix| self.render_detailed_session_row(window, ix, cx))
+            .collect()
     }
 
-    /// 工作区视图置顶区的会话行：标题 + 时间一行，所属工作区一行（置顶会话
-    /// 跨工作区集中展示，需标注归属）
-    pub(crate) fn render_workspace_pinned_row(
+    /// 双行详情会话行：标题 + 时间一行，所属工作区一行。用于置顶区
+    /// （跨工作区集中展示需标注归属）与平铺视图
+    pub(crate) fn render_detailed_session_row(
         &self,
         window: &Window,
         ix: usize,
@@ -352,7 +322,7 @@ impl Sidebar {
                 this.child(div().size_2().rounded_full().bg(color))
             });
         if hovered {
-            // 悬停才渲染置顶/归档按钮（与分组视图一致），时间让位不显示，
+            // 悬停才渲染置顶/归档按钮（与单行会话行一致），时间让位不显示，
             // 此时标题才让宽裁减
             let pin_id = session.id.clone();
             let pinned = session.pinned;
@@ -470,19 +440,9 @@ impl Sidebar {
             out.extend(
                 pinned
                     .iter()
-                    .map(|ix| self.render_workspace_pinned_row(window, *ix, cx)),
+                    .map(|ix| self.render_detailed_session_row(window, *ix, cx)),
             );
         }
-
-        out.push(
-            div()
-                .px_3()
-                .py_1()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("工作区")
-                .into_any_element(),
-        );
 
         for (p_ix, workspace) in self.workspaces.iter().enumerate() {
             let name = self.workspace_name(workspace);
@@ -490,6 +450,13 @@ impl Sidebar {
                 continue;
             }
             let expanded = self.expanded.contains(workspace);
+            // 收起动画播放期间内容仍挂载：expanded 保持 true，open 立即翻 false
+            //（图标即时反馈；此时再点 = 取消收起重新展开）
+            let collapsing = self
+                .expand_anims
+                .get(workspace)
+                .is_some_and(|a| a.collapsing);
+            let open = expanded && !collapsing;
             let renaming = self.renaming == Some(RenameTarget::Workspace(workspace.to_string()));
             let workspace_path = workspace.clone();
 
@@ -516,7 +483,7 @@ impl Sidebar {
                 .rounded(cx.theme().radius)
                 .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                 .child(
-                    Icon::new(if expanded {
+                    Icon::new(if open {
                         IconName::FolderOpen
                     } else {
                         IconName::FolderClosed
@@ -551,8 +518,42 @@ impl Sidebar {
                         }
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded.remove(&workspace_path) {
+                        let collapsing = this
+                            .expand_anims
+                            .get(&workspace_path)
+                            .is_some_and(|a| a.collapsing);
+                        if this.expanded.contains(&workspace_path) && !collapsing {
+                            // 收起：内容保持挂载播滑收动画，计时器到期才卸载；
+                            // 期间再点开（代次不符）自动作废
+                            let anim = this.expand_anims.entry(workspace_path.clone()).or_default();
+                            anim.generation += 1;
+                            anim.collapsing = true;
+                            let generation = anim.generation;
+                            let path = workspace_path.clone();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(EXPAND_ANIM_DUR + std::time::Duration::from_millis(50))
+                                    .await;
+                                this.update(cx, |this, cx| {
+                                    let stale = this.expand_anims.get(&path).is_none_or(|a| {
+                                        !a.collapsing || a.generation != generation
+                                    });
+                                    if !stale {
+                                        this.expanded.remove(&path);
+                                        if let Some(a) = this.expand_anims.get_mut(&path) {
+                                            a.collapsing = false;
+                                        }
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            })
+                            .detach();
+                        } else {
                             this.expanded.insert(workspace_path.clone());
+                            let anim = this.expand_anims.entry(workspace_path.clone()).or_default();
+                            anim.generation += 1;
+                            anim.collapsing = false;
                         }
                         cx.notify();
                     }))
@@ -616,23 +617,51 @@ impl Sidebar {
                 out.push(row.into_any_element());
             }
 
-            if expanded {
-                // 分页：默认一页（5 条），展开更多每次 +1 页，收起回到一页
+            if expanded || collapsing {
+                // 分页：默认一页（5 条），展开更多每次 +1 页，收起回到一页。
+                // 基础页直排；「多出的页」独立子动画块——展开更多 = 滑开淡入、
+                // 收起 = 内容保持挂载滑收淡出（计时器到期才回一页），收/放全程
+                // 旧行被容器裁剪而不是瞬换
                 let shown = self
                     .workspace_shown
                     .get(workspace)
                     .copied()
                     .unwrap_or(WORKSPACE_PAGE_SIZE);
                 let total = sessions.len();
-                for ix in sessions.iter().take(shown) {
-                    out.push(
+                let paginate_collapsing = self
+                    .paginate_anims
+                    .get(workspace)
+                    .is_some_and(|a| a.collapsing);
+                let mut block = v_flex().gap_1();
+                for ix in sessions.iter().take(shown.min(WORKSPACE_PAGE_SIZE)) {
+                    block = block.child(
                         div()
                             // 缩进 24px：会话文字与工作区名字对齐（行 mx+px 16 +
                             // 图标 16 + gap 8 = 40）
                             .pl_6()
-                            .child(self.render_session_row(window, *ix, true, cx))
-                            .into_any_element(),
+                            .child(self.render_session_row(window, *ix, cx)),
                     );
+                }
+                if shown > WORKSPACE_PAGE_SIZE || paginate_collapsing {
+                    let mut extra = v_flex().gap_1();
+                    for ix in sessions
+                        .iter()
+                        .skip(WORKSPACE_PAGE_SIZE)
+                        .take(shown.saturating_sub(WORKSPACE_PAGE_SIZE))
+                    {
+                        extra = extra
+                            .child(div().pl_6().child(self.render_session_row(window, *ix, cx)));
+                    }
+                    match self.paginate_anims.get(workspace) {
+                        Some(anim) => {
+                            block = block.child(crate::anim::expand_anim_wrap(
+                                format!("ws-page:{}:{}", workspace, anim.generation),
+                                anim,
+                                extra.into_any_element(),
+                            ));
+                        }
+                        None => block = block.child(extra),
+                    }
                 }
                 let can_more = shown < total;
                 let can_collapse = shown > WORKSPACE_PAGE_SIZE;
@@ -655,14 +684,19 @@ impl Sidebar {
                                 .cursor_pointer()
                                 .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
+                                    // 展开更多：多出的行进子动画块滑开
                                     *this
                                         .workspace_shown
                                         .entry(path.clone())
                                         .or_insert(WORKSPACE_PAGE_SIZE) += WORKSPACE_PAGE_SIZE;
+                                    let anim = this.paginate_anims.entry(path.clone()).or_default();
+                                    anim.generation += 1;
+                                    anim.collapsing = false;
                                     cx.notify();
                                 }))
                                 .child(Icon::new(IconName::ChevronDown).size_3())
-                                .child("展开更多"),
+                                .child("展开更多")
+                                .test_support(),
                         );
                     }
                     if can_more && can_collapse {
@@ -679,14 +713,60 @@ impl Sidebar {
                                 .cursor_pointer()
                                 .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.workspace_shown.remove(&path);
+                                    // 收起（分页）：多出的行保持挂载播滑收淡出，
+                                    // 计时器到期才回一页（期间再展开代次不符作废）
+                                    let anim = this.paginate_anims.entry(path.clone()).or_default();
+                                    anim.generation += 1;
+                                    anim.collapsing = true;
+                                    let generation = anim.generation;
+                                    let path = path.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(
+                                                EXPAND_ANIM_DUR
+                                                    + std::time::Duration::from_millis(50),
+                                            )
+                                            .await;
+                                        this.update(cx, |this, cx| {
+                                            let stale =
+                                                this.paginate_anims.get(&path).is_none_or(|a| {
+                                                    !a.collapsing || a.generation != generation
+                                                });
+                                            if !stale {
+                                                this.workspace_shown.remove(&path);
+                                                if let Some(a) = this.paginate_anims.get_mut(&path)
+                                                {
+                                                    a.collapsing = false;
+                                                }
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                    })
+                                    .detach();
                                     cx.notify();
                                 }))
                                 .child(Icon::new(IconName::ChevronUp).size_3())
-                                .child("收起"),
+                                .child("收起")
+                                .test_support(),
                         );
                     }
-                    out.push(div().pl_6().child(controls).into_any_element());
+                    block = block.child(div().pl_6().child(controls));
+                }
+                match self.expand_anims.get(workspace) {
+                    Some(anim) => out.push(
+                        // 观测包装（test_support 无 feature 时透传，测试用它量容器实高）
+                        div()
+                            .id(("ws-block", p_ix))
+                            .test_support()
+                            .child(crate::anim::expand_anim_wrap(
+                                format!("ws-expand:{}:{}", workspace, anim.generation),
+                                anim,
+                                block.into_any_element(),
+                            ))
+                            .into_any_element(),
+                    ),
+                    None => out.push(block.into_any_element()),
                 }
             }
         }

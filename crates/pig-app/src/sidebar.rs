@@ -1,12 +1,14 @@
+use gpui_kit::assets::IconName as AssetsIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Side, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::RelativeTime as _;
+use crate::anim::{EXPAND_ANIM_DUR, ExpandAnim};
 
 /// 侧栏会话行数据（AppView 汇总 SessionMeta + 运行时状态后传入）
 pub struct SidebarSession {
@@ -20,9 +22,10 @@ pub struct SidebarSession {
     pub waiting_approval: bool,
 }
 
+/// 侧栏列表视图：平铺列表（跨工作区，行内标注所属工作区）/ 按工作区分组
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SidebarView {
-    Group,
+pub(crate) enum SidebarView {
+    Flat,
     Workspace,
 }
 
@@ -82,11 +85,15 @@ pub struct Sidebar {
     search_open: bool,
     search_input: Entity<InputState>,
     expanded: std::collections::HashSet<String>,
-    archived_open: bool,
+    /// 工作区会话列表的开合动画态（crate::anim::ExpandAnim），key = 工作区路径
+    expand_anims: std::collections::HashMap<String, ExpandAnim>,
+    /// 分页「多出页」子块的开合动画态（展开更多 = 滑开、收起 = 滑收后删行），
+    /// key = 工作区路径
+    paginate_anims: std::collections::HashMap<String, ExpandAnim>,
     /// 悬停中的工作区行路径：行尾浮层（名字渐隐 + 按钮）仅悬停时渲染占位，
     /// 未悬停时名字用满行宽、不裁减
     hovered_workspace: Option<String>,
-    /// 悬停中的会话行 id：渐隐底色与行尾按钮（分组视图）显隐跟随行悬停
+    /// 悬停中的会话行 id：渐隐底色与行尾按钮显隐跟随行悬停
     hovered_session: Option<String>,
     /// 工作区会话分页：路径 → 当前展示条数（缺省 = WORKSPACE_PAGE_SIZE）
     workspace_shown: std::collections::HashMap<String, usize>,
@@ -104,6 +111,8 @@ pub struct Sidebar {
 mod marquee;
 mod menus;
 mod rename;
+#[cfg(test)]
+mod tests;
 mod views;
 
 impl Sidebar {
@@ -132,7 +141,7 @@ impl Sidebar {
             ),
         ];
         Self {
-            view: SidebarView::Group,
+            view: SidebarView::Workspace,
             sessions: vec![],
             workspaces: vec![],
             aliases: std::collections::HashMap::new(),
@@ -142,7 +151,8 @@ impl Sidebar {
             search_open: false,
             search_input,
             expanded: std::collections::HashSet::new(),
-            archived_open: false,
+            expand_anims: std::collections::HashMap::new(),
+            paginate_anims: std::collections::HashMap::new(),
             hovered_workspace: None,
             hovered_session: None,
             workspace_shown: std::collections::HashMap::new(),
@@ -169,11 +179,15 @@ impl Sidebar {
         self.aliases = aliases;
         self.active = active;
         self.title_scrolls.borrow_mut().retain(|id, _| {
-            // 置顶区行的键带 "pinned-" 前缀（同一会话在两个视图的键不冲突）
+            // 双行详情行的键带 "pinned-" 前缀（与同 id 的单行键不冲突）
             let sid = id.strip_prefix("pinned-").unwrap_or(id.as_str());
             self.sessions.iter().any(|s| s.id == sid)
         });
         self.workspace_shown
+            .retain(|path, _| self.workspaces.iter().any(|w| w == path));
+        self.expand_anims
+            .retain(|path, _| self.workspaces.iter().any(|w| w == path));
+        self.paginate_anims
             .retain(|path, _| self.workspaces.iter().any(|w| w == path));
         if self.marquee.as_ref().is_some_and(|m| {
             let sid = m
@@ -240,7 +254,7 @@ impl Sidebar {
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.view {
-            SidebarView::Group => self.render_group_view(window, cx),
+            SidebarView::Flat => self.render_flat_view(window, cx),
             SidebarView::Workspace => self.render_workspace_view(window, cx),
         };
 
@@ -261,6 +275,7 @@ impl Render for Sidebar {
                         // 分隔线由 dock 把手自带线绘制：侧栏自画 border_r 会画在把手命中区
                         // 右侧（gpui-base 的 Side::Left 把手命中区停在分界线左侧），线上不可拖
                         .child(self.render_action_rows(cx))
+                        .child(self.render_list_header(cx))
                         .child(
                             div()
                                 .id("session-list")

@@ -58,6 +58,36 @@ impl AppView {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_state(sessions, workspaces, aliases, active, cx);
         });
+        if self.settings_open {
+            self.sync_archived_page(cx);
+        }
+    }
+
+    /// 设置页「已归档的会话」数据：归档会话清单（含工作区显示名）推给设置页
+    pub(crate) fn sync_archived_page(&self, cx: &mut Context<Self>) {
+        let rows: Vec<crate::settings::ArchivedSessionRow> = self
+            .metas
+            .iter()
+            .filter(|m| m.archived)
+            .map(|m| {
+                let workspace = m.cwd.display().to_string();
+                let workspace_name = crate::settings::workspace_display_name(
+                    &m.cwd,
+                    self.workspace_aliases.get(&workspace).map(String::as_str),
+                );
+                crate::settings::ArchivedSessionRow {
+                    id: m.id.clone(),
+                    title: m.title.clone(),
+                    workspace,
+                    workspace_name,
+                    created_at: m.created_at,
+                    updated_at: m.updated_at,
+                }
+            })
+            .collect();
+        self.settings.update(cx, |settings, cx| {
+            settings.set_archived_sessions(rows, cx);
+        });
     }
 
     pub(crate) fn switch_session(&mut self, session_id: String, cx: &mut Context<Self>) {
@@ -200,6 +230,7 @@ impl AppView {
         self.settings_open = true;
         self.agent.get_config();
         self.sync_scope_workspaces(cx);
+        self.sync_archived_page(cx);
         self.refresh_mcp(cx);
         self.refresh_skills(cx);
         // 主题模式可能在设置页关闭期间被系统外观改变，打开时重新同步下拉

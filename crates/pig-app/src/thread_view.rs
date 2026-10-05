@@ -100,6 +100,13 @@ pub struct ThreadView {
     nav_hover: Option<usize>,
     /// 预览卡当前为哪条消息打开（悬停稳定 120ms 才打开，离开 80ms 才关闭）
     nav_card: Option<usize>,
+    /// 预览卡的渲染数据快照（打开期间逐帧刷新；关闭一刻移入 nav_card_exit 播淡出，
+    /// 也是「切换横条不重播入场动画」的判据）
+    nav_card_last: Option<NavCardData>,
+    /// 预览卡关闭时的出场快照（淡出动画播完即弃）
+    nav_card_exit: Option<NavCardData>,
+    /// 出场动画代次（进动画元素 id，每次关闭重播；清理计时器按代次作废）
+    nav_card_exit_gen: u64,
     /// 各导航横条的屏幕 bounds（on_prepaint 记录），预览卡按它做侧边锚定；
     /// render 只持 &self，故用 RefCell
     nav_bar_bounds: RefCell<HashMap<usize, Rc<Cell<Bounds<Pixels>>>>>,
@@ -181,6 +188,9 @@ impl ThreadView {
             queued: Vec::new(),
             nav_hover: None,
             nav_card: None,
+            nav_card_last: None,
+            nav_card_exit: None,
+            nav_card_exit_gen: 0,
             nav_bar_bounds: RefCell::new(HashMap::new()),
             nav_rail_scroll: ScrollHandle::new(),
             nav_last_active: None,
@@ -355,6 +365,8 @@ impl ThreadView {
         self.follow_bottom = true;
         self.nav_hover = None;
         self.nav_card = None;
+        self.nav_card_last = None;
+        self.nav_card_exit = None;
         self.nav_bar_bounds.borrow_mut().clear();
         self.nav_last_active = None;
         self.nav_jump = false;
@@ -694,44 +706,15 @@ impl ThreadView {
     }
 
     /// 展开/收起内容的动画包装：展开 = 内容从 0 高滑开 + 淡入；收起 = 保持挂载
-    /// 滑收淡出（卸载见 drive_expand_anim 的计时器）。高度目标用内容实测自然高
-    ///（内层 on_prepaint 持续测量——clip/高度帽只作用在外层，内层始终按自然高
-    /// 布局；未测到先隐形挂一帧量高）；动画结束帧（delta=1）摘掉 max_h 帽，
-    /// 超高内容不受残留限制。id 含 gen，每次开合重播
+    /// 滑收淡出（卸载见 drive_expand_anim 的计时器）。实现见 crate::anim（侧栏
+    /// 工作区开合同款共用）；id 含 gen，每次开合重播
     pub(crate) fn expand_anim_wrap(
         &self,
         id: String,
         anim: &ExpandAnim,
         content: AnyElement,
     ) -> AnyElement {
-        let measured = anim.measured_h.clone();
-        let measured_inner = anim.measured_h.clone();
-        let collapsing = anim.collapsing;
-        div()
-            .overflow_hidden()
-            .with_animation(
-                id,
-                Animation::new(EXPAND_ANIM_DUR).with_easing(ease_out_quint()),
-                move |el, delta| {
-                    let d = if collapsing { 1.0 - delta } else { delta };
-                    let h = measured.get();
-                    if !collapsing && delta >= 1.0 {
-                        el
-                    } else if h <= 0. {
-                        el.opacity(0.)
-                    } else {
-                        el.max_h(px(h * d)).opacity(d.max(0.))
-                    }
-                },
-            )
-            .child(
-                div()
-                    .on_prepaint(move |bounds, _, _| {
-                        measured_inner.set(f32::from(bounds.size.height))
-                    })
-                    .child(content),
-            )
-            .into_any_element()
+        crate::anim::expand_anim_wrap(id, anim, content)
     }
 }
 

@@ -598,6 +598,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.scope_workspaces = workspaces;
+        // 归档页工作区过滤下拉的选项随该清单重建（render 前经脏标记同步）
+        self.archived_ws_dirty = true;
         cx.notify();
     }
 

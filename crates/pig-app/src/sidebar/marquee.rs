@@ -165,7 +165,7 @@ impl Sidebar {
     }
 
     /// 会话标题区：横向滚动（悬停跑马灯）+ 两端渐隐。key 为 title_scrolls
-    /// 的键：普通会话行用会话 id，置顶区行用 "pinned-{id}"（同一会话在两
+    /// 的键：单行会话行用会话 id，双行详情行用 "pinned-{id}"（同一会话在两
     /// 种行的滚动状态互不干扰）
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_title_scroll(

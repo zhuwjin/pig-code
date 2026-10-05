@@ -1,5 +1,10 @@
 use super::*;
 
+pub(crate) use crate::anim::{EXPAND_ANIM_DUR, ExpandAnim};
+
+/// 导航预览卡渲染数据（消息下标, 横条 bounds, 用户预览, 助手预览, 是否真实回复文本）
+pub(crate) type NavCardData = (usize, Bounds<Pixels>, String, String, bool);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     User,
@@ -171,9 +176,6 @@ pub struct BashCardContent {
     pub out: crate::code_view::PreparedCode,
 }
 
-/// 展开/收起动画时长
-pub(crate) const EXPAND_ANIM_DUR: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// 思考滚动行的纵滚时序（ZCode QueuedSummaryContent 常量）：300ms 滚动 + 500ms 停留
 pub(crate) const TICKER_ROLL_TRANSITION: std::time::Duration =
     std::time::Duration::from_millis(300);
@@ -314,19 +316,8 @@ pub struct TurnFileRow {
     pub(crate) expanded: bool,
     /// 内联 diff 卡的滚动句柄
     pub(crate) scroll: ScrollHandle,
-    /// 展开/收起动画状态（见 ExpandAnim）
+    /// 展开/收起动画状态（见 crate::anim::ExpandAnim）
     pub(crate) expand_anim: ExpandAnim,
-}
-
-/// 展开/收起动画状态：generation 每次开合 +1（作为动画元素 id 的一部分驱动重播）；
-/// collapsing = 收起动画进行中（内容保持挂载，计时器到期后卸载）；
-/// measured_h = 内容自然高度（render 时 on_prepaint 持续测量，作动画目标高——
-/// 高度由内容决定、不设固定上限；动画结束帧 delta=1 摘掉 max_h 帽）
-#[derive(Default)]
-pub struct ExpandAnim {
-    pub generation: u64,
-    pub collapsing: bool,
-    pub measured_h: Rc<Cell<f32>>,
 }
 
 /// 用户消息的图片附件：事件文本末尾的 `pig-code-composer://attachments/mN`

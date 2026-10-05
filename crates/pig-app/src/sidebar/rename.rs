@@ -23,7 +23,9 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ensure_session_row_visible(&id, window, cx);
+        if !self.ensure_session_row_visible(&id, window, cx) {
+            return;
+        }
         self.renaming = Some(RenameTarget::Session(id));
         self.rename_input.update(cx, |input, cx| {
             input.set_value(title, window, cx);
@@ -32,21 +34,22 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// 行内重命名输入框画在会话行上，先保证该行真实渲染：不可见时退回
-    /// 分组视图（归档会话同时展开归档区），并清掉会过滤掉它的搜索词
+    /// 行内重命名输入框画在会话行上，先保证该行真实渲染：普通会话在工作区
+    /// 视图可能被折叠/分页/名称过滤挡住，退回平铺列表并清掉拦路搜索词；
+    /// 归档会话不在侧栏渲染（设置页「已归档的会话」管理），返回 false 放弃
     fn ensure_session_row_visible(
         &mut self,
         id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.session_row_visible(id, cx) {
-            return;
+            return true;
         }
-        self.view = SidebarView::Group;
         if self.sessions.iter().any(|s| s.id == id && s.archived) {
-            self.archived_open = true;
+            return false;
         }
+        self.view = SidebarView::Flat;
         let blocked_by_query = self
             .sessions
             .iter()
@@ -57,23 +60,23 @@ impl Sidebar {
                 input.set_value("", window, cx);
             });
         }
+        self.session_row_visible(id, cx)
     }
 
-    /// 会话行在当前视图下是否可见：分组视图看归档区开合；工作区视图下归档
-    /// 会话不渲染，普通会话还要求工作区未被搜索过滤、已展开且在分页范围内
+    /// 会话行在当前视图下是否可见：归档会话恒不可见（不在侧栏渲染）；
+    /// 平铺视图看标题过滤；工作区视图还要求工作区未被搜索过滤、已展开
+    /// 且在分页范围内
     fn session_row_visible(&self, id: &str, cx: &App) -> bool {
         let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
             return false;
         };
+        if session.archived {
+            return false;
+        }
         let query = self.query(cx);
         match self.view {
-            SidebarView::Group => {
-                self.matches(&query, &session.title) && (!session.archived || self.archived_open)
-            }
+            SidebarView::Flat => self.matches(&query, &session.title),
             SidebarView::Workspace => {
-                if session.archived {
-                    return false;
-                }
                 if session.pinned {
                     return self.matches(&query, &session.title);
                 }
