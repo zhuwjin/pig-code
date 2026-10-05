@@ -89,6 +89,9 @@ pub struct ThreadView {
     /// 回到底部（任意方式）或点击浮钮后恢复
     follow_bottom: bool,
     streaming: bool,
+    /// 上下文压缩进行中（CompactStarted → ContextCompacted/TurnAborted 之间）：
+    /// 列表末尾渲染「正在压缩上下文」分隔条
+    compacting: bool,
     /// 计划模式回合完成，等待用户确认执行
     plan_pending: bool,
     turn_started: Option<std::time::Instant>,
@@ -182,6 +185,7 @@ impl ThreadView {
             scroll_handle: ScrollHandle::new(),
             follow_bottom: true,
             streaming: false,
+            compacting: false,
             plan_pending: false,
             turn_started: None,
             replay_turn: false,
@@ -363,6 +367,7 @@ impl ThreadView {
         self.messages.clear();
         self.item_index.clear();
         self.follow_bottom = true;
+        self.compacting = false;
         self.nav_hover = None;
         self.nav_card = None;
         self.nav_card_last = None;
@@ -384,6 +389,31 @@ impl ThreadView {
         self.messages.push(ChatMessage::system(text.to_string()));
         self.auto_scroll();
         cx.notify();
+    }
+
+    /// 压缩完成：分隔条样式（渲染为「🗄 上下文已压缩」，摘要全文留在 text 供自测断言）
+    pub fn add_compact_note(&mut self, note: &str, cx: &mut Context<Self>) {
+        self.messages.push(ChatMessage::system_with_kind(
+            note.to_string(),
+            SystemNoteKind::Compacted,
+        ));
+        self.auto_scroll();
+        cx.notify();
+    }
+
+    /// 压缩进行中标记：true → 列表末尾渲染「正在压缩上下文」分隔条
+    pub fn set_compacting(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.compacting == on {
+            return;
+        }
+        self.compacting = on;
+        self.auto_scroll();
+        cx.notify();
+    }
+
+    /// 供自测断言用：压缩进行中标记。
+    pub fn debug_compacting(&self) -> bool {
+        self.compacting
     }
 
     /// 供自测断言用：所有系统提示条文本。
@@ -942,6 +972,32 @@ impl Render for ThreadView {
                                                                 ),
                                                         ),
                                                 ),
+                                        ),
+                                )
+                            })
+                            // 压缩进行中分隔条：同挂列表末尾（自动压缩发生在回合中，
+                            // 与工作中指示可同时出现，分隔条排最后 = 最新状态）
+                            .when(self.compacting, |this| {
+                                this.child(
+                                    div()
+                                        .w_full()
+                                        .when(nav_eligible, |this| this.px_12())
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .max_w(content_max_w)
+                                                .mx_auto()
+                                                .px_4()
+                                                .child(render_compact_divider(
+                                                    ShimmerText::new("正在压缩上下文")
+                                                        .id("compacting-shimmer")
+                                                        .text_sm()
+                                                        .text_color(cx.theme().foreground)
+                                                        .into_any_element(),
+                                                    cx,
+                                                ))
+                                                .id("compacting-divider")
+                                                .test_support(),
                                         ),
                                 )
                             })

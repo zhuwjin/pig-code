@@ -484,6 +484,14 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
+    // 压缩收尾后「正在压缩」标记必须已清除（ContextCompacted 与 CompactStarted 同会话配对）
+    let still_compacting = app!(|app: &mut AppView, cx| {
+        app.views
+            .get(&session_a)
+            .map(|views| views.thread.read(cx).debug_compacting())
+            .unwrap_or(false)
+    });
+    assert!(!still_compacting, "compact 完成后压缩标记应已清除");
     println!("[selftest] 模型摘要 compact OK");
 
     // 场景 C：计划模式闭环

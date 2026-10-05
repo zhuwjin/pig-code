@@ -318,6 +318,8 @@ impl ThreadView {
             Event::TurnAborted { .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;
+                // 中止可能发生在压缩摘要请求期间（收不到 ContextCompacted），兜底清标记
+                self.compacting = false;
                 // 中止收尾：没等到 ToolCallEnd 的工具卡停在「执行中」转圈——
                 // 全部落定（清实时进度行，无输出置「已停止」）。只有最后一条
                 // assistant 消息可能有未完成段，遍历全部消息只是防御乱序
@@ -398,6 +400,7 @@ impl ThreadView {
             Event::SessionList { .. }
             | Event::SessionTitleChanged { .. }
             | Event::FileSearchResults { .. }
+            | Event::CompactStarted { .. }
             | Event::ContextCompacted { .. }
             | Event::TodoListChanged { .. }
             | Event::TaskListChanged { .. }

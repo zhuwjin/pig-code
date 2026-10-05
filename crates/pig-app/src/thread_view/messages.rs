@@ -7,6 +7,21 @@ const NAV_BAR_SPRING: SpringConfig = SpringConfig::new(260., 30., 1.);
 /// 导航预览卡的进出场动画时长（悬停稳定 120ms 开卡不变，动画只管淡入淡出）
 const NAV_CARD_ANIM_DUR: std::time::Duration = std::time::Duration::from_millis(160);
 
+/// 压缩分隔条：分隔线 — 内容 — 分隔线（「正在压缩上下文」进行态与
+/// 「上下文已压缩」完成态共用骨架，对标 ZCode 的上下文压缩分隔行）
+pub(crate) fn render_compact_divider(content: AnyElement, cx: &App) -> AnyElement {
+    let line = || div().flex_grow(1.).h(px(1.)).bg(cx.theme().border);
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .py_2()
+        .child(line())
+        .child(content)
+        .child(line())
+        .into_any_element()
+}
+
 /// 导航预览卡本体（打开卡与出场快照共用）：标题 2 行 + 助手摘要 3 行
 fn nav_card_body(data: &NavCardData, cx: &App) -> Div {
     let (_, _, user_preview, assistant_preview, is_text) = data;
@@ -416,13 +431,38 @@ impl ThreadView {
         let message = &self.messages[ix];
         match message.role {
             Role::User => self.render_user_message(ix, message, cx),
-            Role::System => div()
-                .w_full()
-                .text_center()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(message.text.clone())
-                .into_any_element(),
+            Role::System => match message.system_kind {
+                SystemNoteKind::Plain => div()
+                    .w_full()
+                    .text_center()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(message.text.clone())
+                    .into_any_element(),
+                SystemNoteKind::Compacted => div()
+                    .id(("compact-note", ix))
+                    .test_support()
+                    .w_full()
+                    .child(render_compact_divider(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Icon::new(AssetIconName::Archive)
+                                    .size_3p5()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("上下文已压缩"),
+                            )
+                            .into_any_element(),
+                        cx,
+                    ))
+                    .into_any_element(),
+            },
             Role::Assistant => {
                 let mut segments = Vec::with_capacity(message.segments.len() + 1);
                 for (six, segment) in message.segments.iter().enumerate() {
@@ -462,8 +502,8 @@ impl ThreadView {
                             // 超宽可横滚但无视觉提示）。
                             // 不要动 table_cell 的 padding：列宽测量含 CELL_PAD_PX(16)，
                             // 改大会让所有列的内容盒比测量窄、短列反而折行（实测）。
-                            // 行尾吞字根因是 #3293（inline flow 全角标点量宽少算），
-                            // 等上游 0.7.1+ 根治。
+                            // 行尾吞字（#3293，inline flow 全角标点量宽少算）
+                            // 已由 0.7.1 根治：按整形后绘制宽度收紧重排。
                             let mut table = StyleRefinement::default();
                             table.overflow.x = Some(Overflow::Scroll);
                             TextView::new(state)

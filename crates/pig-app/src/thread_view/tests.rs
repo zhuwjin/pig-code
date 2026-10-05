@@ -842,3 +842,111 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
         "不可滚的卡片应把滚轮穿透给外层列表（{outer_after:?} → 下滚 {outer_chained:?}）"
     );
 }
+
+/// 压缩分隔条：进行中「正在压缩上下文」→ 完成「上下文已压缩」，摘要全文留 text。
+#[gpui_kit::test]
+fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+
+    // 进行中：set_compacting(true) → 进行条出现且铺满内容列（分隔线 flex_grow 生效）
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("整理一下这个文件".to_string(), vec![], cx);
+                view.set_compacting(true, cx);
+                assert!(view.debug_compacting());
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        let snap = window.find("compacting-divider");
+        assert!(snap.visible(), "进行中分隔条应可见");
+        assert!(
+            snap.bounds().size.width > gpui_kit::px(600.),
+            "分隔条应铺满内容列（分隔线 grow）: {:?}",
+            snap.bounds()
+        );
+    })
+    .unwrap();
+
+    // 完成：进行条消失，「上下文已压缩」分隔条出现；摘要全文留在消息 text 供断言
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.set_compacting(false, cx);
+                view.add_compact_note("[前文已压缩·模型摘要] 省略 9 条消息。\n\n摘要正文", cx);
+                assert!(!view.debug_compacting());
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find("compacting-divider").is_none(),
+            "完成后进行条应消失"
+        );
+        // 用户消息占 index 0，压缩条是 index 1
+        let snap = window
+            .try_find(("compact-note", 1usize))
+            .expect("「上下文已压缩」分隔条应出现");
+        assert!(snap.visible());
+    })
+    .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                let notes = view.debug_system_notes();
+                assert!(
+                    notes
+                        .iter()
+                        .any(|n| n.contains("模型摘要") && n.contains("摘要正文")),
+                    "摘要全文应保留在系统条 text: {notes:?}"
+                );
+            });
+        })
+        .unwrap();
+
+    // 中止兜底：压缩中被打断（TurnAborted）标记必须清除，不残留进行条
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.set_compacting(true, cx);
+                view.reduce_event(
+                    pig_protocol::Event::TurnAborted {
+                        session_id: "s".into(),
+                        seq: 2,
+                    },
+                    cx,
+                );
+                assert!(!view.debug_compacting(), "TurnAborted 应清压缩标记");
+            });
+        })
+        .unwrap();
+}

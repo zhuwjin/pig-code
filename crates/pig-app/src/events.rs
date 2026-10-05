@@ -343,14 +343,31 @@ impl AppView {
                     self.agent.git_status(meta.cwd.clone());
                 }
             }
+            Event::CompactStarted { session_id, .. } => {
+                let session_id = session_id.clone();
+                self.ensure_views(&session_id, cx);
+                self.views[&session_id].thread.update(cx, |thread, cx| {
+                    thread.set_compacting(true, cx);
+                });
+            }
             Event::ContextCompacted {
-                session_id, note, ..
+                session_id,
+                note,
+                omitted,
+                ..
             } => {
                 let session_id = session_id.clone();
                 self.ensure_views(&session_id, cx);
                 let note = note.clone();
+                let omitted = *omitted;
                 self.views[&session_id].thread.update(cx, |thread, cx| {
-                    thread.add_system_note(&note, cx);
+                    thread.set_compacting(false, cx);
+                    if omitted == 0 {
+                        // 「历史很短，无需压缩」：短文本直接平铺
+                        thread.add_system_note(&note, cx);
+                    } else {
+                        thread.add_compact_note(&note, cx);
+                    }
                 });
             }
             Event::SubagentHistory {
@@ -761,6 +778,7 @@ pub(crate) fn event_session_id(event: &Event) -> Option<String> {
         | Event::ToolCallBegin { session_id, .. }
         | Event::ToolCallEnd { session_id, .. }
         | Event::ContextUsage { session_id, .. }
+        | Event::CompactStarted { session_id, .. }
         | Event::ContextCompacted { session_id, .. }
         | Event::ApprovalRequested { session_id, .. }
         | Event::QuestionRequested { session_id, .. }

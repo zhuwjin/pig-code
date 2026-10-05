@@ -182,6 +182,14 @@ pub enum Event {
         #[serde(default)]
         input_total: u64,
     },
+    /// 压缩开始（手动 /compact 与采样前水位自动触发都会发；摘要是一次性阻塞
+    /// 请求，期间回合无其他事件，UI 靠它显示「正在压缩上下文」）
+    CompactStarted {
+        session_id: String,
+        seq: u64,
+        /// true = 采样前自动触发；false = 用户手动 /compact
+        automatic: bool,
+    },
     ContextCompacted {
         session_id: String,
         seq: u64,

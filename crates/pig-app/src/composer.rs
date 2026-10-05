@@ -33,7 +33,7 @@ use pig_protocol::{
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "清空当前会话消息"),
-    ("/compact", "压缩上下文（演示）"),
+    ("/compact", "压缩上下文（模型摘要）"),
 ];
 
 pub const PLACEHOLDER_IDLE: &str = "向 pig-code 提问，使用 @ 添加上下文，使用 / 选择命令";

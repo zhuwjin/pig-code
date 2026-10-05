@@ -353,6 +353,9 @@ pub(crate) struct Lightbox {
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
+    /// 系统提示条种类（仅 System 角色有意义）：普通文本 / 「上下文已压缩」分隔条
+    ///（压缩条渲染成带图标的分隔行，摘要全文仍留在 text 供自断言与排查）
+    pub system_kind: SystemNoteKind,
     /// 用户消息的选择 handle + 刷新订阅（拖动选择时驱动实时高亮），仅 User 角色有
     pub selection: Option<(TextSelectionHandle, Subscription)>,
     pub files: Vec<String>,
@@ -362,6 +365,14 @@ pub struct ChatMessage {
     pub footer: Option<String>,
     /// 后台子代理通知卡的 UI 态（render 前惰性创建；仅 <task-notification> 消息为 Some）
     pub notification_ui: Option<NotificationUi>,
+}
+
+/// 系统提示条种类
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SystemNoteKind {
+    Plain,
+    /// 「上下文已压缩」分隔条（分隔线 + Archive 图标 + 短文案，不渲染摘要全文）
+    Compacted,
 }
 
 /// 后台子代理通知卡的 UI 态（随消息存放，clear() 随消息一并释放）
@@ -382,6 +393,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             text,
+            system_kind: SystemNoteKind::Plain,
             selection: None,
             files,
             images: vec![],
@@ -392,9 +404,14 @@ impl ChatMessage {
     }
 
     pub(crate) fn system(text: String) -> Self {
+        Self::system_with_kind(text, SystemNoteKind::Plain)
+    }
+
+    pub(crate) fn system_with_kind(text: String, kind: SystemNoteKind) -> Self {
         Self {
             role: Role::System,
             text,
+            system_kind: kind,
             selection: None,
             files: vec![],
             images: vec![],
@@ -408,6 +425,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             text: String::new(),
+            system_kind: SystemNoteKind::Plain,
             selection: None,
             files: vec![],
             images: vec![],
