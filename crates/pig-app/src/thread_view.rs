@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::{
-    Align, ElementExt as _, Placement, Positioner, ScrollableMask, Scrollbar, SelectableText,
-    TextSelectionHandle,
+    Align, ElementExt as _, Placement, Positioner, ScrollableMask, Scrollbar, ScrollbarMode,
+    SelectableText, TextSelectionHandle,
 };
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -23,11 +23,18 @@ use gpui_kit::*;
 use gpui_kit::{Overflow, StyleRefinement};
 use pig_protocol::{ApprovalDecision, EditDiff, Event};
 
+use crate::code_view::{
+    CODE_LINE_H, CODE_SCROLLBAR_LANE, PreparedCode, code_line, code_line_row, gutter_width,
+    highlight_code, lang_name_for_path, measure_max_line_width,
+};
+
+mod bash;
 mod cards;
 mod diffs;
 mod lightbox;
 mod messages;
 mod model;
+mod read;
 mod reduce;
 mod search;
 
@@ -35,6 +42,7 @@ use lightbox::*;
 use messages::*;
 use model::Role;
 use model::*;
+use read::*;
 
 #[derive(Clone)]
 pub enum ThreadEvent {
@@ -48,6 +56,9 @@ pub enum ThreadEvent {
         /// 展示标题（通知卡的 description）
         title: String,
     },
+    /// 点击 Read 卡的路径：打开右侧「文件」tab 查看完整内容；
+    /// line = Read 输出首行号（打开后滚动定位）
+    OpenFile { path: String, line: Option<usize> },
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,
@@ -415,6 +426,46 @@ impl ThreadView {
         })
     }
 
+    /// 自测用：展开最近一张指定工具的工具卡（展开代码卡渲染路径），返回是否找到。
+    /// 展开后滚回底部：卡片加高会把视口顶离底部，follow_bottom 语义下保持贴底
+    pub fn debug_expand_tool(&mut self, tool: &str, cx: &mut Context<Self>) -> bool {
+        let found = self
+            .messages
+            .iter_mut()
+            .rev()
+            .flat_map(|m| m.segments.iter_mut())
+            .find_map(|s| match s {
+                Segment::ToolCall {
+                    tool: t, expanded, ..
+                } if t.as_str() == tool => {
+                    *expanded = true;
+                    Some(())
+                }
+                _ => None,
+            })
+            .is_some();
+        if found {
+            self.follow_bottom = true;
+            self.scroll_handle.scroll_to_bottom();
+            // 开合动画期间内容持续长高，贴底标记若应用在动画半途会停在半路——
+            // 动画结束后再补一次贴底
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(EXPAND_ANIM_DUR + std::time::Duration::from_millis(50))
+                    .await;
+                this.update(cx, |this, _| {
+                    if this.follow_bottom {
+                        this.scroll_handle.scroll_to_bottom();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            cx.notify();
+        }
+        found
+    }
+
     /// 首张 Agent/AgentSwarm 工具卡片的 (summary, live_note, done)（自测用）。
     pub fn debug_agent_card(&self) -> Option<(String, Option<String>, bool)> {
         self.messages
@@ -575,6 +626,113 @@ impl ThreadView {
         }
         cx.notify();
     }
+
+    /// 段级（Thinking/ToolCall/TurnChanges）或 turn 改动面板文件行级
+    ///（row_ix = Some）的开合动画态
+    pub(crate) fn expand_anim_at(
+        &mut self,
+        message_ix: usize,
+        segment_ix: usize,
+        row_ix: Option<usize>,
+    ) -> Option<&mut ExpandAnim> {
+        let segment = self
+            .messages
+            .get_mut(message_ix)?
+            .segments
+            .get_mut(segment_ix)?;
+        match row_ix {
+            Some(rix) => match segment {
+                Segment::TurnChanges { rows, .. } => {
+                    rows.get_mut(rix).map(|row| &mut row.expand_anim)
+                }
+                _ => None,
+            },
+            None => match segment {
+                Segment::Thinking { expand_anim, .. }
+                | Segment::ToolCall { expand_anim, .. }
+                | Segment::TurnChanges { expand_anim, .. } => Some(expand_anim),
+                _ => None,
+            },
+        }
+    }
+
+    /// 开合切换的动画驱动：gen+1 重播动画；收起时进入 collapsing（内容保持
+    /// 挂载播滑收），计时器到期卸载——期间又展开的代次不符自动作废
+    pub(crate) fn drive_expand_anim(
+        &mut self,
+        message_ix: usize,
+        segment_ix: usize,
+        row_ix: Option<usize>,
+        expanded_now: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anim) = self.expand_anim_at(message_ix, segment_ix, row_ix) else {
+            return;
+        };
+        anim.generation += 1;
+        anim.collapsing = !expanded_now;
+        if expanded_now {
+            return;
+        }
+        let generation = anim.generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(EXPAND_ANIM_DUR + std::time::Duration::from_millis(50))
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(anim) = this.expand_anim_at(message_ix, segment_ix, row_ix)
+                    && anim.collapsing
+                    && anim.generation == generation
+                {
+                    anim.collapsing = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 展开/收起内容的动画包装：展开 = 内容从 0 高滑开 + 淡入；收起 = 保持挂载
+    /// 滑收淡出（卸载见 drive_expand_anim 的计时器）。高度目标用内容实测自然高
+    ///（内层 on_prepaint 持续测量——clip/高度帽只作用在外层，内层始终按自然高
+    /// 布局；未测到先隐形挂一帧量高）；动画结束帧（delta=1）摘掉 max_h 帽，
+    /// 超高内容不受残留限制。id 含 gen，每次开合重播
+    pub(crate) fn expand_anim_wrap(
+        &self,
+        id: String,
+        anim: &ExpandAnim,
+        content: AnyElement,
+    ) -> AnyElement {
+        let measured = anim.measured_h.clone();
+        let measured_inner = anim.measured_h.clone();
+        let collapsing = anim.collapsing;
+        div()
+            .overflow_hidden()
+            .with_animation(
+                id,
+                Animation::new(EXPAND_ANIM_DUR).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    let d = if collapsing { 1.0 - delta } else { delta };
+                    let h = measured.get();
+                    if !collapsing && delta >= 1.0 {
+                        el
+                    } else if h <= 0. {
+                        el.opacity(0.)
+                    } else {
+                        el.max_h(px(h * d)).opacity(d.max(0.))
+                    }
+                },
+            )
+            .child(
+                div()
+                    .on_prepaint(move |bounds, _, _| {
+                        measured_inner.set(f32::from(bounds.size.height))
+                    })
+                    .child(content),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for ThreadView {
@@ -602,6 +760,22 @@ impl Render for ThreadView {
                     record_size,
                     payload_scroll: ScrollHandle::new(),
                 });
+            }
+            // Read/Bash 工具卡的 UI 态惰性创建（换行/复制/高亮缓存；render 路径只读）
+            for segment in &mut message.segments {
+                match segment {
+                    Segment::ToolCall { tool, read_ui, .. }
+                        if tool == "Read" && read_ui.is_none() =>
+                    {
+                        *read_ui = Some(ReadCardUi::new());
+                    }
+                    Segment::ToolCall { tool, bash_ui, .. }
+                        if tool == "Bash" && bash_ui.is_none() =>
+                    {
+                        *bash_ui = Some(BashCardUi::new());
+                    }
+                    _ => {}
+                }
             }
         }
         let mut items = Vec::with_capacity(self.messages.len());

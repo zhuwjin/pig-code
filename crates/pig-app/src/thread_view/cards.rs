@@ -16,6 +16,7 @@ impl ThreadView {
         ticker: &TickerRoll,
         body_scroll: &ScrollHandle,
         ticker_scroll: &ScrollHandle,
+        expand_anim: &ExpandAnim,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -117,6 +118,7 @@ impl ThreadView {
                     .py_1()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut open_now = false;
                         if let Some(Segment::Thinking {
                             open,
                             pinned,
@@ -129,11 +131,14 @@ impl ThreadView {
                             .and_then(|m| m.segments.get_mut(segment_ix))
                         {
                             *open = !*open;
+                            open_now = *open;
                             *pinned = true;
                             // 展开/收起都把滚动行重置到最新行（ZCode：展开时滚动行卸载，
                             // 回折叠时以最新行重新挂载，不重播滚动）
                             ticker.reset_to(ticker_target_line(text));
                         }
+                        // 开合动画驱动（gen 重播 + 收起时保持挂载播滑收）
+                        this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
                         cx.notify();
                     }))
                     .child(
@@ -178,27 +183,36 @@ impl ThreadView {
                             ),
                     ),
             )
-            .when(open, |this| {
+            .when(open || expand_anim.collapsing, |this| {
+                // 开合动画包装（滑开/滑收 + 淡入淡出）
                 this.child(
-                    // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
-                    div()
-                        .relative()
-                        .on_scroll_wheel(consume_scroll(body_scroll))
-                        .child(
-                            div()
-                                .id(("thinking-body", message_ix * 1024 + segment_ix))
-                                .mt_1()
-                                .ml(px(8.))
-                                .border_l_1()
-                                .border_color(cx.theme().border)
-                                .pl(px(14.))
-                                .max_h(px(240.))
-                                .overflow_y_scroll()
-                                .track_scroll(body_scroll)
-                                .text_sm()
-                                .text_color(subtlest)
-                                .child(text.to_string()),
+                    self.expand_anim_wrap(
+                        format!(
+                            "thinking-expand-{message_ix}-{segment_ix}-{}",
+                            expand_anim.generation
                         ),
+                        expand_anim,
+                        // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
+                        div()
+                            .relative()
+                            .on_scroll_wheel(consume_scroll(body_scroll))
+                            .child(
+                                div()
+                                    .id(("thinking-body", message_ix * 1024 + segment_ix))
+                                    .mt_1()
+                                    .ml(px(8.))
+                                    .border_l_1()
+                                    .border_color(cx.theme().border)
+                                    .pl(px(14.))
+                                    .max_h(px(240.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(body_scroll)
+                                    .text_sm()
+                                    .text_color(subtlest)
+                                    .child(text.to_string()),
+                            )
+                            .into_any_element(),
+                    ),
                 )
             })
             .into_any_element()
@@ -210,6 +224,8 @@ impl ThreadView {
     /// 流式期间工具多，持续动画耗渲染资源）。
     /// `approval_pending`：该工具正在等待批准（行尾显示黄色「等待批准」）。
     /// `agent_cards`：SubagentCard 写入的代理卡列表（Agent 一张、AgentSwarm 多张）。
+    /// `read_ui`：Read 工具代码卡的 UI 态（换行/复制/高亮缓存；仅 Read 有值）
+    /// `bash_ui`：Bash 工具代码卡的 UI 态（命令卡+输出卡；仅 Bash 有值）
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_tool_card(
         &self,
@@ -225,7 +241,11 @@ impl ThreadView {
         approval_pending: bool,
         edit: Option<&EditDiff>,
         agent_cards: &[AgentCardMeta],
+        read_ui: Option<&ReadCardUi>,
+        bash_ui: Option<&BashCardUi>,
+        expand_anim: &ExpandAnim,
         body_scroll: &ScrollHandle,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // AgentSwarm 工具卡升级为 Swarm 面板（kimi-code 同款）：可折叠汇总行
@@ -242,6 +262,7 @@ impl ThreadView {
                 done,
                 expanded,
                 agent_cards,
+                expand_anim,
                 cx,
             );
         }
@@ -313,13 +334,17 @@ impl ThreadView {
                     .py_1()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut expanded_now = false;
                         if let Some(Segment::ToolCall { expanded, .. }) = this
                             .messages
                             .get_mut(message_ix)
                             .and_then(|m| m.segments.get_mut(segment_ix))
                         {
                             *expanded = !*expanded;
+                            expanded_now = *expanded;
                         }
+                        // 开合动画驱动（gen 重播 + 收起时保持挂载播滑收）
+                        this.drive_expand_anim(message_ix, segment_ix, None, expanded_now, cx);
                         cx.notify();
                     }))
                     .child(Icon::new(tool_icon).size_4().text_color(subtlest))
@@ -346,9 +371,70 @@ impl ThreadView {
                             .into_any_element()
                     })
                     // 成功不给标记；失败在行尾放叉号（悬停显示原因）
-                    // 编辑类：文件名（亮一档）+ 目录路径（最暗，优先截断）；其余工具单行摘要
-                    // 摘要只占内容宽（过长时收缩截断），让统计/箭头跟在文字后面而非靠右
-                    .child(if edit.is_some() {
+                    // Read：路径保持原有单一全文展示（过长截断），可点击（右侧
+                    // 文件面板看全文），悬停高亮+下划线；完成后追加「N 行」。
+                    // 编辑类：文件名（亮一档）+ 目录路径（最暗，优先截断）；
+                    // 其余工具单行摘要。摘要只占内容宽（过长收缩截断），
+                    // 让统计/箭头跟在文字后面而非靠右
+                    .child(if tool == "Read" {
+                        let key = message_ix * 1024 + segment_ix;
+                        let path = summary.to_string();
+                        let path_hover = cx.theme().foreground;
+                        let line_count = if done && !is_error {
+                            read_output_line_count(output)
+                        } else {
+                            0
+                        };
+                        h_flex()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(("read-path", key))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_sm()
+                                    .text_color(subtle)
+                                    .cursor_pointer()
+                                    .hover(move |this| this.text_color(path_hover).underline())
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new("在右侧查看完整文件").build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let line = this
+                                            .messages
+                                            .get(message_ix)
+                                            .and_then(|m| m.segments.get(segment_ix))
+                                            .and_then(|s| match s {
+                                                Segment::ToolCall { output, .. } => {
+                                                    read_output_first_line(output)
+                                                }
+                                                _ => None,
+                                            });
+                                        cx.emit(ThreadEvent::OpenFile {
+                                            path: path.clone(),
+                                            line,
+                                        });
+                                    }))
+                                    .child(summary.to_string()),
+                            )
+                            .when(line_count > 0, |this| {
+                                this.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .whitespace_nowrap()
+                                        .text_sm()
+                                        .text_color(subtlest)
+                                        .child(format!("{line_count} 行")),
+                                )
+                            })
+                            .into_any_element()
+                    } else if edit.is_some() {
                         let (dir, name) = split_path(summary);
                         h_flex()
                             .min_w_0()
@@ -489,80 +575,125 @@ impl ThreadView {
                     )
                 },
             )
-            .when(expanded, |this| {
-                // 展开正文统一放进带滚动条的视口（track_scroll 持久滚动位置 + 可见滚动条）
+            .when(expanded || expand_anim.collapsing, |this| {
+                // Read 完成且输出是带行号的文件内容 → 代码卡（read.rs）；
+                // 运行中/报错/非内容输出（空文件、未变化）回落通用卡。
+                // Bash 收尾（含失败）→ 命令卡 + 输出卡（bash.rs）；
+                // 运行中/等审批走通用卡（实时输出）
+                let read_card = tool == "Read"
+                    && done
+                    && !is_error
+                    && read_ui.is_some()
+                    && is_read_code_output(output);
+                let bash_card = tool == "Bash" && done && bash_ui.is_some();
+                // 展开正文统一放进带滚动条的视口（track_scroll 持久滚动位置 + 可见滚动条）；
+                // 内容整体包一层开合动画（滑开/滑收 + 淡入淡出）
                 this.child(
-                    div()
-                        .relative()
-                        .mt_2()
-                        .w_full()
-                        // 滚动链：正文能滚时吞掉滚轮，避免外层消息列表联动
-                        .on_scroll_wheel(consume_scroll(body_scroll))
-                        // 编辑类工具展开为内联 diff 代码卡；其余工具是通用输入+输出卡
-                        .child(if let Some(edit) = edit {
-                            Self::render_edit_diff(
-                                ("tool-body", message_ix * 1024 + segment_ix),
-                                edit,
-                                body_scroll,
-                                cx,
-                            )
-                        } else {
-                            v_flex()
+                    div().relative().mt_2().w_full().child(
+                        self.expand_anim_wrap(
+                            format!(
+                                "tool-expand-{message_ix}-{segment_ix}-{}",
+                                expand_anim.generation
+                            ),
+                            expand_anim,
+                            div()
+                                .relative()
                                 .w_full()
-                                .gap_3()
-                                .rounded_xl()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().group_box)
-                                .px_4()
-                                .py_3()
-                                // 完整输入：终端类带 `$` 前缀，其余工具直接全文（折叠行里被截断的部分）
-                                .when(!summary.is_empty(), |this| {
-                                    this.child(
-                                        h_flex()
-                                            .w_full()
-                                            .gap_2()
-                                            .items_start()
-                                            .when(tool == "Bash", |this| {
-                                                this.child(
-                                                    div().text_sm().text_color(subtle).child("$"),
-                                                )
-                                            })
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().foreground)
-                                                    .child(summary.to_string()),
-                                            ),
+                                // 滚动链：正文能滚时吞掉滚轮，避免外层消息列表联动
+                                .on_scroll_wheel(consume_scroll(body_scroll))
+                                // 编辑类工具展开为内联 diff 代码卡；其余工具是通用输入+输出卡
+                                .child(if let Some(edit) = edit {
+                                    Self::render_edit_diff(
+                                        ("tool-body", message_ix * 1024 + segment_ix),
+                                        edit,
+                                        body_scroll,
+                                        cx,
                                     )
-                                })
-                                .child(
-                                    div()
-                                        .id(("tool-body", message_ix * 1024 + segment_ix))
-                                        .max_h(px(120.))
-                                        .overflow_y_scroll()
-                                        .track_scroll(body_scroll)
-                                        .text_sm()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(if is_error {
-                                            cx.theme().danger
-                                        } else {
-                                            subtle
+                                } else if read_card {
+                                    match read_ui {
+                                        Some(ui) => self.render_read_card(
+                                            message_ix,
+                                            segment_ix,
+                                            summary,
+                                            output,
+                                            ui,
+                                            body_scroll,
+                                            window,
+                                            cx,
+                                        ),
+                                        None => div().into_any_element(),
+                                    }
+                                } else if bash_card {
+                                    match bash_ui {
+                                        Some(ui) => self.render_bash_card(
+                                            message_ix, segment_ix, summary, output, is_error, ui,
+                                            window, cx,
+                                        ),
+                                        None => div().into_any_element(),
+                                    }
+                                } else {
+                                    v_flex()
+                                        .w_full()
+                                        .gap_3()
+                                        .rounded_xl()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .bg(cx.theme().group_box)
+                                        .px_4()
+                                        .py_3()
+                                        // 完整输入：终端类带 `$` 前缀，其余工具直接全文（折叠行里被截断的部分）
+                                        .when(!summary.is_empty(), |this| {
+                                            this.child(
+                                                h_flex()
+                                                    .w_full()
+                                                    .gap_2()
+                                                    .items_start()
+                                                    .when(tool == "Bash", |this| {
+                                                        this.child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(subtle)
+                                                                .child("$"),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .text_sm()
+                                                            .text_color(cx.theme().foreground)
+                                                            .child(summary.to_string()),
+                                                    ),
+                                            )
                                         })
-                                        .child(if output.is_empty() && done {
-                                            "没有输出。".to_string()
-                                        } else {
-                                            output.to_string()
-                                        }),
-                                )
-                                .into_any_element()
-                        })
-                        // diff 卡的滚动条已内置（随圆角补丁收角）；通用卡的补在这里
-                        .when(edit.is_none(), |this| {
-                            this.child(Scrollbar::vertical(body_scroll))
-                        }),
+                                        .child(
+                                            div()
+                                                .id(("tool-body", message_ix * 1024 + segment_ix))
+                                                .max_h(px(120.))
+                                                .overflow_y_scroll()
+                                                .track_scroll(body_scroll)
+                                                .text_sm()
+                                                .font_family(cx.theme().mono_font_family.clone())
+                                                .text_color(if is_error {
+                                                    cx.theme().danger
+                                                } else {
+                                                    subtle
+                                                })
+                                                .child(if output.is_empty() && done {
+                                                    "没有输出。".to_string()
+                                                } else {
+                                                    output.to_string()
+                                                }),
+                                        )
+                                        .into_any_element()
+                                })
+                                // diff 卡与 Read/Bash 代码卡的滚动条已内置（随圆角补丁收角）；通用卡的补在这里
+                                .when(edit.is_none() && !read_card && !bash_card, |this| {
+                                    this.child(Scrollbar::vertical(body_scroll))
+                                })
+                                .into_any_element(),
+                        ),
+                    ),
                 )
             })
             .into_any_element()
@@ -765,6 +896,7 @@ impl ThreadView {
         done: bool,
         open: bool,
         cards: &[AgentCardMeta],
+        expand_anim: &ExpandAnim,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let subtle = cx.theme().muted_foreground;
@@ -806,13 +938,16 @@ impl ThreadView {
             .py_1()
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
+                let mut open_now = false;
                 if let Some(Segment::ToolCall { expanded, .. }) = this
                     .messages
                     .get_mut(message_ix)
                     .and_then(|m| m.segments.get_mut(segment_ix))
                 {
                     *expanded = !*expanded;
+                    open_now = *expanded;
                 }
+                this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
                 cx.notify();
             }))
             .child(
@@ -877,13 +1012,16 @@ impl ThreadView {
             .cursor_pointer()
             .hover(|this| this.bg(cx.theme().accent))
             .on_click(cx.listener(move |this, _, _, cx| {
+                let mut open_now = false;
                 if let Some(Segment::ToolCall { expanded, .. }) = this
                     .messages
                     .get_mut(message_ix)
                     .and_then(|m| m.segments.get_mut(segment_ix))
                 {
                     *expanded = !*expanded;
+                    open_now = *expanded;
                 }
+                this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
                 cx.notify();
             }))
             .child(
@@ -1078,14 +1216,20 @@ impl ThreadView {
         v_flex()
             .w_full()
             .child(header)
-            .when(open, |this| {
+            .when(open || expand_anim.collapsing, |this| {
+                // 开合动画包装（滑开/滑收 + 淡入淡出）
                 this.child(
-                    // 缩进用 padding 而非 margin：w_full 子级不会因外边距溢出
-                    div()
-                        .w_full()
-                        .pl(px(24.))
-                        .pt_1()
-                        .child(v_flex().w_full().gap_2().child(parent).child(list)),
+                    self.expand_anim_wrap(
+                        format!("swarm-expand-{key}-{}", expand_anim.generation),
+                        expand_anim,
+                        // 缩进用 padding 而非 margin：w_full 子级不会因外边距溢出
+                        div()
+                            .w_full()
+                            .pl(px(24.))
+                            .pt_1()
+                            .child(v_flex().w_full().gap_2().child(parent).child(list))
+                            .into_any_element(),
+                    ),
                 )
             })
             .into_any_element()

@@ -46,6 +46,10 @@ impl AppView {
         if let RightTab::Subagent { agent_id } = &tab {
             self.subagent_tabs.remove(agent_id);
         }
+        // 「文件」tab 的内容面板随 tab 关闭释放
+        if let RightTab::File { path } = &tab {
+            self.file_tabs.remove(path);
+        }
         if self.right_active.as_ref() == Some(&tab) {
             self.right_active = self.right_tabs.last().cloned();
         }
@@ -70,6 +74,51 @@ impl AppView {
             self.agent.load_subagent(session_id, agent_id.clone());
         }
         let tab = RightTab::Subagent { agent_id };
+        if !self.right_tabs.contains(&tab) {
+            self.right_tabs.push(tab.clone());
+        }
+        self.right_active = Some(tab);
+        self.right_open = true;
+        cx.notify();
+    }
+
+    /// 打开/聚焦「文件」tab（Read 卡路径点击）：路径相对会话 cwd 解析成绝对
+    /// 路径（canonical 去重）；已开则重读文件（拿到最新内容）并聚焦。
+    /// `line`：Read 输出首行号，加载完成后滚动定位到该行。
+    pub(crate) fn open_file_tab(
+        &mut self,
+        session_id: &str,
+        raw_path: String,
+        line: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self
+            .metas
+            .iter()
+            .find(|m| m.id == session_id)
+            .map(|m| m.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
+        let joined = {
+            let path = std::path::PathBuf::from(&raw_path);
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        };
+        // canonicalize 去重（./../符号链接归一）；文件不存在时回落原路径
+        //（面板显示「读取失败」错误态）
+        let full = joined.canonicalize().unwrap_or(joined);
+        let key = full.to_string_lossy().to_string();
+        match self.file_tabs.get(&key) {
+            Some(panel) => panel.update(cx, |panel, cx| panel.reload(line, cx)),
+            None => {
+                let panel = cx.new(|_| FileViewPanel::new(raw_path, full));
+                panel.update(cx, |panel, cx| panel.reload(line, cx));
+                self.file_tabs.insert(key.clone(), panel);
+            }
+        }
+        let tab = RightTab::File { path: key };
         if !self.right_tabs.contains(&tab) {
             self.right_tabs.push(tab.clone());
         }
@@ -347,6 +396,13 @@ impl AppView {
                     truncate_tab_label(&title),
                 )
             }
+            RightTab::File { path } => {
+                let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+                (
+                    Icon::new(IconName::FileText).size_3p5().into_any_element(),
+                    truncate_tab_label(name),
+                )
+            }
         };
         h_flex()
             .id(format!("right-tab-{}", tab.key()))
@@ -464,6 +520,10 @@ impl AppView {
             },
             Some(RightTab::Trajectory) => self.render_trajectory_panel(cx),
             Some(RightTab::Subagent { agent_id }) => match self.subagent_tabs.get(agent_id) {
+                Some(panel) => panel.clone().into_any_element(),
+                None => self.render_right_menu_page(window, cx),
+            },
+            Some(RightTab::File { path }) => match self.file_tabs.get(path) {
                 Some(panel) => panel.clone().into_any_element(),
                 None => self.render_right_menu_page(window, cx),
             },

@@ -398,6 +398,7 @@ impl ThreadView {
                             ticker,
                             body_scroll,
                             ticker_scroll,
+                            expand_anim,
                             ..
                         } => self.render_thinking(
                             ix,
@@ -408,6 +409,7 @@ impl ThreadView {
                             ticker,
                             body_scroll,
                             ticker_scroll,
+                            expand_anim,
                             window,
                             cx,
                         ),
@@ -461,6 +463,9 @@ impl ThreadView {
                             edit,
                             live_note,
                             agent_cards,
+                            read_ui,
+                            bash_ui,
+                            expand_anim,
                             body_scroll,
                         } => {
                             let approval_pending = matches!(
@@ -480,14 +485,20 @@ impl ThreadView {
                                 approval_pending,
                                 edit.as_ref(),
                                 agent_cards,
+                                read_ui.as_ref(),
+                                bash_ui.as_ref(),
+                                expand_anim,
                                 body_scroll,
+                                window,
                                 cx,
                             )
                         }
                         Segment::Approval { .. } => unreachable!(),
-                        Segment::TurnChanges { rows, open } => {
-                            self.render_turn_changes(ix, six, rows, *open, cx)
-                        }
+                        Segment::TurnChanges {
+                            rows,
+                            open,
+                            expand_anim,
+                        } => self.render_turn_changes(ix, six, rows, *open, expand_anim, cx),
                     });
                 }
                 if let Some(footer) = &message.footer {

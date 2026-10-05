@@ -27,6 +27,7 @@ impl ThreadView {
                     body_scroll: ScrollHandle::new(),
                     ticker_scroll: ScrollHandle::new(),
                     ticker: TickerRoll::default(),
+                    expand_anim: ExpandAnim::default(),
                 });
                 let mut roll_promoted = false;
                 let replay = self.replay_turn;
@@ -102,6 +103,9 @@ impl ThreadView {
                     edit: None,
                     live_note: None,
                     agent_cards: vec![],
+                    read_ui: None,
+                    bash_ui: None,
+                    expand_anim: ExpandAnim::default(),
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall { tool, summary, .. }) = self.current_segment(six) {
@@ -127,6 +131,9 @@ impl ThreadView {
                     edit: None,
                     live_note: None,
                     agent_cards: vec![],
+                    read_ui: None,
+                    bash_ui: None,
+                    expand_anim: ExpandAnim::default(),
                     body_scroll: ScrollHandle::new(),
                 });
                 if let Some(Segment::ToolCall {
@@ -358,9 +365,11 @@ impl ThreadView {
                                     edit,
                                     expanded: false,
                                     scroll: ScrollHandle::new(),
+                                    expand_anim: ExpandAnim::default(),
                                 })
                                 .collect(),
                             open: false,
+                            expand_anim: ExpandAnim::default(),
                         });
                 }
                 self.auto_scroll();

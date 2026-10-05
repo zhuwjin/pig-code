@@ -418,3 +418,427 @@ fn ticker_roll_content_overflows_viewport(cx: &mut gpui_kit::TestAppContext) {
         "滚动行内容应溢出视口（钉尾依赖 max_offset），实际 {max:?}"
     );
 }
+
+#[test]
+fn read_output_parsing() {
+    use super::{
+        is_read_code_output, parse_read_output, read_output_first_line, read_output_line_count,
+    };
+    // 标准分页输出：编号行 + 截断提示
+    let output = "215\tlet base = base.strip_suffix(\".exe\");\n216\t}\n\n[已截断: 显示 215-216 行，共 300 行；用 offset 参数继续读取]";
+    let parsed = parse_read_output(output).expect("应解析出内容");
+    assert_eq!(parsed.lines.len(), 2);
+    assert_eq!(parsed.lines[0].0, 215);
+    assert_eq!(parsed.lines[0].1, "let base = base.strip_suffix(\".exe\");");
+    assert_eq!(parsed.lines[1].1, "}");
+    assert_eq!(
+        parsed.notes,
+        vec!["[已截断: 显示 215-216 行，共 300 行；用 offset 参数继续读取]"]
+    );
+    assert_eq!(read_output_line_count(output), 2);
+    assert_eq!(read_output_first_line(output), Some(215));
+    assert!(is_read_code_output(output));
+
+    // 内容行自身以「数字+tab」开头：split_once 只切第一个 tab
+    let parsed = parse_read_output("7\t100\t200").expect("应解析");
+    assert_eq!(parsed.lines, vec![(7, "100\t200".to_string())]);
+
+    // 空内容行（`{no}\t`）与 lossy 警告（无空行分隔）
+    let parsed = parse_read_output("1\t\n2\tx\n[警告: 解码存在替换字符]").expect("应解析");
+    assert_eq!(parsed.lines.len(), 2);
+    assert_eq!(parsed.lines[0].1, "");
+    assert_eq!(parsed.notes, vec!["[警告: 解码存在替换字符]"]);
+
+    // 非内容输出：空文件/未变化/报错 → None（回落通用工具卡）
+    assert!(parse_read_output("（空文件）").is_none());
+    assert!(
+        parse_read_output("（文件未变化：与上次 Read 参数相同且内容一致，无需重复读取）").is_none()
+    );
+    assert!(parse_read_output("文件不存在: foo.rs").is_none());
+    assert!(!is_read_code_output("（空文件）"));
+    assert_eq!(read_output_line_count("（空文件）"), 0);
+    assert_eq!(read_output_first_line("（空文件）"), None);
+}
+
+/// 横向滚动回归：Read 卡不折行时，内容列用 measure_max_line_width 的显式宽度
+/// （不显式给宽会被布局钳进可用空间，横向滚动失效）；这里验证「量宽 + 显式设宽
+/// → ScrollHandle 感知横向溢出」整条链路（结构与 render_read_card 正文一致：
+/// x 滚动容器 > v_flex（显式宽）> code_line_row（nowrap））。
+#[gpui_kit::test]
+fn read_card_nowrap_overflows_horizontally(cx: &mut gpui_kit::TestAppContext) {
+    use crate::code_view::{code_line_row, highlight_code, measure_max_line_width};
+    use gpui_kit::component::{ActiveTheme as _, v_flex};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AppContext as _, InteractiveElement as _, ParentElement as _,
+        StatefulInteractiveElement as _, Styled as _,
+    };
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        h_scroll: gpui_kit::ScrollHandle,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            let code = format!("短行\n{}", "let x = \"超长行\"; ".repeat(40));
+            let theme = cx.theme().highlight_theme.clone();
+            let highlighted = highlight_code(&code, "text", &theme);
+            // 与卡同结构：gutter(28) + 代码格 padding(24) + 最大行宽
+            let content_w = gpui_kit::px(28.)
+                + gpui_kit::px(24.)
+                + measure_max_line_width(&code, &highlighted, window, cx);
+            gpui_kit::div().size_full().child(
+                gpui_kit::div().w(gpui_kit::px(200.)).child(
+                    gpui_kit::div()
+                        .id("read-body-x")
+                        .w_full()
+                        .overflow_x_scroll()
+                        .track_scroll(&self.h_scroll)
+                        .child(v_flex().w(content_w).children(vec![
+                            code_line_row(
+                                1,
+                                "短行",
+                                vec![],
+                                gpui_kit::px(28.),
+                                gpui_kit::hsla(0., 0., 0., 1.),
+                                false,
+                            ),
+                            code_line_row(
+                                2,
+                                highlighted.line_text(&code, 1),
+                                highlighted.line_styles(1),
+                                gpui_kit::px(28.),
+                                gpui_kit::hsla(0., 0., 0., 1.),
+                                false,
+                            ),
+                        ])),
+                ),
+            )
+        }
+    }
+
+    let h_scroll = gpui_kit::ScrollHandle::new();
+    let window = cx.open_window(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)), {
+        let h_scroll = h_scroll.clone();
+        move |_window, _cx| Probe {
+            h_scroll: h_scroll.clone(),
+        }
+    });
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let max = h_scroll.max_offset().x;
+    assert!(
+        max > gpui_kit::px(1.),
+        "显式量宽后超长行应溢出视口产生横向滚动（max_offset.x），实际 {max:?}"
+    );
+}
+
+/// 滚轮轴锁定回归：Read 卡（x/y 两层滚动容器）必须各自只响应自己轴的滚轮
+/// delta。gpui 默认把纵向 delta 映射到仅 x 可滚容器（y→x）、横向 delta 映射到
+/// 仅 y 可滚容器（x→y），不加 restrict_scroll_to_axis 时滚轮一动两轴同滚
+///（2026-10-05 用户实测反馈）。结构与 render_read_card 正文一致。
+/// 注：window.scroll(id) 依赖观测注册表（仅收 test_support 包裹的元素），
+/// 这里用 dispatch_event 往已知布局位置直接派发滚轮事件。
+#[gpui_kit::test]
+fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
+    use crate::code_view::code_line_row;
+    use gpui_kit::component::v_flex;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AppContext as _, InputEvent as _, InteractiveElement as _, ParentElement as _,
+        StatefulInteractiveElement as _, Styled as _,
+    };
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        y_scroll: gpui_kit::ScrollHandle,
+        h_scroll: gpui_kit::ScrollHandle,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            let line = "let x = \"超长行\"; ".repeat(40);
+            gpui_kit::div().size_full().child(
+                gpui_kit::div()
+                    .w(gpui_kit::px(200.))
+                    .h(gpui_kit::px(100.))
+                    .child(
+                        gpui_kit::div()
+                            .id("read-body")
+                            .w_full()
+                            .max_h(gpui_kit::px(100.))
+                            .overflow_y_scroll()
+                            .restrict_scroll_to_axis()
+                            .track_scroll(&self.y_scroll)
+                            .child(
+                                gpui_kit::div()
+                                    .id("read-body-x")
+                                    .overflow_x_scroll()
+                                    .restrict_scroll_to_axis()
+                                    .track_scroll(&self.h_scroll)
+                                    .child(v_flex().w(gpui_kit::px(1200.)).children((0..40).map(
+                                        |ix| {
+                                            code_line_row(
+                                                ix + 1,
+                                                &line,
+                                                vec![],
+                                                gpui_kit::px(28.),
+                                                gpui_kit::hsla(0., 0., 0., 1.),
+                                                false,
+                                            )
+                                        },
+                                    ))),
+                            ),
+                    ),
+            )
+        }
+    }
+
+    let y_scroll = gpui_kit::ScrollHandle::new();
+    let h_scroll = gpui_kit::ScrollHandle::new();
+    let window = cx.open_window(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)), {
+        let (y_scroll, h_scroll) = (y_scroll.clone(), h_scroll.clone());
+        move |_window, _cx| Probe {
+            y_scroll: y_scroll.clone(),
+            h_scroll: h_scroll.clone(),
+        }
+    });
+    // 卡片固定在窗口左上角的 200x100 区域；往其中心派滚轮事件
+    let wheel = |dx: f32, dy: f32| {
+        gpui_kit::ScrollWheelEvent {
+            position: gpui_kit::point(gpui_kit::px(100.), gpui_kit::px(50.)),
+            delta: gpui_kit::ScrollDelta::Lines(gpui_kit::point(dx, dy)),
+            ..Default::default()
+        }
+        .to_platform_input()
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // 纵向滚轮（鼠标滚轮 = Lines，非 precise）：只能滚纵向，横向纹丝不动
+        window.dispatch_event(wheel(0., -3.), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert_eq!(
+        h_scroll.offset().x,
+        gpui_kit::px(0.),
+        "纵向滚轮不得带动横向滚动"
+    );
+    assert!(y_scroll.offset().y < gpui_kit::px(0.), "纵向滚轮应滚纵向");
+    // 横向 delta（Shift+滚轮/触控板横滑）：只能滚横向，纵向保持原位
+    //（滚动偏移与 y 轴同号约定：向右滚 = delta.x 为负、offset.x 变负）
+    let y_before = y_scroll.offset().y;
+    cx.update_window(window.into(), |_, window, cx| {
+        window.dispatch_event(wheel(-4., 0.), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert!(
+        h_scroll.offset().x != gpui_kit::px(0.),
+        "横向 delta 应滚横向"
+    );
+    assert_eq!(y_scroll.offset().y, y_before, "横向 delta 不得带动纵向滚动");
+}
+/// 滚动链回归：Bash 卡的子卡用独立滚动句柄（不走 cards.rs 共享的
+/// consume_scroll(body_scroll) 兜底），内容可滚时必须各自吞掉滚轮——
+/// 否则穿透到外层消息列表双滚（2026-10-05 用户实测反馈）；内容不可滚
+///（短命令）时必须穿透给列表（与其他工具卡行为一致）。
+///
+/// 注意点：①滚轮命中间接看 mouse_position（dispatch_event 不给滚轮更新它），
+/// 派发前先派 MouseMove；②开合动画按真实墙钟播放，期间 max_h 裁切会挡住
+/// 命中——展开后先睡过动画时长再测。
+#[gpui_kit::test]
+fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, InputEvent as _};
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    // 场景：Bash 卡在前（顶部，避免滚动后的几何换算）+ 30 条用户消息撑出
+    // 外层列表滚动（命令 1 行 → 命令卡不可滚；输出 40 行 → 输出卡可滚）
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("先跑个命令".to_string(), vec![], cx);
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 0,
+                        item_id: "b1".into(),
+                        tool: "Bash".into(),
+                        input_summary: "echo hi".into(),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallEnd {
+                        session_id: "s".into(),
+                        seq: 1,
+                        item_id: "b1".into(),
+                        output: (1..=40)
+                            .map(|i| format!("输出行 {i}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        is_error: false,
+                        edit: None,
+                    },
+                    cx,
+                );
+                for ix in 0..30 {
+                    view.append_user_message(format!("消息 {ix}"), vec![], cx);
+                }
+                assert!(view.debug_expand_tool("Bash", cx), "应有 Bash 卡可展开");
+            });
+        })
+        .unwrap();
+    // 列表回顶（卡片在顶部）：append 期间每条消息都强制跟随贴底（含 deferred
+    // 滚动标记），先渲一帧消费掉标记，再显式归零
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                view.follow_bottom = false;
+                view.scroll_handle
+                    .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
+            });
+        })
+        .unwrap();
+    // 渲染一帧（bash_ui 创建 + 内容量高），再等动画播完（开合动画按真实墙钟
+    // 走；不播完 max_h 裁切会把命中区收没）
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    // 滚轮命中间接看 mouse_position：先把指针移过去（dispatch_event 只给
+    // MouseMove/Down/Up 更新 mouse_position，滚轮事件不更新）
+    let mouse_move = |position| {
+        gpui_kit::MouseMoveEvent {
+            position,
+            ..Default::default()
+        }
+        .to_platform_input()
+    };
+    // dy: 负 = 向下滚（offset 变负），正 = 向上滚
+    let wheel = |position, dy: f32| {
+        gpui_kit::ScrollWheelEvent {
+            position,
+            delta: gpui_kit::ScrollDelta::Lines(gpui_kit::point(0., dy)),
+            ..Default::default()
+        }
+        .to_platform_input()
+    };
+    let read_state = |probe: &Probe, cx: &gpui_kit::App| {
+        let view = probe.thread.read(cx);
+        let out = view
+            .messages
+            .iter()
+            .flat_map(|m| &m.segments)
+            .find_map(|s| match s {
+                super::Segment::ToolCall {
+                    bash_ui: Some(ui), ..
+                } => Some((ui.out_scroll.offset().y, ui.cmd_scroll.bounds().center())),
+                _ => None,
+            });
+        (
+            view.scroll_handle.offset().y,
+            view.scroll_handle.max_offset().y,
+            out,
+        )
+    };
+    let (outer_before, outer_max, out_state) = window
+        .update(cx, |probe, _, cx| read_state(probe, cx))
+        .unwrap();
+    let (_, cmd_center) = out_state.expect("Bash 卡 UI 态应已创建");
+    assert!(outer_max > gpui_kit::px(0.), "外层消息列表应可滚动");
+
+    // 输出卡中心（此刻应在视口内）：用卡 bounds 的中心
+    let out_center = window
+        .update(cx, |probe, _, cx| {
+            let view = probe.thread.read(cx);
+            view.messages
+                .iter()
+                .flat_map(|m| &m.segments)
+                .find_map(|s| match s {
+                    super::Segment::ToolCall {
+                        bash_ui: Some(ui), ..
+                    } => Some(ui.out_scroll.bounds().center()),
+                    _ => None,
+                })
+                .expect("Bash 卡 UI 态应已创建")
+        })
+        .unwrap();
+    let list_bounds = window
+        .update(cx, |probe, _, cx| {
+            probe.thread.read(cx).scroll_handle.bounds()
+        })
+        .unwrap();
+    assert!(
+        out_center.y > list_bounds.top() && out_center.y < list_bounds.bottom(),
+        "输出卡应在视口内: {out_center:?} vs {list_bounds:?}"
+    );
+
+    // 滚输出卡（可滚）：卡内滚动 + 外层列表纹丝不动（不穿透）
+    cx.update_window(window.into(), |_, window, cx| {
+        window.dispatch_event(mouse_move(out_center), cx);
+        window.dispatch_event(wheel(out_center, -3.), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let (outer_after, _, out_after) = window
+        .update(cx, |probe, _, cx| read_state(probe, cx))
+        .unwrap();
+    let out_after = out_after.unwrap().0;
+    assert!(out_after < gpui_kit::px(0.), "输出卡应滚动: {out_after:?}");
+    assert_eq!(
+        outer_after, outer_before,
+        "可滚卡片不得把滚轮穿透给外层消息列表"
+    );
+
+    // 滚命令卡（1 行不可滚）：穿透给外层列表（与其他工具卡一致）
+    cx.update_window(window.into(), |_, window, cx| {
+        window.dispatch_event(mouse_move(cmd_center), cx);
+        // 外层列表在顶部，向下滚（dy 为负）才有位移可观
+        window.dispatch_event(wheel(cmd_center, -3.), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let outer_chained = window
+        .update(cx, |probe, _, cx| {
+            probe.thread.read(cx).scroll_handle.offset().y
+        })
+        .unwrap();
+    assert!(
+        outer_chained < outer_after,
+        "不可滚的卡片应把滚轮穿透给外层列表（{outer_after:?} → 下滚 {outer_chained:?}）"
+    );
+}

@@ -566,7 +566,7 @@ impl ReviewPanel {
 }
 
 /// 路径头部截断：太长时保留尾部（文件名最相关），截断点落在路径段边界
-fn shorten_path(path: &str, max_chars: usize) -> String {
+pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
     let len = path.chars().count();
     if len <= max_chars {
         return path.to_string();

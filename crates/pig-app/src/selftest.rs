@@ -186,6 +186,50 @@ pub(crate) async fn run_selftest(
     });
     println!("[selftest] 调用轨迹面板加载/展开渲染 OK");
 
+    // 文件查看器：模拟点击 Read 卡路径（ThreadEvent::OpenFile 与点击同链路）→
+    // 右侧「文件」tab 打开并加载完整内容（README.mock.md 是场景 B 的 Read 目标）
+    app!(|app: &mut AppView, cx| {
+        let views = app.views.get(&session_a).expect("会话 A 视图");
+        views.thread.update(cx, |_, cx| {
+            cx.emit(crate::thread_view::ThreadEvent::OpenFile {
+                path: pig_core::mock::MOCK_FILE_NAME.to_string(),
+                line: Some(1),
+            });
+        });
+    });
+    // 加载走后台线程（读盘 + tree-sitter 高亮），轮询等就绪
+    let mut file_waited = 0u64;
+    loop {
+        timer!(100).await;
+        file_waited += 100;
+        assert!(file_waited < 10_000, "文件面板加载超时");
+        if let Some((path, lines)) = app!(|app: &mut AppView, cx| app.debug_file_tab(cx)) {
+            assert!(lines > 0, "文件面板应有内容行: {path}");
+            break;
+        }
+    }
+    // 关掉文件 tab 还原右侧面板收起态（后续步骤断言「默认收起」）
+    app!(|app: &mut AppView, cx| {
+        if let Some(RightTab::File { path }) = app.right_active.clone() {
+            app.close_right_tab(RightTab::File { path }, cx);
+        }
+    });
+    println!("[selftest] 文件查看面板（Read 路径点击 → 右侧 tab 加载）OK");
+
+    // 展开 Bash 工具卡（命令卡 + 输出卡渲染路径：高亮 + 横向滚动区），
+    // 真实渲染若干帧不 panic 即过（Read 卡展开在会话 B 步骤——它有 Read 调用）
+    let expanded = app!(|app: &mut AppView, cx| {
+        let views = app.views.get(&session_a)?;
+        let mut hit = false;
+        views.thread.update(cx, |thread, cx| {
+            hit = thread.debug_expand_tool("Bash", cx);
+        });
+        Some(hit)
+    });
+    assert_eq!(expanded, Some(true), "会话 A 应有 Bash 工具卡");
+    timer!(300).await;
+    println!("[selftest] Bash 代码卡展开渲染 OK");
+
     // 工作区视图：会话 cwd 应出现在工作区列表，且按工作区分组正确
     let cwd_str = app!(|app: &mut AppView, _| app.cwd.display().to_string());
     let (has_cwd, grouped) = app!(|app: &mut AppView, cx| {
@@ -286,6 +330,20 @@ pub(crate) async fn run_selftest(
     }
     assert!(saw_queued, "应出现排队芯片");
     println!("[selftest] 会话 B 完成，消息排队 OK（自动接续，第二轮历史=6）");
+
+    // 展开会话 B 的 Read 工具卡（代码卡渲染路径：行号 + 高亮 + 横向滚动区），
+    // 真实渲染若干帧不 panic 即过
+    let expanded = app!(|app: &mut AppView, cx| {
+        let views = app.views.get(&session_b)?;
+        let mut hit = false;
+        views.thread.update(cx, |thread, cx| {
+            hit = thread.debug_expand_tool("Read", cx);
+        });
+        Some(hit)
+    });
+    assert_eq!(expanded, Some(true), "会话 B 应有 Read 工具卡");
+    timer!(300).await;
+    println!("[selftest] Read 代码卡展开渲染 OK");
 
     // turn 导航条：会话 B 有 2 轮用户消息，面板已绘制（宽度非零）且达到断点。
     // bounds 由 prepaint 记录：数据就绪不等于帧已绘制，等绘制循环跑完

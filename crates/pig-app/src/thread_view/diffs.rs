@@ -173,6 +173,7 @@ impl ThreadView {
         segment_ix: usize,
         rows: &[TurnFileRow],
         open: bool,
+        expand_anim: &ExpandAnim,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let subtle = cx.theme().muted_foreground;
@@ -199,6 +200,7 @@ impl ThreadView {
                             .pl(px(26.))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                let mut row_open = false;
                                 if let Some(Segment::TurnChanges { rows, .. }) = this
                                     .messages
                                     .get_mut(message_ix)
@@ -206,7 +208,16 @@ impl ThreadView {
                                     && let Some(row) = rows.get_mut(rix)
                                 {
                                     row.expanded = !row.expanded;
+                                    row_open = row.expanded;
                                 }
+                                // 文件行级开合动画（row_ix 定位）
+                                this.drive_expand_anim(
+                                    message_ix,
+                                    segment_ix,
+                                    Some(rix),
+                                    row_open,
+                                    cx,
+                                );
                                 cx.notify();
                             }))
                             .child(Icon::new(IconName::FileText).size_4().text_color(subtlest))
@@ -261,17 +272,26 @@ impl ThreadView {
                                     ),
                             ),
                     )
-                    .when(row.expanded, |this| {
+                    .when(row.expanded || row.expand_anim.collapsing, |this| {
                         this.child(
-                            div()
-                                .relative()
-                                .on_scroll_wheel(consume_scroll(&row.scroll))
-                                .child(Self::render_edit_diff(
-                                    ("turn-diff", (message_ix * 1024 + segment_ix) * 512 + rix),
-                                    &row.edit,
-                                    &row.scroll,
-                                    cx,
-                                )),
+                            // 文件行级开合动画（滑开/滑收 + 淡入淡出）
+                            self.expand_anim_wrap(
+                                format!(
+                                    "turn-file-expand-{}-{segment_ix}-{rix}-{}",
+                                    message_ix, row.expand_anim.generation
+                                ),
+                                &row.expand_anim,
+                                div()
+                                    .relative()
+                                    .on_scroll_wheel(consume_scroll(&row.scroll))
+                                    .child(Self::render_edit_diff(
+                                        ("turn-diff", (message_ix * 1024 + segment_ix) * 512 + rix),
+                                        &row.edit,
+                                        &row.scroll,
+                                        cx,
+                                    ))
+                                    .into_any_element(),
+                            ),
                         )
                     })
                     .into_any_element(),
@@ -289,13 +309,16 @@ impl ThreadView {
                     .py_1()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut open_now = false;
                         if let Some(Segment::TurnChanges { open, .. }) = this
                             .messages
                             .get_mut(message_ix)
                             .and_then(|m| m.segments.get_mut(segment_ix))
                         {
                             *open = !*open;
+                            open_now = *open;
                         }
+                        this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
                         cx.notify();
                     }))
                     .child(
@@ -346,7 +369,17 @@ impl ThreadView {
                             ),
                     ),
             )
-            .when(open, |this| this.children(file_rows))
+            .when(open || expand_anim.collapsing, |this| {
+                // 开合动画包装（滑开/滑收 + 淡入淡出）
+                this.child(self.expand_anim_wrap(
+                    format!(
+                        "turn-changes-expand-{message_ix}-{segment_ix}-{}",
+                        expand_anim.generation
+                    ),
+                    expand_anim,
+                    v_flex().w_full().children(file_rows).into_any_element(),
+                ))
+            })
             .into_any_element()
     }
 }

@@ -5,7 +5,9 @@
 mod agent_client;
 mod assets;
 mod clipboard;
+mod code_view;
 mod composer;
+mod file_panel;
 mod font;
 mod review_panel;
 mod settings;
@@ -80,6 +82,7 @@ impl RelativeTime for u64 {
 
 use crate::agent_client::AgentClient;
 use crate::composer::{Composer, ComposerEvent, PendingApproval, PendingQuestion};
+use crate::file_panel::FileViewPanel;
 use crate::review_panel::{ReviewEvent, ReviewPanel};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
@@ -94,12 +97,19 @@ struct SessionViews {
 }
 
 /// 右侧面板 tab：「改动」「调用轨迹」为内置页；「子代理」每个 agent_id 一个
-/// （通知卡点击打开）。浏览器/终端/侧边聊天后续加。
+/// （通知卡点击打开）；「文件」每个绝对路径一个（Read 卡路径点击打开）。
+/// 浏览器/终端/侧边聊天后续加。
 #[derive(Clone, PartialEq, Eq)]
 enum RightTab {
     Changes,
     Trajectory,
-    Subagent { agent_id: String },
+    Subagent {
+        agent_id: String,
+    },
+    /// 文件查看器；path = 规范化后的绝对路径（file_tabs 的键）
+    File {
+        path: String,
+    },
 }
 
 impl RightTab {
@@ -109,6 +119,7 @@ impl RightTab {
             Self::Changes => "changes".to_string(),
             Self::Trajectory => "trajectory".to_string(),
             Self::Subagent { agent_id } => format!("subagent-{agent_id}"),
+            Self::File { path } => format!("file-{path}"),
         }
     }
 }
@@ -275,6 +286,8 @@ struct AppView {
     right_active: Option<RightTab>,
     /// 「子代理」tab 的内容面板（agent_id → 面板实体；tab 关闭时移除）
     subagent_tabs: HashMap<String, Entity<SubagentPanel>>,
+    /// 「文件」tab 的内容面板（规范化绝对路径 → 面板实体；tab 关闭时移除）
+    file_tabs: HashMap<String, Entity<FileViewPanel>>,
     /// 底部终端面板是否展开（默认收起）
     terminal_open: bool,
     /// 终端面板实体（懒创建；收起仅隐藏，tab 与 shell 进程保留）
@@ -374,6 +387,7 @@ impl AppView {
             right_tabs: vec![],
             right_active: None,
             subagent_tabs: HashMap::new(),
+            file_tabs: HashMap::new(),
             terminal_open: false,
             terminal: None,
             terminal_h: TERMINAL_PANEL_DEFAULT_H,
@@ -540,6 +554,9 @@ impl AppView {
                 ThreadEvent::OpenSubagent { agent_id, title } => {
                     // 通知卡所在会话 = 该 ThreadView 的会话（sid 为订阅时捕获）
                     this.open_subagent_tab(sid.clone(), agent_id.clone(), title.clone(), cx);
+                }
+                ThreadEvent::OpenFile { path, line } => {
+                    this.open_file_tab(&sid, path.clone(), *line, cx);
                 }
             }),
         );
@@ -711,6 +728,18 @@ impl AppView {
             return None;
         };
         self.subagent_tabs.get(agent_id)?.read(cx).debug_state()
+    }
+
+    /// 自测用：当前激活的「文件」tab 的 (路径, 已加载行数)；未激活/未加载为 None
+    pub fn debug_file_tab(&self, cx: &App) -> Option<(String, usize)> {
+        let RightTab::File { path } = self.right_active.as_ref()? else {
+            return None;
+        };
+        self.file_tabs
+            .get(path)?
+            .read(cx)
+            .debug_state()
+            .map(|lines| (path.clone(), lines))
     }
 
     /// 自测用：指定 agent_id 的「子代理」tab 的 (running, 行数含缓冲, 累计活动项数)；

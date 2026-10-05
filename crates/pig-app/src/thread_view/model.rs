@@ -47,6 +47,8 @@ pub enum Segment {
         ticker_scroll: ScrollHandle,
         /// 滚动输出行的纵滚状态机（换行时旧行向上滚出、新行从下方滚入）
         ticker: TickerRoll,
+        /// 展开/收起动画状态（见 ExpandAnim）
+        expand_anim: ExpandAnim,
     },
     Markdown {
         state: Entity<TextViewState>,
@@ -69,16 +71,108 @@ pub enum Segment {
         /// 每个子代理一张；非空时按代理卡样式渲染，点击开右侧子代理对话 tab；
         /// live 直发 + 回放经 rollout 记录重建）
         agent_cards: Vec<AgentCardMeta>,
+        /// Read 工具代码卡的 UI 态（render 前惰性创建；见 read.rs）
+        read_ui: Option<ReadCardUi>,
+        /// Bash 工具代码卡的 UI 态（命令卡 + 输出卡；render 前惰性创建，见 bash.rs）
+        bash_ui: Option<BashCardUi>,
+        /// 展开/收起动画状态（见 ExpandAnim）
+        expand_anim: ExpandAnim,
         /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
         body_scroll: ScrollHandle,
     },
     /// 一轮结束时的本轮文件改动面板（ZCode turn 头部文件更改同款）
-    TurnChanges { rows: Vec<TurnFileRow>, open: bool },
+    TurnChanges {
+        rows: Vec<TurnFileRow>,
+        open: bool,
+        /// 展开/收起动画状态（见 ExpandAnim）
+        expand_anim: ExpandAnim,
+    },
     Approval {
         request_id: String,
         decision: Option<ApprovalDecision>,
     },
 }
+
+/// Read 工具代码卡的 UI 态（render 前惰性创建；段存活期内保留）
+pub struct ReadCardUi {
+    /// 自动换行（默认关：横向滚动）
+    pub wrap: bool,
+    /// 复制按钮反馈（换勾，应用惯例不回弹）
+    pub copied: bool,
+    /// 不折行模式的横向滚动句柄
+    pub h_scroll: ScrollHandle,
+    /// 解析 + 高亮缓存（首次展开时构建；RefCell：render 走 &self 不可变借用。
+    /// 主题切换经 HighlightedCode.theme 的 Arc 指针判等重算）
+    pub cache: std::cell::RefCell<Option<std::rc::Rc<ReadCardContent>>>,
+}
+
+impl ReadCardUi {
+    pub fn new() -> Self {
+        Self {
+            wrap: false,
+            copied: false,
+            h_scroll: ScrollHandle::new(),
+            cache: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+/// Read 输出的解析 + 高亮结果（ReadCardUi.cache 的内容）
+pub struct ReadCardContent {
+    /// (文件行号, 行内容)
+    pub lines: Vec<(usize, String)>,
+    /// 尾部标注行（[已截断…]/[文件信息…]/[警告…]）
+    pub notes: Vec<String>,
+    /// 供高亮的拼接文本（行内容以 \n 相连，不含行号前缀）
+    pub code: String,
+    pub highlighted: crate::code_view::HighlightedCode,
+    /// 不折行模式的内容显式宽度（横向滚动驱动；量宽见 code_view）
+    pub max_line_width: Pixels,
+}
+
+/// Bash 工具代码卡的 UI 态（render 前惰性创建；段存活期内保留）
+pub struct BashCardUi {
+    /// 命令卡/输出卡各自的自动换行开关（默认关：横向滚动）
+    pub cmd_wrap: bool,
+    pub out_wrap: bool,
+    /// 复制按钮反馈（换勾，应用惯例不回弹）
+    pub cmd_copied: bool,
+    pub out_copied: bool,
+    /// 命令卡/输出卡各自的纵向滚动句柄
+    pub cmd_scroll: ScrollHandle,
+    pub out_scroll: ScrollHandle,
+    /// 各自的横向滚动句柄（不折行模式）
+    pub cmd_h_scroll: ScrollHandle,
+    pub out_h_scroll: ScrollHandle,
+    /// 命令（bash 高亮）与输出（纯文本）的内容缓存（RefCell：render 只读借用；
+    /// 主题切换经 PreparedCode.highlighted.theme 的 Arc 指针判等重算）
+    pub cache: std::cell::RefCell<Option<std::rc::Rc<BashCardContent>>>,
+}
+
+impl BashCardUi {
+    pub fn new() -> Self {
+        Self {
+            cmd_wrap: false,
+            out_wrap: false,
+            cmd_copied: false,
+            out_copied: false,
+            cmd_scroll: ScrollHandle::new(),
+            out_scroll: ScrollHandle::new(),
+            cmd_h_scroll: ScrollHandle::new(),
+            out_h_scroll: ScrollHandle::new(),
+            cache: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+/// Bash 卡内容缓存：命令（bash 语法高亮）+ 输出（"text" 纯文本，仅量宽）
+pub struct BashCardContent {
+    pub cmd: crate::code_view::PreparedCode,
+    pub out: crate::code_view::PreparedCode,
+}
+
+/// 展开/收起动画时长
+pub(crate) const EXPAND_ANIM_DUR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 思考滚动行的纵滚时序（ZCode QueuedSummaryContent 常量）：300ms 滚动 + 500ms 停留
 pub(crate) const TICKER_ROLL_TRANSITION: std::time::Duration =
@@ -220,6 +314,19 @@ pub struct TurnFileRow {
     pub(crate) expanded: bool,
     /// 内联 diff 卡的滚动句柄
     pub(crate) scroll: ScrollHandle,
+    /// 展开/收起动画状态（见 ExpandAnim）
+    pub(crate) expand_anim: ExpandAnim,
+}
+
+/// 展开/收起动画状态：generation 每次开合 +1（作为动画元素 id 的一部分驱动重播）；
+/// collapsing = 收起动画进行中（内容保持挂载，计时器到期后卸载）；
+/// measured_h = 内容自然高度（render 时 on_prepaint 持续测量，作动画目标高——
+/// 高度由内容决定、不设固定上限；动画结束帧 delta=1 摘掉 max_h 帽）
+#[derive(Default)]
+pub struct ExpandAnim {
+    pub generation: u64,
+    pub collapsing: bool,
+    pub measured_h: Rc<Cell<f32>>,
 }
 
 /// 用户消息的图片附件：事件文本末尾的 `pig-code-composer://attachments/mN`
