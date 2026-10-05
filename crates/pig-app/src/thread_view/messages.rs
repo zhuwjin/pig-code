@@ -554,6 +554,55 @@ impl ThreadView {
         }
     }
 
+    /// 回合工作行（对齐 ZCode AssistantHistoryStatus）：回合结束后该轮的
+    /// 思考块/工具卡折叠成这一行，点击整行展开/收起。chevron 常显（截图同款），
+    /// 不做展开高度动画——工作段与正文段在消息内交错，不是连续区块
+    fn render_work_row(
+        &self,
+        ix: usize,
+        message: &ChatMessage,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = match message.work_state {
+            Some(WorkState::Completed { duration: Some(d) }) => {
+                // 毫秒 → 秒向最近取整、至少 1 秒（对齐 ZCode workDuration）
+                let secs = (d.as_millis() as f64 / 1000.).round() as u64;
+                fmt_work_duration(secs.max(1), "已工作")
+            }
+            // 回放里无 TurnStats 的历史回合：没有真实时长
+            Some(WorkState::Completed { duration: None }) => "已处理".to_string(),
+            Some(WorkState::Stopped) => "已停止".to_string(),
+            None => return div().into_any_element(),
+        };
+        let open = message.work_open;
+        h_flex()
+            .id(("work-row", ix))
+            .test_support()
+            .w_full()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(label)
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size_3p5()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(message) = this.messages.get_mut(ix) {
+                    message.work_open = !message.work_open;
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     pub(crate) fn render_message(
         &self,
         ix: usize,
@@ -596,136 +645,255 @@ impl ThreadView {
                     .into_any_element(),
             },
             Role::Assistant => {
-                let mut segments = Vec::with_capacity(message.segments.len() + 1);
+                let has_work = message
+                    .segments
+                    .iter()
+                    .any(|s| matches!(s, Segment::Thinking { .. } | Segment::ToolCall { .. }));
+                // 回合已结束且未手动展开：思考块/工具卡收进工作行，只留正文
+                let collapse_work = message.work_state.is_some() && !message.work_open;
+                // 每行带稳定键（段下标/固定名），工作行出现与折叠切换不会
+                // 让其余行的 seg-enter 动画键移位重播
+                let mut segments: Vec<(String, AnyElement)> =
+                    Vec::with_capacity(message.segments.len() + 2);
+                if message.work_state.is_some() && has_work {
+                    segments.push(("work".to_string(), self.render_work_row(ix, message, cx)));
+                }
                 for (six, segment) in message.segments.iter().enumerate() {
                     // 审批不占独立行：待批准状态显示在对应的工具调用行上
                     //（ApprovalRequested 紧跟在该工具的 ToolCallBegin 之后发出）
                     if matches!(segment, Segment::Approval { .. }) {
                         continue;
                     }
-                    segments.push(match segment {
-                        Segment::Thinking {
-                            text,
-                            open,
-                            duration,
-                            ticker,
-                            body_scroll,
-                            ticker_scroll,
-                            expand_anim,
-                            ..
-                        } => self.render_thinking(
-                            ix,
-                            six,
-                            text,
-                            *open,
-                            *duration,
-                            ticker,
-                            body_scroll,
-                            ticker_scroll,
-                            expand_anim,
-                            window,
-                            cx,
-                        ),
-                        Segment::Markdown { state, .. } => {
-                            // 表格对齐 ZCode（w-max min-w-full，PR #2）：列宽按实测
-                            // 内容分配、贴合内容（wrap 表格按字符数比例分列，「前四
-                            // slot」这种短文本列会被压到折行）；帧宽不足时列先收缩
-                            // 换行、到列地板后整体横向滚动（上游无滚动条，窗口极窄时
-                            // 超宽可横滚但无视觉提示）。
-                            // 不要动 table_cell 的 padding：列宽测量含 CELL_PAD_PX(16)，
-                            // 改大会让所有列的内容盒比测量窄、短列反而折行（实测）。
-                            // 行尾吞字（#3293，inline flow 全角标点量宽少算）
-                            // 已由 0.7.1 根治：按整形后绘制宽度收紧重排。
-                            let mut table = StyleRefinement::default();
-                            table.overflow.x = Some(Overflow::Scroll);
-                            TextView::new(state)
-                                .selectable(true)
-                                .stream_fade(self.streaming)
-                                .text_sm()
-                                .style(TextViewStyle::default().table(table))
-                                // 搜索跳转的 reveal 兜底：外层消息列表是
-                                // v_flex().overflow_y_scroll() 的 div 滚动容器，
-                                // 不是 gpui::list——reveal_range 不会自动滚它
-                                //（行不可见时上游报 Hidden，见 TextView::on_reveal
-                                // 文档）。这里按行 bounds（窗口坐标）手动把目标行
-                                // 滚进可视区；行已可见时上游报 Shown，不会调这里
-                                .on_reveal({
-                                    let scroll_handle = self.scroll_handle.clone();
-                                    move |line, _window, _cx| {
-                                        let view = scroll_handle.bounds();
-                                        let mut offset = scroll_handle.offset();
-                                        if line.top() < view.top() {
-                                            offset.y += view.top() - line.top();
-                                        } else if line.bottom() > view.bottom() {
-                                            offset.y -= line.bottom() - view.bottom();
-                                        } else {
-                                            return;
-                                        }
-                                        scroll_handle.set_offset(offset);
-                                    }
-                                })
-                                .into_any_element()
-                        }
-                        Segment::ToolCall {
-                            tool,
-                            summary,
-                            output,
-                            is_error,
-                            done,
-                            expanded,
-                            edit,
-                            live_note,
-                            agent_cards,
-                            read_ui,
-                            bash_ui,
-                            expand_anim,
-                            body_scroll,
-                        } => {
-                            let approval_pending = matches!(
-                                message.segments.get(six + 1),
-                                Some(Segment::Approval { decision: None, .. })
-                            );
-                            self.render_tool_card(
+                    if collapse_work
+                        && matches!(segment, Segment::Thinking { .. } | Segment::ToolCall { .. })
+                    {
+                        continue;
+                    }
+                    let key = format!("seg-{six}");
+                    segments.push((
+                        key,
+                        match segment {
+                            Segment::Thinking {
+                                text,
+                                open,
+                                duration,
+                                ticker,
+                                body_scroll,
+                                ticker_scroll,
+                                expand_anim,
+                                ..
+                            } => self.render_thinking(
                                 ix,
                                 six,
-                                tool,
-                                summary,
-                                live_note.as_deref(),
-                                output,
-                                *is_error,
-                                *done,
-                                *expanded,
-                                approval_pending,
-                                edit.as_ref(),
-                                agent_cards,
-                                read_ui.as_ref(),
-                                bash_ui.as_ref(),
-                                expand_anim,
+                                text,
+                                *open,
+                                *duration,
+                                ticker,
                                 body_scroll,
+                                ticker_scroll,
+                                expand_anim,
                                 window,
                                 cx,
-                            )
-                        }
-                        Segment::Approval { .. } => unreachable!(),
-                        Segment::TurnChanges {
-                            rows,
-                            open,
-                            expand_anim,
-                        } => self.render_turn_changes(ix, six, rows, *open, expand_anim, cx),
-                    });
+                            ),
+                            Segment::Markdown { state, .. } => {
+                                // 表格对齐 ZCode（w-max min-w-full，PR #2）：列宽按实测
+                                // 内容分配、贴合内容（wrap 表格按字符数比例分列，「前四
+                                // slot」这种短文本列会被压到折行）；帧宽不足时列先收缩
+                                // 换行、到列地板后整体横向滚动（上游无滚动条，窗口极窄时
+                                // 超宽可横滚但无视觉提示）。
+                                // 不要动 table_cell 的 padding：列宽测量含 CELL_PAD_PX(16)，
+                                // 改大会让所有列的内容盒比测量窄、短列反而折行（实测）。
+                                // 行尾吞字（#3293，inline flow 全角标点量宽少算）
+                                // 已由 0.7.1 根治：按整形后绘制宽度收紧重排。
+                                let mut table = StyleRefinement::default();
+                                table.overflow.x = Some(Overflow::Scroll);
+                                TextView::new(state)
+                                    .selectable(true)
+                                    .stream_fade(self.streaming)
+                                    .text_sm()
+                                    .style(TextViewStyle::default().table(table))
+                                    // 搜索跳转的 reveal 兜底：外层消息列表是
+                                    // v_flex().overflow_y_scroll() 的 div 滚动容器，
+                                    // 不是 gpui::list——reveal_range 不会自动滚它
+                                    //（行不可见时上游报 Hidden，见 TextView::on_reveal
+                                    // 文档）。这里按行 bounds（窗口坐标）手动把目标行
+                                    // 滚进可视区；行已可见时上游报 Shown，不会调这里
+                                    .on_reveal({
+                                        let scroll_handle = self.scroll_handle.clone();
+                                        move |line, _window, _cx| {
+                                            let view = scroll_handle.bounds();
+                                            let mut offset = scroll_handle.offset();
+                                            if line.top() < view.top() {
+                                                offset.y += view.top() - line.top();
+                                            } else if line.bottom() > view.bottom() {
+                                                offset.y -= line.bottom() - view.bottom();
+                                            } else {
+                                                return;
+                                            }
+                                            scroll_handle.set_offset(offset);
+                                        }
+                                    })
+                                    .into_any_element()
+                            }
+                            Segment::ToolCall {
+                                tool,
+                                summary,
+                                output,
+                                is_error,
+                                done,
+                                expanded,
+                                edit,
+                                live_note,
+                                agent_cards,
+                                read_ui,
+                                bash_ui,
+                                expand_anim,
+                                body_scroll,
+                            } => {
+                                let approval_pending = matches!(
+                                    message.segments.get(six + 1),
+                                    Some(Segment::Approval { decision: None, .. })
+                                );
+                                self.render_tool_card(
+                                    ix,
+                                    six,
+                                    tool,
+                                    summary,
+                                    live_note.as_deref(),
+                                    output,
+                                    *is_error,
+                                    *done,
+                                    *expanded,
+                                    approval_pending,
+                                    edit.as_ref(),
+                                    agent_cards,
+                                    read_ui.as_ref(),
+                                    bash_ui.as_ref(),
+                                    expand_anim,
+                                    body_scroll,
+                                    window,
+                                    cx,
+                                )
+                            }
+                            Segment::Approval { .. } => unreachable!(),
+                            Segment::TurnChanges {
+                                rows,
+                                open,
+                                expand_anim,
+                            } => self.render_turn_changes(ix, six, rows, *open, expand_anim, cx),
+                        },
+                    ));
                 }
                 if let Some(footer) = &message.footer {
-                    segments.push(
+                    segments.push((
+                        "footer".to_string(),
                         h_flex()
                             .gap_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(footer.clone())
                             .into_any_element(),
-                    );
+                    ));
+                }
+                // 操作行（ZCode ConversationAssistantTextActions 同款）：悬停浮现，
+                // 复制整轮 Markdown 原文 + 会话分叉；进行中的回合整行不出
+                let turn_in_flight = self.streaming && ix == self.messages.len() - 1;
+                let has_markdown = message
+                    .segments
+                    .iter()
+                    .any(|s| matches!(s, Segment::Markdown { .. }));
+                if !turn_in_flight {
+                    let group_id = format!("assistant-msg-{ix}");
+                    segments.push((
+                        "actions".to_string(),
+                        h_flex()
+                            .id(("msg-actions", ix))
+                            .test_support()
+                            .gap_1()
+                            // 透明而非 invisible：命中区保留（ZCode opacity-0 同款），
+                            // 悬停消息时浮现
+                            .opacity(0.)
+                            .group_hover(group_id, |this| this.opacity(1.))
+                            .when(has_markdown, |this| {
+                                this.child(
+                                    Button::new(("msg-copy", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(if message.copied {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Copy
+                                        })
+                                        .when(message.copied, |this| {
+                                            this.text_color(cx.theme().success)
+                                        })
+                                        .tooltip("复制")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(message) = this.messages.get_mut(ix) {
+                                                let text = message
+                                                    .segments
+                                                    .iter()
+                                                    .filter_map(|s| match s {
+                                                        Segment::Markdown { text, .. } => {
+                                                            Some(text.as_str())
+                                                        }
+                                                        _ => None,
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n\n");
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    text,
+                                                ));
+                                                message.copied = true;
+                                                message.copied_gen += 1;
+                                                let generation = message.copied_gen;
+                                                // 1.2s 后回弹勾号（ZCode 1200ms 同款）；
+                                                // 连点按代次作废旧计时器
+                                                cx.spawn(
+                                                    async move |this: WeakEntity<ThreadView>, cx| {
+                                                        cx.background_executor()
+                                                            .timer(std::time::Duration::from_millis(1200))
+                                                            .await;
+                                                        let _ = this.update(cx, |this, cx| {
+                                                            if let Some(message) =
+                                                                this.messages.get_mut(ix)
+                                                                && message.copied_gen == generation
+                                                            {
+                                                                message.copied = false;
+                                                                cx.notify();
+                                                            }
+                                                        });
+                                                    },
+                                                )
+                                                .detach();
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new(("msg-fork", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(AssetIconName::GitFork)
+                                    .tooltip("分叉")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        // User 角色与 core 的 User 记录 1:1
+                                        //（含后台子代理 task-notification 合成消息）
+                                        let turns = this.messages[..=ix]
+                                            .iter()
+                                            .filter(|m| m.role == Role::User)
+                                            .count();
+                                        cx.emit(ThreadEvent::Fork { turns });
+                                        cx.notify();
+                                    })),
+                            )
+                            .into_any_element(),
+                    ));
                 }
                 if self.plan_pending && ix == self.messages.len() - 1 {
-                    segments.push(
+                    segments.push((
+                        "plan".to_string(),
                         h_flex()
                             .w_full()
                             .gap_2()
@@ -751,15 +919,16 @@ impl ThreadView {
                                     })),
                             )
                             .into_any_element(),
-                    );
+                    ));
                 }
                 v_flex()
+                    .group(format!("assistant-msg-{ix}"))
                     .w_full()
                     .gap_3()
-                    .children(segments.into_iter().enumerate().map(|(six, segment)| {
+                    .children(segments.into_iter().map(|(key, segment)| {
                         div()
                             .with_animation(
-                                format!("seg-enter-{ix}-{six}"),
+                                format!("seg-enter-{ix}-{key}"),
                                 Animation::new(std::time::Duration::from_millis(150))
                                     .with_easing(ease_out_quint()),
                                 |el, delta| el.opacity(delta),

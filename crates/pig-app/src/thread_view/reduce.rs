@@ -299,13 +299,13 @@ impl ThreadView {
                 }
                 // duration_ms=0 是会话回放的收尾事件：只退出流式状态，不写用时脚注；
                 // stats 有值的历史回合（TurnStats 回放）仍写完整统计脚注
+                let duration = stats
+                    .as_ref()
+                    .map(|s| s.duration_ms)
+                    .filter(|ms| *ms > 0)
+                    .unwrap_or(duration_ms);
                 if duration_ms > 0 || stats.is_some() {
                     let stats_part = stats.as_ref().map(format_turn_stats).unwrap_or_default();
-                    let duration = stats
-                        .as_ref()
-                        .map(|s| s.duration_ms)
-                        .filter(|ms| *ms > 0)
-                        .unwrap_or(duration_ms);
                     if let Some(message) = self.messages.last_mut() {
                         message.footer = Some(format!(
                             "回合结束 · 用时 {:.1}s{stats_part}",
@@ -313,6 +313,9 @@ impl ThreadView {
                         ));
                     }
                 }
+                self.settle_work_rows(WorkState::Completed {
+                    duration: (duration > 0).then_some(std::time::Duration::from_millis(duration)),
+                });
                 self.set_streaming(false, cx);
             }
             Event::TurnAborted { .. } => {
@@ -344,6 +347,7 @@ impl ThreadView {
                 if let Some(message) = self.messages.last_mut() {
                     message.footer = Some("已停止".to_string());
                 }
+                self.settle_work_rows(WorkState::Stopped);
                 self.set_streaming(false, cx);
             }
             Event::TurnFileChanges { files, .. } => {
@@ -417,12 +421,35 @@ impl ThreadView {
             Event::Error { message, .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;
+                self.settle_work_rows(WorkState::Stopped);
                 self.set_streaming(false, cx);
                 self.messages
                     .push(ChatMessage::system(format!("⚠ {message}")));
             }
         }
         cx.notify();
+    }
+
+    /// 回合结束（完成/中断/错误）时落定工作行：该轮的思考块与工具卡折叠成
+    /// 「已工作 N 秒 ›」一行。从消息末尾向前标到 User 消息为止（跳过 System——
+    /// 压缩分隔条可能插在回合中间）；is_none 守卫保证回放里 TurnStats 补发的
+    /// TurnComplete（带真实耗时）与收尾 TurnComplete（duration_ms=0）不互相覆盖
+    fn settle_work_rows(&mut self, state: WorkState) {
+        for message in self.messages.iter_mut().rev() {
+            if message.role == Role::User {
+                break;
+            }
+            if message.role != Role::Assistant || message.work_state.is_some() {
+                continue;
+            }
+            let has_work = message
+                .segments
+                .iter()
+                .any(|s| matches!(s, Segment::Thinking { .. } | Segment::ToolCall { .. }));
+            if has_work {
+                message.work_state = Some(state);
+            }
+        }
     }
 
     /// 收尾当前消息里还在计时的思考段，定格用时。

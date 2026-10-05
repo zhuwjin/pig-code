@@ -42,6 +42,13 @@ pub enum Op {
     DeleteSession {
         session_id: String,
     },
+    /// 会话分叉：以源会话前 N 个回合的历史派生新会话（boundary 含第 N 回合
+    /// 本身），创建后按 OpenSession 冷路径打开（SessionConfigured + replay）
+    ForkSession {
+        session_id: String,
+        /// 保留的回合数（≥1，0 钳为 1；超过源回合总数 = 全量复制）
+        turns: usize,
+    },
     SendMessage {
         session_id: String,
         content: String,

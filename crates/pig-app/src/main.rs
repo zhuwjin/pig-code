@@ -566,6 +566,11 @@ impl AppView {
                 ThreadEvent::OpenFile { path, line } => {
                     this.open_file_tab(&sid, path.clone(), *line, cx);
                 }
+                ThreadEvent::Fork { turns } => {
+                    // 分叉源 = 该 ThreadView 的会话；core 创建后按 OpenSession
+                    // 冷路径回 SessionConfigured，既有链路自动切到新会话
+                    this.agent.fork_session(&sid, *turns);
+                }
             }),
         );
         self._subscriptions.push(cx.subscribe(

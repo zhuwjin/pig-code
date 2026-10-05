@@ -328,6 +328,7 @@ impl ThreadView {
             .child(
                 h_flex()
                     .id(("tool", message_ix * 1024 + segment_ix))
+                    .test_support()
                     .group(group_id.clone())
                     .w_full()
                     .gap_2()

@@ -63,6 +63,8 @@ pub enum ThreadEvent {
         request_id: String,
         decision: ApprovalDecision,
     },
+    /// 会话分叉：以该消息所在回合为止的历史派生新会话（turns = 保留回合数）
+    Fork { turns: usize },
 }
 
 /// 会话内搜索的一次命中：定位到消息/段/段内字节区间。区间基于该段
@@ -79,6 +81,16 @@ struct SearchMatch {
 struct SearchSegmentCache {
     snapshot: RenderedText,
     ranges: Vec<Range<usize>>,
+}
+
+/// 工作时长文案：「{prefix} N 秒」/「{prefix} M 分 S 秒」
+///（运行中的「工作中」与折叠行的「已工作」共用）
+pub(crate) fn fmt_work_duration(secs: u64, prefix: &str) -> String {
+    if secs >= 60 {
+        format!("{prefix} {} 分 {} 秒", secs / 60, secs % 60)
+    } else {
+        format!("{prefix} {secs} 秒")
+    }
 }
 
 pub struct ThreadView {
@@ -800,11 +812,7 @@ impl Render for ThreadView {
             .turn_started
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
-        let working_label = if working_secs >= 60 {
-            format!("工作中 {} 分 {} 秒", working_secs / 60, working_secs % 60)
-        } else {
-            format!("工作中 {working_secs} 秒")
-        };
+        let working_label = fmt_work_duration(working_secs, "工作中");
 
         // 回到底部（滚轮/拖滚动条/键盘任意方式）自动恢复跟随
         if !self.follow_bottom && self.at_bottom() {

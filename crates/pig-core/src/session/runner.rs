@@ -116,6 +116,30 @@ pub async fn agent_loop(
         tokio::select! {
             op = op_rx.recv() => {
                 let Ok(op) = op else { break };
+                // 分叉 = 落盘派生新会话后按 OpenSession 冷路径打开
+                //（SessionConfigured + replay 全套复用，UI 经既有链路自动切换）
+                let op = match op {
+                    Op::ForkSession { session_id, turns } => {
+                        match fork::fork_session(&sessions_dir, &store, &session_id, turns, &mut id_counter) {
+                            Ok(new_id) => {
+                                // 冷路径不发 SessionList：补一条让侧栏即时出现分叉会话
+                                emit_global!(Event::SessionList {
+                                    sessions: store.lock().expect("store lock").sorted_sessions(),
+                                });
+                                Op::OpenSession { session_id: new_id }
+                            }
+                            Err(error) => {
+                                emit_global!(Event::Error {
+                                    session_id: Some(session_id),
+                                    seq,
+                                    message: format!("分叉失败: {error}"),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    other => other,
+                };
                 match op {
                     Op::NewSession { cwd, provider_id, model_id, reasoning_level, exec_mode } => {
                         let cwd = normalize_workspace_path(&cwd);
@@ -831,6 +855,9 @@ pub async fn agent_loop(
                         emit_global!(Event::McpServerList { session_id, servers });
                     }
                     Op::Shutdown => break,
+                    Op::ForkSession { .. } => {
+                        unreachable!("ForkSession 已在分发前转换为 OpenSession")
+                    }
                 }
             }
             Some(session_id) = task_notify_rx.recv() => {

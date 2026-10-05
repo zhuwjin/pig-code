@@ -1012,6 +1012,192 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
         .unwrap();
 }
 
+/// 回合工作行（「已工作 N 秒 ›」）：TurnComplete 后工具卡/思考块收进折叠行，
+/// 点击整行展开（内容变高）再收起；中断回合落 Stopped。时长格式化毫秒→秒
+/// 向最近取整、至少 1 秒在 render_work_row，纯格式化部分直接钉 fmt_work_duration
+#[gpui_kit::test]
+fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+
+    assert_eq!(super::fmt_work_duration(10, "已工作"), "已工作 10 秒");
+    assert_eq!(super::fmt_work_duration(102, "已工作"), "已工作 1 分 42 秒");
+    assert_eq!(super::fmt_work_duration(0, "工作中"), "工作中 0 秒");
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+
+    // 完整回合：用户消息 ix 0，assistant 消息 ix 1，工具卡段 six 0
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("跑个命令".to_string(), vec![], cx);
+                view.reduce_event(
+                    pig_protocol::Event::TurnStarted {
+                        session_id: "s".into(),
+                        seq: 0,
+                        turn_id: "t1".into(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 1,
+                        item_id: "b1".into(),
+                        tool: "Bash".into(),
+                        input_summary: "echo hi".into(),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallEnd {
+                        session_id: "s".into(),
+                        seq: 2,
+                        item_id: "b1".into(),
+                        output: (1..=40)
+                            .map(|i| format!("输出行 {i}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        is_error: false,
+                        edit: None,
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::TurnComplete {
+                        session_id: "s".into(),
+                        seq: 3,
+                        duration_ms: 10_400,
+                        stats: None,
+                    },
+                    cx,
+                );
+                let message = &view.messages[1];
+                assert!(
+                    matches!(
+                        message.work_state,
+                        Some(super::WorkState::Completed {
+                            duration: Some(d)
+                        }) if d == std::time::Duration::from_millis(10_400)
+                    ),
+                    "回合完成应落定工作行（真实耗时）"
+                );
+                assert!(!message.work_open, "工作行默认收起");
+            });
+        })
+        .unwrap();
+
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(window.find(("work-row", 1usize)).visible(), "折叠行应可见");
+        assert!(
+            window.try_find(("tool", 1024usize)).is_none(),
+            "收起时工具卡不应渲染"
+        );
+    })
+    .unwrap();
+
+    // 点击折叠行 → 展开：工具卡回到消息流
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("work-row", 1usize), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find(("tool", 1024usize)).is_some(),
+            "展开后工具卡应回到消息流"
+        );
+    })
+    .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            assert!(
+                probe.thread.read(cx).messages[1].work_open,
+                "点击后工作行应展开"
+            );
+        })
+        .unwrap();
+
+    // 再点 → 收起，工具卡再次消失
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("work-row", 1usize), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find(("tool", 1024usize)).is_none(),
+            "再收起工具卡应消失"
+        );
+    })
+    .unwrap();
+
+    // 中断回合落 Stopped（「已停止」）
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.reduce_event(
+                    pig_protocol::Event::TurnStarted {
+                        session_id: "s".into(),
+                        seq: 4,
+                        turn_id: "t2".into(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 5,
+                        item_id: "b2".into(),
+                        tool: "Bash".into(),
+                        input_summary: "sleep 99".into(),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::TurnAborted {
+                        session_id: "s".into(),
+                        seq: 6,
+                    },
+                    cx,
+                );
+                let message = &view.messages[2];
+                assert!(
+                    matches!(message.work_state, Some(super::WorkState::Stopped)),
+                    "中断回合应落 Stopped"
+                );
+            });
+        })
+        .unwrap();
+}
+
 /// @提及内联 chip：渲染可见（图标+下划线文件名），点击发 OpenFile 打开文件
 #[gpui_kit::test]
 fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppContext) {
@@ -1087,4 +1273,179 @@ fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppCo
         }
         other => panic!("应为 OpenFile 事件: {other:?}"),
     }
+}
+
+/// 消息操作行（ZCode assistant 操作行同款）：回合结束后渲染（悬停浮现），
+/// 分叉事件 turns = 目标消息所在回合序；复制置 copied；进行中的回合整行不出
+#[gpui_kit::test]
+fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    let captured: Rc<RefCell<Vec<super::ThreadEvent>>> = Rc::new(RefCell::new(vec![]));
+    let sink = captured.clone();
+    let mut events_sub = None;
+    window
+        .update(cx, |probe, window, cx| {
+            probe.thread.update(cx, |view, cx| {
+                let entity = cx.entity();
+                events_sub = Some(cx.subscribe_in(
+                    &entity,
+                    window,
+                    move |_, _, event: &super::ThreadEvent, _, _| {
+                        sink.borrow_mut().push(event.clone());
+                    },
+                ));
+                // 两个完整回合：消息 [U0, A1, U2, A3]
+                for (turn, ask, answer) in [("t1", "问一", "答一"), ("t2", "问二", "答二")]
+                {
+                    view.append_user_message(ask.to_string(), vec![], cx);
+                    view.reduce_event(
+                        pig_protocol::Event::TurnStarted {
+                            session_id: "s".into(),
+                            seq: 0,
+                            turn_id: turn.into(),
+                        },
+                        cx,
+                    );
+                    view.reduce_event(
+                        pig_protocol::Event::TextDone {
+                            session_id: "s".into(),
+                            seq: 1,
+                            item_id: format!("{turn}-md"),
+                            full_text: answer.to_string(),
+                        },
+                        cx,
+                    );
+                    view.reduce_event(
+                        pig_protocol::Event::TurnComplete {
+                            session_id: "s".into(),
+                            seq: 2,
+                            duration_ms: 1000,
+                            stats: None,
+                        },
+                        cx,
+                    );
+                }
+            });
+        })
+        .unwrap();
+    let _events_sub = events_sub;
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    // 两回合的操作行都在（透明但可点）
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find(("msg-fork", 1usize)).is_some(),
+            "第一回合应有分叉钮"
+        );
+        assert!(
+            window.try_find(("msg-copy", 1usize)).is_some(),
+            "第一回合应有复制钮"
+        );
+        assert!(
+            window.try_find(("msg-fork", 3usize)).is_some(),
+            "第二回合应有分叉钮"
+        );
+    })
+    .unwrap();
+
+    // 分叉：turns = 目标消息所在回合序
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("msg-fork", 1usize), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("msg-fork", 3usize), cx);
+    })
+    .unwrap();
+    {
+        let events = captured.borrow();
+        let forks: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                super::ThreadEvent::Fork { turns } => Some(*turns),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(forks, vec![1, 2], "分叉回合数: {forks:?}");
+    }
+
+    // 复制：置 copied（勾号反馈），拼全部 Markdown 段
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("msg-copy", 1usize), cx);
+    })
+    .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            assert!(
+                probe.thread.read(cx).messages[1].copied,
+                "复制后应置 copied"
+            );
+        })
+        .unwrap();
+    // 勾号 1.2s 后回弹（回弹计时器走测试调度器假时钟，真 sleep 不推进）
+    cx.dispatcher
+        .advance_clock(std::time::Duration::from_millis(1300));
+    cx.run_until_parked();
+    window
+        .update(cx, |probe, _, cx| {
+            assert!(
+                !probe.thread.read(cx).messages[1].copied,
+                "1.2s 后勾号应回弹"
+            );
+        })
+        .unwrap();
+
+    // 进行中的回合：操作行整行不渲染
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.reduce_event(
+                    pig_protocol::Event::TurnStarted {
+                        session_id: "s".into(),
+                        seq: 3,
+                        turn_id: "t3".into(),
+                    },
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find(("msg-actions", 4usize)).is_none(),
+            "进行中的回合不应渲染操作行"
+        );
+        // 已结束的回合不受新回合影响
+        assert!(window.try_find(("msg-fork", 3usize)).is_some());
+    })
+    .unwrap();
 }

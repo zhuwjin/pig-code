@@ -350,6 +350,18 @@ pub(crate) struct Lightbox {
     pub(crate) drag_moved: bool,
 }
 
+/// 回合工作行状态（对齐 ZCode AssistantHistoryStatus）：回合结束时落在该轮
+/// assistant 消息上，工作段（思考块 + 工具卡）折叠成一行「已工作 N 秒 ›」
+#[derive(Clone, Copy)]
+pub enum WorkState {
+    /// 正常完成；duration 为 None 的是回放里无 TurnStats 的历史回合（文案「已处理」）
+    Completed {
+        duration: Option<std::time::Duration>,
+    },
+    /// 中断或错误收尾（文案「已停止」，与 footer 用词一致）
+    Stopped,
+}
+
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
@@ -363,6 +375,14 @@ pub struct ChatMessage {
     pub images: Vec<UserImage>,
     pub segments: Vec<Segment>,
     pub footer: Option<String>,
+    /// 回合工作行状态（仅 Assistant 角色有意义）：None = 回合未结束或无工作段
+    pub work_state: Option<WorkState>,
+    /// 工作行展开态（true = 工作段内联可见；false = 折叠成一行）
+    pub work_open: bool,
+    /// 操作行「复制」已点击（按钮换勾 + 成功色，1.2s 后回弹——ZCode 同款）
+    pub copied: bool,
+    /// 回弹计时器代次：每次点击 +1，到期代次不符作作废（连点不重提前回弹）
+    pub copied_gen: u64,
     /// 后台子代理通知卡的 UI 态（render 前惰性创建；仅 <task-notification> 消息为 Some）
     pub notification_ui: Option<NotificationUi>,
 }
@@ -399,6 +419,10 @@ impl ChatMessage {
             images: vec![],
             segments: vec![],
             footer: None,
+            work_state: None,
+            work_open: false,
+            copied: false,
+            copied_gen: 0,
             notification_ui: None,
         }
     }
@@ -417,6 +441,10 @@ impl ChatMessage {
             images: vec![],
             segments: vec![],
             footer: None,
+            work_state: None,
+            work_open: false,
+            copied: false,
+            copied_gen: 0,
             notification_ui: None,
         }
     }
@@ -431,6 +459,10 @@ impl ChatMessage {
             images: vec![],
             segments: vec![],
             footer: None,
+            work_state: None,
+            work_open: false,
+            copied: false,
+            copied_gen: 0,
             notification_ui: None,
         }
     }

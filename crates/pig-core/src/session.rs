@@ -830,6 +830,7 @@ impl Session {
 
 mod approval;
 mod compact;
+mod fork;
 mod images;
 mod replay;
 mod runner;

@@ -76,6 +76,14 @@ impl AgentClient {
         });
     }
 
+    /// 会话分叉：以源会话前 turns 个回合的历史派生新会话并切换过去
+    pub fn fork_session(&self, session_id: &str, turns: usize) {
+        self.send(Op::ForkSession {
+            session_id: session_id.to_string(),
+            turns,
+        });
+    }
+
     pub fn send_message(
         &self,
         session_id: String,
