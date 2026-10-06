@@ -776,6 +776,25 @@ impl ThreadView {
                                 )
                             }
                             Segment::Approval { .. } => unreachable!(),
+                            Segment::Plan {
+                                state,
+                                done,
+                                approved,
+                                is_error: _,
+                                open,
+                                expand_anim,
+                                body_scroll,
+                            } => self.render_plan_row(
+                                ix,
+                                six,
+                                state,
+                                *done,
+                                *approved,
+                                *open,
+                                expand_anim,
+                                body_scroll,
+                                cx,
+                            ),
                             Segment::TurnChanges {
                                 rows,
                                 open,
@@ -886,36 +905,6 @@ impl ThreadView {
                                             .count();
                                         cx.emit(ThreadEvent::Fork { turns });
                                         cx.notify();
-                                    })),
-                            )
-                            .into_any_element(),
-                    ));
-                }
-                if self.plan_pending && ix == self.messages.len() - 1 {
-                    segments.push((
-                        "plan".to_string(),
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().success)
-                            .bg(cx.theme().success.opacity(0.08))
-                            .child(
-                                Icon::new(IconName::CircleCheck)
-                                    .size_4()
-                                    .text_color(cx.theme().success),
-                            )
-                            .child(div().text_sm().flex_1().child("计划已就绪"))
-                            .child(
-                                Button::new("execute-plan")
-                                    .primary()
-                                    .small()
-                                    .label("执行计划 ▶")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.trigger_execute_plan(cx);
                                     })),
                             )
                             .into_any_element(),

@@ -46,8 +46,6 @@ use read::*;
 
 #[derive(Clone, Debug)]
 pub enum ThreadEvent {
-    /// 计划模式：用户点了「执行计划」
-    ExecutePlan,
     /// 取消排队消息（文本匹配）
     CancelQueued(String),
     /// 点击后台子代理通知卡：打开右侧「子代理」tab（只读完整对话）
@@ -62,6 +60,8 @@ pub enum ThreadEvent {
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,
+        /// 反馈意见（kimi Revise：计划「修改」提交时携带；其余审批为 None）
+        feedback: Option<String>,
     },
     /// 会话分叉：以该消息所在回合为止的历史派生新会话（turns = 保留回合数）
     Fork { turns: usize },
@@ -104,8 +104,6 @@ pub struct ThreadView {
     /// 上下文压缩进行中（CompactStarted → ContextCompacted/TurnAborted 之间）：
     /// 列表末尾渲染「正在压缩上下文」分隔条
     compacting: bool,
-    /// 计划模式回合完成，等待用户确认执行
-    plan_pending: bool,
     turn_started: Option<std::time::Instant>,
     /// 当前回合由回放重建（turn_id 以 replay- 开头）：思考段不打真实用时
     replay_turn: bool,
@@ -198,7 +196,6 @@ impl ThreadView {
             follow_bottom: true,
             streaming: false,
             compacting: false,
-            plan_pending: false,
             turn_started: None,
             replay_turn: false,
             queued: Vec::new(),
@@ -258,22 +255,6 @@ impl ThreadView {
 
     pub fn is_streaming(&self) -> bool {
         self.streaming
-    }
-
-    pub fn set_plan_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
-        self.plan_pending = pending;
-        cx.notify();
-    }
-
-    pub fn is_plan_pending(&self) -> bool {
-        self.plan_pending
-    }
-
-    /// 与点击「执行计划」按钮相同的路径（自测用）。
-    pub fn trigger_execute_plan(&mut self, cx: &mut Context<Self>) {
-        self.plan_pending = false;
-        cx.emit(ThreadEvent::ExecutePlan);
-        cx.notify();
     }
 
     #[allow(dead_code)] // 调试用
@@ -464,7 +445,7 @@ impl ThreadView {
                     tool_done |= *done && !*is_error;
                     tool_output.push_str(output);
                 }
-                Segment::TurnChanges { .. } | Segment::Approval { .. } => {}
+                Segment::TurnChanges { .. } | Segment::Approval { .. } | Segment::Plan { .. } => {}
             }
         }
         (tool_done, text, thinking, tool_output)
@@ -628,16 +609,18 @@ impl ThreadView {
         let Some((mix, six)) = found else {
             return false;
         };
-        self.decide_approval(mix, six, decision, cx);
+        self.decide_approval(mix, six, decision, None, cx);
         true
     }
 
     /// 按 request_id 定向决议审批卡（审批条路径）：并发审批排队时各笔
     /// 各答各的，不受到达顺序影响；id 不在（已决议/迟到事件）则无操作。
+    /// feedback 仅计划「修改」路径非 None（其余审批为 None）
     pub fn decide_approval_by_id(
         &mut self,
         request_id: &str,
         decision: ApprovalDecision,
+        feedback: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
         let found = self.messages.iter().enumerate().find_map(|(mix, m)| {
@@ -652,7 +635,7 @@ impl ThreadView {
         let Some((mix, six)) = found else {
             return false;
         };
-        self.decide_approval(mix, six, decision, cx);
+        self.decide_approval(mix, six, decision, feedback, cx);
         true
     }
 
@@ -661,6 +644,7 @@ impl ThreadView {
         message_ix: usize,
         segment_ix: usize,
         decision: ApprovalDecision,
+        feedback: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if let Some(Segment::Approval {
@@ -676,6 +660,7 @@ impl ThreadView {
             cx.emit(ThreadEvent::ApprovalReply {
                 request_id: request_id.clone(),
                 decision,
+                feedback,
             });
         }
         cx.notify();

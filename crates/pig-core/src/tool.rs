@@ -258,7 +258,7 @@ pub fn schemas_root(
         .collect()
 }
 
-/// 审批判定：Plan 模式在更早处拦截（直接拒绝），这里只管其余档。
+/// 审批判定：计划模式在更早处整类硬拒（与模式正交），这里只管权限档。
 /// Yolo 与 FullAccess 都不审批（危险命令强制弹窗在 session 层，Yolo 在那里也跳过）。
 pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
     // Agent/AgentSwarm 一律免审批：子代理内部每个写操作会自己走审批门，
@@ -268,7 +268,6 @@ pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
     }
     match mode {
         ExecMode::FullAccess | ExecMode::Yolo => false,
-        ExecMode::Plan => false,
         ExecMode::ConfirmBeforeEdit => !tool.read_only(),
         // MCP 工具无 annotations 时按非只读保守处理：AutoEdit 下也弹审批
         //（is_shell 只覆盖 Bash，挡不住 MCP 写工具直通）

@@ -224,6 +224,8 @@ struct AppView {
     cwd: PathBuf,
     config_path: Option<PathBuf>,
     exec_mode: pig_protocol::ExecMode,
+    /// 计划模式开关（与 exec_mode 正交；SessionConfigured/PlanModeChanged 同步）
+    plan_enabled: bool,
     git_branch: Option<String>,
     /// 标题栏分支切换器的分支列表（当前会话 cwd 的本地分支）
     title_branches: Vec<String>,
@@ -357,6 +359,7 @@ impl AppView {
             cwd,
             config_path,
             exec_mode: pig_protocol::ExecMode::AutoEdit,
+            plan_enabled: false,
             git_branch: None,
             title_branches: vec![],
             title_branch_menu_open: false,
@@ -536,8 +539,10 @@ impl AppView {
                 ThreadEvent::ApprovalReply {
                     request_id,
                     decision,
+                    feedback,
                 } => {
-                    this.agent.approval_reply(request_id.clone(), *decision);
+                    this.agent
+                        .approval_reply(request_id.clone(), *decision, feedback.clone());
                     // 只摘掉答复的这笔，队列里还有下一笔就接着显示；全答完
                     // 才撤审批态恢复输入框（core 侧会把同合并键的等待者一并唤醒）
                     let mut answered_all = true;
@@ -550,9 +555,6 @@ impl AppView {
                         this.pending_approvals.remove(&sid);
                     }
                     this.sync_composer_state(cx);
-                }
-                ThreadEvent::ExecutePlan => {
-                    this.on_execute_plan(cx);
                 }
                 ThreadEvent::CancelQueued(text) => {
                     if let Some(sid) = this.current.clone() {
@@ -679,34 +681,6 @@ impl AppView {
         .detach();
     }
 
-    fn on_execute_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(sid) = self.current.clone() else {
-            return;
-        };
-        self.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
-        self.update_current_meta(|m| {
-            m.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
-        });
-        self.composer.update(cx, |composer, cx| {
-            composer.set_exec_mode(pig_protocol::ExecMode::ConfirmBeforeEdit, cx);
-        });
-        self.agent
-            .set_exec_mode(sid.clone(), pig_protocol::ExecMode::ConfirmBeforeEdit);
-        let text = "计划已确认，请按计划开始执行".to_string();
-        if let Some(views) = self.views.get(&sid) {
-            views.thread.update(cx, |thread, cx| {
-                thread.append_user_message(text.clone(), vec![], cx);
-            });
-        }
-        self.agent.send_message(
-            sid,
-            text,
-            vec![],
-            vec![],
-            pig_protocol::ExecMode::ConfirmBeforeEdit,
-        );
-    }
-
     /// 同步更新 metas 缓存中当前会话的条目（与 core 写穿保持一致；
     /// core 的 Set* 写穿不再发 SessionList，缓存不更新会导致切会话读到旧值）
     fn update_current_meta(&mut self, f: impl FnOnce(&mut SessionMeta)) {
@@ -726,6 +700,17 @@ impl AppView {
             .update(cx, |composer, cx| composer.set_exec_mode(mode, cx));
         if let Some(sid) = &self.current {
             self.agent.set_exec_mode(sid.clone(), mode);
+        }
+    }
+
+    /// 应用计划模式开关（与 exec_mode 正交）：本地缓存 + core 下发 + composer chip
+    fn apply_plan_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.plan_enabled = enabled;
+        self.update_current_meta(|m| m.plan_enabled = enabled);
+        self.composer
+            .update(cx, |composer, cx| composer.set_plan_enabled(enabled, cx));
+        if let Some(sid) = &self.current {
+            self.agent.set_plan_mode(sid.clone(), enabled);
         }
     }
 

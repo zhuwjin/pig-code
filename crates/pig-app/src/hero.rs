@@ -144,6 +144,8 @@ impl AppView {
             model_id,
             self.reasoning_level.clone(),
             Some(mode),
+            // 计划开关带上 composer 草稿态（hero 上勾了「计划」新会话即开）
+            Some(self.plan_enabled),
         );
         self.composer.update(cx, |composer, cx| {
             composer.set_hero_mode(false, cx);

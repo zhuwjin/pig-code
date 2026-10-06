@@ -111,15 +111,105 @@ impl Composer {
         )
     }
 
-    /// 执行模式面板：Command 单选模式列表（键盘导航保持可用）。
-    /// 「工作区外访问」开关区放在 Command 的 footer 槽：模式（单选）与开关（多选）
-    /// 分区展示，开关行不参与 Command 的键盘选择（鼠标交互，可接受的取舍）。
+    /// 执行模式面板：顶部「计划」开关（与权限正交，ZCode V4ComposerModeControls
+    /// 同款布局：计划勾选在上、分隔线、权限单选在下），底部 footer 槽放
+    /// 「工作区外访问」开关。计划/开关行不参与 Command 键盘选择（鼠标交互）。
     pub(crate) fn render_exec_mode_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
+        // 计划开关行（鼠标交互，不进 Command 键盘导航）：灯泡 + 「计划」+ 描述 + Checkbox
+        let plan_on = self.plan_enabled;
         let command = Command::new(&self.exec_command)
             .searchable(false)
+            // header 槽：「计划」开关行 + 分隔线——放在 Command 自己的边框内
+            //（ZCode 菜单布局：计划勾选在上、分隔线、权限单选在下），
+            // 悬停高亮与列表行同款 accent 底色
+            .header({
+                let composer = cx.entity();
+                move |_, _window, cx| {
+                    let composer = composer.clone();
+                    let composer_hover = composer.clone();
+                    let (accent, radius, muted, info) = {
+                        let theme = cx.theme();
+                        (
+                            theme.accent,
+                            theme.radius,
+                            theme.muted_foreground,
+                            theme.info,
+                        )
+                    };
+                    v_flex()
+                        .w_full()
+                        // 垂直内缩与列表容器 p_1 对齐：高亮块不顶弹层上沿
+                        .pt_1()
+                        .pb_1()
+                        .child(
+                            div()
+                                .id("plan-mode-toggle")
+                                .test_support()
+                                // 高亮块与列表行同宽：列表容器有 p_1 内缩，
+                                // header 槽全宽，行要自己内缩一份（分隔线保持通栏）；
+                                // mb 与线下列表的 p_1 顶距对称——高亮不贴分隔线
+                                .mx_1()
+                                .mb_1()
+                                .cursor_pointer()
+                                .rounded(radius)
+                                .hover(move |style| style.bg(accent))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .px_2()
+                                        .py_1p5()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            Icon::new(AssetIconName::Lightbulb)
+                                                .size_4()
+                                                .text_color(info),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .child(div().text_color(info).child("计划"))
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("编辑前先出计划"),
+                                                ),
+                                        )
+                                        .child(
+                                            Checkbox::new("plan-mode")
+                                                .checked(plan_on)
+                                                .tab_stop(false),
+                                        ),
+                                )
+                                .on_hover(move |hovered, window, cx| {
+                                    // 高亮只跟鼠标走：悬停本行时清掉列表的
+                                    // 残留选中块（行 on_hover 会 select，
+                                    // 移到 header 行上没人清它——两个高亮的根源）
+                                    if *hovered {
+                                        composer_hover.update(cx, |this, cx| {
+                                            this.exec_command.update(cx, |state, cx| {
+                                                state.set_selected_index(None, window, cx);
+                                            });
+                                        });
+                                    }
+                                })
+                                .on_click(move |_, _window, cx| {
+                                    composer.update(cx, |this, cx| {
+                                        this.plan_enabled = !this.plan_enabled;
+                                        cx.emit(ComposerEvent::SetPlanMode(this.plan_enabled));
+                                        cx.notify();
+                                    });
+                                })
+                                .into_any_element(),
+                        )
+                        .child(Separator::horizontal())
+                        .into_any_element()
+                }
+            })
             .items(
                 EXEC_MODES
                     .iter()

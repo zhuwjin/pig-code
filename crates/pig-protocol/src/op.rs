@@ -12,6 +12,9 @@ pub enum Op {
         reasoning_level: Option<String>,
         /// UI 当前执行模式；None → 工作区最近活跃会话 / 默认
         exec_mode: Option<ExecMode>,
+        /// 计划模式开关（None/false = 关；不种子继承——计划是临时态）
+        #[serde(default)]
+        plan_enabled: Option<bool>,
     },
     OpenSession {
         session_id: String,
@@ -64,6 +67,9 @@ pub enum Op {
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,
+        /// 反馈意见（kimi Revise：拒绝计划时携带给模型修订；仅 ExitPlanMode 用）
+        #[serde(default)]
+        feedback: Option<String>,
     },
     /// 结构化提问的回复：None = 用户跳过；外层按题、内层为该题选中标签
     ///（"其他"自由文本作为标签原样放入）
@@ -93,6 +99,11 @@ pub enum Op {
     SetExecMode {
         session_id: String,
         mode: ExecMode,
+    },
+    /// 计划模式开关（与执行模式正交；模型侧经 EnterPlanMode/ExitPlanMode 自切）
+    SetPlanMode {
+        session_id: String,
+        enabled: bool,
     },
     /// 会话级「工作区外读/写」开关（默认关；tmp 目录始终放行）
     SetFsAccess {

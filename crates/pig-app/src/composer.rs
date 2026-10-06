@@ -49,7 +49,6 @@ const EXEC_MODES: &[(&str, &str, ExecMode)] = &[
         ExecMode::ConfirmBeforeEdit,
     ),
     ("自动编辑", "自动编辑文件，跑命令前问我", ExecMode::AutoEdit),
-    ("计划模式", "编辑前先出计划", ExecMode::Plan),
     (
         "完全访问",
         "全自动执行；高风险命令仍会弹窗确认",
@@ -66,22 +65,19 @@ fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
     match mode {
         ExecMode::ConfirmBeforeEdit => AssetIconName::Hand,
         ExecMode::AutoEdit => AssetIconName::ShieldCheck,
-        ExecMode::Plan => AssetIconName::Lightbulb,
         ExecMode::FullAccess => AssetIconName::ShieldAlert,
         // 无管制沿用警示图标（现有图标里没有更合适的）
         ExecMode::Yolo => AssetIconName::ShieldAlert,
     }
 }
 
-/// 模式色（弹层行的图标+label、输入框 chip）：按危险程度 中性 → 蓝 → 黄 → 橙 → 红。
+/// 模式色（弹层行的图标+label、输入框 chip）：按危险程度 中性 → 黄 → 橙 → 红。
 /// 描述文字保持 muted 灰不上色。
 fn exec_mode_color(mode: ExecMode, cx: &App) -> Hsla {
     let theme = cx.theme();
     match mode {
         // 中性：默认前景，不额外着色
         ExecMode::ConfirmBeforeEdit => theme.foreground,
-        // 蓝：只读/信息语义
-        ExecMode::Plan => theme.info,
         // 黄/琥珀：中间档
         ExecMode::AutoEdit => theme.warning,
         // 橙：激进但有护栏（主题无 orange token，用 Tailwind 色板的 orange-500）
@@ -163,10 +159,19 @@ pub type ModelOption = (String, String, String, Vec<(String, String)>);
 pub struct PendingApproval {
     /// 这笔审批在 core 侧的等待 id（决议定向回复用）
     pub request_id: String,
+    /// 审批来源会话（ExitPlanMode 的计划文件路径拼接用）
+    pub session_id: String,
     pub tool: String,
-    /// Bash 是命令原文；Write/Edit 是 diff 预览
+    /// Bash 是命令原文；Write/Edit 是 diff 预览；ExitPlanMode 是计划全文
     pub detail: String,
     pub cwd: String,
+}
+
+impl PendingApproval {
+    /// ExitPlanMode 的计划文件绝对路径（core 弹审批前已落盘）
+    pub fn plan_path(&self) -> String {
+        format!("{}/.pigcode/plans/plan-{}.md", self.cwd, self.session_id)
+    }
 }
 
 /// 待回答的结构化提问：显示问题条时输入区隐藏（与审批条互斥，问题优先）。
@@ -248,9 +253,15 @@ pub enum ComposerEvent {
         provider_id: String,
         model_id: String,
     },
+    /// 计划审批面板的路径链接：右侧「文件」tab 打开计划文件
+    OpenFile {
+        path: String,
+    },
     SetReasoning(Option<String>),
     OpenSettings,
     SetExecMode(ExecMode),
+    /// 计划模式开关（与执行模式正交；弹层勾选 / chip 关闭）
+    SetPlanMode(bool),
     /// 选中「无管制模式」：先弹确认框（AppView 宿主），确认后才走 SetExecMode
     RequestYoloConfirm,
     /// 模式菜单里的「工作区外读/写」开关
@@ -272,6 +283,8 @@ pub enum ComposerEvent {
     DecideApproval {
         request_id: String,
         decision: ApprovalDecision,
+        /// 反馈意见（kimi Revise：计划「修改」提交时携带；其余审批为 None）
+        feedback: Option<String>,
     },
     /// 问题条：提交（Some=各题选中标签）/ 跳过（None）
     QuestionReply {
@@ -318,6 +331,8 @@ pub(crate) enum PopupAnchor {
 pub struct Composer {
     input: Entity<TextareaState>,
     exec_mode: usize,
+    /// 计划模式开关（与 exec_mode 正交；开启时 bar 上显示独立「计划」chip）
+    plan_enabled: bool,
     /// 会话级「工作区外读/写」开关（模式菜单里的两个勾选项）
     fs_read_outside: bool,
     fs_write_outside: bool,
@@ -332,6 +347,14 @@ pub struct Composer {
     streaming: bool,
     /// 待审批：Some 时输入区隐藏，显示审批条
     approval: Option<PendingApproval>,
+    /// ExitPlanMode 审批的计划 markdown 视图（kimi 计划审批面板正文；
+    /// 随 set_approval/decide_approval 建立与释放）
+    plan_state: Option<Entity<gpui_kit::component::text::TextViewState>>,
+    /// 计划「修改」输入态（kimi Revise）：true 时面板底部显示反馈输入框，
+    /// 提交并拒绝携带反馈给模型修订
+    plan_revise: bool,
+    /// 反馈输入框（惰性创建，随面板复用）
+    plan_revise_input: Option<Entity<InputState>>,
     /// 审批条的焦点（承接 ⏎ / Ctrl+⏎ / Esc 快捷键）
     approval_focus: FocusHandle,
     /// 是否已为当前审批条抢过焦点（每次出现只抢一次）
@@ -421,6 +444,7 @@ impl Composer {
         Self {
             input,
             exec_mode: 1,
+            plan_enabled: false,
             fs_read_outside: false,
             fs_write_outside: false,
             model: "未配置模型".to_string(),
@@ -430,6 +454,9 @@ impl Composer {
             outside_closed: None,
             streaming: false,
             approval: None,
+            plan_state: None,
+            plan_revise: false,
+            plan_revise_input: None,
             approval_focus: cx.focus_handle(),
             approval_focused: false,
             question: None,
@@ -527,25 +554,69 @@ impl Composer {
 
     /// 待审批操作：Some 时输入区隐藏，显示审批条；None 恢复输入。
     pub fn set_approval(&mut self, approval: Option<PendingApproval>, cx: &mut Context<Self>) {
+        // 计划面板正文（ExitPlanMode 专用）：request_id 变了才重建，重复同步不丢滚动位置
+        let recreate = match (&approval, &self.approval) {
+            (Some(new), Some(old)) => new.request_id != old.request_id,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if recreate {
+            self.plan_revise = false;
+            self.plan_state =
+                match &approval {
+                    Some(a) if a.tool == "ExitPlanMode" => Some(cx.new(|cx| {
+                        gpui_kit::component::text::TextViewState::markdown(&a.detail, cx)
+                    })),
+                    _ => None,
+                };
+        } else if approval.is_none() {
+            self.plan_revise = false;
+            self.plan_state = None;
+        }
         self.approval = approval;
         cx.notify();
     }
 
     /// 审批条决议：清空审批态、发事件（带本条 request_id 定向）、焦点还回输入框。
+    /// feedback 仅计划「修改」提交路径非 None（kimi Revise 携带给模型修订）
     fn decide_approval(
         &mut self,
         decision: ApprovalDecision,
+        feedback: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(approval) = self.approval.take() {
+            self.plan_state = None;
+            self.plan_revise = false;
             cx.emit(ComposerEvent::DecideApproval {
                 request_id: approval.request_id,
                 decision,
+                feedback,
             });
             self.input.update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
         }
+    }
+
+    /// 计划「修改」提交：拒绝并携带反馈文本（kimi Revise；空文本 = 裸拒绝）
+    fn submit_plan_revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let feedback = self
+            .plan_revise_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .filter(|text| !text.trim().is_empty());
+        self.decide_approval(ApprovalDecision::Reject, feedback, window, cx);
+    }
+
+    /// 计划「修改」取消：回三按钮态、清空输入、焦点还审批条
+    fn cancel_plan_revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.plan_revise = false;
+        if let Some(input) = &self.plan_revise_input {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.approval_focus.focus(window, cx);
+        cx.notify();
     }
 
     /// 待回答提问：Some 时显示问题条；None 清除（提交/放弃/回合结束后）。
@@ -825,6 +896,17 @@ impl Composer {
             self.exec_mode = ix;
         }
         cx.notify();
+    }
+
+    /// 计划模式开关（SessionConfigured/PlanModeChanged 同步，或弹层勾选）
+    pub fn set_plan_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.plan_enabled = enabled;
+        cx.notify();
+    }
+
+    /// 当前计划开关（hero 新建会话携带用）
+    pub fn plan_enabled(&self) -> bool {
+        self.plan_enabled
     }
 
     /// 回焦输入框（对话框/弹层关闭后由 AppView 调用）
@@ -1222,11 +1304,70 @@ impl Render for Composer {
                                                     window,
                                                     cx,
                                                 );
+                                                // 高亮只跟鼠标走：清掉默认的键盘选中块
+                                                //（否则首行常驻一个类高亮块，悬停
+                                                // 计划行时读作「两个高亮」）；键盘
+                                                // ↓ 会重新选中，行为不变
+                                                if matches!(this.popup, Some((Popup::ExecMode, _))) {
+                                                    this.exec_command.update(cx, |state, cx| {
+                                                        state.set_selected_index(None, window, cx);
+                                                    });
+                                                }
                                             }),
                                             cx,
                                         ))
                                         .when_some(exec_popup, |this, popup| this.child(popup)),
                                 )
+                                // 计划模式 chip（与权限档正交，ZCode composer 计划 chip 同款）：
+                                // 灯泡 + 「计划」+ X 关闭；仅开启时渲染
+                                .when(self.plan_enabled, |this| {
+                                    this.child(
+                                        h_flex()
+                                            .id("plan-chip")
+                                            .test_support()
+                                            .gap_1()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_full()
+                                            .items_center()
+                                            .bg(cx.theme().accent.opacity(0.5))
+                                            .child(
+                                                Icon::new(AssetIconName::Lightbulb)
+                                                    .size_4()
+                                                    .text_color(cx.theme().info),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().info)
+                                                    .child("计划"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("plan-chip-close")
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .rounded_full()
+                                                    .hover(|this| this.bg(cx.theme().accent))
+                                                    .child(
+                                                        Icon::new(IconName::Close)
+                                                            .size_3()
+                                                            .text_color(
+                                                                cx.theme().muted_foreground,
+                                                            ),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        |this, _, _, cx| {
+                                                            this.plan_enabled = false;
+                                                            cx.emit(ComposerEvent::SetPlanMode(
+                                                                false,
+                                                            ));
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                })
                                 .child(div().flex_1())
                                 .when_some(self.context_usage, |this, (used, total, _, _)| {
                                     // 上下文水位环形指示器（ZCode 同款）：悬停展示容量面板

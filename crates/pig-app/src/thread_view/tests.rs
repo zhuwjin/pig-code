@@ -1449,3 +1449,196 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
     })
     .unwrap();
 }
+
+/// ExitPlanMode 计划卡（kimi「计划 待确认/已通过」同款）：ToolCallBegin 建卡
+/// 显示「待确认」，chevron 展开看计划全文；决议 + ToolCallEnd 后落三态；
+/// 回放形态（Begin+End 连续到达）直接显示结果
+#[gpui_kit::test]
+fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+
+    // live 形态：TurnStarted → ExitPlanMode ToolCallBegin（detail=参数 JSON）→ ApprovalRequested
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("出个计划".to_string(), vec![], cx);
+                view.reduce_event(
+                    pig_protocol::Event::TurnStarted {
+                        session_id: "s".into(),
+                        seq: 0,
+                        turn_id: "t1".into(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 1,
+                        item_id: "pe1".into(),
+                        tool: "ExitPlanMode".into(),
+                        input_summary: "请求退出计划模式".into(),
+                        detail: serde_json::json!({"plan": "# 实施计划\n\n1. 第一步\n2. 第二步"})
+                            .to_string(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ApprovalRequested {
+                        session_id: "s".into(),
+                        seq: 2,
+                        request_id: "req-pe1".into(),
+                        tool: "ExitPlanMode".into(),
+                        detail: "# 实施计划\n\n1. 第一步\n2. 第二步".into(),
+                    },
+                    cx,
+                );
+                let message = &view.messages[1];
+                assert!(
+                    matches!(
+                        message.segments.first(),
+                        Some(super::Segment::Plan { done: false, .. })
+                    ),
+                    "ExitPlanMode 应建 Plan 段而非工具卡段"
+                );
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    // 「计划 · 待确认」行可见；chevron 展开后计划全文可见
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.find(("plan-row", 1024usize)).visible(),
+            "计划行应可见"
+        );
+        assert!(
+            window.try_find(("plan-row-body", 1024usize)).is_none(),
+            "默认收起，无展开体"
+        );
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("plan-row", 1024usize), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find(("plan-row-body", 1024usize)).is_some(),
+            "点击后应展开计划全文"
+        );
+    })
+    .unwrap();
+
+    // 批准 + ToolCallEnd → 「已通过」
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.decide_approval_by_id(
+                    "req-pe1",
+                    pig_protocol::ApprovalDecision::Allow,
+                    None,
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallEnd {
+                        session_id: "s".into(),
+                        seq: 3,
+                        item_id: "pe1".into(),
+                        output: "计划已批准，计划模式已关闭，请按计划开始执行。".into(),
+                        is_error: false,
+                        edit: None,
+                    },
+                    cx,
+                );
+                let Some(super::Segment::Plan {
+                    done,
+                    approved,
+                    open,
+                    ..
+                }) = view.messages[1].segments.first()
+                else {
+                    panic!("应为 Plan 段");
+                };
+                assert!(*done && *approved, "批准后应落「已通过」");
+                assert!(*open, "展开态保留");
+            });
+        })
+        .unwrap();
+
+    // 回放形态：Begin+End 连续到达（output 含「用户拒绝」）→ 直接「已拒绝」
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.reduce_event(
+                    pig_protocol::Event::TurnStarted {
+                        session_id: "s".into(),
+                        seq: 4,
+                        turn_id: "replay-2".into(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 5,
+                        item_id: "replay-2-tool-1".into(),
+                        tool: "ExitPlanMode".into(),
+                        input_summary: "请求退出计划模式".into(),
+                        detail: serde_json::json!({"plan": "# 旧计划"}).to_string(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallEnd {
+                        session_id: "s".into(),
+                        seq: 6,
+                        item_id: "replay-2-tool-1".into(),
+                        output: "用户拒绝退出计划模式，请继续完善计划或回答疑问。".into(),
+                        is_error: true,
+                        edit: None,
+                    },
+                    cx,
+                );
+                let message = view.messages.last().expect("回放消息");
+                assert!(
+                    matches!(
+                        message.segments.first(),
+                        Some(super::Segment::Plan {
+                            done: true,
+                            approved: false,
+                            ..
+                        })
+                    ),
+                    "回放应直接落「已拒绝」"
+                );
+            });
+        })
+        .unwrap();
+}

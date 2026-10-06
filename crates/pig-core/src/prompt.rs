@@ -121,7 +121,7 @@ pub fn system_prompt(
          - 不可逆或影响超出本地的动作（删除、格式化、强制推送、对外发布等）先向用户确认；\
          可逆的局部操作直接做，审批仍按当前执行模式把关。\n\
          - 多步任务先用 TodoList 拆分并随时更新进度。\n\
-         - 任务复杂或改动范围大时，可先调用 EnterPlanMode 进入计划模式调研并出计划。\n\
+         - 任务复杂或改动范围大时，可先调用 EnterPlanMode 进入计划模式：只读调研后把计划写入计划文件，再 ExitPlanMode 请用户确认。\n\
          - 长时命令（dev server/watch/长构建）用 Bash 的 run_in_background，配合 TaskOutput 查输出。\n\
          - 后台子代理完成会自动通知，结果全文在通知给出的文件里（用 Read 读取），等待期间继续其他工作或先收尾，不要轮询任务状态。\n\
          - 需要用户拍板时用 AskUserQuestion 给出选项，而不是纯文本提问。\n\
@@ -169,10 +169,6 @@ pub(crate) fn mode_line(mode: ExecMode) -> &'static str {
         ExecMode::AutoEdit => {
             "当前执行模式: 自动编辑。可以直接修改文件；只读命令直接执行，其余命令执行前会弹窗请用户确认。"
         }
-        ExecMode::Plan => {
-            "当前执行模式: 计划模式。你是只读的：不要调用 Write/Edit/Bash 等修改类工具，\
-             只能用 Read/Glob/Grep 调研，最终输出一份可执行的计划文本。计划写好后调用 ExitPlanMode 工具请用户确认执行。"
-        }
         ExecMode::FullAccess => {
             "当前执行模式: 完全访问。所有工具直接执行，无需审批；命中高风险命令时会弹窗请用户确认。"
         }
@@ -182,18 +178,35 @@ pub(crate) fn mode_line(mode: ExecMode) -> &'static str {
     }
 }
 
+/// 计划模式说明（与执行模式正交的独立开关，kimi PlanModeInjection 同款）：
+/// 开启/关闭后的下一回合经 turn_reminder 注入一次。
+/// kimi 文件语义：计划先经 Write 落计划文件（唯一放行的写路径），
+/// ExitPlanMode 从文件读——计划全文不进聊天正文
+pub(crate) fn plan_line(session_id: &str) -> String {
+    format!(
+        "计划模式已开启：你是只读的——除计划文件外不要调用 Write/Edit/Bash 等修改类工具（会被拒绝），\
+         用 Read/Glob/Grep 调研。计划写好后先用 Write 把它写入计划文件 \
+         `.pigcode/plans/plan-{session_id}.md`（这是唯一允许写入的路径），\
+         再调用 ExitPlanMode 请用户确认；不要把计划全文输出到对话里。\
+         用户批准后计划模式关闭，你即可开始执行。"
+    )
+}
+
 /// 回合边界 reminder：系统提示词冻结后的易变内容经此注入对话尾部（prepend
 /// 到本回合用户消息前）——尾部追加不打断 system+历史的前缀缓存，也不会插在
 /// 工具调用配对中间。ZCode runtime_mode/date_change、kimi agentsMdReminder
 /// 同款思路。
-/// 三类内容全部按需触发：执行模式首轮一次 + 切换后下一回合一次
-///（mode_reminded 去重）；日期跨天/AGENTS.md 变更只在与已提醒内容不一致时
-/// 提醒一次（reminded 状态去重，同内容不重复注入；冻结版不回写，系统提示词
-/// 里的旧值由提醒文案声明作废）。无可提醒内容时返回 None——用户消息保持
-/// 干净，不再每回合顶一个空 reminder。
+/// 三类内容全部按需触发：执行模式/计划开关首轮一次 + 切换后下一回合一次
+///（(mode, plan) 联合键去重，resume 重新冻结后首轮自愈重发）；日期跨天/
+/// AGENTS.md 变更只在与已提醒内容不一致时提醒一次（reminded 状态去重，同
+/// 内容不重复注入；冻结版不回写，系统提示词里的旧值由提醒文案声明作废）。
+/// 无可提醒内容时返回 None——用户消息保持干净，不再每回合顶一个空 reminder。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn turn_reminder(
     mode: ExecMode,
-    mode_reminded: &mut Option<ExecMode>,
+    plan_enabled: bool,
+    session_id: &str,
+    mode_reminded: &mut Option<(ExecMode, bool)>,
     date_frozen: &str,
     date_reminded: &mut String,
     agents_frozen: &str,
@@ -201,9 +214,13 @@ pub(crate) fn turn_reminder(
     agents_reminded: &mut String,
 ) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    if *mode_reminded != Some(mode) {
+    let state = (mode, plan_enabled);
+    if *mode_reminded != Some(state) {
         lines.push(mode_line(mode).to_string());
-        *mode_reminded = Some(mode);
+        if plan_enabled {
+            lines.push(plan_line(session_id));
+        }
+        *mode_reminded = Some(state);
     }
     let today = today();
     if today != *date_reminded {
@@ -509,8 +526,8 @@ mod tests {
         assert!(prompt.contains("工作目录"), "env 块仍在");
     }
 
-    /// turn_reminder：执行模式首轮一次 + 切换后一次；日期/AGENTS.md 变更
-    /// 提醒一次即去重；全部无变化时返回 None（用户消息不再顶空 reminder）
+    /// turn_reminder：执行模式/计划开关首轮一次 + 切换后一次；日期/AGENTS.md
+    /// 变更提醒一次即去重；全部无变化时返回 None（用户消息不再顶空 reminder）
     #[test]
     fn turn_reminder_dedup_and_composition() {
         let today = super::today();
@@ -520,6 +537,8 @@ mod tests {
         // 首轮：只有模式行
         let r = super::turn_reminder(
             pig_protocol::ExecMode::AutoEdit,
+            false,
+            "s1",
             &mut mode_reminded,
             &today,
             &mut date_reminded,
@@ -530,6 +549,7 @@ mod tests {
         .expect("首轮应有模式 reminder");
         assert!(r.starts_with("<system-reminder>"));
         assert!(r.contains("当前执行模式: 自动编辑"));
+        assert!(!r.contains("计划模式"));
         assert!(!r.contains("日期已变更"));
         assert!(!r.contains("AGENTS.md"));
         assert!(r.ends_with("</system-reminder>"));
@@ -537,6 +557,8 @@ mod tests {
         assert!(
             super::turn_reminder(
                 pig_protocol::ExecMode::AutoEdit,
+                false,
+                "s1",
                 &mut mode_reminded,
                 &today,
                 &mut date_reminded,
@@ -547,9 +569,26 @@ mod tests {
             .is_none(),
             "模式未变且无环境变更时不应再有 reminder"
         );
-        // 模式切换：下一回合再提醒一次新模式
+        // 计划开启：模式没变也提醒（联合键含 plan 态），模式行 + 计划行同发
         let r = super::turn_reminder(
-            pig_protocol::ExecMode::Plan,
+            pig_protocol::ExecMode::AutoEdit,
+            true,
+            "s1",
+            &mut mode_reminded,
+            &today,
+            &mut date_reminded,
+            "",
+            "",
+            &mut agents_reminded,
+        )
+        .expect("计划开启应再提醒");
+        assert!(r.contains("当前执行模式: 自动编辑"));
+        assert!(r.contains("计划模式已开启"));
+        // 模式切换：下一回合再提醒一次新模式（计划行不再出现——开关已关）
+        let r = super::turn_reminder(
+            pig_protocol::ExecMode::FullAccess,
+            false,
+            "s1",
             &mut mode_reminded,
             &today,
             &mut date_reminded,
@@ -558,12 +597,15 @@ mod tests {
             &mut agents_reminded,
         )
         .expect("切换后应再提醒模式");
-        assert!(r.contains("当前执行模式: 计划模式"));
+        assert!(r.contains("当前执行模式: 完全访问"));
         assert!(!r.contains("自动编辑"));
+        assert!(!r.contains("计划模式已开启"));
         // AGENTS.md 变更：提醒一次，同内容重复调用去重（此时只含 AGENTS.md 行）
         let fresh = "## AGENTS.md 指令\n新版规则";
         let r1 = super::turn_reminder(
-            pig_protocol::ExecMode::Plan,
+            pig_protocol::ExecMode::FullAccess,
+            false,
+            "s1",
             &mut mode_reminded,
             &today,
             &mut date_reminded,
@@ -577,7 +619,9 @@ mod tests {
         assert!(!r1.contains("当前执行模式"), "模式未变不重复提醒");
         assert!(
             super::turn_reminder(
-                pig_protocol::ExecMode::Plan,
+                pig_protocol::ExecMode::FullAccess,
+                false,
+                "s1",
                 &mut mode_reminded,
                 &today,
                 &mut date_reminded,
@@ -591,7 +635,9 @@ mod tests {
         // AGENTS.md 改回与冻结版一致：不再提醒
         assert!(
             super::turn_reminder(
-                pig_protocol::ExecMode::Plan,
+                pig_protocol::ExecMode::FullAccess,
+                false,
+                "s1",
                 &mut mode_reminded,
                 &today,
                 &mut date_reminded,
@@ -605,7 +651,9 @@ mod tests {
         // 日期跨天：提醒一次并去重（模拟昨天已提醒）
         date_reminded = "2000-01-01".to_string();
         let r4 = super::turn_reminder(
-            pig_protocol::ExecMode::Plan,
+            pig_protocol::ExecMode::FullAccess,
+            false,
+            "s1",
             &mut mode_reminded,
             "2000-01-01",
             &mut date_reminded,
@@ -618,7 +666,9 @@ mod tests {
         assert!(!r4.contains("当前执行模式"), "模式未变不重复提醒");
         assert!(
             super::turn_reminder(
-                pig_protocol::ExecMode::Plan,
+                pig_protocol::ExecMode::FullAccess,
+                false,
+                "s1",
                 &mut mode_reminded,
                 "2000-01-01",
                 &mut date_reminded,

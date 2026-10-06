@@ -43,13 +43,15 @@ impl Session {
         } else if self.history[0].role == "system" {
             self.history[0] = system;
         }
-        // 回合边界 reminder（执行模式首轮/切换、日期跨天、AGENTS.md 变更）：
+        // 回合边界 reminder（执行模式/计划开关首轮或切换、日期跨天、AGENTS.md 变更）：
         // prepend 到用户消息前——尾部注入不打断 system+历史的前缀缓存，也插不进
         // 工具配对中间；无可提醒内容时用户消息保持原样。不落 rollout（恢复会话
         // 由重新冻结 + 首轮提醒自愈）
         let fresh_agents = prompt::agents_md(&self.data_dir, &self.cwd);
         let reminder = prompt::turn_reminder(
             self.mode,
+            self.plan_enabled,
+            &self.id,
             &mut self.mode_reminded,
             &self.date_frozen,
             &mut self.date_reminded,
@@ -485,34 +487,67 @@ impl Session {
                 continue;
             }
             let item_id = format!("{}-tool-{}", turn_id, call.id);
-            let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
-                .unwrap_or_else(|_| call.arguments.clone());
             let summary = tool::summarize(call);
-            self.emit(
-                |session_id, seq| Event::ToolCallBegin {
-                    session_id,
-                    seq,
-                    item_id: item_id.clone(),
-                    tool: call.name.clone(),
-                    input_summary: summary.clone(),
-                    detail,
-                },
-                tx,
-            );
+            // ExitPlanMode 的 begin 在拦截块内发（detail 用生效 plan 重写——
+            // 参数缺省时 core 读计划文件，UI 计划卡与回放恢复同数据源）
+            if call.name != "ExitPlanMode" {
+                let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                    .unwrap_or_else(|_| call.arguments.clone());
+                self.emit(
+                    |session_id, seq| Event::ToolCallBegin {
+                        session_id,
+                        seq,
+                        item_id: item_id.clone(),
+                        tool: call.name.clone(),
+                        input_summary: summary.clone(),
+                        detail,
+                    },
+                    tx,
+                );
+            }
 
             let tool_ref = tools.iter().find(|t| t.name() == call.name);
             let read_only = tool_ref.is_some_and(|t| t.read_only());
 
-            // ExitPlanMode：在 Plan 硬拒之前拦截（它是退出计划模式的唯一出口，
+            // ExitPlanMode：在计划硬拒之前拦截（它是退出计划模式的唯一出口，
             // 强制弹窗请用户确认；复用 ApprovalRequested 通道，UI 无需新组件）。
+            // kimi 语义：plan 参数可选——缺省时 core 读计划文件
             if call.name == "ExitPlanMode" {
                 let args: serde_json::Value =
                     serde_json::from_str(&call.arguments).unwrap_or_default();
-                let plan = args["plan"].as_str().unwrap_or("");
+                let mut plan = args["plan"].as_str().unwrap_or("").to_string();
+                if plan.trim().is_empty() {
+                    plan = read_plan_file(&self.cwd, &self.id).unwrap_or_default();
+                }
+                // begin 用生效 plan 重写（回放经 rollout arguments 恢复同一全文）
+                let enriched_args = serde_json::json!({ "plan": plan }).to_string();
+                let detail = serde_json::to_string_pretty(
+                    &serde_json::from_str::<serde_json::Value>(&enriched_args).unwrap_or_default(),
+                )
+                .unwrap_or_default();
+                self.emit(
+                    |session_id, seq| Event::ToolCallBegin {
+                        session_id,
+                        seq,
+                        item_id: item_id.clone(),
+                        tool: call.name.clone(),
+                        input_summary: summary.clone(),
+                        detail,
+                    },
+                    tx,
+                );
                 let (note, is_error);
-                if self.mode != ExecMode::Plan {
+                if !self.plan_enabled {
                     note = "仅在计划模式下可用".to_string();
+                    is_error = true;
+                } else if plan.trim().is_empty() {
+                    // kimi exitPlanModeTool 同款：计划文件为空/缺失时不弹审批，
+                    // 引导模型先写计划文件
+                    note = format!(
+                        "计划文件为空或不存在：请先用 Write 把计划写入 `.pigcode/plans/plan-{}.md`，再调用 ExitPlanMode。",
+                        self.id
+                    );
                     is_error = true;
                 } else {
                     let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.id);
@@ -522,19 +557,23 @@ impl Session {
                         .lock()
                         .expect("pending lock")
                         .insert(request_id.clone(), (reply_tx, None));
-                    let plan_preview: String = plan.chars().take(500).collect();
+                    // kimi 语义：计划先落盘再弹审批（批准时重写同内容幂等；
+                    // 拒绝后文件保留，修订后下一次 ExitPlanMode 覆盖）
+                    write_plan_file(&self.cwd, &self.id, &plan);
+                    // 完整计划进弹窗（kimi 计划审批面板自带标题，detail = 纯计划
+                    // 全文——截断会让用户批准前看不到全文）
                     self.emit(
                         |session_id, seq| Event::ApprovalRequested {
                             session_id,
                             seq,
                             request_id: request_id.clone(),
                             tool: call.name.clone(),
-                            detail: format!("模型请求结束计划模式并开始执行\n\n{plan_preview}"),
+                            detail: plan.to_string(),
                         },
                         tx,
                     );
-                    let decision = tokio::select! {
-                        reply = reply_rx => reply.unwrap_or(ApprovalDecision::Reject),
+                    let (decision, feedback) = tokio::select! {
+                        reply = reply_rx => reply.unwrap_or((ApprovalDecision::Reject, None)),
                         _ = cancel.cancelled() => {
                             self.pending.lock().expect("pending lock").remove(&request_id);
                             self.settle_cancelled_tool(
@@ -554,36 +593,39 @@ impl Session {
                     };
                     match decision {
                         ApprovalDecision::Allow | ApprovalDecision::AlwaysAllow => {
-                            // 恢复 EnterPlanMode 前的模式（没记录则回落「变更前确认」）：
-                            // 写穿 store + 发事件让 UI 模式 chip 实时更新
-                            let restored = self
-                                .pre_plan_mode
-                                .take()
-                                .unwrap_or(ExecMode::ConfirmBeforeEdit);
-                            self.mode = restored;
+                            // 批准 = 关计划开关 + 计划落盘（弹窗前已写，这里幂等覆盖）
+                            // 退出只翻转计划开关——执行模式是独立维度，原样保留
+                            write_plan_file(&self.cwd, &self.id, &plan);
+                            self.plan_enabled = false;
                             let session_id = self.id.clone();
                             self.store.lock().expect("store lock").update_session(
                                 &session_id,
                                 |m| {
-                                    m.exec_mode = restored;
+                                    m.plan_enabled = false;
                                 },
                             );
                             self.emit(
-                                |session_id, seq| Event::ExecModeChanged {
+                                |session_id, seq| Event::PlanModeChanged {
                                     session_id,
                                     seq,
-                                    mode: restored,
+                                    enabled: false,
                                 },
                                 tx,
                             );
-                            note = format!(
-                                "已切换到「{}」模式，请开始执行计划。",
-                                exec_mode_label(restored)
-                            );
+                            note = "计划已批准，计划模式已关闭，请按计划开始执行。".to_string();
                             is_error = false;
                         }
                         ApprovalDecision::Reject => {
-                            note = "用户拒绝退出计划模式，请继续完善计划或回答疑问。".to_string();
+                            // kimi Revise：拒绝可携带反馈意见，模型据此修订重提
+                            note = match feedback.filter(|f| !f.trim().is_empty()) {
+                                Some(f) => format!(
+                                    "用户拒绝退出计划模式。反馈意见：{}\n请据此修订计划并重新提交。",
+                                    f.trim()
+                                ),
+                                None => {
+                                    "用户拒绝退出计划模式，请继续完善计划或回答疑问。".to_string()
+                                }
+                            };
                             is_error = true;
                         }
                     }
@@ -593,7 +635,8 @@ impl Session {
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
                     summary,
-                    arguments: call.arguments.clone(),
+                    // 落生效 plan（参数缺省时为文件内容）：回放经它恢复计划卡全文
+                    arguments: enriched_args,
                     output: note.clone(),
                     is_error,
                     edit: None,
@@ -615,31 +658,32 @@ impl Session {
             }
 
             // EnterPlanMode：进计划是自我收紧（只读化），直接切换不弹窗。
-            // 记录 pre_plan_mode，ExitPlanMode 确认后恢复原模式。
+            // 计划开关与执行模式正交——只翻转 plan_enabled，模式档不动。
             if call.name == "EnterPlanMode" {
-                let (note, is_error) = if self.mode == ExecMode::Plan {
+                let (note, is_error) = if self.plan_enabled {
                     ("已在计划模式，请继续调研并输出计划。".to_string(), false)
                 } else {
-                    self.pre_plan_mode = Some(self.mode);
-                    self.mode = ExecMode::Plan;
+                    self.plan_enabled = true;
                     let session_id = self.id.clone();
                     self.store
                         .lock()
                         .expect("store lock")
                         .update_session(&session_id, |m| {
-                            m.exec_mode = ExecMode::Plan;
+                            m.plan_enabled = true;
                         });
                     self.emit(
-                        |session_id, seq| Event::ExecModeChanged {
+                        |session_id, seq| Event::PlanModeChanged {
                             session_id,
                             seq,
-                            mode: ExecMode::Plan,
+                            enabled: true,
                         },
                         tx,
                     );
                     (
-                        "已切换到计划模式。接下来只能使用只读工具调研，计划写好后调用 ExitPlanMode 请用户确认执行。"
-                            .to_string(),
+                        format!(
+                            "已开启计划模式。接下来用只读工具调研，计划写好后用 Write 写入计划文件 `.pigcode/plans/plan-{}.md`（唯一可写路径），再调用 ExitPlanMode 请用户确认执行。",
+                            self.id
+                        ),
                         false,
                     )
                 };
@@ -814,9 +858,17 @@ impl Session {
                 continue;
             }
 
-            if self.mode == ExecMode::Plan && !read_only {
-                let note = "计划模式：修改类工具已被禁止执行。请只输出计划文本，等用户切换到其他模式后再执行。"
-                    .to_string();
+            // 计划硬拒（白名单口径，比 kimi-code 黑名单更严）：只读工具 +
+            // 计划文件写（kimi writesOnlyPlanFile）放行，其余修改类直接拒——
+            // 与权限档无关，「完全访问 + 计划」也照拒
+            if self.plan_enabled
+                && !read_only
+                && !tool::is_plan_file_write(&self.cwd, &call.arguments)
+            {
+                let note = format!(
+                    "计划模式：修改类工具已被禁止执行（唯一例外是写计划文件 `.pigcode/plans/plan-{}.md`）。请用只读工具调研，把计划写入计划文件后经 ExitPlanMode 请用户确认。",
+                    self.id
+                );
                 self.history
                     .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
@@ -1344,6 +1396,31 @@ pub(crate) fn pointer_file_references(cwd: &Path, content: &str, files: &[String
     text
 }
 
+/// 读计划文件（ExitPlanMode 的 plan 参数缺省时）：不存在/读失败为 None
+fn read_plan_file(cwd: &Path, session_id: &str) -> Option<String> {
+    std::fs::read_to_string(
+        cwd.join(".pigcode")
+            .join("plans")
+            .join(format!("plan-{session_id}.md")),
+    )
+    .ok()
+}
+
+/// 计划落盘（ZCode plan-file-continuity 同款）：ExitPlanMode 批准时把计划
+/// 全文原子写入 `<cwd>/.pigcode/plans/plan-<session_id>.md`（tmp+rename）。
+/// 失败只打日志不阻断执行——计划已在对话历史与 rollout 里
+fn write_plan_file(cwd: &Path, session_id: &str, plan: &str) {
+    let dir = cwd.join(".pigcode").join("plans");
+    let path = dir.join(format!("plan-{session_id}.md"));
+    let tmp = dir.join(format!("plan-{session_id}.md.tmp"));
+    let result = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&tmp, plan))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(error) = result {
+        eprintln!("[plan] 计划落盘失败 {}: {error}", path.display());
+    }
+}
+
 fn is_image_path(path: &str) -> bool {
     let Some((_, ext)) = path.rsplit_once('.') else {
         return false;
@@ -1501,7 +1578,6 @@ mod tests {
         for mode in [
             ExecMode::ConfirmBeforeEdit,
             ExecMode::AutoEdit,
-            ExecMode::Plan,
             ExecMode::FullAccess,
             ExecMode::Yolo,
         ] {
@@ -1558,12 +1634,6 @@ mod tests {
         assert_eq!(mask, [true, true, false, true, true, false, true]);
     }
 
-    #[test]
-    fn plan_mode_keeps_reads_parallel() {
-        let mask = mask_of(&["Read", "Write"], ExecMode::Plan, false);
-        assert_eq!(mask, [true, false]);
-    }
-
     // ---------- MCP 工具进并发组 ----------
 
     #[test]
@@ -1575,7 +1645,6 @@ mod tests {
         for mode in [
             ExecMode::ConfirmBeforeEdit,
             ExecMode::AutoEdit,
-            ExecMode::Plan,
             ExecMode::FullAccess,
             ExecMode::Yolo,
         ] {

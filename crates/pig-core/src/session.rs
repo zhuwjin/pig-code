@@ -26,13 +26,14 @@ use pig_protocol::AppConfig;
 /// 首词，避免放行 `sleep 5` 连带放行 `sleep 100` 这类同首词不同命令。
 pub type ApprovalCoalesceKey = (String, String, bool);
 /// 审批等待表：request_id → (回复通道, 合并键)；键为 None 的请求（ExitPlanMode
-/// 计划确认）不参与合并，只按自身 request_id 决议。
+/// 计划确认）不参与合并，只按自身 request_id 决议。通道载荷带可选反馈意见
+///（kimi Revise：计划拒绝可携带文本给模型修订；同键扇出者只拿决策不带反馈）
 pub type PendingApprovals = Arc<
     Mutex<
         HashMap<
             String,
             (
-                oneshot::Sender<ApprovalDecision>,
+                oneshot::Sender<(ApprovalDecision, Option<String>)>,
                 Option<ApprovalCoalesceKey>,
             ),
         >,
@@ -42,11 +43,17 @@ pub type PendingApprovals = Arc<
 /// 决议一笔审批：唤醒该 request_id 的等待者，并把同合并键的并发等待者一并
 /// 唤醒（Op::ApprovalReply 的处理路径）。UI 审批条同时只能显示一笔，Swarm
 /// 多个子代理同命令并发等审批时，不扇出的话被顶掉的等待者永远无人应答。
-pub fn resolve_approval(pending: &PendingApprovals, request_id: &str, decision: ApprovalDecision) {
+/// feedback 只随该 request_id 送达（计划修订意见），同键扇出者为 None
+pub fn resolve_approval(
+    pending: &PendingApprovals,
+    request_id: &str,
+    decision: ApprovalDecision,
+    feedback: Option<String>,
+) {
     let mut pending = pending.lock().expect("pending lock");
     let coalesce = pending.get(request_id).and_then(|(_, key)| key.clone());
     if let Some((reply, _)) = pending.remove(request_id) {
-        let _ = reply.send(decision);
+        let _ = reply.send((decision, feedback));
     }
     let Some(key) = coalesce else { return };
     let same_key: Vec<String> = pending
@@ -56,7 +63,7 @@ pub fn resolve_approval(pending: &PendingApprovals, request_id: &str, decision: 
         .collect();
     for id in same_key {
         if let Some((reply, _)) = pending.remove(&id) {
-            let _ = reply.send(decision);
+            let _ = reply.send((decision, None));
         }
     }
 }
@@ -148,8 +155,9 @@ pub struct Session {
     always_allowed: HashSet<(String, String)>,
     /// 项目级 allow/deny 规则（.pigcode/permissions.toml，会话创建/回放时加载一次）
     permissions: crate::permissions::PermissionRules,
-    /// EnterPlanMode 进入计划模式前的模式（ExitPlanMode 确认后恢复；内存态不持久化）
-    pre_plan_mode: Option<ExecMode>,
+    /// 计划模式开关（与 mode 正交；EnterPlanMode/ExitPlanMode 工具与
+    /// Op::SetPlanMode 翻转，写穿 store 持久化）
+    plan_enabled: bool,
     pending: PendingApprovals,
     pending_questions: PendingQuestions,
     mode: ExecMode,
@@ -176,7 +184,7 @@ pub struct Session {
     agents_reminded: String,
     /// 上次已提醒的执行模式（turn_reminder 去重：首轮 None 必提醒一次，
     /// 之后仅模式切换后的下一回合再提醒；不持久化，resume 后首轮自愈）
-    mode_reminded: Option<ExecMode>,
+    mode_reminded: Option<(ExecMode, bool)>,
     /// 会话开始时冻结的子代理档案快照（Agent/AgentSwarm 工具 description
     /// 内嵌档案清单用——每步重扫会让编辑档案打断 tools 前缀缓存；spawn
     /// 执行时另走 load_profiles 现读，清单过期由报错自愈）
@@ -235,6 +243,9 @@ pub(crate) struct GateCtx<'a> {
     pub permissions: &'a crate::permissions::PermissionRules,
     pub always_allowed: &'a mut HashSet<(String, String)>,
     pub session_id: &'a str,
+    /// 计划模式开关：Write/Edit 写计划文件（kimi writesOnlyPlanFile）时
+    /// 审批门直通免审批（路径判定见 tool::is_plan_file_write）
+    pub plan_enabled: bool,
     pub seq: &'a std::sync::atomic::AtomicU64,
     pub store: &'a Arc<Mutex<Store>>,
     /// 内置工具以外的运行时工具（MCP）：执行段的按名查找兜底；
@@ -307,7 +318,10 @@ pub(crate) async fn exec_tool_gated_ctx(
         || (tool.is_some_and(|t| tool::requires_approval(t, ctx.mode))
             && !ctx.always_allowed.contains(&approval_key)
             && !readonly_bash
-            && !allowed_by_rules)
+            && !allowed_by_rules
+            // kimi writesOnlyPlanFile：计划模式下写计划文件直通免审批
+            && !(ctx.plan_enabled
+                && tool::is_plan_file_write(ctx.cwd, &call.arguments)))
     {
         let request_id = format!("{}-{turn_id}-approval-{item_id}", ctx.session_id);
         let detail_text = approval_detail(call, ctx.cwd, danger_reason);
@@ -330,8 +344,8 @@ pub(crate) async fn exec_tool_gated_ctx(
                 detail: detail_text,
             }
         });
-        let decision = tokio::select! {
-            reply = reply_rx => reply.unwrap_or(ApprovalDecision::Reject),
+        let (decision, _feedback) = tokio::select! {
+            reply = reply_rx => reply.unwrap_or((ApprovalDecision::Reject, None)),
             _ = cancel.cancelled() => {
                 ctx.pending.lock().expect("pending lock").remove(&request_id);
                 return GatedToolOutcome::Cancelled;
@@ -559,7 +573,7 @@ impl Session {
             ),
             always_allowed: HashSet::new(),
             permissions: load_permissions(&meta.cwd),
-            pre_plan_mode: None,
+            plan_enabled: false,
             pending,
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -646,7 +660,7 @@ impl Session {
             ),
             always_allowed: HashSet::new(),
             permissions: load_permissions(cwd),
-            pre_plan_mode: None,
+            plan_enabled: false,
             pending,
             pending_questions,
             mode: ExecMode::ConfirmBeforeEdit,
@@ -781,6 +795,10 @@ impl Session {
         self.mode = mode;
     }
 
+    pub fn set_plan_mode(&mut self, enabled: bool) {
+        self.plan_enabled = enabled;
+    }
+
     /// 会话级「工作区外读/写」开关（写进共享 state，回合进行中也生效）
     pub fn set_fs_access(&mut self, read_outside: bool, write_outside: bool) {
         use std::sync::atomic::Ordering;
@@ -841,7 +859,6 @@ mod turn;
 // 大 impl 拆到子模块(同 crate 内 impl 块可分散;子模块可见根的私有项),
 // 对外 API 由显式 re-export 钉住;跨子模块引用经根转发。
 pub use approval::approval_detail;
-pub(crate) use approval::exec_mode_label;
 pub use compact::COMPACTION_MARKER;
 pub(crate) use images::compression_note;
 pub use images::project_images;

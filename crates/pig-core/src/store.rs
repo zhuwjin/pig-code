@@ -40,6 +40,7 @@ impl Store {
                 model_id TEXT,
                 reasoning_level TEXT,
                 exec_mode TEXT NOT NULL DEFAULT 'ConfirmBeforeEdit',
+                plan_enabled INTEGER NOT NULL DEFAULT 0,
                 fs_read_outside INTEGER NOT NULL DEFAULT 0,
                 fs_write_outside INTEGER NOT NULL DEFAULT 0
             );
@@ -81,6 +82,17 @@ impl Store {
             );",
         )
         .map_err(|e| format!("store.sqlite 建表失败: {e}"))?;
+        // 已有库的列补齐（幂等；旧库无 plan_enabled 列时加上，默认 0 = 关）
+        let has_plan: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'plan_enabled'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .unwrap_or(false);
+        if !has_plan {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN plan_enabled INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| format!("store.sqlite 迁移失败: {e}"))?;
+        }
         Ok(Self { conn })
     }
 
@@ -105,19 +117,20 @@ impl Store {
             model_id: row.get(9)?,
             reasoning_level: row.get(10)?,
             exec_mode: Self::mode_from_row(row.get::<_, String>(11)?),
-            fs_read_outside: row.get::<_, i64>(12)? != 0,
-            fs_write_outside: row.get::<_, i64>(13)? != 0,
+            plan_enabled: row.get::<_, i64>(12)? != 0,
+            fs_read_outside: row.get::<_, i64>(13)? != 0,
+            fs_write_outside: row.get::<_, i64>(14)? != 0,
         })
     }
 
-    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, fs_read_outside, fs_write_outside";
+    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, plan_enabled, fs_read_outside, fs_write_outside";
 
     pub fn upsert_session(&self, meta: &SessionMeta) {
         // exec_mode 存变体名（"AutoEdit" 等），读出时按 serde 变体名解析
         let mode_raw = format!("{:?}", meta.exec_mode);
         let result = self.conn.execute(
-            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, fs_read_outside, fs_write_outside)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, plan_enabled, fs_read_outside, fs_write_outside)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 title_custom = excluded.title_custom,
@@ -130,6 +143,7 @@ impl Store {
                 model_id = excluded.model_id,
                 reasoning_level = excluded.reasoning_level,
                 exec_mode = excluded.exec_mode,
+                plan_enabled = excluded.plan_enabled,
                 fs_read_outside = excluded.fs_read_outside,
                 fs_write_outside = excluded.fs_write_outside",
             params![
@@ -145,6 +159,7 @@ impl Store {
                 meta.model_id,
                 meta.reasoning_level,
                 mode_raw,
+                meta.plan_enabled,
                 meta.fs_read_outside,
                 meta.fs_write_outside,
             ],
@@ -505,6 +520,7 @@ mod tests {
             model_id: None,
             reasoning_level: None,
             exec_mode: Default::default(),
+            plan_enabled: false,
             fs_read_outside: false,
             fs_write_outside: false,
         };
@@ -539,6 +555,7 @@ mod tests {
             model_id: None,
             reasoning_level: None,
             exec_mode: Default::default(),
+            plan_enabled: false,
             fs_read_outside: false,
             fs_write_outside: false,
         };
@@ -568,12 +585,14 @@ mod tests {
             model_id: None,
             reasoning_level: None,
             exec_mode: Default::default(),
+            plan_enabled: false,
             fs_read_outside: true,
             fs_write_outside: false,
         };
         store.upsert_session(&meta);
         let read = store.get_session("s1").expect("写入后可读");
         assert!(read.fs_read_outside && !read.fs_write_outside, "新列读回");
+        assert!(!read.plan_enabled, "plan_enabled 默认关");
 
         meta.fs_write_outside = true;
         store.upsert_session(&meta);

@@ -92,6 +92,22 @@ pub enum Segment {
         /// 展开/收起动画状态（见 ExpandAnim）
         expand_anim: ExpandAnim,
     },
+    /// ExitPlanMode 计划卡（kimi「计划 待确认/已通过」同款）：
+    /// ToolCallBegin(tool=ExitPlanMode) 时由 detail JSON 解出 plan 建立，
+    /// live 与回放同路径；收起一行三态，chevron 展开看计划全文
+    Plan {
+        state: Entity<TextViewState>,
+        /// 决议已出（ToolCallEnd 到达）
+        done: bool,
+        /// 决议结果：回执含「计划已批准」
+        approved: bool,
+        is_error: bool,
+        /// 展开态（默认收起一行）
+        open: bool,
+        expand_anim: ExpandAnim,
+        /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
+        body_scroll: ScrollHandle,
+    },
     Approval {
         request_id: String,
         decision: Option<ApprovalDecision>,

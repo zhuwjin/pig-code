@@ -303,9 +303,14 @@ pub(crate) async fn run_selftest(
     println!("[selftest] 工作区列表 OK（会话 cwd 自动出现 + 手动增删）");
 
     // 会话 B：新建 + 场景 A
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_b = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -521,9 +526,14 @@ pub(crate) async fn run_selftest(
     println!("[selftest] 模型摘要 compact OK");
 
     // 场景 C：计划模式闭环
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_c = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -533,50 +543,20 @@ pub(crate) async fn run_selftest(
             break id;
         }
     };
-    app!(|app: &mut AppView, _| {
-        app.exec_mode = pig_protocol::ExecMode::Plan;
-        app.agent
-            .set_exec_mode(session_c.clone(), pig_protocol::ExecMode::Plan);
+    app!(|app: &mut AppView, cx| {
+        // 计划模式与权限档正交：档定在「变更前确认」（执行阶段 3 次审批），计划单独开
+        app.apply_exec_mode(pig_protocol::ExecMode::ConfirmBeforeEdit, cx);
+        app.apply_plan_mode(true, cx);
         app.agent.send_message(
             session_c.clone(),
             format!("{} 给我一个改造计划", pig_core::mock::SCENARIO_C_TRIGGER),
             vec![],
             vec![],
-            pig_protocol::ExecMode::Plan,
+            pig_protocol::ExecMode::ConfirmBeforeEdit,
         );
     });
-    let mut waited = 0u64;
-    loop {
-        timer!(200).await;
-        waited += 200;
-        assert!(waited < 30_000, "场景 C 计划超时");
-        let ready = app!(|app: &mut AppView, cx| {
-            let views = app.views.get(&session_c)?;
-            let thread = views.thread.read(cx);
-            let (_, text, _, _) = thread.debug_last_assistant();
-            (thread.is_plan_pending() && text.contains(pig_core::mock::PLAN_MARKER)).then_some(())
-        });
-        if ready == Some(()) {
-            break;
-        }
-    }
-    println!("[selftest] 计划模式输出计划，执行计划按钮出现");
-
-    // 点「执行计划」（走与按钮相同路径）
-    app!(|app: &mut AppView, cx| {
-        let views = app.views.get(&session_c).expect("C 视图");
-        views
-            .thread
-            .update(cx, |thread, cx| thread.trigger_execute_plan(cx));
-    });
-    let mode = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_exec_mode());
-    assert_eq!(
-        mode,
-        pig_protocol::ExecMode::ConfirmBeforeEdit,
-        "模式应切到变更前确认"
-    );
-
-    // 场景 B 工具链执行（ConfirmBeforeEdit → 3 次审批）
+    // kimi 文件语义闭环：mock 先 Write 计划文件（直通免审批）→ ExitPlanMode 弹
+    // 审批面板 → 批准 → 场景 B 工具链（Write/Edit/Bash 三次审批）→ 收尾
     let mut approvals = 0u32;
     let mut waited = 0u64;
     loop {
@@ -609,8 +589,25 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    assert_eq!(approvals, 3, "执行计划后场景 B 三次审批");
-    println!("[selftest] 计划确认 → 模式切换 → 工具链执行 OK");
+    assert_eq!(approvals, 4, "ExitPlanMode 1 次 + 场景 B 3 次审批");
+    let mode = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_exec_mode());
+    let plan_on = app!(|app: &mut AppView, cx| app.composer.read(cx).plan_enabled());
+    assert_eq!(
+        mode,
+        pig_protocol::ExecMode::ConfirmBeforeEdit,
+        "批准后模式档不变（正交）"
+    );
+    assert!(!plan_on, "批准后计划开关应关闭");
+    // kimi 文件语义：计划文件真实落盘（mock 经 Write 直通写入）
+    let cwd = app!(|app: &mut AppView, _| app.cwd.clone());
+    let plan_file = cwd.join(".pigcode/plans/plan-mock.md");
+    let plan_text = std::fs::read_to_string(&plan_file)
+        .unwrap_or_else(|e| panic!("计划文件应已落盘 {}: {e}", plan_file.display()));
+    assert!(
+        plan_text.contains(pig_core::mock::PLAN_MARKER),
+        "计划文件应含计划全文: {plan_text}"
+    );
+    println!("[selftest] 计划模式闭环（Write 计划文件 → 面板批准 → 开工）OK");
 
     // 水位条
     let usage = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_context_usage());
@@ -629,9 +626,14 @@ pub(crate) async fn run_selftest(
     println!("[selftest] ConfigSnapshot + 模型列表 OK");
 
     // Anthropic 供应商端到端：会话 D 切到 anthropic 模型跑场景 B
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_d = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -697,9 +699,14 @@ pub(crate) async fn run_selftest(
     println!("[selftest] Anthropic 供应商端到端 OK");
 
     // AskUserQuestion：会话 E 走 SCENARIO_Q → 问题条出现 → 选选项 → 提交 → marker + 工具卡
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_e = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -897,9 +904,14 @@ pub(crate) async fn run_selftest(
     println!("[selftest] 改动 chip → 右侧改动面板 OK");
 
     // 会话管理：首条消息自动命名 → 手动重命名 → 删除
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_f = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -1002,6 +1014,7 @@ pub(crate) async fn run_selftest(
         app.cwd.clone(),
         Some("mock".to_string()),
         Some("mock-model".to_string()),
+        None,
         None,
         None,
     ));
@@ -1193,6 +1206,7 @@ pub(crate) async fn run_selftest(
         Some("mock-model".to_string()),
         None,
         None,
+        None,
     ));
     let known3: Vec<String> =
         app!(|app: &mut AppView, _| { app.metas.iter().map(|m| m.id.clone()).collect() });
@@ -1364,9 +1378,14 @@ pub(crate) async fn run_selftest(
     // 子代理场景（A3）：前台 Agent 卡——运行中出现进度行、收尾后原摘要保留；
     // 随后后台子代理完成 → 合成 <task-notification> 用户消息到达（通知卡渲染路径）
     let before_current = app!(|app: &mut AppView, _| app.current.clone());
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_c = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());
@@ -1534,9 +1553,14 @@ pub(crate) async fn run_selftest(
     // A3d：面板实时输出——新会话发 BG，后台子代理运行中经代理卡同路径开 tab：
     // running 指示出现 → SubagentActivity 增量追加 → finished 后 running 消失
     let before_current = app!(|app: &mut AppView, _| app.current.clone());
-    app!(|app: &mut AppView, _| app
-        .agent
-        .new_session(app.cwd.clone(), None, None, None, None));
+    app!(|app: &mut AppView, _| app.agent.new_session(
+        app.cwd.clone(),
+        None,
+        None,
+        None,
+        None,
+        None
+    ));
     let session_d = loop {
         timer!(200).await;
         let current = app!(|app: &mut AppView, _| app.current.clone());

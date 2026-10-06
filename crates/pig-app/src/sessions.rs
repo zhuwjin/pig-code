@@ -102,6 +102,7 @@ impl AppView {
             // 必须按 meta 恢复会话级的模型/模式/思考等级，否则会带着上一个会话的值
             if let Some(meta) = self.metas.iter().find(|m| m.id == session_id).cloned() {
                 self.exec_mode = meta.exec_mode;
+                self.plan_enabled = meta.plan_enabled;
                 self.reasoning_level = meta.reasoning_level.clone();
                 let label = match (&meta.provider_id, &meta.model_id) {
                     (Some(p), Some(m)) => {
@@ -115,6 +116,7 @@ impl AppView {
                 };
                 self.composer.update(cx, |composer, cx| {
                     composer.set_exec_mode(meta.exec_mode, cx);
+                    composer.set_plan_enabled(meta.plan_enabled, cx);
                     composer.set_reasoning_level(meta.reasoning_level.clone(), cx);
                     composer.set_fs_access(meta.fs_read_outside, meta.fs_write_outside, cx);
                     if let Some(label) = label {

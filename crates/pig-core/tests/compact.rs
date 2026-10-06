@@ -288,15 +288,16 @@ async fn compact_failure_falls_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scenario_c_plan_mode() {
     let (config_path, cwd, data_dir) = setup("m5-plan");
-    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let events = agent.events.clone();
-    let sid = new_session(&agent, cwd).await;
+    let sid = new_session(&agent, cwd.clone()).await;
 
     agent
         .ops
-        .send(Op::SetExecMode {
+        .send(Op::SetPlanMode {
             session_id: sid.clone(),
-            mode: ExecMode::Plan,
+            enabled: true,
         })
         .await
         .unwrap();
@@ -305,21 +306,65 @@ async fn scenario_c_plan_mode() {
         &agent,
         &sid,
         "SCENARIO_C 给我一个改造计划",
-        ExecMode::Plan,
+        ExecMode::AutoEdit,
     );
-    let collected = wait_turn(&events).await;
+    // kimi 文件语义闭环：Write 计划文件（直通免审批）→ ExitPlanMode 弹审批 →
+    // 批准后场景 B 工具链（AutoEdit：仅 Bash 弹审批）→ 收尾
+    let mut collected = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            deadline.elapsed() < Duration::from_secs(30),
+            "超时: {collected:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
+        else {
+            continue;
+        };
+        if let Event::ApprovalRequested { request_id, .. } = &event {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision: pig_protocol::ApprovalDecision::Allow,
+                    feedback: None,
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(event, Event::TurnComplete { .. });
+        collected.push(event);
+        if done {
+            break;
+        }
+    }
+    // 计划文件真实写入（直通无审批卡）
+    let plan_file = cwd.join(".pigcode/plans/plan-mock.md");
+    assert!(
+        plan_file.exists(),
+        "Write 计划文件应直通执行: {collected:#?}"
+    );
+    // ExitPlanMode 弹窗 detail 含计划全文
     assert!(
         collected.iter().any(|e| matches!(
             e,
-            Event::TextDone { full_text, .. } if full_text.contains(mock::PLAN_MARKER)
+            Event::ApprovalRequested { tool, detail, .. }
+            if tool == "ExitPlanMode" && detail.contains(mock::PLAN_MARKER)
         )),
-        "应输出计划文本: {collected:#?}"
+        "ExitPlanMode 弹窗应含计划全文: {collected:#?}"
+    );
+    // 批准后计划关闭、模式档不变
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::PlanModeChanged { enabled, .. } if !enabled)),
+        "批准后计划开关关闭"
     );
     assert!(
-        !collected
+        collected
             .iter()
-            .any(|e| matches!(e, Event::ToolCallBegin { .. })),
-        "计划模式不应有工具调用"
+            .any(|e| matches!(e, Event::TextDone { full_text, .. } if full_text.contains(mock::SCENARIO_B_MARKER))),
+        "批准后接场景 B 工具链收尾: {collected:#?}"
     );
     agent.shutdown();
 }

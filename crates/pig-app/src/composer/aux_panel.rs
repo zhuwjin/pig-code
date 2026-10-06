@@ -162,6 +162,9 @@ impl Composer {
         approval: &PendingApproval,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if approval.tool == "ExitPlanMode" {
+            return self.render_plan_approval_bar(approval, cx);
+        }
         let title = match approval.tool.as_str() {
             "Bash" => "运行命令？".to_string(),
             "Write" => "写入文件？".to_string(),
@@ -191,7 +194,7 @@ impl Composer {
                     _ => None,
                 };
                 if let Some(decision) = decision {
-                    this.decide_approval(decision, window, cx);
+                    this.decide_approval(decision, None, window, cx);
                 }
             }))
             .child(
@@ -230,7 +233,12 @@ impl Composer {
                             .small()
                             .label("本会话内批准  Ctrl+⏎")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.decide_approval(ApprovalDecision::AlwaysAllow, window, cx);
+                                this.decide_approval(
+                                    ApprovalDecision::AlwaysAllow,
+                                    None,
+                                    window,
+                                    cx,
+                                );
                             })),
                     )
                     .child(div().flex_1())
@@ -240,7 +248,7 @@ impl Composer {
                             .small()
                             .label("拒绝  Esc")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.decide_approval(ApprovalDecision::Reject, window, cx);
+                                this.decide_approval(ApprovalDecision::Reject, None, window, cx);
                             })),
                     )
                     .child(
@@ -249,9 +257,189 @@ impl Composer {
                             .small()
                             .label("批准  ⏎")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.decide_approval(ApprovalDecision::Allow, window, cx);
+                                this.decide_approval(ApprovalDecision::Allow, None, window, cx);
                             })),
                     ),
+            )
+            .into_any_element()
+    }
+
+    /// 计划审批面板（kimi-code 图2 同款）：橙点 +「按这份计划开始实现？」，
+    /// 计划全文 markdown 内嵌滚动（TextView），底部 修改 / 拒绝并退出(Esc) /
+    /// 批准 plan(⏎)。「修改」= 拒绝 + 焦点自动回输入框（decide_approval 既有行为），
+    /// 用户直接输入修改意见作为下条消息
+    fn render_plan_approval_bar(
+        &self,
+        approval: &PendingApproval,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cwd = approval.cwd.clone();
+        let plan = self.plan_state.clone();
+        v_flex()
+            .id("approval-bar")
+            .w_full()
+            .gap_3()
+            .p_2()
+            .track_focus(&self.approval_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // 修改输入态：⏎ 提交并拒绝（带反馈）、Esc 取消回三按钮；
+                // 三按钮态：⏎ 批准、Esc 拒绝并退出
+                if this.plan_revise {
+                    match event.keystroke.key.as_str() {
+                        "enter" => this.submit_plan_revise(window, cx),
+                        "escape" => this.cancel_plan_revise(window, cx),
+                        _ => {}
+                    }
+                    return;
+                }
+                let decision = match event.keystroke.key.as_str() {
+                    "enter" => Some(ApprovalDecision::Allow),
+                    "escape" => Some(ApprovalDecision::Reject),
+                    _ => None,
+                };
+                if let Some(decision) = decision {
+                    this.decide_approval(decision, None, window, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().size(px(8.)).rounded_full().bg(cx.theme().warning))
+                    .child(div().text_sm().font_medium().child("按这份计划开始实现？")),
+            )
+            // 计划文件路径链接（kimi 同款蓝链）：core 弹审批前已落盘，
+            // 点击右侧「文件」tab 打开
+            .child(
+                div()
+                    .id("plan-path")
+                    .test_support()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(cx.theme().info)
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(approval.plan_path())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let path = this
+                            .approval
+                            .as_ref()
+                            .map(|a| a.plan_path())
+                            .unwrap_or_default();
+                        cx.emit(ComposerEvent::OpenFile { path });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("plan-approval-detail")
+                    .test_support()
+                    .w_full()
+                    .rounded(px(10.))
+                    .bg(cx.theme().background)
+                    .p_3()
+                    .max_h(px(480.))
+                    .overflow_y_scroll()
+                    .when_some(plan, |this, state| {
+                        this.child(
+                            gpui_kit::component::text::TextView::new(&state)
+                                .selectable(true)
+                                .text_sm(),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("工作目录： {cwd}")),
+            )
+            // 修改输入态（kimi Revise）：反馈输入框 + 取消 / 提交并拒绝；
+            // 三按钮态：修改 / 拒绝并退出 / 批准 plan
+            .when(self.plan_revise, |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .rounded(px(10.))
+                        .bg(cx.theme().background)
+                        .px_3()
+                        .py_2()
+                        .when_some(self.plan_revise_input.clone(), |this, input| {
+                            this.child(gpui_kit::component::input::Input::new(&input))
+                        }),
+                )
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .when(self.plan_revise, |this| {
+                        this.child(div().flex_1())
+                            .child(
+                                Button::new("plan-revise-cancel")
+                                    .secondary()
+                                    .small()
+                                    .label("取消  Esc")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel_plan_revise(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("plan-revise-submit")
+                                    .primary()
+                                    .small()
+                                    .label("提交并拒绝  ↵")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.submit_plan_revise(window, cx);
+                                    })),
+                            )
+                    })
+                    .when(!self.plan_revise, |this| {
+                        this.child(
+                            Button::new("plan-revise")
+                                .secondary()
+                                .small()
+                                .label("修改")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    // kimi Revise：进输入态，反馈随「提交并拒绝」携带
+                                    this.plan_revise = true;
+                                    if this.plan_revise_input.is_none() {
+                                        this.plan_revise_input = Some(cx.new(|cx| {
+                                            InputState::new(window, cx).placeholder("说明拒绝原因…")
+                                        }));
+                                    }
+                                    let input =
+                                        this.plan_revise_input.clone().expect("revise input");
+                                    input.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("plan-reject")
+                                .secondary()
+                                .small()
+                                .label("拒绝并退出  Esc")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.decide_approval(
+                                        ApprovalDecision::Reject,
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(
+                            Button::new("plan-approve")
+                                .primary()
+                                .small()
+                                .label("批准 plan  ↵")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.decide_approval(ApprovalDecision::Allow, None, window, cx);
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }

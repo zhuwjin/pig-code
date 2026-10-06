@@ -141,7 +141,7 @@ pub async fn agent_loop(
                     other => other,
                 };
                 match op {
-                    Op::NewSession { cwd, provider_id, model_id, reasoning_level, exec_mode } => {
+                    Op::NewSession { cwd, provider_id, model_id, reasoning_level, exec_mode, plan_enabled } => {
                         let cwd = normalize_workspace_path(&cwd);
                         id_counter += 1;
                         let id = format!("s{}-{}", now_secs(), id_counter);
@@ -166,6 +166,8 @@ pub async fn agent_loop(
                             exec_mode: exec_mode.unwrap_or_else(|| {
                                 seed.as_ref().map(|m| m.exec_mode).unwrap_or_default()
                             }),
+                            // 计划是临时态：不种子继承，只按 UI 显式传入
+                            plan_enabled: plan_enabled.unwrap_or(false),
                             // 区外读写开关随工作区种子继承（与 exec_mode 同口径）
                             fs_read_outside: seed.as_ref().map(|m| m.fs_read_outside).unwrap_or(false),
                             fs_write_outside: seed.as_ref().map(|m| m.fs_write_outside).unwrap_or(false),
@@ -198,6 +200,7 @@ pub async fn agent_loop(
                         match Session::create(meta.clone(), pending.clone(), pending_questions.clone(), store.clone(), &sessions_dir, data_dir.clone(), task_notify_tx.clone(), wake_tx.clone(), config.as_ref()) {
                             Ok(mut session) => {
                                 session.set_mode(meta.exec_mode);
+                                session.set_plan_mode(meta.plan_enabled);
                                 session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
                                 let selection = meta_to_selection(&meta);
                                 let state = session.state.clone();
@@ -213,6 +216,7 @@ pub async fn agent_loop(
                                     model_id: meta.model_id.clone(),
                                     reasoning_level: meta.reasoning_level.clone(),
                                     exec_mode: meta.exec_mode,
+                                    plan_enabled: meta.plan_enabled,
                                     fs_read_outside: meta.fs_read_outside,
                                     fs_write_outside: meta.fs_write_outside,
                                 });
@@ -251,6 +255,7 @@ pub async fn agent_loop(
                                     model_id: meta.model_id.clone(),
                                     reasoning_level: meta.reasoning_level.clone(),
                                     exec_mode: meta.exec_mode,
+                                    plan_enabled: meta.plan_enabled,
                                     fs_read_outside: meta.fs_read_outside,
                                     fs_write_outside: meta.fs_write_outside,
                                 });
@@ -288,6 +293,7 @@ pub async fn agent_loop(
                                 let selection = meta.as_ref().and_then(meta_to_selection);
                                 if let Some(meta) = &meta {
                                     session.set_mode(meta.exec_mode);
+                                    session.set_plan_mode(meta.plan_enabled);
                                     session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
                                 }
                                 let cwd = session.cwd.clone();
@@ -312,6 +318,7 @@ pub async fn agent_loop(
                                     model_id: meta.as_ref().and_then(|m| m.model_id.clone()),
                                     reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
                                     exec_mode: meta.as_ref().map(|m| m.exec_mode).unwrap_or_default(),
+                                    plan_enabled: meta.as_ref().is_some_and(|m| m.plan_enabled),
                                     fs_read_outside: meta.as_ref().map(|m| m.fs_read_outside).unwrap_or(false),
                                     fs_write_outside: meta.as_ref().map(|m| m.fs_write_outside).unwrap_or(false),
                                 });
@@ -602,9 +609,9 @@ pub async fn agent_loop(
                             cancel.cancel();
                         }
                     }
-                    Op::ApprovalReply { request_id, decision } => {
+                    Op::ApprovalReply { request_id, decision, feedback } => {
                         // 决议同时唤醒同合并键的并发等待者（见 resolve_approval）
-                        super::resolve_approval(&pending, &request_id, decision);
+                        super::resolve_approval(&pending, &request_id, decision, feedback);
                     }
                     Op::QuestionReply { request_id, answers } => {
                         if let Some(reply) = pending_questions.lock().expect("pending questions lock").remove(&request_id) {
@@ -617,12 +624,20 @@ pub async fn agent_loop(
                             entry.last_mode = mode;
                             if let Some(session) = entry.session.as_mut() {
                                 session.set_mode(mode);
-                                // 手动切模式：EnterPlanMode 的记忆作废（之后再
-                                // ExitPlanMode 回落到默认「变更前确认」）
-                                session.pre_plan_mode = None;
                             }
                             store.lock().expect("store lock").update_session(&session_id, |m| {
                                 m.exec_mode = mode;
+                            });
+                        }
+                    }
+                    Op::SetPlanMode { session_id, enabled } => {
+                        // 计划开关与模式档正交：UI 是发起方，不回 PlanModeChanged
+                        if let Some(entry) = sessions.get_mut(&session_id)
+                            && let Some(session) = entry.session.as_mut()
+                        {
+                            session.set_plan_mode(enabled);
+                            store.lock().expect("store lock").update_session(&session_id, |m| {
+                                m.plan_enabled = enabled;
                             });
                         }
                     }

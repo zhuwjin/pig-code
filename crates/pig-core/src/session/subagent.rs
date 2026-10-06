@@ -38,8 +38,8 @@ impl Session {
         if !resume.is_empty() && !subagent_type.is_empty() {
             return fail("resume 与 subagent_type 互斥：续跑已有子代理时不能指定类型".to_string());
         }
-        // 计划模式硬拒：子代理可能修改文件，Plan 只读语义不能被绕过
-        if self.mode == ExecMode::Plan {
+        // 计划模式硬拒：子代理可能修改文件，只读语义不能被绕过
+        if self.plan_enabled {
             return fail(
                 "计划模式下不可委派子代理（子代理可能修改文件）。请先用只读工具自行调研并输出计划，或退出计划模式后再委派。"
                     .to_string(),
@@ -244,6 +244,7 @@ impl Session {
                 permissions: &self.permissions,
                 always_allowed: &mut self.always_allowed,
                 session_id: &self.id,
+                plan_enabled: false,
                 seq: &self.seq,
                 store: &self.store,
                 extra_tools: &mcp_extra,
@@ -326,7 +327,7 @@ impl Session {
             Err(error) => return fail(error),
         };
         // 计划模式硬拒（与 run_subagent 同口径）：子代理可能修改文件——前台/后台同拒
-        if self.mode == ExecMode::Plan {
+        if self.plan_enabled {
             return fail(
                 "计划模式下不可委派子代理（子代理可能修改文件）。请先用只读工具自行调研并输出计划，或退出计划模式后再委派。"
                     .to_string(),
@@ -473,6 +474,7 @@ impl Session {
                         permissions: &permissions,
                         always_allowed: &mut always_allowed,
                         session_id: &session_id,
+                        plan_enabled: false,
                         seq: &seq,
                         store: &store,
                         extra_tools: &mcp_extra,
@@ -809,6 +811,7 @@ async fn drive_subagent_detached(
             permissions: &ctx.permissions,
             always_allowed: &mut ctx.always_allowed,
             session_id: &ctx.session_id,
+            plan_enabled: false,
             seq: &ctx.seq,
             store: &ctx.store,
             extra_tools: &mcp_extra,

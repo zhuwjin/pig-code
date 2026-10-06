@@ -19,6 +19,7 @@ impl AppView {
                 model_id,
                 reasoning_level,
                 exec_mode,
+                plan_enabled,
                 fs_read_outside,
                 fs_write_outside,
             } => {
@@ -43,6 +44,7 @@ impl AppView {
                 };
                 // 恢复会话的模型/模式/思考等级（core 持久化在 sessions 表）
                 self.exec_mode = *exec_mode;
+                self.plan_enabled = *plan_enabled;
                 self.reasoning_level = reasoning_level.clone();
                 self.current_model = match (provider_id, model_id) {
                     (Some(p), Some(m)) => Some((p.clone(), m.clone())),
@@ -52,6 +54,7 @@ impl AppView {
                     composer.set_model_name(label, cx);
                     composer.set_hero_mode(false, cx);
                     composer.set_exec_mode(*exec_mode, cx);
+                    composer.set_plan_enabled(*plan_enabled, cx);
                     composer.set_reasoning_level(reasoning_level.clone(), cx);
                     composer.set_fs_access(*fs_read_outside, *fs_write_outside, cx);
                 });
@@ -167,7 +170,7 @@ impl AppView {
             Event::ExecModeChanged {
                 session_id, mode, ..
             } => {
-                // core 侧主动切了模式（ExitPlanMode 确认后）：chip/缓存同步
+                // core 侧主动切了模式：chip/缓存同步
                 self.exec_mode = *mode;
                 if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
                     meta.exec_mode = *mode;
@@ -175,6 +178,22 @@ impl AppView {
                 let mode = *mode;
                 self.composer.update(cx, |composer, cx| {
                     composer.set_exec_mode(mode, cx);
+                });
+                cx.notify();
+            }
+            Event::PlanModeChanged {
+                session_id,
+                enabled,
+                ..
+            } => {
+                // 模型经 EnterPlanMode/ExitPlanMode 自切：chip/缓存同步
+                self.plan_enabled = *enabled;
+                if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
+                    meta.plan_enabled = *enabled;
+                }
+                let enabled = *enabled;
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_plan_enabled(enabled, cx);
                 });
                 cx.notify();
             }
@@ -328,15 +347,6 @@ impl AppView {
                 if *duration_ms > 0 && self.right_active.as_ref() == Some(&RightTab::Trajectory) {
                     self.reload_trajectory();
                 }
-                // duration_ms=0 是会话回放，不触发计划模式待执行标记
-                if *duration_ms > 0 && self.exec_mode == pig_protocol::ExecMode::Plan {
-                    let session_id = session_id.clone();
-                    if let Some(views) = self.views.get(&session_id) {
-                        views.thread.update(cx, |thread, cx| {
-                            thread.set_plan_pending(true, cx);
-                        });
-                    }
-                }
                 self.refresh_git_branch(self.current_cwd(), cx);
                 // 回合结束（agent 写文件已落定）：刷新工作区 git 状态
                 if let Some(meta) = self.metas.iter().find(|m| &m.id == session_id) {
@@ -460,6 +470,7 @@ impl AppView {
                     if !queue.iter().any(|p| p.request_id == *request_id) {
                         queue.push_back(PendingApproval {
                             request_id: request_id.clone(),
+                            session_id: sid.clone(),
                             tool: tool.clone(),
                             detail: detail.clone(),
                             cwd,
@@ -669,6 +680,9 @@ impl AppView {
             ComposerEvent::SetExecMode(mode) => {
                 self.apply_exec_mode(*mode, cx);
             }
+            ComposerEvent::SetPlanMode(enabled) => {
+                self.apply_plan_mode(*enabled, cx);
+            }
             ComposerEvent::RequestYoloConfirm => {
                 self.yolo_confirm_open = true;
                 self.yolo_confirm_focus.focus(window, cx);
@@ -688,9 +702,15 @@ impl AppView {
                 }
             }
             ComposerEvent::OpenSettings => self.open_settings(cx),
+            ComposerEvent::OpenFile { path } => {
+                if let Some(sid) = self.current.clone() {
+                    self.open_file_tab(&sid, path.clone(), None, cx);
+                }
+            }
             ComposerEvent::DecideApproval {
                 request_id,
                 decision,
+                feedback,
             } => {
                 // 走 ThreadView 单一路径：按审批条携带的 request_id 定向更新线程内
                 // 审批卡状态，并经 ThreadEvent::ApprovalReply 回复 core（那里同时
@@ -700,8 +720,9 @@ impl AppView {
                 {
                     let request_id = request_id.clone();
                     let decision = *decision;
+                    let feedback = feedback.clone();
                     views.thread.update(cx, |thread, cx| {
-                        thread.decide_approval_by_id(&request_id, decision, cx);
+                        thread.decide_approval_by_id(&request_id, decision, feedback, cx);
                     });
                 }
             }
@@ -808,6 +829,7 @@ pub(crate) fn event_session_id(event: &Event) -> Option<String> {
         | Event::SubagentHistory { session_id, .. }
         | Event::SubagentActivity { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
+        | Event::PlanModeChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
         | Event::SessionTitleChanged { .. }

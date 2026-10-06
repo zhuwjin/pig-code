@@ -242,7 +242,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let session_id = common::new_session(&agent, cwd.clone()).await;
 
-    // 开关全开 + Plan 模式
+    // 开关全开 + 计划模式（与执行模式正交：档保持 AutoEdit，计划硬拒照旧）
     agent
         .ops
         .send(Op::SetFsAccess {
@@ -254,9 +254,9 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         .unwrap();
     agent
         .ops
-        .send(Op::SetExecMode {
+        .send(Op::SetPlanMode {
             session_id: session_id.clone(),
-            mode: ExecMode::Plan,
+            enabled: true,
         })
         .await
         .unwrap();
@@ -267,7 +267,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
             content: format!("{} 改个文件", pig_core::mock::SCENARIO_B_TRIGGER),
             files: vec![],
             images: vec![],
-            mode: ExecMode::Plan,
+            mode: ExecMode::AutoEdit,
         })
         .await
         .unwrap();

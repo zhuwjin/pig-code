@@ -25,22 +25,12 @@ impl Session {
             permissions: &self.permissions,
             always_allowed: &mut self.always_allowed,
             session_id: &self.id,
+            plan_enabled: self.plan_enabled,
             seq: &self.seq,
             store: &self.store,
             extra_tools: &extra,
         };
         exec_tool_gated_ctx(&mut gate, call, tool, item_id, turn_id, tx, cancel).await
-    }
-}
-
-/// 模式中文名（工具结果文案用；与 app 侧 EXEC_MODES 的标签一致）
-pub(crate) fn exec_mode_label(mode: ExecMode) -> &'static str {
-    match mode {
-        ExecMode::ConfirmBeforeEdit => "变更前确认",
-        ExecMode::AutoEdit => "自动编辑",
-        ExecMode::Plan => "计划",
-        ExecMode::FullAccess => "完全访问",
-        ExecMode::Yolo => "无管制",
     }
 }
 

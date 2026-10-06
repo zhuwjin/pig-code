@@ -73,6 +73,54 @@ pub const SCENARIO_PLAN_ENTER_TRIGGER: &str = "PLAN_ENTER_SCENARIO";
 pub const PLAN_ENTER_MARKER: &str = "MOCK_PLAN_ENTER_DONE";
 pub const PLAN_ENTER_FILE: &str = "plan_enter.txt";
 
+/// 计划文件语义场景：裸 ExitPlanMode（不带 plan 参数 → core 读计划文件）。
+/// 批准后（结果含「计划已批准」）→ Write plan_file_exec.txt 验证执行。
+pub const SCENARIO_PLAN_FILE_TRIGGER: &str = "PLAN_FILE_SCENARIO";
+pub const PLAN_FILE_EXEC_FILE: &str = "plan_file_exec.txt";
+
+/// 计划写门控场景：Write 计划目录（直通）→ Write 普通文件（应被硬拒）→ 文本。
+pub const SCENARIO_PLAN_WRITE_GATE_TRIGGER: &str = "PLAN_WRITE_GATE_SCENARIO";
+
+/// 计划文件语义场景：裸 ExitPlanMode（{} 无 plan 参数）；批准后接 Write。
+fn plan_file_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks("call_pf_1", "ExitPlanMode", "{}", None),
+        1 if body.contains("计划已批准") => tool_call_chunks(
+            "call_pf_2",
+            "Write",
+            &serde_json::json!({"path": PLAN_FILE_EXEC_FILE, "content": "executed\n"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": PLAN_EXIT_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
+/// 计划写门控场景：先写计划目录（直通），再写普通文件（应被硬拒）。
+fn plan_write_gate_response(tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_pg_1",
+            "Write",
+            &serde_json::json!({"path": ".pigcode/plans/plan-gate.md", "content": "gate plan\n"})
+                .to_string(),
+            None,
+        ),
+        1 => tool_call_chunks(
+            "call_pg_2",
+            "Write",
+            &serde_json::json!({"path": "other.txt", "content": "x\n"}).to_string(),
+            None,
+        ),
+        _ => vec![
+            sse_chunk(serde_json::json!({"content": PLAN_EXIT_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ],
+    }
+}
+
 /// 图片工具场景（ReadMediaFile 验证）：0 个结果 → ReadMediaFile pic.png → 文本。
 /// 能力门控（input_image=false 时会话层直接报错不执行）与图片进上下文链路用。
 pub const SCENARIO_MEDIA_TRIGGER: &str = "MEDIA_SCENARIO";
@@ -481,7 +529,7 @@ fn slow_bash_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 计划退出场景：按 tool 结果数推进；Allow 后（结果含「已切换到」）接 Write。
+/// 计划退出场景：按 tool 结果数推进；Allow 后（结果含「计划已批准」）接 Write。
 fn plan_exit_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -490,7 +538,7 @@ fn plan_exit_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
             &serde_json::json!({"plan": "第一步：创建 plan_exit.txt 验证执行"}).to_string(),
             None,
         ),
-        1 if body.contains("已切换到") => tool_call_chunks(
+        1 if body.contains("计划已批准") => tool_call_chunks(
             "call_pe_2",
             "Write",
             &serde_json::json!({"path": PLAN_EXIT_FILE, "content": "executed\n"}).to_string(),
@@ -943,7 +991,6 @@ fn text_response() -> Vec<String> {
 pub const SCENARIO_C_TRIGGER: &str = "SCENARIO_C";
 pub const PLAN_MARKER: &str = "MOCK_PLAN_OK";
 pub const SUMMARY_MARKER: &str = "MOCK_SUMMARY_OK";
-pub const PLAN_CONFIRM_TEXT: &str = "计划已确认";
 /// 会话自动命名 sidecar 的 mock 标题（selftest 断言用）
 pub const MOCK_TITLE: &str = "自动命名自测标题";
 
@@ -1004,28 +1051,28 @@ async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) -> 
     stream.write_all(resp.as_bytes()).await.is_ok()
 }
 
-/// 场景 C：计划模式，直接输出 markdown 计划（无工具调用）。
-fn scenario_c_response() -> Vec<String> {
+/// 场景 C：计划模式（kimi 文件语义）——Write 计划文件 → ExitPlanMode →
+/// 批准后接场景 B 工具链（与 live 全链路一致：Write 卡 → 计划行 → 审批面板 → 开工）
+fn scenario_c_response(tool_results: usize) -> Vec<String> {
     let plan = format!(
-        "## 执行计划
-
-1. 创建 `src/hello.txt` 写入三行内容
-2. 将第二行改为大写
-3. 运行 echo 验证
-
-**计划就绪**: {PLAN_MARKER}
-"
+        "## 执行计划\n\n1. 创建 `src/hello.txt` 写入三行内容\n2. 将第二行改为大写\n3. 运行 echo 验证\n\n**计划就绪**: {PLAN_MARKER}\n"
     );
-    let chars: Vec<char> = plan.chars().collect();
-    let mut chunks: Vec<String> = chars
-        .chunks(9)
-        .map(|piece| {
-            let delta: String = piece.iter().collect();
-            sse_chunk(serde_json::json!({"content": delta}), None)
-        })
-        .collect();
-    chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
-    chunks
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_c_1",
+            "Write",
+            &serde_json::json!({"path": ".pigcode/plans/plan-mock.md", "content": plan})
+                .to_string(),
+            None,
+        ),
+        1 => tool_call_chunks(
+            "call_c_2",
+            "ExitPlanMode",
+            &serde_json::json!({"plan": plan}).to_string(),
+            None,
+        ),
+        _ => scenario_b_response(tool_results - 2, "src/hello_plan.txt"),
+    }
 }
 
 /// ECHO_USAGE <n>：文本回复 + 指定 total_tokens（测试自动 compact 触发）。
@@ -1150,10 +1197,8 @@ async fn handle_connection(
         echo_usage_response(&body)
     } else if body.contains("ECHO_HISTORY") {
         echo_history_response(&body)
-    } else if body.contains(PLAN_CONFIRM_TEXT) && body.contains(SCENARIO_C_TRIGGER) {
-        scenario_b_response(tool_results, "src/hello_plan.txt")
     } else if body.contains(SCENARIO_C_TRIGGER) {
-        scenario_c_response()
+        scenario_c_response(tool_results)
     } else if body.contains(TODO_SCENARIO_TRIGGER) {
         todo_scenario_response(&body)
     } else if body.contains(SCENARIO_Q_TRIGGER) {
@@ -1170,6 +1215,10 @@ async fn handle_connection(
         plan_exit_scenario_response(&body, tool_results)
     } else if body.contains(SCENARIO_PLAN_ENTER_TRIGGER) {
         plan_enter_scenario_response(tool_results)
+    } else if body.contains(SCENARIO_PLAN_FILE_TRIGGER) {
+        plan_file_scenario_response(&body, tool_results)
+    } else if body.contains(SCENARIO_PLAN_WRITE_GATE_TRIGGER) {
+        plan_write_gate_response(tool_results)
     } else if body.contains(SCENARIO_MEDIA_TRIGGER) {
         media_scenario_response(tool_results)
     } else if body.contains(SUBAGENT_TRIGGER) {

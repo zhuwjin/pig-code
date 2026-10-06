@@ -7,10 +7,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// 收集一个完整 turn 的事件；`approval` 为 Some 时自动按给定决策回复审批。
+/// `plan` 为 true 时回合前开启计划模式（与 mode 正交叠加）
 async fn run_scenario_b(
     mode: ExecMode,
     approval: Option<ApprovalDecision>,
     cwd_name: &str,
+    plan: bool,
 ) -> (Vec<Event>, PathBuf, pig_core::AgentHandle, String) {
     let (config_path, dir, data_dir) = setup(cwd_name);
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
@@ -25,6 +27,16 @@ async fn run_scenario_b(
         })
         .await
         .unwrap();
+    if plan {
+        agent
+            .ops
+            .send(Op::SetPlanMode {
+                session_id: session_id.clone(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+    }
     agent
         .ops
         .send(Op::SendMessage {
@@ -56,6 +68,7 @@ async fn run_scenario_b(
                 .send(Op::ApprovalReply {
                     request_id: request_id.clone(),
                     decision,
+                    feedback: None,
                 })
                 .await
                 .unwrap();
@@ -120,6 +133,7 @@ async fn scenario_b_allow_all_then_revert() {
         ExecMode::ConfirmBeforeEdit,
         Some(ApprovalDecision::Allow),
         "allow",
+        false,
     )
     .await;
 
@@ -207,6 +221,7 @@ async fn scenario_b_deny_all() {
         ExecMode::ConfirmBeforeEdit,
         Some(ApprovalDecision::Reject),
         "deny",
+        false,
     )
     .await;
 
@@ -229,8 +244,13 @@ async fn scenario_b_deny_all() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_edit_only_bash_needs_approval() {
-    let (events, dir, agent, _) =
-        run_scenario_b(ExecMode::AutoEdit, Some(ApprovalDecision::Allow), "auto").await;
+    let (events, dir, agent, _) = run_scenario_b(
+        ExecMode::AutoEdit,
+        Some(ApprovalDecision::Allow),
+        "auto",
+        false,
+    )
+    .await;
 
     assert_eq!(approvals(&events), ["Bash"], "AutoEdit 只有 Bash 需审批");
     assert!(dir.join(mock::SCENARIO_B_FILE).exists());
@@ -239,7 +259,9 @@ async fn auto_edit_only_bash_needs_approval() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plan_mode_blocks_writes_without_approval() {
-    let (events, dir, agent, _) = run_scenario_b(ExecMode::Plan, None, "plan").await;
+    // 计划开 + 变更前确认：修改类工具被计划硬拒，连审批卡都不弹
+    let (events, dir, agent, _) =
+        run_scenario_b(ExecMode::ConfirmBeforeEdit, None, "plan", true).await;
 
     assert!(approvals(&events).is_empty(), "计划模式无审批卡");
     let blocked = tool_ends(&events)
@@ -262,8 +284,29 @@ async fn plan_mode_blocks_writes_without_approval() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_mode_overrides_full_access() {
+    // 「完全访问 + 计划」：计划压过完全访问——写仍被硬拒（ZCode 同语义）
+    let (events, dir, agent, _) =
+        run_scenario_b(ExecMode::FullAccess, None, "plan-full", true).await;
+
+    assert!(approvals(&events).is_empty(), "计划模式无审批卡");
+    let blocked = tool_ends(&events)
+        .iter()
+        .filter(|(_, out, _)| out.contains("计划模式"))
+        .count();
+    assert_eq!(
+        blocked,
+        3,
+        "完全访问下写仍被计划硬拒: {:?}",
+        tool_ends(&events)
+    );
+    assert!(!dir.join(mock::SCENARIO_B_FILE).exists());
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_access_no_approvals() {
-    let (events, dir, agent, _) = run_scenario_b(ExecMode::FullAccess, None, "full").await;
+    let (events, dir, agent, _) = run_scenario_b(ExecMode::FullAccess, None, "full", false).await;
 
     assert!(approvals(&events).is_empty(), "完全访问无审批卡");
     assert!(dir.join(mock::SCENARIO_B_FILE).exists());
@@ -375,6 +418,7 @@ async fn run_danger(
                 .send(Op::ApprovalReply {
                     request_id: request_id.clone(),
                     decision,
+                    feedback: None,
                 })
                 .await
                 .unwrap();
@@ -530,7 +574,8 @@ async fn yolo_danger_no_dialog_executes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn yolo_normal_flow_no_dialogs() {
-    let (events, dir, agent, _session_id) = run_scenario_b(ExecMode::Yolo, None, "yolo-b").await;
+    let (events, dir, agent, _session_id) =
+        run_scenario_b(ExecMode::Yolo, None, "yolo-b", false).await;
     assert!(
         approvals(&events).is_empty(),
         "Yolo 下 Write/Edit/Bash 都不弹窗"
@@ -593,12 +638,14 @@ async fn yolo_sensitive_file_still_blocked() {
 
 /// 通用触发场景驱动：每个审批弹窗都按 decision 回复（None = 不回复，出现弹窗会卡到超时）。
 /// `permissions` 非空时在 new_session 前写入 .pigcode/permissions.toml（规则随会话加载）。
+/// `plan` 为 true 时回合前开启计划模式（与 mode 正交叠加）
 async fn run_trigger(
     mode: ExecMode,
     decision: Option<ApprovalDecision>,
     trigger: &str,
     cwd_name: &str,
     permissions: Option<&str>,
+    plan: bool,
 ) -> (Vec<Event>, PathBuf, pig_core::AgentHandle) {
     let (config_path, dir, data_dir) = setup(cwd_name);
     if let Some(permissions) = permissions {
@@ -617,6 +664,16 @@ async fn run_trigger(
         })
         .await
         .unwrap();
+    if plan {
+        agent
+            .ops
+            .send(Op::SetPlanMode {
+                session_id: session_id.clone(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+    }
     agent
         .ops
         .send(Op::SendMessage {
@@ -648,6 +705,7 @@ async fn run_trigger(
                 .send(Op::ApprovalReply {
                     request_id: request_id.clone(),
                     decision,
+                    feedback: None,
                 })
                 .await
                 .unwrap();
@@ -674,6 +732,7 @@ async fn always_allow_is_per_subject() {
         mock::SCENARIO_SUBJECT_TRIGGER,
         "subject",
         None,
+        false,
     )
     .await;
     let details = approval_details(&events);
@@ -712,6 +771,7 @@ async fn auto_edit_readonly_bash_passthrough() {
         mock::SCENARIO_READONLY_TRIGGER,
         "readonly",
         None,
+        false,
     )
     .await;
     assert!(approval_details(&events).is_empty(), "只读命令不应弹窗");
@@ -784,8 +844,8 @@ fn task_stop_read_only_exempt_from_approval() {
         "ConfirmBeforeEdit 下也免批"
     );
     assert!(
-        !pig_core::tool::requires_approval(stop.as_ref(), ExecMode::Plan),
-        "Plan 下允许（Plan 只硬拒非只读）"
+        !pig_core::tool::requires_approval(stop.as_ref(), ExecMode::AutoEdit),
+        "AutoEdit 下只读也免批"
     );
 }
 
@@ -800,6 +860,7 @@ async fn permissions_deny_hard_rejects_even_in_full_access() {
         mock::SCENARIO_DANGER_TRIGGER,
         "perm-deny",
         Some("deny = [\"Bash(mkfs*)\"]\n"),
+        false,
     )
     .await;
     assert!(approval_details(&events).is_empty(), "deny 优先于危险弹窗");
@@ -830,6 +891,7 @@ async fn permissions_allow_skips_approval() {
         mock::SCENARIO_READONLY_TRIGGER,
         "perm-allow",
         Some("allow = [\"Bash(ls)\"]\n"),
+        false,
     )
     .await;
     assert!(approval_details(&events).is_empty(), "allow 免审批");
@@ -851,6 +913,7 @@ async fn permissions_allow_does_not_exempt_danger() {
         mock::SCENARIO_DANGER_TRIGGER,
         "perm-danger-allow",
         Some("allow = [\"Bash(mkfs*)\"]\n"),
+        false,
     )
     .await;
     let details = approval_details(&events);
@@ -863,14 +926,16 @@ async fn permissions_allow_does_not_exempt_danger() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exit_plan_mode_allow_switches_and_executes() {
-    // Plan + ExitPlanMode + Allow：弹窗 → 切到变更前确认 → 后续 Write 在新模式下审批执行
+async fn exit_plan_mode_allow_exits_and_executes() {
+    // 计划开 + ExitPlanMode + Allow：弹窗（含完整计划）→ 计划关闭、模式档不动 →
+    // 后续 Write 按权限档（变更前确认）审批执行；计划全文落盘 .pigcode/plans/
     let (events, dir, agent) = run_trigger(
-        ExecMode::Plan,
+        ExecMode::ConfirmBeforeEdit,
         Some(ApprovalDecision::Allow),
         mock::SCENARIO_PLAN_EXIT_TRIGGER,
         "plan-exit-allow",
         None,
+        true,
     )
     .await;
     let details = approval_details(&events);
@@ -880,23 +945,38 @@ async fn exit_plan_mode_allow_switches_and_executes() {
         "ExitPlanMode + Write 各弹一次: {details:?}"
     );
     assert_eq!(details[0].0, "ExitPlanMode");
-    assert!(details[0].1.contains("结束计划模式"), "{details:?}");
     assert!(
         details[0].1.contains("第一步"),
-        "plan 摘要进 detail: {details:?}"
+        "完整 plan 进 detail: {details:?}"
     );
-    assert_eq!(details[1].0, "Write", "切模式后 Write 走正常审批");
+    assert_eq!(details[1].0, "Write", "计划关闭后 Write 走权限档审批");
     assert!(
         events.iter().any(|e| matches!(
             e,
-            Event::ExecModeChanged { mode, .. } if *mode == ExecMode::ConfirmBeforeEdit
+            Event::PlanModeChanged { enabled, .. } if !enabled
         )),
-        "UI 收到模式更新事件"
+        "UI 收到计划关闭事件"
+    );
+    assert!(
+        mode_changes(&events).is_empty(),
+        "执行模式档全程不变（正交）"
     );
     assert_eq!(
         std::fs::read_to_string(dir.join(mock::PLAN_EXIT_FILE)).unwrap(),
         "executed\n",
-        "Write 在新模式下真实执行"
+        "Write 在权限档下真实执行"
+    );
+    // 计划落盘：.pigcode/plans/plan-<sid>.md 含完整计划
+    let plans_dir = dir.join(".pigcode").join("plans");
+    let plan_files: Vec<_> = std::fs::read_dir(&plans_dir)
+        .expect("plans 目录存在")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(plan_files.len(), 1, "一份计划文件: {plan_files:?}");
+    let plan_text = std::fs::read_to_string(plan_files[0].path()).unwrap();
+    assert!(
+        plan_text.contains("第一步"),
+        "计划文件含完整计划: {plan_text}"
     );
     agent.shutdown();
 }
@@ -904,11 +984,12 @@ async fn exit_plan_mode_allow_switches_and_executes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exit_plan_mode_reject_stays_plan() {
     let (events, dir, agent) = run_trigger(
-        ExecMode::Plan,
+        ExecMode::ConfirmBeforeEdit,
         Some(ApprovalDecision::Reject),
         mock::SCENARIO_PLAN_EXIT_TRIGGER,
         "plan-exit-reject",
         None,
+        true,
     )
     .await;
     let details = approval_details(&events);
@@ -922,12 +1003,88 @@ async fn exit_plan_mode_reject_stays_plan() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, Event::ExecModeChanged { .. })),
-        "模式不变"
+            .any(|e| matches!(e, Event::PlanModeChanged { .. })),
+        "计划开关不变"
     );
     assert!(
         !dir.join(mock::PLAN_EXIT_FILE).exists(),
         "Reject 后 Write 未发生"
+    );
+    // kimi 语义：计划先落盘再弹审批——拒绝后计划文件也保留（修订后覆盖重写）
+    let plans_dir = dir.join(".pigcode").join("plans");
+    assert!(
+        std::fs::read_dir(&plans_dir).is_ok_and(|mut d| d.next().is_some()),
+        "拒绝后计划文件仍应落盘保留"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exit_plan_mode_reject_with_feedback() {
+    // kimi Revise：拒绝携带反馈意见 → 进模型回执，计划开关保持
+    let (config_path, dir, data_dir) = setup("plan-revise");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, dir.clone()).await;
+    agent
+        .ops
+        .send(Op::SetPlanMode {
+            session_id: session_id.clone(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: format!("{} 开始", mock::SCENARIO_PLAN_EXIT_TRIGGER),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::ConfirmBeforeEdit,
+        })
+        .await
+        .unwrap();
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "等待回合结束超时: {collected:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
+        else {
+            continue;
+        };
+        if let Event::ApprovalRequested { request_id, .. } = &event {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision: ApprovalDecision::Reject,
+                    feedback: Some("第二步不对，改用方案 B".to_string()),
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(event, Event::TurnComplete { .. });
+        collected.push(event);
+        if done {
+            break;
+        }
+    }
+    let ends = tool_ends(&collected);
+    assert!(
+        ends.iter().any(|(_, out, err)| *err
+            && out.contains("反馈意见")
+            && out.contains("第二步不对，改用方案 B")),
+        "回执应携带反馈意见: {ends:?}"
+    );
+    assert!(
+        !collected
+            .iter()
+            .any(|e| matches!(e, Event::PlanModeChanged { .. })),
+        "拒绝后计划开关保持"
     );
     agent.shutdown();
 }
@@ -940,14 +1097,15 @@ async fn exit_plan_mode_outside_plan_errors() {
         mock::SCENARIO_PLAN_EXIT_TRIGGER,
         "plan-exit-nonplan",
         None,
+        false,
     )
     .await;
-    assert!(approval_details(&events).is_empty(), "非 Plan 不弹窗");
+    assert!(approval_details(&events).is_empty(), "计划未开不弹窗");
     assert!(
         tool_ends(&events)
             .iter()
             .any(|(_, out, err)| *err && out.contains("仅在计划模式下可用")),
-        "非 Plan 报错"
+        "计划未开报错"
     );
     agent.shutdown();
 }
@@ -964,16 +1122,27 @@ fn mode_changes(events: &[Event]) -> Vec<ExecMode> {
         .collect()
 }
 
+fn plan_changes(events: &[Event]) -> Vec<bool> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PlanModeChanged { enabled, .. } => Some(*enabled),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn enter_plan_switches_without_dialog_and_exit_restores_original() {
-    // AutoEdit → EnterPlanMode（不弹窗，直接切 Plan）→ Write 被 Plan 硬拒 →
-    // ExitPlanMode（弹窗 Allow）→ 恢复 AutoEdit → Write 免审批执行
+async fn enter_plan_without_dialog_and_exit_keeps_mode() {
+    // AutoEdit → EnterPlanMode（不弹窗，开计划）→ Write 被计划硬拒 →
+    // ExitPlanMode（弹窗 Allow）→ 计划关闭、模式档全程 AutoEdit 不动 → Write 免审批执行
     let (events, dir, agent) = run_trigger(
         ExecMode::AutoEdit,
         Some(ApprovalDecision::Allow),
         mock::SCENARIO_PLAN_ENTER_TRIGGER,
         "plan-enter",
         None,
+        false,
     )
     .await;
 
@@ -986,27 +1155,31 @@ async fn enter_plan_switches_without_dialog_and_exit_restores_original() {
     assert_eq!(details[0].0, "ExitPlanMode");
 
     assert_eq!(
-        mode_changes(&events),
-        [ExecMode::Plan, ExecMode::AutoEdit],
-        "进入 Plan → 恢复原模式（AutoEdit，不是默认的变更前确认）"
+        plan_changes(&events),
+        [true, false],
+        "EnterPlanMode 开 → ExitPlanMode 关"
+    );
+    assert!(
+        mode_changes(&events).is_empty(),
+        "执行模式档全程不变（正交，不再恢复原模式）"
     );
 
     let ends = tool_ends(&events);
     assert!(
         ends.iter().any(|(id, out, err)| id.contains("call_pn_1")
             && !err
-            && out.contains("已切换到计划模式")),
-        "EnterPlanMode 幂等成功: {ends:?}"
+            && out.contains("已开启计划模式")),
+        "EnterPlanMode 成功: {ends:?}"
     );
     assert!(
         ends.iter()
             .any(|(id, out, err)| id.contains("call_pn_2") && *err && out.contains("计划模式")),
-        "Plan 下 Write 被硬拒: {ends:?}"
+        "计划开启下 Write 被硬拒: {ends:?}"
     );
     assert!(
         ends.iter()
             .any(|(id, _, err)| id.contains("call_pn_4") && !err),
-        "恢复后 Write 执行: {ends:?}"
+        "计划关闭后 Write 执行: {ends:?}"
     );
     assert_eq!(
         std::fs::read_to_string(dir.join(mock::PLAN_ENTER_FILE)).unwrap(),
@@ -1017,13 +1190,14 @@ async fn enter_plan_switches_without_dialog_and_exit_restores_original() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enter_plan_mode_idempotent_when_already_plan() {
-    // Plan 下再调 EnterPlanMode：幂等提示，无模式事件；后续 ExitPlanMode 仍弹窗
+    // 计划已开再调 EnterPlanMode：幂等提示，无计划事件；后续 ExitPlanMode 仍弹窗
     let (events, _dir, agent) = run_trigger(
-        ExecMode::Plan,
+        ExecMode::AutoEdit,
         Some(ApprovalDecision::Reject),
         mock::SCENARIO_PLAN_ENTER_TRIGGER,
         "plan-enter-idem",
         None,
+        true,
     )
     .await;
     let ends = tool_ends(&events);
@@ -1032,9 +1206,157 @@ async fn enter_plan_mode_idempotent_when_already_plan() {
             .any(|(id, out, err)| id.contains("call_pn_1") && !err && out.contains("已在计划模式")),
         "幂等提示: {ends:?}"
     );
-    assert!(mode_changes(&events).is_empty(), "幂等路径不发模式事件");
+    assert!(plan_changes(&events).is_empty(), "幂等路径不发计划事件");
     let details = approval_details(&events);
     assert_eq!(details.len(), 1, "只有 ExitPlanMode 一次弹窗: {details:?}");
+    agent.shutdown();
+}
+
+// ---------- 计划文件语义（kimi writesOnlyPlanFile / ExitPlanMode 从文件读） ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exit_plan_mode_reads_plan_file_when_arg_empty() {
+    // kimi 语义：ExitPlanMode 不带 plan 参数 → core 读计划文件进弹窗
+    let (config_path, dir, data_dir) = setup("plan-read-file");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, dir.clone()).await;
+    // 预落计划文件（等价于模型经 Write 写入）
+    let plans_dir = dir.join(".pigcode/plans");
+    std::fs::create_dir_all(&plans_dir).unwrap();
+    std::fs::write(
+        plans_dir.join(format!("plan-{session_id}.md")),
+        "文件里的计划：第一步落地",
+    )
+    .unwrap();
+    agent
+        .ops
+        .send(Op::SetPlanMode {
+            session_id: session_id.clone(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: format!("{} 开始", mock::SCENARIO_PLAN_FILE_TRIGGER),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::ConfirmBeforeEdit,
+        })
+        .await
+        .unwrap();
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "等待回合结束超时: {collected:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
+        else {
+            continue;
+        };
+        if let Event::ApprovalRequested { request_id, .. } = &event {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision: ApprovalDecision::Allow,
+                    feedback: None,
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(event, Event::TurnComplete { .. });
+        collected.push(event);
+        if done {
+            break;
+        }
+    }
+    let details = approval_details(&collected);
+    assert_eq!(
+        details.len(),
+        2,
+        "ExitPlanMode + Write（变更前确认档）各弹一次: {details:?}"
+    );
+    assert_eq!(details[0].0, "ExitPlanMode");
+    assert!(
+        details[0].1.contains("文件里的计划"),
+        "detail 应来自计划文件: {details:?}"
+    );
+    assert_eq!(details[1].0, "Write", "批准后 Write 走权限档审批");
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::PlanModeChanged { enabled, .. } if !enabled)),
+        "批准后计划关闭"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(mock::PLAN_FILE_EXEC_FILE)).unwrap(),
+        "executed\n",
+        "批准后 Write 执行"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exit_plan_mode_without_plan_and_file_errors() {
+    // 无 plan 参数且计划文件不存在：不弹审批，回执引导先写计划文件
+    let (events, _dir, agent) = run_trigger(
+        ExecMode::ConfirmBeforeEdit,
+        None,
+        mock::SCENARIO_PLAN_FILE_TRIGGER,
+        "plan-no-file",
+        None,
+        true,
+    )
+    .await;
+    assert!(approval_details(&events).is_empty(), "无计划无文件不弹窗");
+    assert!(
+        tool_ends(&events)
+            .iter()
+            .any(|(_, out, err)| *err && out.contains("计划文件为空或不存在")),
+        "回执应引导写计划文件: {:?}",
+        tool_ends(&events)
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_mode_write_plan_dir_passthrough_others_denied() {
+    // kimi writesOnlyPlanFile：写计划目录直通免审批；写普通文件仍被计划硬拒
+    let (events, dir, agent) = run_trigger(
+        ExecMode::ConfirmBeforeEdit,
+        None,
+        mock::SCENARIO_PLAN_WRITE_GATE_TRIGGER,
+        "plan-write-gate",
+        None,
+        true,
+    )
+    .await;
+    assert!(
+        approval_details(&events).is_empty(),
+        "计划目录写直通免审批（全程无审批卡）"
+    );
+    let ends = tool_ends(&events);
+    assert!(
+        ends.iter()
+            .any(|(id, _, err)| id.contains("call_pg_1") && !err),
+        "计划目录写应直通成功: {ends:?}"
+    );
+    assert!(
+        dir.join(".pigcode/plans/plan-gate.md").exists(),
+        "计划文件真实写入"
+    );
+    assert!(
+        ends.iter()
+            .any(|(id, out, err)| id.contains("call_pg_2") && *err && out.contains("计划模式")),
+        "普通文件应被计划硬拒: {ends:?}"
+    );
+    assert!(!dir.join("other.txt").exists(), "普通文件未创建");
     agent.shutdown();
 }
 
@@ -1076,10 +1398,10 @@ async fn approval_reply_fans_out_same_coalesce_key() {
     let mut plan = park(&pending, "req-plan", None);
 
     // 只答复其中一个 sleep 5：另一个同键等待者应被一并唤醒
-    resolve_approval(&pending, "req-sleep-a", ApprovalDecision::Allow);
+    resolve_approval(&pending, "req-sleep-a", ApprovalDecision::Allow, None);
 
-    assert_eq!(sleep_a.try_recv(), Ok(ApprovalDecision::Allow));
-    assert_eq!(sleep_b.try_recv(), Ok(ApprovalDecision::Allow));
+    assert_eq!(sleep_a.try_recv(), Ok((ApprovalDecision::Allow, None)));
+    assert_eq!(sleep_b.try_recv(), Ok((ApprovalDecision::Allow, None)));
     // 不同命令、危险位不同的同命令、计划确认：都不受波及，仍挂在等待表
     assert!(echo.try_recv().is_err());
     assert!(danger.try_recv().is_err());
@@ -1093,6 +1415,6 @@ async fn approval_reply_fans_out_same_coalesce_key() {
     }
 
     // 不存在的 request_id（迟到/重复的 UI 回复）：无操作不 panic
-    resolve_approval(&pending, "req-missing", ApprovalDecision::Reject);
+    resolve_approval(&pending, "req-missing", ApprovalDecision::Reject, None);
     assert_eq!(pending.lock().unwrap().len(), 3);
 }

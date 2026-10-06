@@ -122,6 +122,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                 model_id: None,
                 reasoning_level: None,
                 exec_mode: None,
+                plan_enabled: None,
             })
             .await
             .expect("send NewSession");
@@ -167,6 +168,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                         .send(Op::ApprovalReply {
                             request_id,
                             decision: pig_protocol::ApprovalDecision::Allow,
+                            feedback: None,
                         })
                         .await
                         .expect("send ApprovalReply");

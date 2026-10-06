@@ -48,6 +48,7 @@ pub async fn new_session(agent: &pig_core::AgentHandle, cwd: PathBuf) -> String 
             model_id: None,
             reasoning_level: None,
             exec_mode: None,
+            plan_enabled: None,
         })
         .await
         .unwrap();

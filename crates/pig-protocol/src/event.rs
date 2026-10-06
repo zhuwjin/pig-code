@@ -23,6 +23,9 @@ pub enum Event {
         model_id: Option<String>,
         reasoning_level: Option<String>,
         exec_mode: ExecMode,
+        /// 计划模式开关（重开恢复、新建继承的值；与 exec_mode 正交）
+        #[serde(default)]
+        plan_enabled: bool,
         /// 会话级「工作区外读/写」开关（UI 模式菜单勾选态恢复用）
         #[serde(default)]
         fs_read_outside: bool,
@@ -212,6 +215,13 @@ pub enum Event {
         session_id: String,
         seq: u64,
         mode: ExecMode,
+    },
+    /// 计划模式开关变化（模型经 EnterPlanMode/ExitPlanMode 自切时发出；
+    /// UI 主动切换走 Op::SetPlanMode，不回事件）
+    PlanModeChanged {
+        session_id: String,
+        seq: u64,
+        enabled: bool,
     },
     /// AskUserQuestion：core 阻塞等待 Op::QuestionReply（同 request_id）
     QuestionRequested {

@@ -29,7 +29,6 @@ pub enum ExecMode {
     #[default]
     ConfirmBeforeEdit,
     AutoEdit,
-    Plan,
     FullAccess,
     /// 无管制全自动（容器/沙箱场景）：无审批，危险命令也不拦截
     Yolo,
@@ -102,6 +101,10 @@ pub struct SessionMeta {
     pub reasoning_level: Option<String>,
     #[serde(default)]
     pub exec_mode: ExecMode,
+    /// 计划模式（与执行模式正交的独立开关，ZCode planEnabled 同语义）：
+    /// 开启时修改类工具被硬拒，ExitPlanMode 批准只翻转本开关、权限档不动
+    #[serde(default)]
+    pub plan_enabled: bool,
     /// 会话级开关：允许读取/写入工作区外文件（tmp 目录始终放行；敏感文件永远拦截）
     #[serde(default)]
     pub fs_read_outside: bool,

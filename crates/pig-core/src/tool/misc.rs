@@ -279,11 +279,11 @@ impl Tool for ExitPlanModeTool {
             "type": "function",
             "function": {
                 "name": "ExitPlanMode",
-                "description": "计划写好、准备开始执行时调用：请用户确认后退出计划模式。仅在计划模式下可用。",
+                "description": "计划写入计划文件、准备开始执行时调用：请用户确认后退出计划模式。仅在计划模式下可用。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "plan": { "type": "string", "description": "计划摘要（展示在确认弹窗里，截取前 500 字符）" }
+                        "plan": { "type": "string", "description": "可选。通常无需提供——默认读取计划文件 `.pigcode/plans/plan-<session_id>.md` 的全文；提供时覆盖文件内容" }
                     }
                 }
             }

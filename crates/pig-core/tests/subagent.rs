@@ -47,6 +47,7 @@ async fn run_turn(
                 .send(Op::ApprovalReply {
                     request_id: request_id.clone(),
                     decision,
+                    feedback: None,
                 })
                 .await
                 .unwrap();
@@ -372,7 +373,7 @@ async fn subagent_result_truncated_and_spilled() {
     agent.shutdown();
 }
 
-/// Plan 模式拒绝：计划模式下委派子代理 → 「计划模式下不可委派」。
+/// 计划模式拒绝：计划开启下委派子代理 → 「计划模式下不可委派」。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subagent_plan_mode_rejected() {
     let (config_path, cwd, data_dir) = setup("subagent-plan");
@@ -382,9 +383,9 @@ async fn subagent_plan_mode_rejected() {
 
     agent
         .ops
-        .send(Op::SetExecMode {
+        .send(Op::SetPlanMode {
             session_id: sid.clone(),
-            mode: ExecMode::Plan,
+            enabled: true,
         })
         .await
         .unwrap();
@@ -392,7 +393,7 @@ async fn subagent_plan_mode_rejected() {
         &agent,
         &sid,
         &format!("{} GREP", mock::SUBAGENT_TRIGGER),
-        ExecMode::Plan,
+        ExecMode::AutoEdit,
         None,
     )
     .await;
@@ -764,6 +765,7 @@ async fn subagent_background_approval_gate() {
                     .send(Op::ApprovalReply {
                         request_id: request_id.clone(),
                         decision: ApprovalDecision::Allow,
+                        feedback: None,
                     })
                     .await
                     .unwrap();

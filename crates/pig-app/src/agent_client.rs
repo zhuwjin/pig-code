@@ -24,6 +24,7 @@ impl AgentClient {
         model_id: Option<String>,
         reasoning_level: Option<String>,
         exec_mode: Option<ExecMode>,
+        plan_enabled: Option<bool>,
     ) {
         self.send(Op::NewSession {
             cwd,
@@ -31,6 +32,7 @@ impl AgentClient {
             model_id,
             reasoning_level,
             exec_mode,
+            plan_enabled,
         });
     }
 
@@ -155,6 +157,14 @@ impl AgentClient {
         self.send(Op::SetExecMode { session_id, mode });
     }
 
+    /// 计划模式开关（与执行模式正交；core 写穿 store，不回事件）
+    pub fn set_plan_mode(&self, session_id: String, enabled: bool) {
+        self.send(Op::SetPlanMode {
+            session_id,
+            enabled,
+        });
+    }
+
     pub fn set_fs_access(&self, session_id: String, read_outside: bool, write_outside: bool) {
         self.send(Op::SetFsAccess {
             session_id,
@@ -163,10 +173,17 @@ impl AgentClient {
         });
     }
 
-    pub fn approval_reply(&self, request_id: String, decision: ApprovalDecision) {
+    /// 审批决议回复（feedback 仅计划「修改」路径非 None，kimi Revise 携带给模型）
+    pub fn approval_reply(
+        &self,
+        request_id: String,
+        decision: ApprovalDecision,
+        feedback: Option<String>,
+    ) {
         self.send(Op::ApprovalReply {
             request_id,
             decision,
+            feedback,
         });
     }
 

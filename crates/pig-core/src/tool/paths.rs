@@ -68,6 +68,46 @@ pub fn resolve_checked(cwd: &Path, path: &str, create_parents: bool) -> Result<P
     })
 }
 
+/// kimi writesOnlyPlanFile：Write/Edit 的目标路径是否落在计划目录
+///（`.pigcode/plans/` 内的 `.md` 文件；提示词引导模型写 `plan-<session_id>.md`
+/// 自然命中，判定不钉死文件名）。纯词法归一比较（不触碰文件系统——计划目录
+/// 可能尚不存在，resolve_checked 的父目录 canonicalize 会失败）；相对/绝对
+/// 路径都认，暂不支持经符号链接 cwd 的绝对路径比较（可接受边界）
+pub fn is_plan_file_write(cwd: &Path, arguments: &str) -> bool {
+    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let Some(path) = args["path"].as_str() else {
+        return false;
+    };
+    let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let raw = Path::new(path);
+    let full = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        cwd_canonical.join(raw)
+    };
+    // 判定放宽到 plans 目录内的 md 文件（不钉死文件名：kimi 的 slug 机制同理
+    // 是「计划目录可写」，提示词引导的 plan-<sid>.md 自然命中）
+    let plans_dir = cwd_canonical.join(".pigcode/plans");
+    let full = lexical_normalize(&full);
+    full.starts_with(lexical_normalize(&plans_dir))
+        && full.extension().is_some_and(|ext| ext == "md")
+}
+
+/// 词法归一（`.` 去掉、`..` 弹一级；不解符号链接不查文件系统）
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// 区外读/写策略：Read 看 fs_read_outside 开关，Write 看 fs_write_outside
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FsAccess {

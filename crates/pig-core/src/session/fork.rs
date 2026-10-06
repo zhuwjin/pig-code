@@ -60,6 +60,7 @@ pub fn fork_session(
         model_id: src_meta.model_id.clone(),
         reasoning_level: src_meta.reasoning_level.clone(),
         exec_mode: src_meta.exec_mode,
+        plan_enabled: false,
         fs_read_outside: src_meta.fs_read_outside,
         fs_write_outside: src_meta.fs_write_outside,
     };

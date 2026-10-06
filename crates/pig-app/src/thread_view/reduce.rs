@@ -4,10 +4,10 @@ impl ThreadView {
     pub fn reduce_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::SessionConfigured { .. } => {}
-            // 模式 chip 在 composer（main.rs 处理）；消息流无需响应
+            // 模式 chip 与计划 chip 在 composer（main.rs/events.rs 处理）；消息流无需响应
             Event::ExecModeChanged { .. } => {}
+            Event::PlanModeChanged { .. } => {}
             Event::TurnStarted { turn_id, .. } => {
-                self.plan_pending = false;
                 self.replay_turn = turn_id.starts_with("replay-");
                 self.messages.push(ChatMessage::assistant());
                 self.item_index.clear();
@@ -89,9 +89,26 @@ impl ThreadView {
                 item_id,
                 tool,
                 input_summary,
+                detail,
                 ..
             } => {
                 self.finish_thinking();
+                if tool == "ExitPlanMode" {
+                    // 计划卡：detail = 完整参数 JSON（live/回放同路径），解出 plan 全文
+                    let args: serde_json::Value = serde_json::from_str(&detail).unwrap_or_default();
+                    let plan = args["plan"].as_str().unwrap_or("").to_string();
+                    self.find_or_create(&item_id, || Segment::Plan {
+                        state: cx.new(|cx| TextViewState::markdown(&plan, cx)),
+                        done: false,
+                        approved: false,
+                        is_error: false,
+                        open: false,
+                        expand_anim: ExpandAnim::default(),
+                        body_scroll: ScrollHandle::new(),
+                    });
+                    self.auto_scroll();
+                    return cx.notify();
+                }
                 let six = self.find_or_create(&item_id, || Segment::ToolCall {
                     tool: tool.clone(),
                     summary: input_summary.clone(),
@@ -136,6 +153,20 @@ impl ThreadView {
                     expand_anim: ExpandAnim::default(),
                     body_scroll: ScrollHandle::new(),
                 });
+                if let Some(Segment::Plan {
+                    done,
+                    approved,
+                    is_error: err,
+                    ..
+                }) = self.current_segment(six)
+                {
+                    // 计划卡收尾：决议结果写三态（回放同路径）
+                    *done = true;
+                    *approved = output.contains("计划已批准");
+                    *err = is_error;
+                    self.auto_scroll();
+                    return cx.notify();
+                }
                 if let Some(Segment::ToolCall {
                     output: out,
                     is_error: err,

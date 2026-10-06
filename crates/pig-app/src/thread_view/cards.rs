@@ -218,6 +218,113 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// ExitPlanMode 计划卡（kimi「计划 待确认/已通过」同款）：收起一行三态，
+    /// chevron 展开看计划全文 markdown（TextView，超 480px 内部滚动）
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_plan_row(
+        &self,
+        message_ix: usize,
+        segment_ix: usize,
+        state: &Entity<TextViewState>,
+        done: bool,
+        approved: bool,
+        open: bool,
+        expand_anim: &ExpandAnim,
+        body_scroll: &ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (status, status_color) = if !done {
+            ("待确认", cx.theme().warning)
+        } else if approved {
+            ("已通过", cx.theme().success)
+        } else {
+            ("已拒绝", cx.theme().danger)
+        };
+        let muted = cx.theme().muted_foreground;
+        let subtlest = muted.opacity(0.6);
+        let key = message_ix * 1024 + segment_ix;
+        let group_id = format!("plan-row-{message_ix}-{segment_ix}");
+        v_flex()
+            .w_full()
+            .child(
+                h_flex()
+                    .id(("plan-row", key))
+                    .test_support()
+                    .group(group_id.clone())
+                    .w_full()
+                    .gap_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut open_now = false;
+                        if let Some(Segment::Plan { open, .. }) = this
+                            .messages
+                            .get_mut(message_ix)
+                            .and_then(|m| m.segments.get_mut(segment_ix))
+                        {
+                            *open = !*open;
+                            open_now = *open;
+                        }
+                        this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        Icon::new(AssetIconName::ClipboardList)
+                            .size_4()
+                            .text_color(subtlest),
+                    )
+                    .child(div().text_sm().text_color(subtlest).child("计划"))
+                    .child(div().text_sm().text_color(status_color).child(status))
+                    // 箭头默认隐藏，行悬停或展开时显示
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(group_id, |this| this.visible())
+                            .when(open, |this| this.visible())
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size_4()
+                                .text_color(subtlest),
+                            ),
+                    ),
+            )
+            .when(open || expand_anim.collapsing, |this| {
+                // 开合动画包装（滑开/滑收 + 淡入淡出）
+                this.child(
+                    self.expand_anim_wrap(
+                        format!(
+                            "plan-expand-{message_ix}-{segment_ix}-{}",
+                            expand_anim.generation
+                        ),
+                        expand_anim,
+                        // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
+                        div()
+                            .relative()
+                            .on_scroll_wheel(consume_scroll(body_scroll))
+                            .child(
+                                div()
+                                    .id(("plan-row-body", key))
+                                    .test_support()
+                                    .mt_1()
+                                    .rounded(px(10.))
+                                    .bg(cx.theme().background)
+                                    .p_3()
+                                    .max_h(px(480.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(body_scroll)
+                                    .child(TextView::new(state).selectable(true).text_sm()),
+                            )
+                            .into_any_element(),
+                    ),
+                )
+            })
+            .into_any_element()
+    }
+
     /// 工具调用（ZCode 同款）：无边框摘要行（图标 + 中文工具名 + 单行摘要 + 状态词），
     /// 箭头仅悬停/展开时显示；展开后是圆角描边卡片：完整输入（终端类带 `$` 前缀）+
     /// 等宽输出，输出限高内部滚动。运行中不用 spinner，工具名扫光（ZCode 的取舍：
