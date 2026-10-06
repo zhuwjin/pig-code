@@ -9,6 +9,17 @@ impl AppView {
             .and_then(|id| self.metas.iter().find(|m| &m.id == id))
             .map(|m| m.title.clone())
             .unwrap_or_else(|| "pig-code".to_string());
+        // debug 构建标题栏带版本号，便于区分日常调试/自测与 release 分发
+        let label = if cfg!(debug_assertions) {
+            let version = env!("CARGO_PKG_VERSION");
+            if self.current.is_some() {
+                format!("pig-code v{version} · {title}")
+            } else {
+                format!("pig-code v{version}")
+            }
+        } else {
+            format!("pig-code · {title}")
+        };
 
         // Windows 上标题栏命中 HTCAPTION：左键按下仍会派发 MouseDownEvent，但抬起被
         // OS 的窗口移动模态循环吞掉，窗口级文本选择一旦开始手势就收不到结束，
@@ -54,12 +65,7 @@ impl AppView {
                                         cx.notify();
                                     })),
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .child(format!("pig-code · {title}")),
-                            )
+                            .child(div().text_sm().font_semibold().child(label))
                             // 会话操作菜单（三个点）：有活动会话才显示
                             .when(self.current.is_some(), |this| {
                                 this.child(
