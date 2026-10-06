@@ -329,11 +329,6 @@ pub(crate) fn ticker_target_line(text: &str) -> Option<(usize, String)> {
 /// 每轮改动面板里的单文件行
 pub struct TurnFileRow {
     pub(crate) edit: EditDiff,
-    pub(crate) expanded: bool,
-    /// 内联 diff 卡的滚动句柄
-    pub(crate) scroll: ScrollHandle,
-    /// 展开/收起动画状态（见 crate::anim::ExpandAnim）
-    pub(crate) expand_anim: ExpandAnim,
 }
 
 /// 用户消息的图片附件：事件文本末尾的 `pig-code-composer://attachments/mN`

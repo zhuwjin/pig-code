@@ -138,7 +138,7 @@ impl ThreadView {
                             ticker.reset_to(ticker_target_line(text));
                         }
                         // 开合动画驱动（gen 重播 + 收起时保持挂载播滑收）
-                        this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
+                        this.drive_expand_anim(message_ix, segment_ix, open_now, cx);
                         cx.notify();
                     }))
                     .child(
@@ -265,7 +265,7 @@ impl ThreadView {
                             *open = !*open;
                             open_now = *open;
                         }
-                        this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
+                        this.drive_expand_anim(message_ix, segment_ix, open_now, cx);
                         cx.notify();
                     }))
                     .child(
@@ -452,7 +452,7 @@ impl ThreadView {
                             expanded_now = *expanded;
                         }
                         // 开合动画驱动（gen 重播 + 收起时保持挂载播滑收）
-                        this.drive_expand_anim(message_ix, segment_ix, None, expanded_now, cx);
+                        this.drive_expand_anim(message_ix, segment_ix, expanded_now, cx);
                         cx.notify();
                     }))
                     .child(Icon::new(tool_icon).size_4().text_color(subtlest))
@@ -1055,7 +1055,7 @@ impl ThreadView {
                     *expanded = !*expanded;
                     open_now = *expanded;
                 }
-                this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
+                this.drive_expand_anim(message_ix, segment_ix, open_now, cx);
                 cx.notify();
             }))
             .child(
@@ -1129,7 +1129,7 @@ impl ThreadView {
                     *expanded = !*expanded;
                     open_now = *expanded;
                 }
-                this.drive_expand_anim(message_ix, segment_ix, None, open_now, cx);
+                this.drive_expand_anim(message_ix, segment_ix, open_now, cx);
                 cx.notify();
             }))
             .child(

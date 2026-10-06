@@ -396,15 +396,7 @@ impl ThreadView {
                         .expect("assistant message")
                         .segments
                         .push(Segment::TurnChanges {
-                            rows: files
-                                .into_iter()
-                                .map(|edit| TurnFileRow {
-                                    edit,
-                                    expanded: false,
-                                    scroll: ScrollHandle::new(),
-                                    expand_anim: ExpandAnim::default(),
-                                })
-                                .collect(),
+                            rows: files.into_iter().map(|edit| TurnFileRow { edit }).collect(),
                             open: false,
                             expand_anim: ExpandAnim::default(),
                         });

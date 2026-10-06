@@ -316,6 +316,8 @@ pig-code/
 >
 > 计划「修改」Revise 闭环（2026-10-06 四轮，用户给 kimi 反馈输入截图拍板）：**①协议**——`Op::ApprovalReply` 加 `#[serde(default)] feedback: Option<String>`；core pending 审批通道载荷改 `(ApprovalDecision, Option<String>)`（同键扇出者只拿决策不带反馈），ExitPlanMode 的 Reject 分支拼「用户拒绝退出计划模式。反馈意见：{feedback}。请据此修订计划并重新提交。」（空反馈回落原文案）。**②UI 链**——`ComposerEvent::DecideApproval`/`ThreadEvent::ApprovalReply`/`AgentClient::approval_reply` 全部带 feedback（其余审批恒 None）。**③面板双态**（kimi 图同款）——「修改」进输入态：底部出反馈输入框（`plan_revise_input` 惰性 InputState，placeholder「说明拒绝原因…」），按钮区变「取消 Esc / 提交并拒绝 ↵」；取消回三按钮（清空输入、焦点还审批条），提交 = Reject + feedback（空文本 = 裸拒绝）。键盘分态：输入态 ⏎=提交并拒绝、Esc=取消；三按钮态 ⏎=批准、Esc=拒绝并退出。**测试**：composer `plan_approval_panel_decides` 改走双态（修改出输入框、取消回三按钮、打字提交带反馈、批准 Allow、拒绝 None）；core `exit_plan_mode_reject_with_feedback`（回执含反馈原文、计划开关保持）。验证：fmt/clippy 干净，pig-core 32 + pig-app 75 全绿，PIG_SELFTEST PASS。
 >
+> turn 改动面板卡片化（2026-10-06 五轮，用户给 ZCode 文件更改卡截图拍板）：**①样式**（diffs.rs `render_turn_changes`）——圆角描边卡片：头部 SquarePen 图标 +「N 个文件已修改」+ 右端等宽「+A -D」与 48×4 增删比例条（绿=新增占比、红=删除）；文件行改「目录暗淡可省略 + 文件名高亮」整路径渲染，右端等宽 +N/-N；折叠态直出前 3 行（`PREVIEW_ROWS`），超出部分由底部「还有 N 个文件 ▾ / 收起 ▴」行开合（段级 expand_anim 不变）。**②文件行点击改右侧打开**（用户拍板）——不再行内展开 diff 卡，点击发 `ThreadEvent::OpenFile{path, line: None}` 走 `open_file_tab` 右侧「文件」tab（Read 卡路径点击同链路，按会话 cwd 解析 + canonical 去重）；悬停路径整行 group_hover 加下划线 + tooltip「在右侧打开文件」（不刷 hover 底色——矩形底色会盖出卡片圆角）。**③连带清理**——`TurnFileRow` 只留 `edit`（expanded/scroll/expand_anim 删除），`expand_anim_at`/`drive_expand_anim` 去掉文件行级 row_ix 维度（仅段级）；工具卡的编辑 diff 卡 `render_edit_diff` 不受影响（cards.rs 仍用）。验证：fmt/clippy 干净，pig-app 75 全绿。
+>
 >
 ### M0 — 应用骨架（GUI 先行，mock 数据）
 - workspace 化（`pig-protocol`/`pig-core`/`pig-app`），`pig-app` 引入 `gpui-kit = "0.6"`，`gpui_kit::init` + 无边框窗口 + `TitleBar` + 亮暗主题。

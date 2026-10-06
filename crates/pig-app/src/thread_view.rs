@@ -666,32 +666,22 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 段级（Thinking/ToolCall/TurnChanges）或 turn 改动面板文件行级
-    ///（row_ix = Some）的开合动画态
+    /// 段级（Thinking/ToolCall/TurnChanges）的开合动画态
     pub(crate) fn expand_anim_at(
         &mut self,
         message_ix: usize,
         segment_ix: usize,
-        row_ix: Option<usize>,
     ) -> Option<&mut ExpandAnim> {
         let segment = self
             .messages
             .get_mut(message_ix)?
             .segments
             .get_mut(segment_ix)?;
-        match row_ix {
-            Some(rix) => match segment {
-                Segment::TurnChanges { rows, .. } => {
-                    rows.get_mut(rix).map(|row| &mut row.expand_anim)
-                }
-                _ => None,
-            },
-            None => match segment {
-                Segment::Thinking { expand_anim, .. }
-                | Segment::ToolCall { expand_anim, .. }
-                | Segment::TurnChanges { expand_anim, .. } => Some(expand_anim),
-                _ => None,
-            },
+        match segment {
+            Segment::Thinking { expand_anim, .. }
+            | Segment::ToolCall { expand_anim, .. }
+            | Segment::TurnChanges { expand_anim, .. } => Some(expand_anim),
+            _ => None,
         }
     }
 
@@ -701,11 +691,10 @@ impl ThreadView {
         &mut self,
         message_ix: usize,
         segment_ix: usize,
-        row_ix: Option<usize>,
         expanded_now: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(anim) = self.expand_anim_at(message_ix, segment_ix, row_ix) else {
+        let Some(anim) = self.expand_anim_at(message_ix, segment_ix) else {
             return;
         };
         anim.generation += 1;
@@ -719,7 +708,7 @@ impl ThreadView {
                 .timer(EXPAND_ANIM_DUR + std::time::Duration::from_millis(50))
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(anim) = this.expand_anim_at(message_ix, segment_ix, row_ix)
+                if let Some(anim) = this.expand_anim_at(message_ix, segment_ix)
                     && anim.collapsing
                     && anim.generation == generation
                 {
