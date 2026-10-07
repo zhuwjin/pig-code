@@ -1,4 +1,5 @@
-// 显式导入：super 链会把 gpui 的 `test` 宏导进来遮蔽内置 #[test]（dock.rs 同款坑）
+// Explicit imports: the super chain pulls in gpui's `test` macro, which shadows the
+// built-in #[test] (same trap as dock.rs)
 use crate::sidebar::{Sidebar, SidebarSession};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
@@ -7,7 +8,8 @@ use gpui_kit::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// 侧栏探针视图（dock.rs 测试同款结构：窗口根视图持有实体）
+/// Sidebar probe view (same structure as dock.rs tests: the window root view holds
+/// the entity)
 struct SidebarProbe {
     sidebar: Entity<Sidebar>,
 }
@@ -22,7 +24,7 @@ fn make_sessions(workspace: &str, count: usize) -> Vec<SidebarSession> {
     (0..count)
         .map(|i| SidebarSession {
             id: format!("s{i}"),
-            title: format!("会话 {i}"),
+            title: format!("session {i}"),
             cwd: PathBuf::from(workspace),
             updated_at: 1000 + i as u64,
             pinned: false,
@@ -62,8 +64,9 @@ fn click(
     .expect("window alive");
 }
 
-/// 分页「展开更多/收起」：容器高度应渐变，而非瞬变（用户实测回归：
-/// 收起时内容已变少，max_h 上限帽压不住容器）
+/// Pagination "show more/collapse": the container height should animate, not jump
+/// (user-reported regression: after collapsing the content is already reduced, and
+/// the max_h cap cannot hold the container down)
 #[test]
 fn workspace_pagination_resize_animates() {
     let cx = &mut gpui_kit::TestAppContext::single();
@@ -74,7 +77,7 @@ fn workspace_pagination_resize_animates() {
             SidebarProbe { sidebar }
         }
     });
-    // 12 个会话都在同一工作区
+    // All 12 sessions in one workspace
     window
         .update(cx, |probe, _, cx| {
             probe.sidebar.update(cx, |sidebar, cx| {
@@ -90,7 +93,7 @@ fn workspace_pagination_resize_animates() {
         .expect("window alive");
     render(cx, &window);
 
-    // 展开工作区（与点击文件夹行同路径：入组 + gen+1）
+    // Expand the workspace (same path as clicking the folder row: insert + gen+1)
     window
         .update(cx, |probe, _, cx| {
             probe.sidebar.update(cx, |sidebar, _cx| {
@@ -104,36 +107,44 @@ fn workspace_pagination_resize_animates() {
         })
         .expect("window alive");
     render(cx, &window);
-    // 睡过展开动画落终态（5 条 + 分页控制条）
+    // Sleep past the expand animation to reach the end state (5 rows + pagination
+    // controls)
     std::thread::sleep(std::time::Duration::from_millis(300));
     render(cx, &window);
     let h5 = block_height(cx, &window);
 
-    // 展开更多：+5 条，容器应从 h5 渐变上去
+    // Show more: 5 extra rows; the container should grow gradually from h5
     click(cx, &window, ("workspace-more", 0));
     render(cx, &window);
     let h_grow_start = block_height(cx, &window);
     assert!(
         h_grow_start < h5 + 60.,
-        "展开更多首帧容器应仍接近旧高 {h5}，实测 {h_grow_start}"
+        "show-more first frame should stay near the old height {h5}, got {h_grow_start}"
     );
     std::thread::sleep(std::time::Duration::from_millis(300));
     render(cx, &window);
     let h10 = block_height(cx, &window);
-    assert!(h10 > h5 + 80., "展开更多终态应明显更高（{h5} → {h10}）");
+    assert!(
+        h10 > h5 + 80.,
+        "show-more end state should be clearly taller ({h5} -> {h10})"
+    );
 
-    // 收起（分页）：容器应从 h10 渐变回 h5，而不是瞬塌
+    // Collapse (pagination): the container should shrink from h10 back to h5
+    // gradually, not collapse instantly
     click(cx, &window, ("workspace-collapse", 0));
     render(cx, &window);
     let h_shrink_start = block_height(cx, &window);
     assert!(
         h_shrink_start > h10 - 60.,
-        "分页收起首帧容器应仍接近旧高 {h10}，实测 {h_shrink_start}"
+        "collapse first frame should stay near the old height {h10}, got {h_shrink_start}"
     );
-    // 「到期删行」计时器是真实墙钟：先睡过它（250ms），再泵前台续体
-    //（run_until_parked 对挂起定时器视为 parked 会立即返回，不能替代等待）
-    // 「到期删行」计时器走测试调度器的假时钟（真 sleep 不推进）：
-    // 推进假时钟过 250ms，再泵前台续体应用变更
+    // The "delete rows on expiry" timer follows the real wall clock: sleep past it
+    // (250ms) first, then pump the foreground continuations
+    // (run_until_parked treats pending timers as parked and returns immediately, it
+    // cannot replace the wait)
+    // The "delete rows on expiry" timer runs on the test scheduler's fake clock (a
+    // real sleep does not advance it): advance the fake clock past 250ms, then pump
+    // the foreground continuations to apply the change
     cx.dispatcher
         .advance_clock(std::time::Duration::from_millis(300));
     cx.run_until_parked();
@@ -141,6 +152,6 @@ fn workspace_pagination_resize_animates() {
     let h_back = block_height(cx, &window);
     assert!(
         (h_back - h5).abs() < 2.,
-        "分页收起终态应回到 {h5}，实测 {h_back}"
+        "collapse end state should return to {h5}, got {h_back}"
     );
 }

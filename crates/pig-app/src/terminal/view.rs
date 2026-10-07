@@ -1,10 +1,12 @@
-//! TerminalView：一条终端会话的 gpui Entity。
+//! TerminalView: the gpui Entity for one terminal session.
 //!
-//! 骨架参考 tty7 `src/terminal/view.rs`（18109 行只取 ~700）：持有 Term 封装 +
-//! FocusHandle；cx.spawn 事件泵批量 drain alacritty 事件后 cx.notify；根 div
-//! track_focus + on_key_down + on_scroll_wheel；滚轮转 display_offset；鼠标拖选；
-//! Cmd 组合键分流；光标 530ms 闪烁。砍掉：搜索/历史/补全/composer/agent 检测/
-//! SSH/鼠标上报（mouse reporting 留给 TODO）。
+//! Skeleton based on tty7 `src/terminal/view.rs` (~700 lines taken out of
+//! 18109): holds the Term wrapper plus a FocusHandle; a cx.spawn event pump
+//! drains alacritty events in batches then cx.notify; the root div does
+//! track_focus plus on_key_down plus on_scroll_wheel; the scroll wheel drives
+//! display_offset; mouse drag selection; Cmd chord interception; 530ms cursor
+//! blink. Dropped: search/history/completion/composer/agent detection/SSH/mouse
+//! reporting (mouse reporting left as a TODO).
 
 use alacritty_terminal::event::{Event as AlacEvent, WindowSize};
 use alacritty_terminal::grid::{Dimensions as _, Scroll};
@@ -22,11 +24,11 @@ use super::element::{GridSnapshot, RenderCell, TerminalElement};
 use super::input::{self, KeyFlags};
 use super::term::{TermSize, Terminal};
 
-/// grid 四周留白（tty7 的 GRID_PAD_X/Y 同款量级）
+/// Padding around the grid (same magnitude as tty7's GRID_PAD_X/Y)
 const GRID_PAD_X: f32 = 6.;
 const GRID_PAD_Y: f32 = 4.;
 
-/// 面板订阅的事件：子进程退出（tab 标签追加「（已退出）」）
+/// Events the panel subscribes to: child process exit (the tab label gets "(exited)" appended)
 pub(crate) enum TerminalViewEvent {
     Exited,
 }
@@ -36,31 +38,32 @@ impl EventEmitter<TerminalViewEvent> for TerminalView {}
 pub(crate) struct TerminalView {
     pub(crate) terminal: Terminal,
     pub(crate) focus_handle: FocusHandle,
-    /// cell 尺寸（prepaint 每帧量；input.rs 的 IME 锚点要用 cell_width）
+    /// Cell size (measured every frame in prepaint; input.rs needs cell_width for the IME anchor)
     pub(crate) cell_width: Pixels,
     pub(crate) line_height: Pixels,
-    /// 行高 = 字号 × 倍数（等宽终端惯例 1.3；暂无配置项）
+    /// Line height = font size × multiplier (1.3, the monospace terminal convention; no config item yet)
     pub(crate) line_height_mul: f32,
-    /// 上一帧的 grid 与快照：读线程持锁时直接重画（见 element.rs build_grid）
+    /// Previous frame's grid and snapshot: redrawn as-is while the reader thread holds the lock (see element.rs build_grid)
     pub(crate) grid_buf: Vec<RenderCell>,
     pub(crate) grid_snap: Option<GridSnapshot>,
-    /// IME 预编辑文本（marked text），画在光标 cell 处带下划线
+    /// IME preedit text (marked text), drawn underlined at the cursor cell
     pub(crate) marked_text: String,
     pub(crate) cursor_visible: bool,
     selecting: bool,
-    /// 触摸板平滑滚动攒下的不足一行行程
+    /// Sub-line travel accumulated by smooth trackpad scrolling
     scroll_debt: f32,
     _subscriptions: Vec<Subscription>,
 }
 
 impl TerminalView {
-    /// 包装一条已起好的 shell（PTY 由面板先 spawn，失败时不建 tab）。
-    /// 接好事件泵 / 闪烁定时器 / 焦点订阅。
+    /// Wrap an already-started shell (the PTY is spawned by the panel first; no
+    /// tab is created on failure). Wires up the event pump / blink timer / focus
+    /// subscriptions.
     pub(crate) fn new(terminal: Terminal, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // 事件泵：批量 drain 后统一处理（连续的 Wakeup 折叠成一个），
-        // 参考 tty7 view.rs:1722-1750
+        // Event pump: drain in batches, process together (consecutive Wakeup
+        // events collapse into one), see tty7 view.rs:1722-1750
         let events = terminal.events.clone();
         cx.spawn(async move |this, cx| {
             let mut batch = Vec::new();
@@ -85,7 +88,7 @@ impl TerminalView {
         })
         .detach();
 
-        // 光标闪烁：530ms 翻位，仅聚焦时闪（失焦画常显空心框，见 paint_cursor）
+        // Cursor blink: toggles every 530ms, blinking only while focused (unfocused draws a steady hollow box, see paint_cursor)
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -146,7 +149,7 @@ impl TerminalView {
         KeyFlags::from_mode(self.terminal.term.lock().mode())
     }
 
-    /// 键盘输入：写 PTY + 回底清选区（tty7 send_to_pty + jump_to_prompt）
+    /// Keyboard input: write to the PTY plus scroll to bottom and clear the selection (tty7 send_to_pty + jump_to_prompt)
     fn send_to_pty(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         if self.terminal.exited() {
             return;
@@ -160,7 +163,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 焦点进/出上报（模式 1004 开着才发）
+    /// Focus in/out reporting (sent only when mode 1004 is on)
     fn report_focus_change(&self, focused: bool) {
         let mode = *self.terminal.term.lock().mode();
         if mode.contains(TermMode::FOCUS_IN_OUT) {
@@ -169,11 +172,11 @@ impl TerminalView {
         }
     }
 
-    /// alacritty 事件处理（参考 tty7 view.rs:2508 handle_event，砍到必需子集）
+    /// alacritty event handling (see handle_event at tty7 view.rs:2508, trimmed to the required subset)
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         match ev {
             AlacEvent::Wakeup => cx.notify(),
-            // tab 标签只显示 shell 名，标题事件忽略
+            // The tab label only shows the shell name; title events are ignored
             AlacEvent::Title(_) | AlacEvent::ResetTitle => {}
             AlacEvent::PtyWrite(text) => self.terminal.write(text.as_bytes()),
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
@@ -190,7 +193,7 @@ impl TerminalView {
                 }
             }
             AlacEvent::ColorRequest(idx, fmt) => {
-                // 程序查询配色（OSC 10/11/12 与 256 色表）：按当前主题应答
+                // The program queries the color scheme (OSC 10/11/12 and the 256-color table): answer from the current theme
                 let colors = TermColors::resolve(cx);
                 let rgb = match idx {
                     256 => colors.fg_rgb,
@@ -221,14 +224,14 @@ impl TerminalView {
         let ks = &ev.keystroke;
         let m = &ks.modifiers;
 
-        // Cmd 组合键分流处理，不进 PTY（tty7 handle_cmd_shortcut 的精简版）
+        // Cmd chords are intercepted and handled here, never sent to the PTY (a trimmed tty7 handle_cmd_shortcut)
         if m.platform && !m.control && !m.alt {
             match ks.key.as_str() {
                 "c" => {
                     if self.has_selection() {
                         self.copy_selection(cx);
                     } else {
-                        // 无选区时 Cmd+C 透传 ETX（中断前台程序）
+                        // With no selection, Cmd+C passes ETX through (interrupts the foreground program)
                         self.send_to_pty(b"\x03", cx);
                     }
                     cx.stop_propagation();
@@ -255,11 +258,14 @@ impl TerminalView {
         }
     }
 
-    /// 滚轮：默认滚 scrollback；alt screen 且程序开了 alternate scroll（1007，
-    /// less/vim 默认开）时转方向键。像素滚轮按行高累计，触摸板平滑滚动自然
-    /// 落成整行（参考 tty7 view.rs:6056-6076 的量化分支）。
+    /// Scroll wheel: scrolls the scrollback by default; in an alt screen where
+    /// the program enabled alternate scroll (1007, on by default in less/vim) it
+    /// converts to arrow keys. Pixel-wheel deltas accumulate by line height, so
+    /// smooth trackpad scrolling lands on whole lines naturally (see the
+    /// quantization branch at tty7 view.rs:6056-6076).
     ///
-    /// TODO: 鼠标上报（MOUSE_MODE 下滚轮应编码成鼠标事件发给程序）
+    /// TODO: mouse reporting (under MOUSE_MODE the wheel should be encoded as
+    /// mouse events and sent to the program)
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let raw = match ev.delta {
             ScrollDelta::Lines(p) => p.y,
@@ -288,8 +294,9 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 按下起选区（shift+单击扩展现有选区；双击词选、三击行选）
-    /// 像素 → (line, col) 换算要加 display_offset（参考 tty7 on_select_start）
+    /// Press starts a selection (shift+click extends the existing one; double
+    /// click selects a word, triple click a line). The pixel → (line, col)
+    /// conversion must add display_offset (see tty7 on_select_start)
     pub(crate) fn on_select_start(
         &mut self,
         col: usize,
@@ -395,7 +402,7 @@ impl TerminalView {
         self.send_to_pty(&bytes, cx);
     }
 
-    /// IME 提交文本（InputHandler::replace_text_in_range 进来）
+    /// IME committed text (arrives via InputHandler::replace_text_in_range)
     pub(crate) fn input_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
@@ -415,8 +422,8 @@ impl TerminalView {
         }
     }
 
-    /// prepaint 每帧调：记下 cell 尺寸，grid 尺寸有变才 resize
-    /// （Term 与 PTY 同步走 terminal.resize）
+    /// Called every frame in prepaint: record the cell size; resize only when
+    /// the grid size changed (Term and PTY both go through terminal.resize)
     pub(crate) fn set_grid_size(
         &mut self,
         cols: usize,
@@ -427,7 +434,7 @@ impl TerminalView {
     ) {
         self.cell_width = cell_width;
         self.line_height = line_height;
-        // 报给子进程的 cell 像素尺寸用设备像素（逻辑 × 缩放），kitty/ghostty 同款
+        // Cell pixel sizes reported to the child use device pixels (logical × scale), same as kitty/ghostty
         let scale = if scale.is_finite() && scale > 0. {
             scale
         } else {
@@ -469,16 +476,19 @@ impl Render for TerminalView {
     }
 }
 
-/// bracketed paste 的开始/结束括号（DEC 模式 2004）
+/// Opening/closing brackets for bracketed paste (DEC mode 2004)
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// 粘贴文本 → 写往 PTY 的字节（全抄 tty7 `crates/tty7-core/src/core/paste.rs`）。
+/// Pasted text → bytes written to the PTY (a verbatim port of tty7
+/// `crates/tty7-core/src/core/paste.rs`).
 ///
-/// 带括号时剥掉所有 ESC——内容里自带的 `ESC[201~` 会提前关上括号，其后的
-/// 文本就会以「键入」身份到达 shell，粘贴文本变命令就是这么来的。
-/// CRLF 一律折叠成一个换行；不带括号时换行发 \r（键盘 Enter 的字节），
-/// 多行命令逐行执行，这是没有 2004 的终端一直以来的语义。
+/// When bracketed, every ESC is stripped: an `ESC[201~` inside the content would
+/// close the bracket early, and the text after it would arrive at the shell as
+/// if typed, which is how pasted text turns into executed commands. CRLF is
+/// always folded into a single newline; without brackets, newlines are sent as
+/// \r (the keyboard Enter byte) so multi-line commands run line by line, the
+/// long-standing semantics of terminals without 2004.
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     let mut folded = Vec::with_capacity(text.len());
     let bytes = text.as_bytes();

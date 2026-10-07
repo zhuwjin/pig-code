@@ -34,9 +34,11 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// 行内重命名输入框画在会话行上，先保证该行真实渲染：普通会话在工作区
-    /// 视图可能被折叠/分页/名称过滤挡住，退回平铺列表并清掉拦路搜索词；
-    /// 归档会话不在侧栏渲染（设置页「已归档的会话」管理），返回 false 放弃
+    /// The inline rename input is drawn on the session row, so first ensure the row
+    /// actually renders: a regular session may be hidden in the workspace view by
+    /// collapsing/pagination/name filtering, so fall back to the flat list and clear
+    /// any blocking search term; archived sessions are not rendered in the sidebar
+    /// (managed on the settings page's "archived sessions"), return false to give up
     fn ensure_session_row_visible(
         &mut self,
         id: &str,
@@ -63,9 +65,11 @@ impl Sidebar {
         self.session_row_visible(id, cx)
     }
 
-    /// 会话行在当前视图下是否可见：归档会话恒不可见（不在侧栏渲染）；
-    /// 平铺视图看标题过滤；工作区视图还要求工作区未被搜索过滤、已展开
-    /// 且在分页范围内
+    /// Whether a session row is visible in the current view: archived sessions are
+    /// never visible (not rendered in the sidebar);
+    /// the flat view checks title filtering; the workspace view additionally
+    /// requires the workspace to be unfiltered by search, expanded,
+    /// and within the pagination range
     fn session_row_visible(&self, id: &str, cx: &App) -> bool {
         let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
             return false;
@@ -81,7 +85,8 @@ impl Sidebar {
                     return self.matches(&query, &session.title);
                 }
                 let workspace = session.cwd.display().to_string();
-                // 工作区视图按工作区名/路径过滤，不过滤会话标题
+                // The workspace view filters by workspace name/path, not by session
+                // title
                 if !self.matches(&query, &self.workspace_name(&workspace))
                     && !self.matches(&query, &workspace)
                 {
@@ -128,7 +133,7 @@ impl Sidebar {
                 cx.emit(SidebarEvent::RenameWorkspace(path, alias));
             }
             RenameTarget::Session(id) => {
-                // 空值视为取消，不改名
+                // An empty value means cancel; no rename
                 if !value.is_empty() {
                     cx.emit(SidebarEvent::RenameSession(id, value));
                 }

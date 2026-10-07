@@ -1,26 +1,26 @@
 use super::*;
 
-/// 记录 turn_originals，回合结束 take_turn_changes 算「本轮首次写前 → 当前」净额并清空。
+/// Records turn_originals; at turn end take_turn_changes computes the "before the first write of this turn → current" net delta and clears it.
 #[derive(Default)]
 pub struct ChangeTracker {
     originals: HashMap<PathBuf, Option<Vec<u8>>>,
     stats: HashMap<PathBuf, (u32, u32)>,
-    /// 本次进程内新增、尚未落盘的快照路径（session 侧 drain 后写库）
+    /// Snapshot paths newly added in this process, not yet persisted (the session side drains them into the store)
     dirty: Vec<PathBuf>,
-    /// 本轮内各文件首次写前的原始字节（None = 本轮新建）；回合结束 take 清空
+    /// Original bytes before each file's first write within this turn (None = created this turn); taken (cleared) at turn end
     turn_originals: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
-/// 读文件原始字节（None = 文件不存在）
+/// Read a file's raw bytes (None = file does not exist)
 fn read_original_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("读取失败 {}: {e}", path.display())),
+        Err(e) => Err(format!("Failed to read {}: {e}", path.display())),
     }
 }
 
-/// 字节 → LF 模型视图：优先 text::decode，失败降级 lossy UTF-8（diff 兜底用）
+/// Bytes → LF model view: text::decode first, falling back to lossy UTF-8 on failure (diff fallback)
 pub(crate) fn decoded_view(bytes: &[u8]) -> String {
     match crate::text::decode(bytes) {
         Ok(doc) => doc.text,
@@ -28,10 +28,10 @@ pub(crate) fn decoded_view(bytes: &[u8]) -> String {
     }
 }
 
-/// 快照持久化编码前缀：非 UTF-8 字节以十六进制度过 String 边界
+/// Snapshot persistence encoding prefix: non-UTF-8 bytes cross the String boundary as hexadecimal
 const SNAPSHOT_HEX_PREFIX: &str = "pigcode:hex:";
 
-/// 原始字节 → 持久化 String：合法 UTF-8 直接转；否则 hex（保持 store/session 签名不变）
+/// Raw bytes → persisted String: valid UTF-8 converts directly; otherwise hex (keeping the store/session signatures unchanged)
 pub fn snapshot_to_store(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(text) => text.to_string(),
@@ -39,16 +39,20 @@ pub fn snapshot_to_store(bytes: &[u8]) -> String {
             let mut out = String::with_capacity(SNAPSHOT_HEX_PREFIX.len() + bytes.len() * 2);
             out.push_str(SNAPSHOT_HEX_PREFIX);
             for byte in bytes {
-                out.push(char::from_digit((byte >> 4) as u32, 16).expect("0-15 是合法 hex 位"));
-                out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("0-15 是合法 hex 位"));
+                out.push(
+                    char::from_digit((byte >> 4) as u32, 16).expect("0-15 is a valid hex digit"),
+                );
+                out.push(
+                    char::from_digit((byte & 0x0f) as u32, 16).expect("0-15 is a valid hex digit"),
+                );
             }
             out
         }
     }
 }
 
-/// 持久化 String → 原始字节：有 hex 前缀则解码；无前缀 = 写入端直存的合法 UTF-8
-///（snapshot_to_store 只对非 UTF-8 字节加 hex 前缀，UTF-8 原文不落前缀）
+/// Persisted String → raw bytes: decode when the hex prefix is present; no prefix = valid UTF-8 stored directly by the writer
+/// (snapshot_to_store adds the hex prefix only for non-UTF-8 bytes; UTF-8 originals get no prefix)
 pub fn snapshot_from_store(s: &str) -> Vec<u8> {
     let Some(hex) = s.strip_prefix(SNAPSHOT_HEX_PREFIX) else {
         return s.as_bytes().to_vec();
@@ -61,7 +65,7 @@ pub fn snapshot_from_store(s: &str) -> Vec<u8> {
         let low = (digits[index + 1] as char).to_digit(16);
         match (high, low) {
             (Some(high), Some(low)) => out.push(((high << 4) | low) as u8),
-            // 非法 hex（数据损坏）：截断保底，不 panic
+            // Invalid hex (corrupted data): truncate as a safety net, never panic
             _ => break,
         }
         index += 2;
@@ -70,7 +74,7 @@ pub fn snapshot_from_store(s: &str) -> Vec<u8> {
 }
 
 impl ChangeTracker {
-    /// 修改前快照原始字节（None = 文件原本不存在）；已快照过的路径不重复读盘。
+    /// Snapshot raw bytes before modification (None = the file did not exist); paths already snapshotted are not read from disk again.
     pub fn snapshot(&mut self, path: &Path) -> Result<(), String> {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.originals.entry(path.to_path_buf())
@@ -78,7 +82,7 @@ impl ChangeTracker {
             entry.insert(read_original_bytes(path)?);
             self.dirty.push(path.to_path_buf());
         }
-        // 每轮口径：本轮首次写前同样记一笔（独立于会话级基线）
+        // Per-turn accounting: also record before this turn's first write (independent of the session-level baseline)
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.turn_originals.entry(path.to_path_buf())
         {
@@ -87,21 +91,21 @@ impl ChangeTracker {
         Ok(())
     }
 
-    /// 取出新增快照路径（落盘后清空）
+    /// Take out the newly added snapshot paths (cleared after persisting)
     pub fn take_dirty(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.dirty)
     }
 
-    /// 读取某路径的原始快照（None 值 = 文件原本不存在；None 返回 = 未追踪）。
-    /// 内部字节经 snapshot_to_store 转成持久化 String，session 侧 4MB 检查逻辑不变。
+    /// Read a path's original snapshot (a None value = the file did not originally exist; a None return = untracked).
+    /// Internal bytes go through snapshot_to_store into a persisted String; the session-side 4MB check logic is unchanged.
     pub fn original(&self, path: &Path) -> Option<Option<String>> {
         self.originals
             .get(path)
             .map(|original| original.as_deref().map(snapshot_to_store))
     }
 
-    /// 重启后恢复基线（来自 file_originals 表；恢复的不标 dirty，避免回写）。
-    /// 持久化 String 经 snapshot_from_store 还原为字节。
+    /// Restore the baseline after restart (from the file_originals table; restored entries are not marked dirty, avoiding write-back).
+    /// The persisted String is turned back into bytes via snapshot_from_store.
     pub fn restore(&mut self, entries: Vec<(PathBuf, Option<String>)>) {
         for (path, original) in entries {
             self.originals
@@ -109,17 +113,17 @@ impl ChangeTracker {
         }
     }
 
-    /// 生成「原始 → 当前」的 unified diff 与增删行数（两侧都先解码为 LF 视图）。
+    /// Produce the "original → current" unified diff and added/removed line counts (both sides decoded to the LF view first).
     pub fn diff(&mut self, cwd: &Path, path: &Path) -> Result<FileChange, String> {
         let original_bytes = self
             .originals
             .get(path)
-            .ok_or_else(|| "文件未追踪".to_string())?
+            .ok_or_else(|| "file not tracked".to_string())?
             .clone()
             .unwrap_or_default();
         let original = decoded_view(&original_bytes);
         let current_bytes =
-            std::fs::read(path).map_err(|e| format!("读取失败 {}: {e}", path.display()))?;
+            std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let current = decoded_view(&current_bytes);
         let diff = similar::TextDiff::from_lines(&original, &current);
         let mut additions = 0;
@@ -153,8 +157,8 @@ impl ChangeTracker {
         })
     }
 
-    /// 计算并清空「本轮改动」：每文件 本轮首次写前 → 当前磁盘 的净 diff（LF 视图）。
-    /// 净额为零（本轮内改回原文）不产出；文件被删除的暂不产出。
+    /// Compute and clear "this turn's changes": per file, the net diff of "before the first write of this turn → current disk" (LF view).
+    /// A zero net delta (reverted to the original within the turn) produces nothing; deleted files produce nothing for now.
     pub fn take_turn_changes(&mut self, cwd: &Path) -> Vec<FileChange> {
         let entries = std::mem::take(&mut self.turn_originals);
         let mut changes = Vec::new();
@@ -174,22 +178,25 @@ impl ChangeTracker {
         changes
     }
 
-    /// 撤销：原始字节原样写回（GBK/UTF-16/CRLF 字节级精确）；新建文件删除。
-    pub fn revert(&mut self, path: &Path) -> Result<(), String> {
+    /// Revert: write the original bytes back verbatim (byte-exact for GBK/UTF-16/CRLF); newly created files are deleted.
+    pub fn revert(&mut self, path: &Path) -> Result<(), CoreError> {
         let Some(original) = self.originals.remove(path) else {
-            return Err("文件未被修改过，无法撤销".to_string());
+            return Err(CoreError::RevertNotModified);
         };
         self.stats.remove(path);
         match original {
-            Some(bytes) => {
-                std::fs::write(path, bytes).map_err(|e| format!("恢复失败 {}: {e}", path.display()))
-            }
-            None => std::fs::remove_file(path)
-                .map_err(|e| format!("删除新建文件失败 {}: {e}", path.display())),
+            Some(bytes) => std::fs::write(path, bytes).map_err(|e| CoreError::RevertWrite {
+                path: path.display().to_string(),
+                detail: e.to_string(),
+            }),
+            None => std::fs::remove_file(path).map_err(|e| CoreError::RevertDelete {
+                path: path.display().to_string(),
+                detail: e.to_string(),
+            }),
         }
     }
 
-    #[allow(dead_code)] // M4 会话统计会用
+    #[allow(dead_code)] // will be used by M4 session statistics
     pub fn totals(&self) -> (u32, u32) {
         self.stats
             .values()

@@ -1,21 +1,25 @@
-//! 字体设置：配置 → 全局主题的应用与恢复。
+//! Font settings: applying config → global theme, and restoring.
 //!
-//! GPUI 对找不到的字体家族会在首次排版时 panic（`Font::fallbacks` 只补缺
-//! 字形、不救缺家族），所以配置里的字体名必须先对系统已装字体校验，未安装
-//! 的按默认处理。枚举系统字体约百毫秒（macOS），进程内缓存一次（对齐上游
-//! mono_font 探测策略）。
+//! GPUI panics at first layout when a font family cannot be found
+//! (`Font::fallbacks` only fills missing glyphs, not missing families), so font
+//! names from config must first be validated against installed system fonts;
+//! uninstalled ones fall back to defaults. Enumerating system fonts takes about
+//! a hundred ms (macOS), cached once per process (matching the upstream
+//! mono_font probing strategy).
 //!
-//! 亮/暗切换不重置字体：上游 `Theme::change → apply_config` 只在主题文件显式
-//! 指定 `font.family` 时才覆盖，内置默认主题不含该键。
+//! Light/dark switching does not reset fonts: upstream's
+//! `Theme::change → apply_config` only overrides when the theme file explicitly
+//! specifies `font.family`; built-in default themes lack that key.
 
 use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::{App, Global, SharedString};
 use pig_protocol::AppConfig;
 use std::sync::OnceLock;
 
-/// 启动时记录的默认字体（恢复「系统默认」时用）。等宽默认随平台（macOS
-/// Menlo / Windows Consolas / Linux DejaVu Sans Mono），上游 init 时若缺装
-/// 会换成备选——这里记录的是实际生效值，不是平台名。
+/// Default fonts recorded at startup (used when restoring "system defaults").
+/// The monospace default follows the platform (macOS Menlo / Windows Consolas /
+/// Linux DejaVu Sans Mono); upstream's init swaps in a fallback when missing, so
+/// what is recorded here is the actually effective value, not the platform name.
 #[derive(Clone)]
 pub struct FontDefaults {
     pub ui: SharedString,
@@ -24,16 +28,16 @@ pub struct FontDefaults {
 
 impl Global for FontDefaults {}
 
-/// GPUI 的虚拟系统字体家族（不出现在已装字体列表里，校验时放行）
+/// GPUI's virtual system font family (absent from installed font lists; allowed through validation)
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 
-/// 已安装字体家族名（all_font_names 已排序去重），进程内缓存
+/// Installed font family names (all_font_names is sorted and deduped), cached per process
 pub fn installed_font_names(cx: &App) -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
     NAMES.get_or_init(|| cx.text_system().all_font_names())
 }
 
-/// 记录当前主题字体为默认值（`gpui_kit::init` 之后立即调用一次）
+/// Record the current theme fonts as defaults (called once right after `gpui_kit::init`)
 pub fn capture_defaults(cx: &mut App) {
     if !cx.has_global::<FontDefaults>() {
         let theme = cx.theme();
@@ -44,8 +48,10 @@ pub fn capture_defaults(cx: &mut App) {
     }
 }
 
-/// 把配置里的字体设置应用到全局主题；值有变化才刷新窗口（幂等，
-/// 启动 ConfigSnapshot 与设置页确认后各调一次，后者保存落盘还会再回流一次）。
+/// Apply the config's font settings to the global theme; windows are refreshed
+/// only when values change (idempotent; called once each at startup from
+/// ConfigSnapshot and after settings-page confirmation, the latter re-flowing
+/// once more when the save persists).
 pub fn apply_config_fonts(config: &AppConfig, cx: &mut App) {
     let Some(defaults) = cx.try_global::<FontDefaults>().cloned() else {
         return;
@@ -62,7 +68,7 @@ pub fn apply_config_fonts(config: &AppConfig, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// 配置值 → 实际家族名：None / 未安装 → 默认；`.SystemUIFont` 虚拟家族放行
+/// Config value → actual family name: None / not installed → default; the `.SystemUIFont` virtual family is allowed through
 fn resolve_font(
     configured: Option<&str>,
     installed: &[String],
@@ -74,7 +80,7 @@ fn resolve_font(
             SharedString::from(name.to_string())
         }
         Some(name) => {
-            eprintln!("[font] 字体 {name:?} 未安装，沿用默认字体");
+            eprintln!("[font] font {name:?} not installed, keeping the default");
             default.clone()
         }
     }

@@ -1,0 +1,100 @@
+_version: 2
+
+# 主窗口杂项（main.rs  leftover）/ hero 首页 / 标题栏 / dock。
+# dock.rs 无可翻译文案（仅 expect/测试断言），故无 dock.* 键。
+
+main:
+  pick_directory_prompt:
+    zh-CN: 选择工作目录
+    en: Select working directory
+  empty_hint:
+    zh-CN: 新建任务或从左侧选择会话
+    en: Start a new task or pick a session on the left
+
+hero:
+  select_workspace:
+    zh-CN: 选择工作区
+    en: Select workspace
+  yolo_title:
+    zh-CN: 开启无管制模式？
+    en: Enable unrestricted mode?
+  yolo_body:
+    zh-CN: 此模式下所有操作直接执行：不弹任何确认，危险命令也不再拦截。仅建议在容器、虚拟机等隔离环境中使用。
+    en: In this mode everything runs directly — no confirmations, and dangerous commands are not blocked either. Only use it in isolated environments such as containers or VMs.
+  yolo_note:
+    zh-CN: 注意：敏感文件（.env / 私钥 / 云凭据）仍会拦截。
+    en: "Note: sensitive files (.env / private keys / cloud credentials) are still blocked."
+  yolo_confirm:
+    zh-CN: 开启无管制模式
+    en: Enable unrestricted mode
+  greeting_morning:
+    zh-CN: 上午好呀，接下来交给我吧
+    en: Good morning — leave the rest to me
+  greeting_afternoon:
+    zh-CN: 下午好呀，接下来交给我吧
+    en: Good afternoon — leave the rest to me
+  greeting_evening:
+    zh-CN: 晚上好呀，接下来交给我吧
+    en: Good evening — leave the rest to me
+  chip_summarize:
+    zh-CN: 总结这个工作区
+    en: Summarize this workspace
+  chip_summarize_prompt:
+    zh-CN: 请阅读 README 并总结这个工作区的结构和主要模块。
+    en: Read the README and summarize this workspace's structure and main modules.
+  chip_fix:
+    zh-CN: 修复一个报错
+    en: Fix an error
+  chip_fix_prompt:
+    zh-CN: 我遇到了一个报错：
+    en: "I ran into an error: "
+  chip_test:
+    zh-CN: 写单元测试
+    en: Write unit tests
+  chip_test_prompt:
+    zh-CN: 请为主要模块写单元测试。
+    en: Write unit tests for the main modules.
+
+title_bar:
+  back_to_workspace:
+    zh-CN: 返回工作区
+    en: Back to workspace
+  settings:
+    zh-CN: 设置
+    en: Settings
+  open_in:
+    zh-CN: 在%{name}中打开
+    en: Open in %{name}
+  unpin:
+    zh-CN: 取消置顶
+    en: Unpin
+  pin:
+    zh-CN: 置顶
+    en: Pin
+  unarchive:
+    zh-CN: 取消归档
+    en: Unarchive
+  archive:
+    zh-CN: 归档
+    en: Archive
+  rename:
+    zh-CN: 重命名
+    en: Rename
+  view_trajectory:
+    zh-CN: 查看调用轨迹
+    en: View trajectory
+  switch_branch:
+    zh-CN: 切换分支
+    en: Switch branch
+
+# 「在系统文件管理器中打开」的平台称呼（标题栏 split 按钮的菜单标签/tooltip）
+files:
+  manager_macos:
+    zh-CN: 访达
+    en: Finder
+  manager_windows:
+    zh-CN: 文件资源管理器
+    en: File Explorer
+  manager_linux:
+    zh-CN: 文件管理器
+    en: File Manager

@@ -34,14 +34,19 @@ impl SettingsView {
             enabled: model.enabled,
             reasoning_levels: model.reasoning_levels.clone(),
             reasoning_labels: model.reasoning_labels.clone(),
-            // 已被删出等级表的默认档不算数
+            // A default level already removed from the level list doesn't count
             default_level: model
                 .default_reasoning_level
                 .clone()
                 .filter(|lv| model.reasoning_levels.contains(lv)),
-            new_level: cx.new(|cx| InputState::new(window, cx).placeholder("等级名，如 high")),
-            new_label: cx
-                .new(|cx| InputState::new(window, cx).placeholder("显示名（可选），如 最高")),
+            new_level: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.models.new_level_placeholder"))
+            }),
+            new_label: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.models.new_label_placeholder"))
+            }),
             params_json: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 8)
@@ -57,8 +62,9 @@ impl SettingsView {
             lookup_state: LookupState::Idle,
             lookup_overwrite: false,
         };
-        // 模型 ID 输入完成（回车/失焦）→ 查 models.dev 自动填充。
-        // 对话框每次重开都新建输入框，旧订阅靠 entity id 排除
+        // Model ID input confirmed (Enter/blur) → query models.dev for
+        // auto-fill. Each dialog reopen creates a fresh input; stale
+        // subscriptions are excluded by entity id
         let id_input = dialog.id.clone();
         self._subscriptions.push(cx.subscribe_in(
             &id_input,
@@ -75,7 +81,7 @@ impl SettingsView {
                     | gpui_kit::component::input::InputEvent::Blur => {
                         this.maybe_lookup_model(false, cx);
                     }
-                    // 输入变化：清掉上一次查询的状态提示
+                    // Input changed: clear the previous lookup's status hint
                     gpui_kit::component::input::InputEvent::Change => {
                         let dirty = this
                             .model_dialog
@@ -112,13 +118,13 @@ impl SettingsView {
         > = serde_json::from_str(params_raw.trim());
 
         let error = if id.is_empty() {
-            Some("模型 ID 不能为空".to_string())
+            Some(rust_i18n::t!("settings.models.err_id_empty").to_string())
         } else if context_window.is_err() || context_window.as_ref().ok() == Some(&0) {
-            Some("上下文窗口必须是正整数".to_string())
+            Some(rust_i18n::t!("settings.models.err_context").to_string())
         } else if max_tokens.is_err() || max_tokens.as_ref().ok() == Some(&0) {
-            Some("最大输出 Token 必须是正整数".to_string())
+            Some(rust_i18n::t!("settings.models.err_max_tokens").to_string())
         } else if let Err(e) = &params {
-            Some(format!("推理参数映射不是合法 JSON 对象: {e}"))
+            Some(rust_i18n::t!("settings.models.err_params_json", error = e).to_string())
         } else {
             None
         };
@@ -140,19 +146,21 @@ impl SettingsView {
             input_pdf: dialog.input_pdf,
             cap_structured: dialog.cap_structured,
             cap_web_search: dialog.cap_web_search,
-            // 无设置 UI：编辑时保留手配的原值，新建为 None
+            // No settings UI: keep the hand-configured value when editing,
+            // None when creating
             web_search_tool: dialog
                 .snapshot
                 .as_ref()
                 .and_then(|m| m.web_search_tool.clone()),
             cap_system_msg: dialog.cap_system_msg,
             reasoning_levels: dialog.reasoning_levels.clone(),
-            // 默认档必须仍在等级表内
+            // The default level must still be in the level list
             default_reasoning_level: dialog
                 .default_level
                 .clone()
                 .filter(|lv| dialog.reasoning_levels.contains(lv)),
-            // 显示名只保留仍存在的等级 id（防御chip外路径改列表）
+            // Display names only keep level ids that still exist (guards
+            // against list edits outside the chips)
             reasoning_labels: dialog
                 .reasoning_labels
                 .iter()
@@ -171,7 +179,8 @@ impl SettingsView {
     }
 }
 impl SettingsView {
-    /// 左列供应商行：边框行卡，选中 primary 描边 + hover accent 半透明
+    /// Left column provider row: bordered row card; selected gets a primary
+    /// border, hover gets accent at half opacity
     pub(crate) fn render_provider_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let provider = &self.config.providers[ix];
         let selected = self.selected == Some(ix);
@@ -210,8 +219,10 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 模型 ID 输入完成：非空且与上次查询不同才发起 models.dev 查询。
-    /// overwrite=true 为「重置表单」语义（查询结果完全覆盖 + 缺字段回落默认值）
+    /// Model ID input confirmed: only query models.dev when non-empty and
+    /// different from the last lookup. overwrite=true means "reset form"
+    /// semantics (query results fully overwrite plus missing fields fall back
+    /// to defaults)
     pub(crate) fn maybe_lookup_model(&mut self, overwrite: bool, cx: &mut Context<Self>) {
         let Some(dialog) = &self.model_dialog else {
             return;
@@ -230,9 +241,13 @@ impl SettingsView {
         cx.emit(SettingsEvent::LookupModel(id));
     }
 
-    /// models.dev 查询结果回填弹窗。只在事件对应弹窗当前编辑的 ID 时应用。
-    /// 重置触发的查询（lookup_overwrite）：字段 = 数据源值 ?? 新建默认值，参数 JSON 无条件重生成；
-    /// 回车/失焦触发的查询：温和填充——数据源有才覆盖，缺字段不动用户值，手配参数 JSON 保留
+    /// Backfill the dialog from a models.dev lookup result. Only applied when
+    /// the event matches the ID currently being edited in the dialog.
+    /// Reset-triggered lookups (lookup_overwrite): field = source value ??
+    /// new-model default, params JSON regenerated unconditionally;
+    /// Enter/blur-triggered lookups: gentle filling — overwrite only what the
+    /// source has, leave user values for missing fields, keep the hand-tuned
+    /// params JSON
     pub fn apply_model_info(
         &mut self,
         id: &str,
@@ -251,15 +266,18 @@ impl SettingsView {
             return;
         }
         let Some(info) = info else {
-            // None = 网络失败或数据源未收录：解锁该 ID，回车可重试
-            // （core 侧有 10 分钟节流，重试不会连打网络）
+            // None = network failure or not listed in the source: unlock this ID
+            // so Enter can retry (core throttles for 10 minutes, so retries
+            // don't hammer the network)
             dialog.looked_up_id = None;
             dialog.lookup_state = LookupState::NotFound;
             cx.notify();
             return;
         };
         dialog.lookup_state = LookupState::Idle;
-        // 上下文窗口 / 最大输出：重置语义缺字段回落新建默认值；回车语义缺则不动
+        // Context window / max output: reset semantics fall back to new-model
+        // defaults when the source lacks them; Enter semantics leave them
+        // untouched when missing
         let context_src = info.context.or(info.input);
         if overwrite || context_src.is_some() {
             let context = context_src.unwrap_or(NEW_MODEL_CONTEXT);
@@ -277,29 +295,32 @@ impl SettingsView {
             dialog
                 .reasoning_labels
                 .retain(|k, _| info.reasoning_levels.contains(k));
-            // 常用等级配中文显示名，其余显示 id 本身
+            // Common levels get localized display names; the rest show the id
+            // itself
             for (level, label) in [
-                ("none", "无"),
-                ("minimal", "极简"),
-                ("low", "低"),
-                ("medium", "中"),
-                ("high", "高"),
-                ("xhigh", "超高"),
-                ("max", "最高"),
+                ("none", rust_i18n::t!("settings.reasoning.none")),
+                ("minimal", rust_i18n::t!("settings.reasoning.minimal")),
+                ("low", rust_i18n::t!("settings.reasoning.low")),
+                ("medium", rust_i18n::t!("settings.reasoning.medium")),
+                ("high", rust_i18n::t!("settings.reasoning.high")),
+                ("xhigh", rust_i18n::t!("settings.reasoning.xhigh")),
+                ("max", rust_i18n::t!("settings.reasoning.max")),
             ] {
                 if info.reasoning_levels.iter().any(|l| l == level) {
                     dialog.reasoning_labels.insert(level.into(), label.into());
                 }
             }
             dialog.reasoning_levels = info.reasoning_levels.clone();
-            // 等级表变了：指向已删等级的默认档作废
+            // The level list changed: a default level pointing at a removed
+            // level is voided
             dialog.default_level = dialog
                 .default_level
                 .take()
                 .filter(|lv| info.reasoning_levels.contains(lv));
         }
-        // 推理参数 JSON：重置语义无条件按等级 + API 格式重新生成；
-        // 回车语义只在未手配（空对象）时生成建议值
+        // Reasoning params JSON: reset semantics regenerate unconditionally from
+        // levels plus API format; Enter semantics only generate suggestions when
+        // not hand-tuned (empty object)
         let params_current = dialog.params_json.read(cx).value().trim().to_string();
         let untouched = serde_json::from_str::<serde_json::Value>(&params_current)
             .map(|v| v.as_object().is_some_and(|m| m.is_empty()))
@@ -321,7 +342,9 @@ impl SettingsView {
                 dialog.advanced_open = true;
             }
         }
-        // 输入模态：重置语义缺数据按全 false；回车语义数据源未给则不动勾选
+        // Input modalities: reset semantics default everything to false when
+        // the source lacks data; Enter semantics leave checkboxes untouched
+        // when the source doesn't say
         if overwrite || !info.input_modalities.is_empty() {
             let has = |m: &str| info.input_modalities.iter().any(|v| v == m);
             dialog.input_image = has("image");
@@ -336,7 +359,8 @@ impl SettingsView {
 
     pub(crate) fn render_detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(p_ix) = self.selected else {
-            // 空态（对齐 ZCode PresetProviderPlaceholderCard：居中 muted 提示）
+            // Empty state (aligned with ZCode's PresetProviderPlaceholderCard:
+            // centered muted hint)
             return v_flex()
                 .size_full()
                 .items_center()
@@ -344,7 +368,11 @@ impl SettingsView {
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::Bot).size_8())
-                .child(div().text_sm().child("选择或添加一个供应商"))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(rust_i18n::t!("settings.models.select_or_add").to_string()),
+                )
                 .into_any_element();
         };
         let provider = self.config.providers[p_ix].clone();
@@ -380,9 +408,9 @@ impl SettingsView {
                             .ghost()
                             .small()
                             .label(if self.delete_armed {
-                                "确认删除？"
+                                rust_i18n::t!("settings.common.confirm_delete")
                             } else {
-                                "删除"
+                                rust_i18n::t!("common.delete")
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.delete_armed {
@@ -405,7 +433,7 @@ impl SettingsView {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("名称"),
+                            .child(rust_i18n::t!("settings.common.field_name").to_string()),
                     )
                     .child(Input::new(&self.name_input)),
             )
@@ -427,9 +455,10 @@ impl SettingsView {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("API 格式"),
+                            .child(rust_i18n::t!("settings.models.api_format").to_string()),
                     )
-                    // Select 与输入框同款触发器（Button 默认 16px 居中，与表单不协调）
+                    // Select with the same trigger as the inputs (Button's
+                    // default 16px centering clashes with the form)
                     .child(
                         Select::new(&self.format_select)
                             .w_full()
@@ -448,12 +477,15 @@ impl SettingsView {
                                     .text_color(cx.theme().muted_foreground)
                                     .child("API Key"),
                             )
-                            // 预设供应商带入的密钥管理页（自定义供应商无此入口）
+                            // Key management page brought in by the preset
+                            // provider (custom providers have no such entry)
                             .when_some(
                                 provider.key_url.clone().filter(|u| !u.is_empty()),
                                 |this, url| {
                                     this.child(div().flex_1()).child(
-                                        // 文字与图标横向排布（块级 div 会把图标挤到下一行）
+                                        // Text and icon laid out horizontally
+                                        // (a block-level div would push the
+                                        // icon to the next line)
                                         h_flex()
                                             .id("get-api-key")
                                             .gap_0p5()
@@ -461,7 +493,10 @@ impl SettingsView {
                                             .text_color(cx.theme().primary)
                                             .cursor_pointer()
                                             .hover(|this| this.underline())
-                                            .child("获取密钥")
+                                            .child(
+                                                rust_i18n::t!("settings.models.get_api_key")
+                                                    .to_string(),
+                                            )
                                             .child(Icon::new(IconName::ExternalLink).size_3())
                                             .on_click(cx.listener(move |_, _, _, cx| {
                                                 cx.open_url(&url);
@@ -516,20 +551,22 @@ impl SettingsView {
                             .flex_1()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("模型"),
+                            .child(rust_i18n::t!("settings.models.models").to_string()),
                     )
                     .child(
                         Button::new("add-model")
                             .secondary()
                             .small()
                             .icon(IconName::Plus)
-                            .label("添加模型")
+                            .label(rust_i18n::t!("settings.models.add_model"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_model_dialog(None, window, cx);
                             })),
                     ),
             )
-            // 模型列表（对齐 ZCode：一个圆角容器多行、行间分隔线、空态虚线框）
+            // Model list (aligned with ZCode: one rounded container with
+            // multiple rows, divider lines between rows, dashed box for the
+            // empty state)
             .child(if provider.models.is_empty() {
                 h_flex()
                     .h_12()
@@ -543,7 +580,7 @@ impl SettingsView {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(Icon::new(IconName::Info).size_4())
-                    .child(div().child("暂无模型，点击「添加模型」创建"))
+                    .child(div().child(rust_i18n::t!("settings.models.no_models").to_string()))
                     .into_any_element()
             } else {
                 v_flex()
@@ -551,7 +588,8 @@ impl SettingsView {
                     .rounded_lg()
                     .border_1()
                     .border_color(cx.theme().border)
-                    // 与输入框同色阶（官方 input_background），避免背景色块断层
+                    // Same color band as the inputs (official
+                    // input_background), avoiding a background color break
                     .bg(cx.theme().input_background())
                     .children(provider.models.iter().enumerate().map(|(m_ix, model)| {
                         let provider_id = provider_id.clone();
@@ -579,7 +617,7 @@ impl SettingsView {
                                         .px_1()
                                         .rounded_sm()
                                         .bg(cx.theme().accent)
-                                        .child("视觉"),
+                                        .child(rust_i18n::t!("settings.models.vision").to_string()),
                                 )
                             })
                             .child(div().flex_1())
@@ -658,7 +696,11 @@ impl SettingsView {
                         div()
                             .text_lg()
                             .font_semibold()
-                            .child(if snapshot_exists { "编辑模型配置" } else { "添加模型" }),
+                            .child(if snapshot_exists {
+                                rust_i18n::t!("settings.models.edit_title").to_string()
+                            } else {
+                                rust_i18n::t!("settings.models.add_model").to_string()
+                            }),
                     )
                     .child(
                         v_flex()
@@ -670,7 +712,7 @@ impl SettingsView {
                                         div()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("模型 ID"),
+                                            .child(rust_i18n::t!("settings.models.model_id").to_string()),
                                     )
                                     .child(match dialog.lookup_state {
                                         LookupState::Pending => h_flex()
@@ -678,18 +720,18 @@ impl SettingsView {
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
                                             .child(Spinner::new().small())
-                                            .child("正在查询 models.dev…")
+                                            .child(rust_i18n::t!("settings.models.lookup_pending").to_string())
                                             .into_any_element(),
                                         LookupState::NotFound => div()
                                             .text_xs()
                                             .text_color(cx.theme().warning)
-                                            .child("models.dev 未收录该 ID，回车可重试")
+                                            .child(rust_i18n::t!("settings.models.lookup_not_found").to_string())
                                             .into_any_element(),
                                         LookupState::Idle => div()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
                                             .opacity(0.7)
-                                            .child("输入后回车，自动填充上下文/输出/推理等级（models.dev）")
+                                            .child(rust_i18n::t!("settings.models.lookup_hint").to_string())
                                             .into_any_element(),
                                     }),
                             )
@@ -702,21 +744,21 @@ impl SettingsView {
                                 v_flex()
                                     .flex_1()
                                     .gap_1()
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("上下文窗口"))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.context_window").to_string()))
                                     .child(Input::new(&dialog.context_window)),
                             )
                             .child(
                                 v_flex()
                                     .flex_1()
                                     .gap_1()
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("最大输出 Token"))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.max_output").to_string()))
                                     .child(Input::new(&dialog.max_tokens)),
                             ),
                     )
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().text_sm().flex_1().child("启用该模型"))
+                            .child(div().text_sm().flex_1().child(rust_i18n::t!("settings.models.enable_model").to_string()))
                             .child(
                                 Switch::new("model-enabled-dialog")
                                     .checked(dialog.enabled)
@@ -751,7 +793,7 @@ impl SettingsView {
                                         .size_4()
                                         .text_color(cx.theme().muted_foreground),
                                     )
-                                    .child(div().text_sm().child("高级配置")),
+                                    .child(div().text_sm().child(rust_i18n::t!("settings.models.advanced").to_string())),
                             )
                             .when(dialog.advanced_open, |this| {
                                 this.child(
@@ -760,21 +802,21 @@ impl SettingsView {
                                         .child(
                                             h_flex()
                                                 .gap_3()
-                                                .child(Checkbox::new("in-image").label("图片").checked(dialog.input_image).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.input_image = *v; } cx.notify(); })))
-                                                .child(Checkbox::new("in-video").label("视频").checked(dialog.input_video).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.input_video = *v; } cx.notify(); })))
+                                                .child(Checkbox::new("in-image").label(rust_i18n::t!("settings.models.input_image").as_ref()).checked(dialog.input_image).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.input_image = *v; } cx.notify(); })))
+                                                .child(Checkbox::new("in-video").label(rust_i18n::t!("settings.models.input_video").as_ref()).checked(dialog.input_video).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.input_video = *v; } cx.notify(); })))
                                                 .child(Checkbox::new("in-pdf").label("PDF").checked(dialog.input_pdf).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.input_pdf = *v; } cx.notify(); }))),
                                         )
                                         .child(
                                             h_flex()
                                                 .gap_3()
-                                                .child(Checkbox::new("cap-struct").label("结构化输出").checked(dialog.cap_structured).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_structured = *v; } cx.notify(); })))
-                                                .child(Checkbox::new("cap-web").label("原生联网搜索").checked(dialog.cap_web_search).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_web_search = *v; } cx.notify(); })))
-                                                .child(Checkbox::new("cap-sys").label("对话中系统消息").checked(dialog.cap_system_msg).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_system_msg = *v; } cx.notify(); }))),
+                                                .child(Checkbox::new("cap-struct").label(rust_i18n::t!("settings.models.cap_structured").as_ref()).checked(dialog.cap_structured).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_structured = *v; } cx.notify(); })))
+                                                .child(Checkbox::new("cap-web").label(rust_i18n::t!("settings.models.cap_web_search").as_ref()).checked(dialog.cap_web_search).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_web_search = *v; } cx.notify(); })))
+                                                .child(Checkbox::new("cap-sys").label(rust_i18n::t!("settings.models.cap_system_msg").as_ref()).checked(dialog.cap_system_msg).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_system_msg = *v; } cx.notify(); }))),
                                         )
                                         .child(
                                             v_flex()
                                                 .gap_1()
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("推理等级"))
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.reasoning_levels").to_string()))
                                                 .child(
                                                     h_flex()
                                                         .gap_1()
@@ -787,7 +829,15 @@ impl SettingsView {
                                                                 .py_0p5()
                                                                 .rounded_full()
                                                                 .bg(cx.theme().accent)
-                                                                // 点 chip 文本：回填到输入行编辑（从列表移除，点 + 重新加入）
+                                                                // Clicking the
+                                                                // chip text:
+                                                                // backfills the
+                                                                // input row for
+                                                                // editing
+                                                                // (removed from
+                                                                // the list;
+                                                                // click + to add
+                                                                // it back)
                                                                 .child(
                                                                     div()
                                                                         .id(("edit-level", ix))
@@ -874,12 +924,16 @@ impl SettingsView {
                                         .child(
                                             v_flex()
                                                 .gap_1()
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("默认思考等级（新会话与切换模型的初始档）"))
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.default_level").to_string()))
                                                 .child(
                                                     h_flex()
                                                         .gap_1()
                                                         .children(
-                                                            // 首项「不设置」= None，其余为等级表各档
+                                                            // First entry
+                                                            // "unset" = None;
+                                                            // the rest are
+                                                            // the level list's
+                                                            // levels
                                                             [None]
                                                                 .into_iter()
                                                                 .chain(dialog.reasoning_levels.iter().cloned().map(Some))
@@ -888,7 +942,7 @@ impl SettingsView {
                                                                     let selected = dialog.default_level == opt;
                                                                     let label = opt.clone()
                                                                         .map(|lv| dialog.reasoning_labels.get(&lv).cloned().filter(|s| !s.is_empty()).unwrap_or(lv))
-                                                                        .unwrap_or_else(|| "不设置".to_string());
+                                                                        .unwrap_or_else(|| rust_i18n::t!("settings.models.level_unset").to_string());
                                                                     div()
                                                                         .id(("default-level", ix))
                                                                         .px_2()
@@ -912,7 +966,7 @@ impl SettingsView {
                                         .child(
                                             v_flex()
                                                 .gap_1()
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("推理参数映射（JSON：等级 → 请求体合并参数）"))
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.params_mapping").to_string()))
                                                 .child(Textarea::new(&dialog.params_json))
                                                 .when_some(dialog.params_error.clone(), |this, error| {
                                                     this.child(
@@ -933,7 +987,7 @@ impl SettingsView {
                                 Button::new("reset-dialog")
                                     .ghost()
                                     .small()
-                                    .label("重置表单")
+                                    .label(rust_i18n::t!("settings.models.reset_form"))
                                     .disabled(!snapshot_exists)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         let snapshot =
@@ -941,8 +995,12 @@ impl SettingsView {
                                         let editing = this.model_dialog.as_ref().and_then(|d| d.editing);
                                         if snapshot.is_some() {
                                             this.open_model_dialog(editing, window, cx);
-                                            // 恢复快照后按当前模型 ID 重新走 models.dev
-                                            // 自动填充（重置语义：完全覆盖 + 缺字段回落默认）
+                                            // After restoring the snapshot, run
+                                            // the models.dev auto-fill again for
+                                            // the current model ID (reset
+                                            // semantics: full overwrite plus
+                                            // missing fields fall back to
+                                            // defaults)
                                             this.maybe_lookup_model(true, cx);
                                         }
                                         cx.notify();
@@ -953,7 +1011,7 @@ impl SettingsView {
                                 Button::new("cancel-dialog")
                                     .outline()
                                     .small()
-                                    .label("取消")
+                                    .label(rust_i18n::t!("common.cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.model_dialog = None;
                                         cx.notify();
@@ -963,7 +1021,7 @@ impl SettingsView {
                                 Button::new("save-dialog")
                                     .primary()
                                     .small()
-                                    .label("保存")
+                                    .label(rust_i18n::t!("settings.common.save"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.save_model_dialog(cx);
                                     })),

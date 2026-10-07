@@ -1,9 +1,9 @@
 use super::*;
 
-/// 内部 ChatMsg 列表 → OpenAI messages 数组。
-/// 与 serde 直序的唯一差异：OpenAI 的 tool 角色消息不能带图——带图的工具结果
-///（ReadMediaFile）拆成两条：tool 消息只留文本 output，图片拆到紧随的 user
-/// 消息（content parts：text 标注 + image_url data URL）。
+/// Internal ChatMsg list -> OpenAI messages array.
+/// The only difference from direct serde serialization: OpenAI tool-role messages cannot carry images -- an image-carrying tool result
+/// (ReadMediaFile) splits into two: the tool message keeps only the text output, images move to the immediately following user
+/// message (content parts: text label + image_url data URL).
 pub(crate) fn to_openai_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(messages.len());
     for msg in messages {
@@ -12,17 +12,17 @@ pub(crate) fn to_openai_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value>
             continue;
         }
         match msg.role.as_str() {
-            // tool 角色不能带图：拆成 tool 文本 + 紧随的 user 图片消息
+            // The tool role cannot carry images: split into tool text + an immediately following user image message
             "tool" => {
                 let mut text_only = msg.clone();
                 text_only.images = vec![];
                 out.push(serde_json::to_value(&text_only).unwrap_or_default());
                 let mut parts = Vec::with_capacity(msg.images.len() * 2);
                 for img in &msg.images {
-                    let label = img.label.as_deref().unwrap_or("图片");
+                    let label = img.label.as_deref().unwrap_or("image");
                     parts.push(serde_json::json!({
                         "type": "text",
-                        "text": format!("[ReadMediaFile 输出图片: {label}]"),
+                        "text": format!("[ReadMediaFile output image: {label}]"),
                     }));
                     parts.push(serde_json::json!({
                         "type": "image_url",
@@ -33,7 +33,7 @@ pub(crate) fn to_openai_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value>
                 }
                 out.push(serde_json::json!({"role": "user", "content": parts}));
             }
-            // 用户消息带图（粘贴发送）：content 改 parts 数组（文本在前、图在后）
+            // User message with images (sent by pasting): content becomes a parts array (text first, images after)
             "user" => {
                 let mut parts = Vec::with_capacity(msg.images.len() + 1);
                 parts.push(serde_json::json!({
@@ -61,8 +61,8 @@ pub(crate) struct StreamOptions {
     include_usage: bool,
 }
 
-/// 请求级工具清单组装（流式/非流式共用，防两处漂移）：
-/// 原样 OpenAI 线格式 + 显式配置时的服务端搜索工具。
+/// Request-level tool list assembly (shared by streaming/non-streaming, to prevent drift between the two):
+/// OpenAI wire shape verbatim + the server-side search tool when explicitly configured.
 pub(crate) fn openai_request_tools(
     config: &ResolvedModel,
     tools: &[serde_json::Value],
@@ -80,7 +80,7 @@ pub(crate) async fn stream_openai(
     tools: Vec<serde_json::Value>,
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let client = http_client();
     let tools = openai_request_tools(config, &tools);
     let messages_json = to_openai_messages(&messages);
@@ -94,7 +94,9 @@ pub(crate) async fn stream_openai(
         },
         max_tokens: config.max_output_tokens,
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| CoreError::Internal {
+        detail: e.to_string(),
+    })?;
     merge_reasoning_params(&mut body, config);
 
     let response = match send_with_retry(
@@ -116,7 +118,9 @@ pub(crate) async fn stream_openai(
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
         let detail: String = detail.chars().take(500).collect();
-        return Err(format!("HTTP {status}: {detail}"));
+        return Err(CoreError::Internal {
+            detail: format!("HTTP {status}: {detail}"),
+        });
     }
 
     let mut byte_stream = response.bytes_stream();
@@ -129,7 +133,9 @@ pub(crate) async fn stream_openai(
             _ = cancel.cancelled() => return Ok(()),
         };
         let Some(chunk) = chunk else { break };
-        let bytes = chunk.map_err(|e| format!("读取流失败: {e}"))?;
+        let bytes = chunk.map_err(|e| CoreError::StreamRead {
+            detail: e.to_string(),
+        })?;
         buffer.push_str(&String::from_utf8_lossy(&bytes));
 
         while let Some(pos) = buffer.find('\n') {
@@ -263,8 +269,8 @@ pub(crate) struct OpenAiPromptDetails {
     cached_tokens: Option<u64>,
 }
 
-/// OpenAI 兼容端点：无服务端搜索标准，只有显式配置 web_search_tool 才注入
-///（如智谱 {"type":"web_search","web_search":{"enable":true,"search_result":true}}）。
+/// OpenAI-compatible endpoints: no server-side search standard; inject only when web_search_tool is explicitly configured
+/// (e.g. Zhipu {"type":"web_search","web_search":{"enable":true,"search_result":true}}).
 pub fn openai_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Value> {
     if !config.cap_web_search {
         return None;

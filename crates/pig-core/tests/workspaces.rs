@@ -12,7 +12,7 @@ async fn workspaces_add_list_remove() {
     let events = agent.events.clone();
     let _sid = new_session(&agent, cwd.clone()).await;
 
-    // 初始为空
+    // Initially empty
     agent.ops.send(Op::ListWorkspaces).await.unwrap();
     let collected = recv_until(&events, Duration::from_secs(5), |e| {
         matches!(e, Event::WorkspaceList { .. })
@@ -21,7 +21,10 @@ async fn workspaces_add_list_remove() {
     let Some(Event::WorkspaceList { workspaces }) = collected.last() else {
         panic!()
     };
-    assert!(workspaces.is_empty(), "初始工作区列表应为空");
+    assert!(
+        workspaces.is_empty(),
+        "initial workspace list should be empty"
+    );
 
     let p1 = cwd.join("proj-a");
     let p2 = cwd.join("proj-b");
@@ -38,7 +41,7 @@ async fn workspaces_add_list_remove() {
         .send(Op::AddWorkspace { path: p2.clone() })
         .await
         .unwrap();
-    // 重复 add 幂等
+    // Duplicate add is idempotent
     agent
         .ops
         .send(Op::AddWorkspace { path: p1.clone() })
@@ -59,11 +62,15 @@ async fn workspaces_add_list_remove() {
             break;
         }
     }
-    let workspaces = last.expect("应有 WorkspaceList");
-    assert_eq!(workspaces.len(), 2, "重复 add 应幂等: {workspaces:?}");
+    let workspaces = last.expect("should receive WorkspaceList");
+    assert_eq!(
+        workspaces.len(),
+        2,
+        "duplicate add should be idempotent: {workspaces:?}"
+    );
     assert!(workspaces.iter().any(|p| p.path == p1 && p.added_at > 0));
 
-    // remove 存在的 + remove 不存在的（不炸）：remove = 置为隐藏，条目保留
+    // Remove an existing path + a nonexistent one (must not blow up): remove = mark hidden, entry kept
     agent
         .ops
         .send(Op::RemoveWorkspace { path: p1.clone() })
@@ -96,14 +103,18 @@ async fn workspaces_add_list_remove() {
     }
     let workspaces = last.unwrap();
     let visible: Vec<_> = workspaces.iter().filter(|p| !p.hidden).collect();
-    assert_eq!(visible.len(), 1, "移除后仅 p2 可见: {workspaces:?}");
+    assert_eq!(
+        visible.len(),
+        1,
+        "only p2 should remain visible after remove: {workspaces:?}"
+    );
     assert_eq!(visible[0].path, p2);
     assert!(
         workspaces.iter().any(|p| p.path == p1 && p.hidden),
-        "p1 应为隐藏条目"
+        "p1 should be a hidden entry"
     );
 
-    // 落盘验证：重开 store，隐藏条目保留（含 proj-a）
+    // Persistence check: reopen the store, hidden entries are kept (including proj-a)
     let store = pig_core::store::Store::open(&data_dir).unwrap();
     let persisted = store.workspaces();
     assert!(
@@ -112,7 +123,7 @@ async fn workspaces_add_list_remove() {
         "{persisted:?}"
     );
 
-    // 隐藏工作区下新建会话 → 自动恢复显示
+    // Create a session under a hidden workspace -> visibility auto-restored
     agent
         .ops
         .send(Op::RemoveWorkspace { path: cwd.clone() })
@@ -127,7 +138,10 @@ async fn workspaces_add_list_remove() {
         )
     })
     .await;
-    assert!(collected.last().is_some(), "隐藏工作区下新建会话应恢复显示");
+    assert!(
+        collected.last().is_some(),
+        "creating a session in a hidden workspace should restore visibility"
+    );
 
     agent.shutdown();
 }

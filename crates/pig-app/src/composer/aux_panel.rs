@@ -1,9 +1,11 @@
 use super::*;
 
 impl Composer {
-    /// 当前进度（TodoList）+ 后台 Bash 任务 + 会话改动：chip 行。
-    /// 进度/任务 chip 点击在芯片上方弹出只读面板（v1 无停止按钮）；
-    /// 改动 chip 发事件让 AppView 打开右侧面板的改动 tab。
+    /// Chip row for current progress (TodoList) + background Bash tasks + session
+    /// changes.
+    /// Clicking a progress/task chip opens a read-only popup above the chip (v1 has
+    /// no stop button); the changes chip emits an event for AppView to open the
+    /// changes tab of the right panel.
     pub(crate) fn render_aux(&self, cx: &mut Context<Self>) -> AnyElement {
         let bash_running = self
             .tasks
@@ -22,8 +24,9 @@ impl Composer {
             .count();
 
         let mut chips = h_flex().w_full().gap_2();
-        // chip 按任务类型拆分（kimi-code 同款）：「后台 Bash」「后台 Agent」各自独立
-        // 显隐与弹层；对应类别的任务列表为空时该 chip 不出现
+        // Chips are split by task type (same as kimi-code): "background Bash" and
+        // "background Agent" have independent visibility and popups; a chip does not
+        // appear when its category's task list is empty
         if self.tasks.iter().any(|t| TaskChipKind::Bash.matches(t)) {
             let open = matches!(self.popup, Some((Popup::Tasks, _)));
             chips = chips.child(
@@ -71,7 +74,8 @@ impl Composer {
                     .rounded_full()
                     .cursor_pointer()
                     .hover(|this| this.bg(cx.theme().accent))
-                    // 不再弹层：点击直接打开右侧面板的改动 tab
+                    // No more popup: clicking directly opens the right panel's
+                    // changes tab
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(ComposerEvent::OpenChanges);
                     }))
@@ -80,7 +84,7 @@ impl Composer {
                             .size_4()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(div().text_sm().child("改动"))
+                    .child(div().text_sm().child(rust_i18n::t!("composer.changes")))
                     .child(
                         div()
                             .text_sm()
@@ -100,14 +104,21 @@ impl Composer {
             chips = chips.child(
                 div()
                     .relative()
-                    .child(self.render_aux_chip(
-                        "aux-todos",
-                        AssetIconName::ListTodo,
-                        format!("当前进度 {done}/{}", self.todos.len()),
-                        open,
-                        Popup::Todos,
-                        cx,
-                    ))
+                    .child(
+                        self.render_aux_chip(
+                            "aux-todos",
+                            AssetIconName::ListTodo,
+                            rust_i18n::t!(
+                                "composer.todo_progress",
+                                done = done,
+                                total = self.todos.len()
+                            )
+                            .to_string(),
+                            open,
+                            Popup::Todos,
+                            cx,
+                        ),
+                    )
                     .when(open, |this| this.child(self.render_todos_panel(cx))),
             );
         }
@@ -143,7 +154,8 @@ impl Composer {
             .child(div().text_sm().child(label))
     }
 
-    /// 面板内容外壳：弹层内衬（rounded_xl + popover 背景 + 边框），观感与其他弹层一致。
+    /// Panel content shell: popup lining (rounded_xl + popover background + border),
+    /// visually consistent with the other popups.
     pub(crate) fn aux_panel_shell(&self, content: Div, cx: &mut Context<Self>) -> Div {
         content
             .w_full()
@@ -155,8 +167,10 @@ impl Composer {
             .border_color(cx.theme().border)
     }
 
-    /// 审批条（kimi 同款）：审批期间替换输入区。橙色圆点 + 标题，深色内嵌块
-    /// 展示命令/diff，底部 本会话内批准(Ctrl+⏎) / 拒绝(Esc) / 批准(⏎)。
+    /// Approval bar (same as kimi): replaces the input area while an approval is
+    /// pending. Orange dot + title, a dark inset block showing the command/diff, and
+    /// at the bottom: always allow in this session (Ctrl+⏎) / reject (Esc) /
+    /// approve (⏎).
     pub(crate) fn render_approval_bar(
         &self,
         approval: &PendingApproval,
@@ -166,10 +180,10 @@ impl Composer {
             return self.render_plan_approval_bar(approval, cx);
         }
         let title = match approval.tool.as_str() {
-            "Bash" => "运行命令？".to_string(),
-            "Write" => "写入文件？".to_string(),
-            "Edit" => "修改文件？".to_string(),
-            tool => format!("执行 {tool}？"),
+            "Bash" => rust_i18n::t!("composer.approve_bash").to_string(),
+            "Write" => rust_i18n::t!("composer.approve_write").to_string(),
+            "Edit" => rust_i18n::t!("composer.approve_edit").to_string(),
+            tool => rust_i18n::t!("composer.approve_other", tool = tool).to_string(),
         };
         let detail = if approval.tool == "Bash" {
             format!("$ {}", approval.detail)
@@ -177,6 +191,18 @@ impl Composer {
             approval.detail.clone()
         };
         let cwd = approval.cwd.clone();
+        // High-risk command: add a warning line above the detail (⚠️ high-risk
+        // command: {localized reason})
+        let danger_line = approval
+            .danger_key
+            .as_deref()
+            .and_then(danger_reason_text)
+            .map(|reason| {
+                format!(
+                    "⚠️ {}：{reason}",
+                    rust_i18n::t!("approval.danger.high_risk")
+                )
+            });
 
         v_flex()
             .id("approval-bar")
@@ -203,6 +229,9 @@ impl Composer {
                     .child(div().size(px(8.)).rounded_full().bg(cx.theme().warning))
                     .child(div().text_sm().font_medium().child(title)),
             )
+            .when_some(danger_line, |this, line| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(line))
+            })
             .child(
                 div()
                     .id("approval-detail")
@@ -220,18 +249,22 @@ impl Composer {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("工作目录： {cwd}")),
+                    .child(rust_i18n::t!("composer.working_dir", cwd = cwd).to_string()),
             )
             .child(
                 h_flex()
                     .w_full()
                     .gap_2()
-                    // 与问卷动作按钮同尺寸（Small），各确认条按钮字号一致
+                    // Same size as the questionnaire action buttons (Small), keeping
+                    // button font sizes uniform across confirmation bars
                     .child(
                         Button::new("approval-always")
                             .secondary()
                             .small()
-                            .label("本会话内批准  Ctrl+⏎")
+                            .label(format!(
+                                "{}  Ctrl+⏎",
+                                rust_i18n::t!("composer.approve_always")
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.decide_approval(
                                     ApprovalDecision::AlwaysAllow,
@@ -246,7 +279,7 @@ impl Composer {
                         Button::new("approval-reject")
                             .secondary()
                             .small()
-                            .label("拒绝  Esc")
+                            .label(format!("{}  Esc", rust_i18n::t!("composer.reject")))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.decide_approval(ApprovalDecision::Reject, None, window, cx);
                             })),
@@ -255,7 +288,7 @@ impl Composer {
                         Button::new("approval-allow")
                             .primary()
                             .small()
-                            .label("批准  ⏎")
+                            .label(format!("{}  ⏎", rust_i18n::t!("composer.approve")))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.decide_approval(ApprovalDecision::Allow, None, window, cx);
                             })),
@@ -264,10 +297,12 @@ impl Composer {
             .into_any_element()
     }
 
-    /// 计划审批面板（kimi-code 图2 同款）：橙点 +「按这份计划开始实现？」，
-    /// 计划全文 markdown 内嵌滚动（TextView），底部 修改 / 拒绝并退出(Esc) /
-    /// 批准 plan(⏎)。「修改」= 拒绝 + 焦点自动回输入框（decide_approval 既有行为），
-    /// 用户直接输入修改意见作为下条消息
+    /// Plan approval panel (same as kimi-code figure 2): orange dot + "start
+    /// implementing this plan?", the full plan scrolls inline as markdown
+    /// (TextView), and at the bottom: revise / reject and exit (Esc) / approve plan
+    /// (⏎). "Revise" = reject plus focus returning to the composer automatically
+    /// (existing decide_approval behavior), with the user's revision typed directly
+    /// as the next message
     fn render_plan_approval_bar(
         &self,
         approval: &PendingApproval,
@@ -282,8 +317,9 @@ impl Composer {
             .p_2()
             .track_focus(&self.approval_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                // 修改输入态：⏎ 提交并拒绝（带反馈）、Esc 取消回三按钮；
-                // 三按钮态：⏎ 批准、Esc 拒绝并退出
+                // Revise input mode: ⏎ submits and rejects (with feedback), Esc
+                // cancels back to the three buttons;
+                // three-button mode: ⏎ approves, Esc rejects and exits
                 if this.plan_revise {
                     match event.keystroke.key.as_str() {
                         "enter" => this.submit_plan_revise(window, cx),
@@ -305,10 +341,16 @@ impl Composer {
                 h_flex()
                     .gap_2()
                     .child(div().size(px(8.)).rounded_full().bg(cx.theme().warning))
-                    .child(div().text_sm().font_medium().child("按这份计划开始实现？")),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(rust_i18n::t!("composer.plan_approve_title")),
+                    ),
             )
-            // 计划文件路径链接（kimi 同款蓝链）：core 弹审批前已落盘，
-            // 点击右侧「文件」tab 打开
+            // Plan file path link (kimi-style blue link): core has already written
+            // it to disk before requesting approval; clicking opens it in the right
+            // panel's "files" tab
             .child(
                 div()
                     .id("plan-path")
@@ -350,10 +392,11 @@ impl Composer {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("工作目录： {cwd}")),
+                    .child(rust_i18n::t!("composer.working_dir", cwd = cwd).to_string()),
             )
-            // 修改输入态（kimi Revise）：反馈输入框 + 取消 / 提交并拒绝；
-            // 三按钮态：修改 / 拒绝并退出 / 批准 plan
+            // Revise input mode (kimi Revise): feedback input + cancel / submit and
+            // reject;
+            // three-button mode: revise / reject and exit / approve plan
             .when(self.plan_revise, |this| {
                 this.child(
                     div()
@@ -377,7 +420,7 @@ impl Composer {
                                 Button::new("plan-revise-cancel")
                                     .secondary()
                                     .small()
-                                    .label("取消  Esc")
+                                    .label(format!("{}  Esc", rust_i18n::t!("common.cancel")))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.cancel_plan_revise(window, cx);
                                     })),
@@ -386,7 +429,10 @@ impl Composer {
                                 Button::new("plan-revise-submit")
                                     .primary()
                                     .small()
-                                    .label("提交并拒绝  ↵")
+                                    .label(format!(
+                                        "{}  ↵",
+                                        rust_i18n::t!("composer.submit_and_reject")
+                                    ))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.submit_plan_revise(window, cx);
                                     })),
@@ -397,13 +443,16 @@ impl Composer {
                             Button::new("plan-revise")
                                 .secondary()
                                 .small()
-                                .label("修改")
+                                .label(rust_i18n::t!("composer.revise"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    // kimi Revise：进输入态，反馈随「提交并拒绝」携带
+                                    // kimi Revise: enter input mode; the feedback is
+                                    // carried by "submit and reject"
                                     this.plan_revise = true;
                                     if this.plan_revise_input.is_none() {
                                         this.plan_revise_input = Some(cx.new(|cx| {
-                                            InputState::new(window, cx).placeholder("说明拒绝原因…")
+                                            InputState::new(window, cx).placeholder(rust_i18n::t!(
+                                                "composer.revise_placeholder"
+                                            ))
                                         }));
                                     }
                                     let input =
@@ -420,7 +469,10 @@ impl Composer {
                             Button::new("plan-reject")
                                 .secondary()
                                 .small()
-                                .label("拒绝并退出  Esc")
+                                .label(format!(
+                                    "{}  Esc",
+                                    rust_i18n::t!("composer.reject_and_exit")
+                                ))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.decide_approval(
                                         ApprovalDecision::Reject,
@@ -434,7 +486,7 @@ impl Composer {
                             Button::new("plan-approve")
                                 .primary()
                                 .small()
-                                .label("批准 plan  ↵")
+                                .label(format!("{}  ↵", rust_i18n::t!("composer.approve_plan")))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.decide_approval(ApprovalDecision::Allow, None, window, cx);
                                 })),

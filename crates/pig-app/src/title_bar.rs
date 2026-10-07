@@ -7,9 +7,10 @@ impl AppView {
             .current
             .as_ref()
             .and_then(|id| self.metas.iter().find(|m| &m.id == id))
-            .map(|m| m.title.clone())
+            .map(|m| crate::sidebar::display_title(&m.title))
             .unwrap_or_else(|| "pig-code".to_string());
-        // debug 构建标题栏带版本号，便于区分日常调试/自测与 release 分发
+        // Debug builds carry the version in the title bar, making it easy
+        // to tell daily debugging/self-tests from release distribution
         let label = if cfg!(debug_assertions) {
             let version = env!("CARGO_PKG_VERSION");
             if self.current.is_some() {
@@ -21,9 +22,12 @@ impl AppView {
             format!("pig-code · {title}")
         };
 
-        // Windows 上标题栏命中 HTCAPTION：左键按下仍会派发 MouseDownEvent，但抬起被
-        // OS 的窗口移动模态循环吞掉，窗口级文本选择一旦开始手势就收不到结束，
-        // 之后移动鼠标会变成拖选。按下标题栏时抑制选择，手势便永不开始。
+        // On Windows the title bar hits HTCAPTION: a left press still
+        // dispatches MouseDownEvent, but the release is swallowed by the
+        // OS's window-move modal loop, so window-level text selection never
+        // sees the gesture end once started, and moving the mouse afterwards
+        // becomes a drag-select. Suppressing selection while the title bar
+        // is pressed means the gesture never starts.
         div()
             .id("title-bar-selection-guard")
             .w_full()
@@ -34,8 +38,10 @@ impl AppView {
             .child(
                 TitleBar::new()
                     .child(if self.settings_open {
-                        // 设置模式：左区换「返回工作区」（与其他标题栏按钮同款样式，
-                        // 替代在设置侧栏里叠加返回按钮的方案）
+                        // Settings mode: the left zone swaps to "back to
+                        // workspace" (same style as the other title bar
+                        // buttons, instead of stacking a back button inside
+                        // the settings sidebar)
                         h_flex()
                             .gap_2()
                             .child(
@@ -44,13 +50,18 @@ impl AppView {
                                     .small()
                                     .occlude()
                                     .icon(IconName::ArrowLeft)
-                                    .label("返回工作区")
+                                    .label(rust_i18n::t!("title_bar.back_to_workspace"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.settings_open = false;
                                         cx.notify();
                                     })),
                             )
-                            .child(div().text_sm().font_semibold().child("设置"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(rust_i18n::t!("title_bar.settings")),
+                            )
                     } else {
                         h_flex()
                             .gap_2()
@@ -66,7 +77,8 @@ impl AppView {
                                     })),
                             )
                             .child(div().text_sm().font_semibold().child(label))
-                            // 会话操作菜单（三个点）：有活动会话才显示
+                            // Session actions menu (three dots): only shown
+                            // with an active session
                             .when(self.current.is_some(), |this| {
                                 this.child(
                                     div()
@@ -82,9 +94,13 @@ impl AppView {
                                                 .icon(IconName::Ellipsis)
                                                 .on_click(cx.listener(
                                                     |this, event: &ClickEvent, _, cx| {
-                                                        // 与分支 chip 同款：菜单打开时点按钮，
-                                                        // 按下先 outside-close（记位置），同一次
-                                                        // 按压的 click 按位置吞掉防收起又弹开
+                                                        // Same as the branch chip: with the
+                                                        // menu open, the press first fires
+                                                        // outside-close (recording the
+                                                        // position) and the click of the
+                                                        // same press is swallowed by
+                                                        // position, preventing
+                                                        // collapse-then-reopen
                                                         let down_pos = match event {
                                                             ClickEvent::Mouse(e) => {
                                                                 Some(e.down.position)
@@ -113,14 +129,22 @@ impl AppView {
                         h_flex()
                             .gap_1()
                             .px_2()
-                            // 「在访达/文件管理器中打开」split 按钮：主钮直接打开当前
-                            // 工作区，chevron 出菜单（后续在终端/编辑器打开等挂同一菜单）
+                            // "Open in Finder/file manager" split button:
+                            // the main button opens the current workspace
+                            // directly, the chevron opens a menu (open in
+                            // terminal/editor etc. will later hang on the
+                            // same menu)
                             .when(self.current.is_some(), |this| {
                                 let fm_label =
-                                    format!("在{}中打开", pig_core::files::file_manager_name());
-                                // 彩色图标不能走 Icon（svg 按文字色渲成单色）：
-                                // macOS 用 NSWorkspace 取的真实访达图标（img 保色），
-                                // 取到前/其余平台回退 Lucide 文件夹
+                                    rust_i18n::t!("title_bar.open_in", name = file_manager_name())
+                                        .to_string();
+                                // Colorful icons cannot go through Icon
+                                // (svg renders monochrome in the text
+                                // color): macOS uses the real Finder icon
+                                // fetched via NSWorkspace (img keeps
+                                // colors), falling back to the Lucide
+                                // folder before it arrives / on other
+                                // platforms
                                 let fm_icon_el: AnyElement = match &self.fm_icon {
                                     Some(icon) => img(icon.clone()).size_4().into_any_element(),
                                     None => Icon::new(AssetsIconName::FolderOpen)
@@ -146,9 +170,14 @@ impl AppView {
                                         .dropdown_menu(move |menu, _, _| {
                                             let view = view.clone();
                                             let label = menu_label.clone();
-                                            // 有真图就用 ElementItem 自绘「图标+文字」行
-                                            //（icon 槽只收单色 Icon，彩图得走 img）；
-                                            // 无真图（非 mac/未取到）退化为纯文字项
+                                            // With a real image, draw an
+                                            // "icon + text" row via the
+                                            // ElementItem variant (the icon
+                                            // slot only takes monochrome
+                                            // Icons, colorful images must go
+                                            // through img); without one
+                                            // (non-mac / not yet fetched)
+                                            // degrade to a plain text item
                                             let item = match menu_icon.clone() {
                                                 Some(icon) => {
                                                     PopupMenuItem::element(move |_, _| {
@@ -187,9 +216,13 @@ impl AppView {
                                                 ))
                                                 .on_click(cx.listener(
                                                     |this, event: &ClickEvent, _, cx| {
-                                                        // 菜单打开时点 chip：按下先触发
-                                                        // outside-close（记录位置），同一次按压
-                                                        // 的 click 按位置吞掉，避免收起又弹开
+                                                        // Clicking the chip while the menu is
+                                                        // open: the press first fires
+                                                        // outside-close (recording the
+                                                        // position), and the click of the
+                                                        // same press is swallowed by
+                                                        // position, avoiding
+                                                        // collapse-then-reopen
                                                         let down_pos = match event {
                                                             ClickEvent::Mouse(e) => {
                                                                 Some(e.down.position)
@@ -280,8 +313,10 @@ impl AppView {
             })
     }
 
-    /// 标题栏会话菜单（三个点弹层）：锚定按钮下方、左对齐（菜单向右展开），点外部收起。
-    /// 置顶/归档/重命名与侧栏右键菜单同链路；末项「查看调用轨迹」
+    /// Title bar session menu (three-dot popup): anchored below the button,
+    /// left-aligned (the menu expands rightward), closes on outside click.
+    /// Pin/archive/rename share the same path as the sidebar context menu;
+    /// the last item is "view trajectory"
     pub(crate) fn render_session_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let meta = self
             .current
@@ -333,7 +368,11 @@ impl AppView {
                                     })
                                     .size_4(),
                                 )
-                                .child(div().child(if pinned { "取消置顶" } else { "置顶" }))
+                                .child(div().child(if pinned {
+                                    rust_i18n::t!("title_bar.unpin")
+                                } else {
+                                    rust_i18n::t!("title_bar.pin")
+                                }))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.session_menu_open = false;
                                     this.agent.set_pinned(&pin_id, !pinned);
@@ -359,9 +398,9 @@ impl AppView {
                                     .size_4(),
                                 )
                                 .child(div().child(if archived {
-                                    "取消归档"
+                                    rust_i18n::t!("title_bar.unarchive")
                                 } else {
-                                    "归档"
+                                    rust_i18n::t!("title_bar.archive")
                                 }))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.session_menu_open = false;
@@ -369,7 +408,9 @@ impl AppView {
                                     cx.notify();
                                 })),
                         )
-                        // 归档会话不在侧栏渲染（设置页管理），行内重命名无行可承载——隐藏该入口
+                        // Archived sessions are not rendered in the sidebar
+                        // (managed in the settings page), and inline rename
+                        // has no row to live on — hide this entry
                         .when(!archived, |this| {
                             this.child(
                                 h_flex()
@@ -382,10 +423,12 @@ impl AppView {
                                     .cursor_pointer()
                                     .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
                                     .child(Icon::new(AssetsIconName::SquarePen).size_4())
-                                    .child(div().child("重命名"))
+                                    .child(div().child(rust_i18n::t!("title_bar.rename")))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.session_menu_open = false;
-                                        // 行内重命名输入框画在侧栏会话行上：收起态先展开侧栏
+                                        // The inline rename input is drawn
+                                        // on the sidebar session row: expand
+                                        // the sidebar first when collapsed
                                         this.sidebar_collapsed = false;
                                         this.sidebar.update(cx, |sidebar, cx| {
                                             sidebar.start_session_rename(
@@ -411,7 +454,7 @@ impl AppView {
                                 .cursor_pointer()
                                 .hover(|h| h.bg(cx.theme().accent.opacity(0.6)))
                                 .child(Icon::new(IconName::FileText).size_4())
-                                .child(div().child("查看调用轨迹"))
+                                .child(div().child(rust_i18n::t!("title_bar.view_trajectory")))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.session_menu_open = false;
                                     this.open_trajectory(cx);
@@ -423,23 +466,26 @@ impl AppView {
         .into_any_element()
     }
 
-    /// 当前会话的工作区在系统文件管理器中打开（macOS 访达 / Windows 资源管理器 /
-    /// Linux xdg-open；detached spawn，启动失败只记日志）
+    /// Open the current session's workspace in the system file manager
+    /// (macOS Finder / Windows Explorer / Linux xdg-open; detached spawn,
+    /// failures only logged)
     pub(crate) fn open_current_in_file_manager(&self) {
         let Some(cwd) = self.current_cwd() else {
             return;
         };
         if let Err(err) = pig_core::files::open_in_file_manager(&cwd) {
             eprintln!(
-                "[fm] 打开{}失败 {}: {err}",
-                pig_core::files::file_manager_name(),
+                "[fm] failed to open via {} {}: {err}",
+                file_manager_name(),
                 cwd.display()
             );
         }
     }
 
-    /// 标题栏分支切换菜单：deferred 到窗口层，锚定分支 chip 正下方
-    /// （与标签页 "+" 菜单同一模式）。当前分支高亮，点击其他分支 checkout。
+    /// Title bar branch switch menu: deferred to the window layer, anchored
+    /// right below the branch chip (same pattern as the tab "+" menu). The
+    /// current branch is highlighted; clicking another branch checks it
+    /// out.
     pub(crate) fn render_branch_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.git_branch.clone().unwrap_or_default();
         deferred(
@@ -472,7 +518,7 @@ impl AppView {
                                 .py_1()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("切换分支"),
+                                .child(rust_i18n::t!("title_bar.switch_branch")),
                         )
                         .children(self.title_branches.iter().map(|branch| {
                             let branch = branch.clone();
@@ -522,5 +568,19 @@ impl AppView {
         )
         .with_priority(1)
         .into_any_element()
+    }
+}
+
+/// Platform name for "open in the system file manager" (localized): macOS
+/// Finder / Windows File Explorer / Linux file manager. Decided locally by
+/// the UI after core became language-agnostic (formerly
+/// pig_core::files::file_manager_name).
+pub(crate) fn file_manager_name() -> String {
+    if cfg!(target_os = "macos") {
+        rust_i18n::t!("files.manager_macos").to_string()
+    } else if cfg!(target_os = "windows") {
+        rust_i18n::t!("files.manager_windows").to_string()
+    } else {
+        rust_i18n::t!("files.manager_linux").to_string()
     }
 }

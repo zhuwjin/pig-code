@@ -1,7 +1,8 @@
-//! 子代理档案体系（A1：档案/配置层，不接 Session）。
-//! 内置两个档案 + 用户级（{data_dir}/agents/*.md）/项目级（{cwd}/.pigcode/agents/*.md）
-//! Markdown 档案按名覆盖（ZCode 同款体系）：目录优先级 项目级 > 用户级 > 内置，
-//! 同名后者整体替换前者。另有 {data_dir}/agents-state.json 的运行时模型覆盖。
+//! Subagent profile system (A1: profile/config layer, not wired to Session).
+//! Two built-in profiles + user-level ({data_dir}/agents/*.md) and project-level
+//! ({cwd}/.pigcode/agents/*.md) Markdown profiles overriding by name (same system as ZCode):
+//! directory precedence is project > user > built-in, and a same-name later entry wholly
+//! replaces the earlier one. Runtime model overrides live in {data_dir}/agents-state.json.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,10 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::ResolvedModel;
 
-/// 子代理默认最大回合数（max_turns 未配置时）
+/// Default max turns for a subagent (when max_turns is not configured)
 pub const DEFAULT_MAX_TURNS: usize = 20;
 
-/// 子代理强制剔除的工具（防嵌套委派/计划模式死锁/阻塞父 turn 提问）
+/// Tools forcibly removed from subagents (prevents nested delegation / plan-mode deadlock / blocking the parent turn with questions)
 pub const FORBIDDEN_CHILD_TOOLS: [&str; 5] = [
     "Agent",
     "AgentSwarm",
@@ -23,24 +24,24 @@ pub const FORBIDDEN_CHILD_TOOLS: [&str; 5] = [
     "AskUserQuestion",
 ];
 
-/// 子代理档案
+/// Subagent profile
 #[derive(Clone, Debug)]
 pub struct AgentProfile {
     /// ^[a-zA-Z0-9-]{3,50}$
     pub name: String,
-    /// 给主模型看的调用依据
+    /// Call rationale shown to the main model
     pub description: String,
-    /// None 或含 "*" = 全部工具
+    /// None, or containing "*" = all tools
     pub tools: Option<Vec<String>>,
-    /// None = 继承父会话；"providerId/modelId" 或裸 "modelId"（默认供应商内找）
+    /// None = inherit the parent session; "providerId/modelId" or bare "modelId" (looked up in the default provider)
     pub model: Option<String>,
-    /// 推理档位名，仅配合显式 model 生效
+    /// Reasoning level name; only effective together with an explicit model
     pub thought_level: Option<String>,
-    /// 缺省 DEFAULT_MAX_TURNS
+    /// Defaults to DEFAULT_MAX_TURNS
     pub max_turns: Option<usize>,
-    /// 系统提示是否注入 AGENTS.md，缺省 true
+    /// Whether the system prompt injects AGENTS.md; defaults to true
     pub inject_agents_md: bool,
-    /// 系统提示正文（markdown）
+    /// System prompt body (markdown)
     pub system_prompt: String,
     pub source: AgentSource,
 }
@@ -65,7 +66,7 @@ pub use store::set_model_override;
 pub(crate) use store::*;
 pub(crate) use swarm::*;
 
-/// 按名字找档案：精确匹配 → 归一匹配；多个命中报错列候选，零命中报错列全部可用名。
+/// Find a profile by name: exact match first, then normalized match; multiple hits error listing candidates, zero hits error listing all available names.
 pub fn find_profile<'a>(
     profiles: &'a [AgentProfile],
     query: &str,
@@ -80,7 +81,7 @@ pub fn find_profile<'a>(
         .collect();
     match hits.len() {
         0 => Err(format!(
-            "未找到子代理 \"{query}\"。可用: {}",
+            "No subagent found for \"{query}\". Available: {}",
             profiles
                 .iter()
                 .map(|p| p.name.as_str())
@@ -89,7 +90,7 @@ pub fn find_profile<'a>(
         )),
         1 => Ok(hits[0]),
         _ => Err(format!(
-            "\"{query}\" 匹配到多个子代理: {}",
+            "\"{query}\" matches multiple subagents: {}",
             hits.iter()
                 .map(|p| p.name.as_str())
                 .collect::<Vec<_>>()
@@ -98,9 +99,9 @@ pub fn find_profile<'a>(
     }
 }
 
-/// 子代理实际可用工具集：profile.tools=None 或含 "*" → 全部 − FORBIDDEN；
-/// 显式列表 → 列表 ∩ 全部 − FORBIDDEN（列表里不存在的名字忽略）；
-/// input_image=false 再剔 ReadMediaFile。
+/// Effective tool set for a subagent: profile.tools=None or containing "*" -> all - FORBIDDEN;
+/// an explicit list -> list ∩ all - FORBIDDEN (names in the list that do not exist are ignored);
+/// input_image=false additionally removes ReadMediaFile.
 pub fn child_tool_set(
     profile: &AgentProfile,
     all_tool_names: &[String],
@@ -119,18 +120,20 @@ pub fn child_tool_set(
         .collect()
 }
 
-/// 子代理 MCP 工具继承判定：收窄后的内置工具集含写工具（Write/Edit）→ 继承全部
-/// 已连接 MCP 工具；否则（只读档案，如 explore）只继承 readOnlyHint 的 MCP 工具。
-/// 注意 Bash 不作判别：explore 收窄后含 Bash 但属只读档案——写面判别只看
-/// 纯文件变更工具（Bash 调用本身仍过审批门/规则门）。
-/// 入参是 child_tool_set 收窄后的内置工具名（MCP 工具不在其中，mcp__ 前缀天然不撞名）。
+/// Subagent MCP tool inheritance check: if the narrowed built-in tool set contains write tools
+/// (Write/Edit) -> inherit all connected MCP tools; otherwise (a read-only profile such as
+/// explore) inherit only MCP tools with readOnlyHint. Note Bash is not part of the check:
+/// explore includes Bash after narrowing yet is a read-only profile — the write-capability
+/// check only looks at pure file-change tools (Bash calls themselves still pass the approval
+/// gate / rule gate). The input is the narrowed built-in tool names from child_tool_set (MCP
+/// tools are not among them; the mcp__ prefix never collides by name).
 pub fn child_inherits_all_mcp(child_tool_names: &[String]) -> bool {
     child_tool_names
         .iter()
         .any(|name| name == "Write" || name == "Edit")
 }
 
-/// 「providerId/modelId」全集（仅启用供应商），报错提示用
+/// Full set of "providerId/modelId" pairs (enabled providers only), for error messages
 fn available_model_list(config: &AppConfig) -> String {
     let ids: Vec<String> = config
         .providers
@@ -139,22 +142,24 @@ fn available_model_list(config: &AppConfig) -> String {
         .flat_map(|p| p.models.iter().map(|m| format!("{}/{}", p.id, m.id)))
         .collect();
     if ids.is_empty() {
-        "（无已启用供应商）".to_string()
+        "(no enabled providers)".to_string()
     } else {
         ids.join(", ")
     }
 }
 
-/// 严格解析子代理模型（ZCode 同款：解析失败即报错，不回落——与
-/// session::resolve_model 的宽松静默回落相对，子代理配置错误必须当场暴露）。
+/// Strictly resolve a subagent model (same as ZCode: a resolution failure is an error, no
+/// fallback — in contrast with session::resolve_model's lenient silent fallback, subagent
+/// config errors must surface immediately).
 pub fn resolve_subagent_model(
     config: &AppConfig,
     parent: &ResolvedModel,
     profile: &AgentProfile,
 ) -> Result<ResolvedModel, String> {
     let Some(spec) = profile.model.as_ref() else {
-        // 继承父会话模型；thought_level 在继承时忽略——档位是各模型自己的表，
-        // 父模型的推理参数在父会话解析时已定型，这里不替它改。
+        // Inherit the parent session model; thought_level is ignored on inherit — levels are
+        // per-model tables, and the parent model's reasoning params were already fixed when
+        // the parent session resolved them; do not change them here.
         return Ok(parent.clone());
     };
     let (provider, model_id): (&ProviderConfig, &str) = match spec.split_once('/') {
@@ -165,7 +170,8 @@ pub fn resolve_subagent_model(
                 .find(|p| p.enabled && p.id == provider_id)
                 .ok_or_else(|| {
                     format!(
-                        "子代理 {} 指定的供应商 \"{provider_id}\" 不存在或未启用。可用模型: {}",
+                        "Subagent {} specified provider \"{provider_id}\", which does not exist \
+                         or is not enabled. Available models: {}",
                         profile.name,
                         available_model_list(config)
                     )
@@ -179,7 +185,8 @@ pub fn resolve_subagent_model(
                 .find(|p| p.enabled && p.id == config.default_provider)
                 .ok_or_else(|| {
                     format!(
-                        "默认供应商 \"{}\" 不存在或未启用。可用模型: {}",
+                        "Default provider \"{}\" does not exist or is not enabled. Available \
+                         models: {}",
                         config.default_provider,
                         available_model_list(config)
                     )
@@ -193,7 +200,7 @@ pub fn resolve_subagent_model(
         .find(|m| m.id == model_id)
         .ok_or_else(|| {
             format!(
-                "供应商 {} 下没有模型 \"{model_id}\"（子代理 {}）。可用模型: {}",
+                "Provider {} has no model \"{model_id}\" (subagent {}). Available models: {}",
                 provider.id,
                 profile.name,
                 available_model_list(config)
@@ -206,12 +213,13 @@ pub fn resolve_subagent_model(
                     model.reasoning_params.keys().map(String::as_str).collect();
                 levels.sort_unstable();
                 let available = if levels.is_empty() {
-                    "（无）".to_string()
+                    "(none)".to_string()
                 } else {
                     levels.join(", ")
                 };
                 format!(
-                    "模型 \"{}\" 没有推理档位 \"{level}\"，可用档位: {available}",
+                    "Model \"{}\" has no reasoning level \"{level}\"; available levels: \
+                     {available}",
                     model.id
                 )
             })?;
@@ -219,7 +227,7 @@ pub fn resolve_subagent_model(
         }
         None => None,
     };
-    // 字段填法对齐 session::resolve_model
+    // Field filling aligned with session::resolve_model
     Ok(ResolvedModel {
         base_url: provider.base_url.clone(),
         api_key: crate::config::expand_env(&provider.api_key),
@@ -235,18 +243,18 @@ pub fn resolve_subagent_model(
     })
 }
 
-/// 给 Agent 工具描述拼接用的档案清单，每行一个。
+/// Profile listing for the Agent tool description, one per line.
 pub fn agent_description_list(profiles: &[AgentProfile]) -> String {
     profiles
         .iter()
         .map(|p| {
             let tools = match &p.tools {
-                None => "全部".to_string(),
-                Some(list) if list.iter().any(|t| t == "*") => "全部".to_string(),
-                Some(list) if list.is_empty() => "无".to_string(),
+                None => "all".to_string(),
+                Some(list) if list.iter().any(|t| t == "*") => "all".to_string(),
+                Some(list) if list.is_empty() => "none".to_string(),
                 Some(list) => list.join(", "),
             };
-            format!("- {}: {}（工具: {}）", p.name, p.description, tools)
+            format!("- {}: {} (tools: {})", p.name, p.description, tools)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -257,9 +265,9 @@ mod tests {
     use super::*;
     use pig_protocol::{ApiFormat, ModelConfig};
 
-    // ---------- 测试辅助 ----------
+    // ---------- test helpers ----------
 
-    /// 临时目录：进程号+纳秒保证唯一，Drop 自动清理
+    /// Temp dir: pid + nanos for uniqueness, auto-cleaned on Drop
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -272,7 +280,7 @@ mod tests {
                 "pig-agent-test-{tag}-{}-{nanos}",
                 std::process::id()
             ));
-            std::fs::create_dir_all(&path).expect("创建临时目录");
+            std::fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }
     }
@@ -283,13 +291,13 @@ mod tests {
         }
     }
 
-    /// 在 dir 下写一个档案文件（自动建目录）
+    /// Write one profile file under dir (creates the directory)
     fn write_agent(dir: &Path, file: &str, content: &str) {
-        std::fs::create_dir_all(dir).expect("建 agents 目录");
-        std::fs::write(dir.join(file), content).expect("写档案文件");
+        std::fs::create_dir_all(dir).expect("create agents dir");
+        std::fs::write(dir.join(file), content).expect("write profile file");
     }
 
-    /// 造一个只改 model/thought_level 的档案（其余字段本组测试不关心）
+    /// Build a profile varying only model/thought_level (other fields don't matter to this test group)
     fn subagent(model: Option<&str>, level: Option<&str>) -> AgentProfile {
         AgentProfile {
             name: "tester".into(),
@@ -299,18 +307,18 @@ mod tests {
             thought_level: level.map(str::to_string),
             max_turns: None,
             inject_agents_md: true,
-            system_prompt: "正文。".into(),
+            system_prompt: "body text.".into(),
             source: AgentSource::BuiltIn,
         }
     }
 
-    // ---------- frontmatter 解析 ----------
+    // ---------- frontmatter parsing ----------
 
     #[test]
     fn parse_full_frontmatter() {
         let md = r#"---
 name: code-review
-description: "审查代码改动"
+description: "Review code changes"
 tools:
   - Read
   - Grep
@@ -319,14 +327,17 @@ model: deepseek/deepseek-chat
 thoughtLevel: high
 maxTurns: 30
 injectAgentsMd: false
-unknown: 忽略我
+unknown: ignore me
 ---
 
-你是代码审查员，只输出问题清单。
+You are a code reviewer; output only the issue list.
 "#;
-        let p = parse_agent_markdown(md).expect("完整 frontmatter 应解析成功");
+        let p = parse_agent_markdown(md).expect("full frontmatter should parse");
         assert_eq!(p.name, "code-review");
-        assert_eq!(p.description, "审查代码改动", "值两侧引号应剥离");
+        assert_eq!(
+            p.description, "Review code changes",
+            "surrounding quotes stripped"
+        );
         assert_eq!(
             p.tools,
             Some(vec![
@@ -339,26 +350,30 @@ unknown: 忽略我
         assert_eq!(p.thought_level.as_deref(), Some("high"));
         assert_eq!(p.max_turns, Some(30));
         assert!(!p.inject_agents_md);
-        assert_eq!(p.system_prompt, "你是代码审查员，只输出问题清单。");
+        assert_eq!(
+            p.system_prompt,
+            "You are a code reviewer; output only the issue list."
+        );
     }
 
     #[test]
     fn parse_minimal_frontmatter() {
-        // 只有必填字段：其余取缺省值
-        let md = "---\nname: helper\ndescription: 简单助手\n---\n做该做的事。";
-        let p = parse_agent_markdown(md).expect("最小 frontmatter");
-        assert_eq!(p.tools, None, "tools 缺省 = 全部");
-        assert_eq!(p.model, None, "model 缺省 = 继承");
+        // Only required fields; the rest take defaults
+        let md = "---\nname: helper\ndescription: simple helper\n---\nDo what needs to be done.";
+        let p = parse_agent_markdown(md).expect("minimal frontmatter");
+        assert_eq!(p.tools, None, "tools default = all");
+        assert_eq!(p.model, None, "model default = inherit");
         assert_eq!(p.thought_level, None);
         assert_eq!(p.max_turns, None);
-        assert!(p.inject_agents_md, "inject_agents_md 缺省 true");
-        assert_eq!(p.system_prompt, "做该做的事。");
+        assert!(p.inject_agents_md, "inject_agents_md defaults to true");
+        assert_eq!(p.system_prompt, "Do what needs to be done.");
     }
 
     #[test]
     fn parse_inline_list() {
-        let md = "---\nname: helper\ndescription: d\ntools: [Read, Grep, \"Bash\"]\n---\n正文。";
-        let p = parse_agent_markdown(md).expect("行内列表");
+        let md =
+            "---\nname: helper\ndescription: d\ntools: [Read, Grep, \"Bash\"]\n---\nbody text.";
+        let p = parse_agent_markdown(md).expect("inline list");
         assert_eq!(
             p.tools,
             Some(vec![
@@ -371,29 +386,29 @@ unknown: 忽略我
 
     #[test]
     fn parse_dash_list_with_comments() {
-        // 缩进 `- item` 列表 + # 注释行 + 单引号剥离
-        let md = "---\n# 这是注释\nname: helper\ndescription: d\ntools:\n  - Read  \n  - 'Glob'\n---\n正文。";
-        let p = parse_agent_markdown(md).expect("破折号列表");
+        // Indented `- item` list + # comment lines + single-quote stripping
+        let md = "---\n# this is a comment\nname: helper\ndescription: d\ntools:\n  - Read  \n  - 'Glob'\n---\nbody text.";
+        let p = parse_agent_markdown(md).expect("dash list");
         assert_eq!(p.tools, Some(vec!["Read".to_string(), "Glob".to_string()]));
     }
 
     #[test]
     fn parse_unknown_fields_ignored() {
-        let md = "---\nname: helper\ndescription: d\nfoo: bar\nzzz:\n  - a\n---\n正文。";
-        let p = parse_agent_markdown(md).expect("未知字段应被忽略");
+        let md = "---\nname: helper\ndescription: d\nfoo: bar\nzzz:\n  - a\n---\nbody text.";
+        let p = parse_agent_markdown(md).expect("unknown fields should be ignored");
         assert_eq!(p.name, "helper");
-        assert_eq!(p.tools, None, "未知字段的列表不应串到 tools");
+        assert_eq!(p.tools, None, "unknown-field list must not leak into tools");
     }
 
     #[test]
     fn parse_missing_name_err() {
-        let md = "---\ndescription: d\n---\n正文。";
+        let md = "---\ndescription: d\n---\nbody text.";
         assert!(parse_agent_markdown(md).unwrap_err().contains("name"));
     }
 
     #[test]
     fn parse_missing_description_err() {
-        let md = "---\nname: helper\n---\n正文。";
+        let md = "---\nname: helper\n---\nbody text.";
         assert!(
             parse_agent_markdown(md)
                 .unwrap_err()
@@ -405,31 +420,37 @@ unknown: 忽略我
     fn parse_invalid_name_err() {
         let too_long = "x".repeat(51);
         for bad in ["ab", "has space", "under_score", too_long.as_str()] {
-            let md = format!("---\nname: {bad}\ndescription: d\n---\n正文。");
-            assert!(parse_agent_markdown(&md).is_err(), "name {bad:?} 应非法");
+            let md = format!("---\nname: {bad}\ndescription: d\n---\nbody text.");
+            assert!(
+                parse_agent_markdown(&md).is_err(),
+                "name {bad:?} should be invalid"
+            );
         }
     }
 
     #[test]
     fn parse_bad_max_turns_err() {
         for bad in ["0", "-1", "abc"] {
-            let md = format!("---\nname: helper\ndescription: d\nmaxTurns: {bad}\n---\n正文。");
-            assert!(parse_agent_markdown(&md).is_err(), "maxTurns={bad} 应报错");
+            let md = format!("---\nname: helper\ndescription: d\nmaxTurns: {bad}\n---\nbody text.");
+            assert!(
+                parse_agent_markdown(&md).is_err(),
+                "maxTurns={bad} should error"
+            );
         }
     }
 
     #[test]
     fn parse_model_inherit_is_none() {
         for value in ["inherit", "main", ""] {
-            let md = format!("---\nname: helper\ndescription: d\nmodel: {value}\n---\n正文。");
-            let p = parse_agent_markdown(&md).expect("inherit/main/空 应解析为继承");
-            assert_eq!(p.model, None, "model: {value:?} 应为 None");
+            let md = format!("---\nname: helper\ndescription: d\nmodel: {value}\n---\nbody text.");
+            let p = parse_agent_markdown(&md).expect("inherit/main/empty should parse as inherit");
+            assert_eq!(p.model, None, "model: {value:?} should be None");
         }
     }
 
     #[test]
     fn parse_no_frontmatter_err() {
-        assert!(parse_agent_markdown("没有 frontmatter 的正文").is_err());
+        assert!(parse_agent_markdown("body text without frontmatter").is_err());
         assert!(parse_agent_markdown("").is_err());
     }
 
@@ -440,31 +461,31 @@ unknown: 忽略我
         let tmp = TempDir::new("load");
         let data_dir = tmp.0.join("data");
         let cwd = tmp.0.join("proj");
-        // 用户级覆盖内置 explore
+        // user level overrides builtin explore
         write_agent(
             &data_dir.join("agents"),
             "explore.md",
-            "---\nname: explore\ndescription: 用户版 explore\n---\n用户正文。",
+            "---\nname: explore\ndescription: user explore\n---\nuser body text.",
         );
-        // 项目级再覆盖用户级（优先级：项目 > 用户 > 内置）
+        // project level overrides user level again (precedence: project > user > builtin)
         write_agent(
             &cwd.join(".pigcode/agents"),
             "explore.md",
-            "---\nname: explore\ndescription: 项目版 explore\n---\n项目正文。",
+            "---\nname: explore\ndescription: project explore\n---\nproject body text.",
         );
-        // 用户级新档案（名字排在最后，顺带验证排序）
+        // new user-level profile (name sorts last; also verifies ordering)
         write_agent(
             &data_dir.join("agents"),
             "helper.md",
-            "---\nname: z-helper\ndescription: 用户助手\n---\n正文。",
+            "---\nname: z-helper\ndescription: user helper\n---\nbody text.",
         );
-        // 坏文件：解析失败应跳过，不影响其他档案
-        write_agent(&data_dir.join("agents"), "bad.md", "这不是档案");
-        // 非 .md 文件应被忽略
+        // bad file: parse failure should be skipped without affecting other profiles
+        write_agent(&data_dir.join("agents"), "bad.md", "not a profile");
+        // non-.md files must be ignored
         write_agent(
             &data_dir.join("agents"),
             "note.txt",
-            "---\nname: ghost\ndescription: x\n---\n正文。",
+            "---\nname: ghost\ndescription: x\n---\nbody text.",
         );
 
         let profiles = load_profiles(&cwd, &data_dir);
@@ -472,21 +493,21 @@ unknown: 忽略我
         assert_eq!(
             names,
             ["explore", "general-purpose", "z-helper"],
-            "按 name 排序；坏文件/非 md 不进列表"
+            "sorted by name; bad/non-md files excluded"
         );
         let explore = find_profile(&profiles, "explore").expect("explore");
         assert_eq!(
-            explore.description, "项目版 explore",
-            "项目级应覆盖用户级与内置"
+            explore.description, "project explore",
+            "project level overrides user level and builtin"
         );
         assert_eq!(explore.source, AgentSource::Project);
         assert_eq!(
-            explore.system_prompt, "项目正文。",
-            "同名整体替换（含正文）"
+            explore.system_prompt, "project body text.",
+            "same name replaces wholesale (body included)"
         );
         let helper = find_profile(&profiles, "z-helper").expect("z-helper");
         assert_eq!(helper.source, AgentSource::User);
-        let general = find_profile(&profiles, "general-purpose").expect("内置 general-purpose");
+        let general = find_profile(&profiles, "general-purpose").expect("builtin general-purpose");
         assert_eq!(general.source, AgentSource::BuiltIn);
     }
 
@@ -494,15 +515,18 @@ unknown: 忽略我
     fn load_profiles_user_overrides_builtin() {
         let tmp = TempDir::new("load-user");
         let data_dir = tmp.0.join("data");
-        let cwd = tmp.0.join("proj"); // 无项目级目录
+        let cwd = tmp.0.join("proj"); // no project-level directory
         write_agent(
             &data_dir.join("agents"),
             "explore.md",
-            "---\nname: explore\ndescription: 用户版 explore\n---\n正文。",
+            "---\nname: explore\ndescription: user explore\n---\nbody text.",
         );
         let profiles = load_profiles(&cwd, &data_dir);
         let explore = find_profile(&profiles, "explore").expect("explore");
-        assert_eq!(explore.description, "用户版 explore", "用户级应覆盖内置");
+        assert_eq!(
+            explore.description, "user explore",
+            "user level overrides builtin"
+        );
         assert_eq!(explore.source, AgentSource::User);
     }
 
@@ -510,10 +534,10 @@ unknown: 忽略我
     fn load_profiles_missing_dirs_ok() {
         let tmp = TempDir::new("load-empty");
         let profiles = load_profiles(&tmp.0.join("nope"), &tmp.0.join("nope-data"));
-        assert_eq!(profiles.len(), 2, "目录不存在 = 只剩两个内置");
+        assert_eq!(profiles.len(), 2, "missing dirs = only two builtins remain");
     }
 
-    // ---------- agents-state.json 覆盖 ----------
+    // ---------- agents-state.json overrides ----------
 
     #[test]
     fn state_override_applies_to_builtin() {
@@ -530,11 +554,14 @@ unknown: 忽略我
         assert_eq!(
             general.model.as_deref(),
             Some("p1/m1"),
-            "内置无 frontmatter，state 必生效"
+            "builtins have no frontmatter, state must apply"
         );
         assert_eq!(general.thought_level.as_deref(), Some("low"));
         let explore = find_profile(&profiles, "explore").expect("explore");
-        assert_eq!(explore.model, None, "未列在 state 里的内置不受影响");
+        assert_eq!(
+            explore.model, None,
+            "builtins not listed in state unaffected"
+        );
     }
 
     #[test]
@@ -544,7 +571,7 @@ unknown: 忽略我
         write_agent(
             &data_dir.join("agents"),
             "custom.md",
-            "---\nname: custom\ndescription: d\nmodel: p2/m2\n---\n正文。",
+            "---\nname: custom\ndescription: d\nmodel: p2/m2\n---\nbody text.",
         );
         std::fs::write(
             data_dir.join("agents-state.json"),
@@ -556,37 +583,38 @@ unknown: 忽略我
         assert_eq!(
             custom.model.as_deref(),
             Some("p2/m2"),
-            "frontmatter 显式 model 优先于 state"
+            "explicit frontmatter model wins over state"
         );
         assert_eq!(
             custom.thought_level, None,
-            "整个 state 条目对显式 model 的档案不生效"
+            "whole state entry skipped for profiles with explicit model"
         );
     }
 
     #[test]
     fn set_model_override_roundtrip() {
         let tmp = TempDir::new("state-rw");
-        let data_dir = tmp.0.join("data"); // 不存在：写入前应 create_dir_all
-        set_model_override(&data_dir, "explore", Some("p1/m1"), Some("high")).expect("设置覆盖");
+        let data_dir = tmp.0.join("data"); // does not exist: set_model_override must create_dir_all first
+        set_model_override(&data_dir, "explore", Some("p1/m1"), Some("high"))
+            .expect("set override");
         let profiles = load_profiles(&tmp.0.join("proj"), &data_dir);
         let explore = find_profile(&profiles, "explore").expect("explore");
         assert_eq!(explore.model.as_deref(), Some("p1/m1"));
         assert_eq!(explore.thought_level.as_deref(), Some("high"));
-        // 两个键都给 None = 删除该 name 条目
-        set_model_override(&data_dir, "explore", None, None).expect("删除覆盖");
+        // both keys None = delete the entry for that name
+        set_model_override(&data_dir, "explore", None, None).expect("delete override");
         let profiles = load_profiles(&tmp.0.join("proj"), &data_dir);
         let explore = find_profile(&profiles, "explore").expect("explore");
-        assert_eq!(explore.model, None, "删除后恢复继承");
+        assert_eq!(explore.model, None, "delete restores inherit");
         assert_eq!(explore.thought_level, None);
-        // 文件仍是合法 JSON（坏 state 会让 load 静默丢覆盖，必须守住）
+        // the file must still be valid JSON (a corrupt state file would make load silently drop overrides — guard this)
         let raw = std::fs::read_to_string(data_dir.join("agents-state.json")).unwrap();
-        serde_json::from_str::<serde_json::Value>(&raw).expect("state 文件应为合法 JSON");
+        serde_json::from_str::<serde_json::Value>(&raw).expect("state file should be valid JSON");
     }
 
     // ---------- resolve_subagent_model ----------
 
-    /// 两个供应商各带模型：p1/m1 有两档推理参数，p2/m2 无
+    /// Two providers each with one model: p1/m1 has two reasoning levels, p2/m2 none
     fn test_config() -> AppConfig {
         let mut m1 = ModelConfig::new("m1", 100_000, 8_000);
         m1.cap_web_search = true;
@@ -600,7 +628,7 @@ unknown: 忽略我
             providers: vec![
                 ProviderConfig {
                     id: "p1".into(),
-                    name: "供应商一".into(),
+                    name: "Provider One".into(),
                     base_url: "http://p1.local".into(),
                     api_key: "key-1".into(),
                     api_format: ApiFormat::OpenAiChat,
@@ -610,7 +638,7 @@ unknown: 忽略我
                 },
                 ProviderConfig {
                     id: "p2".into(),
-                    name: "供应商二".into(),
+                    name: "Provider Two".into(),
                     base_url: "http://p2.local".into(),
                     api_key: "key-2".into(),
                     api_format: ApiFormat::AnthropicMessages,
@@ -624,6 +652,7 @@ unknown: 忽略我
             ui_font: None,
             mono_font: None,
             terminal_shell: None,
+            language: None,
         }
     }
 
@@ -639,22 +668,22 @@ unknown: 忽略我
             cap_web_search: false,
             web_search_tool: None,
             input_image: false,
-            provider_name: "父供应商".into(),
+            provider_name: "parent provider".into(),
         }
     }
 
     #[test]
     fn resolve_inherit_clones_parent() {
         let parent = parent_model();
-        // 继承时 thought_level 应被忽略
+        // thought_level must be ignored on inherit
         let resolved =
             resolve_subagent_model(&test_config(), &parent, &subagent(None, Some("low")))
-                .expect("继承");
+                .expect("inherit");
         assert_eq!(resolved.model, "parent-model");
         assert_eq!(resolved.api_key, "parent-key");
         assert_eq!(
             resolved.reasoning_params, parent.reasoning_params,
-            "继承时沿用父模型推理参数"
+            "inherit keeps the parent model's reasoning params"
         );
     }
 
@@ -665,23 +694,29 @@ unknown: 忽略我
             &parent_model(),
             &subagent(Some("p2/m2"), None),
         )
-        .expect("p2/m2 应解析成功");
+        .expect("p2/m2 should resolve");
         assert_eq!(resolved.model, "m2");
         assert_eq!(resolved.base_url, "http://p2.local");
         assert_eq!(resolved.api_key, "key-2");
         assert_eq!(resolved.api_format, ApiFormat::AnthropicMessages);
-        assert_eq!(resolved.provider_name, "供应商二");
+        assert_eq!(resolved.provider_name, "Provider Two");
         assert_eq!(resolved.context_window, 200_000);
-        assert_eq!(resolved.reasoning_params, None, "未给档位 = 无推理参数");
+        assert_eq!(
+            resolved.reasoning_params, None,
+            "no level = no reasoning params"
+        );
     }
 
     #[test]
     fn resolve_bare_model_uses_default_provider() {
         let resolved =
             resolve_subagent_model(&test_config(), &parent_model(), &subagent(Some("m1"), None))
-                .expect("裸 modelId 应命中默认供应商");
+                .expect("bare modelId hits the default provider");
         assert_eq!(resolved.base_url, "http://p1.local");
-        assert!(resolved.cap_web_search, "能力标记取自 ModelConfig");
+        assert!(
+            resolved.cap_web_search,
+            "capability flags come from ModelConfig"
+        );
         assert!(resolved.input_image);
     }
 
@@ -693,10 +728,10 @@ unknown: 忽略我
             &subagent(Some("p9/m1"), None),
         )
         .unwrap_err();
-        assert!(err.contains("p9"), "应点名坏供应商: {err}");
+        assert!(err.contains("p9"), "should name the bad provider: {err}");
         assert!(
             err.contains("p1/m1") && err.contains("p2/m2"),
-            "应列可用 providerId/modelId 全集: {err}"
+            "should list available providerId/modelId pairs: {err}"
         );
     }
 
@@ -708,8 +743,8 @@ unknown: 忽略我
             &subagent(Some("p1/m9"), None),
         )
         .unwrap_err();
-        assert!(err.contains("m9"), "应点名坏模型: {err}");
-        assert!(err.contains("p1/m1"), "应列可用全集: {err}");
+        assert!(err.contains("m9"), "should name the bad model: {err}");
+        assert!(err.contains("p1/m1"), "should list all available: {err}");
     }
 
     #[test]
@@ -720,10 +755,10 @@ unknown: 忽略我
             &subagent(Some("p1/m1"), Some("max")),
         )
         .unwrap_err();
-        assert!(err.contains("max"), "应点名坏档位: {err}");
+        assert!(err.contains("max"), "should name the bad level: {err}");
         assert!(
             err.contains("low") && err.contains("high"),
-            "应列该模型可用档位: {err}"
+            "should list the model's available levels: {err}"
         );
     }
 
@@ -734,11 +769,11 @@ unknown: 忽略我
             &parent_model(),
             &subagent(Some("p1/m1"), Some("high")),
         )
-        .expect("好档位");
+        .expect("good level");
         assert_eq!(
             resolved.reasoning_params,
             Some(serde_json::json!({"effort": "high"})),
-            "档位参数应注入 reasoning_params"
+            "level params should be injected into reasoning_params"
         );
     }
 
@@ -765,15 +800,18 @@ unknown: 忽略我
             "GENERAL_PURPOSE",
             "generalpurpose",
         ] {
-            let found =
-                find_profile(&profiles, query).unwrap_or_else(|e| panic!("{query} 应命中: {e}"));
-            assert_eq!(found.name, "general-purpose", "归一匹配 {query}");
+            let found = find_profile(&profiles, query)
+                .unwrap_or_else(|e| panic!("{query} should match: {e}"));
+            assert_eq!(
+                found.name, "general-purpose",
+                "normalized match for {query}"
+            );
         }
     }
 
     #[test]
     fn find_ambiguous_err_lists_candidates() {
-        // "my-agent" 与 "my_agent" 归一后相同 → 归一查询命中两个
+        // "my-agent" and "my_agent" normalize identically -> the normalized query hits both
         let mut a = subagent(None, None);
         a.name = "my-agent".into();
         let mut b = subagent(None, None);
@@ -781,7 +819,7 @@ unknown: 忽略我
         let err = find_profile(&[a, b], "myagent").unwrap_err();
         assert!(
             err.contains("my-agent") && err.contains("my_agent"),
-            "应列候选名: {err}"
+            "should list candidates: {err}"
         );
     }
 
@@ -790,7 +828,7 @@ unknown: 忽略我
         let profiles = three_profiles();
         let err = find_profile(&profiles, "nope").unwrap_err();
         for name in ["explore", "general-purpose", "tester"] {
-            assert!(err.contains(name), "应列可用 {name}: {err}");
+            assert!(err.contains(name), "should list available {name}: {err}");
         }
     }
 
@@ -819,7 +857,7 @@ unknown: 忽略我
         ] {
             assert!(
                 tools.contains(&expected.to_string()),
-                "explore 应有 {expected}"
+                "explore should have {expected}"
             );
         }
         for banned in [
@@ -833,7 +871,7 @@ unknown: 忽略我
         ] {
             assert!(
                 !tools.contains(&banned.to_string()),
-                "explore 不应有 {banned}"
+                "explore should not have {banned}"
             );
         }
     }
@@ -843,12 +881,21 @@ unknown: 忽略我
         let general = &builtin_profiles()[0];
         assert_eq!(general.name, "general-purpose");
         let tools = child_tool_set(general, &all_tool_names(), true);
-        assert!(tools.contains(&"Bash".to_string()), "全部工具应含 Bash");
-        assert!(tools.contains(&"Write".to_string()), "全部工具应含 Write");
-        assert!(!tools.contains(&"Agent".to_string()), "Agent 永远剔除");
+        assert!(
+            tools.contains(&"Bash".to_string()),
+            "all tools should include Bash"
+        );
+        assert!(
+            tools.contains(&"Write".to_string()),
+            "all tools should include Write"
+        );
+        assert!(
+            !tools.contains(&"Agent".to_string()),
+            "Agent always removed"
+        );
         assert!(
             !tools.contains(&"AgentSwarm".to_string()),
-            "AgentSwarm 永远剔除"
+            "AgentSwarm always removed"
         );
         assert!(!tools.contains(&"AskUserQuestion".to_string()));
         assert!(!tools.contains(&"EnterPlanMode".to_string()));
@@ -857,7 +904,7 @@ unknown: 忽略我
 
     #[test]
     fn child_set_explicit_list_intersection() {
-        // 列表 ∩ 全部；不存在的名字忽略；FORBIDDEN 即使显式列出也剔除
+        // list ∩ all; nonexistent names ignored; FORBIDDEN removed even when explicitly listed
         let mut profile = subagent(None, None);
         profile.tools = Some(vec![
             "Read".into(),
@@ -871,17 +918,20 @@ unknown: 忽略我
         assert!(tools.contains(&"Bash".to_string()));
         assert!(
             !tools.contains(&"NotExist".to_string()),
-            "不存在的工具名忽略"
+            "nonexistent tool names ignored"
         );
         assert!(
             !tools.contains(&"Agent".to_string()),
-            "显式列出 Agent 也要剔除"
+            "explicitly listed Agent still removed"
         );
         assert!(
             !tools.contains(&"AgentSwarm".to_string()),
-            "显式列出 AgentSwarm 也要剔除"
+            "explicitly listed AgentSwarm still removed"
         );
-        assert!(!tools.contains(&"Write".to_string()), "不在列表里的不给");
+        assert!(
+            !tools.contains(&"Write".to_string()),
+            "not in the list, not given"
+        );
     }
 
     #[test]
@@ -889,7 +939,7 @@ unknown: 忽略我
         let mut profile = subagent(None, None);
         profile.tools = Some(vec!["*".into()]);
         let tools = child_tool_set(&profile, &all_tool_names(), true);
-        assert!(tools.contains(&"Write".to_string()), "含 * = 全部");
+        assert!(tools.contains(&"Write".to_string()), "* means all");
         assert!(!tools.contains(&"Agent".to_string()));
     }
 
@@ -899,12 +949,12 @@ unknown: 忽略我
         let with = child_tool_set(general, &all_tool_names(), true);
         assert!(
             with.contains(&"ReadMediaFile".to_string()),
-            "支持图片时保留"
+            "kept when images supported"
         );
         let without = child_tool_set(general, &all_tool_names(), false);
         assert!(
             !without.contains(&"ReadMediaFile".to_string()),
-            "不支持图片时剔除"
+            "removed when images unsupported"
         );
     }
 
@@ -912,37 +962,40 @@ unknown: 忽略我
 
     #[test]
     fn mcp_inherit_all_for_full_profile() {
-        // general-purpose（tools=None → 全部内置收窄）：含 Write/Edit → 继承全部 MCP
+        // general-purpose (tools=None -> all builtins after narrowing): includes Write/Edit -> inherits all MCP
         let general = &builtin_profiles()[0];
         let keep = child_tool_set(general, &all_tool_names(), true);
-        assert!(child_inherits_all_mcp(&keep), "全工具档案继承全部 MCP 工具");
+        assert!(
+            child_inherits_all_mcp(&keep),
+            "full-tool profile inherits all MCP tools"
+        );
     }
 
     #[test]
     fn mcp_inherit_readonly_for_readonly_profile() {
-        // explore 收窄后不含 Write/Edit（含 Bash 不影响判定）→ 只继承 readOnlyHint
+        // explore narrowed down lacks Write/Edit (Bash does not affect the check) -> inherits only readOnlyHint
         let explore = &builtin_profiles()[1];
         let keep = child_tool_set(explore, &all_tool_names(), true);
-        assert!(keep.contains(&"Bash".to_string()), "explore 含 Bash");
+        assert!(keep.contains(&"Bash".to_string()), "explore includes Bash");
         assert!(
             !child_inherits_all_mcp(&keep),
-            "只读档案只继承 readOnlyHint 的 MCP 工具"
+            "read-only profile inherits only readOnlyHint MCP tools"
         );
-        // 显式列表给了 Write 的自定义档案 → 全继承
+        // custom profile whose explicit list includes Write -> inherits all
         let mut writer = subagent(None, None);
         writer.tools = Some(vec!["Read".into(), "Write".into()]);
         let keep = child_tool_set(&writer, &all_tool_names(), true);
         assert!(child_inherits_all_mcp(&keep));
     }
 
-    // ---------- 其他 ----------
+    // ---------- misc ----------
 
     #[test]
     fn builtin_prompts_have_delivery_suffix() {
         for p in builtin_profiles() {
             assert!(
-                p.system_prompt.contains("你是子代理"),
-                "{} 缺固定交付尾段",
+                p.system_prompt.contains("You are a subagent"),
+                "{} missing the fixed delivery suffix",
                 p.name
             );
         }
@@ -951,12 +1004,15 @@ unknown: 忽略我
     #[test]
     fn description_list_format() {
         let list = agent_description_list(&builtin_profiles());
-        assert!(list.contains("- general-purpose: "), "每行 - name: 开头");
-        assert!(list.contains("（工具: 全部）"), "tools=None 显示全部");
+        assert!(
+            list.contains("- general-purpose: "),
+            "each line starts with - name:"
+        );
+        assert!(list.contains("(tools: all)"), "tools=None shows all");
         assert!(list.contains("- explore: "));
         assert!(
-            list.contains("（工具: Read, Glob, Grep, Bash, FetchURL, ReadMediaFile, TodoList）"),
-            "显式列表应逐名列出"
+            list.contains("(tools: Read, Glob, Grep, Bash, FetchURL, ReadMediaFile, TodoList)"),
+            "explicit list named tool by tool"
         );
     }
 
@@ -965,29 +1021,36 @@ unknown: 忽略我
         let tmp = TempDir::new("prompt");
         let cwd = tmp.0.join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(cwd.join("AGENTS.md"), "项目规则").unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "project rules").unwrap();
         let mut profile = subagent(None, None);
-        profile.system_prompt = "档案正文。".into();
+        profile.system_prompt = "profile body text.".into();
         let agents = crate::prompt::agents_md(&tmp.0, &cwd);
         let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
-        assert!(prompt.contains("<env>"), "应含 env 块");
+        assert!(prompt.contains("<env>"), "should contain env block");
         assert!(
-            prompt.contains("工作区 AGENTS.md"),
-            "inject_agents_md=true 应注入"
+            prompt.contains("Workspace AGENTS.md"),
+            "inject_agents_md=true should inject"
         );
-        assert!(prompt.contains("项目规则"));
-        assert!(prompt.ends_with("</env>"), "env 块收尾（易变内容放最后）");
-        assert!(prompt.contains("档案正文。"), "档案正文保留在 env 之前");
-        // 关闭注入后不再有 AGENTS.md 段
+        assert!(prompt.contains("project rules"));
+        assert!(
+            prompt.ends_with("</env>"),
+            "env block ends the prompt (volatile last)"
+        );
+        assert!(
+            prompt.contains("profile body text."),
+            "profile body kept before env"
+        );
+        // with injection off, the AGENTS.md section is gone
         profile.inject_agents_md = false;
         let prompt = crate::prompt::subagent_system_prompt(&profile, &cwd, None, &agents, "");
         assert!(!prompt.contains("AGENTS.md"));
         assert!(prompt.ends_with("</env>"));
     }
 
-    /// 工具 schema 的档案清单会话冻结：Agent/AgentSwarm 的 description 内嵌
-    /// 档案清单，tools 在缓存前缀最前面——同一份快照下磁盘档案再变，
-    /// schema 字节也不变（新会话的新快照才反映变化）
+    /// The profile listing in tool schemas is frozen per session: Agent/AgentSwarm descriptions
+    /// embed the profile listing, and tools sit at the very front of the cache prefix — under
+    /// the same snapshot, on-disk profile changes never change the schema bytes (only a new
+    /// session's new snapshot reflects them)
     #[test]
     fn all_root_schema_freezes_profiles() {
         let tmp = TempDir::new("freeze");
@@ -995,23 +1058,27 @@ unknown: 忽略我
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(
             agents_dir.join("extra.md"),
-            "---\nname: extra\ndescription: 测试档案\n---\n档案正文。",
+            "---\nname: extra\ndescription: test profile\n---\nprofile body text.",
         )
         .unwrap();
         let ws = tmp.0.join("ws");
         let snapshot = load_profiles(&ws, &tmp.0);
         assert!(
             snapshot.iter().any(|p| p.name == "extra"),
-            "项目级档案应进快照"
+            "project-level profile should be in the snapshot"
         );
         let schemas = |profiles: &[AgentProfile]| {
             serde_json::to_string(&crate::tool::schemas_root(&ws, &tmp.0, profiles)).unwrap()
         };
         let frozen = schemas(&snapshot);
-        // 冻结后磁盘增删档案：同一份快照产出的 schema 字节不变
+        // after freezing, add/remove profiles on disk: schema bytes from the same snapshot stay unchanged
         std::fs::remove_file(agents_dir.join("extra.md")).unwrap();
-        assert_eq!(frozen, schemas(&snapshot), "快照未变则 tools 前缀字节稳定");
-        // 新会话的新快照才会反映变化
+        assert_eq!(
+            frozen,
+            schemas(&snapshot),
+            "same snapshot keeps tools prefix bytes stable"
+        );
+        // only a new session's new snapshot reflects the change
         let fresh = load_profiles(&ws, &tmp.0);
         assert!(!fresh.iter().any(|p| p.name == "extra"));
         assert_ne!(frozen, schemas(&fresh));

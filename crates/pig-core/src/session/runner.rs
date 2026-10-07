@@ -2,25 +2,27 @@ use super::*;
 
 struct SessionEntry {
     session: Option<Session>,
-    /// 与 Session 共享 Arc 的工具状态：session 进入 turn future（session=None）时
-    /// 仍可取待办/任务快照
+    /// Tool state sharing an Arc with Session: still usable to fetch todo/task
+    /// snapshots while the session is inside the turn future (session=None)
     state: crate::task::SessionToolState,
     cancel: Option<CancellationToken>,
     model_override: Option<ModelSelection>,
-    /// 会话级思考等级：独立于模型覆盖存在（无覆盖时作用于配置默认模型）
+    /// Session-level reasoning level: exists independently of the model override (applies to the configured default model when there is no override)
     reasoning_level: Option<String>,
-    /// 最近一次用户消息/手动切换的执行模式：后台子代理完成的唤醒回合用它起 turn
-    ///（不能用 default——会覆盖用户当前模式）
+    /// Exec mode of the most recent user message/manual switch: wake turns started by
+    /// background subagent completion use it to start turns (not default, which would
+    /// override the user's current mode)
     last_mode: ExecMode,
-    /// 回合进行中到达的消息在此排队（FIFO），回合结束自动接续
+    /// Messages arriving mid-turn are queued here (FIFO) and auto-continue when the turn ends
     queue: std::collections::VecDeque<(
         String,
         Vec<String>,
         Vec<pig_protocol::PendingImage>,
         ExecMode,
     )>,
-    /// MCP 状态缓存：回合收尾/设置页查询时从 Session 的 manager 刷新
-    ///（None = 尚未懒连接；回合进行中 Session 不在手边时按此缓存应答）
+    /// MCP status cache: refreshed from the Session's manager at turn wrap-up or
+    /// settings-page queries (None = not lazily connected yet; answered from this
+    /// cache while the Session is out of hand mid-turn)
     mcp_status: Option<Vec<pig_protocol::McpServerStatus>>,
 }
 type TurnFuture = std::pin::Pin<Box<dyn Future<Output = (String, Session)>>>;
@@ -52,7 +54,7 @@ fn start_turn(
         (session_id, session)
     }));
 }
-/// agent manager：多会话并存，各会话独立 turn/cancel/审批表。
+/// Agent manager: multiple concurrent sessions, each with its own turn/cancel/approval table.
 pub async fn agent_loop(
     op_rx: async_channel::Receiver<Op>,
     event_tx: async_channel::Sender<Event>,
@@ -61,7 +63,7 @@ pub async fn agent_loop(
     data_dir: PathBuf,
 ) {
     let config_path = config_path.unwrap_or_else(config::default_path);
-    let mut load_error: Option<String> = None;
+    let mut load_error: Option<CoreError> = None;
     let mut config: Option<AppConfig> = match config::load(&config_path) {
         Ok(config) => Some(config),
         Err(error) => {
@@ -71,7 +73,7 @@ pub async fn agent_loop(
     };
     let sessions_dir = data_dir.join("sessions");
     let store = Arc::new(Mutex::new(
-        Store::open(&data_dir).unwrap_or_else(|e| panic!("store 初始化失败: {e}")),
+        Store::open(&data_dir).unwrap_or_else(|e| panic!("store initialization failed: {e}")),
     ));
     let pending: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
     let pending_questions: PendingQuestions = Arc::new(Mutex::new(HashMap::new()));
@@ -83,20 +85,21 @@ pub async fn agent_loop(
         }};
     }
     if let Some(error) = &load_error {
+        // Structured config-load failure is sent directly (GUI appends a "check config.toml" hint by kind)
         emit_global!(Event::Error {
             session_id: None,
             seq,
-            message: format!("配置解析失败: {error}。请检查或修复 ~/.pigcode/config.toml"),
+            error: error.clone(),
         });
     }
     let mut sessions: HashMap<String, SessionEntry> = HashMap::new();
-    // 已删除会话：在飞回合收尾（Session drop → 句柄关闭）后补删 rollout 文件
+    // Deleted sessions: the rollout file is deleted after the in-flight turn wraps up (Session drop -> handle closed)
     let mut deleted_sessions: HashSet<String> = HashSet::new();
     let mut turns: FuturesUnordered<TurnFuture> = FuturesUnordered::new();
     let mut id_counter = 0u64;
-    // 后台任务完成通知：watcher 发 session_id → select 分支推 TaskListChanged
+    // Background task completion notifications: the watcher sends session_id -> the select branch pushes TaskListChanged
     let (task_notify_tx, mut task_notify_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    // 后台子代理完成唤醒：(session_id, 通知文本) → 合成 user 消息起新回合
+    // Background subagent completion wake-ups: (session_id, notification text) -> synthesize a user message to start a new turn
     let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     macro_rules! resolve {
         ($override:expr, $level:expr) => {
@@ -109,30 +112,32 @@ pub async fn agent_loop(
         ($override:expr) => {
             resolve!($override, None)
                 .map(|r| (r.model.clone(), r.provider_name.clone()))
-                .unwrap_or_else(|| ("未配置模型".to_string(), String::new()))
+                // No model configured: empty-string sentinel (GUI renders the localized "New task/No model" placeholder)
+                .unwrap_or_else(|| (String::new(), String::new()))
         };
     }
     loop {
         tokio::select! {
             op = op_rx.recv() => {
                 let Ok(op) = op else { break };
-                // 分叉 = 落盘派生新会话后按 OpenSession 冷路径打开
-                //（SessionConfigured + replay 全套复用，UI 经既有链路自动切换）
+                // Fork = persist a derived new session, then open it via the OpenSession cold path
+                // (SessionConfigured + full replay reuse; the UI switches automatically through existing flows)
                 let op = match op {
                     Op::ForkSession { session_id, turns } => {
                         match fork::fork_session(&sessions_dir, &store, &session_id, turns, &mut id_counter) {
                             Ok(new_id) => {
-                                // 冷路径不发 SessionList：补一条让侧栏即时出现分叉会话
+                                // The cold path does not emit SessionList: emit one so the forked session appears in the sidebar immediately
                                 emit_global!(Event::SessionList {
                                     sessions: store.lock().expect("store lock").sorted_sessions(),
                                 });
                                 Op::OpenSession { session_id: new_id }
                             }
                             Err(error) => {
+                                // Structured fork errors are forwarded as-is (no message wrapping)
                                 emit_global!(Event::Error {
                                     session_id: Some(session_id),
                                     seq,
-                                    message: format!("分叉失败: {error}"),
+                                    error,
                                 });
                                 continue;
                             }
@@ -145,14 +150,16 @@ pub async fn agent_loop(
                         let cwd = normalize_workspace_path(&cwd);
                         id_counter += 1;
                         let id = format!("s{}-{}", now_secs(), id_counter);
-                        // 新会话默认值 = 工作区最近活跃会话；UI 显式传入的字段优先于种子
+                        // New-session defaults = the workspace's most recently active session; fields passed explicitly by the UI take priority over the seed
                         let seed = store
                             .lock()
                             .expect("store lock")
                             .latest_active_in_workspace(&cwd);
                         let mut meta = SessionMeta {
                             id: id.clone(),
-                            title: "新任务".to_string(),
+                            // New-session seed title: empty-string sentinel (GUI renders the localized "New task");
+                            // persisted data holds no natural-language constants
+                            title: String::new(),
                             title_custom: false,
                             cwd,
                             created_at: now_secs(),
@@ -161,19 +168,19 @@ pub async fn agent_loop(
                             archived: false,
                             provider_id: provider_id.or_else(|| seed.as_ref().and_then(|m| m.provider_id.clone())),
                             model_id: model_id.or_else(|| seed.as_ref().and_then(|m| m.model_id.clone())),
-                            // 思考等级按 UI 原样（hero 默认值已把种子下达到 UI；None = 关）
+                            // Reasoning level passes through from the UI as-is (hero defaults already seed the UI; None = off)
                             reasoning_level,
                             exec_mode: exec_mode.unwrap_or_else(|| {
                                 seed.as_ref().map(|m| m.exec_mode).unwrap_or_default()
                             }),
-                            // 计划是临时态：不种子继承，只按 UI 显式传入
+                            // Plan mode is transient: not inherited from the seed, only set explicitly by the UI
                             plan_enabled: plan_enabled.unwrap_or(false),
-                            // 区外读写开关随工作区种子继承（与 exec_mode 同口径）
+                            // Outside-workspace read/write switches inherit from the workspace seed (same policy as exec_mode)
                             fs_read_outside: seed.as_ref().map(|m| m.fs_read_outside).unwrap_or(false),
                             fs_write_outside: seed.as_ref().map(|m| m.fs_write_outside).unwrap_or(false),
                         };
-                        // UI 未指定思考等级且模型配置了默认等级 → 采用默认档
-                        //（写进 meta，SessionConfigured 会同步回 UI 的等级 chip）
+                        // UI left the reasoning level unset and the model config has a default -> adopt the default tier
+                        // (written into meta; SessionConfigured syncs it back to the UI's level chip)
                         if meta.reasoning_level.is_none()
                             && let Some(cfg) = config.as_ref()
                         {
@@ -220,13 +227,13 @@ pub async fn agent_loop(
                                     fs_read_outside: meta.fs_read_outside,
                                     fs_write_outside: meta.fs_write_outside,
                                 });
-                                // 新会话面板初始化为空快照
+                                // New session: panels initialize to empty snapshots
                                 emit_global!(Event::TodoListChanged { session_id: id.clone(), seq, items: vec![] });
                                 emit_global!(Event::TaskListChanged { session_id: id.clone(), seq, tasks: vec![] });
                                 emit_global!(Event::SessionList {
                                     sessions: store.lock().expect("store lock").sorted_sessions(),
                                 });
-                                // 已移除（隐藏）的工作区下新建会话：自动恢复显示
+                                // Creating a session under a removed (hidden) workspace: automatically unhide it
                                 if store.lock().expect("store lock").unhide_workspace(&meta.cwd) {
                                     emit_global!(Event::WorkspaceList {
                                         workspaces: store.lock().expect("store lock").workspaces(),
@@ -236,7 +243,7 @@ pub async fn agent_loop(
                             Err(error) => emit_global!(Event::Error {
                                 session_id: None,
                                 seq,
-                                message: error,
+                                error,
                             }),
                         }
                     }
@@ -259,13 +266,13 @@ pub async fn agent_loop(
                                     fs_read_outside: meta.fs_read_outside,
                                     fs_write_outside: meta.fs_write_outside,
                                 });
-                                // 切回已打开会话：补发面板快照，UI 重置面板
+                                // Switching back to an already-open session: re-emit panel snapshots so the UI resets its panels
                                 if let Some(entry) = sessions.get(&session_id) {
                                     let items = entry.state.todos.lock().expect("todos lock").clone();
                                     let tasks = crate::task::snapshot(&entry.state.tasks);
                                     emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items });
                                     emit_global!(Event::TaskListChanged { session_id: session_id.clone(), seq, tasks });
-                                    // 补发水位/累计（composer 的容量 chip 换会话后仍是旧值）
+                                    // Re-emit the usage watermark/totals (the composer's capacity chip would otherwise keep stale values after switching sessions)
                                     if let Some(session) = &entry.session
                                         && let Some(used) = session.last_total_tokens
                                         && let Some(resolved) = resolve!(
@@ -288,7 +295,7 @@ pub async fn agent_loop(
                         }
                         match Session::load(&session_id, &sessions_dir, pending.clone(), pending_questions.clone(), store.clone(), data_dir.clone(), task_notify_tx.clone(), wake_tx.clone(), config.as_ref()) {
                             Ok((mut session, records)) => {
-                                // 恢复持久化的模式/模型覆盖（meta 由 Set* 写穿保持最新）
+                                // Restore persisted mode/model overrides (meta stays current via Set* write-through)
                                 let meta = store.lock().expect("store lock").get_session(&session_id);
                                 let selection = meta.as_ref().and_then(meta_to_selection);
                                 if let Some(meta) = &meta {
@@ -322,15 +329,15 @@ pub async fn agent_loop(
                                     fs_read_outside: meta.as_ref().map(|m| m.fs_read_outside).unwrap_or(false),
                                     fs_write_outside: meta.as_ref().map(|m| m.fs_write_outside).unwrap_or(false),
                                 });
-                                // 重新打开的会话无持久化面板状态：空快照重置
+                                // Reopened sessions have no persisted panel state: reset with empty snapshots
                                 emit_global!(Event::TodoListChanged { session_id: session_id.clone(), seq, items: vec![] });
                                 emit_global!(Event::TaskListChanged { session_id: session_id.clone(), seq, tasks: vec![] });
                                 if let Some(entry) = sessions.get_mut(&session_id)
                                     && let Some(session) = entry.session.as_mut() {
                                         session.replay(&records, &event_tx);
                                     }
-                                // 回放已恢复水位与累计：补发上下文容量，重开 app 不必
-                                // 等下一条消息即显示（模型未配置则跳过，无窗口可报）
+                                // Replay already restored the usage watermark and totals: re-emit context capacity so
+                                // reopening the app shows it without waiting for the next message (skipped when no model is configured; no window to report)
                                 if let Some(entry) = sessions.get(&session_id)
                                     && let Some(session) = &entry.session
                                     && let Some(used) = session.last_total_tokens
@@ -350,7 +357,7 @@ pub async fn agent_loop(
                             Err(error) => emit_global!(Event::Error {
                                 session_id: None,
                                 seq,
-                                message: error,
+                                error,
                             }),
                         }
                     }
@@ -391,7 +398,7 @@ pub async fn agent_loop(
                             if let Some(archived) = archived { meta.archived = archived; }
                             if let Some(title) = &title {
                                 meta.title = title.clone();
-                                // 手动重命名：自动命名此后不再覆盖
+                                // Manual rename: auto-naming never overrides it afterwards
                                 meta.title_custom = true;
                             }
                             meta.updated_at = now_secs();
@@ -401,8 +408,8 @@ pub async fn agent_loop(
                         });
                     }
                     Op::DeleteSession { session_id } => {
-                        // 在飞回合：先取消；Session 还在 turn future 里，
-                        // rollout 句柄要等回合收尾 drop 后才能删文件
+                        // Turn in flight: cancel first; the Session is still inside the turn future,
+                        // so the rollout file can only be deleted after the turn wraps up and drops it
                         let turn_in_flight = sessions
                             .get(&session_id)
                             .is_some_and(|e| e.session.is_none());
@@ -411,7 +418,7 @@ pub async fn agent_loop(
                         {
                             cancel.cancel();
                         }
-                        // idle：Session 随 entry 移除而 drop，句柄已关
+                        // Idle: the Session drops with the removed entry; the handle is already closed
                         deleted_sessions.insert(session_id.clone());
                         store.lock().expect("store lock").delete_session(&session_id);
                         if !turn_in_flight {
@@ -428,13 +435,13 @@ pub async fn agent_loop(
                             emit_global!(Event::Error {
                                 session_id: Some(session_id),
                                 seq,
-                                message: "会话不存在，请先新建或打开".to_string(),
+                                error: CoreError::SessionNotFoundOpen,
                             });
                             continue;
                         };
-                        // 记录最近模式：唤醒回合按它起 turn（含排队情形）
+                        // Record the latest mode: wake turns start turns with it (queued case included)
                         entry.last_mode = mode;
-                        // 回合进行中 → 排队，回合结束自动接续（Interrupt 不清队列）
+                        // Turn in progress -> queue the message; it auto-continues when the turn ends (Interrupt does not clear the queue)
                         if entry.session.is_none() {
                             entry.queue.push_back((content.clone(), files, images, mode));
                             emit_global!(Event::MessageQueued {
@@ -448,7 +455,7 @@ pub async fn agent_loop(
                             emit_global!(Event::Error {
                                 session_id: Some(session_id),
                                 seq,
-                                message: "未配置模型，请在 设置 → 模型设置 中添加供应商和模型".to_string(),
+                                error: CoreError::NoModelConfigured,
                             });
                             continue;
                         };
@@ -491,14 +498,16 @@ pub async fn agent_loop(
                                     let _ = tx.send(Event::Error {
                                         session_id: None,
                                         seq: 0,
-                                        message: error,
+                                        error,
                                     }).await;
                                 }
                                 Err(e) => {
                                     let _ = tx.send(Event::Error {
                                         session_id: None,
                                         seq: 0,
-                                        message: format!("git 任务失败: {e}"),
+                                        error: CoreError::GitTask {
+                                            detail: e.to_string(),
+                                        },
                                     }).await;
                                 }
                             }
@@ -536,25 +545,26 @@ pub async fn agent_loop(
                                 crate::git::git_diff(&cwd2, &path2, staged)
                             })
                             .await;
-                            if let Ok(diff) = result {
+                            if let Ok((diff, note)) = result {
                                 let _ = tx
                                     .send(Event::GitDiff {
                                         cwd,
                                         path,
                                         staged,
                                         diff,
+                                        note,
                                     })
                                     .await;
                             }
                         });
                     }
                     Op::LoadSubagent { session_id, agent_id } => {
-                        // 无需 Session 实例：直接读子代理上下文 JSONL（右侧 tab 只读展示）
+                        // No Session instance needed: read the subagent context JSONL directly (read-only display in the right-side tab)
                         let tx = event_tx.clone();
                         let path = crate::agent::agents_dir(&sessions_dir, &session_id)
                             .join(format!("{agent_id}.jsonl"));
-                        // 「运行中」口径：会话任务注册表里同 agent_id 且 Running；
-                        // 会话不在内存（未加载）→ false
+                        // "Running" criterion: same agent_id in the session task registry with status Running;
+                        // session not in memory (not loaded) -> false
                         let running = sessions.get(&session_id).is_some_and(|entry| {
                             entry.state.tasks.lock().expect("task registry lock").iter().any(|t| {
                                 t.agent_id.as_deref() == Some(agent_id.as_str())
@@ -586,7 +596,7 @@ pub async fn agent_loop(
                                         .send(Event::Error {
                                             session_id: Some(session_id),
                                             seq: 0,
-                                            message: format!("读取子代理记录失败: {error}"),
+                                            error: CoreError::SubagentRead { detail: error },
                                         })
                                         .await;
                                 }
@@ -595,7 +605,9 @@ pub async fn agent_loop(
                                         .send(Event::Error {
                                             session_id: Some(session_id),
                                             seq: 0,
-                                            message: format!("读取子代理记录任务失败: {e}"),
+                                            error: CoreError::SubagentReadTask {
+                                                detail: e.to_string(),
+                                            },
                                         })
                                         .await;
                                 }
@@ -610,7 +622,7 @@ pub async fn agent_loop(
                         }
                     }
                     Op::ApprovalReply { request_id, decision, feedback } => {
-                        // 决议同时唤醒同合并键的并发等待者（见 resolve_approval）
+                        // The decision also wakes concurrent waiters under the same merge key (see resolve_approval)
                         super::resolve_approval(&pending, &request_id, decision, feedback);
                     }
                     Op::QuestionReply { request_id, answers } => {
@@ -620,7 +632,7 @@ pub async fn agent_loop(
                     }
                     Op::SetExecMode { session_id, mode } => {
                         if let Some(entry) = sessions.get_mut(&session_id) {
-                            // 手动切模式：唤醒回合跟随最近模式
+                            // Manual mode switch: wake turns follow the latest mode
                             entry.last_mode = mode;
                             if let Some(session) = entry.session.as_mut() {
                                 session.set_mode(mode);
@@ -631,7 +643,7 @@ pub async fn agent_loop(
                         }
                     }
                     Op::SetPlanMode { session_id, enabled } => {
-                        // 计划开关与模式档正交：UI 是发起方，不回 PlanModeChanged
+                        // The plan toggle is orthogonal to the mode tier: the UI is the initiator, so no PlanModeChanged is emitted back
                         if let Some(entry) = sessions.get_mut(&session_id)
                             && let Some(session) = entry.session.as_mut()
                         {
@@ -643,7 +655,7 @@ pub async fn agent_loop(
                     }
                     Op::SetFsAccess { session_id, read_outside, write_outside } => {
                         if let Some(entry) = sessions.get_mut(&session_id) {
-                            // state 是共享句柄：回合进行中（session=None）同样生效
+                            // state is a shared handle: also takes effect mid-turn (session=None)
                             entry.state.fs_read_outside.store(read_outside, std::sync::atomic::Ordering::Relaxed);
                             entry.state.fs_write_outside.store(write_outside, std::sync::atomic::Ordering::Relaxed);
                             store.lock().expect("store lock").update_session(&session_id, |m| {
@@ -660,12 +672,12 @@ pub async fn agent_loop(
                             Some(_) => emit_global!(Event::Error {
                                 session_id: Some(session_id),
                                 seq,
-                                message: "回合进行中，无法撤销文件".to_string(),
+                                error: CoreError::RevertTurnInFlight,
                             }),
                             None => emit_global!(Event::Error {
                                 session_id: Some(session_id),
                                 seq,
-                                message: "会话不存在".to_string(),
+                                error: CoreError::SessionNotFound,
                             }),
                         }
                     }
@@ -691,8 +703,8 @@ pub async fn agent_loop(
                         });
                     }
                     Op::ModelLookup { id } => {
-                        // 缓存命中直接回；未命中（新模型 ID）且缓存不新鲜才重拉，
-                        // 避免用户在对话框试错 ID 时连打 models.dev
+                        // Answer directly on cache hit; refetch only on a miss (new model ID) with a stale cache,
+                        // to avoid hammering models.dev while the user tries IDs in the dialog
                         const REFETCH_AFTER_SECS: u64 = 10 * 60;
                         let tx = event_tx.clone();
                         let cache_path = data_dir.join("models-dev-cache.json");
@@ -707,7 +719,7 @@ pub async fn agent_loop(
                             .flatten();
                             let (fetched_at, index) = match loaded {
                                 Some((_, index)) if index.contains_key(&lookup_id) => {
-                                    // 命中：无需网络
+                                    // Hit: no network needed
                                     let _ = tx
                                         .send(Event::ModelInfo {
                                             id,
@@ -766,7 +778,7 @@ pub async fn agent_loop(
                             _ => emit_global!(Event::Error {
                                 session_id: Some(session_id),
                                 seq,
-                                message: "回合进行中或会话不存在，无法压缩".to_string(),
+                                error: CoreError::CompactUnavailable,
                             }),
                         }
                     }
@@ -778,7 +790,7 @@ pub async fn agent_loop(
                                 reasoning_level: reasoning_level.clone(),
                             });
                             entry.reasoning_level = reasoning_level.clone();
-                            // 写穿 sessions 表：重开/新建继承都从这里取
+                            // Write-through to the sessions table: both reopen and new-session inheritance read from here
                             store.lock().expect("store lock").update_session(&session_id, |m| {
                                 m.provider_id = Some(provider_id.clone());
                                 m.model_id = Some(model_id.clone());
@@ -788,7 +800,7 @@ pub async fn agent_loop(
                     }
                     Op::SetReasoning { session_id, reasoning_level } => {
                         if let Some(entry) = sessions.get_mut(&session_id) {
-                            // 独立于模型覆盖保存：无覆盖时作用于配置默认模型（resolve 的 default_level）
+                            // Saved independently of the model override: applies to the configured default model when there is no override (resolve's default_level)
                             entry.reasoning_level = reasoning_level.clone();
                             if let Some(sel) = &mut entry.model_override {
                                 sel.reasoning_level = reasoning_level.clone();
@@ -808,7 +820,7 @@ pub async fn agent_loop(
                             emit_global!(Event::Error {
                                 session_id: None,
                                 seq,
-                                message: error,
+                                error,
                             });
                         } else {
                             config = Some(new_config);
@@ -823,38 +835,37 @@ pub async fn agent_loop(
                         });
                         let tx = event_tx.clone();
                         tokio::spawn(async move {
-                            let result = match found {
-                                Some(provider) => {
-                                    let model = provider
-                                        .models
-                                        .first()
-                                        .map(|m| m.id.clone())
-                                        .unwrap_or_else(|| "ping".to_string());
-                                    provider::test_provider(
-                                        &provider.base_url,
-                                        &config::expand_env(&provider.api_key),
-                                        provider.api_format,
-                                        &model,
-                                    )
-                                    .await
-                                }
-                                None => Err("供应商不存在".to_string()),
+                            let Some(provider) = found else {
+                                // Provider not found: structured error (a different channel from connection results)
+                                let _ = tx.send(Event::Error {
+                                    session_id: None,
+                                    seq: 0,
+                                    error: CoreError::ProviderNotFound,
+                                }).await;
+                                return;
                             };
-                            let (ok, message) = match result {
-                                Ok(message) => (true, message),
-                                Err(message) => (false, message),
-                            };
+                            let model = provider
+                                .models
+                                .first()
+                                .map(|m| m.id.clone())
+                                .unwrap_or_else(|| "ping".to_string());
+                            let result = provider::test_provider(
+                                &provider.base_url,
+                                &config::expand_env(&provider.api_key),
+                                provider.api_format,
+                                &model,
+                            )
+                            .await;
                             let _ = tx.send(Event::TestResult {
                                 provider_id,
-                                ok,
-                                message,
+                                result,
                             }).await;
                         });
                     }
                     Op::ListMcpServers { session_id } => {
                         let servers = match sessions.get_mut(&session_id) {
                             Some(entry) => {
-                                // 回合进行中（session=None）读不到 manager：回缓存清单
+                                // Mid-turn (session=None) the manager is unreachable: answer from the cached list
                                 if let Some(statuses) = entry
                                     .session
                                     .as_ref()
@@ -871,22 +882,22 @@ pub async fn agent_loop(
                     }
                     Op::Shutdown => break,
                     Op::ForkSession { .. } => {
-                        unreachable!("ForkSession 已在分发前转换为 OpenSession")
+                        unreachable!("ForkSession is converted to OpenSession before dispatch")
                     }
                 }
             }
             Some(session_id) = task_notify_rx.recv() => {
-                // 后台任务状态变化：推面板快照（entry.state 与 Session 共享 Arc，
-                // session 在 turn future 中也能取到注册表）
+                // Background task status change: push panel snapshots (entry.state shares an Arc with
+                // the Session, so the registry is reachable while the session is inside the turn future)
                 if let Some(entry) = sessions.get(&session_id) {
                     let tasks = crate::task::snapshot(&entry.state.tasks);
                     emit_global!(Event::TaskListChanged { session_id, seq, tasks });
                 }
             }
             Some((session_id, content)) = wake_rx.recv() => {
-                // 后台子代理完成唤醒：合成 user 消息起新回合。
-                // 忙/闲判定对齐 SendMessage：忙则排队（回合结束自动接续）；
-                // 模式用 last_mode（最近一次用户模式，不回落 default）
+                // Background subagent completion wake-up: synthesize a user message to start a new turn.
+                // Busy/idle detection mirrors SendMessage: queue when busy (auto-continue at turn end);
+                // the mode comes from last_mode (the user's most recent mode, no fallback to default)
                 let Some(entry) = sessions.get_mut(&session_id) else {
                     continue;
                 };
@@ -900,19 +911,19 @@ pub async fn agent_loop(
             }
             Some((session_id, session)) = turns.next(), if !turns.is_empty() => {
                 if deleted_sessions.contains(&session_id) {
-                    // 已删除会话的回合收尾：Session 在此 drop，句柄关闭后补删文件
+                    // Turn wrap-up for a deleted session: the Session drops here; delete the file after the handle closes
                     let _ = std::fs::remove_file(sessions_dir.join(format!("{session_id}.jsonl")));
                     continue;
                 }
                 if let Some(entry) = sessions.get_mut(&session_id) {
-                    // 回合收尾刷新 MCP 状态缓存（懒连接发生在回合内）
+                    // Refresh the MCP status cache at turn wrap-up (lazy connection happens inside the turn)
                     entry.mcp_status = session
                         .mcp
                         .as_ref()
                         .map(|mcp| mcp.statuses());
                     entry.session = Some(session);
                     entry.cancel = None;
-                    // 回合结束（含中止/出错）后自动取出队首继续
+                    // After the turn ends (including abort/error), automatically pop the queue head and continue
                     if let Some((content, files, images, mode)) = entry.queue.pop_front()
                         && let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) {
                             start_turn(entry, session_id.clone(), content, files, images, mode, &resolved, &event_tx, &turns);

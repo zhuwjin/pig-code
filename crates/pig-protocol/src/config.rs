@@ -7,35 +7,38 @@ pub struct ModelConfig {
     pub enabled: bool,
     pub context_window: u64,
     pub max_output_tokens: u64,
-    // 输入类型（文本恒有）
+    // Input types (text is always available)
     #[serde(default)]
     pub input_image: bool,
     #[serde(default)]
     pub input_video: bool,
     #[serde(default)]
     pub input_pdf: bool,
-    // 能力标记（存储为主，暂不全部消费）
+    // Capability flags (stored primarily, not all consumed yet)
     #[serde(default)]
     pub cap_structured: bool,
     #[serde(default)]
     pub cap_web_search: bool,
-    /// 原生联网搜索工具定义：Anthropic 缺省 web_search_20250305；OpenAI 兼容
-    /// 端点需显式配置（如智谱 {"type":"web_search","web_search":{...}}）
+    /// Native web search tool definition: Anthropic defaults to web_search_20250305;
+    /// OpenAI-compatible endpoints need explicit configuration (e.g. Zhipu
+    /// {"type":"web_search","web_search":{...}})
     #[serde(default)]
     pub web_search_tool: Option<serde_json::Value>,
     #[serde(default)]
     pub cap_system_msg: bool,
-    /// 可选推理等级，如 ["low","high","max"]
+    /// Optional reasoning levels, e.g. ["low","high","max"]
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
-    /// 默认思考等级：新会话未指定等级、切换模型等级不适配时的初始档；
-    /// None = 未设置（沿用现状：启发式兜底/关）
+    /// Default reasoning level: the initial level when a new session specifies none,
+    /// or when a model switch's level doesn't fit; None = unset (keep current
+    /// behavior: heuristic fallback/off)
     #[serde(default)]
     pub default_reasoning_level: Option<String>,
-    /// 等级 id → 界面显示名（如 max → "最高"）；纯展示层，请求仍按 id 合并参数
+    /// Level id → UI display name (e.g. max → "highest"); display-only, requests
+    /// still merge params by id
     #[serde(default)]
     pub reasoning_labels: std::collections::HashMap<String, String>,
-    /// 等级 → 合并进请求体的 JSON
+    /// Level → JSON merged into the request body
     #[serde(default)]
     pub reasoning_params: std::collections::HashMap<String, serde_json::Value>,
 }
@@ -71,22 +74,24 @@ pub struct ProviderConfig {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    /// 支持 ${ENV_VAR} 引用环境变量
+    /// Supports ${ENV_VAR} environment variable references
     pub api_key: String,
     pub api_format: ApiFormat,
     pub enabled: bool,
     pub models: Vec<ModelConfig>,
-    /// 密钥管理页地址（预设供应商带入；设置页展示「获取密钥」入口用，不参与请求）
+    /// Key management page URL (brought in by preset providers; shown as the
+    /// settings page's "get key" entry, not used in requests)
     #[serde(default)]
     pub key_url: Option<String>,
 }
 
-/// 回合 token 用量：input = 未缓存命中的输入，cache_read = 缓存命中的输入
-///（命中率 = cache_read / (input + cache_read)），output = 输出；
-/// duration_ms 为回合墙钟耗时（含工具执行/审批等待），api_ms 为纯 provider
-/// 请求耗时，ttft_ms 为其中等待首个输出 token 的时间之和、api_steps 为请求
-/// 次数（平均首字 = ttft_ms / api_steps）；输出速度按 (api_ms - ttft_ms)
-/// 计算，即不含首字的纯解码速度
+/// Turn token usage: input = cache-miss input tokens, cache_read = cache-hit input
+/// tokens (hit rate = cache_read / (input + cache_read)), output = output tokens;
+/// duration_ms is the turn's wall clock (including tool execution/approval waits),
+/// api_ms is pure provider request time, ttft_ms is the summed time waiting for
+/// the first output token and api_steps is the request count (average TTFT =
+/// ttft_ms / api_steps); output speed is computed from (api_ms - ttft_ms), i.e.
+/// pure decode speed excluding the first token
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TurnUsageStats {
     pub input: u64,
@@ -101,34 +106,40 @@ pub struct TurnUsageStats {
     pub api_steps: u64,
 }
 
-/// models.dev 的模型元数据（自动填充用）
+/// models.dev model metadata (for auto-fill)
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelRegistryInfo {
-    /// 数据源里的完整 ID（provider/model）
+    /// Full ID in the source (provider/model)
     pub full_id: String,
-    /// 上下文窗口（limit.context，缺省回退 limit.input）
+    /// Context window (limit.context, falling back to limit.input when absent)
     pub context: Option<u64>,
-    /// 单独的最大输入限制（多数模型没有）
+    /// Separate max input limit (most models don't have one)
     pub input: Option<u64>,
-    /// 最大输出 token（limit.output）
+    /// Max output tokens (limit.output)
     pub output: Option<u64>,
-    /// 是否支持推理
+    /// Whether reasoning is supported
     pub reasoning: bool,
-    /// 推理等级（reasoning_options 里 effort 类型的 values；仅 toggle 的为空）
+    /// Reasoning levels (values of the effort-type entry in reasoning_options;
+    /// empty for toggle-only)
     pub reasoning_levels: Vec<String>,
-    /// 输入模态（modalities.input，如 ["text","image"]）；空 = 数据源未给，UI 不动能力勾选
+    /// Input modalities (modalities.input, e.g. ["text","image"]); empty = the
+    /// source doesn't say, UI leaves capability checkboxes untouched
     #[serde(default)]
     pub input_modalities: Vec<String>,
-    /// 结构化输出支持；None = 数据源未给，UI 不动勾选
+    /// Structured output support; None = the source doesn't say, UI leaves
+    /// checkboxes untouched
     #[serde(default)]
     pub structured_output: Option<bool>,
 }
 
-/// models.dev 只给等级名，参数形态按供应商 API 格式生成（对齐 ZCode 内置规则）：
-/// 等级名直接透传（不归一）；OpenAI Chat → 四字段兼容包（thinking/enable_thinking/
-/// reasoning_effort/reasoning.effort，不同后端认不同字段）；Anthropic Messages →
-/// 关档 thinking.type=disabled，开档 thinking.type=enabled + output_config.effort
-/// （GLM-5/DeepSeek-V4/Claude-5 这代模型的形态；不使用 budget_tokens）。
+/// models.dev only provides level names; the parameter shape is generated per the
+/// provider's API format (aligned with ZCode's built-in rules): level names pass
+/// through as-is (no normalization); OpenAI Chat → a four-field compatibility
+/// bundle (thinking/enable_thinking/reasoning_effort/reasoning.effort, different
+/// backends honor different fields); Anthropic Messages → off levels use
+/// thinking.type=disabled, on levels use thinking.type=enabled plus
+/// output_config.effort (the shape of the GLM-5/DeepSeek-V4/Claude-5 generation;
+/// no budget_tokens).
 pub fn default_reasoning_params(
     levels: &[String],
     api_format: ApiFormat,
@@ -138,7 +149,8 @@ pub fn default_reasoning_params(
         let off = level == "none" || level == "disabled";
         let params = match api_format {
             ApiFormat::OpenAiChat => {
-                // "enabled" 是开关型等级，落到 effort high（ZCode 兜底同款）
+                // "enabled" is a toggle-style level, mapped to effort high
+                // (same as ZCode's fallback)
                 let effort = if off {
                     "none"
                 } else if level == "enabled" {
@@ -180,13 +192,15 @@ mod reasoning_params_tests {
 
     #[test]
     fn provider_config_deserializes_legacy_json_without_key_url() {
-        // key_url 为后加字段：存量 config.toml/rollout 里没有它，必须能读回
+        // key_url is a later addition: existing config.toml/rollout files lack it
+        // (old records live in rollouts) and must still read back
         let legacy = r#"{
-            "id": "p1", "name": "旧供应商", "base_url": "http://p1.local",
+            "id": "p1", "name": "legacy provider", "base_url": "http://p1.local",
             "api_key": "k", "api_format": "OpenAiChat", "enabled": true,
             "models": []
         }"#;
-        let provider: ProviderConfig = serde_json::from_str(legacy).expect("旧格式必须兼容");
+        let provider: ProviderConfig =
+            serde_json::from_str(legacy).expect("legacy format must remain compatible");
         assert_eq!(provider.key_url, None);
     }
 
@@ -197,16 +211,16 @@ mod reasoning_params_tests {
             .map(|s| s.to_string())
             .collect();
         let params = default_reasoning_params(&levels, ApiFormat::OpenAiChat);
-        // none：四字段全关档
+        // none: all four fields in the off state
         assert_eq!(params["none"]["thinking"]["type"], "disabled");
         assert_eq!(params["none"]["enable_thinking"], false);
         assert_eq!(params["none"]["reasoning_effort"], "none");
-        // 等级透传，max 不归一
+        // Levels pass through; max is not normalized
         assert_eq!(params["low"]["reasoning_effort"], "low");
         assert_eq!(params["max"]["reasoning_effort"], "max");
         assert_eq!(params["max"]["reasoning"]["effort"], "max");
         assert_eq!(params["max"]["thinking"]["type"], "enabled");
-        // 开关型等级 enabled → effort high
+        // Toggle-style level enabled → effort high
         assert_eq!(params["enabled"]["reasoning_effort"], "high");
     }
 
@@ -221,10 +235,13 @@ mod reasoning_params_tests {
         assert!(params["none"].get("output_config").is_none());
         assert_eq!(params["low"]["thinking"]["type"], "enabled");
         assert_eq!(params["low"]["output_config"]["effort"], "low");
-        // max 透传，不映射预算
+        // max passes through, no budget mapping
         assert_eq!(params["max"]["output_config"]["effort"], "max");
         let flat = serde_json::to_string(&params).unwrap();
-        assert!(!flat.contains("budget_tokens"), "不再生成 budget_tokens");
+        assert!(
+            !flat.contains("budget_tokens"),
+            "budget_tokens should no longer be generated"
+        );
     }
 }
 
@@ -233,17 +250,24 @@ pub struct AppConfig {
     pub providers: Vec<ProviderConfig>,
     pub default_provider: String,
     pub default_model: String,
-    /// 界面字体家族名（GPUI 字体名，如 "PingFang SC"）；
-    /// None = 系统默认（.SystemUIFont），未安装的字体按默认处理（防 GPUI panic）
+    /// UI font family name (GPUI font name, e.g. "PingFang SC");
+    /// None = system default (.SystemUIFont); uninstalled fonts are treated as
+    /// default (guards against GPUI panic)
     #[serde(default)]
     pub ui_font: Option<String>,
-    /// 等宽字体家族名（代码块/diff/命令行，如 "JetBrains Mono"）；None = 平台默认
-    /// （macOS Menlo / Windows Consolas / Linux DejaVu Sans Mono，缺装时上游自动换备选）
+    /// Monospace font family name (code blocks/diff/command lines, e.g.
+    /// "JetBrains Mono"); None = platform default (macOS Menlo / Windows Consolas /
+    /// Linux DejaVu Sans Mono; the upstream swaps in a fallback when missing)
     #[serde(default)]
     pub mono_font: Option<String>,
-    /// 内嵌终端启动的 shell 路径（如 "/bin/zsh"、"/opt/homebrew/bin/fish"）；
-    /// None = 系统默认 shell（$SHELL → passwd 登录 shell / Windows pwsh→powershell→cmd）。
-    /// 对之后新建的终端标签生效
+    /// Shell path launched by the embedded terminal (e.g. "/bin/zsh",
+    /// "/opt/homebrew/bin/fish"); None = system default shell ($SHELL → passwd
+    /// login shell / Windows pwsh→powershell→cmd). Takes effect for terminal
+    /// tabs created afterwards
     #[serde(default)]
     pub terminal_shell: Option<String>,
+    /// UI language ("zh-CN" / "en"); None = follow system (zh* → zh-CN,
+    /// everything else → en)
+    #[serde(default)]
+    pub language: Option<String>,
 }

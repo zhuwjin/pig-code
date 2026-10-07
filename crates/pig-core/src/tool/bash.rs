@@ -1,17 +1,28 @@
 use super::*;
 
-/// 保守的破坏性命令黑名单（非 AST，只拦明确形态；命中即拒绝并说明理由）。
-/// 宁可误拦也不放行，误拦文案引导用户手动执行。返回 Some(原因) 表示应拦截。
-pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
+/// Dangerous-command reason: key feeds the GUI approval dialog (core.danger.* localized via t!),
+/// en feeds the model-facing rejection receipt (both channels share the same decision).
+#[derive(Clone, Copy, Debug)]
+pub struct DangerReason {
+    pub key: &'static str,
+    pub en: &'static str,
+}
+
+/// Conservative destructive-command blocklist (no AST; only explicit shapes are intercepted; a hit is rejected with the reason stated).
+/// Prefer false positives over letting things through; the false-positive message guides the user to run it manually. Returning Some(reason) means the command should be blocked.
+pub fn is_dangerous_command(command: &str) -> Option<DangerReason> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let compact: String = command.chars().filter(|c| !c.is_whitespace()).collect();
 
-    // fork 炸弹：:(){ :|:& };:
+    // fork bomb: :(){ :|:& };:
     if compact.contains(":(){") && compact.contains("|:&") {
-        return Some("fork 炸弹");
+        return Some(DangerReason {
+            key: "fork_bomb",
+            en: "fork bomb",
+        });
     }
 
-    // 命令位判定：首 token，或跟在 ; & | && || sudo then do if ! ( 之后
+    // Command-position check: the first token, or one following ; & | && || sudo then do if ! (
     let in_command_position = |i: usize| {
         if i == 0 {
             return true;
@@ -33,7 +44,7 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
         if !in_command_position(i) {
             continue;
         }
-        // rm -rf/-fr 且目标为 / /* ~ ~/ $HOME .（普通 rm -rf node_modules 放行）
+        // rm -rf/-fr with a target of / /* ~ ~/ $HOME . (an ordinary rm -rf node_modules is allowed)
         if base == "rm" {
             let mut recursive_force = false;
             let mut dangerous_target = false;
@@ -48,21 +59,30 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
                 }
             }
             if recursive_force && dangerous_target {
-                return Some("rm -rf 指向根/家/当前目录");
+                return Some(DangerReason {
+                    key: "rm_rf_root",
+                    en: "rm -rf targeting the root, home, or current directory",
+                });
             }
         }
-        // 磁盘格式化/分区
+        // Disk formatting/partitioning
         if base == "mkfs" || base.starts_with("mkfs.") || base == "fdisk" {
-            return Some("磁盘格式化/分区操作");
+            return Some(DangerReason {
+                key: "disk_format",
+                en: "disk formatting/partitioning",
+            });
         }
         if base == "diskutil"
             && tokens
                 .get(i + 1)
                 .is_some_and(|next| next.starts_with("erase"))
         {
-            return Some("磁盘格式化/分区操作");
+            return Some(DangerReason {
+                key: "disk_format",
+                en: "disk formatting/partitioning",
+            });
         }
-        // dd 写块设备（of=/dev/…，字符设备白名单放行）
+        // dd writing to a block device (of=/dev/…; character devices are allowlisted)
         if base == "dd" {
             for t in &tokens[i + 1..] {
                 if let Some(target) = t.strip_prefix("of=")
@@ -72,29 +92,41 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
                         "/dev/null" | "/dev/zero" | "/dev/random" | "/dev/urandom"
                     )
                 {
-                    return Some("dd 写入块设备");
+                    return Some(DangerReason {
+                        key: "dd_block",
+                        en: "dd writing to a block device",
+                    });
                 }
             }
         }
-        // 关机/重启
+        // Shutdown/reboot
         if matches!(base, "shutdown" | "reboot" | "halt" | "poweroff") {
-            return Some("关机/重启操作");
+            return Some(DangerReason {
+                key: "shutdown",
+                en: "shutdown/reboot",
+            });
         }
         if base == "systemctl"
             && tokens
                 .get(i + 1)
                 .is_some_and(|next| matches!(*next, "poweroff" | "reboot" | "halt" | "kexec"))
         {
-            return Some("关机/重启操作");
+            return Some(DangerReason {
+                key: "shutdown",
+                en: "shutdown/reboot",
+            });
         }
         if base == "init"
             && tokens
                 .get(i + 1)
                 .is_some_and(|next| matches!(*next, "0" | "6"))
         {
-            return Some("关机/重启操作");
+            return Some(DangerReason {
+                key: "shutdown",
+                en: "shutdown/reboot",
+            });
         }
-        // 递归改权/改属根目录
+        // Recursive permission/ownership change on the root directory
         if base == "chmod" || base == "chown" {
             let recursive = tokens[i + 1..]
                 .iter()
@@ -102,10 +134,13 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
             let root_target = tokens[i + 1..].contains(&"/");
             let is_777 = tokens[i + 1..].contains(&"777");
             if recursive && root_target && (base == "chown" || is_777) {
-                return Some("递归改权/改属根目录");
+                return Some(DangerReason {
+                    key: "chmod_root",
+                    en: "recursive chmod/chown on /",
+                });
             }
         }
-        // git push --force / -f 不拦（常见操作，审批模式兜底）
+        // git push --force / -f is not blocked (a common operation; approval mode is the safety net)
     }
     None
 }
@@ -124,13 +159,13 @@ impl Tool for Bash {
             "type": "function",
             "function": {
                 "name": "Bash",
-                "description": "执行 shell 命令并返回 stdout/stderr 与退出码。工作目录为工作区根。高风险命令会弹窗请用户确认。Shell 选择：Unix 优先原生 bash（无则 sh），Windows 优先 Git Bash（Unix 语法）、未安装回退 cmd /C——以系统提示 env 块的 Shell 标注为准。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0（git 不会交互提问挂死）。timeout 默认 60s 最大 300s，超时自动转后台任务继续跑（输出不丢）；输出超 30KB 时完整内容落盘 .pigcode/tool-results/ 并返回头尾预览，累计超 16MiB 强制停止。长时命令（dev server/watch/长构建）也可用 run_in_background 直接后台运行。",
+                "description": "Execute a shell command and return stdout/stderr with the exit code. The working directory is the workspace root. High-risk commands trigger a user confirmation dialog. Shell selection: Unix prefers native bash (falling back to sh); Windows prefers Git Bash (Unix syntax), falling back to cmd /C when Git Bash is not installed — see the Shell line of the env block in the system prompt. NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0 are injected (git never blocks on an interactive prompt). timeout defaults to 60s and is capped at 300s; on timeout the command is moved to a background task and keeps running (no output lost). Output over 30KB is spilled to .pigcode/tool-results/ with a head/tail preview returned; a cumulative 16MiB hard stop applies. Long-lived commands (dev servers, watchers, long builds) can also be run directly in the background with run_in_background.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "要执行的命令" },
-                        "run_in_background": { "type": "boolean", "description": "true 时后台运行，立即返回 task_id（默认 false）" },
-                        "timeout": { "type": "integer", "description": "超时秒数，默认 60，最大 300；超时后命令自动转入后台继续运行，不丢输出" }
+                        "command": { "type": "string", "description": "The command to execute" },
+                        "run_in_background": { "type": "boolean", "description": "true runs the command in the background and returns a task_id immediately (default false)" },
+                        "timeout": { "type": "integer", "description": "Timeout in seconds; default 60, max 300. On timeout the command moves to a background task and keeps running without losing output" }
                     },
                     "required": ["command"]
                 }
@@ -144,13 +179,15 @@ impl Tool for Bash {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let command = args["command"].as_str().ok_or("缺少参数 command")?;
-            // 黑名单（is_dangerous_command）的拦截在会话层：命中 → 强制审批弹窗，
-            // 用户 Allow 才走到这里；execute 层不再硬拒。
+            let command = args["command"]
+                .as_str()
+                .ok_or("Missing required parameter: command")?;
+            // The blocklist (is_dangerous_command) is enforced at the session layer: a hit → forced approval dialog;
+            // execution reaches here only after the user allows; the execute layer no longer hard-rejects.
             if args["run_in_background"].as_bool().unwrap_or(false) {
                 let task_id = crate::task::spawn_background(ctx.state, ctx.cwd, command);
                 return Ok(ToolEffect::plain(format!(
-                    "已在后台启动，task_id: {task_id}。用 TaskOutput 查看输出，TaskStop 停止。"
+                    "Started in the background, task_id: {task_id}. Use TaskOutput to check its output and TaskStop to stop it."
                 )));
             }
             let secs = args["timeout"].as_u64().unwrap_or(60).clamp(1, 300);
@@ -163,11 +200,11 @@ impl Tool for Bash {
             .await
             {
                 crate::task::ForegroundOutcome::SpawnFailed { error } => {
-                    Err(format!("启动命令失败: {error}"))
+                    Err(format!("Failed to start command: {error}"))
                 }
                 crate::task::ForegroundOutcome::TimedOut { task_id } => {
                     Ok(ToolEffect::plain(format!(
-                        "命令超过 {secs}s 未结束，已转入后台任务 {task_id}（输出持续保留）。用 TaskOutput 查看，TaskStop 停止。"
+                        "Command did not finish within {secs}s; moved to background task {task_id} (output is preserved). Use TaskOutput to check it and TaskStop to stop it."
                     )))
                 }
                 crate::task::ForegroundOutcome::Completed {
@@ -177,13 +214,13 @@ impl Tool for Bash {
                 } => {
                     let mut text = output;
                     if text.chars().count() <= MAX_BASH_OUTPUT {
-                        // 小输出不留痕：清掉 spill 文件
+                        // Small outputs leave no trace: remove the spill file
                         if let Some(path) = &spill_path {
                             let _ = std::fs::remove_file(path);
                         }
                         text.push_str(&format!("\n[exit code: {code}]"));
                     } else {
-                        // 头尾预览 + 全量在 spill 文件（注册表 output 有 64KB 滚动上限，不作数）
+                        // Head/tail preview + the full output in the spill file (the registry output has a 64KB rolling cap and does not count)
                         let total = text.chars().count();
                         let head: String = text.chars().take(4096).collect();
                         let tail = crate::task::tail_chars(&text, 1024);
@@ -194,9 +231,9 @@ impl Tool for Bash {
                                     .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                                     .unwrap_or_else(|_| path.display().to_string())
                             })
-                            .unwrap_or_else(|| "（未知路径）".to_string());
+                            .unwrap_or_else(|| "(unknown path)".to_string());
                         text = format!(
-                            "{head}\n\n[...中间省略...]\n\n{tail}\n\n[输出过长（共 {total} 字符），完整输出已保存到 {spill_display}，可用 Read 分页查看]\n[exit code: {code}]"
+                            "{head}\n\n[...middle omitted...]\n\n{tail}\n\n[Output too long ({total} chars total); the full output was saved to {spill_display} — page through it with Read]\n[exit code: {code}]"
                         );
                     }
                     Ok(ToolEffect::plain(text))

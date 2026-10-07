@@ -14,24 +14,24 @@ pub(crate) struct CompleteChoice {
 #[derive(Deserialize)]
 pub(crate) struct CompleteMessage {
     content: Option<String>,
-    /// 有值 = 模型在摘要时试图调用工具（摘要指令禁止），调用方应落回截断路径
+    /// Some = the model tried to call a tool while summarizing (forbidden by the summary instructions); the caller should fall back to the truncation path
     tool_calls: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct CompleteBlock {
     text: Option<String>,
-    /// 块类型：tool_use = 模型在摘要时试图调用工具（同上）
+    /// Block type: tool_use = the model tried to call a tool while summarizing (see above)
     #[serde(rename = "type")]
     kind: Option<String>,
 }
 
-/// 非流式一次性请求（compaction 摘要）。
+/// Non-streaming one-shot request (compaction summary).
 pub async fn complete_text(
     config: &ResolvedModel,
     user_content: String,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<String, String> {
+) -> Result<String, CoreError> {
     let client = http_client();
     match config.api_format {
         ApiFormat::OpenAiChat => {
@@ -47,25 +47,29 @@ pub async fn complete_text(
                     .bearer_auth(&config.api_key)
                     .json(&body)
                     .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err("已取消".to_string()),
+                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
-                return Err(format!("HTTP {status}: {detail}"));
+                return Err(CoreError::Internal {
+                    detail: format!("HTTP {status}: {detail}"),
+                });
             }
-            let parsed: CompleteResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("解析响应失败: {e}"))?;
+            let parsed: CompleteResponse =
+                response.json().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?;
             parsed
                 .choices
                 .and_then(|mut c| c.pop())
                 .and_then(|c| c.message)
                 .and_then(|m| m.content)
                 .filter(|content| !content.is_empty())
-                .ok_or_else(|| "响应无内容".to_string())
+                .ok_or_else(|| CoreError::Internal {
+                    detail: "Response has no content".to_string(),
+                })
         }
         ApiFormat::AnthropicMessages => {
             let body = serde_json::json!({
@@ -81,41 +85,45 @@ pub async fn complete_text(
                     .header("anthropic-version", "2023-06-01")
                     .json(&body)
                     .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err("已取消".to_string()),
+                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
-                return Err(format!("HTTP {status}: {detail}"));
+                return Err(CoreError::Internal {
+                    detail: format!("HTTP {status}: {detail}"),
+                });
             }
-            let parsed: CompleteResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("解析响应失败: {e}"))?;
+            let parsed: CompleteResponse =
+                response.json().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?;
             parsed
                 .content
                 .and_then(|blocks| blocks.into_iter().find_map(|b| b.text))
                 .filter(|text| !text.is_empty())
-                .ok_or_else(|| "响应无内容".to_string())
+                .ok_or_else(|| CoreError::Internal {
+                    detail: "Response has no content".to_string(),
+                })
         }
     }
 }
 
-/// 非流式一次性请求（compaction 摘要）多消息形态：完整消息列表 + 工具清单。
-/// 与会话请求同一份 system/tools/历史字节 → OpenAI 系自动前缀缓存命中上次
-/// 回合写入的缓存（ZCode 同管线投影 / kimi-code 同 history 数组的同款取舍）。
-/// 模型若在摘要时返回工具调用（指令禁止），按失败处理，调用方落回截断路径。
+/// Non-streaming one-shot request (compaction summary), multi-message form: full message list + tool list.
+/// The same system/tools/history bytes as the session request -> OpenAI-family automatic prefix caching hits the cache written
+/// by the previous turn (same trade-off as ZCode's same-pipeline projection / kimi-code's same history array).
+/// If the model returns tool calls while summarizing (forbidden by the instructions), treat it as a failure; the caller falls back to the truncation path.
 pub async fn complete_messages(
     config: &ResolvedModel,
     messages: &[ChatMsg],
     tools: &[serde_json::Value],
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<String, String> {
+) -> Result<String, CoreError> {
     let client = http_client();
     match config.api_format {
         ApiFormat::OpenAiChat => {
-            // 与流式路径同一套工具组装（服务端搜索工具按能力注入），缓存前缀才对齐
+            // The same tool assembly as the streaming path (server-side search tool injected per capability), so the cache prefix aligns
             let tools = openai_request_tools(config, tools);
             let mut body = serde_json::json!({
                 "model": config.model,
@@ -132,36 +140,44 @@ pub async fn complete_messages(
                     .bearer_auth(&config.api_key)
                     .json(&body)
                     .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err("已取消".to_string()),
+                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
-                return Err(format!("HTTP {status}: {detail}"));
+                return Err(CoreError::Internal {
+                    detail: format!("HTTP {status}: {detail}"),
+                });
             }
-            let parsed: CompleteResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("解析响应失败: {e}"))?;
+            let parsed: CompleteResponse =
+                response.json().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?;
             let message = parsed
                 .choices
                 .and_then(|mut c| c.pop())
                 .and_then(|c| c.message)
-                .ok_or_else(|| "响应无消息".to_string())?;
+                .ok_or_else(|| CoreError::Internal {
+                    detail: "Response has no message".to_string(),
+                })?;
             if message.tool_calls.is_some() {
-                return Err("摘要响应包含工具调用".to_string());
+                return Err(CoreError::Internal {
+                    detail: "Summary response contains tool calls".to_string(),
+                });
             }
             message
                 .content
                 .filter(|content| !content.is_empty())
-                .ok_or_else(|| "响应无内容".to_string())
+                .ok_or_else(|| CoreError::Internal {
+                    detail: "Response has no content".to_string(),
+                })
         }
         ApiFormat::AnthropicMessages => {
             let (system, msgs) = to_anthropic_messages(messages);
-            // 与流式路径同一套工具组装（OpenAI 线格式 → Anthropic 形态 +
-            // 能力开启时的服务端搜索工具）。直接透传 root_schemas 的 OpenAI
-            // 线格式会被 Anthropic 兼容端点 422 拒绝（实测 Kimi 报错）
+            // The same tool assembly as the streaming path (OpenAI wire shape -> Anthropic shape +
+            // the server-side search tool when the capability is on). Passing root_schemas' OpenAI
+            // wire shape through directly gets rejected with 422 by Anthropic-compatible endpoints (Kimi errors in practice)
             let anthropic_tools = anthropic_request_tools(config, tools);
             let mut body = serde_json::json!({
                 "model": config.model,
@@ -182,38 +198,46 @@ pub async fn complete_messages(
                     .header("anthropic-version", "2023-06-01")
                     .json(&body)
                     .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err("已取消".to_string()),
+                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
-                return Err(format!("HTTP {status}: {detail}"));
+                return Err(CoreError::Internal {
+                    detail: format!("HTTP {status}: {detail}"),
+                });
             }
-            let parsed: CompleteResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("解析响应失败: {e}"))?;
-            let blocks = parsed.content.ok_or_else(|| "响应无内容".to_string())?;
+            let parsed: CompleteResponse =
+                response.json().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?;
+            let blocks = parsed.content.ok_or_else(|| CoreError::Internal {
+                detail: "Response has no content".to_string(),
+            })?;
             if blocks.iter().any(|b| b.kind.as_deref() == Some("tool_use")) {
-                return Err("摘要响应包含工具调用".to_string());
+                return Err(CoreError::Internal {
+                    detail: "Summary response contains tool calls".to_string(),
+                });
             }
             blocks
                 .into_iter()
                 .find_map(|b| b.text)
                 .filter(|text| !text.is_empty())
-                .ok_or_else(|| "响应无内容".to_string())
+                .ok_or_else(|| CoreError::Internal {
+                    detail: "Response has no content".to_string(),
+                })
         }
     }
 }
 
-/// 连通性测试：最小请求，2xx 即通过。
+/// Connectivity test: minimal request, any 2xx passes. The result is carried as a structured ConnTestResult (localized in the UI).
 pub async fn test_provider(
     base_url: &str,
     api_key: &str,
     format: ApiFormat,
     model: &str,
-) -> Result<String, String> {
+) -> ConnTestResult {
     let client = http_client();
     let send = async {
         match format {
@@ -249,28 +273,46 @@ pub async fn test_provider(
             }
         }
     };
-    let response = tokio::time::timeout(std::time::Duration::from_secs(10), send)
-        .await
-        .map_err(|_| "连接超时（10s）".to_string())?
-        .map_err(net_err)?;
+    const TIMEOUT_SECS: u64 = 10;
+    let response =
+        match tokio::time::timeout(std::time::Duration::from_secs(TIMEOUT_SECS), send).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                // Network errors fold in the root cause and become the failure detail (same policy as streaming requests)
+                let CoreError::Network { detail } = net_err(e) else {
+                    unreachable!("net_err is always Network")
+                };
+                return ConnTestResult::Failed { detail };
+            }
+            Err(_) => {
+                return ConnTestResult::Timeout { secs: TIMEOUT_SECS };
+            }
+        };
     let status = response.status();
     if status.is_success() {
-        Ok(format!("连接成功（HTTP {status}）"))
+        ConnTestResult::Connected {
+            status: status.as_u16(),
+        }
     } else {
         let detail = response.text().await.unwrap_or_default();
         let detail: String = detail.chars().take(200).collect();
-        Err(format!("HTTP {status}: {detail}"))
+        ConnTestResult::Failed {
+            detail: format!("HTTP {status}: {detail}"),
+        }
     }
 }
 
-/// 命令行网络探针（pig-app 的 PIG_NET_TEST=1 触发，不开窗口）：
-/// 读取应用真实配置，逐个测试已启用供应商的模型连通性（ping + 真实流式请求），
-/// 打印结果，用于网络排障。
+/// Command-line network probe (triggered by PIG_NET_TEST=1 in pig-app, opens no window):
+/// reads the app's real config and probes each enabled provider's models for connectivity one by one (ping + a real streaming request),
+/// printing the results, for network troubleshooting.
 pub fn net_test_blocking(config_path: &std::path::Path) {
     let config = match crate::config::load(config_path) {
         Ok(config) => config,
         Err(e) => {
-            println!("[net-test] 读取配置失败（{}）: {e}", config_path.display());
+            println!(
+                "[net-test] Failed to read config ({}): {e:?}",
+                config_path.display()
+            );
             return;
         }
     };
@@ -294,7 +336,7 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
                 provider.name, model.id, provider.base_url
             );
 
-            // 与发送消息完全相同的流式路径
+            // The exact same streaming path as sending a message
             let resolved = ResolvedModel {
                 base_url: provider.base_url.clone(),
                 api_key,
@@ -320,7 +362,7 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
             let mut outcome = "Finished".to_string();
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    ProviderEvent::Failed(e) => outcome = format!("Failed: {e}"),
+                    ProviderEvent::Failed(e) => outcome = format!("Failed: {e:?}"),
                     ProviderEvent::ToolCalls(_) => outcome = "ToolCalls".to_string(),
                     _ => {}
                 }
@@ -332,6 +374,6 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
         }
     }
     if tested == 0 {
-        println!("[net-test] 没有已启用的供应商模型");
+        println!("[net-test] no enabled provider model");
     }
 }

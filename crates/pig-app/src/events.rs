@@ -1,9 +1,11 @@
 use super::*;
+use pig_protocol::ConnTestResult;
 
 impl AppView {
     pub(crate) fn route_event(&mut self, event: Event, cx: &mut Context<Self>) {
-        // 已删除会话的迟到事件（删除前已入队的流式/收尾事件）直接丢弃，
-        // 防止 ensure_views 给已删会话重建僵尸视图
+        // Late events of deleted sessions (streaming/wrap-up events enqueued
+        // before deletion) are dropped outright, preventing ensure_views from
+        // rebuilding zombie views for a deleted session
         if let Some(sid) = event_session_id(&event)
             && self.deleted_sessions.contains(&sid)
         {
@@ -25,24 +27,31 @@ impl AppView {
             } => {
                 let session_id = session_id.clone();
                 eprintln!(
-                    "[model] SessionConfigured {session_id} → provider={provider_id:?} model={model_id:?} 思考={reasoning_level:?}"
+                    "[model] SessionConfigured {session_id} -> provider={provider_id:?} model={model_id:?} thinking={reasoning_level:?}"
                 );
                 self.ensure_views(&session_id, cx);
                 self.current = Some(session_id.clone());
-                // 换会话：调用轨迹 tab 若开着，重读新会话的落盘记录
+                // Session switched: if the trajectory tab is open, reload the new
+                // session's persisted records
                 if self.right_tabs.contains(&RightTab::Trajectory) {
                     self.reload_trajectory();
                 }
-                // 换了会话：先清掉上一个会话的上下文水位（有数据的会话随后会收到补发）
+                // Session switched: clear the previous session's context watermark
+                // first (sessions with data receive a re-push shortly after)
                 self.composer.update(cx, |composer, cx| {
                     composer.clear_context_usage(cx);
                 });
-                let label = if provider_name.is_empty() {
+                let label = if model.is_empty() {
+                    // No model configured: core sends an empty-string sentinel
+                    // and the UI swaps in a localized placeholder
+                    rust_i18n::t!("composer.no_model").to_string()
+                } else if provider_name.is_empty() {
                     model.clone()
                 } else {
                     format!("{provider_name}/{model}")
                 };
-                // 恢复会话的模型/模式/思考等级（core 持久化在 sessions 表）
+                // Restore the session's model/mode/reasoning level (persisted by
+                // core in the sessions table)
                 self.exec_mode = *exec_mode;
                 self.plan_enabled = *plan_enabled;
                 self.reasoning_level = reasoning_level.clone();
@@ -58,7 +67,8 @@ impl AppView {
                     composer.set_reasoning_level(reasoning_level.clone(), cx);
                     composer.set_fs_access(*fs_read_outside, *fs_write_outside, cx);
                 });
-                // 切换/新建会话：用缓存快照同步进度/任务面板（无快照则清空）
+                // Session switched/created: sync the progress/task panels from
+                // the cached snapshots (cleared when there is no snapshot)
                 let todos = self
                     .todos_by_session
                     .get(&session_id)
@@ -77,12 +87,14 @@ impl AppView {
                     self.agent
                         .send_message(session_id, text, files, images, mode);
                 }
-                // 切换/新建会话：标题栏分支跟随会话 cwd；拉工作区 git 状态（Review 面板）
+                // Session switched/created: the title bar branch follows the
+                // session cwd; pull the workspace git status (Review panel)
                 self.refresh_git_branch(Some(cwd.clone()), cx);
                 self.agent.git_status(cwd.clone());
             }
             Event::ModelInfo { id, info } => {
-                // 回填 InputState::set_value 需要 window，经 AnyWindowHandle 进入窗口上下文
+                // Backfilling InputState::set_value needs a window; enter the
+                // window context via AnyWindowHandle
                 let (id, info) = (id.clone(), info.clone());
                 let settings = self.settings.clone();
                 if let Some(handle) = cx.windows().into_iter().next() {
@@ -95,9 +107,14 @@ impl AppView {
             }
             Event::ConfigSnapshot { config } => {
                 self.config = Some(config.clone());
-                // 启动加载与每次保存后都会到达：把配置里的字体应用到全局主题（幂等）
+                // Arrives both on startup load and after every save: apply the
+                // config's fonts to the global theme (idempotent)
                 font::apply_config_fonts(config, cx);
-                // 终端面板已存在时同步 shell 配置（已开的 tab 不变，之后新建生效）
+                // The language is likewise applied idempotently (windows are not
+                // refreshed when the effective locale is unchanged)
+                crate::i18n::apply_config_language(config, cx);
+                // Sync the shell config when the terminal panel already exists
+                // (open tabs unchanged; takes effect for later new ones)
                 if let Some(panel) = &self.terminal {
                     let shell = config.terminal_shell.clone();
                     panel.update(cx, |panel, cx| panel.set_shell(shell, cx));
@@ -109,18 +126,31 @@ impl AppView {
             }
             Event::TestResult {
                 provider_id,
-                ok,
-                message,
+                result,
             } => {
+                // Structured result → (ok, localized message): failures pass the
+                // upstream English detail through verbatim
+                let (ok, message) = match result {
+                    ConnTestResult::Connected { status } => (
+                        true,
+                        rust_i18n::t!("settings.models.test_ok", status = status).to_string(),
+                    ),
+                    ConnTestResult::Timeout { .. } => (
+                        false,
+                        rust_i18n::t!("settings.models.test_timeout").to_string(),
+                    ),
+                    ConnTestResult::Failed { detail } => (false, detail.clone()),
+                };
                 self.settings.update(cx, |settings, cx| {
-                    settings.set_test_result(provider_id, *ok, message.clone(), cx);
+                    settings.set_test_result(provider_id, ok, message, cx);
                 });
             }
             Event::McpServerList {
                 session_id,
                 servers,
             } => {
-                // 设置页 MCP 状态回包：只采纳当前活动会话的应答
+                // Settings page MCP status reply: only accept the answer of the
+                // currently active session
                 if self.current.as_deref() == Some(session_id.as_str()) {
                     let servers = servers.clone();
                     self.settings.update(cx, |settings, cx| {
@@ -147,7 +177,8 @@ impl AppView {
                             .map(|alias| (p.path.display().to_string(), alias))
                     })
                     .collect();
-                // 工作区清单变化同步给设置页（MCP 页作用域选择器的候选）
+                // Sync workspace list changes to the settings page (candidates
+                // for the MCP page scope selector)
                 self.sync_scope_workspaces(cx);
             }
             Event::SessionList { sessions } => {
@@ -161,7 +192,8 @@ impl AppView {
                 self.push_hero_info(cx);
             }
             Event::SessionTitleChanged { session_id, title } => {
-                // 自动命名 sidecar 完成：只补丁标题，不重发整个列表
+                // Auto-naming sidecar finished: patch only the title, do not
+                // resend the whole list
                 if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
                     meta.title = title.clone();
                 }
@@ -170,7 +202,7 @@ impl AppView {
             Event::ExecModeChanged {
                 session_id, mode, ..
             } => {
-                // core 侧主动切了模式：chip/缓存同步
+                // Core switched the mode on its own: sync chip/cache
                 self.exec_mode = *mode;
                 if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
                     meta.exec_mode = *mode;
@@ -186,7 +218,8 @@ impl AppView {
                 enabled,
                 ..
             } => {
-                // 模型经 EnterPlanMode/ExitPlanMode 自切：chip/缓存同步
+                // The model toggled itself via EnterPlanMode/ExitPlanMode: sync
+                // chip/cache
                 self.plan_enabled = *enabled;
                 if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
                     meta.plan_enabled = *enabled;
@@ -199,10 +232,12 @@ impl AppView {
             }
             Event::Error {
                 session_id: None,
-                message,
+                error,
                 ..
             } => {
-                let message = message.clone();
+                // Core structured error → localized text (the detail is appended
+                // as the verbatim English original)
+                let message = crate::errors::core_error_text(error);
                 if self.is_hero(cx) {
                     self.hero_error = Some(message);
                 } else if let Some(sid) = self.current.clone() {
@@ -235,8 +270,10 @@ impl AppView {
                     self.hero_branch = Some(branch.clone());
                     self.agent.git_info(cwd.clone());
                 }
-                // 标题栏分支切换器：当前会话目录切了分支 → 更新 chip + 重拉分支列表，
-                // 并刷新工作区 git 状态（切分支后改动面板内容全变）
+                // Title bar branch switcher: the current session's directory
+                // switched branch → update the chip + re-pull the branch list, and
+                // refresh the workspace git status (after a branch switch the
+                // changes panel content changes entirely)
                 if self.current_cwd().as_ref() == Some(cwd) {
                     self.git_branch = Some(branch.clone());
                     self.refresh_git_branch(Some(cwd.clone()), cx);
@@ -249,7 +286,8 @@ impl AppView {
                 unstaged,
                 staged,
             } => {
-                // 工作区口径：同 cwd 的所有会话面板都更新
+                // Workspace scope: all session panels with the same cwd are
+                // updated
                 let (is_git, unstaged, staged) = (*is_git, unstaged.clone(), staged.clone());
                 let sids: Vec<String> = self
                     .metas
@@ -265,7 +303,8 @@ impl AppView {
                         });
                     }
                 }
-                // 输入框上方的改动 chip：git 口径（未暂存 + 已暂存合并统计）
+                // Changes chip above the composer: git scope (unstaged + staged
+                // merged stats)
                 if self.current.as_ref().is_some_and(|cur| sids.contains(cur)) {
                     let (adds, dels) = unstaged
                         .iter()
@@ -282,9 +321,13 @@ impl AppView {
                 }
             }
             Event::GitDiff {
-                cwd, path, diff, ..
+                cwd,
+                path,
+                diff,
+                note,
+                ..
             } => {
-                let (path, diff) = (path.clone(), diff.clone());
+                let (path, diff, note) = (path.clone(), diff.clone(), *note);
                 let sids: Vec<String> = self
                     .metas
                     .iter()
@@ -295,7 +338,7 @@ impl AppView {
                     if let Some(views) = self.views.get(&sid) {
                         let (path, diff) = (path.clone(), diff.clone());
                         views.review.update(cx, |review, cx| {
-                            review.set_git_diff(path, diff, cx);
+                            review.set_git_diff(path, diff, note, cx);
                         });
                     }
                 }
@@ -343,12 +386,14 @@ impl AppView {
                 duration_ms,
                 ..
             } => {
-                // 回合结束且轨迹 tab 在前台：重读落盘记录（本回合的新调用已写入）
+                // Turn ended with the trajectory tab in front: reload the
+                // persisted records (this turn's new calls are already written)
                 if *duration_ms > 0 && self.right_active.as_ref() == Some(&RightTab::Trajectory) {
                     self.reload_trajectory();
                 }
                 self.refresh_git_branch(self.current_cwd(), cx);
-                // 回合结束（agent 写文件已落定）：刷新工作区 git 状态
+                // Turn ended (agent file writes have settled): refresh the
+                // workspace git status
                 if let Some(meta) = self.metas.iter().find(|m| &m.id == session_id) {
                     self.agent.git_status(meta.cwd.clone());
                 }
@@ -373,7 +418,8 @@ impl AppView {
                 self.views[&session_id].thread.update(cx, |thread, cx| {
                     thread.set_compacting(false, cx);
                     if omitted == 0 {
-                        // 「历史很短，无需压缩」：短文本直接平铺
+                        // "History too short to compact": short texts are laid
+                        // out flat directly
                         thread.add_system_note(&note, cx);
                     } else {
                         thread.add_compact_note(&note, cx);
@@ -389,8 +435,9 @@ impl AppView {
                 running,
                 ..
             } => {
-                // 右侧「子代理」tab 的内容到达：只更新已开的 tab；
-                // 会话归属不符（迟到/串会话的事件）忽略
+                // Content arrived for the right "Subagent" tab: update only an
+                // already-open tab; a session mismatch (late/cross-session event)
+                // is ignored
                 if let Some(panel) = self.subagent_tabs.get(agent_id)
                     && panel.read(cx).matches_session(session_id)
                 {
@@ -413,9 +460,12 @@ impl AppView {
                 finished,
                 ..
             } => {
-                // 子代理实时增量：追加展示项 / 收尾关「运行中」。
-                // finished 后全量重拉一次收口——增量追加与初次加载分属不同任务
-                //（同一事件通道 FIFO，但读文件与驱动并发），窄竞态以全量覆盖自愈
+                // Live subagent increments: append display items / turn off
+                // "running" at the end. After finished, one full re-pull closes it
+                // out — incremental appends and the initial load belong to
+                // different tasks (the same FIFO event channel, but file reads
+                // race the driver), and the full overwrite self-heals the narrow
+                // race
                 if let Some(panel) = self.subagent_tabs.get(agent_id)
                     && panel.read(cx).matches_session(session_id)
                 {
@@ -438,7 +488,8 @@ impl AppView {
             _ => {}
         }
 
-        // 运行状态跟踪（侧栏状态点 + 当前会话的 composer 状态）
+        // Running state tracking (sidebar status dot + the current session's
+        // composer state)
         let sid = event_session_id(&event);
         if let Some(sid) = &sid {
             match &event {
@@ -455,6 +506,7 @@ impl AppView {
                     request_id,
                     tool,
                     detail,
+                    danger_key,
                     ..
                 } => {
                     self.approval_pending.insert(sid.clone());
@@ -464,8 +516,11 @@ impl AppView {
                         .find(|m| &m.id == sid)
                         .map(|m| m.cwd.display().to_string())
                         .unwrap_or_default();
-                    // 入队而非覆盖单槽：并发审批（如 Swarm 多个子代理）各留一笔，
-                    // 审批条逐笔显示、逐笔答复；同 request_id 重复事件幂等跳过
+                    // Queue instead of overwriting a single slot: concurrent
+                    // approvals (e.g. Swarm with multiple subagents) each keep an
+                    // entry, shown and answered one by one on the approval bar;
+                    // duplicate events with the same request_id are skipped
+                    // idempotently
                     let queue = self.pending_approvals.entry(sid.clone()).or_default();
                     if !queue.iter().any(|p| p.request_id == *request_id) {
                         queue.push_back(PendingApproval {
@@ -473,6 +528,7 @@ impl AppView {
                             session_id: sid.clone(),
                             tool: tool.clone(),
                             detail: detail.clone(),
+                            danger_key: danger_key.clone(),
                             cwd,
                         });
                     }
@@ -500,7 +556,7 @@ impl AppView {
             }
         }
 
-        // 路由到 per-session 视图
+        // Route to per-session views
         if let Some(sid) = &sid {
             self.ensure_views(sid, cx);
             if let Some(views) = self.views.get(sid) {
@@ -523,7 +579,8 @@ impl AppView {
                         views.review.update(cx, |review, cx| {
                             review.remove(&path, cx);
                         });
-                        // 撤销改变了工作区内容：刷新 git 状态
+                        // The revert changed workspace content: refresh git
+                        // status
                         if let Some(meta) = self.metas.iter().find(|m| &m.id == sid) {
                             self.agent.git_status(meta.cwd.clone());
                         }
@@ -564,7 +621,8 @@ impl AppView {
                 let Some(sid) = self.current.clone() else {
                     return;
                 };
-                // 用户消息由 core 的 Event::UserMessage 统一上屏（含排队出队路径）
+                // User messages reach the screen uniformly via core's
+                // Event::UserMessage (including the queued-then-dequeued path)
                 self.agent
                     .send_message(sid, text.clone(), files.clone(), images.clone(), *mode);
             }
@@ -575,7 +633,8 @@ impl AppView {
                 self.agent.git_info(cwd.clone());
                 self.hero_cwd = Some(cwd);
                 self.push_hero_info(cx);
-                // 换了工作区：按新工作区最近活跃会话重铺默认值
+                // Workspace changed: re-lay defaults from the new workspace's
+                // most recently active session
                 self.apply_hero_defaults(cx);
             }
             ComposerEvent::ClearCwd => {
@@ -614,19 +673,23 @@ impl AppView {
                 model_id,
             } => {
                 eprintln!(
-                    "[model] 收到切换 → {provider_id}/{model_id}（hero={}，原思考={:?}）",
+                    "[model] switch received -> {provider_id}/{model_id} (hero={}, previous thinking={:?})",
                     self.current.is_none(),
                     self.reasoning_level
                 );
                 self.current_model = Some((provider_id.clone(), model_id.clone()));
                 if self.current.is_none() {
-                    // hero 态的显式选择：此后的工作区种子默认值不再覆盖模型
+                    // An explicit selection in hero mode: workspace seed defaults
+                    // no longer override the model afterwards
                     self.hero_model_dirty = true;
                 }
-                // 切模型的思考等级落点（优先级从高到低）：
-                // 1. 新模型配置的默认档
-                // 2. 继承上个模型的等级（需新模型支持；None=关原样继承）
-                // 3. 继承档不被支持（Some 但不在表内）→ 启发式兜底（high → 首个非关档）
+                // Reasoning level landing after a model switch (priority high to
+                // low):
+                // 1. The new model's configured default tier
+                // 2. Inherit the previous model's level (requires the new model to
+                //    support it; None = off, inherited as-is)
+                // 3. Inherited level unsupported (Some but not in the list) →
+                //    heuristic fallback (high → first non-off tier)
                 let new_levels = self.model_reasoning_levels(provider_id, model_id);
                 let target = self
                     .model_default_reasoning_level(provider_id, model_id)
@@ -643,7 +706,7 @@ impl AppView {
                     });
                 if self.reasoning_level != target {
                     eprintln!(
-                        "[model] 切换 {model_id}：思考等级 {:?} → {:?}",
+                        "[model] switching {model_id}: thinking level {:?} -> {:?}",
                         self.reasoning_level, target
                     );
                     self.reasoning_level = target;
@@ -669,7 +732,9 @@ impl AppView {
             }
             ComposerEvent::SetReasoning(level) => {
                 self.reasoning_level = level.clone();
-                // 思考等级独立于模型选择：未显式选模型时同样写穿并生效（作用于默认模型）
+                // The reasoning level is independent of model selection:
+                // write-through and apply even without an explicit model pick
+                // (acts on the default model)
                 self.update_current_meta(|m| {
                     m.reasoning_level = level.clone();
                 });
@@ -712,9 +777,10 @@ impl AppView {
                 decision,
                 feedback,
             } => {
-                // 走 ThreadView 单一路径：按审批条携带的 request_id 定向更新线程内
-                // 审批卡状态，并经 ThreadEvent::ApprovalReply 回复 core（那里同时
-                // 从队列摘掉这笔）
+                // Take the single ThreadView path: update the in-thread approval
+                // card state directed by the request_id carried on the approval
+                // bar, and reply to core via ThreadEvent::ApprovalReply (which
+                // also removes the entry from the queue there)
                 if let Some(sid) = &self.current
                     && let Some(views) = self.views.get(sid)
                 {
@@ -730,7 +796,8 @@ impl AppView {
                 request_id,
                 answers,
             } => {
-                // 提交/跳过后立即撤掉问题条（不等回合结束），恢复输入框
+                // Remove the question bar immediately after submit/skip (not
+                // waiting for turn end) and restore the composer
                 if let Some(sid) = &self.current {
                     self.pending_questions.remove(sid);
                 }
@@ -739,8 +806,9 @@ impl AppView {
                 self.sync_composer_state(cx);
             }
             ComposerEvent::SearchFiles(query) => {
-                // 会话内按会话目录搜；hero（未建会话）按 hero 工作区搜——
-                // 此前 hero 上 @ 搜索被直接丢弃，弹框永远等不到结果
+                // In a session, search the session directory; hero (no session
+                // yet) searches the hero workspace — previously @ searches on
+                // hero were dropped outright and the popup never got results
                 let (sid, cwd) = match &self.current {
                     Some(sid) => (sid.clone(), None),
                     None => (
@@ -760,8 +828,9 @@ impl AppView {
                 self.open_right_tab(RightTab::Changes, cx);
             }
             ComposerEvent::OpenSubagent { agent_id, title } => {
-                // 「后台 Agent」弹层的任务行点击：开右侧子代理对话 tab
-                //（弹层已在 composer 侧收起；同 agent_id 聚焦不重复加载）
+                // Task row click in the "background Agent" popup: open the right
+                // subagent conversation tab (the popup already collapsed on the
+                // composer side; same agent_id focuses without reloading)
                 if let Some(sid) = self.current.clone() {
                     self.open_subagent_tab(sid, agent_id.clone(), title.clone(), cx);
                 }

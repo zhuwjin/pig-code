@@ -1,0 +1,148 @@
+_version: 2
+
+# core 结构化错误（pig_protocol::CoreError）的本地化文案：src/errors.rs 的
+# core_error_text 按键映射，渲染点（错误气泡/系统提示条/设置页状态行）统一走它。
+# 键名 = CoreError 变体的 snake_case（Mcp* 变体收进 errors.mcp.*，去掉重复前缀）；
+# 插值参数 %{e} 是英文 detail 诊断原文（上游透传），%{path}/%{id}/%{key}/%{command}/
+# %{name}/%{method} 是协议字段原样值——最终形态「中文提示: 英文 detail」。
+
+errors:
+  # 配置读写
+  config_parse:
+    zh-CN: "配置解析失败: %{e}。请检查或修复 ~/.pigcode/config.toml"
+    en: "Failed to parse config: %{e}. Please check or fix ~/.pigcode/config.toml"
+  config_read:
+    zh-CN: "读取配置失败 %{path}: %{e}"
+    en: "Failed to read config %{path}: %{e}"
+  config_parse_file:
+    zh-CN: "解析配置失败 %{path}: %{e}。请检查或修复 ~/.pigcode/config.toml"
+    en: "Failed to parse config %{path}: %{e}"
+  config_serialize:
+    zh-CN: "序列化配置失败: %{e}"
+    en: "Failed to serialize config: %{e}"
+  config_write:
+    zh-CN: "写入配置失败 %{path}: %{e}"
+    en: "Failed to write config %{path}: %{e}"
+  # 会话/分叉/撤销/压缩
+  fork_source_missing:
+    zh-CN: "源会话不存在: %{id}"
+    en: "Source session does not exist: %{id}"
+  fork_media_dir_create:
+    zh-CN: "创建分叉媒体目录失败: %{e}"
+    en: "Failed to create fork media directory: %{e}"
+  fork_media_copy:
+    zh-CN: "复制分叉媒体 %{path} 失败: %{e}"
+    en: "Failed to copy fork media %{path}: %{e}"
+  session_not_found_open:
+    zh-CN: 会话不存在，请先新建或打开
+    en: Session does not exist; create or open one first
+  session_not_found:
+    zh-CN: 会话不存在
+    en: Session does not exist
+  no_model_configured:
+    zh-CN: 未配置模型，请在 设置 → 模型设置 中添加供应商和模型
+    en: No model configured; add a provider and model in Settings → Model Settings
+  compact_unavailable:
+    zh-CN: 回合进行中或会话不存在，无法压缩
+    en: A turn is in progress or the session does not exist; cannot compact
+  provider_not_found:
+    zh-CN: 供应商不存在
+    en: Provider does not exist
+  revert_turn_in_flight:
+    zh-CN: 回合进行中，无法撤销文件
+    en: A turn is in progress; cannot revert files
+  revert_not_modified:
+    zh-CN: 文件未被修改过，无法撤销
+    en: The file has not been modified; nothing to revert
+  revert_write:
+    zh-CN: "恢复失败 %{path}: %{e}"
+    en: "Failed to restore %{path}: %{e}"
+  revert_delete:
+    zh-CN: "删除新建文件失败 %{path}: %{e}"
+    en: "Failed to delete new file %{path}: %{e}"
+  # 任务/子代理
+  git_task:
+    zh-CN: "git 任务失败: %{e}"
+    en: "git task failed: %{e}"
+  subagent_read:
+    zh-CN: "读取子代理记录失败: %{e}"
+    en: "Failed to read subagent record: %{e}"
+  subagent_read_task:
+    zh-CN: "读取子代理记录任务失败: %{e}"
+    en: "Subagent record read task failed: %{e}"
+  # 网络/流（root cause 已折叠进 detail）
+  network:
+    zh-CN: "网络错误: %{e}"
+    en: "Network error: %{e}"
+  stream_read:
+    zh-CN: "读取流失败: %{e}"
+    en: "Failed to read stream: %{e}"
+  # rollout/持久化
+  rollout_no_meta:
+    zh-CN: "rollout 缺少 meta 行: %{id}"
+    en: "rollout missing meta line: %{id}"
+  sessions_dir_create:
+    zh-CN: "创建 sessions 目录失败: %{e}"
+    en: "Failed to create sessions directory: %{e}"
+  rollout_create:
+    zh-CN: "创建 rollout 失败 %{path}: %{e}"
+    en: "Failed to create rollout %{path}: %{e}"
+  rollout_open:
+    zh-CN: "打开 rollout 失败 %{path}: %{e}"
+    en: "Failed to open rollout %{path}: %{e}"
+  rollout_read:
+    zh-CN: "读取 rollout 失败 %{path}: %{e}"
+    en: "Failed to read rollout %{path}: %{e}"
+  rollout_line_parse:
+    zh-CN: "rollout 行解析失败: %{e}"
+    en: "Failed to parse rollout line: %{e}"
+  data_dir_create:
+    zh-CN: "创建数据目录失败 %{path}: %{e}"
+    en: "Failed to create data directory %{path}: %{e}"
+  skills_state_serialize:
+    zh-CN: "序列化 skills-state 失败: %{e}"
+    en: "Failed to serialize skills-state: %{e}"
+  skills_state_write:
+    zh-CN: "写入 skills-state.json 失败: %{e}"
+    en: "Failed to write skills-state.json: %{e}"
+  # git
+  git_spawn:
+    zh-CN: "启动 git 失败: %{e}"
+    en: "Failed to start git: %{e}"
+  git_checkout:
+    zh-CN: "git checkout 失败: %{e}"
+    en: "git checkout failed: %{e}"
+  # MCP（McpServerStatus.error 复用 CoreError，设置页 MCP 服务器状态里展示）
+  mcp:
+    initialize:
+      zh-CN: "initialize 失败: %{e}"
+      en: "initialize failed: %{e}"
+    spawn:
+      zh-CN: "启动失败（%{command}）: %{e}"
+      en: "Failed to start (%{command}): %{e}"
+    notify_write:
+      zh-CN: "MCP server %{name} 通知 %{method} 写入失败: %{e}"
+      en: "MCP server %{name}: failed to write %{method} notification: %{e}"
+    invalid_url:
+      zh-CN: "url 无效: %{e}"
+      en: "Invalid URL: %{e}"
+    header_blocked:
+      zh-CN: header %{key} 由传输层管理，不允许自定义
+      en: header %{key} is managed by the transport; custom values are not allowed
+    header_name_invalid:
+      zh-CN: "header 名非法: %{key}"
+      en: "Invalid header name: %{key}"
+    header_value_invalid:
+      zh-CN: header %{key} 的值含非法字符
+      en: header %{key} value contains invalid characters
+  # 项目权限文件
+  permissions_parse:
+    zh-CN: "解析项目权限文件失败: %{e}"
+    en: "Failed to parse project permissions file: %{e}"
+  # 兜底：未细化的上游/内部错误用通用文案 + 英文 detail；反序列化出未知 kind 走 unknown
+  internal:
+    zh-CN: "操作失败，请稍后重试 (%{e})"
+    en: "Operation failed; please try again later (%{e})"
+  unknown:
+    zh-CN: 未知错误
+    en: Unknown error

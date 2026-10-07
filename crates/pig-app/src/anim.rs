@@ -1,8 +1,12 @@
-//! 展开/收起动画：内容从 0 高滑开 + 淡入；收起保持挂载播滑收淡出（内容卸载
-//! 由调用方的计时器负责，见 thread_view `drive_expand_anim` / sidebar 工作区
-//! 行点击处理）。高度目标用内容实测自然高（内层 on_prepaint 持续测量——clip/
-//! 高度帽只作用在外层，内层始终按自然高布局；未测到先隐形挂一帧量高）；
-//! 动画结束帧（delta=1）摘掉 max_h 帽，超高内容不受残留限制。
+//! Expand/collapse animation: content slides open from 0 height plus fades in;
+//! collapse keeps it mounted while playing the slide-shut fade-out (unmounting
+//! the content is the caller's timer's job, see thread_view `drive_expand_anim`
+//! and the sidebar workspace row click handling). The height target is the
+//! content's measured natural height (the inner on_prepaint keeps measuring; the
+//! clip/height cap only applies to the outer layer, the inner layer always lays
+//! out at natural height; if not yet measured, stay mounted invisibly for one
+//! frame to measure). The animation's final frame (delta=1) removes the max_h
+//! cap so extra-tall content is not limited by the leftover value.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -10,13 +14,17 @@ use std::rc::Rc;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::*;
 
-/// 展开/收起动画时长
+/// Expand/collapse animation duration
 pub(crate) const EXPAND_ANIM_DUR: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// 展开/收起动画状态：generation 每次开合 +1（作为动画元素 id 的一部分驱动重播）；
-/// collapsing = 收起动画进行中（内容保持挂载，计时器到期后卸载）；
-/// measured_h = 内容自然高度（render 时 on_prepaint 持续测量，作动画目标高——
-/// 高度由内容决定、不设固定上限；动画结束帧 delta=1 摘掉 max_h 帽）
+/// Expand/collapse animation state: generation increments by 1 on each
+/// open/close (part of the animation element id, driving the replay);
+/// collapsing = a collapse animation is in flight (content stays mounted, the
+/// timer unmounts it when it expires);
+/// measured_h = the content's natural height (continuously measured by
+/// on_prepaint during render, used as the animation target height; the height is
+/// decided by the content with no fixed cap, and the final frame delta=1 removes
+/// the max_h cap)
 #[derive(Default)]
 pub struct ExpandAnim {
     pub generation: u64,
@@ -24,8 +32,9 @@ pub struct ExpandAnim {
     pub measured_h: Rc<Cell<f32>>,
 }
 
-/// 展开/收起内容的动画包装：展开 = 内容从 0 高滑开 + 淡入；收起 = 保持挂载
-/// 滑收淡出。id 含 generation，每次开合重播
+/// Animation wrapper for expandable/collapsible content: expand = content slides
+/// open from 0 height plus fades in; collapse = stays mounted while sliding shut
+/// and fading out. The id includes generation, replaying on each open/close
 pub(crate) fn expand_anim_wrap(id: String, anim: &ExpandAnim, content: AnyElement) -> AnyElement {
     let measured = anim.measured_h.clone();
     let measured_inner = anim.measured_h.clone();
@@ -34,10 +43,12 @@ pub(crate) fn expand_anim_wrap(id: String, anim: &ExpandAnim, content: AnyElemen
         .overflow_hidden()
         .with_animation(
             id,
-            // delta 保持线性，缓动按方向在闭包内分别取：
-            // 展开 = ease-out（快开缓落）；收起 = ease-in（慢起步加速收尽——
-            // 用 ease-out 收会把动作压在前半段，剩余时间近静止地爬尾巴，
-            // 卸载计时器到期时读作「最后顿一下」
+            // delta stays linear; the easing is picked per direction inside the
+            // closure: expand = ease-out (fast open, gentle settle); collapse =
+            // ease-in (slow start, accelerating to fully shut; easing-out the
+            // collapse would cram the motion into the first half and creep
+            // nearly still through the tail, which reads as a final stutter when
+            // the unmount timer expires)
             Animation::new(EXPAND_ANIM_DUR),
             move |el, delta| {
                 let d = if collapsing {

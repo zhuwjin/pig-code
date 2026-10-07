@@ -1,10 +1,11 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-/// 与 core mcp::config::DEFAULT_TIMEOUT 对齐（配置缺省时的展示值）
+/// Aligned with core's mcp::config::DEFAULT_TIMEOUT (display value when the
+/// config omits it)
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// 空配置时的引导示例（core 支持的 stdio 形态）
+/// Onboarding example for an empty config (the stdio shape core supports)
 const MCP_EXAMPLE: &str = r#"{
   "mcpServers": {
     "filesystem": {
@@ -14,16 +15,20 @@ const MCP_EXAMPLE: &str = r#"{
   }
 }"#;
 
-/// MCP 页作用域（对齐 ZCode PluginScopeMenu）：用户级 + 工作区清单二选一
+/// MCP page scope (aligned with ZCode's PluginScopeMenu): user-level or one of
+/// the workspace list
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum McpScope {
-    /// 只看/只写用户级 `<data_dir>/mcp.json`（对所有工作区生效）
+    /// Read/write only the user-level `<data_dir>/mcp.json` (applies to all
+    /// workspaces)
     User,
-    /// 工作区：查看用户级 + 该工作区 `.pigcode/mcp.json` 的合并（同名覆盖）
+    /// Workspace: view the merge of user level plus that workspace's
+    /// `.pigcode/mcp.json` (same-name overrides)
     Workspace(PathBuf),
 }
 
-/// 工作区显示名：别名优先，否则取目录名，最后回落完整路径
+/// Workspace display name: alias first, else the directory name, finally
+/// falling back to the full path
 pub(crate) fn workspace_display_name(path: &Path, alias: Option<&str>) -> String {
     if let Some(alias) = alias.filter(|s| !s.trim().is_empty()) {
         return alias.to_string();
@@ -40,15 +45,16 @@ pub(crate) enum McpSource {
 }
 
 impl McpSource {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::User => "用户级",
-            Self::Project => "项目级",
+            Self::User => rust_i18n::t!("settings.common.scope_user").to_string(),
+            Self::Project => rust_i18n::t!("settings.common.scope_project").to_string(),
         }
     }
 }
 
-/// 对话框可选的传输类型（core 不支持 legacy SSE，只有这两种）
+/// Transport kinds selectable in the dialog (core does not support legacy SSE,
+/// only these two)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum McpTransportKind {
     Stdio,
@@ -56,15 +62,16 @@ pub(crate) enum McpTransportKind {
 }
 
 impl McpTransportKind {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Stdio => "stdio（本地命令）",
-            Self::Http => "HTTP（远程端点）",
+            Self::Stdio => rust_i18n::t!("settings.mcp.transport_stdio").to_string(),
+            Self::Http => rust_i18n::t!("settings.mcp.transport_http").to_string(),
         }
     }
 }
 
-/// server 传输形态：stdio（command/args）或远程（url）——列表展示投影
+/// Server transport shape: stdio (command/args) or remote (url) — a projection
+/// for list display
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum McpTransport {
     Stdio { command: String, args: Vec<String> },
@@ -101,35 +108,39 @@ impl McpTransport {
     }
 }
 
-/// 一个 mcp.json server 条目的展示投影：raw 保留完整 JSON（编辑回写保真），
-/// 解析结论放 transport / invalid_reason（与 core config::parse_server 同口径）
+/// Display projection of one mcp.json server entry: raw keeps the full JSON
+/// (fidelity for edit write-back), the parse conclusion goes into transport /
+/// invalid_reason (same criteria as core's config::parse_server)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct McpServerInfo {
     pub name: String,
     pub source: McpSource,
-    /// 条目原始 JSON（含 env/headers/type 及 oauth 等未知字段）
+    /// Raw entry JSON (including env/headers/type and unknown fields like oauth)
     pub raw: serde_json::Value,
     pub transport: Option<McpTransport>,
-    /// `disabled: true` 停用：core 不连接该条
+    /// Disabled by `disabled: true`: core does not connect to this entry
     pub disabled: bool,
     pub timeout_ms: Option<u64>,
-    /// 条目解析失败原因（core 连接时会跳过该条）
+    /// Why the entry failed to parse (core skips it when connecting)
     pub invalid_reason: Option<String>,
-    /// 项目级条目覆盖了用户级同名条目
+    /// This project-level entry overrides a user-level entry with the same name
     pub overrides_user: bool,
 }
 
-/// 两个配置来源文件 + 合并后的 server 清单（设置页 MCP 数据快照）
+/// The two config source files plus the merged server list (the settings
+/// page's MCP data snapshot)
 pub(crate) struct McpConfigSnapshot {
     pub user_path: PathBuf,
     pub user_exists: bool,
-    /// None = 无活动会话（未确定工作区，项目级不参与）
+    /// None = no active session (workspace undetermined, project level does not
+    /// participate)
     pub project_path: Option<PathBuf>,
     pub project_exists: bool,
     pub servers: Vec<McpServerInfo>,
 }
 
-/// 读用户级 `<data_dir>/mcp.json` + 项目级 `<workspace>/.pigcode/mcp.json` 并合并
+/// Read the user-level `<data_dir>/mcp.json` plus the project-level
+/// `<workspace>/.pigcode/mcp.json` and merge
 pub(crate) fn load_mcp_snapshot(workspace: Option<&Path>) -> McpConfigSnapshot {
     let user_path = pig_core::data_dir().join("mcp.json");
     let project_path = workspace.map(|root| root.join(".pigcode").join("mcp.json"));
@@ -154,8 +165,10 @@ fn read_servers(path: &Path, source: McpSource) -> Vec<McpServerInfo> {
         .unwrap_or_default()
 }
 
-/// 解析单个 mcp.json：文件级非法返回空；条目级非法保留该条并标注原因（供编辑修复）。
-/// 校验口径与 core config::parse_server 一致（显式 type 优先，否则按 url/command 推断）
+/// Parse a single mcp.json: file-level invalid returns empty; entry-level
+/// invalid keeps the entry with its reason annotated (for edit-and-fix).
+/// Validation criteria match core's config::parse_server (explicit type first,
+/// otherwise inferred from url/command)
 fn parse_servers(raw: &str, source: McpSource) -> Vec<McpServerInfo> {
     let Ok(file) = serde_json::from_str::<serde_json::Value>(raw) else {
         return vec![];
@@ -186,18 +199,18 @@ fn parse_server_entry(name: &str, value: &serde_json::Value, source: McpSource) 
         Some("http") | Some("streamable-http") => remote_projection(value),
         Some("sse") => (
             None,
-            Some("legacy SSE（HTTP+SSE）传输暂不支持，请用 streamable HTTP 端点".to_string()),
+            Some(rust_i18n::t!("settings.mcp.err_sse").to_string()),
         ),
         Some(other) => (
             None,
-            Some(format!("未知 type \"{other}\"（支持 stdio/http）")),
+            Some(rust_i18n::t!("settings.mcp.err_unknown_type", other = other).to_string()),
         ),
         None => match (non_empty("command"), non_empty("url")) {
             (Some(_), _) => stdio_projection(value),
             (None, Some(_)) => remote_projection(value),
             (None, None) => (
                 None,
-                Some("缺少 command（stdio 形态）或 url（远程形态）".to_string()),
+                Some(rust_i18n::t!("settings.mcp.err_missing_command_or_url").to_string()),
             ),
         },
     };
@@ -225,7 +238,10 @@ fn stdio_projection(value: &serde_json::Value) -> (Option<McpTransport>, Option<
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
     else {
-        return (None, Some("stdio 形态缺少 command".to_string()));
+        return (
+            None,
+            Some(rust_i18n::t!("settings.mcp.err_stdio_missing_command").to_string()),
+        );
     };
     let args = value
         .get("args")
@@ -251,12 +267,15 @@ fn remote_projection(value: &serde_json::Value) -> (Option<McpTransport>, Option
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
     else {
-        return (None, Some("远程形态缺少 url".to_string()));
+        return (
+            None,
+            Some(rust_i18n::t!("settings.mcp.err_remote_missing_url").to_string()),
+        );
     };
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return (
             None,
-            Some(format!("url 须以 http:// 或 https:// 开头: {url}")),
+            Some(rust_i18n::t!("settings.mcp.err_url_prefix", url = url).to_string()),
         );
     }
     (
@@ -267,8 +286,9 @@ fn remote_projection(value: &serde_json::Value) -> (Option<McpTransport>, Option
     )
 }
 
-/// 用户级为底、项目级覆盖同名（与 core 合并口径一致）；输出按名字排序。
-/// 非法/停用条目也保留（页面负责标注与编辑修复）
+/// User level as the base, project level overrides same names (same merge
+/// criteria as core); output sorted by name. Invalid/disabled entries are kept
+/// too (the page annotates them and offers edit-and-fix)
 fn merge_servers(user: Vec<McpServerInfo>, project: Vec<McpServerInfo>) -> Vec<McpServerInfo> {
     let mut merged = user;
     for mut server in project {
@@ -283,9 +303,11 @@ fn merge_servers(user: Vec<McpServerInfo>, project: Vec<McpServerInfo>) -> Vec<M
     merged
 }
 
-// ---------- mcp.json 写入（新建/编辑/删除/启停都落盘，之后整页刷新） ----------
+// ---------- mcp.json writes (create/edit/delete/enable-disable all persist,
+// then the whole page refreshes) ----------
 
-/// 读 mcp.json 的 mcpServers 对象（文件缺失/无 mcpServers → 空对象）
+/// Read the mcpServers object of mcp.json (missing file/no mcpServers → empty
+/// object)
 fn read_servers_object(path: &Path) -> serde_json::Map<String, serde_json::Value> {
     std::fs::read_to_string(path)
         .ok()
@@ -294,22 +316,25 @@ fn read_servers_object(path: &Path) -> serde_json::Map<String, serde_json::Value
         .unwrap_or_default()
 }
 
-/// 写回 mcp.json：保留 mcpServers 之外的文件级字段；既有内容非法时拒绝改写（不静默覆盖），
-/// 父目录缺失则创建
+/// Write mcp.json back: keep file-level fields other than mcpServers; refuse to
+/// rewrite when the existing content is invalid (no silent overwrite); create
+/// missing parent directories
 fn write_servers_object(
     path: &Path,
     servers: serde_json::Map<String, serde_json::Value>,
 ) -> std::io::Result<()> {
     let mut file = match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
-            std::io::Error::other(format!("既有 mcp.json 不是合法 JSON，拒绝改写: {e}"))
+            std::io::Error::other(
+                rust_i18n::t!("settings.mcp.err_existing_invalid_json", error = e).to_string(),
+            )
         })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(e),
     };
     if !file.is_object() {
         return Err(std::io::Error::other(
-            "既有 mcp.json 顶层不是对象，拒绝改写",
+            rust_i18n::t!("settings.mcp.err_existing_not_object").to_string(),
         ));
     }
     file["mcpServers"] = serde_json::Value::Object(servers);
@@ -321,21 +346,21 @@ fn write_servers_object(
     std::fs::write(path, text)
 }
 
-/// 新建/覆盖一个 server 条目
+/// Create/overwrite one server entry
 fn upsert_mcp_server(path: &Path, name: &str, entry: serde_json::Value) -> std::io::Result<()> {
     let mut servers = read_servers_object(path);
     servers.insert(name.to_string(), entry);
     write_servers_object(path, servers)
 }
 
-/// 删除一个 server 条目（文件缺失/条目不存在视为成功）
+/// Delete one server entry (missing file/missing entry counts as success)
 fn delete_mcp_server(path: &Path, name: &str) -> std::io::Result<()> {
     let mut servers = read_servers_object(path);
     servers.remove(name);
     write_servers_object(path, servers)
 }
 
-/// 启用/停用一个 server 条目（disabled: true / 移除该键）
+/// Enable/disable one server entry (disabled: true / remove the key)
 fn set_mcp_disabled(path: &Path, name: &str, disabled: bool) -> std::io::Result<()> {
     let mut servers = read_servers_object(path);
     let Some(entry) = servers.get_mut(name) else {
@@ -353,13 +378,19 @@ fn set_mcp_disabled(path: &Path, name: &str, disabled: bool) -> std::io::Result<
 
 fn format_timeout(timeout_ms: Option<u64>) -> String {
     match timeout_ms {
-        None => format!("超时 {}s（默认）", DEFAULT_TIMEOUT_MS / 1000),
-        Some(ms) if ms % 1000 == 0 => format!("超时 {}s", ms / 1000),
-        Some(ms) => format!("超时 {ms}ms"),
+        None => rust_i18n::t!(
+            "settings.mcp.timeout_default",
+            secs = DEFAULT_TIMEOUT_MS / 1000
+        )
+        .to_string(),
+        Some(ms) if ms % 1000 == 0 => {
+            rust_i18n::t!("settings.mcp.timeout_secs", secs = ms / 1000).to_string()
+        }
+        Some(ms) => rust_i18n::t!("settings.mcp.timeout_ms", ms = ms).to_string(),
     }
 }
 
-/// JSON 对象草稿的展示/回填格式：空对象或缺省 → "{}"
+/// Display/backfill format of a JSON object draft: empty object or absent → "{}"
 fn pretty_object(value: Option<&serde_json::Value>) -> String {
     match value.filter(|v| v.as_object().is_some_and(|m| !m.is_empty())) {
         Some(v) => serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".to_string()),
@@ -367,7 +398,8 @@ fn pretty_object(value: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// 环境变量/请求头草稿文本 → JSON 对象（空文本/空对象 → 空 map）
+/// Environment variable/header draft text → JSON object (blank text/empty
+/// object → empty map)
 fn parse_object_json(
     raw: &str,
     label: &str,
@@ -376,33 +408,38 @@ fn parse_object_json(
     if raw.is_empty() {
         return Ok(Default::default());
     }
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("{label}不是合法 JSON: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        rust_i18n::t!("settings.mcp.err_label_not_json", label = label, error = e).to_string()
+    })?;
     match parsed {
         serde_json::Value::Object(map) => Ok(map),
-        _ => Err(format!("{label}必须是 {{\"KEY\": \"value\"}} 形式的对象")),
+        _ => Err(rust_i18n::t!("settings.mcp.err_label_must_be_object", label = label).to_string()),
     }
 }
 
-/// 表单 → (名称, 条目 JSON)。以编辑底稿为底覆盖表单字段：oauth 等未知字段保真回写
+/// Form → (name, entry JSON). Overlay form fields on the edit base: unknown
+/// fields like oauth are written back faithfully
 fn entry_from_form(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::Value), String> {
     let name = dialog.name.read(cx).value().trim().to_string();
     if name.is_empty() {
-        return Err("名称不能为空".to_string());
+        return Err(rust_i18n::t!("settings.mcp.err_name_empty").to_string());
     }
     let mut entry = if dialog.base.is_object() {
         dialog.base.clone()
     } else {
         serde_json::json!({})
     };
-    let map = entry.as_object_mut().expect("base 为对象或空对象");
-    // command/url 二选一即可推断，去掉残留 type 避免与表单选择冲突
+    let map = entry
+        .as_object_mut()
+        .expect("base should be an object or empty object");
+    // Either command or url suffices for inference; drop a leftover type to
+    // avoid conflicting with the form choice
     map.remove("type");
     match dialog.kind {
         McpTransportKind::Stdio => {
             let command = dialog.command.read(cx).value().trim().to_string();
             if command.is_empty() {
-                return Err("stdio 形态需要填写命令".to_string());
+                return Err(rust_i18n::t!("settings.mcp.err_stdio_command").to_string());
             }
             map.insert("command".to_string(), serde_json::json!(command));
             let args_text = dialog.args.read(cx).value().to_string();
@@ -414,7 +451,10 @@ fn entry_from_form(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::
             }
             map.remove("url");
             map.remove("headers");
-            let env = parse_object_json(&dialog.env_draft, "环境变量")?;
+            let env = parse_object_json(
+                &dialog.env_draft,
+                rust_i18n::t!("settings.mcp.env_label").as_ref(),
+            )?;
             if env.is_empty() {
                 map.remove("env");
             } else {
@@ -424,16 +464,19 @@ fn entry_from_form(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::
         McpTransportKind::Http => {
             let url = dialog.url.read(cx).value().trim().to_string();
             if url.is_empty() {
-                return Err("HTTP 形态需要填写 URL".to_string());
+                return Err(rust_i18n::t!("settings.mcp.err_http_url").to_string());
             }
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err("URL 须以 http:// 或 https:// 开头".to_string());
+                return Err(rust_i18n::t!("settings.mcp.err_url_scheme").to_string());
             }
             map.insert("url".to_string(), serde_json::json!(url));
             map.remove("command");
             map.remove("args");
             map.remove("env");
-            let headers = parse_object_json(&dialog.headers_draft, "请求头")?;
+            let headers = parse_object_json(
+                &dialog.headers_draft,
+                rust_i18n::t!("settings.mcp.headers_label").as_ref(),
+            )?;
             if headers.is_empty() {
                 map.remove("headers");
             } else {
@@ -447,48 +490,48 @@ fn entry_from_form(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::
     } else {
         let ms: u64 = timeout_raw
             .parse()
-            .map_err(|_| "超时必须是正整数（毫秒）".to_string())?;
+            .map_err(|_| rust_i18n::t!("settings.mcp.err_timeout").to_string())?;
         if ms == 0 {
-            return Err("超时必须是正整数（毫秒）".to_string());
+            return Err(rust_i18n::t!("settings.mcp.err_timeout").to_string());
         }
         map.insert("timeoutMs".to_string(), serde_json::json!(ms));
     }
     Ok((name, entry))
 }
 
-/// JSON 模式 → (名称, 条目 JSON)。兼容 `{"server-name": {...}}` 与
-/// Claude 风格 `{"mcpServers": {...}}`；一次只编辑一个 server
+/// JSON mode → (name, entry JSON). Accepts both `{"server-name": {...}}` and
+/// Claude-style `{"mcpServers": {...}}`; only one server is edited at a time
 fn entry_from_json(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::Value), String> {
     let raw = dialog.json_text.read(cx).value().trim().to_string();
     if raw.is_empty() {
-        return Err("JSON 配置不能为空".to_string());
+        return Err(rust_i18n::t!("settings.mcp.err_json_empty").to_string());
     }
-    let parsed: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("不是合法 JSON: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| rust_i18n::t!("settings.mcp.err_invalid_json", error = e).to_string())?;
     let mut obj = parsed
         .as_object()
         .cloned()
-        .ok_or_else(|| "顶层必须是对象".to_string())?;
+        .ok_or_else(|| rust_i18n::t!("settings.mcp.err_top_not_object").to_string())?;
     if let Some(inner) = obj.get("mcpServers") {
         obj = inner
             .as_object()
             .cloned()
-            .ok_or_else(|| "mcpServers 字段必须是对象".to_string())?;
+            .ok_or_else(|| rust_i18n::t!("settings.mcp.err_mcpservers_not_object").to_string())?;
     }
     if obj.len() != 1 {
-        return Err("JSON 模式一次只编辑一个 server（顶层恰好一个键值对）".to_string());
+        return Err(rust_i18n::t!("settings.mcp.err_json_single_server").to_string());
     }
     let (name, entry) = obj.into_iter().next().expect("len == 1");
     if name.trim().is_empty() {
-        return Err("服务器名（JSON 键）不能为空".to_string());
+        return Err(rust_i18n::t!("settings.mcp.err_json_name_empty").to_string());
     }
     if !entry.is_object() {
-        return Err("server 配置必须是对象".to_string());
+        return Err(rust_i18n::t!("settings.mcp.err_server_config_object").to_string());
     }
     if let Some(editing) = &dialog.editing
         && name != *editing
     {
-        return Err(format!("编辑时不能改名（JSON 键必须是 \"{editing}\"）"));
+        return Err(rust_i18n::t!("settings.mcp.err_rename", editing = editing).to_string());
     }
     let has = |key: &str| {
         entry
@@ -497,12 +540,12 @@ fn entry_from_json(dialog: &McpDialog, cx: &App) -> Result<(String, serde_json::
             .is_some_and(|s| !s.trim().is_empty())
     };
     if !has("command") && !has("url") {
-        return Err("配置缺少 command（stdio 形态）或 url（远程形态）".to_string());
+        return Err(rust_i18n::t!("settings.mcp.err_config_missing_command_url").to_string());
     }
     Ok((name, entry))
 }
 
-/// JSON 解析成功后回填表单（JSON → 表单切换用）
+/// Backfill the form after JSON parses successfully (for JSON → form switching)
 fn refill_mcp_form(
     dialog: &mut McpDialog,
     name: &str,
@@ -565,12 +608,13 @@ fn refill_mcp_form(
         .update(cx, |i, cx| i.set_value(draft, window, cx));
 }
 
-/// 环境变量是否「已配置」（与 core tool/websearch.rs 同口径：存在且非空白）
+/// Whether an environment variable is "configured" (same criteria as core's
+/// tool/websearch.rs: present and non-blank)
 fn api_key_configured(raw: Option<String>) -> bool {
     raw.is_some_and(|value| !value.trim().is_empty())
 }
 
-/// (tavily, brave) 配置状态；同时配置时 Tavily 优先
+/// (tavily, brave) configuration status; Tavily wins when both are configured
 fn websearch_backends() -> (bool, bool) {
     (
         api_key_configured(std::env::var("TAVILY_API_KEY").ok()),
@@ -579,40 +623,48 @@ fn websearch_backends() -> (bool, bool) {
 }
 
 impl SettingsView {
-    /// 刷新 MCP 页：作废状态查询结果，AppView 收到事件后重读配置并重新查询 core
+    /// Refresh the MCP page: invalidate the status query result; on the event
+    /// AppView re-reads config and queries core again
     pub(crate) fn refresh_mcp(&mut self, cx: &mut Context<Self>) {
         self.mcp_connection = None;
         cx.emit(SettingsEvent::RefreshMcp);
         cx.notify();
     }
 
-    /// AppView 刷新 MCP 快照时读取：当前选中的作用域
+    /// Read by AppView when refreshing the MCP snapshot: the currently selected
+    /// scope
     pub(crate) fn mcp_scope(&self) -> &McpScope {
         &self.mcp_scope
     }
 
-    /// 工作区清单喂入（侧栏同口径：可见工作区 ∪ 会话 cwd，含显示名）
+    /// Workspace list feed (same source as the sidebar: visible workspaces ∪
+    /// session cwd, with display names)
     pub(crate) fn set_scope_workspaces(
         &mut self,
         workspaces: Vec<(PathBuf, String)>,
         cx: &mut Context<Self>,
     ) {
         self.scope_workspaces = workspaces;
-        // 归档页工作区过滤下拉的选项随该清单重建（render 前经脏标记同步）
+        // The archived page workspace filter dropdown's options rebuild from
+        // this list (synced via the dirty flag before render)
         self.archived_ws_dirty = true;
         cx.notify();
     }
 
-    /// 连接状态是否适用于当前查看的配置：固定工作区 ≠ 会话工作区时不适用
+    /// Whether connection status applies to the config being viewed: not
+    /// applicable when the pinned workspace ≠ session workspace
     fn mcp_status_applicable(&self) -> bool {
         match &self.mcp_scope {
-            // 用户级条目参与会话连接（session 连的是 用户级+会话工作区 的合并）
+            // User-level entries participate in the session connection (the
+            // session connects the merge of user level plus the session
+            // workspace)
             McpScope::User => true,
             McpScope::Workspace(path) => self.session_cwd.as_deref() == Some(path.as_path()),
         }
     }
 
-    /// 切换作用域：换目标后整页刷新（AppView 按新作用域重读快照）
+    /// Switch scope: refresh the whole page after changing the target (AppView
+    /// re-reads the snapshot for the new scope)
     fn set_mcp_scope(&mut self, scope: McpScope, cx: &mut Context<Self>) {
         self.mcp_scope_popup = false;
         if self.mcp_scope == scope {
@@ -623,10 +675,14 @@ impl SettingsView {
         self.refresh_mcp(cx);
     }
 
-    /// 作用域选择器（pill 按钮；下拉经 deferred 弹层，列表区滚动不裁剪）
+    /// Scope selector (pill button; the dropdown goes through a deferred popup
+    /// so list scrolling doesn't clip it)
     pub(crate) fn render_mcp_scope(&self, cx: &mut Context<Self>) -> AnyElement {
         let (icon, label) = match &self.mcp_scope {
-            McpScope::User => (IconName::User, "用户级".to_string()),
+            McpScope::User => (
+                IconName::User,
+                rust_i18n::t!("settings.common.scope_user").to_string(),
+            ),
             McpScope::Workspace(path) => {
                 let alias = self
                     .scope_workspaces
@@ -651,8 +707,12 @@ impl SettingsView {
                     .icon(icon)
                     .label(label)
                     .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                        // 弹层打开时点按钮：按下先触发弹层 outside-close（记录按下位置），
-                        // 紧随的 click 按同一位置吞掉，避免收起又马上弹开（API 格式弹层同款）
+                        // Clicking the button while the popup is open: the
+                        // press first triggers the popup's outside-close
+                        // (recording the press position), and the immediately
+                        // following click is swallowed by matching the same
+                        // position, avoiding collapse-then-reopen (same
+                        // approach as the API format popup)
                         let down_pos = match event {
                             ClickEvent::Mouse(e) => Some(e.down.position),
                             _ => None,
@@ -674,7 +734,8 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 作用域下拉：用户级 + 工作区清单（会话所在工作区带「当前会话」标记）
+    /// Scope dropdown: user level plus the workspace list (the session's
+    /// workspace gets a "current session" badge)
     fn render_mcp_scope_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut popup = v_flex()
             .id("mcp-scope-popup")
@@ -693,7 +754,9 @@ impl SettingsView {
                 cx.notify();
             }))
             .child(
-                // 用户级：选中不打高亮，行尾打勾（ZCode 同款）；hover 圆角描边高亮
+                // User level: selection uses no highlight fill, a check at
+                // the row end (like ZCode); hover highlights with a rounded
+                // border
                 h_flex()
                     .id("mcp-scope-user")
                     .gap_2()
@@ -718,13 +781,19 @@ impl SettingsView {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().child("用户级"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(rust_i18n::t!("settings.common.scope_user").to_string()),
+                            )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .truncate()
-                                    .child("全局配置，对所有工作区生效"),
+                                    .child(
+                                        rust_i18n::t!("settings.mcp.scope_user_hint").to_string(),
+                                    ),
                             ),
                     )
                     .when(self.mcp_scope == McpScope::User, |this| {
@@ -743,7 +812,7 @@ impl SettingsView {
                     .py_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("工作区"),
+                    .child(rust_i18n::t!("settings.common.workspace_section").to_string()),
             );
             for (path, display) in self.scope_workspaces.clone() {
                 let selected = self.mcp_scope == McpScope::Workspace(path.clone());
@@ -788,7 +857,12 @@ impl SettingsView {
                                                     .rounded_sm()
                                                     .bg(cx.theme().accent)
                                                     .flex_shrink_0()
-                                                    .child("当前会话"),
+                                                    .child(
+                                                        rust_i18n::t!(
+                                                            "settings.common.current_session"
+                                                        )
+                                                        .to_string(),
+                                                    ),
                                             )
                                         }),
                                 )
@@ -824,8 +898,10 @@ impl SettingsView {
         .into_any_element()
     }
 
-    /// 对话框目标文件路径（按作用域）。项目级条目只在项目路径已知（已打开会话）时
-    /// 才会出现；若快照已刷新为无会话状态则返回 None，调用方放弃写入
+    /// The dialog's target file path (by scope). Project-level entries only
+    /// exist when the project path is known (a session is open); if the
+    /// snapshot has since refreshed to a no-session state, return None and the
+    /// caller gives up writing
     fn mcp_target_path(snapshot: &McpConfigSnapshot, scope: McpSource) -> Option<PathBuf> {
         match scope {
             McpSource::User => Some(snapshot.user_path.clone()),
@@ -833,7 +909,8 @@ impl SettingsView {
         }
     }
 
-    /// 启停开关：把 disabled 写进条目所在文件，然后整页刷新
+    /// Enable/disable toggle: write disabled into the entry's source file, then
+    /// refresh the whole page
     fn toggle_mcp_server(
         &mut self,
         name: &str,
@@ -854,13 +931,21 @@ impl SettingsView {
                 self.refresh_mcp(cx);
             }
             Err(e) => {
-                self.mcp_write_error = Some(format!("写入 {} 失败：{e}", path.display()));
+                self.mcp_write_error = Some(
+                    rust_i18n::t!(
+                        "settings.mcp.write_failed",
+                        path = path.display(),
+                        error = e
+                    )
+                    .to_string(),
+                );
                 cx.notify();
             }
         }
     }
 
-    /// 打开新建（name=None）/编辑对话框，按现有条目预填
+    /// Open the create (name=None)/edit dialog, prefilled from the existing
+    /// entry
     pub(crate) fn open_mcp_dialog(
         &mut self,
         name: Option<&str>,
@@ -892,7 +977,9 @@ impl SettingsView {
             .and_then(|server| server.timeout_ms)
             .map(|ms| ms.to_string())
             .unwrap_or_default();
-        // 项目级目标的工作区名（快照项目路径上溯两级 = 工作区根；显示名走别名表）
+        // Workspace name for a project-level target (two levels up from the
+        // snapshot's project path = workspace root; display name via the alias
+        // table)
         let project_root = snapshot
             .and_then(|s| s.project_path.as_ref())
             .and_then(|p| p.parent())
@@ -923,7 +1010,7 @@ impl SettingsView {
             kind,
             name: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("例如 filesystem")
+                    .placeholder(rust_i18n::t!("settings.mcp.name_placeholder"))
                     .default_value(name.map(str::to_string).unwrap_or_default())
             }),
             command: cx.new(|cx| {
@@ -943,7 +1030,7 @@ impl SettingsView {
             }),
             timeout: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("30000（默认）")
+                    .placeholder(rust_i18n::t!("settings.mcp.timeout_placeholder"))
                     .default_value(timeout)
             }),
             project_workspace,
@@ -965,7 +1052,8 @@ impl SettingsView {
             base,
             error: None,
         };
-        // 环境变量/请求头草稿随编辑框内容变化（切换传输类型时交换显示）
+        // Environment variable/header drafts follow the textarea's content
+        // (swapped for display when switching transport kind)
         let textarea = dialog.env_headers.clone();
         self._subscriptions.push(cx.subscribe_in(
             &textarea,
@@ -991,7 +1079,8 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 保存对话框：表单/JSON 模式各自校验后写入目标文件并刷新
+    /// Save the dialog: form/JSON mode each validate, then write the target
+    /// file and refresh
     fn save_mcp_dialog(&mut self, cx: &mut Context<Self>) {
         let parsed = {
             let Some(dialog) = self.mcp_dialog.as_ref() else {
@@ -1015,7 +1104,7 @@ impl SettingsView {
         };
         let Some(snapshot) = self.mcp_snapshot.as_ref() else {
             if let Some(dialog) = self.mcp_dialog.as_mut() {
-                dialog.error = Some("配置尚未加载完成，请稍后重试".to_string());
+                dialog.error = Some(rust_i18n::t!("settings.mcp.err_not_loaded").to_string());
             }
             cx.notify();
             return;
@@ -1025,7 +1114,8 @@ impl SettingsView {
         };
         let Some(path) = Self::mcp_target_path(snapshot, dialog.scope) else {
             if let Some(dialog) = self.mcp_dialog.as_mut() {
-                dialog.error = Some("项目级路径不可用（会话已关闭），请改用用户级".to_string());
+                dialog.error =
+                    Some(rust_i18n::t!("settings.mcp.err_project_unavailable").to_string());
             }
             cx.notify();
             return;
@@ -1037,7 +1127,12 @@ impl SettingsView {
                 self.refresh_mcp(cx);
             }
             Err(e) => {
-                let message = format!("写入 {} 失败：{e}", path.display());
+                let message = rust_i18n::t!(
+                    "settings.mcp.write_failed",
+                    path = path.display(),
+                    error = e
+                )
+                .to_string();
                 self.mcp_write_error = Some(message.clone());
                 if let Some(dialog) = self.mcp_dialog.as_mut() {
                     dialog.error = Some(message);
@@ -1047,7 +1142,9 @@ impl SettingsView {
         }
     }
 
-    /// 删除正在编辑的 server（两步确认）；从其来源文件删除——项目级删除后用户级同名条目自然生效
+    /// Delete the server being edited (two-step confirm); removed from its
+    /// source file — after a project-level deletion the user-level same-name
+    /// entry takes effect again
     fn delete_mcp_dialog_server(&mut self, cx: &mut Context<Self>) {
         let (armed, editing, scope) = {
             let Some(dialog) = &self.mcp_dialog else {
@@ -1072,7 +1169,8 @@ impl SettingsView {
         let Some(path) = Self::mcp_target_path(snapshot, scope) else {
             if let Some(dialog) = self.mcp_dialog.as_mut() {
                 dialog.delete_armed = false;
-                dialog.error = Some("项目级路径不可用（会话已关闭），删除已取消".to_string());
+                dialog.error =
+                    Some(rust_i18n::t!("settings.mcp.err_project_delete_unavailable").to_string());
             }
             cx.notify();
             return;
@@ -1084,7 +1182,12 @@ impl SettingsView {
                 self.refresh_mcp(cx);
             }
             Err(e) => {
-                let message = format!("删除失败（{}）：{e}", path.display());
+                let message = rust_i18n::t!(
+                    "settings.mcp.delete_failed",
+                    path = path.display(),
+                    error = e
+                )
+                .to_string();
                 self.mcp_write_error = Some(message.clone());
                 if let Some(dialog) = self.mcp_dialog.as_mut() {
                     dialog.delete_armed = false;
@@ -1095,7 +1198,8 @@ impl SettingsView {
         }
     }
 
-    /// 切换传输类型：当前编辑框内容存回草稿，再换另一份草稿显示
+    /// Switch transport kind: save the current textarea content back into its
+    /// draft, then display the other draft
     fn set_mcp_dialog_kind(
         &mut self,
         kind: McpTransportKind,
@@ -1125,7 +1229,8 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 切换作用域（仅新建时可选；项目级要求已打开会话）
+    /// Switch scope (only selectable when creating; project level requires an
+    /// open session)
     fn set_mcp_dialog_scope(&mut self, scope: McpSource, cx: &mut Context<Self>) {
         let Some(dialog) = self.mcp_dialog.as_mut() else {
             return;
@@ -1140,7 +1245,8 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 表单 ⇄ JSON 模式切换：双向都从对侧重新推导（JSON 解析失败则留在 JSON 模式）
+    /// Form ⇄ JSON mode switch: both directions re-derive from the other side
+    /// (a JSON parse failure stays in JSON mode)
     fn set_mcp_json_mode(&mut self, json_mode: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.mcp_dialog.as_mut() else {
             return;
@@ -1192,7 +1298,11 @@ impl SettingsView {
                 .py_8()
                 .text_color(cx.theme().muted_foreground)
                 .child(Spinner::new().small())
-                .child(div().text_sm().child("正在读取配置…"))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(rust_i18n::t!("settings.mcp.loading").to_string()),
+                )
                 .into_any_element();
         };
 
@@ -1227,7 +1337,8 @@ impl SettingsView {
                     .child(error.clone()),
             );
         }
-        // 作用域行：选择器 +（有 server 时）连接状态摘要
+        // Scope row: the selector plus (when servers exist) the connection
+        // status summary
         page = page.child(
             h_flex()
                 .w_full()
@@ -1251,7 +1362,7 @@ impl SettingsView {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .py_6()
-                    .child("没有匹配的 MCP 服务器"),
+                    .child(rust_i18n::t!("settings.mcp.no_match").to_string()),
             );
         } else {
             page = page
@@ -1259,7 +1370,12 @@ impl SettingsView {
                     div()
                         .text_sm()
                         .font_semibold()
-                        .child(format!("服务器（{}）", snapshot.servers.len())),
+                        .child(if snapshot.servers.len() == 1 {
+                            rust_i18n::t!("settings.mcp.server_count_one", n = 1).to_string()
+                        } else {
+                            rust_i18n::t!("settings.mcp.server_count", n = snapshot.servers.len())
+                                .to_string()
+                        }),
                 )
                 .children(
                     filtered
@@ -1276,8 +1392,10 @@ impl SettingsView {
         page.into_any_element()
     }
 
-    /// 帮助弹窗：手动编辑示例 + 配置文件路径 + 生效时机
-    ///（页头信息按钮弹出；配置未加载时省略路径段只显示格式说明）
+    /// Help dialog: manual edit example plus config file paths plus when
+    /// changes take effect (popped up by the header info button; when config is
+    /// not loaded the paths section is omitted and only the format notes are
+    /// shown)
     pub(crate) fn render_mcp_help_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .absolute()
@@ -1298,24 +1416,40 @@ impl SettingsView {
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_lg().font_semibold().child("MCP 配置说明"))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(rust_i18n::t!("settings.mcp.help_title").to_string()),
+                    )
                     .when_some(self.mcp_snapshot.as_ref(), |this, snapshot| {
                         this.child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_sm().font_semibold().child("配置文件"))
+                                .child(
+                                    div().text_sm().font_semibold().child(
+                                        rust_i18n::t!("settings.mcp.config_files").to_string(),
+                                    ),
+                                )
                                 .child(self.render_mcp_sources(snapshot, cx)),
                         )
                     })
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().font_semibold().child("手动编辑"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(rust_i18n::t!("settings.mcp.manual_edit").to_string()),
+                            )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("参考以下格式（项目级覆盖用户级同名条目）："),
+                                    .child(
+                                        rust_i18n::t!("settings.mcp.manual_edit_hint").to_string(),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1334,14 +1468,14 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("配置对之后新建的会话生效（会话级懒连接，首个回合时连接）。"),
+                            .child(rust_i18n::t!("settings.mcp.effective_hint").to_string()),
                     )
                     .child(
                         h_flex().gap_2().child(div().flex_1()).child(
                             Button::new("close-mcp-help")
                                 .primary()
                                 .small()
-                                .label("关闭")
+                                .label(rust_i18n::t!("settings.common.close"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.mcp_help_open = false;
                                     cx.notify();
@@ -1352,7 +1486,8 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 连接状态摘要行：其他工作区/无会话/查询中/未发起懒连接/已连接计数
+    /// Connection status summary row: other workspace/no session/querying/lazy
+    /// connection not started/connected count
     fn render_mcp_status(
         &self,
         snapshot: &McpConfigSnapshot,
@@ -1360,16 +1495,19 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        // 固定查看的工作区 ≠ 会话工作区：连接状态不适用（core 连的是会话工作区的配置）
+        // Pinned viewing workspace ≠ session workspace: connection status does
+        // not apply (core connects the session workspace's config)
         if !self.mcp_status_applicable() {
             return h_flex()
                 .gap_1()
                 .items_center()
                 .child(Icon::new(IconName::Info).size_3p5().text_color(muted))
                 .child(
-                    div().text_xs().text_color(muted).truncate().child(
-                        "正在查看其他工作区的项目级配置；连接状态仅对当前会话的工作区显示。",
-                    ),
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .truncate()
+                        .child(rust_i18n::t!("settings.mcp.status_other_workspace").to_string()),
                 )
                 .into_any_element();
         }
@@ -1382,14 +1520,19 @@ impl SettingsView {
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .child("未打开会话：连接状态在打开会话后显示。"),
+                        .child(rust_i18n::t!("settings.mcp.status_no_session").to_string()),
                 )
                 .into_any_element(),
             (Some(_), None) => h_flex()
                 .gap_2()
                 .items_center()
                 .child(Spinner::new().small())
-                .child(div().text_xs().text_color(muted).child("正在查询连接状态…"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(rust_i18n::t!("settings.mcp.status_querying").to_string()),
+                )
                 .into_any_element(),
             (Some(_), Some(None)) => h_flex()
                 .gap_1()
@@ -1399,7 +1542,7 @@ impl SettingsView {
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .child("当前会话尚未发起 MCP 连接（在首个回合按需建立）。"),
+                        .child(rust_i18n::t!("settings.mcp.status_lazy").to_string()),
                 )
                 .into_any_element(),
             (Some(_), Some(Some(_))) => {
@@ -1419,16 +1562,20 @@ impl SettingsView {
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(format!(
-                        "当前会话已连接 {connected}/{} 个服务器（未连接 = 连接失败或已停用）。",
-                        snapshot.servers.len()
-                    ))
+                    .child(
+                        rust_i18n::t!(
+                            "settings.mcp.status_connected",
+                            connected = connected,
+                            total = snapshot.servers.len()
+                        )
+                        .to_string(),
+                    )
                     .into_any_element()
             }
         }
     }
 
-    /// 无 server 时的引导：新建入口 + 示例 JSON
+    /// Onboarding when no servers exist: create entry point plus example JSON
     fn render_mcp_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .gap_3()
@@ -1443,13 +1590,13 @@ impl SettingsView {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("尚未配置 MCP 服务器"),
+                    .child(rust_i18n::t!("settings.mcp.empty_title").to_string()),
             )
             .child(
                 Button::new("new-mcp-empty")
                     .primary()
                     .icon(IconName::Plus)
-                    .label("新建 MCP 服务器")
+                    .label(rust_i18n::t!("settings.mcp.new_mcp_server"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_mcp_dialog(None, window, cx);
                     })),
@@ -1471,17 +1618,32 @@ impl SettingsView {
             .child(
                 v_flex()
                     .gap_2()
-                    .child(websearch_backend_row("Tavily", "TAVILY_API_KEY", "优先", tavily, cx))
-                    .child(websearch_backend_row("Brave", "BRAVE_API_KEY", "备选", brave, cx)),
+                    .child(websearch_backend_row(
+                        "Tavily",
+                        "TAVILY_API_KEY",
+                        rust_i18n::t!("settings.websearch.role_primary").as_ref(),
+                        tavily,
+                        cx,
+                    ))
+                    .child(websearch_backend_row(
+                        "Brave",
+                        "BRAVE_API_KEY",
+                        rust_i18n::t!("settings.websearch.role_fallback").as_ref(),
+                        brave,
+                        cx,
+                    )),
             )
             .child(
-                div().text_xs().text_color(cx.theme().muted_foreground).child(
-                    match active {
-                        Some(name) => format!("当前生效后端：{name}（同时配置时优先 Tavily）。"),
-                        None => "当前无生效后端：两个环境变量都未配置，WebSearch 工具不可用。"
-                            .to_string(),
-                    },
-                ),
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(match active {
+                        Some(name) => {
+                            rust_i18n::t!("settings.websearch.active_backend", name = name)
+                                .to_string()
+                        }
+                        None => rust_i18n::t!("settings.websearch.no_backend").to_string(),
+                    }),
             )
             .child(
                 v_flex()
@@ -1490,7 +1652,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("在启动应用的环境（shell / 启动器）中设置后重启生效："),
+                            .child(rust_i18n::t!("settings.websearch.env_hint").to_string()),
                     )
                     .child(
                         div()
@@ -1503,13 +1665,14 @@ impl SettingsView {
                             .text_xs()
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().muted_foreground)
-                            .child("export TAVILY_API_KEY=<密钥>   # tavily.com\nexport BRAVE_API_KEY=<密钥>     # brave.com/search/api"),
+                            .child(rust_i18n::t!("settings.websearch.env_example").to_string()),
                     ),
             )
             .into_any_element()
     }
 
-    /// 配置来源两行：用户级/项目级文件路径与是否存在
+    /// Two config source rows: user-level/project-level file paths and whether
+    /// they exist
     fn render_mcp_sources(
         &self,
         snapshot: &McpConfigSnapshot,
@@ -1518,20 +1681,32 @@ impl SettingsView {
         v_flex()
             .gap_1()
             .child(mcp_source_row(
-                "用户级",
+                rust_i18n::t!("settings.common.scope_user").as_ref(),
                 Some(&snapshot.user_path),
                 snapshot.user_exists,
                 cx,
             ))
             .child(match &snapshot.project_path {
-                Some(path) => mcp_source_row("项目级", Some(path), snapshot.project_exists, cx),
-                None => mcp_source_row("项目级", None, false, cx),
+                Some(path) => mcp_source_row(
+                    rust_i18n::t!("settings.common.scope_project").as_ref(),
+                    Some(path),
+                    snapshot.project_exists,
+                    cx,
+                ),
+                None => mcp_source_row(
+                    rust_i18n::t!("settings.common.scope_project").as_ref(),
+                    None,
+                    false,
+                    cx,
+                ),
             })
             .into_any_element()
     }
 
-    /// 单个 server 卡片：状态点 + 名称 + 状态/工具数 + 来源/传输 chip + 超时 + 编辑/启停，
-    /// 第二行命令/URL 摘要，第三行失败原因（连接失败或条目非法）
+    /// One server card: status dot plus name plus status/tool count plus
+    /// source/transport chips plus timeout plus edit/enable-disable; second row
+    /// the command/URL summary, third row the failure reason (connection
+    /// failure or invalid entry)
     fn render_mcp_server(
         &self,
         ix: usize,
@@ -1547,16 +1722,32 @@ impl SettingsView {
                 .bg(cx.theme().accent)
                 .child(label.to_string())
         };
-        // 状态优先级：已停用 > 条目非法 > 连接失败 > 已连接 > 未连接/未知
+        // Status priority: disabled > invalid entry > connection failed >
+        // connected > disconnected/unknown
         let (dot, status_text) = if server.disabled {
-            (cx.theme().muted_foreground, "已停用")
+            (
+                cx.theme().muted_foreground,
+                rust_i18n::t!("settings.mcp.state_disabled").to_string(),
+            )
         } else if server.invalid_reason.is_some() {
-            (cx.theme().danger, "配置无效")
+            (
+                cx.theme().danger,
+                rust_i18n::t!("settings.mcp.state_invalid").to_string(),
+            )
         } else {
             match status {
-                Some(s) if s.connected => (cx.theme().success, "已连接"),
-                Some(_) => (cx.theme().danger, "连接失败"),
-                None => (cx.theme().muted_foreground, "未连接"),
+                Some(s) if s.connected => (
+                    cx.theme().success,
+                    rust_i18n::t!("settings.mcp.state_connected").to_string(),
+                ),
+                Some(_) => (
+                    cx.theme().danger,
+                    rust_i18n::t!("settings.mcp.state_failed").to_string(),
+                ),
+                None => (
+                    cx.theme().muted_foreground,
+                    rust_i18n::t!("settings.mcp.state_disconnected").to_string(),
+                ),
             }
         };
         let name = server.name.clone();
@@ -1564,13 +1755,20 @@ impl SettingsView {
         let edit_name = server.name.clone();
         let enabled = !server.disabled;
         let error_line = if let Some(reason) = &server.invalid_reason {
-            Some(format!("配置无效：{reason}"))
+            Some(rust_i18n::t!("settings.mcp.invalid_prefix", reason = reason).to_string())
         } else {
+            // Structured CoreError → localized single line (the mapped result
+            // is already single-line, no need to trim the first line)
             status
                 .filter(|s| !s.connected)
                 .and_then(|s| s.error.as_ref())
-                .and_then(|error| error.lines().next())
-                .map(|line| format!("连接失败：{line}"))
+                .map(|error| {
+                    rust_i18n::t!(
+                        "settings.mcp.failed_prefix",
+                        error = crate::errors::core_error_text(error)
+                    )
+                    .to_string()
+                })
         };
         let transport_chip = server.transport.as_ref().map(|t| t.chip_label());
         let summary = server
@@ -1601,16 +1799,25 @@ impl SettingsView {
                     )
                     .when_some(
                         status.filter(|s| s.connected && s.tool_count > 0),
-                        |this, s| this.child(chip(&format!("{} 个工具", s.tool_count), cx)),
+                        |this, s| {
+                            this.child(chip(
+                                &(if s.tool_count == 1 {
+                                    rust_i18n::t!("settings.mcp.tool_count_one", n = 1)
+                                } else {
+                                    rust_i18n::t!("settings.mcp.tool_count", n = s.tool_count)
+                                }),
+                                cx,
+                            ))
+                        },
                     )
-                    .child(chip(server.source.label(), cx))
+                    .child(chip(&server.source.label(), cx))
                     .when_some(transport_chip, |this, label| this.child(chip(label, cx)))
                     .when(server.overrides_user, |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("覆盖用户级同名配置"),
+                                .child(rust_i18n::t!("settings.mcp.overrides_user").to_string()),
                         )
                     })
                     .child(div().flex_1())
@@ -1648,14 +1855,15 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 新建/编辑对话框（表单/JSON 双模式）
+    /// Create/edit dialog (dual form/JSON modes)
     pub(crate) fn render_mcp_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(dialog) = &self.mcp_dialog else {
             return div().into_any_element();
         };
         let editing = dialog.editing.is_some();
 
-        // 表单模式主体（名称/作用域/类型/传输字段/超时/高级 env|headers）
+        // Form mode body (name/scope/type/transport fields/timeout/advanced
+        // env|headers)
         let form = v_flex()
             .gap_3()
             .child(
@@ -1665,7 +1873,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("名称"),
+                            .child(rust_i18n::t!("settings.common.field_name").to_string()),
                     )
                     .child(Input::new(&dialog.name).disabled(editing))
                     .child(
@@ -1673,7 +1881,7 @@ impl SettingsView {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .opacity(0.7)
-                            .child("工具名前缀 mcp__<名称>__<工具>；编辑时不可改名（删除后重建）"),
+                            .child(rust_i18n::t!("settings.mcp.name_hint").to_string()),
                     ),
             )
             .child(
@@ -1683,7 +1891,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("作用域"),
+                            .child(rust_i18n::t!("settings.common.scope").to_string()),
                     )
                     .child(
                         h_flex()
@@ -1694,7 +1902,7 @@ impl SettingsView {
                                     .when(dialog.scope == McpSource::User, |this| this.primary())
                                     .when(dialog.scope != McpSource::User, |this| this.outline())
                                     .disabled(editing)
-                                    .label("用户级")
+                                    .label(rust_i18n::t!("settings.common.scope_user"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.set_mcp_dialog_scope(McpSource::User, cx);
                                     })),
@@ -1706,8 +1914,13 @@ impl SettingsView {
                                     .when(dialog.scope != McpSource::Project, |this| this.outline())
                                     .disabled(editing || !dialog.project_available)
                                     .label(match &dialog.project_workspace {
-                                        Some(name) => format!("项目级（{name}）"),
-                                        None => "项目级".to_string(),
+                                        Some(name) => rust_i18n::t!(
+                                            "settings.common.scope_project_named",
+                                            name = name
+                                        )
+                                        .to_string(),
+                                        None => rust_i18n::t!("settings.common.scope_project")
+                                            .to_string(),
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.set_mcp_dialog_scope(McpSource::Project, cx);
@@ -1721,7 +1934,8 @@ impl SettingsView {
                                 .text_color(cx.theme().muted_foreground)
                                 .opacity(0.7)
                                 .child(
-                                    "用户级视图只写用户级；在列表上方切换到具体工作区后可写项目级",
+                                    rust_i18n::t!("settings.common.project_unavailable_hint")
+                                        .to_string(),
                                 ),
                         )
                     }),
@@ -1733,7 +1947,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("类型"),
+                            .child(rust_i18n::t!("settings.mcp.field_type").to_string()),
                     )
                     .child(
                         h_flex()
@@ -1784,7 +1998,7 @@ impl SettingsView {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("命令"),
+                                .child(rust_i18n::t!("settings.mcp.field_command").to_string()),
                         )
                         .child(Input::new(&dialog.command)),
                 )
@@ -1795,7 +2009,7 @@ impl SettingsView {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("参数（空格分隔）"),
+                                .child(rust_i18n::t!("settings.mcp.field_args").to_string()),
                         )
                         .child(Input::new(&dialog.args))
                         .child(
@@ -1803,7 +2017,7 @@ impl SettingsView {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .opacity(0.7)
-                                .child("含空格的参数请用 JSON 模式填写 args 数组"),
+                                .child(rust_i18n::t!("settings.mcp.args_hint").to_string()),
                         ),
                 )
             })
@@ -1827,7 +2041,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("超时（毫秒）"),
+                            .child(rust_i18n::t!("settings.mcp.field_timeout").to_string()),
                     )
                     .child(Input::new(&dialog.timeout)),
             )
@@ -1855,8 +2069,12 @@ impl SettingsView {
                                 .text_color(cx.theme().muted_foreground),
                             )
                             .child(div().text_sm().child(match dialog.kind {
-                                McpTransportKind::Stdio => "环境变量（可选，JSON）",
-                                McpTransportKind::Http => "请求头（可选，JSON）",
+                                McpTransportKind::Stdio => {
+                                    rust_i18n::t!("settings.mcp.env_optional").to_string()
+                                }
+                                McpTransportKind::Http => {
+                                    rust_i18n::t!("settings.mcp.headers_optional").to_string()
+                                }
                             })),
                     )
                     .when(dialog.advanced_open, |this| {
@@ -1871,10 +2089,12 @@ impl SettingsView {
                                         .opacity(0.7)
                                         .child(match dialog.kind {
                                             McpTransportKind::Stdio => {
-                                                "如 {\"MY_API_KEY\": \"your-key\"}"
+                                                rust_i18n::t!("settings.mcp.env_example")
+                                                    .to_string()
                                             }
                                             McpTransportKind::Http => {
-                                                "如 {\"Authorization\": \"Bearer your-token\"}"
+                                                rust_i18n::t!("settings.mcp.headers_example")
+                                                    .to_string()
                                             }
                                         }),
                                 ),
@@ -1890,7 +2110,7 @@ impl SettingsView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .opacity(0.7)
-                    .child("支持粘贴 {\"server-name\": {…}} 或 Claude 风格 {\"mcpServers\": {…}}；一次只编辑一个 server"),
+                    .child(rust_i18n::t!("settings.mcp.json_hint").to_string()),
             );
 
         div()
@@ -1913,12 +2133,13 @@ impl SettingsView {
                     .border_1()
                     .border_color(cx.theme().border)
                     .child(div().text_lg().font_semibold().child(if editing {
-                        format!(
-                            "编辑 MCP 服务器「{}」",
-                            dialog.editing.clone().expect("editing")
+                        rust_i18n::t!(
+                            "settings.mcp.edit_title",
+                            name = dialog.editing.clone().expect("editing")
                         )
+                        .to_string()
                     } else {
-                        "新建 MCP 服务器".to_string()
+                        rust_i18n::t!("settings.mcp.new_mcp_server").to_string()
                     }))
                     .child(
                         h_flex()
@@ -1928,7 +2149,7 @@ impl SettingsView {
                                     .small()
                                     .when(!dialog.json_mode, |this| this.primary())
                                     .when(dialog.json_mode, |this| this.outline())
-                                    .label("表单")
+                                    .label(rust_i18n::t!("settings.mcp.form_mode"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.set_mcp_json_mode(false, window, cx);
                                     })),
@@ -1958,9 +2179,9 @@ impl SettingsView {
                                         .ghost()
                                         .small()
                                         .label(if dialog.delete_armed {
-                                            "确认删除？"
+                                            rust_i18n::t!("settings.common.confirm_delete")
                                         } else {
-                                            "删除"
+                                            rust_i18n::t!("common.delete")
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.delete_mcp_dialog_server(cx);
@@ -1972,7 +2193,7 @@ impl SettingsView {
                                 Button::new("mcp-dialog-cancel")
                                     .outline()
                                     .small()
-                                    .label("取消")
+                                    .label(rust_i18n::t!("common.cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.mcp_dialog = None;
                                         cx.notify();
@@ -1982,7 +2203,7 @@ impl SettingsView {
                                 Button::new("mcp-dialog-save")
                                     .primary()
                                     .small()
-                                    .label("保存")
+                                    .label(rust_i18n::t!("settings.common.save"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.save_mcp_dialog(cx);
                                     })),
@@ -1993,7 +2214,7 @@ impl SettingsView {
     }
 }
 
-/// 配置来源行：级别标签 + 文件路径 + 「未创建」标注
+/// One config source row: level label plus file path plus a "not created" note
 fn mcp_source_row(
     label: &str,
     path: Option<&Path>,
@@ -2018,7 +2239,7 @@ fn mcp_source_row(
                 .font_family(cx.theme().mono_font_family.clone())
                 .child(match path {
                     Some(path) => path.display().to_string(),
-                    None => "选择工作区后显示其项目级配置".to_string(),
+                    None => rust_i18n::t!("settings.mcp.source_pick_workspace").to_string(),
                 }),
         )
         .when(path.is_some() && !exists, |this| {
@@ -2026,12 +2247,13 @@ fn mcp_source_row(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("（未创建）"),
+                    .child(rust_i18n::t!("settings.common.not_created").to_string()),
             )
         })
 }
 
-/// WebSearch 后端行：名称 + 角色 chip + 环境变量名 + 配置状态（不展示密钥内容）
+/// WebSearch backend row: name plus role chip plus environment variable name
+/// plus configuration status (never shows key contents)
 fn websearch_backend_row(
     name: &str,
     env_var: &str,
@@ -2087,7 +2309,11 @@ fn websearch_backend_row(
                 } else {
                     cx.theme().muted_foreground
                 })
-                .child(if configured { "已配置" } else { "未配置" }),
+                .child(if configured {
+                    rust_i18n::t!("settings.websearch.configured")
+                } else {
+                    rust_i18n::t!("settings.websearch.not_configured")
+                }),
         )
 }
 

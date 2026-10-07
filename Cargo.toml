@@ -2,5 +2,10 @@
 resolver = "2"
 members = ["crates/*"]
 
+[profile.dev]
+# 0: 无调试信息; 1: 仅行号表（体积骤降 60%~80%，仍保留 panic 堆栈追踪）; 2: 完整符号（默认）
+debug = 1
+
 [profile.dev.package."*"]
 opt-level = 3
+debug = 0

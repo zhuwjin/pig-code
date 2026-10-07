@@ -1,10 +1,10 @@
 use super::*;
 
-/// 保守只读命令判定（AutoEdit 直通用，宁漏不放）：单条简单命令——
-/// 无管道/重定向/链式/命令替换/多行。形态门之后：
-/// - 吐文件类命令（cat/head/tail/sort/uniq）走参数级判定（readonly_dump_command）：
-///   敏感文件、越出工作区、glob、stdin、follow 模式、写输出选项一律不放行；
-/// - 其余首词在白名单；git 再看子命令白名单（branch/remote/tag 仅无参列表形态）。
+/// Conservative read-only command check (for AutoEdit pass-through; better to miss than to let through): a single simple command —
+/// no pipes/redirections/chaining/command substitution/multiple lines. After the shape gate:
+/// - file-dumping commands (cat/head/tail/sort/uniq) go through the argument-level check (readonly_dump_command):
+///   sensitive files, escapes from the workspace, globs, stdin, follow mode, and write-output options are never allowed;
+/// - other commands need their first word in the allowlist; git additionally checks the subcommand allowlist (branch/remote/tag only in the argument-less list form).
 pub fn is_readonly_command(command: &str, cwd: &Path) -> bool {
     if command
         .chars()
@@ -43,7 +43,7 @@ pub fn is_readonly_command(command: &str, cwd: &Path) -> bool {
         if GIT_READONLY.contains(&second) {
             return true;
         }
-        // branch/remote/tag 仅纯列表形态（无第三个参数）
+        // branch/remote/tag only in the pure list form (no third argument)
         if matches!(second, "branch" | "remote" | "tag") && tokens.len() == 2 {
             return true;
         }
@@ -51,12 +51,12 @@ pub fn is_readonly_command(command: &str, cwd: &Path) -> bool {
     false
 }
 
-/// 吐文件类命令的参数级只读判定。形态门已保证无管道/替换，token 即参数，
-/// 无引号歧义；选项表只列常见形态，未识别选项按布尔处理——误判方向是
-/// 「多弹一次审批」而非漏放（fail-closed）。拒绝的形态：
-/// tail -f/-F（跟随输出长驻）、sort -o/--output 与 uniq 的第二文件参数（写输出）、
-/// glob 字符（展开结果不可知）、`-`/`--`/无文件参数（stdin 语义）、
-/// 路径越出工作区（含 Windows 下 MSYS 绝对路径 /x）、敏感文件名。
+/// Argument-level read-only check for file-dumping commands. The shape gate already guarantees no pipes/substitution, so tokens are arguments
+/// with no quoting ambiguity; the option tables list only common shapes, and unrecognized options are treated as boolean flags — the misjudgment direction is
+/// "one extra approval dialog", never letting something slip through (fail-closed). Rejected shapes:
+/// tail -f/-F (long-running follow output), sort -o/--output and uniq's second file argument (write output),
+/// glob characters (expansion results unknowable), `-`/`--`/no file argument (stdin semantics),
+/// paths escaping the workspace (including MSYS absolute paths /x on Windows), sensitive file names.
 fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
     let mut files: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -71,7 +71,7 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
             continue;
         };
         if let Some(long) = flag.strip_prefix('-') {
-            // 长选项：name 或 name=value
+            // Long option: name or name=value
             let name = long.split('=').next().unwrap_or("");
             if name.is_empty() {
                 return false;
@@ -79,7 +79,7 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
             if matches!((cmd, name), ("tail", "follow") | ("sort", "output")) {
                 return false;
             }
-            // 吃一个参数值的长选项（--lines 50 形态；--lines=50 自带值）
+            // Long options that consume an argument value (the --lines 50 form; --lines=50 carries its own value)
             let takes_value = matches!(
                 (cmd, name),
                 ("head" | "tail", "lines" | "bytes")
@@ -94,13 +94,13 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
             }
             continue;
         }
-        // 短选项：首字符定语义；后续字符存在视为附着值（-n50），否则吃下一 token
+        // Short option: the first character decides the semantics; further characters count as an attached value (-n50), otherwise consume the next token
         let mut chars = flag.chars();
         let Some(first) = chars.next() else {
             return false;
         };
         let attached_value = chars.next().is_some();
-        // tail -f/-F 跟随输出长驻；sort -o 写输出文件
+        // tail -f/-F is a long-running follow; sort -o writes an output file
         if matches!((cmd, first), ("tail", 'f') | ("tail", 'F') | ("sort", 'o')) {
             return false;
         }
@@ -115,9 +115,9 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
         }
     }
     if files.is_empty() {
-        return false; // 无文件参数 = 读 stdin
+        return false; // no file argument = read stdin
     }
-    // uniq 的第二个位置参数是输出文件（uniq in out）
+    // uniq's second positional argument is the output file (uniq in out)
     if cmd == "uniq" && files.len() > 1 {
         return false;
     }
@@ -129,9 +129,9 @@ fn readonly_dump_command(cmd: &str, args: &[&str], cwd: &Path) -> bool {
     })
 }
 
-/// 词法归一（不碰盘）：绝对路径直接折叠；相对路径从 cwd 起拼接后折叠 `.`/`..`。
-/// `..` 越过起始根返回 None。不做 canonicalize——判定目标是「模型顺手的误读」，
-/// 符号链接伪装属于对抗场景，交由审批/权限层。
+/// Lexical normalization (no disk access): absolute paths collapse directly; relative paths are joined onto cwd, then `.`/`..` collapsed.
+/// `..` escaping the starting root returns None. No canonicalize — the target of this check is "the model's casual misread";
+/// symlink disguise is an adversarial scenario, left to the approval/permission layer.
 fn normalize_within(cwd: &Path, arg: &str) -> Option<PathBuf> {
     let raw = Path::new(arg);
     let components: Vec<std::path::Component> = if raw.is_absolute() {

@@ -17,7 +17,7 @@ async fn full_turn_with_tool_call() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "读一下 mock 文件并总结".into(),
+            content: "read the mock file and summarize".into(),
             files: vec![mock::MOCK_FILE_NAME.into()],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -34,11 +34,11 @@ async fn full_turn_with_tool_call() {
         events
             .iter()
             .any(|e| matches!(e, Event::ReasoningDelta { delta, .. } if !delta.is_empty())),
-        "应有 reasoning delta"
+        "should have reasoning delta"
     );
     assert!(
         events.iter().any(|e| matches!(e, Event::TextDelta { .. })),
-        "应有 text delta"
+        "should have text delta"
     );
     assert!(
         events.iter().any(|e| matches!(
@@ -46,27 +46,27 @@ async fn full_turn_with_tool_call() {
             Event::ToolCallBegin { tool, input_summary, .. }
                 if tool == "Read" && input_summary.contains(mock::MOCK_FILE_NAME)
         )),
-        "应有 Read 工具调用: {events:#?}"
+        "should have Read tool call: {events:#?}"
     );
     assert!(
         events.iter().any(|e| matches!(
             e,
-            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("已知文件")
+            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("known file")
         )),
-        "工具输出应含文件内容"
+        "tool output should contain the file content"
     );
     assert!(
         events.iter().any(|e| matches!(
             e,
             Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER)
         )),
-        "最终文本应含 mock 标记"
+        "final text should contain the mock marker"
     );
     assert!(
         events
             .iter()
             .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
-        "应有上下文用量事件"
+        "should have a context usage event"
     );
     assert!(
         events.iter().all(|e| match e {
@@ -96,15 +96,15 @@ async fn full_turn_with_tool_call() {
             } => sid == &session_id,
             _ => true,
         }),
-        "事件 session_id 应一致"
+        "event session_id should be consistent"
     );
 
-    // rollout 文件应已落盘
+    // The rollout file should already be persisted
     let rollout = data_dir
         .join("sessions")
         .join(format!("{session_id}.jsonl"));
-    let content = std::fs::read_to_string(&rollout).expect("rollout 存在");
-    assert!(content.contains("\"type\":\"meta\""), "首行 meta");
+    let content = std::fs::read_to_string(&rollout).expect("rollout exists");
+    assert!(content.contains("\"type\":\"meta\""), "first line is meta");
     assert!(content.contains("\"type\":\"user\""));
     assert!(content.contains("\"type\":\"text\""));
     assert!(content.contains("\"type\":\"tool_call\""));
@@ -123,7 +123,7 @@ async fn interrupt_during_stream() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "说点什么".into(),
+            content: "say something".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -145,7 +145,7 @@ async fn interrupt_during_stream() {
         events
             .iter()
             .any(|e| matches!(e, Event::TurnAborted { .. })),
-        "应收到 TurnAborted: {events:#?}"
+        "should receive TurnAborted: {events:#?}"
     );
     agent.shutdown();
 }
@@ -160,7 +160,7 @@ async fn missing_config_is_empty_not_error() {
     );
     let events = agent.events.clone();
 
-    // 配置缺失不应有 Error；GetConfig 返回空快照
+    // A missing config must not error; GetConfig returns an empty snapshot
     agent.ops.send(Op::GetConfig).await.unwrap();
     let collected = recv_until(&events, Duration::from_secs(5), |e| {
         matches!(e, Event::ConfigSnapshot { .. })
@@ -168,17 +168,17 @@ async fn missing_config_is_empty_not_error() {
     .await;
     assert!(
         !collected.iter().any(|e| matches!(e, Event::Error { .. })),
-        "配置缺失不应报错: {collected:#?}"
+        "missing config should not error: {collected:#?}"
     );
     assert!(
         collected.iter().any(|e| matches!(
             e,
             Event::ConfigSnapshot { config, .. } if config.providers.is_empty()
         )),
-        "应返回空配置: {collected:#?}"
+        "should return an empty config: {collected:#?}"
     );
 
-    // NewSession 正常，模型名报"未配置模型"；发送时才报引导性错误
+    // NewSession works normally (model name is the empty-string sentinel; the GUI renders a localized placeholder); only sending reports the structured error
     let sid = new_session(&agent, dir).await;
     agent
         .ops
@@ -198,14 +198,17 @@ async fn missing_config_is_empty_not_error() {
     assert!(
         collected.iter().any(|e| matches!(
             e,
-            Event::Error { message, .. } if message.contains("模型设置")
+            Event::Error {
+                error: pig_protocol::CoreError::NoModelConfigured,
+                ..
+            }
         )),
-        "发送时应报引导性错误: {collected:#?}"
+        "sending should report the structured no-model-configured error: {collected:#?}"
     );
     agent.shutdown();
 }
 
-/// 发 SCENARIO_Q 并等待 QuestionRequested，返回 request_id（同时断言问题内容）。
+/// Send SCENARIO_Q and wait for QuestionRequested, returning the request_id (also asserting on the question content).
 async fn wait_question(
     agent: &pig_core::AgentHandle,
     events: &async_channel::Receiver<Event>,
@@ -215,7 +218,10 @@ async fn wait_question(
         .ops
         .send(Op::SendMessage {
             session_id: session_id.to_string(),
-            content: format!("{} 帮我决定实现方案", mock::SCENARIO_Q_TRIGGER),
+            content: format!(
+                "{} help me decide on an implementation approach",
+                mock::SCENARIO_Q_TRIGGER
+            ),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -235,15 +241,15 @@ async fn wait_question(
                 ..
             } => {
                 assert_eq!(questions.len(), 2);
-                assert_eq!(questions[0].question, "选择实现方案");
+                assert_eq!(questions[0].question, "Choose an implementation approach");
                 assert_eq!(questions[0].options.len(), 2);
-                assert_eq!(questions[1].question, "需要跑测试吗");
+                assert_eq!(questions[1].question, "Should tests run?");
                 assert_eq!(questions[1].options.len(), 2);
                 Some(request_id.clone())
             }
             _ => None,
         })
-        .expect("应收到 QuestionRequested")
+        .expect("should receive QuestionRequested")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -258,7 +264,7 @@ async fn ask_user_question_answer() {
         .ops
         .send(Op::QuestionReply {
             request_id,
-            answers: Some(vec![vec!["方案 A".to_string()], vec!["要".to_string()]]),
+            answers: Some(vec![vec!["Option A".to_string()], vec!["Yes".to_string()]]),
         })
         .await
         .unwrap();
@@ -270,18 +276,18 @@ async fn ask_user_question_answer() {
         collected.iter().any(|e| matches!(
             e,
             Event::ToolCallEnd { output, is_error: false, .. }
-                if output.contains("用户已回答")
-                    && output.contains("方案 A")
-                    && output.contains("需要跑测试吗：要")
+                if output.contains("The user answered")
+                    && output.contains("Option A")
+                    && output.contains("Should tests run?: Yes")
         )),
-        "工具输出应含两题答案: {collected:#?}"
+        "tool output should contain both answers: {collected:#?}"
     );
     assert!(
         collected.iter().any(|e| matches!(
             e,
             Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_Q_MARKER)
         )),
-        "最终文本应含 marker: {collected:#?}"
+        "final text should contain the marker: {collected:#?}"
     );
     agent.shutdown();
 }
@@ -309,15 +315,17 @@ async fn ask_user_question_skip() {
     assert!(
         collected.iter().any(|e| matches!(
             e,
-            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("自行决定")
+            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("decide from context")
         )),
-        "跳过应提示自行决定: {collected:#?}"
+        "skipping should tell the model to decide from context: {collected:#?}"
     );
     agent.shutdown();
 }
 
-/// 工具执行中点停止：卡片补「已停止」收尾落 rollout（重启回放不丢）、
-/// 历史 tool_use/tool_result 配对完整（下次请求不悬空）、后续回合正常。
+/// Stop during tool execution: the card gets its "Stopped" closing entry
+/// persisted to the rollout (not lost on restart replay), the history's
+/// tool_use/tool_result pairing stays complete (no dangling entries in the
+/// next request), and later turns proceed normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_during_tool_persists_stopped_card() {
     let (config_path, cwd, data_dir) = setup("m2-tool-interrupt");
@@ -326,12 +334,12 @@ async fn interrupt_during_tool_persists_stopped_card() {
     let events = agent.events.clone();
     let session_id = new_session(&agent, cwd).await;
 
-    // Yolo：sleep 30 不进审批门，直接执行
+    // Yolo: sleep 30 skips the approval gate and executes directly
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: format!("{} 跑个慢命令", mock::SCENARIO_SLOW_TRIGGER),
+            content: format!("{} run a slow command", mock::SCENARIO_SLOW_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::Yolo,
@@ -356,30 +364,33 @@ async fn interrupt_during_tool_persists_stopped_card() {
         matches!(e, Event::TurnAborted { .. })
     })
     .await;
-    // 补发的 ToolCallEnd 在 TurnAborted 之前到达，卡片带「已停止」落定
+    // The supplementary ToolCallEnd arrives before TurnAborted; the card settles with "Stopped"
     let end_ix = aborted
         .iter()
-        .position(|e| matches!(e, Event::ToolCallEnd { output, is_error: false, .. } if output == "已停止"))
-        .expect("中止应补 ToolCallEnd 已停止");
+        .position(|e| matches!(e, Event::ToolCallEnd { output, is_error: false, .. } if output == "Stopped"))
+        .expect("abort should emit the stopped ToolCallEnd");
     let abort_ix = aborted
         .iter()
         .position(|e| matches!(e, Event::TurnAborted { .. }))
-        .expect("应收到 TurnAborted");
-    assert!(end_ix < abort_ix, "ToolCallEnd 应先于 TurnAborted");
+        .expect("should receive TurnAborted");
+    assert!(
+        end_ix < abort_ix,
+        "ToolCallEnd should come before TurnAborted"
+    );
 
-    // rollout 落了 tool_call 记录（重启回放重建卡片，不再凭空消失）
+    // The rollout contains the tool_call record (restart replay rebuilds the card instead of it vanishing)
     let rollout = data_dir
         .join("sessions")
         .join(format!("{session_id}.jsonl"));
-    let records = pig_core::rollout::Rollout::load(&rollout).expect("rollout 可读");
+    let records = pig_core::rollout::Rollout::load(&rollout).expect("rollout readable");
     assert!(
         records.iter().any(|r| matches!(r,
             pig_core::rollout::RolloutRecord::ToolCall { tool, output, .. }
-                if tool == "Bash" && output == "已停止")),
-        "rollout 应含已停止的 Bash 记录: {records:#?}"
+                if tool == "Bash" && output == "Stopped")),
+        "rollout should contain the stopped Bash record: {records:#?}"
     );
 
-    // 重启口径的历史重建：tool_use 与 tool_result 配对完整（不悬空）
+    // History rebuild as done on restart: tool_use and tool_result are fully paired (no dangling entries)
     let history = pig_core::rollout::rebuild_history(&records, String::new());
     let tool_use_count = history
         .iter()
@@ -387,17 +398,23 @@ async fn interrupt_during_tool_persists_stopped_card() {
         .count();
     let tool_result_count = history
         .iter()
-        .filter(|m| m.role == "tool" && m.content.as_deref() == Some("已停止"))
+        .filter(|m| m.role == "tool" && m.content.as_deref() == Some("Stopped"))
         .count();
-    assert_eq!(tool_use_count, 1, "应恰有一个 tool_use: {history:#?}");
-    assert_eq!(tool_result_count, 1, "应恰有一个已停止 tool_result");
+    assert_eq!(
+        tool_use_count, 1,
+        "should have exactly one tool_use: {history:#?}"
+    );
+    assert_eq!(
+        tool_result_count, 1,
+        "should have exactly one stopped tool_result"
+    );
 
-    // 同会话续聊：历史合法、下一回合正常收尾
+    // Continue the same session: history stays valid, the next turn completes normally
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "继续".into(),
+            content: "continue".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::Yolo,
@@ -410,13 +427,15 @@ async fn interrupt_during_tool_persists_stopped_card() {
     .await;
     assert!(
         !followup.iter().any(|e| matches!(e, Event::Error { .. })),
-        "停止后续聊不应报错: {followup:#?}"
+        "follow-up after a stop should not error: {followup:#?}"
     );
     agent.shutdown();
 }
 
-/// 思考滚动行演示场景（TICKER_SCENARIO）：多行变速思考流完整到达引擎——
-/// 思考全文含超长行/快速连发行/收尾行，正文带 marker，回合正常收尾。
+/// Reasoning ticker demo scenario (TICKER_SCENARIO): the multi-line
+/// variable-speed reasoning stream reaches the engine intact — the full
+/// reasoning text contains an extra-long line / rapid-fire lines / closing
+/// lines, the body carries the marker, and the turn completes normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ticker_scenario_streams_multiline_reasoning() {
     let (config_path, cwd, data_dir) = setup("ticker-scenario");
@@ -428,14 +447,17 @@ async fn ticker_scenario_streams_multiline_reasoning() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: format!("{} 演示思考滚动行", mock::SCENARIO_TICKER_TRIGGER),
+            content: format!(
+                "{} demo the reasoning ticker",
+                mock::SCENARIO_TICKER_TRIGGER
+            ),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
         .unwrap();
-    // 场景脚本全长约 15s（故意慢速），留足余量
+    // The scenario script runs about 15s in total (deliberately slow); leave ample headroom
     let events = recv_until(&events, Duration::from_secs(60), |e| {
         matches!(e, Event::TurnComplete { .. })
     })
@@ -448,8 +470,11 @@ async fn ticker_scenario_streams_multiline_reasoning() {
             _ => None,
         })
         .collect();
-    // 多行：快速连发六行与三行收尾都到了
-    assert!(reasoning.lines().count() >= 10, "思考应有多行: {reasoning}");
+    // Multiple lines: all six rapid-fire lines and the three closing lines arrived
+    assert!(
+        reasoning.lines().count() >= 10,
+        "reasoning should have multiple lines: {reasoning}"
+    );
     for word in [
         "快速行一",
         "快速行二",
@@ -458,19 +483,22 @@ async fn ticker_scenario_streams_multiline_reasoning() {
         "快速行五",
         "快速行六",
     ] {
-        assert!(reasoning.contains(word), "思考应含 {word}: {reasoning}");
+        assert!(
+            reasoning.contains(word),
+            "reasoning should contain {word}: {reasoning}"
+        );
     }
-    // 超长行原样到达（钉尾横滚的素材）
+    // The extra-long line arrives intact (material for the pinned-tail horizontal scroll)
     assert!(
         reasoning.lines().any(|line| line.chars().count() > 100),
-        "应有超长思考行: {reasoning}"
+        "should have an extra-long reasoning line: {reasoning}"
     );
     assert!(
         events.iter().any(|e| matches!(
             e,
             Event::TextDone { full_text, .. } if full_text.contains(mock::TICKER_MARKER)
         )),
-        "正文应含 marker: {events:#?}"
+        "text should contain the marker: {events:#?}"
     );
     agent.shutdown();
 }

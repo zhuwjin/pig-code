@@ -1,0 +1,245 @@
+_version: 2
+
+# 输入区（composer*：placeholder/斜杠命令/执行模式/审批条/弹层/任务面板/问卷/图片附件）。
+# 按钮尾部快捷键（如 "  Ctrl+⏎"）留在代码里拼接，不进文案。
+
+composer:
+  placeholder_idle:
+    zh-CN: 向 pig-code 提问，使用 @ 添加上下文，使用 / 选择命令
+    en: Ask pig-code anything — @ to add context, / for commands
+  placeholder_streaming:
+    zh-CN: 继续输入以排队后续修改
+    en: Keep typing to queue further changes
+  slash_clear:
+    zh-CN: 清空当前会话消息
+    en: Clear current session messages
+  slash_compact:
+    zh-CN: 压缩上下文（模型摘要）
+    en: Compact context (model summary)
+  exec_confirm:
+    zh-CN: 变更前确认
+    en: Confirm before changes
+  exec_confirm_desc:
+    zh-CN: 改文件、跑命令前先问我
+    en: Ask me before editing files or running commands
+  exec_auto_edit:
+    zh-CN: 自动编辑
+    en: Auto-edit
+  exec_auto_edit_desc:
+    zh-CN: 自动编辑文件，跑命令前问我
+    en: Edit files automatically; ask me before running commands
+  exec_full_access:
+    zh-CN: 完全访问
+    en: Full access
+  exec_full_access_desc:
+    zh-CN: 全自动执行；高风险命令仍会弹窗确认
+    en: Fully automatic; high-risk commands still ask for confirmation
+  exec_yolo:
+    zh-CN: 无管制模式
+    en: Unrestricted mode
+  exec_yolo_desc:
+    zh-CN: 全自动执行，无确认无拦截；仅限容器/沙箱使用
+    en: Fully automatic, no confirmations or blocks; containers/sandboxes only
+  task_duration_seconds:
+    zh-CN: "%{n} 秒"
+    en: "%{n}s"
+  task_duration_minutes:
+    zh-CN: "%{n} 分"
+    en: "%{n}m"
+  filter_running:
+    zh-CN: 进行中
+    en: Running
+  filter_finished:
+    zh-CN: 已完成
+    en: Finished
+  filter_all:
+    zh-CN: 全部
+    en: All
+  chip_bash:
+    zh-CN: 后台 Bash
+    en: Background Bash
+  chip_agent:
+    zh-CN: 后台 Agent
+    en: Background Agent
+  chip_running:
+    zh-CN: "%{name} %{n} 运行中"
+    en: "%{name} %{n} running"
+  no_model:
+    zh-CN: 未配置模型
+    en: No model configured
+  not_git_repo:
+    zh-CN: 非 git 仓库
+    en: Not a git repository
+  plan:
+    zh-CN: 计划
+    en: Plan
+  plan_desc:
+    zh-CN: 编辑前先出计划
+    en: Plan before editing
+  reasoning_off_chip:
+    zh-CN: 关
+    en: Off
+  stop:
+    zh-CN: 停止
+    en: Stop
+  send:
+    zh-CN: 发送
+    en: Send
+  context_capacity:
+    zh-CN: 上下文容量
+    en: Context capacity
+  cache_hit_rate:
+    zh-CN: "平均缓存命中率 %{rate}%（命中 %{hit} / 输入 %{total}）"
+    en: "Avg cache hit rate %{rate}% (hit %{hit} / input %{total})"
+  todo_progress:
+    zh-CN: "当前进度 %{done}/%{total}"
+    en: "Progress %{done}/%{total}"
+  no_bash_tasks:
+    zh-CN: 无后台 Bash 任务
+    en: No background Bash tasks
+  no_agent_tasks:
+    zh-CN: 无后台 Agent 任务
+    en: No background Agent tasks
+  no_output_yet:
+    zh-CN: （暂无输出）
+    en: (no output yet)
+  changes:
+    zh-CN: 改动
+    en: Changes
+  approve_bash:
+    zh-CN: 运行命令？
+    en: Run command?
+  approve_write:
+    zh-CN: 写入文件？
+    en: Write file?
+  approve_edit:
+    zh-CN: 修改文件？
+    en: Edit file?
+  approve_other:
+    zh-CN: "执行 %{tool}？"
+    en: "Run %{tool}?"
+  working_dir:
+    zh-CN: "工作目录： %{cwd}"
+    en: "Working directory: %{cwd}"
+  approve_always:
+    zh-CN: 本会话内批准
+    en: Always allow in this session
+  reject:
+    zh-CN: 拒绝
+    en: Reject
+  approve:
+    zh-CN: 批准
+    en: Approve
+  plan_approve_title:
+    zh-CN: 按这份计划开始实现？
+    en: Start implementing with this plan?
+  submit_and_reject:
+    zh-CN: 提交并拒绝
+    en: Submit and reject
+  revise:
+    zh-CN: 修改
+    en: Revise
+  revise_placeholder:
+    zh-CN: 说明拒绝原因…
+    en: Reason for rejecting…
+  reject_and_exit:
+    zh-CN: 拒绝并退出
+    en: Reject and exit
+  approve_plan:
+    zh-CN: 批准 plan
+    en: Approve plan
+  search_workspace:
+    zh-CN: 搜索工作区
+    en: Search workspaces
+  open_folder:
+    zh-CN: 打开文件夹
+    en: Open folder
+  no_workspace:
+    zh-CN: 不在工作区中工作
+    en: Work without a workspace
+  no_matching_workspaces:
+    zh-CN: 没有匹配的工作区
+    en: No matching workspaces
+  search_branch:
+    zh-CN: 搜索分支
+    en: Search branches
+  no_matching_branches:
+    zh-CN: 没有匹配的分支
+    en: No matching branches
+  fs_outside_access:
+    zh-CN: 工作区外访问
+    en: Access outside workspace
+  fs_read:
+    zh-CN: 读
+    en: Read
+  fs_write:
+    zh-CN: 写
+    en: Write
+  search_model:
+    zh-CN: 搜索模型
+    en: Search models
+  no_models_configured:
+    zh-CN: 还没有配置模型，去设置页添加
+    en: No models configured yet — add one in Settings
+  manage_models:
+    zh-CN: 管理模型
+    en: Manage models
+  no_matching_models:
+    zh-CN: 没有匹配的模型
+    en: No matching models
+  reasoning_off:
+    zh-CN: 关闭
+    en: Off
+  question_placeholder:
+    zh-CN: 说说你的想法…
+    en: Share your thoughts…
+  question_other:
+    zh-CN: 其他
+    en: Other
+  question_prev:
+    zh-CN: 上一题
+    en: Previous
+  question_skip:
+    zh-CN: 放弃
+    en: Skip
+  question_next:
+    zh-CN: 下一题
+    en: Next
+  question_submit:
+    zh-CN: 提交
+    en: Submit
+  paste_limit:
+    zh-CN: "最多粘贴 %{n} 张图片"
+    en: Up to %{n} images can be pasted
+  tiff_failed:
+    zh-CN: "TIFF 图片无法转换：%{error}"
+    en: "Failed to convert TIFF image: %{error}"
+  image_label:
+    zh-CN: "图片 %{n}"
+    en: "Image %{n}"
+
+# 审批卡的高风险命令警示行（ApprovalRequested.danger_key → 静态映射，见 composer/aux_panel.rs）。
+# high_risk 是标题（代码里拼 ⚠️ 前缀与 reason），其余六个是原因键（core bash.rs DangerReason.key）。
+approval:
+  danger:
+    high_risk:
+      zh-CN: 高风险命令
+      en: High-risk command
+    fork_bomb:
+      zh-CN: fork 炸弹
+      en: fork bomb
+    rm_rf_root:
+      zh-CN: rm -rf 指向根/家/当前目录
+      en: rm -rf targeting the root, home, or current directory
+    disk_format:
+      zh-CN: 磁盘格式化/分区操作
+      en: disk formatting/partitioning
+    dd_block:
+      zh-CN: dd 写入块设备
+      en: dd writing to a block device
+    shutdown:
+      zh-CN: 关机/重启操作
+      en: shutdown/reboot
+    chmod_root:
+      zh-CN: 递归改权/改属根目录
+      en: recursive chmod/chown on /

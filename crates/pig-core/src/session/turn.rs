@@ -28,8 +28,9 @@ impl Session {
             tx,
         );
 
-        // 系统提示词全部用会话冻结快照（git/AGENTS.md/技能/日期），模式已移入
-        // turn_reminder——会话内字节稳定，前缀缓存最大化
+        // The system prompt uses session-frozen snapshots throughout (git/
+        // AGENTS.md/skills/date); the mode has moved into turn_reminder — bytes
+        // stay stable within a session, maximizing prefix cache hits
         let system = ChatMsg::system(prompt::system_prompt(
             &self.cwd,
             true,
@@ -43,10 +44,12 @@ impl Session {
         } else if self.history[0].role == "system" {
             self.history[0] = system;
         }
-        // 回合边界 reminder（执行模式/计划开关首轮或切换、日期跨天、AGENTS.md 变更）：
-        // prepend 到用户消息前——尾部注入不打断 system+历史的前缀缓存，也插不进
-        // 工具配对中间；无可提醒内容时用户消息保持原样。不落 rollout（恢复会话
-        // 由重新冻结 + 首轮提醒自愈）
+        // Turn-boundary reminder (exec mode/plan toggle on first turn or on
+        // switch, date rollover, AGENTS.md changes): prepended to the user
+        // message — injecting at the tail does not break the system+history
+        // prefix cache, nor can it land between a tool_use/tool_result pair;
+        // with nothing to remind, the user message stays as-is. Not persisted to
+        // rollout (a resumed session heals via re-freezing + first-turn reminder)
         let fresh_agents = prompt::agents_md(&self.data_dir, &self.cwd);
         let reminder = prompt::turn_reminder(
             self.mode,
@@ -59,15 +62,18 @@ impl Session {
             &fresh_agents,
             &mut self.agents_reminded,
         );
-        // @引用文件按指针形态注入（kimi-code 同款取舍）：只给路径（+可选行范围），
-        // 内容由模型按需用 Read 现读——永远新鲜、恒定一行、不伤前缀缓存
+        // @-referenced files are injected as pointers (same trade-off as
+        // kimi-code): only the path (+ optional line range) is given; the model
+        // reads the content on demand with Read — always fresh, a constant one
+        // line, no prefix-cache damage
         let mut user_text = pointer_file_references(&self.cwd, &content, &files);
         if let Some(reminder) = reminder {
             user_text = format!("{reminder}\n\n{user_text}");
         }
         if self.history.len() == 1 {
-            // 首条消息：种标题（首 30 字符兜底），并异步生成模型标题；
-            // 手动重命名过（title_custom）两者都不覆盖
+            // First message: seed the title (first 30 chars as fallback) and
+            // generate a model title async; if manually renamed (title_custom),
+            // neither overwrites
             let title: String = content.chars().take(30).collect();
             let id = self.id.clone();
             self.store
@@ -81,13 +87,18 @@ impl Session {
                 });
             spawn_title_generation(&self.store, &self.id, &content, config, tx);
         }
-        // rollout 只记原文（files 另存字段；「引用文件」后缀已废除——
-        // UI 用 files 渲染内联 chip，模型侧 resume 经 rebuild_history 转指针行）
+        // Rollout stores the original text only (files go in a separate field;
+        // the "referenced files" suffix is gone — the UI renders inline chips
+        // from files, and on resume the model side converts them to pointer
+        // lines via rebuild_history)
         let rollout_text = content.clone();
         let record_files = files.clone();
-        // 粘贴图片（ZCode 式管线）：压缩 → 落会话媒体目录 → rollout 记 ImageRef
-        //（不存 base64）+ history 进 ChatImage；压缩失败的图跳过并在文本里记 note。
-        // 文件名目录内续排（next_media_index）：按消息内序号命名会被后续回合覆盖
+        // Pasted images (ZCode-style pipeline): compress → persist into the
+        // session media dir → rollout records an ImageRef (no base64 stored) +
+        // history gets a ChatImage; images that fail to compress are skipped
+        // with a note in the text. File names continue the directory sequence
+        // (next_media_index): naming by per-message index would be overwritten
+        // by later turns
         let mut image_refs: Vec<crate::rollout::ImageRef> = Vec::new();
         let mut chat_images: Vec<crate::provider::ChatImage> = Vec::new();
         if !images.is_empty() {
@@ -105,11 +116,14 @@ impl Session {
                         if let Err(error) = std::fs::create_dir_all(&media_dir)
                             .and_then(|()| std::fs::write(&file, &comp.bytes))
                         {
-                            user_text.push_str(&format!("\n[图片 {} 落盘失败: {error}]", ix + 1));
+                            user_text
+                                .push_str(&format!("\n[Image {} failed to save: {error}]", ix + 1));
                             continue;
                         }
-                        // 压缩附注（kimi-code caption 思路）：缩放/转码改变了图就在
-                        // 文本里告知模型，原图落盘供 ReadMediaFile region 看高清局部
+                        // Compression note (kimi-code caption idea): if scaling/
+                        // re-encoding changed the image, tell the model in the
+                        // text; the original is persisted for ReadMediaFile
+                        // region close-ups
                         if let Some(note) =
                             compression_note(ix + 1, pending, &comp, &media_dir, next)
                         {
@@ -125,17 +139,19 @@ impl Session {
                         chat_images.push(crate::provider::ChatImage {
                             media_type: comp.media_type,
                             data_base64: crate::tool::base64_encode(&comp.bytes),
-                            label: Some(format!("图片 {}", ix + 1)),
+                            label: Some(format!("Image {}", ix + 1)),
                         });
                     }
                     Err(error) => {
-                        user_text.push_str(&format!("\n[图片 {} 压缩失败: {error}]", ix + 1));
+                        user_text
+                            .push_str(&format!("\n[Image {} failed to compress: {error}]", ix + 1));
                     }
                 }
             }
         }
         let image_count = image_refs.len();
-        // 能力投影：模型不支持图片输入 → 不进 ChatMsg.images，文本占位告知（带媒体路径）
+        // Capability projection: model without image input → keep out of
+        // ChatMsg.images and inform via a text placeholder (with the media path)
         let media_paths: Vec<std::path::PathBuf> =
             image_refs.iter().map(|r| r.path.clone()).collect();
         project_images(
@@ -147,8 +163,9 @@ impl Session {
         let mut user_msg = ChatMsg::user(std::mem::take(&mut user_text));
         user_msg.images = chat_images;
         self.history.push(user_msg);
-        // 事件文本带附件链接（UI 渲染缩略图用）；history/rollout 是干净文本
-        let display_text = crate::rollout::user_display_text(&rollout_text, &image_refs);
+        // The event carries the clean text + attachment numbers (for UI
+        // thumbnails); history/rollout likewise hold the clean text
+        let nums = crate::rollout::image_nums(&image_refs);
         self.record(&RolloutRecord::User {
             text: rollout_text.clone(),
             files: record_files.clone(),
@@ -158,9 +175,10 @@ impl Session {
             |session_id, seq| Event::UserMessage {
                 session_id,
                 seq,
-                text: display_text,
+                text: rollout_text.clone(),
                 files: record_files.clone(),
                 image_count,
+                image_nums: nums,
             },
             tx,
         );
@@ -183,7 +201,9 @@ impl Session {
                             self.turn_cache_read,
                             self.turn_output,
                         );
-                        // 回合统计持久化：回放恢复 footer 与会话累计（水位由 StepUsage 恢复）
+                        // Persist turn stats: replay restores the footer and
+                        // session totals (the usage watermark is restored by
+                        // StepUsage)
                         self.record(&RolloutRecord::TurnStats {
                             input: self.turn_input,
                             cache_read: self.turn_cache_read,
@@ -194,7 +214,8 @@ impl Session {
                             api_steps: self.turn_api_steps,
                         });
                     }
-                    // 本轮改动面板先于回合结束事件发出（durable 数据先于边界事件）
+                    // The turn's changes panel is emitted before the turn-end
+                    // event (durable data before boundary events)
                     self.flush_turn_changes(tx);
                     let stats = (self.turn_input + self.turn_cache_read + self.turn_output > 0)
                         .then_some(pig_protocol::TurnUsageStats {
@@ -220,7 +241,8 @@ impl Session {
                 }
                 StepOutcome::ToolsExecuted => continue,
                 StepOutcome::Ended => {
-                    // 中断/失败收尾：本轮已发生的修改也要产出面板
+                    // Interrupt/failure wrap-up: changes already made this turn
+                    // still produce a panel
                     self.flush_turn_changes(tx);
                     return;
                 }
@@ -236,14 +258,16 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> StepOutcome {
-        // MCP 懒连接（每会话一次）：读 .pigcode/mcp.json + data_dir/mcp.json，
-        // 无配置时得到空 manager，开销可忽略；单 server 失败不影响其他
+        // Lazy MCP connection (once per session): reads .pigcode/mcp.json +
+        // data_dir/mcp.json; with no config we get an empty manager at
+        // negligible cost; a single server failure does not affect the others
         if self.mcp.is_none() {
             self.mcp = Some(Arc::new(
                 crate::mcp::McpManager::connect_all(&self.cwd, &self.data_dir).await,
             ));
         }
-        // 采样前检查水位：超过 context_window - max_output_tokens - 13k 缓冲就先自动 compact
+        // Check the usage watermark before sampling: above context_window -
+        // max_output_tokens - 13k of buffer, auto-compact first
         if let Some(used) = self.last_total_tokens {
             let threshold = config
                 .context_window
@@ -257,16 +281,19 @@ impl Session {
         let reasoning_item = format!("{turn_id}-reason-{step}");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let api_started = Instant::now();
-        // 调用轨迹输入投影：请求前拍快照（图片只记张数，长内容截断）。
-        // 落盘只存增量：与上一条的完整投影取公共前缀，offset + delta（对齐
-        // ZCode model-io，避免同一会话完整上下文梯度逐条重复）
+        // Model-io trace input projection: snapshot before the request (images
+        // recorded as counts, long content truncated). Persisting stores only
+        // the delta: take the common prefix against the previous full
+        // projection, offset + delta (aligned with ZCode model-io, avoiding
+        // re-recording the growing full context per entry in the same session)
         let io_input_full = crate::model_io::project_input(&self.history);
         let io_offset = crate::model_io::common_prefix_len(&io_input_full, &self.io_last_input);
         let io_input: Vec<_> = io_input_full[io_offset..].to_vec();
         let provider_task = tokio::spawn(provider::stream_chat(
             config.clone(),
             self.history.clone(),
-            // 根会话工具集 = 内置 + Agent/AgentSwarm + MCP（每步重建：档案与 MCP 工具可增改）
+            // Root session tool set = built-in + Agent/AgentSwarm + MCP (rebuilt
+            // every step: profiles and MCP tools may change)
             self.root_schemas(),
             event_tx,
             cancel.clone(),
@@ -276,9 +303,10 @@ impl Session {
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut provider_failed = false;
-        // 首个输出 token（思考/正文增量）到达时刻：TTFT = 该时刻 - 请求发出
+        // When the first output token (reasoning/text delta) arrives: TTFT =
+        // that moment - request sent
         let mut first_token_at: Option<Instant> = None;
-        // 本步用量与失败原因（轨迹落盘用）
+        // This step's usage and failure reason (for the persisted trace)
         let mut step_usage = crate::model_io::ModelIoUsage::default();
         let mut step_error: Option<String> = None;
 
@@ -335,7 +363,9 @@ impl Session {
                         used,
                         total,
                     };
-                    // 每次请求的用量即时落盘（durable 先于事件），回放用最后一条恢复水位
+                    // Per-request usage is persisted immediately (durable before
+                    // events); replay restores the watermark from the last
+                    // record
                     self.record(&RolloutRecord::StepUsage {
                         input,
                         cache_read,
@@ -357,22 +387,27 @@ impl Session {
                 }
                 Some(ProviderEvent::Finished) | None => break,
                 Some(ProviderEvent::Failed(error)) => {
+                    // Structured error goes straight to the UI (forwarded via
+                    // Event::Error); the trace persists a one-line English
+                    // version
+                    step_error = Some(crate::provider::core_error_en(&error));
                     self.emit(
                         |session_id, seq| Event::Error {
                             session_id: Some(session_id),
                             seq,
-                            message: error.clone(),
+                            error,
                         },
                         tx,
                     );
-                    step_error = Some(error);
                     provider_failed = true;
                     break;
                 }
             }
         }
-        // 纯 API 耗时：请求发出到流结束（含失败请求），不含工具执行与审批等待；
-        // TTFT 到首个输出 token（纯 tool_call 响应没有增量事件，TTFT 记 0）
+        // Pure API time: request sent to stream end (including failed
+        // requests), excluding tool execution and approval waits; TTFT is up to
+        // the first output token (a pure tool_call response has no delta
+        // events, TTFT = 0)
         let api_elapsed = api_started.elapsed();
         self.turn_api_ms += api_elapsed.as_millis() as u64;
         self.turn_api_steps += 1;
@@ -382,8 +417,10 @@ impl Session {
             .min(api_elapsed.as_millis() as u64);
         self.turn_ttft_ms += step_ttft_ms;
 
-        // 调用轨迹落盘（失败/取消也记）：UI「查看调用轨迹」直读该文件；
-        // 写失败非致命（与 rollout.append 同口径，eprintln 走 core 惯例）
+        // Persist the model-io trace (failures/cancellations recorded too): the
+        // UI's "view model io" reads this file directly; write failures are
+        // non-fatal (same policy as rollout.append, eprintln per core
+        // convention)
         let io_finish = if provider_failed {
             "error"
         } else if cancel.is_cancelled() {
@@ -413,9 +450,10 @@ impl Session {
         if let Err(e) =
             crate::model_io::append(&self.data_dir.join("sessions"), &self.id, &io_record)
         {
-            eprintln!("写入调用轨迹失败（忽略）: {e}");
+            eprintln!("Failed to write model io trace (ignored): {e}");
         }
-        // 本条完整投影成为下一条的增量基准
+        // This entry's full projection becomes the delta baseline for the next
+        // one
         self.io_last_input = io_input_full;
 
         if provider_failed {
@@ -446,7 +484,8 @@ impl Session {
             );
             self.record(&RolloutRecord::Text { text: text.clone() });
         }
-        // 思考内容随 assistant 消息进历史：Anthropic thinking 模式要求回传
+        // Reasoning enters history with the assistant message: Anthropic
+        // thinking mode requires it to be sent back
         self.history.push(ChatMsg::assistant(
             text,
             tool_calls.clone(),
@@ -457,8 +496,11 @@ impl Session {
         }
 
         let tools = self.root_tools();
-        // P0 分组并发：连续「可安全并发」的只读调用切成并发组（JoinSet，上限 8）；
-        // 不可并发的调用是同步点——前面的组排干后走下方原有串行路径（拦截语义不变）
+        // P0 grouped concurrency: consecutive "safe to run concurrently"
+        // read-only calls form a parallel group (JoinSet, cap 8); non-
+        // concurrentable calls are sync points — after the preceding group
+        // drains, they take the original serial path below (interception
+        // semantics unchanged)
         let mask = parallel_mask(
             &tool_calls,
             &tools,
@@ -469,7 +511,7 @@ impl Session {
         let mut next_ix = 0usize;
         for (call_ix, call) in tool_calls.iter().enumerate() {
             if call_ix < next_ix {
-                continue; // 已随前面的并发组执行完毕
+                continue; // already executed with an earlier parallel group
             }
             if mask[call_ix] {
                 let mut group_end = call_ix + 1;
@@ -477,7 +519,8 @@ impl Session {
                     group_end += 1;
                 }
                 next_ix = group_end;
-                // 取消收尾（补回执 + TurnAborted）在组内完成，false 即回合终止
+                // Cancellation wrap-up (receipts + TurnAborted) happens inside
+                // the group; false means the turn ends
                 if !self
                     .run_parallel_group(&tool_calls, call_ix, group_end, &turn_id, tx, cancel)
                     .await
@@ -488,8 +531,10 @@ impl Session {
             }
             let item_id = format!("{}-tool-{}", turn_id, call.id);
             let summary = tool::summarize(call);
-            // ExitPlanMode 的 begin 在拦截块内发（detail 用生效 plan 重写——
-            // 参数缺省时 core 读计划文件，UI 计划卡与回放恢复同数据源）
+            // ExitPlanMode's begin is emitted inside the interception block
+            // (detail rewritten with the effective plan — when the argument is
+            // omitted, core reads the plan file; the UI plan card and replay
+            // restore share one data source)
             if call.name != "ExitPlanMode" {
                 let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
                     .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
@@ -510,9 +555,11 @@ impl Session {
             let tool_ref = tools.iter().find(|t| t.name() == call.name);
             let read_only = tool_ref.is_some_and(|t| t.read_only());
 
-            // ExitPlanMode：在计划硬拒之前拦截（它是退出计划模式的唯一出口，
-            // 强制弹窗请用户确认；复用 ApprovalRequested 通道，UI 无需新组件）。
-            // kimi 语义：plan 参数可选——缺省时 core 读计划文件
+            // ExitPlanMode: intercepted before the plan-mode hard rejection (it
+            // is the only way out of plan mode; force a popup for user
+            // confirmation; reuses the ApprovalRequested channel so the UI
+            // needs no new component). kimi semantics: the plan argument is
+            // optional — when omitted, core reads the plan file
             if call.name == "ExitPlanMode" {
                 let args: serde_json::Value =
                     serde_json::from_str(&call.arguments).unwrap_or_default();
@@ -520,7 +567,8 @@ impl Session {
                 if plan.trim().is_empty() {
                     plan = read_plan_file(&self.cwd, &self.id).unwrap_or_default();
                 }
-                // begin 用生效 plan 重写（回放经 rollout arguments 恢复同一全文）
+                // begin is rewritten with the effective plan (replay restores
+                // the same full text via the rollout arguments)
                 let enriched_args = serde_json::json!({ "plan": plan }).to_string();
                 let detail = serde_json::to_string_pretty(
                     &serde_json::from_str::<serde_json::Value>(&enriched_args).unwrap_or_default(),
@@ -539,29 +587,35 @@ impl Session {
                 );
                 let (note, is_error);
                 if !self.plan_enabled {
-                    note = "仅在计划模式下可用".to_string();
+                    note = "Only available in plan mode.".to_string();
                     is_error = true;
                 } else if plan.trim().is_empty() {
-                    // kimi exitPlanModeTool 同款：计划文件为空/缺失时不弹审批，
-                    // 引导模型先写计划文件
+                    // Same as kimi exitPlanModeTool: when the plan file is empty
+                    // or missing, no approval popup — guide the model to write
+                    // the plan file first
                     note = format!(
-                        "计划文件为空或不存在：请先用 Write 把计划写入 `.pigcode/plans/plan-{}.md`，再调用 ExitPlanMode。",
+                        "The plan file is empty or missing: write the plan to `.pigcode/plans/plan-{}.md` with Write first, then call ExitPlanMode.",
                         self.id
                     );
                     is_error = true;
                 } else {
                     let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.id);
                     let (reply_tx, reply_rx) = oneshot::channel();
-                    // 计划确认是一次性弹窗，不参与同键合并决议
+                    // Plan confirmation is a one-shot popup; it does not join
+                    // same-key coalesced decisions
                     self.pending
                         .lock()
                         .expect("pending lock")
                         .insert(request_id.clone(), (reply_tx, None));
-                    // kimi 语义：计划先落盘再弹审批（批准时重写同内容幂等；
-                    // 拒绝后文件保留，修订后下一次 ExitPlanMode 覆盖）
+                    // kimi semantics: persist the plan before requesting
+                    // approval (rewriting the same content on approval is
+                    // idempotent; after rejection the file stays, and the next
+                    // ExitPlanMode overwrites it once revised)
                     write_plan_file(&self.cwd, &self.id, &plan);
-                    // 完整计划进弹窗（kimi 计划审批面板自带标题，detail = 纯计划
-                    // 全文——截断会让用户批准前看不到全文）
+                    // The full plan goes into the popup (the kimi plan approval
+                    // panel has its own title; detail = the plain plan full
+                    // text — truncation would hide the full text from the user
+                    // before approval)
                     self.emit(
                         |session_id, seq| Event::ApprovalRequested {
                             session_id,
@@ -569,6 +623,7 @@ impl Session {
                             request_id: request_id.clone(),
                             tool: call.name.clone(),
                             detail: plan.to_string(),
+                            danger_key: None,
                         },
                         tx,
                     );
@@ -593,8 +648,11 @@ impl Session {
                     };
                     match decision {
                         ApprovalDecision::Allow | ApprovalDecision::AlwaysAllow => {
-                            // 批准 = 关计划开关 + 计划落盘（弹窗前已写，这里幂等覆盖）
-                            // 退出只翻转计划开关——执行模式是独立维度，原样保留
+                            // Approved = turn off the plan toggle + persist the
+                            // plan (already written before the popup; idempotent
+                            // overwrite here). Exiting only flips the plan
+                            // toggle — the exec mode is an independent dimension
+                            // and stays as-is
                             write_plan_file(&self.cwd, &self.id, &plan);
                             self.plan_enabled = false;
                             let session_id = self.id.clone();
@@ -612,18 +670,20 @@ impl Session {
                                 },
                                 tx,
                             );
-                            note = "计划已批准，计划模式已关闭，请按计划开始执行。".to_string();
+                            note = "Plan approved; plan mode is now off. Start executing the plan."
+                                .to_string();
                             is_error = false;
                         }
                         ApprovalDecision::Reject => {
-                            // kimi Revise：拒绝可携带反馈意见，模型据此修订重提
+                            // kimi Revise: a rejection may carry feedback the
+                            // model uses to revise and resubmit
                             note = match feedback.filter(|f| !f.trim().is_empty()) {
                                 Some(f) => format!(
-                                    "用户拒绝退出计划模式。反馈意见：{}\n请据此修订计划并重新提交。",
+                                    "The user declined to exit plan mode. Feedback: {}\nRevise the plan accordingly and resubmit.",
                                     f.trim()
                                 ),
                                 None => {
-                                    "用户拒绝退出计划模式，请继续完善计划或回答疑问。".to_string()
+                                    "The user declined to exit plan mode. Continue refining the plan or answer open questions.".to_string()
                                 }
                             };
                             is_error = true;
@@ -635,7 +695,9 @@ impl Session {
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
                     summary,
-                    // 落生效 plan（参数缺省时为文件内容）：回放经它恢复计划卡全文
+                    // Persist the effective plan (file content when the
+                    // argument is omitted): replay restores the plan card's full
+                    // text from it
                     arguments: enriched_args,
                     output: note.clone(),
                     is_error,
@@ -657,11 +719,17 @@ impl Session {
                 continue;
             }
 
-            // EnterPlanMode：进计划是自我收紧（只读化），直接切换不弹窗。
-            // 计划开关与执行模式正交——只翻转 plan_enabled，模式档不动。
+            // EnterPlanMode: entering plan mode is self-tightening (read-only),
+            // so switch directly without a popup. The plan toggle is orthogonal
+            // to the exec mode — only plan_enabled flips; the permission tier
+            // stays.
             if call.name == "EnterPlanMode" {
                 let (note, is_error) = if self.plan_enabled {
-                    ("已在计划模式，请继续调研并输出计划。".to_string(), false)
+                    (
+                        "Already in plan mode; continue researching and write the plan."
+                            .to_string(),
+                        false,
+                    )
                 } else {
                     self.plan_enabled = true;
                     let session_id = self.id.clone();
@@ -681,7 +749,7 @@ impl Session {
                     );
                     (
                         format!(
-                            "已开启计划模式。接下来用只读工具调研，计划写好后用 Write 写入计划文件 `.pigcode/plans/plan-{}.md`（唯一可写路径），再调用 ExitPlanMode 请用户确认执行。",
+                            "Plan mode is on. Research with read-only tools from here; when the plan is ready, write it with Write to the plan file `.pigcode/plans/plan-{}.md` (the only writable path), then call ExitPlanMode to ask the user to confirm execution.",
                             self.id
                         ),
                         false,
@@ -713,10 +781,14 @@ impl Session {
                 continue;
             }
 
-            // Agent：委派子代理（前台同步）。拦在 ReadMediaFile 门控与 Plan 硬拒之前
-            // ——Plan 拒绝文案由 run_subagent 内部给出（比通用硬拒更贴合语义）。
-            // 子工具调用不发顶层 ToolCallBegin/End：父时间线只有 Agent 一张卡，
-            // 实时进度走 SubagentProgress，审批仍弹（子代理的写操作自己过审批门）。
+            // Agent: delegate a subagent (synchronous, foreground).
+            // Intercepted before the ReadMediaFile gate and the plan hard
+            // rejection — the plan rejection message comes from inside
+            // run_subagent (more fitting than the generic hard rejection).
+            // Child tool calls emit no top-level ToolCallBegin/End: the parent
+            // timeline has only one Agent card; live progress goes through
+            // SubagentProgress, approvals still pop up (the subagent's writes
+            // pass the approval gate themselves).
             if call.name == "Agent" {
                 match self
                     .run_subagent(call, &turn_id, &item_id, config, tx, cancel)
@@ -737,7 +809,8 @@ impl Session {
                             output: note.clone(),
                             is_error,
                             edit: None,
-                            // 代理卡元信息随记录持久化：回放经它重建代理卡
+                            // Agent card metadata is persisted with the record:
+                            // replay rebuilds the agent card from it
                             agent_card: card,
                             agent_cards: cards,
                         });
@@ -772,10 +845,13 @@ impl Session {
                 }
             }
 
-            // AgentSwarm：批量并行子代理。默认前台阻塞至全部完成；run_in_background
-            // 时逐个后台派发、立即返回回执（完成经 <task-notification> 逐个唤醒）。
-            // 与 Agent 同点拦截——Plan 拒绝文案由 run_swarm 内部给出；
-            // 各子代理的写操作仍各自过审批门。
+            // AgentSwarm: batch parallel subagents. By default it blocks in the
+            // foreground until all finish; with run_in_background it dispatches
+            // each to the background and returns receipts immediately
+            // (completions wake the parent one by one via <task-notification>).
+            // Intercepted at the same point as Agent — the plan rejection
+            // message comes from inside run_swarm; each subagent's writes still
+            // pass the approval gate.
             if call.name == "AgentSwarm" {
                 match self.run_swarm(call, &item_id, config, tx, cancel).await {
                     SubagentOutcome::Finished {
@@ -827,11 +903,13 @@ impl Session {
                 }
             }
 
-            // ReadMediaFile 能力门控：当前模型不支持图片输入时直接引导换模型
-            //（不执行、不弹审批；schemas 里始终可见，模型调了就被引导）
+            // ReadMediaFile capability gate: when the current model lacks image
+            // input, guide toward switching models (no execution, no approval
+            // popup; always visible in schemas, and calling it triggers the
+            // guidance)
             if call.name == "ReadMediaFile" && !config.input_image {
                 let note =
-                    "当前模型不支持图片输入，请在设置里更换模型或勾选图片输入能力".to_string();
+                    "The current model does not support image input; switch the model or enable the image-input capability in Settings.".to_string();
                 self.history
                     .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
@@ -858,15 +936,17 @@ impl Session {
                 continue;
             }
 
-            // 计划硬拒（白名单口径，比 kimi-code 黑名单更严）：只读工具 +
-            // 计划文件写（kimi writesOnlyPlanFile）放行，其余修改类直接拒——
-            // 与权限档无关，「完全访问 + 计划」也照拒
+            // Plan-mode hard rejection (allowlist-based, stricter than
+            // kimi-code's blocklist): read-only tools + plan file writes (kimi
+            // writesOnlyPlanFile) pass; all other modifying tools are rejected
+            // outright — independent of the permission tier, "full access +
+            // plan" is rejected too
             if self.plan_enabled
                 && !read_only
                 && !tool::is_plan_file_write(&self.cwd, &call.arguments)
             {
                 let note = format!(
-                    "计划模式：修改类工具已被禁止执行（唯一例外是写计划文件 `.pigcode/plans/plan-{}.md`）。请用只读工具调研，把计划写入计划文件后经 ExitPlanMode 请用户确认。",
+                    "Plan mode: modifying tools are disabled (the only exception is writing the plan file `.pigcode/plans/plan-{}.md`). Research with read-only tools, write the plan into the plan file, then call ExitPlanMode to ask the user for confirmation.",
                     self.id
                 );
                 self.history
@@ -895,15 +975,17 @@ impl Session {
                 continue;
             }
 
-            // AskUserQuestion：结构化提问在会话层拦截执行（工具本身只注册 schema）。
-            // read_only，无需审批；Esc 跳过（None）不算错误。
+            // AskUserQuestion: structured questions are intercepted and
+            // executed at the session layer (the tool itself only registers a
+            // schema). Read-only, no approval needed; an Esc skip (None) is not
+            // an error.
             if call.name == "AskUserQuestion" {
                 let args: serde_json::Value =
                     serde_json::from_str(&call.arguments).unwrap_or_default();
                 let questions = match tool::parse_questions(&args) {
                     Ok(questions) => questions,
                     Err(error) => {
-                        let note = format!("AskUserQuestion 参数非法: {error}");
+                        let note = format!("Invalid AskUserQuestion arguments: {error}");
                         self.history
                             .push(ChatMsg::tool_result(&call.id, note.clone()));
                         self.record(&RolloutRecord::ToolCall {
@@ -946,7 +1028,7 @@ impl Session {
                     tx,
                 );
                 let reply = tokio::select! {
-                    // sender 被 drop（回复方消失）按跳过处理
+                    // sender dropped (replier gone) is treated as skip
                     reply = reply_rx => reply.unwrap_or(None),
                     _ = cancel.cancelled() => {
                         self.pending_questions
@@ -970,15 +1052,15 @@ impl Session {
                 };
                 let note = match &reply {
                     Some(answers) => {
-                        let mut text = "用户已回答：\n".to_string();
+                        let mut text = "The user answered:\n".to_string();
                         for (ix, question) in questions.iter().enumerate() {
                             let labels = answers
                                 .get(ix)
-                                .map(|labels| labels.join("、"))
+                                .map(|labels| labels.join(", "))
                                 .filter(|s| !s.is_empty())
-                                .unwrap_or_else(|| "（未选择）".to_string());
+                                .unwrap_or_else(|| "(no selection)".to_string());
                             text.push_str(&format!(
-                                "{}. {}：{}\n",
+                                "{}. {}: {}\n",
                                 ix + 1,
                                 question.question,
                                 labels
@@ -986,7 +1068,8 @@ impl Session {
                         }
                         text
                     }
-                    None => "用户选择不回答，请根据上下文自行决定并继续。".to_string(),
+                    None => "The user chose not to answer; decide from context and continue."
+                        .to_string(),
                 };
                 self.history
                     .push(ChatMsg::tool_result(&call.id, note.clone()));
@@ -1014,9 +1097,11 @@ impl Session {
                 continue;
             }
 
-            // 通用路径：危险黑名单/项目权限规则/审批门/执行/会话级副作用全部在
-            // exec_tool_gated（子代理循环复用同一门控）；本处只收尾
-            // history/rollout/ToolCallEnd（父会话自己的历史与 rollout）
+            // Generic path: danger blocklist/project permission rules/approval
+            // gate/execution/session-level side effects all live in
+            // exec_tool_gated (the subagent loop reuses the same gate); this
+            // spot only finalizes history/rollout/ToolCallEnd (the parent
+            // session's own history and rollout)
             match self
                 .exec_tool_gated(
                     call,
@@ -1074,8 +1159,10 @@ impl Session {
                     edit,
                     images,
                 } => {
-                    // 图片随 history 进模型上下文（Anthropic blocks / OpenAI 拆 user 消息）；
-                    // rollout 的 ToolCall 记录只存 output 文本（尺寸摘要在内），base64 不落盘
+                    // Images enter the model context via history (Anthropic
+                    // blocks / OpenAI split user messages); the rollout ToolCall
+                    // record stores only the output text (size summary
+                    // included), base64 is not persisted
                     self.history.push(ChatMsg::tool_result_with_images(
                         &call.id,
                         output.clone(),
@@ -1108,13 +1195,19 @@ impl Session {
         StepOutcome::ToolsExecuted
     }
 
-    /// 并发只读组执行（P0）：组内调用经 parallel_mask 判定为只读、当前模式免审批、
-    /// 无会话层拦截（Agent/AskUserQuestion/计划模式切换等同步点都在串行路径）。
-    /// ToolCallBegin 按原序先发（卡片顺序 = 原始顺序）；ToolCallEnd 随完成即达
-    ///（item_id 寻址，TUI find_or_create 容忍乱序，回放由 rollout 记录序重建）；
-    /// history/rollout 在组排干后按原 index 补齐，tool_result 配对顺序不乱。
-    /// 返回 false = 被取消：在跑任务已 abort 排干、未完成的调用已补「已停止」回执、
-    /// 组后剩余调用已补历史回执、TurnAborted 已发（调用方直接 Ended）。
+    /// Executes a parallel read-only group (P0): calls in the group are judged
+    /// read-only by parallel_mask, approval-free in the current mode, and free
+    /// of session-layer interception (sync points such as Agent/AskUserQuestion/
+    /// plan mode toggles all live on the serial path). ToolCallBegin is emitted
+    /// first in original order (card order = original order); ToolCallEnd
+    /// arrives as each call completes (addressed by item_id; the TUI's
+    /// find_or_create tolerates out-of-order arrival, and replay rebuilds from
+    /// the rollout record order); history/rollout are backfilled by original
+    /// index once the group drains, so tool_result pairing order is preserved.
+    /// Returns false = cancelled: running tasks have been aborted and drained,
+    /// unfinished calls have received "Stopped" receipts, calls after the group
+    /// have history receipts, and TurnAborted has been sent (the caller goes
+    /// straight to Ended).
     async fn run_parallel_group(
         &mut self,
         tool_calls: &[ToolCall],
@@ -1124,10 +1217,11 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> bool {
-        /// 并发组内同时执行的调用数上限
+        /// Cap on calls executing simultaneously within a parallel group
         const MAX_PARALLEL: usize = 8;
 
-        // 全组成员按原序发 Begin 并预计算卡片信息（summary 随 rollout 持久化）
+        // Emit Begin for all group members in original order and precompute
+        // card info (summary is persisted with the rollout)
         let group = &tool_calls[start..end];
         let mut cards: Vec<ParallelCall> = Vec::with_capacity(group.len());
         for call in group {
@@ -1154,11 +1248,16 @@ impl Session {
             });
         }
 
-        // 并发执行：只读工具不触碰 ChangeTracker（各任务持一次性实例，debug 断言兜底）；
-        // 会话共享态（read_states/todos/tasks）全是 Arc<Mutex>/atomic，本就为前后台共享设计，
-        // 并发读安全；写互斥由分组保证（写工具是同步点，组排干后才会执行）。
-        // MCP 工具：mask 已保证只读+免审批+无 deny 命中；任务内 clone Arc<McpManager>
-        // 按名现取（McpTool clone 即 Arc 克隆，便宜），经 execute_with_extra 执行
+        // Concurrent execution: read-only tools never touch the ChangeTracker
+        // (each task holds a one-shot instance, with a debug assertion as
+        // backstop); session-shared state (read_states/todos/tasks) is all
+        // Arc<Mutex>/atomic, designed for foreground/background sharing from the
+        // start, so concurrent reads are safe; write exclusion is guaranteed by
+        // grouping (write tools are sync points, executed only after the group
+        // drains). MCP tools: the mask already guarantees read-only +
+        // approval-free + no deny hit; the task clones Arc<McpManager> and
+        // fetches by name (an McpTool clone is just an Arc clone, cheap),
+        // executed via execute_with_extra
         let mut set: tokio::task::JoinSet<(usize, ParallelOutput)> = tokio::task::JoinSet::new();
         let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
         slots.resize_with(cards.len(), || None);
@@ -1184,7 +1283,8 @@ impl Session {
                         }
                         _ => vec![],
                     };
-                    // Skill 只读可并发，走 extra 通道（串行门控同款）
+                    // Skill is read-only and concurrentable, served via the
+                    // extra channel (same as the serial gate)
                     if call.name == "Skill" {
                         extra.push(Box::new(tool::SkillTool::new(&cwd, &data_dir)));
                     }
@@ -1192,7 +1292,7 @@ impl Session {
                         tool::execute_with_extra(&call, ctx, &extra).await;
                     debug_assert!(
                         file_change.is_none() && tracker.take_dirty().is_empty(),
-                        "并发只读段不产生文件改动: {}",
+                        "concurrent read-only segment produces no file changes: {}",
                         call.name
                     );
                     let images = tool_images_to_chat(&call.arguments, images);
@@ -1229,7 +1329,8 @@ impl Session {
                             );
                             slots[index] = Some(out);
                         }
-                        // panic/abort：槽位留空，下方收尾统一兜底
+                        // panic/abort: leave the slot empty; the wrap-up below
+                        // backstops it
                         Some(Err(_)) => {}
                         None => break false,
                     }
@@ -1239,8 +1340,11 @@ impl Session {
         };
 
         if cancelled {
-            // 中止在跑任务并排干：阻塞读会跑完当前 fs 调用后在下一让出点退出，
-            // JoinSet 析构兜底 abort，不留孤儿；排干窗口内刚好完成的按正常完成落定
+            // Abort running tasks and drain: a blocking read finishes the
+            // current fs call then exits at the next yield point; the JoinSet
+            // destructor backstops with abort so no orphans remain; those that
+            // happen to finish within the drain window settle as normal
+            // completions
             set.abort_all();
             while let Some(joined) = set.join_next().await {
                 if let Ok((index, out)) = joined {
@@ -1260,7 +1364,8 @@ impl Session {
             }
         }
 
-        // 统一收尾（严格原序）：history 与 rollout 按原 index 补齐
+        // Unified wrap-up (strictly original order): history and rollout are
+        // backfilled by original index
         for (index, card) in cards.iter().enumerate() {
             match slots[index].take() {
                 Some(out) => {
@@ -1286,7 +1391,9 @@ impl Session {
                         agent_card: None,
                         agent_cards: vec![],
                     });
-                    // 防御：分类保证只读无改动；未来误标 read_only 的变更工具不丢数据
+                    // Defense in depth: classification guarantees read-only
+                    // means no changes; a future mutating tool mislabeled
+                    // read_only loses no data
                     if let Some(change) = file_change {
                         {
                             let store = self.store.lock().expect("store lock");
@@ -1316,7 +1423,9 @@ impl Session {
                     }
                 }
                 None if cancelled => {
-                    // 取消：组内成员都发过 Begin，逐卡落定「已停止」（rest 语义在下方统一处理）
+                    // Cancelled: every group member already got a Begin, so
+                    // settle each card as "Stopped" (rest semantics handled
+                    // uniformly below)
                     self.settle_cancelled_tool(
                         CancelledTool {
                             call: &card.call,
@@ -1330,8 +1439,10 @@ impl Session {
                     );
                 }
                 None => {
-                    // 正常路径的空槽 = 任务 panic：补错误回执保持 tool_use 配对完整
-                    let note = "工具执行内部错误（任务异常终止）".to_string();
+                    // Empty slot on the normal path = task panic: backfill an
+                    // error receipt to keep tool_use pairing complete
+                    let note = "Internal tool execution error (the task terminated unexpectedly)"
+                        .to_string();
                     self.history
                         .push(ChatMsg::tool_result(&card.call.id, note.clone()));
                     self.record(&RolloutRecord::ToolCall {
@@ -1360,10 +1471,11 @@ impl Session {
         }
 
         if cancelled {
-            // 组后剩余调用没发过 Begin：只补历史回执保持配对（settle 的 rest 语义）
+            // Calls after the group never got a Begin: only history receipts
+            // are backfilled to keep pairing (settle's rest semantics)
             for rest in &tool_calls[end..] {
                 self.history
-                    .push(ChatMsg::tool_result(&rest.id, "已停止".to_string()));
+                    .push(ChatMsg::tool_result(&rest.id, "Stopped".to_string()));
             }
             self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
         }
@@ -1371,32 +1483,35 @@ impl Session {
     }
 }
 
-/// @引用文件的指针行：只注入路径与大小，不读内容、不带读取指引
-///（kimi-code TUI 的极简形态：@ 是注意力引导；「需要时主动调工具」在系统
-/// 提示词里是常驻指令，工具清单也在，逐条重复提示是噪音）。
-/// 路径仍经 resolve_checked 校验（工作区内、非敏感）；图片只标注类型。
+/// Pointer line for @-referenced files: injects only the path and size — no
+/// content read, no reading guidance (kimi-code TUI's minimal form: @ is an
+/// attention guide; "call tools proactively when needed" is a standing system-
+/// prompt instruction and the tool list is right there, so per-file hints are
+/// noise). Paths still go through resolve_checked validation (inside the
+/// workspace, non-sensitive); images are annotated with their kind only.
 pub(crate) fn pointer_file_references(cwd: &Path, content: &str, files: &[String]) -> String {
     let mut text = content.to_string();
     for file in files {
         let block = match tool::resolve_checked(cwd, file, false) {
             Ok(full) => {
                 let size = std::fs::metadata(&full).ok().map(|m| m.len());
-                let kind = if is_image_path(file) { "，图片" } else { "" };
+                let kind = if is_image_path(file) { ", image" } else { "" };
                 match size {
                     Some(bytes) => {
-                        format!("\n\n[引用文件 {file}（{}{kind}）]", human_size(bytes))
+                        format!("\n\n[Referenced file {file} ({}{kind})]", human_size(bytes))
                     }
-                    None => format!("\n\n[引用文件 {file}{kind}]"),
+                    None => format!("\n\n[Referenced file {file}{kind}]"),
                 }
             }
-            Err(error) => format!("\n\n[无法引用文件 {file}: {error}]"),
+            Err(error) => format!("\n\n[Cannot reference file {file}: {error}]"),
         };
         text.push_str(&block);
     }
     text
 }
 
-/// 读计划文件（ExitPlanMode 的 plan 参数缺省时）：不存在/读失败为 None
+/// Reads the plan file (when ExitPlanMode's plan argument is omitted): None if
+/// missing or unreadable
 fn read_plan_file(cwd: &Path, session_id: &str) -> Option<String> {
     std::fs::read_to_string(
         cwd.join(".pigcode")
@@ -1406,9 +1521,11 @@ fn read_plan_file(cwd: &Path, session_id: &str) -> Option<String> {
     .ok()
 }
 
-/// 计划落盘（ZCode plan-file-continuity 同款）：ExitPlanMode 批准时把计划
-/// 全文原子写入 `<cwd>/.pigcode/plans/plan-<session_id>.md`（tmp+rename）。
-/// 失败只打日志不阻断执行——计划已在对话历史与 rollout 里
+/// Persists the plan (same as ZCode plan-file-continuity): when ExitPlanMode
+/// is approved, atomically write the full plan to
+/// `<cwd>/.pigcode/plans/plan-<session_id>.md` (tmp+rename). Failure only logs
+/// and does not block execution — the plan already lives in the conversation
+/// history and rollout
 fn write_plan_file(cwd: &Path, session_id: &str, plan: &str) {
     let dir = cwd.join(".pigcode").join("plans");
     let path = dir.join(format!("plan-{session_id}.md"));
@@ -1417,7 +1534,7 @@ fn write_plan_file(cwd: &Path, session_id: &str, plan: &str) {
         .and_then(|()| std::fs::write(&tmp, plan))
         .and_then(|()| std::fs::rename(&tmp, &path));
     if let Err(error) = result {
-        eprintln!("[plan] 计划落盘失败 {}: {error}", path.display());
+        eprintln!("[plan] failed to persist plan {}: {error}", path.display());
     }
 }
 
@@ -1441,15 +1558,18 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// 并发只读组内一个调用的预计算卡片信息（Begin 先发，End 随完成即达）
+/// Precomputed card info for one call in a parallel read-only group (Begin sent
+/// first, End arrives on completion)
 struct ParallelCall {
     call: ToolCall,
     item_id: String,
     summary: String,
 }
 
-/// 并发只读组单个调用的执行产物（与 GatedToolOutcome::Executed 同构，
-/// 外加 file_change 防御通道——分类保证只读恒为 None，误标时不丢数据）
+/// Execution product of one call in a parallel read-only group (same shape as
+/// GatedToolOutcome::Executed, plus a defensive file_change channel —
+/// classification guarantees read-only is always None; if mislabeled, no data
+/// is lost)
 struct ParallelOutput {
     output: String,
     is_error: bool,
@@ -1458,29 +1578,38 @@ struct ParallelOutput {
     file_change: Option<tool::FileChange>,
 }
 
-/// 并发只读段排除名单：虽声明 read_only() 但有会话副作用或会话层拦截语义，
-/// 一律落回串行同步点。AskUserQuestion/EnterPlanMode/ExitPlanMode/Agent 的
-/// 拦截逻辑在 run_step 串行体内，语义不变（天然同步点）。
+/// Exclusion list for the parallel read-only segment: tools that declare
+/// read_only() but have session side effects or session-layer interception
+/// semantics all fall back to serial sync points. The interception logic for
+/// AskUserQuestion/EnterPlanMode/ExitPlanMode/Agent lives in run_step's serial
+/// body with unchanged semantics (natural sync points).
 const PARALLEL_EXCLUDED: &[&str] = &[
-    "TodoList",        // 写变体改 todos 并落库推事件
-    "TaskStop",        // 停止后台任务，是变更操作
-    "AskUserQuestion", // 会话层弹窗拦截
-    "EnterPlanMode",   // 模式切换拦截
-    "ExitPlanMode",    // 模式切换拦截（带审批弹窗）
-    "Agent",           // 子代理委派拦截
+    "TodoList",        // write variant mutates todos, persists and pushes events
+    "TaskStop",        // stops a background task; a mutating operation
+    "AskUserQuestion", // session-layer popup interception
+    "EnterPlanMode",   // mode-switch interception
+    "ExitPlanMode",    // mode-switch interception (with approval popup)
+    "Agent",           // subagent delegation interception
 ];
 
-/// 单调用并发安全判定（保守原则，全部满足才可并发）：
-/// 已知工具、read_only、当前模式免审批（read_only 工具在现有审批矩阵下全模式免审批，
-/// 仍走 requires_approval 同一判定防矩阵变更后回归）。工作区外访问在本代码库是
-/// 硬错误/会话开关门控（resolve_with_access），不产生审批弹窗，敏感文件在工具内部
-/// 无条件硬拒——审批弹窗只会来自危险命令/requires_approval 分支，并发组成员按此
-/// 分类永远不会进入那两个分支，因此不可能出现两个审批弹窗并发。
-/// ReadMediaFile 在模型不支持图片输入时被会话层能力门控拦截，不可并发。
-/// MCP 工具：read_only（readOnlyHint）+ 免审批之外还要过项目 deny 规则预检——
-/// 并发路径不走 exec_tool_gated_ctx，串行门控里的 deny 判定在此补齐
-/// （subject 口径与串行一致 = 工具全名）。McpClient 请求多路复用已核实并发安全
-///（stdio：AtomicU64 id + Mutex pending map + stdin 写锁；http：每请求独立 POST）。
+/// Concurrency-safety check for a single call (conservative: all must hold):
+/// known tool, read_only, approval-free in the current mode (read-only tools
+/// are approval-free in all modes under the current approval matrix, but still
+/// go through the same requires_approval check to guard against regressions if
+/// the matrix changes). Out-of-workspace access in this codebase is a hard
+/// error / session-toggle gate (resolve_with_access) and produces no approval
+/// popup; sensitive files are unconditionally hard-rejected inside tools —
+/// approval popups can only come from the dangerous-command/requires_approval
+/// branches, and group members classified here never enter those two branches,
+/// so two concurrent approval popups are impossible. ReadMediaFile is
+/// intercepted by the session-layer capability gate when the model lacks image
+/// input; not concurrent. MCP tools: besides read_only (readOnlyHint) +
+/// approval-free, they must pass a project deny-rule precheck — the concurrent
+/// path bypasses exec_tool_gated_ctx, so the serial gate's deny check is
+/// duplicated here (subject is the full tool name, same as serial). McpClient
+/// request multiplexing is verified concurrency-safe (stdio: AtomicU64 id +
+/// Mutex pending map + stdin write lock; http: one independent POST per
+/// request).
 fn parallel_safe(
     call: &ToolCall,
     tools: &[Box<dyn tool::Tool>],
@@ -1500,16 +1629,18 @@ fn parallel_safe(
     if !tool_ref.read_only() || tool::requires_approval(tool_ref.as_ref(), mode) {
         return false;
     }
-    // MCP 工具的项目 deny 预检（命中 → 落回串行同步点，走完整门控给出拒绝文案）
+    // Project deny precheck for MCP tools (hit → falls back to a serial sync
+    // point; the full gate produces the rejection message)
     if call.name.starts_with("mcp__") && permissions.deny_hit(&call.name, &call.name).is_some() {
         return false;
     }
     true
 }
 
-/// 把一个 step 的 tool_calls 切成并发段掩码：true = 可进并发只读组；
-/// false = 同步点（写/壳/需审批/会话层拦截/未知工具/deny 命中的 MCP），
-/// 排干前组后单独串行执行。
+/// Slices one step's tool_calls into a parallel-segment mask: true = may join
+/// a parallel read-only group; false = sync point (writes/shell/needs
+/// approval/session-layer interception/unknown tool/MCP deny hit), executed
+/// serially on its own after the preceding group drains.
 fn parallel_mask(
     calls: &[ToolCall],
     tools: &[Box<dyn tool::Tool>],
@@ -1528,10 +1659,11 @@ mod tests {
     use super::*;
 
     fn mask_of(names: &[&str], mode: ExecMode, input_image: bool) -> Vec<bool> {
-        mask_with(names, &tool::all(), mode, input_image, "无规则")
+        mask_with(names, &tool::all(), mode, input_image, "no-rules")
     }
 
-    /// 带工具集与权限规则的掩码：rules 为 permissions.toml 文本（"无规则" 特例 = 空规则）
+    /// Mask with tool set and permission rules: rules is permissions.toml text
+    /// ("no-rules" is the special case = empty rules)
     fn mask_with(
         names: &[&str],
         tools: &[Box<dyn tool::Tool>],
@@ -1547,15 +1679,16 @@ mod tests {
                 arguments: "{}".to_string(),
             })
             .collect();
-        let permissions = if rules_toml == "无规则" {
+        let permissions = if rules_toml == "no-rules" {
             crate::permissions::PermissionRules::default()
         } else {
-            crate::permissions::PermissionRules::parse(rules_toml).expect("规则合法")
+            crate::permissions::PermissionRules::parse(rules_toml).expect("rules should parse")
         };
         parallel_mask(&calls, tools, mode, input_image, &permissions)
     }
 
-    /// 造一个 MCP 工具（for_test 假连接，只关心 name/read_only 判定）
+    /// Build an MCP tool (for_test fake connection; only the name/read_only
+    /// classification matters)
     fn mcp_tool(tool_name: &str, read_only: bool) -> Box<dyn tool::Tool> {
         let spec = crate::mcp::McpToolSpec {
             name: tool_name.to_string(),
@@ -1625,7 +1758,8 @@ mod tests {
 
     #[test]
     fn segments_split_on_sync_points() {
-        // Read Read | Write | Grep Glob | Bash | Read —— 写/壳把段切开
+        // Read Read | Write | Grep Glob | Bash | Read — writes/shell split
+        // segments
         let mask = mask_of(
             &["Read", "Read", "Write", "Grep", "Glob", "Bash", "Read"],
             ExecMode::AutoEdit,
@@ -1634,7 +1768,7 @@ mod tests {
         assert_eq!(mask, [true, true, false, true, true, false, true]);
     }
 
-    // ---------- MCP 工具进并发组 ----------
+    // ---------- MCP tools joining parallel groups ----------
 
     #[test]
     fn mcp_readonly_parallel_safe_in_all_modes() {
@@ -1653,12 +1787,12 @@ mod tests {
                 &tools,
                 mode,
                 false,
-                "无规则",
+                "no-rules",
             );
             assert_eq!(
                 mask,
                 [true, false],
-                "{mode:?}: 只读 MCP 可并发，写 MCP 同步点"
+                "{mode:?}: read-only MCP tools run concurrently, writing MCP is a sync point"
             );
         }
     }
@@ -1669,7 +1803,8 @@ mod tests {
             .into_iter()
             .chain(vec![mcp_tool("read", true)])
             .collect();
-        // deny 规则命中（工具全名 subject，与串行门控同口径）→ 回串行
+        // deny rule hit (full tool name as subject, same as the serial gate) →
+        // back to serial
         let mask = mask_with(
             &["mcp__srv__read"],
             &tools,
@@ -1677,12 +1812,17 @@ mod tests {
             false,
             "deny = [\"mcp__srv__read(*)\"]",
         );
-        assert_eq!(mask, [false], "deny 命中的 MCP 工具不可并发");
+        assert_eq!(
+            mask,
+            [false],
+            "MCP tools matched by deny cannot run concurrently"
+        );
     }
 
     #[test]
     fn mcp_unknown_tool_not_parallel() {
-        // 工具集里查不到的 mcp__ 名（未连接/未继承）→ 同步点
+        // An mcp__ name absent from the tool set (not connected/not
+        // inherited) → sync point
         let mask = mask_of(&["mcp__ghost__read"], ExecMode::Yolo, false);
         assert_eq!(mask, [false]);
     }
@@ -1695,7 +1835,8 @@ mod tests {
         dir
     }
 
-    /// 指针行：只给路径+大小（图片标注类型），不带读取指引、不读文件内容
+    /// Pointer line: path + size only (images annotated with kind), no reading
+    /// guidance, no file content
     #[test]
     fn pointer_references_never_inline_content() {
         let dir = pointer_test_dir("basic");
@@ -1703,24 +1844,28 @@ mod tests {
         std::fs::write(dir.join("big.rs"), "x".repeat(2048)).unwrap();
         std::fs::write(dir.join("logo.png"), b"\x89PNG").unwrap();
 
-        // 默认：路径 + 大小，无指引、无内容
-        let out = pointer_file_references(&dir, "看下这个", &["a.rs".into()]);
-        assert!(out.contains("[引用文件 a.rs（13 B）]"), "{out}");
-        assert!(!out.contains("Read"), "不带读取指引: {out}");
-        assert!(!out.contains("fn main"), "不得内联内容: {out}");
+        // Default: path + size, no guidance, no content
+        let out = pointer_file_references(&dir, "take a look at this", &["a.rs".into()]);
+        assert!(out.contains("[Referenced file a.rs (13 B)]"), "{out}");
+        assert!(!out.contains("Read"), "no read guidance expected: {out}");
+        assert!(!out.contains("fn main"), "must not inline content: {out}");
 
-        // 大文件：同样只给指针（读取由模型用 Read 分页）
-        let out = pointer_file_references(&dir, "看 10000 到 10050 行", &["big.rs".into()]);
-        assert!(out.contains("[引用文件 big.rs（2.0 KB）]"), "{out}");
-        assert!(!out.contains("xxx"), "不得内联内容: {out}");
+        // Large file: pointer only as well (the model reads it with paged
+        // Read)
+        let out = pointer_file_references(&dir, "view lines 10000 to 10050", &["big.rs".into()]);
+        assert!(out.contains("[Referenced file big.rs (2.0 KB)]"), "{out}");
+        assert!(!out.contains("xxx"), "must not inline content: {out}");
 
-        // 图片：只标注类型
-        let out = pointer_file_references(&dir, "看图", &["logo.png".into()]);
-        assert!(out.contains("（4 B，图片）]"), "{out}");
+        // Image: kind annotation only
+        let out = pointer_file_references(&dir, "view the image", &["logo.png".into()]);
+        assert!(out.contains("(4 B, image)]"), "{out}");
 
-        // 工作区外/不存在：报错行
+        // Outside the workspace/missing: error line
         let out = pointer_file_references(&dir, "x", &["../etc/passwd".into()]);
-        assert!(out.contains("[无法引用文件 ../etc/passwd"), "{out}");
+        assert!(
+            out.contains("[Cannot reference file ../etc/passwd"),
+            "{out}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,13 +1,14 @@
 use super::*;
 
 impl Composer {
-    /// 工作区选择面板：Command 面板（搜索框 + 工作区列表 + 操作行），锚定在工作区芯片正上方。
+    /// Workspace picker panel: a Command panel (search box + workspace list + action
+    /// rows), anchored right above the workspace chip.
     pub(crate) fn render_cwd_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
         let command = Command::new(&self.cwd_command)
-            .placeholder("搜索工作区")
+            .placeholder(rust_i18n::t!("composer.search_workspace"))
             .items(self.hero_cwds.iter().map(|cwd| {
                 let name = std::path::Path::new(cwd)
                     .file_name()
@@ -22,13 +23,13 @@ impl Composer {
             .separator()
             .item(
                 CommandItem::new()
-                    .label("打开文件夹")
+                    .label(rust_i18n::t!("composer.open_folder"))
                     .icon(IconName::FolderOpen),
             )
             .when(self.hero_cwd.is_some(), |this| {
                 this.item(
                     CommandItem::new()
-                        .label("不在工作区中工作")
+                        .label(rust_i18n::t!("composer.no_workspace"))
                         .icon(IconName::CircleX),
                 )
             })
@@ -38,7 +39,7 @@ impl Composer {
                     .py_1p5()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("没有匹配的工作区")
+                    .child(rust_i18n::t!("composer.no_matching_workspaces"))
             })
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
@@ -67,13 +68,14 @@ impl Composer {
         )
     }
 
-    /// 分支选择面板：Command 面板（搜索框 + 分支列表），锚定在分支芯片正上方。
+    /// Branch picker panel: a Command panel (search box + branch list), anchored
+    /// right above the branch chip.
     pub(crate) fn render_branch_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
         let command = Command::new(&self.branch_command)
-            .placeholder("搜索分支")
+            .placeholder(rust_i18n::t!("composer.search_branch"))
             .items(self.hero_branches.iter().map(|branch| {
                 CommandItem::new()
                     .label(branch.clone())
@@ -87,7 +89,7 @@ impl Composer {
                     .py_1p5()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("没有匹配的分支")
+                    .child(rust_i18n::t!("composer.no_matching_branches"))
             })
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
@@ -111,20 +113,24 @@ impl Composer {
         )
     }
 
-    /// 执行模式面板：顶部「计划」开关（与权限正交，ZCode V4ComposerModeControls
-    /// 同款布局：计划勾选在上、分隔线、权限单选在下），底部 footer 槽放
-    /// 「工作区外访问」开关。计划/开关行不参与 Command 键盘选择（鼠标交互）。
+    /// Exec mode panel: the "Plan" toggle on top (orthogonal to permissions, same
+    /// layout as ZCode's V4ComposerModeControls: plan checkbox above, separator,
+    /// permission radio group below), with the "access outside workspace" toggles in
+    /// the bottom footer slot. The plan/toggle rows do not take part in Command
+    /// keyboard selection (mouse interaction).
     pub(crate) fn render_exec_mode_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
-        // 计划开关行（鼠标交互，不进 Command 键盘导航）：灯泡 + 「计划」+ 描述 + Checkbox
+        // Plan toggle row (mouse interaction, not in Command keyboard navigation):
+        // lightbulb + "Plan" + description + Checkbox
         let plan_on = self.plan_enabled;
         let command = Command::new(&self.exec_command)
             .searchable(false)
-            // header 槽：「计划」开关行 + 分隔线——放在 Command 自己的边框内
-            //（ZCode 菜单布局：计划勾选在上、分隔线、权限单选在下），
-            // 悬停高亮与列表行同款 accent 底色
+            // Header slot: "Plan" toggle row + separator, placed inside Command's own
+            // border (ZCode menu layout: plan checkbox above, separator, permission
+            // radio group below); the hover highlight uses the same accent background
+            // as list rows
             .header({
                 let composer = cx.entity();
                 move |_, _window, cx| {
@@ -141,16 +147,20 @@ impl Composer {
                     };
                     v_flex()
                         .w_full()
-                        // 垂直内缩与列表容器 p_1 对齐：高亮块不顶弹层上沿
+                        // Vertical inset matches the list container's p_1: the
+                        // highlight block does not touch the popup's top edge
                         .pt_1()
                         .pb_1()
                         .child(
                             div()
                                 .id("plan-mode-toggle")
                                 .test_support()
-                                // 高亮块与列表行同宽：列表容器有 p_1 内缩，
-                                // header 槽全宽，行要自己内缩一份（分隔线保持通栏）；
-                                // mb 与线下列表的 p_1 顶距对称——高亮不贴分隔线
+                                // Highlight block as wide as the list rows: the list
+                                // container has a p_1 inset while the header slot is
+                                // full width, so the row must inset itself (the
+                                // separator stays full-bleed); mb mirrors the p_1 top
+                                // gap of the list below, so the highlight does not
+                                // hug the separator
                                 .mx_1()
                                 .mb_1()
                                 .cursor_pointer()
@@ -171,12 +181,16 @@ impl Composer {
                                         .child(
                                             v_flex()
                                                 .flex_1()
-                                                .child(div().text_color(info).child("计划"))
+                                                .child(
+                                                    div()
+                                                        .text_color(info)
+                                                        .child(rust_i18n::t!("composer.plan")),
+                                                )
                                                 .child(
                                                     div()
                                                         .text_xs()
                                                         .text_color(muted)
-                                                        .child("编辑前先出计划"),
+                                                        .child(rust_i18n::t!("composer.plan_desc")),
                                                 ),
                                         )
                                         .child(
@@ -186,9 +200,11 @@ impl Composer {
                                         ),
                                 )
                                 .on_hover(move |hovered, window, cx| {
-                                    // 高亮只跟鼠标走：悬停本行时清掉列表的
-                                    // 残留选中块（行 on_hover 会 select，
-                                    // 移到 header 行上没人清它——两个高亮的根源）
+                                    // The highlight follows only the mouse: hovering
+                                    // this row clears the list's leftover selection
+                                    // block (row on_hover selects, and nothing clears
+                                    // it when the mouse moves onto the header row,
+                                    // the root cause of two highlights)
                                     if *hovered {
                                         composer_hover.update(cx, |this, cx| {
                                             this.exec_command.update(cx, |state, cx| {
@@ -210,42 +226,42 @@ impl Composer {
                         .into_any_element()
                 }
             })
-            .items(
-                EXEC_MODES
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, (label, desc, mode))| {
-                        let icon = exec_mode_icon(*mode);
-                        CommandItem::new()
-                            .label(*label)
-                            .checked(ix == self.exec_mode)
-                            .child(move |_, cx| {
-                                // 图标与 label 按模式危险程度上色（显式 text_color，
-                                // hover/选中的继承色盖不住模式色）；描述保持 muted
-                                let mode_color = exec_mode_color(*mode, cx);
-                                h_flex()
-                                    .flex_1()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(Icon::new(icon).size_4().text_color(mode_color))
+            .items(EXEC_MODES.iter().enumerate().map(|(ix, mode)| {
+                let icon = exec_mode_icon(*mode);
+                CommandItem::new()
+                    .label(exec_mode_label(*mode))
+                    .checked(ix == self.exec_mode)
+                    .child(move |_, cx| {
+                        // Icon and label are colored by the mode's danger level
+                        // (explicit text_color; the inherited hover/selected color
+                        // cannot override the mode color); the description stays muted
+                        let mode_color = exec_mode_color(*mode, cx);
+                        h_flex()
+                            .flex_1()
+                            .gap_2()
+                            .items_center()
+                            .child(Icon::new(icon).size_4().text_color(mode_color))
+                            .child(
+                                v_flex()
                                     .child(
-                                        v_flex()
-                                            .child(div().text_color(mode_color).child(*label))
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(*desc),
-                                            ),
+                                        div().text_color(mode_color).child(exec_mode_label(*mode)),
                                     )
-                            })
-                    }),
-            )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(exec_mode_description(*mode)),
+                                    ),
+                            )
+                    })
+            }))
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
-                    if let Some((_, _, mode)) = EXEC_MODES.get(ix.row) {
+                    if let Some(mode) = EXEC_MODES.get(ix.row) {
                         if *mode == ExecMode::Yolo && this.exec_mode != ix.row {
-                            // 无管制模式：先关弹层再弹确认框（确认后才 emit SetExecMode）
+                            // Unrestricted mode: close the popup first, then show the
+                            // confirm dialog (SetExecMode is emitted only after
+                            // confirmation)
                             this.close_command_popup(window, cx);
                             cx.emit(ComposerEvent::RequestYoloConfirm);
                             return;
@@ -261,8 +277,9 @@ impl Composer {
                     this.close_command_popup(window, cx);
                 });
             })
-            // footer 槽：分隔线 + 单行开关区（「工作区外访问  读 ☐  写 ☑」）；
-            // 复选框即开关态视觉，不再用 CommandItem.checked 的 ✓
+            // Footer slot: separator + a one-line toggle area ("access outside
+            // workspace  read ☐  write ☑"); the checkbox itself is the toggle state
+            // visual, no longer using CommandItem.checked's ✓
             .footer({
                 let composer = cx.entity();
                 let read_on = self.fs_read_outside;
@@ -280,14 +297,19 @@ impl Composer {
                                 .py_1p5()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_xs().text_color(muted).child("工作区外访问"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(rust_i18n::t!("composer.fs_outside_access")),
+                                )
                                 .child(
                                     h_flex()
                                         .gap_3()
                                         .items_center()
                                         .child(fs_toggle(
                                             "fs-access-read",
-                                            "读",
+                                            rust_i18n::t!("composer.fs_read"),
                                             read_on,
                                             true,
                                             composer.clone(),
@@ -295,7 +317,7 @@ impl Composer {
                                         ))
                                         .child(fs_toggle(
                                             "fs-access-write",
-                                            "写",
+                                            rust_i18n::t!("composer.fs_write"),
                                             write_on,
                                             false,
                                             composer.clone(),
@@ -306,7 +328,8 @@ impl Composer {
                         .into_any_element()
                 }
             });
-        // 定宽 300px：开关区描述文字按宽度换行，不再被弹层裁切
+        // Fixed 300px width: the toggle area's description text wraps by width
+        // instead of being clipped by the popup
         let content = v_flex().w(px(300.)).child(command).into_any_element();
         self.popup_shell(
             "composer-exec-popup",
@@ -317,12 +340,13 @@ impl Composer {
         )
     }
 
-    /// 模型面板：搜索框 + 按供应商分组的模型列表 + 「管理模型」操作行。
+    /// Model panel: search box + model list grouped by provider + a "manage models"
+    /// action row.
     pub(crate) fn render_model_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_confirm_composer = cx.entity();
         let on_cancel_composer = cx.entity();
 
-        // 按供应商分组，保持配置中的出现顺序
+        // Group by provider, preserving the order of appearance in the config
         let mut groups: Vec<(String, Vec<ModelOption>)> = Vec::new();
         for model in &self.models {
             match groups.iter_mut().find(|(name, _)| *name == model.0) {
@@ -331,11 +355,12 @@ impl Composer {
             }
         }
 
-        let mut command = Command::new(&self.model_command).placeholder("搜索模型");
+        let mut command =
+            Command::new(&self.model_command).placeholder(rust_i18n::t!("composer.search_model"));
         if groups.is_empty() {
             command = command.item(
                 CommandItem::new()
-                    .label("还没有配置模型，去设置页添加")
+                    .label(rust_i18n::t!("composer.no_models_configured"))
                     .icon(IconName::Info),
             );
         } else {
@@ -350,10 +375,11 @@ impl Composer {
                 ));
             }
         }
-        // 未分组项固定为 section 0，分组从 section 1 起（与 entries 书写顺序无关）
+        // Ungrouped items are fixed at section 0; groups start at section 1
+        // (regardless of the order entries are written in)
         command = command.separator().item(
             CommandItem::new()
-                .label("管理模型")
+                .label(rust_i18n::t!("composer.manage_models"))
                 .icon(AssetIconName::Settings),
         );
         let command = command
@@ -363,18 +389,18 @@ impl Composer {
                     .py_1p5()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("没有匹配的模型")
+                    .child(rust_i18n::t!("composer.no_matching_models"))
             })
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     if ix.section == 0 {
-                        eprintln!("[model-popup] 点击「管理模型」(section=0)");
+                        eprintln!("[model-popup] clicked \"Manage models\" (section=0)");
                         cx.emit(ComposerEvent::OpenSettings);
                     } else if let Some((_, items)) = groups.get(ix.section - 1)
                         && let Some((provider_name, provider_id, model_id, _)) = items.get(ix.row)
                     {
                         eprintln!(
-                            "[model-popup] 选中 section={} row={} → {provider_id}/{model_id}",
+                            "[model-popup] selected section={} row={} -> {provider_id}/{model_id}",
                             ix.section, ix.row
                         );
                         this.model = format!("{provider_name}/{model_id}");
@@ -384,7 +410,7 @@ impl Composer {
                         });
                     } else {
                         eprintln!(
-                            "[model-popup] 点击未能解析为模型: section={} row={}",
+                            "[model-popup] click did not resolve to a model: section={} row={}",
                             ix.section, ix.row
                         );
                     }
@@ -405,8 +431,10 @@ impl Composer {
         )
     }
 
-    /// 思考等级面板：无搜索框，「关闭」+ 等级列表，当前等级勾选。
-    /// levels 为 (id, 显示名)；界面展示显示名，确认回传 id。
+    /// Reasoning level panel: no search box, "off" + level list with the current
+    /// level checked.
+    /// levels is (id, display name); the UI shows the display name and confirmation
+    /// returns the id.
     pub(crate) fn render_reasoning_popup(
         &self,
         levels: &[(String, String)],
@@ -420,11 +448,12 @@ impl Composer {
             .searchable(false)
             .item(
                 CommandItem::new()
-                    .label("关闭")
+                    .label(rust_i18n::t!("composer.reasoning_off"))
                     .checked(self.reasoning_level.is_none()),
             )
             .items(levels.iter().map(|(id, label)| {
-                // 显示名与 id 不同则括号附上 id，避免歧义
+                // When the display name differs from the id, append the id in
+                // parentheses to avoid ambiguity
                 let text = if label == id {
                     id.clone()
                 } else {

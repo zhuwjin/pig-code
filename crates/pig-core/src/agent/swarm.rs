@@ -1,22 +1,23 @@
-//! AgentSwarm 批量并行子代理的执行侧：子任务上下文准备（复用 run_subagent 同款
-//! 档案/模型/工具收窄/JSONL 落盘管线）与聚合结果格式化。参数展开/校验在
-//! tool::parse_swarm_args（schema 层纯函数）；并发驱动在 session 层
-//!（drive_subagent 私有），全局并发槽在 task.rs。
+//! Execution side of AgentSwarm batch-parallel subagents: subtask context preparation
+//! (reusing the same profile/model/tool-narrowing/JSONL persistence pipeline as
+//! run_subagent) and aggregated result formatting. Argument expansion/validation lives in
+//! tool::parse_swarm_args (a pure function at the schema layer); concurrent driving lives in
+//! the session layer (drive_subagent, private); the global concurrency slots live in task.rs.
 
 use super::*;
 use crate::provider::ChatMsg;
 
-/// 聚合结果总预算（与单个子代理结果注入父会话的 32K 预算一致）
+/// Total budget for the aggregated result (same as the 32K budget for a single subagent's result injected into the parent session)
 pub const SWARM_RESULT_BUDGET: usize = 32_000;
-/// 单个子代理在聚合结果里的预览上限（超出截断，全文见各自 result.md）
+/// Per-subagent preview cap inside the aggregated result (truncated beyond this; full text in each result.md)
 pub const SWARM_CHILD_PREVIEW: usize = 3_000;
 
-/// AgentSwarm 单个子代理的最终状态
+/// Final status of a single subagent in an AgentSwarm
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwarmChildStatus {
     Completed,
     Failed,
-    /// 父 turn 取消 / TaskStop
+    /// Parent turn cancelled / TaskStop
     Cancelled,
 }
 
@@ -30,25 +31,26 @@ impl SwarmChildStatus {
     }
 }
 
-/// 聚合用的单子代理结果（session 层驱动完成后构造；准备阶段失败无 agent_id）
+/// Single-subagent result for aggregation (constructed by the session layer after driving finishes; preparation-phase failures have no agent_id)
 pub struct SwarmChildResult {
     pub description: String,
     pub agent_id: Option<String>,
     pub status: SwarmChildStatus,
     pub turns: usize,
-    /// 结果全文路径（result.md 落盘成功且非取消时）
+    /// Path of the full result (when result.md was persisted and not cancelled)
     pub result_path: Option<PathBuf>,
-    /// 结果文本（驱动已按 32K 截断；聚合时再加 SWARM_CHILD_PREVIEW 上限）
+    /// Result text (already truncated to 32K by the driver; aggregation adds the SWARM_CHILD_PREVIEW cap)
     pub result_text: String,
-    /// 是否经历过全局并发槽排队（聚合头部说明排队情况用）
+    /// Whether it waited in the global concurrency-slot queue (for the queue note in the aggregation header)
     pub queued: bool,
-    /// token 用量 (input, cache_read, output)：前台 swarm 累加进父回合统计
+    /// Token usage (input, cache_read, output): foreground swarms accumulate into the parent turn's stats
     pub usage: (u64, u64, u64),
 }
 
-/// 聚合结果为单个工具结果：头部统计（成功/失败/取消 + 并发槽排队情况），
-/// 每个子任务一段（简述、agent_id、状态、结果文件指针、预览）。总长按
-/// SWARM_RESULT_BUDGET 截断——溢出段降级为指针行（每项仍可达 result.md）。
+/// Aggregated result as a single tool result: header stats (completed/failed/cancelled +
+/// concurrency-slot queueing), then one section per subtask (description, agent_id, status,
+/// result-file pointer, preview). Total length is truncated to SWARM_RESULT_BUDGET —
+/// overflowing sections degrade to pointer lines (each item still reaches its result.md).
 pub fn format_swarm_result(children: &[SwarmChildResult]) -> String {
     let total = children.len();
     let completed = children
@@ -63,22 +65,27 @@ pub fn format_swarm_result(children: &[SwarmChildResult]) -> String {
     let queued = children.iter().filter(|c| c.queued).count();
     let queue_note = if queued > 0 {
         format!(
-            "；全局并发上限 {}，其中 {queued} 个曾排队等待空槽",
+            "; global concurrency limit {}, {queued} waited in queue for a free slot",
             crate::task::MAX_CONCURRENT_SUBAGENTS
         )
     } else {
         String::new()
     };
     let mut out = format!(
-        "子代理群执行完成：共 {total} 个（成功 {completed} / 失败 {failed} / 取消 {cancelled}）{queue_note}。\n\
-         每项结果全文在下方给出的 result.md 文件里，需要完整内容用 Read 读取；用 Agent(resume=\"agent_id\", prompt=\"...\") 可续跑某一项。\n"
+        "Swarm finished: {total} subagents total ({completed} completed / {failed} failed / \
+         {cancelled} cancelled){queue_note}.\n\
+         Each item's full result is in the result.md file listed below — use Read for the \
+         complete content; Agent(resume=\"agent_id\", prompt=\"...\") resumes a specific item.\n"
     );
     for (ix, child) in children.iter().enumerate() {
         let section = format_child_section(ix + 1, child);
         if out.chars().count() + section.chars().count() > SWARM_RESULT_BUDGET {
-            // 预算耗尽：本段及后续全部降级为指针行；指针尾必须完整保留
-            //（每项的状态与 result.md 都可达），头部为它腾空间
-            let mut tail = String::from("\n[聚合结果过长，以下子代理只留状态与结果文件指针：]\n");
+            // Budget exhausted: this section and all later ones degrade to pointer lines; the
+            // pointer tail must stay complete (each item's status and result.md remain
+            // reachable), and the head makes room for it
+            let mut tail = String::from(
+                "\n[Aggregated result too long; the subagents below keep only status and result-file pointers:]\n",
+            );
             for rest in &children[ix..] {
                 tail.push_str(&child_pointer_line(rest));
                 tail.push('\n');
@@ -95,7 +102,7 @@ pub fn format_swarm_result(children: &[SwarmChildResult]) -> String {
     out
 }
 
-/// 聚合结果里的单子任务段：简述标题 + agent_id/状态/轮次 + 结果文件指针 + 预览
+/// One subtask section in the aggregated result: description heading + agent_id/status/turns + result-file pointer + preview
 fn format_child_section(n: usize, child: &SwarmChildResult) -> String {
     let mut section = format!("\n## {n}. {}\n", child.description);
     match &child.agent_id {
@@ -105,18 +112,18 @@ fn format_child_section(n: usize, child: &SwarmChildResult) -> String {
             child.turns
         )),
         None => section.push_str(&format!(
-            "status: {}（准备阶段失败，未启动）\n",
+            "status: {} (failed during preparation, not started)\n",
             child.status.label()
         )),
     }
     if let Some(path) = &child.result_path {
-        section.push_str(&format!("结果全文: {}\n", path.display()));
+        section.push_str(&format!("Full result: {}\n", path.display()));
     }
     let count = child.result_text.chars().count();
     if count == 0 {
         let placeholder = match child.status {
-            SwarmChildStatus::Cancelled => "（已停止，无结果）",
-            _ => "（无结果文本）",
+            SwarmChildStatus::Cancelled => "(stopped, no result)",
+            _ => "(no result text)",
         };
         section.push_str(placeholder);
     } else if count > SWARM_CHILD_PREVIEW {
@@ -126,8 +133,8 @@ fn format_child_section(n: usize, child: &SwarmChildResult) -> String {
             .take(SWARM_CHILD_PREVIEW)
             .collect();
         let hint = match &child.result_path {
-            Some(path) => format!("\n[预览截断，全文: {}]", path.display()),
-            None => "\n[预览截断]".to_string(),
+            Some(path) => format!("\n[Preview truncated; full result: {}]", path.display()),
+            None => "\n[Preview truncated]".to_string(),
         };
         section.push_str(&preview);
         section.push_str(&hint);
@@ -138,27 +145,27 @@ fn format_child_section(n: usize, child: &SwarmChildResult) -> String {
     section
 }
 
-/// 预算溢出时的单行指针（description 已截 60 字符，行长远小于预算分摊）
+/// One-line pointer on budget overflow (description is already capped at 60 chars; line length is far below the budgeted share)
 fn child_pointer_line(child: &SwarmChildResult) -> String {
     let base = match &child.agent_id {
         Some(agent_id) => format!(
-            "- {}（{agent_id}，status: {}）",
+            "- {} ({agent_id}, status: {})",
             child.description,
             child.status.label()
         ),
         None => format!(
-            "- {}（status: {}，准备阶段失败）",
+            "- {} (status: {}, failed during preparation)",
             child.description,
             child.status.label()
         ),
     };
     match &child.result_path {
-        Some(path) => format!("{base}：{}", path.display()),
+        Some(path) => format!("{base}: {}", path.display()),
         None => base,
     }
 }
 
-/// 一个子代理的完整执行准备（SubagentDrive 的全部原料，session 层组装驱动）
+/// Full execution prep for one subagent (all inputs of SubagentDrive; the session layer assembles the driver)
 pub struct SwarmChildPrep {
     pub agent_id: String,
     pub cwd: PathBuf,
@@ -171,34 +178,35 @@ pub struct SwarmChildPrep {
     pub jsonl: PathBuf,
     pub max_turns: usize,
     pub description: String,
-    /// 会话 MCP 句柄（None = 未连接）：并发驱动闭包在 GateCtx 组装点现取继承工具
+    /// Session MCP handle (None = not connected): the concurrent driving closure fetches the inherited tools at the GateCtx assembly point
     pub mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
-    /// 继承规则快照（与 run_subagent 同口径）
+    /// Inheritance-rule snapshot (same policy as run_subagent)
     pub mcp_inherits_all: bool,
 }
 
-/// 单个子任务的准备结果：失败不影响其他子任务（聚合时记为准备阶段失败项）
+/// Preparation result for a single subtask: a failure does not affect other subtasks (recorded as a preparation-phase failure at aggregation)
 pub enum SwarmPrep {
     Ready(Box<SwarmChildPrep>),
     Failed { description: String, error: String },
 }
 
-/// 后台 swarm 即时回执里的一项（已派发的 Ready 子代理，或准备阶段失败项）
+/// One entry in a background swarm's immediate receipt (a dispatched Ready subagent, or a preparation-phase failure)
 pub struct SwarmReceiptChild {
     pub description: String,
-    /// 已派发子代理的 agent_id（None = 准备阶段失败未启动，error 带原因）
+    /// agent_id of the dispatched subagent (None = preparation-phase failure, not started; error carries the reason)
     pub agent_id: Option<String>,
-    /// 已派发子代理的后台任务 task_id（与 agent_id 同有无）
+    /// Background task task_id of the dispatched subagent (present iff agent_id is)
     pub task_id: Option<String>,
-    /// 回执组装瞬间按空闲并发槽估算的排队态（true = 排队等待空槽；瞬时值，仅供参考）
+    /// Queue state estimated from free concurrency slots at receipt-assembly time (true = queued waiting for a free slot; instantaneous, informational only)
     pub queued: bool,
-    /// 准备阶段失败原因
+    /// Preparation-phase failure reason
     pub error: Option<String>,
 }
 
-/// 后台 swarm 的即时回执（纯函数以便单测）：头部统计 + 逐项 agent_id/task_id/status
-/// （queued/running），准备阶段失败项同样列出；告知完成经 <task-notification>
-/// 逐个送达、不要轮询（与单后台 Agent 回执同口径）。
+/// Immediate receipt of a background swarm (a pure function for unit testing): header stats +
+/// per-item agent_id/task_id/status (queued/running), with preparation-phase failures listed
+/// too; tells the model completions arrive one by one via <task-notification> and must not be
+/// polled (same policy as the single background Agent receipt).
 pub fn format_swarm_receipt(children: &[SwarmReceiptChild]) -> String {
     let total = children.len();
     let queued = children.iter().filter(|c| c.queued).count();
@@ -206,17 +214,21 @@ pub fn format_swarm_receipt(children: &[SwarmReceiptChild]) -> String {
     let mut notes = String::new();
     if queued > 0 {
         notes.push_str(&format!(
-            "；全局并发上限 {}，其中 {queued} 个先排队等待空槽",
+            "; global concurrency limit {}, {queued} will queue for a free slot first",
             crate::task::MAX_CONCURRENT_SUBAGENTS
         ));
     }
     if failed > 0 {
-        notes.push_str(&format!("；{failed} 个准备阶段失败（未启动，见下方列表）"));
+        notes.push_str(&format!(
+            "; {failed} failed during preparation (not started; see the list below)"
+        ));
     }
     let mut out = format!(
-        "子代理群已在后台启动：共 {total} 个{notes}。\n\
-         每项完成或失败都会以 <task-notification> 逐个送达——不要轮询；结果全文在通知给出的文件里（用 Read 读取）。\n\
-         可用 TaskList 查看、TaskOutput 看进度、TaskStop 停止、Agent(resume=\"agent_id\", prompt=\"...\") 续跑某一项。\n"
+        "Swarm launched in the background: {total} subagents total{notes}.\n\
+         Each item's completion or failure arrives as its own <task-notification> — do not \
+         poll; the full result is in the file the notification points to (read it with Read).\n\
+         Use TaskList to list tasks, TaskOutput to check progress, TaskStop to stop one, and \
+         Agent(resume=\"agent_id\", prompt=\"...\") to resume a specific item.\n"
     );
     for (ix, child) in children.iter().enumerate() {
         out.push_str(&format!("\n{}. {}\n", ix + 1, child.description));
@@ -226,35 +238,37 @@ pub fn format_swarm_receipt(children: &[SwarmReceiptChild]) -> String {
                 if child.queued { "queued" } else { "running" }
             )),
             _ => out.push_str(&format!(
-                "status: failed（准备阶段失败，未启动）: {}\n",
-                child.error.as_deref().unwrap_or("未知错误")
+                "status: failed (failed during preparation, not started): {}\n",
+                child.error.as_deref().unwrap_or("unknown error")
             )),
         }
     }
     out
 }
 
-/// prepare_swarm_children 的入参包（Session 字段快照，全不可变借用）
+/// Input bundle for prepare_swarm_children (a snapshot of Session fields, all immutable borrows)
 pub struct SwarmPrepCtx<'a> {
     pub cwd: &'a Path,
     pub data_dir: &'a Path,
     pub git_snapshot: Option<&'a str>,
-    /// 会话冻结的技能/AGENTS.md 段（子代理系统提示注入用，与主代理同一份）
+    /// Skills/AGENTS.md sections frozen for the session (injected into the subagent system prompt; same copy as the main agent)
     pub skills_prompt: &'a str,
     pub agents_prompt: &'a str,
     pub app_config: Option<&'a AppConfig>,
     pub parent_config: &'a ResolvedModel,
     pub session_id: &'a str,
-    /// resume 条目的运行中冲突检测（注册表同 agent_id 且 Running → 拒绝并行续跑）
+    /// Running-conflict detection for resume entries (a registry entry with the same agent_id and Running -> reject parallel continuation)
     pub tasks: &'a crate::task::TaskRegistry,
-    /// 会话 MCP 句柄（None = 未连接）：MCP 工具按继承规则进子代理工具集
+    /// Session MCP handle (None = not connected): MCP tools enter the subagent tool set per the inheritance rule
     pub mcp: Option<&'a std::sync::Arc<crate::mcp::McpManager>>,
 }
 
-/// 批量准备子代理上下文（与 run_subagent 同管线：档案/模型/工具收窄/JSONL 落盘）。
-/// items 子任务共用一份档案+模型解析——档案/模型错误是调用级参数错误，整体 Err
-/// 当场暴露（resolve_subagent_model 严格语义）；resume 条目各自按现状重解析，
-/// 单条失败（不存在/运行中/档案已删）只记该条 Failed，不影响其他。
+/// Batch-prepare subagent contexts (same pipeline as run_subagent: profile/model/tool
+/// narrowing/JSONL persistence). Item subtasks share one profile+model resolution —
+/// profile/model errors are call-level argument errors that fail the whole call with Err
+/// surfaced immediately (strict semantics of resolve_subagent_model); resume entries are each
+/// re-resolved as-is, and a single failure (nonexistent/running/profile deleted) is recorded
+/// as that entry's Failed without affecting the others.
 pub fn prepare_swarm_children(
     ctx: &SwarmPrepCtx<'_>,
     plan: &crate::tool::SwarmPlan,
@@ -262,7 +276,7 @@ pub fn prepare_swarm_children(
 ) -> Result<Vec<SwarmPrep>, String> {
     let profiles = load_profiles(ctx.cwd, ctx.data_dir);
     let agents_dir = agents_dir(&ctx.data_dir.join("sessions"), ctx.session_id);
-    // items 共用档案/模型：有 items 才解析（纯续跑不碰 subagent_type）
+    // items share the profile/model: only resolve when there are items (pure resume never touches subagent_type)
     let item_profile = if plan.item_count() > 0 {
         Some(find_profile(&profiles, &plan.subagent_type)?.clone())
     } else {
@@ -276,8 +290,12 @@ pub fn prepare_swarm_children(
     for task in &plan.tasks {
         match &task.resume {
             None => {
-                let profile = item_profile.clone().expect("item 子任务必有档案");
-                let child_config = item_config.clone().expect("item 子任务必有模型");
+                let profile = item_profile
+                    .clone()
+                    .expect("item subtask must have a profile");
+                let child_config = item_config
+                    .clone()
+                    .expect("item subtask must have a model config");
                 *agent_seq += 1;
                 let agent_id = format!("a{}-{}", crate::rollout::now_secs(), *agent_seq);
                 let history = vec![
@@ -328,8 +346,9 @@ pub fn prepare_swarm_children(
     Ok(preps)
 }
 
-/// resume 子任务准备：读入已有上下文 + 追加新 prompt（档案/模型按现状重解析，
-/// 与 run_subagent 的 resume 分支同口径）；模型解析失败不持久化追加行。
+/// Resume-subtask prep: read the existing context + append the new prompt (profile/model
+/// re-resolved as-is, same policy as run_subagent's resume branch); on model-resolution
+/// failure nothing is appended to the persisted file.
 fn prepare_resume(
     ctx: &SwarmPrepCtx<'_>,
     profiles: &[AgentProfile],
@@ -339,7 +358,7 @@ fn prepare_resume(
 ) -> Result<SwarmChildPrep, String> {
     let jsonl = agents_dir.join(format!("{resume_id}.jsonl"));
     if !jsonl.exists() {
-        // 列可用 agent_id（*.jsonl 去后缀），帮助模型纠正拼写
+        // List available agent_ids (*.jsonl without the extension) to help the model fix typos
         let mut ids: Vec<String> = std::fs::read_dir(agents_dir)
             .ok()
             .into_iter()
@@ -356,13 +375,15 @@ fn prepare_resume(
             .collect();
         ids.sort();
         let available = if ids.is_empty() {
-            "（无）".to_string()
+            "(none)".to_string()
         } else {
             ids.join(", ")
         };
-        return Err(format!("子代理 \"{resume_id}\" 不存在。可用: {available}"));
+        return Err(format!(
+            "Subagent \"{resume_id}\" does not exist. Available: {available}"
+        ));
     }
-    // 运行中冲突：注册表里同 agent_id 且 Running → 不允许并行续跑
+    // Running conflict: a registry entry with the same agent_id and Running -> no parallel continuation allowed
     let running_task = ctx
         .tasks
         .lock()
@@ -375,7 +396,8 @@ fn prepare_resume(
         .map(|t| t.id.clone());
     if let Some(task_id) = running_task {
         return Err(format!(
-            "该子代理仍在运行（task_id {task_id}），可用 TaskStop 停止后再续跑"
+            "This subagent is still running (task_id {task_id}); stop it with TaskStop, \
+             then resume"
         ));
     }
     let (meta, mut history) = read_agent(&jsonl)?;
@@ -394,7 +416,7 @@ fn prepare_resume(
     ))
 }
 
-/// 子代理模型解析（严格：失败即报错；未加载应用配置时显式模型不可用，继承不受影响）
+/// Subagent model resolution (strict: failure is an error; without the app config loaded an explicit model is unusable, inherit is unaffected)
 fn resolve_child_config(
     ctx: &SwarmPrepCtx<'_>,
     profile: &AgentProfile,
@@ -402,15 +424,16 @@ fn resolve_child_config(
     match ctx.app_config {
         Some(app_config) => resolve_subagent_model(app_config, ctx.parent_config, profile),
         None if profile.model.is_some() => {
-            Err("未加载应用配置，无法解析子代理指定模型".to_string())
+            Err("App config not loaded; cannot resolve the subagent's specified model".to_string())
         }
         None => Ok(ctx.parent_config.clone()),
     }
 }
 
-/// 组装执行准备：工具收窄（档案列表 ∩ 全部 − FORBIDDEN；input_image=false 再剔
-/// ReadMediaFile）+ MCP 继承（与 run_subagent 同规则：全工具档案继承全部已连接
-/// MCP 工具，只读档案只继承 readOnlyHint 的）+ max_turns 缺省
+/// Assemble the execution prep: tool narrowing (profile list ∩ all - FORBIDDEN;
+/// input_image=false additionally removes ReadMediaFile) + MCP inheritance (same rules as
+/// run_subagent: full-tool profiles inherit all connected MCP tools, read-only profiles only
+/// the readOnlyHint ones) + max_turns default
 fn assemble_prep(
     agent_id: String,
     profile: AgentProfile,
@@ -431,7 +454,7 @@ fn assemble_prep(
     if let Some(mcp) = ctx.mcp {
         tools.extend(mcp.child_tools(mcp_inherits_all));
     }
-    // Skill 补给全部 swarm 子代理（与 run_subagent 同口径：只读、越档案默认）
+    // Skill is supplied to all swarm subagents (same policy as run_subagent: read-only, overriding the profile default)
     tools.push(Box::new(crate::tool::SkillTool::new(ctx.cwd, ctx.data_dir)));
     let schemas: Vec<serde_json::Value> = tools.iter().map(|t| t.schema()).collect();
     SwarmChildPrep {
@@ -451,14 +474,14 @@ fn assemble_prep(
     }
 }
 
-/// 子代理上下文 JSONL 追加一行（失败非致命：打日志继续，与 rollout.append 同口径）
+/// Append one line to the subagent context JSONL (failure is non-fatal: log and continue, same policy as rollout.append)
 fn persist_line(jsonl: &Path, line: &serde_json::Value) {
     if let Err(error) = append_agent_record(jsonl, line) {
-        eprintln!("[agent] 子代理上下文落盘失败: {error}");
+        eprintln!("[agent] failed to persist subagent context: {error}");
     }
 }
 
-/// 子代理消息落盘：base64 不落盘（与主 rollout 同口径）
+/// Persist a subagent message: base64 is not persisted (same policy as the main rollout)
 fn persist_msg(jsonl: &Path, msg: &ChatMsg) {
     let mut msg = msg.clone();
     msg.images.clear();
@@ -470,7 +493,7 @@ mod tests {
     use super::*;
     use pig_protocol::ApiFormat;
 
-    /// 临时目录：进程号+纳秒保证唯一，Drop 自动清理
+    /// Temp dir: pid + nanos for uniqueness, auto-cleaned on Drop
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -483,7 +506,7 @@ mod tests {
                 "pig-swarm-test-{tag}-{}-{nanos}",
                 std::process::id()
             ));
-            std::fs::create_dir_all(&path).expect("创建临时目录");
+            std::fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }
     }
@@ -506,11 +529,11 @@ mod tests {
             cap_web_search: false,
             web_search_tool: None,
             input_image: true,
-            provider_name: "父供应商".into(),
+            provider_name: "parent provider".into(),
         }
     }
 
-    /// items 批量调用的准备上下文（cwd/data_dir 都在临时目录下）
+    /// Prep context for an items batch call (cwd/data_dir both under the temp dir)
     fn prep_ctx<'a>(
         tmp: &'a TempDir,
         tasks: &'a crate::task::TaskRegistry,
@@ -530,7 +553,7 @@ mod tests {
         }
     }
 
-    /// 带 MCP 句柄的假工具规格
+    /// Fake MCP tool spec for tests
     fn mcp_spec(tool_name: &str, read_only: bool) -> crate::mcp::McpToolSpec {
         crate::mcp::McpToolSpec {
             name: tool_name.to_string(),
@@ -551,42 +574,48 @@ mod tests {
         let tasks = crate::task::TaskRegistry::default();
         let parent = parent_model();
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "b.rs"]
         }))
-        .expect("合法调用");
+        .expect("valid args");
         let mut seq = 0u64;
         let preps = prepare_swarm_children(&prep_ctx(&tmp, &tasks, &parent), &plan, &mut seq)
-            .expect("内置档案应解析成功");
+            .expect("builtin profile should resolve");
         assert_eq!(preps.len(), 2);
-        assert_eq!(seq, 2, "每个 item 子任务消耗一个序号");
+        assert_eq!(seq, 2, "each item subtask consumes one seq number");
         let mut agent_ids = Vec::new();
         for prep in &preps {
             let SwarmPrep::Ready(prep) = prep else {
-                panic!("items 子任务应全部 Ready");
+                panic!("item subtasks should all be Ready");
             };
             agent_ids.push(prep.agent_id.clone());
             assert_eq!(prep.profile.name, "general-purpose");
-            assert_eq!(prep.child_config.model, "parent-model", "继承父模型");
+            assert_eq!(
+                prep.child_config.model, "parent-model",
+                "inherits parent model"
+            );
             assert_eq!(prep.history.len(), 2, "system + user");
             assert!(
                 prep.history[1]
                     .content
                     .as_deref()
                     .is_some_and(|c| c.contains(".rs")),
-                "user 消息是展开后的 prompt"
+                "user message is the expanded prompt"
             );
             let names: Vec<&str> = prep.tools.iter().map(|t| t.name()).collect();
-            assert!(names.contains(&"Write"), "general-purpose 全工具");
+            assert!(names.contains(&"Write"), "general-purpose has all tools");
             for banned in ["Agent", "AgentSwarm", "AskUserQuestion", "EnterPlanMode"] {
-                assert!(!names.contains(&banned), "嵌套工具必须剔除: {banned}");
+                assert!(
+                    !names.contains(&banned),
+                    "nesting tools must be removed: {banned}"
+                );
             }
-            // JSONL 落盘：meta 行 + 两条消息，可读回
-            let (meta, history) = read_agent(&prep.jsonl).expect("落盘上下文可读回");
+            // JSONL persisted: meta line + two messages, readable back
+            let (meta, history) = read_agent(&prep.jsonl).expect("persisted context reads back");
             assert_eq!(meta.profile, "general-purpose");
             assert_eq!(history.len(), 2);
         }
-        assert_ne!(agent_ids[0], agent_ids[1], "agent_id 必须唯一");
+        assert_ne!(agent_ids[0], agent_ids[1], "agent_id must be unique");
     }
 
     #[test]
@@ -595,16 +624,19 @@ mod tests {
         let tasks = crate::task::TaskRegistry::default();
         let parent = parent_model();
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "b.rs"],
-            "subagent_type": "不存在"
+            "subagent_type": "nonexistent"
         }))
-        .expect("参数校验不查档案");
+        .expect("arg validation does not check profiles");
         let mut seq = 0u64;
         let err = prepare_swarm_children(&prep_ctx(&tmp, &tasks, &parent), &plan, &mut seq)
             .err()
-            .expect("档案错误整体报错");
-        assert!(err.contains("不存在"), "档案错误整体报错: {err}");
+            .expect("profile error fails the whole call");
+        assert!(
+            err.contains("nonexistent"),
+            "profile error fails the whole call: {err}"
+        );
     }
 
     #[test]
@@ -617,19 +649,19 @@ mod tests {
             vec![mcp_spec("read", true), mcp_spec("write", false)],
         ));
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "b.rs"]
         }))
-        .expect("合法调用");
+        .expect("valid args");
         let mut ctx = prep_ctx(&tmp, &tasks, &parent);
         ctx.mcp = Some(&mcp);
         let mut seq = 0u64;
-        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("准备成功");
+        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("prepare ok");
         let SwarmPrep::Ready(prep) = &preps[0] else {
-            panic!("应 Ready");
+            panic!("should be Ready");
         };
         let names: Vec<&str> = prep.tools.iter().map(|t| t.name()).collect();
-        // general-purpose（全工具档案）：继承全部已连接 MCP 工具，schemas 同步
+        // general-purpose (full-tool profile): inherits all connected MCP tools, schemas in sync
         assert!(prep.mcp_inherits_all);
         assert!(names.contains(&"mcp__srv__read"), "{names:?}");
         assert!(names.contains(&"mcp__srv__write"), "{names:?}");
@@ -643,16 +675,16 @@ mod tests {
             "{schema_names:?}"
         );
 
-        // explore（只读档案）：只继承 readOnlyHint 的 MCP 工具
+        // explore (read-only profile): inherits only readOnlyHint MCP tools
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
-            "prompt_template": "调研 {{item}}",
+            "prompt_template": "Investigate {{item}}",
             "items": ["a.rs", "b.rs"],
             "subagent_type": "explore"
         }))
-        .expect("合法调用");
-        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("准备成功");
+        .expect("valid args");
+        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("prepare ok");
         let SwarmPrep::Ready(prep) = &preps[0] else {
-            panic!("应 Ready");
+            panic!("should be Ready");
         };
         let names: Vec<&str> = prep.tools.iter().map(|t| t.name()).collect();
         assert!(!prep.mcp_inherits_all);
@@ -665,14 +697,14 @@ mod tests {
         let tmp = TempDir::new("conflict");
         let tasks = crate::task::TaskRegistry::default();
         let parent = parent_model();
-        // 注册一个同 agent_id 的 Running 任务 → resume 冲突；上下文文件只需存在
-        //（冲突检测在读入之前）
+        // Register a Running task with the same agent_id -> resume conflict; the context file
+        // only needs to exist (conflict detection happens before reading)
         let agents = agents_dir(&tmp.0.join("sessions"), "s-test");
         std::fs::create_dir_all(&agents).unwrap();
         std::fs::write(agents.join("a1.jsonl"), "").unwrap();
         tasks.lock().unwrap().push(crate::task::TaskEntry {
             id: "b1".into(),
-            command: "子代理".into(),
+            command: "subagent".into(),
             status: pig_protocol::TaskStatus::Running,
             started_at: 0,
             ended_at: None,
@@ -684,23 +716,23 @@ mod tests {
             foreground: false,
         });
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
-            "prompt_template": "处理 {{item}}",
+            "prompt_template": "Process {{item}}",
             "items": ["one"],
-            "resume_agent_ids": {"a1": "继续"}
+            "resume_agent_ids": {"a1": "continue"}
         }))
-        .expect("混用合法");
+        .expect("mixed args valid");
         let mut seq = 0u64;
         let preps = prepare_swarm_children(&prep_ctx(&tmp, &tasks, &parent), &plan, &mut seq)
-            .expect("单条失败不拖垮整体");
+            .expect("single failure does not sink the whole call");
         assert_eq!(preps.len(), 2);
         assert!(
             matches!(&preps[0], SwarmPrep::Ready(_)),
-            "item 子任务不受影响"
+            "item subtask unaffected"
         );
         let SwarmPrep::Failed { error, .. } = &preps[1] else {
-            panic!("冲突的 resume 条目应 Failed");
+            panic!("conflicting resume entry should be Failed");
         };
-        assert!(error.contains("仍在运行"), "{error}");
+        assert!(error.contains("still running"), "{error}");
     }
 
     #[test]
@@ -710,14 +742,14 @@ mod tests {
         let parent = parent_model();
         let agents = agents_dir(&tmp.0.join("sessions"), "s-test");
         std::fs::create_dir_all(&agents).unwrap();
-        // 合法上下文：meta + 一条 user
+        // Valid context: meta + one user message
         append_agent_record(
             &agents.join("a9.jsonl"),
             &serde_json::json!({
                 "type": "meta",
                 "agent_id": "a9",
                 "profile": "general-purpose",
-                "description": "旧任务",
+                "description": "old task",
                 "model": "m",
                 "provider": "p",
                 "created_at": 1,
@@ -726,37 +758,37 @@ mod tests {
         .unwrap();
         append_agent_record(
             &agents.join("a9.jsonl"),
-            &serde_json::json!({ "type": "msg", "msg": ChatMsg::user("旧 prompt".to_string()) }),
+            &serde_json::json!({ "type": "msg", "msg": ChatMsg::user("old prompt".to_string()) }),
         )
         .unwrap();
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
             "prompt_template": "",
-            "resume_agent_ids": {"a9": "继续查调用方"}
+            "resume_agent_ids": {"a9": "continue finding callers"}
         }))
-        .expect("纯 resume");
+        .expect("pure resume");
         let mut seq = 0u64;
         let preps =
             prepare_swarm_children(&prep_ctx(&tmp, &tasks, &parent), &plan, &mut seq).unwrap();
-        assert_eq!(seq, 0, "resume 不消耗序号");
+        assert_eq!(seq, 0, "resume consumes no seq number");
         let [SwarmPrep::Ready(prep)] = preps.as_slice() else {
-            panic!("单条 resume 应 Ready");
+            panic!("single resume should be Ready");
         };
-        assert_eq!(prep.agent_id, "a9", "resume 复用原 agent_id");
-        assert_eq!(prep.history.len(), 2, "旧 user + 新 user");
+        assert_eq!(prep.agent_id, "a9", "resume reuses the original agent_id");
+        assert_eq!(prep.history.len(), 2, "old user + new user");
         assert_eq!(
             prep.history[1].content.as_deref(),
-            Some("继续查调用方"),
-            "追加 prompt 进历史"
+            Some("continue finding callers"),
+            "appended prompt enters history"
         );
         let (_, history) = read_agent(&prep.jsonl).unwrap();
-        assert_eq!(history.len(), 2, "追加行已落盘");
+        assert_eq!(history.len(), 2, "appended line persisted");
     }
 
     // ---------- format_swarm_result ----------
 
     fn child(status: SwarmChildStatus, text: &str) -> SwarmChildResult {
         SwarmChildResult {
-            description: "任务项".into(),
+            description: "task item".into(),
             agent_id: Some("a1-1".into()),
             status,
             turns: 3,
@@ -769,22 +801,31 @@ mod tests {
 
     #[test]
     fn aggregate_counts_and_queue_note() {
-        let mut failed = child(SwarmChildStatus::Failed, "模型请求失败: boom");
+        let mut failed = child(SwarmChildStatus::Failed, "model request failed: boom");
         failed.queued = true;
         let out = format_swarm_result(&[
-            child(SwarmChildStatus::Completed, "结论一"),
+            child(SwarmChildStatus::Completed, "conclusion one"),
             failed,
             child(SwarmChildStatus::Cancelled, ""),
         ]);
-        assert!(out.contains("共 3 个（成功 1 / 失败 1 / 取消 1）"), "{out}");
         assert!(
-            out.contains("并发上限") && out.contains("1 个曾排队"),
-            "排队情况应写进头部: {out}"
+            out.contains("3 subagents total (1 completed / 1 failed / 1 cancelled)"),
+            "{out}"
         );
-        assert!(out.contains("## 1."), "每项一段");
-        assert!(out.contains("结果全文: /tmp/agents/a1-1.result.md"));
-        assert!(out.contains("（已停止，无结果）"), "取消项占位");
-        assert!(out.contains("模型请求失败: boom"), "失败项带原因");
+        assert!(
+            out.contains("concurrency limit") && out.contains("1 waited in queue"),
+            "queue info should be in the header: {out}"
+        );
+        assert!(out.contains("## 1."), "one section per item");
+        assert!(out.contains("Full result: /tmp/agents/a1-1.result.md"));
+        assert!(
+            out.contains("(stopped, no result)"),
+            "cancelled item placeholder"
+        );
+        assert!(
+            out.contains("model request failed: boom"),
+            "failed item carries its reason"
+        );
     }
 
     #[test]
@@ -792,16 +833,16 @@ mod tests {
         let big = "x".repeat(SWARM_CHILD_PREVIEW + 500);
         let out = format_swarm_result(&[child(SwarmChildStatus::Completed, &big)]);
         assert!(
-            out.contains("[预览截断，全文: /tmp/agents/a1-1.result.md]"),
+            out.contains("[Preview truncated; full result: /tmp/agents/a1-1.result.md]"),
             "{out}"
         );
         let body = out.matches('x').count();
-        assert_eq!(body, SWARM_CHILD_PREVIEW, "预览按上限截断");
+        assert_eq!(body, SWARM_CHILD_PREVIEW, "preview capped at the limit");
     }
 
     #[test]
     fn aggregate_overflow_degrades_to_pointer_tail() {
-        // 多项大结果撑爆总预算：溢出段降级为指针行，每项仍可达 result.md
+        // Many large results blow the total budget: overflowing sections degrade to pointer lines, each item still reaches result.md
         let big = "x".repeat(SWARM_CHILD_PREVIEW);
         let children: Vec<SwarmChildResult> = (0..40)
             .map(|i| {
@@ -814,31 +855,40 @@ mod tests {
         let out = format_swarm_result(&children);
         assert!(
             out.chars().count() <= SWARM_RESULT_BUDGET,
-            "总长受预算约束: {}",
+            "total length bounded by budget: {}",
             out.chars().count()
         );
-        assert!(out.contains("只留状态与结果文件指针"), "{out}");
-        assert!(out.contains("a1-39.result.md"), "尾部项的指针必须完整保留");
+        assert!(out.contains("status and result-file pointers"), "{out}");
+        assert!(
+            out.contains("a1-39.result.md"),
+            "tail item pointers must stay complete"
+        );
     }
 
     #[test]
     fn aggregate_prep_failure_section() {
         let prep_failed = SwarmChildResult {
-            description: "续跑旧代理".into(),
+            description: "resume old agent".into(),
             agent_id: None,
             status: SwarmChildStatus::Failed,
             turns: 0,
             result_path: None,
-            result_text: "子代理 \"a9\" 不存在。可用: （无）".into(),
+            result_text: "Subagent \"a9\" does not exist. Available: (none)".into(),
             queued: false,
             usage: (0, 0, 0),
         };
         let out = format_swarm_result(&[prep_failed]);
-        assert!(out.contains("准备阶段失败，未启动"), "{out}");
-        assert!(out.contains("不存在"), "错误原因内联: {out}");
+        assert!(
+            out.contains("failed during preparation, not started"),
+            "{out}"
+        );
+        assert!(
+            out.contains("does not exist"),
+            "error reason inlined: {out}"
+        );
     }
 
-    // ---------- format_swarm_receipt（后台回执） ----------
+    // ---------- format_swarm_receipt (background receipt) ----------
 
     fn receipt_child(
         description: &str,
@@ -858,16 +908,30 @@ mod tests {
     #[test]
     fn receipt_lists_each_child_with_ids_and_status() {
         let out = format_swarm_receipt(&[
-            receipt_child("审查 a.rs", Some(("a1-1", "b1")), false, None),
-            receipt_child("审查 b.rs", Some(("a1-2", "b2")), true, None),
-            receipt_child("续跑旧代理", None, false, Some("子代理 \"a9\" 不存在")),
+            receipt_child("Review a.rs", Some(("a1-1", "b1")), false, None),
+            receipt_child("Review b.rs", Some(("a1-2", "b2")), true, None),
+            receipt_child(
+                "resume old agent",
+                None,
+                false,
+                Some("Subagent \"a9\" does not exist"),
+            ),
         ]);
-        assert!(out.contains("共 3 个"), "{out}");
-        assert!(out.contains("排队等待空槽"), "排队情况进头部: {out}");
-        assert!(out.contains("1 个准备阶段失败"), "失败计数进头部: {out}");
-        assert!(out.contains("<task-notification>"), "告知通知语义: {out}");
-        assert!(out.contains("不要轮询"), "{out}");
-        assert!(out.contains("1. 审查 a.rs"), "逐项列出: {out}");
+        assert!(out.contains("3 subagents total"), "{out}");
+        assert!(
+            out.contains("queue for a free slot"),
+            "queue info in the header: {out}"
+        );
+        assert!(
+            out.contains("1 failed during preparation"),
+            "failure count in the header: {out}"
+        );
+        assert!(
+            out.contains("<task-notification>"),
+            "notification semantics stated: {out}"
+        );
+        assert!(out.contains("do not poll"), "{out}");
+        assert!(out.contains("1. Review a.rs"), "each item listed: {out}");
         assert!(
             out.contains("agent_id: a1-1 · task_id: b1 · status: running"),
             "{out}"
@@ -877,19 +941,24 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("status: failed（准备阶段失败，未启动）: 子代理 \"a9\" 不存在"),
-            "准备失败项带原因: {out}"
+            out.contains(
+                "status: failed (failed during preparation, not started): Subagent \"a9\" does not exist"
+            ),
+            "prep-failed item carries its reason: {out}"
         );
     }
 
     #[test]
     fn receipt_all_running_no_queue_no_failure_notes() {
         let out = format_swarm_receipt(&[
-            receipt_child("任务一", Some(("a1-1", "b1")), false, None),
-            receipt_child("任务二", Some(("a1-2", "b2")), false, None),
+            receipt_child("task one", Some(("a1-1", "b1")), false, None),
+            receipt_child("task two", Some(("a1-2", "b2")), false, None),
         ]);
-        assert!(out.contains("共 2 个。"), "无附加说明时头部干净: {out}");
-        assert!(!out.contains("排队"), "{out}");
-        assert!(!out.contains("准备阶段失败"), "{out}");
+        assert!(
+            out.contains("2 subagents total."),
+            "header clean when no notes: {out}"
+        );
+        assert!(!out.contains("queue"), "{out}");
+        assert!(!out.contains("failed during preparation"), "{out}");
     }
 }

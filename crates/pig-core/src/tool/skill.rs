@@ -4,9 +4,9 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-/// Skill 工具：按名加载技能的完整 SKILL.md 正文（剥 frontmatter、替换目录
-/// 占位符），加载后模型按技能指示继续工作。只读、全模式免审批（与 ZCode 同款
-/// 语义：清单在系统提示词里，正文按需加载，避免全量注入撑爆上下文）。
+/// Skill tool: loads a skill's full SKILL.md body by name (frontmatter stripped, directory
+/// placeholders substituted); after loading, the model continues following the skill's instructions. Read-only, approval-free in all modes (same semantics
+/// as ZCode: the listing lives in the system prompt and bodies load on demand, avoiding full injection blowing up the context).
 pub(crate) struct SkillTool {
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
@@ -35,12 +35,12 @@ impl Tool for SkillTool {
             "type": "function",
             "function": {
                 "name": "Skill",
-                "description": "加载技能的完整说明并按其指示执行。技能 = 领域能力/工作流的说明书（SKILL.md），可用技能的名称与简介列在系统提示词的「可用技能」清单里。\n何时调用：用户任务与某技能的职责匹配时，先把本工具作为第一步调用（阻塞性要求：加载完成前不要开始做任务本体）；用户消息里的 \"/<名字>\" 指的也是技能。\n重要约束：只能调用清单里出现的技能或用户显式输入的 /<名字>，不要凭训练记忆猜技能名；不要只提到技能却不实际调用；同一技能本次会话已加载过就直接遵循其指示，不要重复加载。",
+                "description": "Load a skill's full instructions and follow them. A skill is a packaged domain capability or workflow (a SKILL.md); the names and summaries of available skills are listed in the system prompt's skill listing.\nWhen to call: when the user's task matches a skill's purpose, call this tool as the first step (blocking requirement: do not start the task itself until the skill is loaded); a \"/<name>\" in the user's message also refers to a skill.\nConstraints: only invoke skills that appear in the listing or that the user explicitly typed as /<name> — never guess skill names from training memory; do not merely mention a skill without actually calling it; if a skill was already loaded this session, follow its instructions directly instead of loading it again.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "skill": { "type": "string", "description": "技能名（不带斜杠，取自可用技能清单）" },
-                        "args": { "type": "string", "description": "可选的任务参数/上下文，透传给技能正文使用" }
+                        "skill": { "type": "string", "description": "Skill name (no slash, from the available-skills listing)" },
+                        "args": { "type": "string", "description": "Optional task arguments/context, passed through to the skill body" }
                     },
                     "required": ["skill"]
                 }
@@ -54,18 +54,18 @@ impl Tool for SkillTool {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let _ = ctx; // 发现路径经构造期注入（cwd/data_dir），不依赖会话态
+            let _ = ctx; // discovery paths are injected at construction time (cwd/data_dir), no session state needed
             let name = args["skill"]
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .ok_or("缺少参数 skill（技能名，不带斜杠）")?;
+                .ok_or("Missing required parameter: skill (the skill name, without a slash)")?;
             let output = skills::load_skill_output(&self.cwd, &self.data_dir, name)?;
             let args_note = args["args"]
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(|args| format!("\n\n用户传入参数：{args}"))
+                .map(|args| format!("\n\nUser-supplied arguments: {args}"))
                 .unwrap_or_default();
             Ok(ToolEffect::plain(format!("{output}{args_note}")))
         })

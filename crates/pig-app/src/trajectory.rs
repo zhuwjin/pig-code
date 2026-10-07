@@ -1,26 +1,30 @@
-//! 模型调用轨迹面板：读当前会话的 `{session_id}.model-io.jsonl`（pig-core 每次
-//! 主会话步骤落盘一条；UI 直读文件不走协议）。布局对齐 ZCode「模型调用轨迹」：
-//! 按调用分组（序号 / 来源 / 结束原因胶囊 / IN·OUT token / 耗时 / 时刻），
-//! 每次调用下「输入」「输出」两个卡片；卡片内逐消息一行（彩色角色标签 +
-//! 单行预览 + chevron），各行独立展开看全文，展开行头部带耗时、时间戳与
-//! 复制按钮。
+//! Model io trace panel: reads the current session's
+//! `{session_id}.model-io.jsonl` (pig-core persists one record per
+//! main-session step; the UI reads the file directly without going through
+//! the protocol). Layout follows ZCode's "model io trace": grouped per call
+//! (index / source / finish-reason pill / IN·OUT tokens / duration / clock
+//! time), with "Input" and "Output" cards under each call; inside a card
+//! each message is one row (colored role label + single-line preview +
+//! chevron), each row expands independently to show the full text, and an
+//! expanded row's header carries the duration, timestamp and a copy button.
 
 use std::collections::HashSet;
 
 use super::*;
 
-/// 面板状态（AppView.trajectory，None = 未打开）
+/// Panel state (AppView.trajectory, None = not open)
 pub(crate) struct TrajectoryState {
     pub(crate) records: Vec<pig_core::model_io::ModelIoRecord>,
-    /// 文件读取失败（记录为空时展示）
+    /// File read failure (shown when records are empty)
     pub(crate) error: Option<String>,
-    /// 展开的消息行 key（"{turn}:{row_ix}"；turn 唯一标识一次调用，刷新后
-    /// 展开态可保留）
+    /// Keys of expanded message rows ("{turn}:{row_ix}"; turn uniquely
+    /// identifies a call, so expanded state survives refreshes)
     pub(crate) expanded: HashSet<String>,
 }
 
 impl TrajectoryState {
-    /// 读当前数据目录下该会话的调用轨迹（文件缺失 = 空列表，非错误）
+    /// Load this session's model io trace from the current data directory
+    /// (missing file = empty list, not an error)
     pub(crate) fn load(session_id: &str) -> Self {
         let sessions_dir = pig_core::data_dir().join("sessions");
         let path = pig_core::model_io::model_io_path(&sessions_dir, session_id);
@@ -39,7 +43,8 @@ impl TrajectoryState {
     }
 }
 
-/// 行的视觉角色：决定标签文案与颜色（对齐 ZCode trajectoryRoleTextClass 六种）
+/// Visual role of a row: decides the label text and color (six kinds, aligned
+/// with ZCode's trajectoryRoleTextClass)
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualRole {
     System,
@@ -51,18 +56,19 @@ enum VisualRole {
 }
 
 impl VisualRole {
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::System => "系统提示词",
-            Self::User => "用户消息",
-            Self::Assistant => "助手消息",
-            Self::Reasoning => "思考过程",
-            Self::ToolCall => "工具调用",
-            Self::ToolResult => "工具结果",
+            Self::System => rust_i18n::t!("trajectory.kind_system"),
+            Self::User => rust_i18n::t!("trajectory.kind_user"),
+            Self::Assistant => rust_i18n::t!("trajectory.kind_assistant"),
+            Self::Reasoning => rust_i18n::t!("trajectory.kind_reasoning"),
+            Self::ToolCall => rust_i18n::t!("trajectory.kind_tool_call"),
+            Self::ToolResult => rust_i18n::t!("trajectory.kind_tool_result"),
         }
     }
 
-    /// 标签颜色（ZCode 深/浅两套 hex + 80% 不透明度；system 用主题灰）
+    /// Label color (ZCode's dark/light hex pair + 80% opacity; system uses
+    /// the theme's gray)
     fn color(self, cx: &App) -> Hsla {
         let dark = cx.theme().is_dark();
         let hex = match self {
@@ -108,7 +114,8 @@ impl VisualRole {
     }
 }
 
-/// 输入消息 → 视觉角色（tool 归「工具结果」，未知 role 按 system 灰处理）
+/// Input message → visual role (tool maps to "tool result"; unknown roles
+/// are treated as system gray)
 fn input_role(msg: &pig_core::model_io::ModelIoMessage) -> VisualRole {
     match msg.role.as_str() {
         "system" => VisualRole::System,
@@ -119,17 +126,18 @@ fn input_role(msg: &pig_core::model_io::ModelIoMessage) -> VisualRole {
     }
 }
 
-/// 调用来源标签（source 字段预留了 subagent/compact 等扩展）
-fn source_label(source: &str) -> &str {
+/// Call source label (the source field reserves extensions like
+/// subagent/compact)
+fn source_label(source: &str) -> std::borrow::Cow<'static, str> {
     match source {
-        "main" => "主会话",
-        "subagent" => "子代理",
-        "compact" => "上下文压缩",
-        other => other,
+        "main" => rust_i18n::t!("trajectory.source_main"),
+        "subagent" => rust_i18n::t!("trajectory.source_subagent"),
+        "compact" => rust_i18n::t!("trajectory.source_compact"),
+        other => std::borrow::Cow::Owned(other.to_string()),
     }
 }
 
-/// 千分位数字（对齐 ZCode toLocaleString：48,442）
+/// Thousands-separated number (aligned with ZCode's toLocaleString: 48,442)
 fn fmt_num(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -142,7 +150,8 @@ fn fmt_num(n: u64) -> String {
     out
 }
 
-/// 耗时（ZCode formatTrajectoryDuration：<1s 毫秒；<10s 两位小数秒；否则一位）
+/// Duration (ZCode formatTrajectoryDuration: milliseconds below 1s; two
+/// decimal places below 10s; otherwise one)
 fn fmt_duration(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms}ms")
@@ -153,14 +162,15 @@ fn fmt_duration(ms: u64) -> String {
     }
 }
 
-/// 毫秒时间戳 → 本地时间（local-offset 失败返回 None，调用方降级为空串）
+/// Millisecond timestamp → local time (returns None when the local offset
+/// fails; callers degrade to an empty string)
 fn local_dt(ts_ms: u64) -> Option<time::OffsetDateTime> {
     let utc = time::OffsetDateTime::from_unix_timestamp_nanos(ts_ms as i128 * 1_000_000).ok()?;
     let offset = time::UtcOffset::current_local_offset().ok()?;
     Some(utc.to_offset(offset))
 }
 
-/// 12 小时制与 AM/PM（0 点 → 12 AM，12 点 → 12 PM）
+/// 12-hour clock and AM/PM (0 → 12 AM, 12 → 12 PM)
 fn hour12(hour: u8) -> (u8, &'static str) {
     let ampm = if hour < 12 { "AM" } else { "PM" };
     (
@@ -172,7 +182,7 @@ fn hour12(hour: u8) -> (u8, &'static str) {
     )
 }
 
-/// 时刻（对齐 ZCode formatTrajectoryClockTime：02:41:48 PM）
+/// Clock time (aligned with ZCode formatTrajectoryClockTime: 02:41:48 PM)
 fn fmt_clock(ts_ms: u64) -> String {
     let Some(dt) = local_dt(ts_ms) else {
         return String::new();
@@ -181,7 +191,8 @@ fn fmt_clock(ts_ms: u64) -> String {
     format!("{h:02}:{:02}:{:02} {ampm}", dt.minute(), dt.second())
 }
 
-/// 展开行时间戳（对齐 ZCode formatTrajectoryDateTime：10/4/2026, 2:42:08 PM）
+/// Expanded-row timestamp (aligned with ZCode formatTrajectoryDateTime:
+/// 10/4/2026, 2:42:08 PM)
 fn fmt_datetime(ts_ms: u64) -> String {
     let Some(dt) = local_dt(ts_ms) else {
         return String::new();
@@ -198,25 +209,29 @@ fn fmt_datetime(ts_ms: u64) -> String {
     )
 }
 
-/// 单行预览：所有空白（含换行）折叠为一个空格（ZCode messagePreview 同款）
+/// Single-line preview: all whitespace (newlines included) collapses into
+/// one space (same as ZCode messagePreview)
 fn preview(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// 展示用文本截断（字符边界；轨迹里单条内容已截 4000，展示再收 2000）
+/// Text truncation for display (at char boundaries; a single entry in the
+/// trace is already cut at 4000, display tightens to 2000)
 fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {
         let head: String = text.chars().take(max).collect();
-        format!("{head}…（已截断）")
+        rust_i18n::t!("trajectory.truncated", head = head).to_string()
     }
 }
 
-/// 消息行渲染参数（rec_ix + row_ix 组元素 id；key 为展开态键）
+/// Message row render parameters (rec_ix + row_ix form the element id; key
+/// is the expanded-state key)
 struct RowSpec {
     rec_ix: usize,
-    /// 卡片内行序（「输入」「输出」连续编号，兼作斑马纹奇偶）
+    /// Row index inside the card (continuously numbered across the "Input"
+    /// and "Output" cards, doubling as the zebra stripe parity)
     row_ix: usize,
     key: String,
     role: VisualRole,
@@ -227,32 +242,37 @@ struct RowSpec {
 }
 
 impl AppView {
-    /// 按当前会话重读调用轨迹落盘记录（打开 tab / 切会话 / 回合完成 / 手动刷新）
+    /// Reread the current session's persisted model io trace records (on tab
+    /// open / session switch / turn completion / manual refresh)
     pub(crate) fn reload_trajectory(&mut self) {
         if let Some(session_id) = self.current.clone() {
             self.trajectory = Some(TrajectoryState::load(&session_id));
         }
     }
 
-    /// 标题栏菜单入口：打开右侧「调用轨迹」tab（open_right_tab 内部会重读数据）
+    /// Title bar menu entry: opens the right "trajectory" tab
+    /// (open_right_tab rereads the data internally)
     pub(crate) fn open_trajectory(&mut self, cx: &mut Context<Self>) {
         self.open_right_tab(RightTab::Trajectory, cx);
     }
 
-    /// 右侧面板「调用轨迹」tab 内容：汇总副标题 + 按时间正序的调用卡片列表
+    /// Right panel "trajectory" tab content: summary subtitle + a list of
+    /// call cards in chronological order
     pub(crate) fn render_trajectory_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(state) = &self.trajectory else {
-            // 打开 tab 即会重读，这里兜底未打开会话的场景
+            // Opening the tab rereads; this is the fallback for the
+            // no-open-session case
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("开始会话后，这里会显示模型调用记录")
+                .child(rust_i18n::t!("trajectory.empty"))
                 .into_any_element();
         };
-        // 副标题：调用数 · 总 token（IN 含缓存命中 + OUT）· 出现过的模型（保序去重）
+        // Subtitle: call count · total tokens (IN including cache hits +
+        // OUT) · models seen (order-preserving dedup)
         let calls = state.records.len();
         let (in_total, out_total) = state.records.iter().fold((0u64, 0u64), |(i, o), r| {
             (i + r.usage.input + r.usage.cache_read, o + r.usage.output)
@@ -264,13 +284,20 @@ impl AppView {
             }
         }
         let summary = if models.is_empty() {
-            format!("{calls} 次调用 · {} tok", fmt_num(in_total + out_total))
-        } else {
-            format!(
-                "{calls} 次调用 · {} tok · {}",
-                fmt_num(in_total + out_total),
-                models.join(", ")
+            rust_i18n::t!(
+                "trajectory.summary",
+                calls = calls,
+                tokens = fmt_num(in_total + out_total)
             )
+            .to_string()
+        } else {
+            rust_i18n::t!(
+                "trajectory.summary_models",
+                calls = calls,
+                tokens = fmt_num(in_total + out_total),
+                models = models.join(", ")
+            )
+            .to_string()
         };
 
         v_flex()
@@ -310,14 +337,19 @@ impl AppView {
                     .text_color(cx.theme().muted_foreground)
                     .child(Icon::new(IconName::Inbox).size_5())
                     .child(div().text_sm().child(match &state.error {
-                        Some(error) => format!("读取调用轨迹失败：{error}"),
-                        None => "暂无模型调用记录（本会话还没有请求）".to_string(),
+                        Some(error) => {
+                            rust_i18n::t!("trajectory.read_failed", error = error).to_string()
+                        }
+                        None => rust_i18n::t!("trajectory.no_records").to_string(),
                     }))
                     .into_any_element()
             } else {
-                // 展示层增量（对齐 ZCode 时间线）：首条展示完整起始上下文；后续
-                // 条目只展示相对上一条新增的输入，且滤掉 assistant（回复已作为
-                // 上一条的输出呈现）；上下文变短（compact 重置）时回退完整展示
+                // Display-layer deltas (aligned with ZCode's timeline): the
+                // first record shows the full starting context; later
+                // records only show the input added relative to the previous
+                // one, with assistant messages filtered out (replies already
+                // appear as the previous record's output); when the context
+                // shrinks (compact reset), fall back to full display
                 let mut cards = Vec::new();
                 let mut prev_len = 0usize;
                 for (rec_ix, record) in state.records.iter().enumerate() {
@@ -339,8 +371,9 @@ impl AppView {
             .into_any_element()
     }
 
-    /// 单次调用卡片：分组头（序号/来源/结束原因/IN·OUT·耗时·时刻）+
-    /// 「输入」「输出」两个 section 卡片 + 错误块；display_input 为展示层增量输入
+    /// Single call card: group header (index/source/finish reason/
+    /// IN·OUT·duration·clock time) + "Input" and "Output" section cards +
+    /// error block; display_input is the display-layer delta input
     fn render_call_card(
         &self,
         rec_ix: usize,
@@ -348,7 +381,8 @@ impl AppView {
         display_input: &[pig_core::model_io::ModelIoMessage],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 主题取值先物化为本地变量（Hsla Copy / 字体 clone），后续闭包要 &mut cx
+        // Materialize theme values into locals first (Hsla is Copy / fonts
+        // are cloned); later closures need &mut cx
         let (muted, danger, border, accent, mono) = {
             let theme = cx.theme();
             (
@@ -360,12 +394,12 @@ impl AppView {
             )
         };
         let (finish_label, finish_color) = match record.finish.as_str() {
-            "stop" => ("正常结束", muted),
-            "tool_calls" => ("工具调用", muted),
-            "cancelled" => ("已取消", muted),
-            _ => ("失败", danger),
+            "stop" => (rust_i18n::t!("trajectory.finish_stop"), muted),
+            "tool_calls" => (rust_i18n::t!("trajectory.finish_tool_calls"), muted),
+            "cancelled" => (rust_i18n::t!("trajectory.finish_cancelled"), muted),
+            _ => (rust_i18n::t!("trajectory.finish_failed"), danger),
         };
-        // 输入消息行
+        // Input message rows
         let mut input_rows: Vec<AnyElement> = Vec::new();
         let mut row_ix = 0usize;
         for msg in display_input {
@@ -374,13 +408,16 @@ impl AppView {
                 if !full.is_empty() {
                     full.push('\n');
                 }
-                full.push_str(&format!("[调用工具: {}]", msg.tool_calls.join(", ")));
+                full.push_str(
+                    rust_i18n::t!("trajectory.calls_tools", tools = msg.tool_calls.join(", "))
+                        .as_ref(),
+                );
             }
             if msg.images > 0 {
                 if !full.is_empty() {
                     full.push('\n');
                 }
-                full.push_str(&format!("[图片 x{}]", msg.images));
+                full.push_str(rust_i18n::t!("trajectory.images", n = msg.images).as_ref());
             }
             if full.is_empty() {
                 full = "—".to_string();
@@ -401,7 +438,8 @@ impl AppView {
             ));
             row_ix += 1;
         }
-        // 输出消息行：思考过程 → 助手消息 → 各工具调用（行序与输入连续）
+        // Output message rows: reasoning → assistant message → tool calls
+        // (row numbering continues from the input)
         let mut output_rows: Vec<AnyElement> = Vec::new();
         let mut push_output = |role: VisualRole, full: String, rows: &mut Vec<AnyElement>| {
             let row_preview = preview(&full);
@@ -442,7 +480,7 @@ impl AppView {
             .w_full()
             .gap_2()
             .child(
-                // 分组头（ZCode CallMetadata：IN n · OUT n · 时长 · 时刻）
+                // Group header (ZCode CallMetadata: IN n · OUT n · duration · time)
                 h_flex()
                     .w_full()
                     .items_center()
@@ -489,24 +527,30 @@ impl AppView {
                     ),
             )
             .when(!input_rows.is_empty(), |this| {
-                this.child(section_card("输入", input_rows, cx))
+                this.child(section_card(
+                    rust_i18n::t!("trajectory.input").as_ref(),
+                    input_rows,
+                    cx,
+                ))
             })
             .when(!output_rows.is_empty(), |this| {
-                this.child(section_card("输出", output_rows, cx))
+                this.child(section_card(
+                    rust_i18n::t!("trajectory.output").as_ref(),
+                    output_rows,
+                    cx,
+                ))
             })
             .when_some(record.error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(danger)
-                        .child(format!("错误：{}", clip(&error, 2000))),
-                )
+                this.child(div().text_xs().text_color(danger).child(
+                    rust_i18n::t!("trajectory.error", error = clip(&error, 2000)).to_string(),
+                ))
             })
             .into_any_element()
     }
 
-    /// 单条消息行（输入/输出卡片共用）：折叠 = 彩色角色标签 + 单行预览 +
-    /// chevron；展开 = 标签 + 耗时·时间戳 + 复制按钮 + 完整内容
+    /// Single message row (shared by the input/output cards): collapsed =
+    /// colored role label + single-line preview + chevron; expanded = label +
+    /// duration·timestamp + copy button + full content
     fn render_msg_row(&self, spec: RowSpec, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -620,7 +664,8 @@ impl AppView {
     }
 }
 
-/// 「输入」/「输出」section 卡片：标题条 + 行间细分隔线的消息行列表
+/// "Input"/"Output" section card: title bar + message row list with thin
+/// dividers between rows
 fn section_card(title: &str, rows: Vec<AnyElement>, cx: &mut Context<AppView>) -> AnyElement {
     let theme = cx.theme();
     let mut card = v_flex()

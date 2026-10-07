@@ -1,5 +1,6 @@
-//! 显式导入（不用 `use super::*`）：test-support 下 glob 会把 gpui 的 test 宏
-//! 引进来遮蔽内置 #[test]（gpui-kit lib.rs 注明的坑，mcp/tests.rs 同款做法）
+//! Explicit imports (no `use super::*`): under test-support a glob would pull
+//! in gpui's test macro and shadow the built-in #[test] (a pitfall noted in
+//! gpui-kit's lib.rs; same approach as mcp/tests.rs)
 use super::{
     SkillInfo, SkillsSnapshot, create_skill_dir, delete_skill_dir, load_skills_from,
     sanitize_dir_name, write_skill_md,
@@ -7,7 +8,8 @@ use super::{
 use pig_core::skills as skill_core;
 use std::path::{Path, PathBuf};
 
-/// 最小临时目录辅助（mcp/tests.rs 同款做法，不引 tempfile 依赖）
+/// Minimal temp directory helper (same approach as mcp/tests.rs, no tempfile
+/// dependency)
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -32,7 +34,8 @@ fn write_skill(root: &Path, dir_name: &str, markdown: &str) {
     std::fs::write(dir.join(skill_core::SKILL_FILE), markdown).unwrap();
 }
 
-/// 快照合并：项目级覆盖用户级并打标；启停状态来自 skills-state.json
+/// Snapshot merging: project level overrides user level and is flagged; the
+/// enable state comes from skills-state.json
 #[test]
 fn snapshot_merges_scopes_and_state() {
     let tmp = TempDir::new("snapshot");
@@ -43,17 +46,17 @@ fn snapshot_merges_scopes_and_state() {
     write_skill(
         &skill_core::user_root(&data),
         "pdf",
-        "---\nname: pdf\ndescription: 用户级 PDF\n---\n正文",
+        "---\nname: pdf\ndescription: user-level PDF\n---\nbody",
     );
     write_skill(
         &skill_core::project_root(&ws),
         "pdf",
-        "---\nname: pdf\ndescription: 项目级 PDF\n---\n正文",
+        "---\nname: pdf\ndescription: project-level PDF\n---\nbody",
     );
     write_skill(
         &skill_core::user_root(&data),
         "plain",
-        "无 frontmatter 正文",
+        "no frontmatter body",
     );
     let off_path = skill_core::user_root(&data)
         .join("plain")
@@ -63,11 +66,12 @@ fn snapshot_merges_scopes_and_state() {
     let snapshot: SkillsSnapshot = load_skills_from(&data, Some(&ws));
     assert_eq!(snapshot.skills.len(), 2);
     let pdf: &SkillInfo = snapshot.skills.iter().find(|s| s.name == "pdf").unwrap();
-    assert_eq!(pdf.description, "项目级 PDF");
+    assert_eq!(pdf.description, "project-level PDF");
     assert_eq!(pdf.source, skill_core::SkillSource::Project);
     assert!(pdf.overrides_user);
     assert_eq!(pdf.dir_name, "pdf");
-    // 停用状态挂到用户级 plain 上，frontmatter 缺失也有标记
+    // The disabled state attaches to the user-level plain; a missing
+    // frontmatter is flagged too
     let plain: &SkillInfo = snapshot.skills.iter().find(|s| s.name == "plain").unwrap();
     assert!(!plain.enabled);
     assert!(!plain.has_frontmatter);
@@ -75,7 +79,8 @@ fn snapshot_merges_scopes_and_state() {
     assert!(snapshot.project_exists);
 }
 
-/// 用户级作用域（workspace=None）：只列用户级，项目级不参与
+/// User-level scope (workspace=None): only user-level skills listed, project
+/// level does not participate
 #[test]
 fn snapshot_user_scope_only() {
     let tmp = TempDir::new("user-only");
@@ -86,12 +91,12 @@ fn snapshot_user_scope_only() {
     write_skill(
         &skill_core::user_root(&data),
         "a",
-        "---\nname: a\ndescription: 用户\n---\n正文",
+        "---\nname: a\ndescription: user\n---\nbody",
     );
     write_skill(
         &skill_core::project_root(&ws),
         "b",
-        "---\nname: b\ndescription: 项目\n---\n正文",
+        "---\nname: b\ndescription: project\n---\nbody",
     );
     let snapshot = load_skills_from(&data, None);
     let names: Vec<&str> = snapshot.skills.iter().map(|s| s.name.as_str()).collect();
@@ -99,7 +104,8 @@ fn snapshot_user_scope_only() {
     assert!(snapshot.project_path.is_none());
 }
 
-/// 目录名归一：小写、空白/下划线折成 -、首尾 - 裁剪、非法输入 None
+/// Directory name normalization: lowercase, whitespace/underscores folded into
+/// dashes, leading/trailing dashes trimmed, invalid input None
 #[test]
 fn dir_name_sanitizing() {
     assert_eq!(
@@ -112,7 +118,11 @@ fn dir_name_sanitizing() {
     );
     assert_eq!(sanitize_dir_name("pdf").as_deref(), Some("pdf"));
     assert_eq!(sanitize_dir_name("--pdf--").as_deref(), Some("pdf"));
-    assert_eq!(sanitize_dir_name("中文技能"), None, "无 ASCII 字符应失败");
+    assert_eq!(
+        sanitize_dir_name("中文技能"),
+        None,
+        "input without ASCII characters should fail"
+    );
     assert_eq!(sanitize_dir_name("   "), None);
     let long = "a".repeat(65);
     assert_eq!(sanitize_dir_name(&long), None);
@@ -120,30 +130,35 @@ fn dir_name_sanitizing() {
     assert_eq!(sanitize_dir_name(&ok).as_deref(), Some(ok.as_str()));
 }
 
-/// 新建目录：正常落盘 + 已存在拒绝覆盖；编辑保存整文件重写
+/// Create directory: normal persist plus refuses to overwrite when it exists;
+/// edit save rewrites the whole file
 #[test]
 fn create_and_rewrite_skill_files() {
     let tmp = TempDir::new("create");
     let root = tmp.0.join("skills");
-    let dir = create_skill_dir(&root, "demo", "---\nname: demo\n---\n正文").unwrap();
+    let dir = create_skill_dir(&root, "demo", "---\nname: demo\n---\nbody").unwrap();
     assert!(dir.join(skill_core::SKILL_FILE).is_file());
-    let err = create_skill_dir(&root, "demo", "---\nname: demo\n---\n正文").unwrap_err();
-    assert!(err.contains("已存在"), "应拒绝覆盖: {err}");
-    write_skill_md(&dir, "---\nname: demo\ndescription: 补写\n---\n新正文").unwrap();
+    let err = create_skill_dir(&root, "demo", "---\nname: demo\n---\nbody").unwrap_err();
+    assert!(err.contains("已存在"), "should refuse to overwrite: {err}");
+    write_skill_md(&dir, "---\nname: demo\ndescription: amended\n---\nnew body").unwrap();
     let content = std::fs::read_to_string(dir.join(skill_core::SKILL_FILE)).unwrap();
-    assert!(content.contains("新正文"));
+    assert!(content.contains("new body"));
 }
 
-/// 删除护栏：仅受控根的直接子目录可删；根自身/越界路径拒绝
+/// Delete guard: only direct children of the controlled roots may be deleted;
+/// the root itself/out-of-bounds paths are refused
 #[test]
 fn delete_guarded_to_roots() {
     let tmp = TempDir::new("delete");
     let root = tmp.0.join("skills");
-    let dir = create_skill_dir(&root, "demo", "---\nname: demo\n---\n正文").unwrap();
+    let dir = create_skill_dir(&root, "demo", "---\nname: demo\n---\nbody").unwrap();
     delete_skill_dir(&dir, &[&root]).unwrap();
     assert!(!dir.exists());
     let outside = tmp.0.join("elsewhere");
     std::fs::create_dir_all(&outside).unwrap();
     let err = delete_skill_dir(&outside, &[&root]).unwrap_err();
-    assert!(err.contains("拒绝删除"), "越界应拒绝: {err}");
+    assert!(
+        err.contains("拒绝删除"),
+        "out-of-bounds path should be refused: {err}"
+    );
 }

@@ -1,24 +1,24 @@
-//! 模型调用轨迹落盘：`{sessions_dir}/{session_id}.model-io.jsonl`，每行一次
-//! provider 调用（对齐 ZCode 的 model-io：UI「查看调用轨迹」按会话 id 直读
-//! 该文件还原请求/响应/工具调用，不依赖 rollout 快照）。
+//! Model-call trace persistence: `{sessions_dir}/{session_id}.model-io.jsonl`, one line per
+//! provider call (aligned with ZCode's model-io: the UI's "view call trace" reads this file
+//! directly by session id to restore requests/responses/tool calls, without relying on rollout snapshots).
 
 use crate::provider::{ChatMsg, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// 单次调用的输入消息投影：只留文本与结构信息，图片不落 base64
+/// Input-message projection for a single call: keeps only text and structural info; images are not persisted as base64
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModelIoMessage {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// assistant 消息携带的工具调用（仅 id + 名称）
+    /// Tool calls carried by the assistant message (id + name only)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<String>,
-    /// tool 角色的对应调用 id
+    /// The corresponding call id for the tool role
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// 随消息进上下文的图片张数（内容不入轨迹）
+    /// Number of images entering context with the message (content is not recorded in the trace)
     #[serde(default, skip_serializing_if = "usize_is_zero")]
     pub images: usize,
 }
@@ -35,7 +35,7 @@ pub struct ModelIoUsage {
     pub cache_read: u64,
     #[serde(default)]
     pub output: u64,
-    /// 模型上报的累计上下文占用（水位），未知为 0
+    /// Cumulative context occupancy reported by the model (usage watermark), 0 when unknown
     #[serde(default)]
     pub used: u64,
     #[serde(default)]
@@ -49,14 +49,14 @@ pub struct ModelIoToolCall {
     pub arguments: String,
 }
 
-/// 一次 provider 调用的完整记录（正常/工具调用/失败/取消都落盘）
+/// Complete record of one provider call (normal/tool-call/failure/cancellation are all persisted)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelIoRecord {
-    /// 落盘时刻（毫秒 Unix 时间戳）
+    /// Persistence time (Unix timestamp in milliseconds)
     pub ts_ms: u64,
-    /// 回合/步骤标识（如 "{turn_id}-s{step}"）
+    /// Turn/step identifier (e.g. "{turn_id}-s{step}")
     pub turn: String,
-    /// 调用来源：main = 主会话步骤（后续可扩展 subagent/compact/title）
+    /// Call source: main = main-session step (extensible to subagent/compact/title later)
     pub source: String,
     pub provider: String,
     pub model: String,
@@ -73,25 +73,29 @@ pub struct ModelIoRecord {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ModelIoToolCall>,
-    /// 增量输入：本条 input 只存与上一条完整输入不同的尾部，
-    /// 此前缀条数与上一条共享（对齐 ZCode model-io 的 delta 存储；
-    /// 0 = 全量。读取时由 read_all 顺序展开还原）
+    /// Delta input: this record's input stores only the tail differing from the previous record's
+    /// full input; a prefix of that many entries is shared with the previous record (aligned with
+    /// ZCode model-io's delta storage; 0 = full. read_all expands it back in order when reading)
     #[serde(default)]
     pub input_offset: usize,
     pub input: Vec<ModelIoMessage>,
 }
 
-/// 轨迹文件路径（调用方持有 sessions_dir，与会话 rollout 同目录）
+/// Trace file path (the caller holds sessions_dir; same directory as the session rollout)
 pub fn model_io_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(format!("{session_id}.model-io.jsonl"))
 }
 
-/// 追加一条调用记录。目录不存在则创建；失败返回 Err（调用方按非致命处理，
-/// 与 rollout.append 同口径）。
+/// Append one call record. Creates the directory if missing; failure returns Err (the caller
+/// treats it as non-fatal, same policy as rollout.append).
 pub fn append(sessions_dir: &Path, session_id: &str, record: &ModelIoRecord) -> Result<(), String> {
     use std::io::Write as _;
-    std::fs::create_dir_all(sessions_dir)
-        .map_err(|e| format!("创建会话目录失败 {}: {e}", sessions_dir.display()))?;
+    std::fs::create_dir_all(sessions_dir).map_err(|e| {
+        format!(
+            "Failed to create session directory {}: {e}",
+            sessions_dir.display()
+        )
+    })?;
     let path = model_io_path(sessions_dir, session_id);
     let mut line = serde_json::to_string(record).map_err(|e| e.to_string())?;
     line.push('\n');
@@ -99,15 +103,16 @@ pub fn append(sessions_dir: &Path, session_id: &str, record: &ModelIoRecord) -> 
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|e| format!("打开调用轨迹失败 {}: {e}", path.display()))?;
+        .map_err(|e| format!("Failed to open model io trace {}: {e}", path.display()))?;
     file.write_all(line.as_bytes())
-        .map_err(|e| format!("写入调用轨迹失败 {}: {e}", path.display()))
+        .map_err(|e| format!("Failed to write model io trace {}: {e}", path.display()))
 }
 
-/// 读入全部调用记录（文件缺失 = 空列表），并把增量输入顺序展开成完整序列
-///（record N 的完整输入 = record N-1 完整输入前 input_offset 条 + 本条 delta）。
-/// 展开链断裂（offset 超出上一条长度，不应发生）时按全量兜底。坏行跳过并
-/// eprintln 行号——轨迹是诊断数据，不能因一条坏行整页打不开。
+/// Read all call records (missing file = empty list), expanding delta inputs in order into full
+/// sequences (record N's full input = the first input_offset entries of record N-1's full input + this record's delta).
+/// If the expansion chain breaks (offset exceeds the previous record's length, which should not happen), fall
+/// back to treating it as full. Bad lines are skipped with the line number eprintln'd — the trace is diagnostic
+/// data, and one bad line must not make the whole page unopenable.
 pub fn read_all(path: &Path) -> Vec<ModelIoRecord> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return vec![];
@@ -120,11 +125,14 @@ pub fn read_all(path: &Path) -> Vec<ModelIoRecord> {
         let mut record: ModelIoRecord = match serde_json::from_str(line) {
             Ok(record) => record,
             Err(e) => {
-                eprintln!("调用轨迹第 {} 行解析失败，已跳过: {e}", ix + 1);
+                eprintln!(
+                    "failed to parse model io trace line {}, skipped: {e}",
+                    ix + 1
+                );
                 continue;
             }
         };
-        // delta 展开：拼上上一条的共享前缀
+        // Delta expansion: prepend the previous record's shared prefix
         if let Some(previous) = records.last().filter(|_| record.input_offset > 0) {
             let offset = record.input_offset.min(previous.input.len());
             let mut full = previous.input[..offset].to_vec();
@@ -136,7 +144,7 @@ pub fn read_all(path: &Path) -> Vec<ModelIoRecord> {
     records
 }
 
-/// 两条输入投影的公共前缀条数（逐条字段全等；delta 落盘的切分点）
+/// Number of common-prefix entries between two input projections (all fields equal per entry; the split point for delta persistence)
 pub fn common_prefix_len(a: &[ModelIoMessage], b: &[ModelIoMessage]) -> usize {
     a.iter()
         .zip(b)
@@ -150,7 +158,7 @@ pub fn common_prefix_len(a: &[ModelIoMessage], b: &[ModelIoMessage]) -> usize {
         .count()
 }
 
-/// 请求前的输入历史 → 轨迹投影（深内容截断防单条撑爆文件：字符边界取前 4000）
+/// Pre-request input history -> trace projection (deep content truncated to keep one record from bloating the file: first 4000 chars at a char boundary)
 pub fn project_input(messages: &[ChatMsg]) -> Vec<ModelIoMessage> {
     messages
         .iter()
@@ -171,7 +179,7 @@ pub fn project_input(messages: &[ChatMsg]) -> Vec<ModelIoMessage> {
         .collect()
 }
 
-/// 响应累积的工具调用 → 轨迹投影（参数 JSON 可能很长，同样截断）
+/// Response-accumulated tool calls -> trace projection (argument JSON can be long; truncated likewise)
 pub fn project_tool_calls(calls: &[ToolCall]) -> Vec<ModelIoToolCall> {
     calls
         .iter()
@@ -183,7 +191,7 @@ pub fn project_tool_calls(calls: &[ToolCall]) -> Vec<ModelIoToolCall> {
         .collect()
 }
 
-/// 当前 Unix 毫秒时间戳（轨迹记录与 UI 展示用）
+/// Current Unix millisecond timestamp (for trace records and UI display)
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -213,8 +221,8 @@ mod tests {
             },
             finish: "tool_calls".into(),
             error: None,
-            reasoning: "想".into(),
-            text: "答".into(),
+            reasoning: "thinking".into(),
+            text: "answer".into(),
             tool_calls: vec![ModelIoToolCall {
                 id: "c1".into(),
                 name: "Bash".into(),
@@ -243,7 +251,7 @@ mod tests {
         assert_eq!(all[0].usage.input, 10);
         assert_eq!(all[0].tool_calls[0].name, "Bash");
         assert_eq!(all[0].input[0].content.as_deref(), Some("hi"));
-        // 文件缺失 = 空
+        // Missing file = empty
         assert!(read_all(&dir.join("nope.jsonl")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -265,7 +273,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        // 第二条只存 delta：共享前缀 2 条，新增 assistant + user
+        // The second record stores only the delta: 2 shared-prefix entries, plus a new assistant + user
         let mut second = sample();
         second.input_offset = 2;
         second.input = vec![
@@ -284,13 +292,13 @@ mod tests {
         append(&dir, "s1", &second).unwrap();
         let all = read_all(&model_io_path(&dir, "s1"));
         assert_eq!(all.len(), 2);
-        // 首条全量
+        // First record is full
         assert_eq!(all[0].input.len(), 2);
-        // 次条展开 = 前缀 2 + delta 2
+        // Second record expanded = prefix 2 + delta 2
         assert_eq!(all[1].input.len(), 4);
         assert_eq!(all[1].input[0].role, "system");
         assert_eq!(all[1].input[2].content.as_deref(), Some("a1"));
-        // 前缀计算：公共前缀 2
+        // Prefix computation: common prefix 2
         assert_eq!(common_prefix_len(&first.input, &all[1].input), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

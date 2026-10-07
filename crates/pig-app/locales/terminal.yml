@@ -1,0 +1,14 @@
+_version: 2
+
+# 底部终端面板（terminal/mod.rs；term.rs/pty.rs 的中文均为测试断言，不翻译）。
+
+terminal:
+  exited:
+    zh-CN: "%{label}（已退出）"
+    en: "%{label} (exited)"
+  none:
+    zh-CN: 无终端
+    en: No terminal
+  new:
+    zh-CN: 新建终端
+    en: New terminal

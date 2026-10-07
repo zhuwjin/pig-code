@@ -1,11 +1,11 @@
 use crate::NoConsoleExt as _;
 use std::path::Path;
 
-use pig_protocol::GitFileChange;
+use pig_protocol::{CoreError, GitDiffNote, GitFileChange};
 
-/// untracked 文件行数统计上限（ZCode GIT_UNTRACKED_STAT_MAX_BYTES 同值）
+/// Line-count cap for untracked files (same value as ZCode's GIT_UNTRACKED_STAT_MAX_BYTES)
 const UNTRACKED_STAT_MAX_BYTES: u64 = 1024 * 1024;
-/// 单文件 diff 原文上限（ZCode DEFAULT_GIT_DIFF_BYTES 同值）
+/// Cap for a single file's raw diff (same value as ZCode's DEFAULT_GIT_DIFF_BYTES)
 const DIFF_MAX_BYTES: usize = 1024 * 1024;
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -19,7 +19,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// 查询目录的 git 信息：当前分支 + 本地分支列表。非 git 仓库返回 (None, vec![])。
+/// Query a directory's git info: current branch + local branch list. Non-git directories return (None, vec![]).
 pub fn git_info(cwd: &Path) -> (Option<String>, Vec<String>) {
     let current = std::process::Command::new("git")
         .no_console()
@@ -50,25 +50,27 @@ pub fn git_info(cwd: &Path) -> (Option<String>, Vec<String>) {
     (current, branches)
 }
 
-/// 切换分支；失败透传 git stderr。
-pub fn checkout(cwd: &Path, branch: &str) -> Result<(), String> {
+/// Switch branches; failure forwards git stderr.
+pub fn checkout(cwd: &Path, branch: &str) -> Result<(), CoreError> {
     let output = std::process::Command::new("git")
         .no_console()
         .args(["checkout", branch])
         .current_dir(cwd)
         .output()
-        .map_err(|e| format!("启动 git 失败: {e}"))?;
+        .map_err(|e| CoreError::GitSpawn {
+            detail: e.to_string(),
+        })?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git checkout 失败: {stderr}"))
+        Err(CoreError::GitCheckout { detail: stderr })
     }
 }
 
-/// 工作区 git 改动列表：(未暂存, 已暂存)。非 git 仓库返回 None。
-/// 口径同 ZCode gitCliRepo：porcelain 拿状态，numstat 拿增删行数，
-/// untracked 逐文件读内容数行（>1MB / 含 NUL 的二进制计 0）。
+/// Workspace git change list: (unstaged, staged). Non-git directories return None.
+/// Same criteria as ZCode's gitCliRepo: porcelain for status, numstat for added/removed lines,
+/// untracked files read and line-counted per file (>1MB / binary with NUL counts as 0).
 pub fn git_status(cwd: &Path) -> Option<(Vec<GitFileChange>, Vec<GitFileChange>)> {
     let status_out = run_git(
         cwd,
@@ -88,7 +90,7 @@ pub fn git_status(cwd: &Path) -> Option<(Vec<GitFileChange>, Vec<GitFileChange>)
         ],
     )
     .unwrap_or_default();
-    // porcelain/numstat 的路径都相对仓库根
+    // porcelain/numstat paths are both relative to the repository root
     let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
         .map(|s| Path::new(s.trim()).to_path_buf())
         .unwrap_or_else(|| cwd.to_path_buf());
@@ -110,7 +112,7 @@ pub fn git_status(cwd: &Path) -> Option<(Vec<GitFileChange>, Vec<GitFileChange>)
             continue;
         }
         if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
-            // 冲突（UU/AA/DD）：行数靠 git diff 算不准，归 0 展示
+            // Conflict (UU/AA/DD): line counts via git diff are unreliable; shown as 0
             unstaged.push(GitFileChange {
                 path,
                 additions: 0,
@@ -141,9 +143,10 @@ pub fn git_status(cwd: &Path) -> Option<(Vec<GitFileChange>, Vec<GitFileChange>)
     Some((unstaged, staged))
 }
 
-/// 单文件 git diff 原文。staged=false 未暂存（untracked 手工拼 /dev/null 全新增），
-/// true 已暂存（git diff --cached）。
-pub fn git_diff(cwd: &Path, path: &str, staged: bool) -> String {
+/// Single-file raw git diff + structured placeholder note. staged=false means unstaged (untracked files
+/// get a hand-built /dev/null all-added diff), true means staged (git diff --cached).
+/// note = Some: diff unavailable/truncated (the UI localizes the placeholder text by kind); the diff field is truncated text or empty.
+pub fn git_diff(cwd: &Path, path: &str, staged: bool) -> (String, Option<GitDiffNote>) {
     if staged {
         return run_git(cwd, &["diff", "--cached", "--no-color", "--", path])
             .map(truncate_diff)
@@ -153,41 +156,44 @@ pub fn git_diff(cwd: &Path, path: &str, staged: bool) -> String {
     if !out.trim().is_empty() {
         return truncate_diff(out);
     }
-    // git diff 无输出 = 未跟踪文件（或未变更）：按 /dev/null → 全新增拼
+    // Empty git diff output = untracked file (or unchanged): build it as /dev/null -> all-added
     untracked_diff(cwd, path).unwrap_or_default()
 }
 
-fn truncate_diff(diff: String) -> String {
+fn truncate_diff(diff: String) -> (String, Option<GitDiffNote>) {
     if diff.len() <= DIFF_MAX_BYTES {
-        return diff;
+        return (diff, None);
     }
     let mut end = DIFF_MAX_BYTES;
     while !diff.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n… diff 超过 1MB，已截断 …", &diff[..end])
+    (diff[..end].to_string(), Some(GitDiffNote::Truncated))
 }
 
-/// untracked 文件的合成 diff（ZCode buildUntrackedTextDiffResult 同款思路）：
-/// 空 → 全文。二进制/超 1MB 给占位说明。
-fn untracked_diff(cwd: &Path, path: &str) -> Option<String> {
+/// Synthesized diff for untracked files (same idea as ZCode's buildUntrackedTextDiffResult):
+/// empty -> full text. Binary/over-1MB yields no text diff (note placeholder).
+fn untracked_diff(cwd: &Path, path: &str) -> Option<(String, Option<GitDiffNote>)> {
     let root = run_git(cwd, &["rev-parse", "--show-toplevel"])
         .map(|s| Path::new(s.trim()).to_path_buf())
         .unwrap_or_else(|| cwd.to_path_buf());
     let full = root.join(path);
     let meta = std::fs::metadata(&full).ok()?;
     if meta.len() > UNTRACKED_STAT_MAX_BYTES {
-        return Some("（文件超过 1MB，无文本 diff）".to_string());
+        return Some((String::new(), Some(GitDiffNote::TooLarge)));
     }
     let bytes = std::fs::read(&full).ok()?;
     if bytes.contains(&0) {
-        return Some("（二进制文件，无文本 diff）".to_string());
+        return Some((String::new(), Some(GitDiffNote::Binary)));
     }
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    Some(crate::tool::per_edit_diff(&root, &full, "", &content).unified_diff)
+    Some((
+        crate::tool::per_edit_diff(&root, &full, "", &content).unified_diff,
+        None,
+    ))
 }
 
-/// porcelain v1 -z 解析：(X, Y, path)。重命名取新路径并跳过紧随的原始路径字段。
+/// porcelain v1 -z parsing: (X, Y, path). Renames take the new path and skip the immediately following original-path field.
 fn parse_porcelain(out: &str) -> Vec<(char, char, String)> {
     let mut entries = Vec::new();
     let mut fields = out.split('\0');
@@ -201,7 +207,7 @@ fn parse_porcelain(out: &str) -> Vec<(char, char, String)> {
         };
         let path = field[3..].to_string();
         if x == 'R' || y == 'R' || x == 'C' || y == 'C' {
-            // 重命名/复制：下一个 NUL 字段是原始路径，跳过
+            // Rename/copy: the next NUL field is the original path; skip it
             fields.next();
         }
         if path.is_empty() {
@@ -212,7 +218,7 @@ fn parse_porcelain(out: &str) -> Vec<(char, char, String)> {
     entries
 }
 
-/// numstat -z 解析：path → (additions, deletions)。二进制（- -）计 (0,0)；重命名取新路径。
+/// numstat -z parsing: path -> (additions, deletions). Binary (- -) counts as (0,0); renames take the new path.
 fn parse_numstat(out: &str) -> std::collections::HashMap<String, (u32, u32)> {
     let mut map = std::collections::HashMap::new();
     let mut fields = out.split('\0').peekable();
@@ -224,7 +230,7 @@ fn parse_numstat(out: &str) -> std::collections::HashMap<String, (u32, u32)> {
         let additions = a.parse().unwrap_or(0);
         let deletions = d.parse().unwrap_or(0);
         let path = if path.is_empty() {
-            // 重命名：a\td\t\0old\0new\0
+            // Rename: a\td\t\0old\0new\0
             let _old = fields.next();
             fields.next().unwrap_or_default().to_string()
         } else {
@@ -238,7 +244,7 @@ fn parse_numstat(out: &str) -> std::collections::HashMap<String, (u32, u32)> {
     map
 }
 
-/// untracked 文件行数：>1MB 或含 NUL（二进制）计 0；末尾无换行补 1 行。
+/// Untracked file line count: >1MB or containing NUL (binary) counts as 0; a missing final line ending adds 1 line.
 fn count_file_lines(path: &Path) -> u32 {
     let Ok(meta) = std::fs::metadata(path) else {
         return 0;
@@ -285,7 +291,7 @@ mod tests {
         assert_eq!(map.get("new.txt"), Some(&(3, 1)));
         assert_eq!(map.get("bin.png"), Some(&(0, 0)));
         assert_eq!(map.get("plain.txt"), Some(&(10, 2)));
-        assert_eq!(map.get("old.txt"), None, "重命名取新路径");
+        assert_eq!(map.get("old.txt"), None, "renames map to the new path");
     }
 
     #[test]
@@ -298,6 +304,6 @@ mod tests {
         std::fs::write(&file, "a\nb\n").unwrap();
         assert_eq!(count_file_lines(&file), 2);
         std::fs::write(&file, [b'a', 0, b'b']).unwrap();
-        assert_eq!(count_file_lines(&file), 0, "含 NUL 视为二进制");
+        assert_eq!(count_file_lines(&file), 0, "NUL bytes mean binary");
     }
 }

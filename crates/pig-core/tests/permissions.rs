@@ -1,4 +1,4 @@
-//! 项目级权限规则（.pigcode/permissions.toml）：解析、匹配、语法容错。
+//! Project-level permission rules (.pigcode/permissions.toml): parsing, matching, and syntax tolerance.
 
 use pig_core::permissions::PermissionRules;
 
@@ -10,30 +10,30 @@ fn parse_and_match_allow_deny() {
         deny  = ["Bash(git push *)"]
         "#,
     )
-    .expect("合法 toml");
+    .expect("valid toml");
     assert!(!rules.is_empty());
     assert_eq!(rules.skipped, 0);
 
-    // Bash 匹配完整命令串
+    // Bash matches the full command string
     assert!(rules.allow_hit("Bash", "cargo test"));
     assert!(rules.allow_hit("Bash", "cargo build --release"));
     assert!(!rules.allow_hit("Bash", "npm test"));
     assert!(rules.allow_hit("Bash", "ls"));
     assert!(
         !rules.allow_hit("Bash", "ls -la"),
-        "Bash(ls) 不匹配带参形式"
+        "Bash(ls) must not match forms with arguments"
     );
-    // 工具名大小写不敏感
+    // Tool names are case-insensitive
     assert!(rules.allow_hit("bash", "cargo test"));
     assert!(rules.allow_hit("BASH", "ls"));
 
-    // Write/Edit 匹配 path（glob）
+    // Write/Edit match the path (glob)
     assert!(rules.allow_hit("Edit", "src/a.rs"));
     assert!(rules.allow_hit("Edit", "src/deep/nested.rs"));
     assert!(!rules.allow_hit("Edit", "docs/a.md"));
     assert!(rules.allow_hit("Write", "docs/a.md"));
 
-    // deny 命中返回规则原文
+    // A deny hit returns the original rule text
     assert_eq!(
         rules.deny_hit("Bash", "git push --force"),
         Some("Bash(git push *)")
@@ -47,7 +47,7 @@ fn backslash_subject_normalized() {
     let rules = PermissionRules::parse(r#"deny = ["Edit(src/**)"]"#).unwrap();
     assert!(
         rules.deny_hit("Edit", "src\\win\\a.rs").is_some(),
-        "反斜杠归一为 / 后匹配"
+        "backslashes are normalized to / before matching"
     );
 }
 
@@ -55,7 +55,7 @@ fn backslash_subject_normalized() {
 fn missing_file_is_empty_rules() {
     let dir = std::env::temp_dir().join(format!("pig-core-perms-none-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let rules = PermissionRules::load(&dir).expect("缺文件按空规则");
+    let rules = PermissionRules::load(&dir).expect("missing file means empty rules");
     assert!(rules.is_empty());
     assert!(!rules.allow_hit("Bash", "anything"));
     assert!(rules.deny_hit("Bash", "anything").is_none());
@@ -64,19 +64,28 @@ fn missing_file_is_empty_rules() {
 #[test]
 fn invalid_toml_is_error() {
     let err = PermissionRules::parse("allow = [not toml").unwrap_err();
-    assert!(err.contains("解析失败"), "{err}");
+    assert!(
+        matches!(err, pig_protocol::CoreError::PermissionsParse { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]
 fn malformed_rules_skipped_and_counted() {
     let rules = PermissionRules::parse(
         r#"
-        allow = ["Bash(cargo *)", "not-a-rule", "(空工具名)", "Edit(src/**"]
+        allow = ["Bash(cargo *)", "not-a-rule", "(no tool name)", "Edit(src/**"]
         "#,
     )
-    .expect("语法错误的规则不影响整体解析");
-    assert_eq!(rules.skipped, 3, "3 条非法规则跳过计数");
-    assert!(rules.allow_hit("Bash", "cargo check"), "合法规则仍生效");
+    .expect("malformed rules must not break overall parsing");
+    assert_eq!(
+        rules.skipped, 3,
+        "3 invalid rules should be skipped and counted"
+    );
+    assert!(
+        rules.allow_hit("Bash", "cargo check"),
+        "valid rules still take effect"
+    );
 }
 
 #[test]

@@ -1,13 +1,13 @@
-//! streamable HTTP 传输（MCP 2025-03-26+）：单端点 POST JSON-RPC。
-//! - 请求头：Accept 同时给 `application/json, text/event-stream`，自定义 headers 全量携带；
-//! - 响应两种形态都支持：`application/json` 直接回包 / `text/event-stream` SSE 流回包
-//!   （流内按 id 配对，server→client 请求另行 POST 回 -32601，通知忽略）；
-//! - `Mcp-Session-Id`：initialize 响应带回后后续请求（含 DELETE）都携带；
-//! - `MCP-Protocol-Version`：按 initialize 协商结果携带（2025-06-18 起服务端要求）；
-//! - DELETE 终止会话尽力而为（无会话 id / 405 / 网络失败都忽略）；
-//! - 防御与 stdio 同口径：单次调用超时一致、响应体 8MB 上限、连接断开即本请求报错。
+//! streamable HTTP transport (MCP 2025-03-26+): single-endpoint POST JSON-RPC.
+//! - Request headers: Accept carries both `application/json, text/event-stream`; custom headers are all included;
+//! - Both response shapes are supported: `application/json` direct reply / `text/event-stream` SSE streaming reply
+//!   (within the stream, responses are matched by id; server-to-client requests get a separate POST reply of -32601; notifications are ignored);
+//! - `Mcp-Session-Id`: once returned by the initialize response, carried on all subsequent requests (including DELETE);
+//! - `MCP-Protocol-Version`: carried per the initialize negotiation result (required by servers since 2025-06-18);
+//! - DELETE session termination is best-effort (missing session id / 405 / network failures are all ignored);
+//! - Defenses match stdio: same per-call timeout, 8MB response body cap, a connection drop fails the current request.
 //!
-//! legacy SSE（2024-11-05 双端点 HTTP+SSE）不支持——config 层已拦下该形态。
+//! legacy SSE (2024-11-05 dual-endpoint HTTP+SSE) is not supported -- the config layer already rejects that shape.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,14 +17,15 @@ use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
 use crate::mcp::config::McpHttpConfig;
+use pig_protocol::CoreError;
 
-/// streamable HTTP 握手宣告的协议版本（该传输形态自 2025-03-26 引入）
+/// Protocol version declared in the streamable HTTP handshake (this transport shape was introduced in 2025-03-26)
 const PROTOCOL_VERSION_HTTP: &str = "2025-03-26";
-/// 响应体上限（对齐 stdio 单行上限；SSE 流按累计字节计）
+/// Response body cap (aligned with the stdio per-line cap; SSE streams are measured by cumulative bytes)
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
-/// 报错文案里带的响应体预览上限
+/// Cap on the response body preview included in error messages
 const ERROR_BODY_PREVIEW: usize = 2 * 1024;
-/// 自定义 header 黑名单：逐跳/ framing 头由 reqwest 自己管理，用户配置会让请求畸形
+/// Custom header blocklist: hop-by-hop/framing headers are managed by reqwest itself; user configuration would malform the request
 const BLOCKED_HEADERS: &[&str] = &[
     "content-length",
     "host",
@@ -37,13 +38,13 @@ const BLOCKED_HEADERS: &[&str] = &[
     "keep-alive",
 ];
 
-/// streamable HTTP 传输：每个请求独立 POST（天然并发安全，无共享 in-flight 状态；
-/// 可变共享态只有 session_id/protocol_version 两个协商结果，Mutex 保护）
+/// streamable HTTP transport: each request is an independent POST (naturally concurrency-safe, no shared in-flight state;
+/// the only mutable shared state is the two negotiation results session_id/protocol_version, protected by a Mutex)
 pub struct HttpTransport {
     name: String,
     client: reqwest::Client,
     url: String,
-    /// 预编译的自定义请求头（new 时校验，非法/黑名单条目拒绝整个 server 配置）
+    /// Pre-built custom request headers (validated in new; an invalid/blocklisted entry rejects the whole server config)
     headers: reqwest::header::HeaderMap,
     timeout: Duration,
     next_id: AtomicU64,
@@ -53,24 +54,26 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
-    pub fn new(name: &str, config: &McpHttpConfig, timeout: Duration) -> Result<Self, String> {
-        // URL 在 config 层只验了 scheme，这里完整解析（失败跳过该 server）
-        reqwest::Url::parse(&config.url).map_err(|e| format!("url 无效: {e}"))?;
+    pub fn new(name: &str, config: &McpHttpConfig, timeout: Duration) -> Result<Self, CoreError> {
+        // The config layer only validates the URL scheme; parse it fully here (a failure skips this server)
+        reqwest::Url::parse(&config.url).map_err(|e| CoreError::McpInvalidUrl {
+            detail: e.to_string(),
+        })?;
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in &config.headers {
             let key_lower = key.to_ascii_lowercase();
             if BLOCKED_HEADERS.contains(&key_lower.as_str()) {
-                return Err(format!("header {key} 由传输层管理，不允许自定义"));
+                return Err(CoreError::McpHeaderBlocked { key: key.clone() });
             }
             let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                .map_err(|_| format!("header 名非法: {key}"))?;
+                .map_err(|_| CoreError::McpHeaderNameInvalid { key: key.clone() })?;
             let value = reqwest::header::HeaderValue::from_str(value)
-                .map_err(|_| format!("header {key} 的值含非法字符"))?;
+                .map_err(|_| CoreError::McpHeaderValueInvalid { key: key.clone() })?;
             headers.insert(name, value);
         }
         Ok(Self {
             name: name.to_string(),
-            // 与 provider 同口径：只限建连时间，整体超时由每次调用的 tokio timeout 管
+            // Same policy as the provider: only the connect time is limited; the overall timeout is governed by each call's tokio timeout
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(15))
                 .build()
@@ -85,7 +88,7 @@ impl HttpTransport {
         })
     }
 
-    /// 组请求头：自定义 → 协议强制（content-type/accept，防自定义覆盖）→ 协商态
+    /// Build request headers: custom -> protocol-forced (content-type/accept, preventing custom overrides) -> negotiated state
     fn build_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = self.headers.clone();
         headers.insert(
@@ -109,7 +112,7 @@ impl HttpTransport {
         headers
     }
 
-    /// 记录响应带回的会话 id（initialize 响应协商；后续响应若再带则跟随滚动）
+    /// Record the session id returned by a response (negotiated from the initialize response; later responses carrying one again roll it forward)
     fn capture_session(&self, response: &reqwest::Response) {
         if let Some(value) = response
             .headers()
@@ -120,9 +123,10 @@ impl HttpTransport {
         }
     }
 
-    /// 发 POST 并做状态码检查；成功返回响应（体未读）
+    /// Send the POST and check the status code; returns the response on success (body unread)
     async fn post(&self, message: &Value) -> Result<reqwest::Response, String> {
-        let body = serde_json::to_vec(message).map_err(|e| format!("序列化消息失败: {e}"))?;
+        let body =
+            serde_json::to_vec(message).map_err(|e| format!("Failed to serialize message: {e}"))?;
         let response = self
             .client
             .post(&self.url)
@@ -130,7 +134,7 @@ impl HttpTransport {
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("MCP server {} 请求失败: {e}", self.name))?;
+            .map_err(|e| format!("MCP server {} request failed: {e}", self.name))?;
         self.capture_session(&response);
         let status = response.status();
         if !status.is_success() {
@@ -139,7 +143,7 @@ impl HttpTransport {
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default();
             let hint = if status.as_u16() == 404 {
-                "（会话可能已过期或服务端路径不对）"
+                " (the session may have expired or the endpoint path is wrong)"
             } else {
                 ""
             };
@@ -152,7 +156,7 @@ impl HttpTransport {
         Ok(response)
     }
 
-    /// 从响应里取回指定 id 的 JSON-RPC 结果：按 Content-Type 分流 JSON / SSE
+    /// Extract the JSON-RPC result with the given id from the response: dispatch to JSON / SSE by Content-Type
     async fn take_response(
         &self,
         response: reqwest::Response,
@@ -173,27 +177,32 @@ impl HttpTransport {
         match media.as_str() {
             "application/json" => {
                 let body = read_body_capped(response, MAX_BODY_BYTES).await?;
-                let message: Value = serde_json::from_slice(&body)
-                    .map_err(|e| format!("MCP server {} 响应不是合法 JSON: {e}", self.name))?;
+                let message: Value = serde_json::from_slice(&body).map_err(|e| {
+                    format!("MCP server {} response is not valid JSON: {e}", self.name)
+                })?;
                 match message.get("id").and_then(Value::as_u64) {
                     Some(id) if id != want_id => Err(format!(
-                        "MCP server {} 响应 id {id} 与请求 {want_id} 不符",
+                        "MCP server {} response id {id} does not match request id {want_id}",
                         self.name
                     )),
-                    _ => rpc_result(&message)
-                        .ok_or_else(|| format!("MCP server {} 响应缺少 result/error", self.name))?,
+                    _ => rpc_result(&message).ok_or_else(|| {
+                        format!(
+                            "MCP server {} response has neither result nor error",
+                            self.name
+                        )
+                    })?,
                 }
             }
             "text/event-stream" => self.read_sse_response(response, want_id).await,
             _ => Err(format!(
-                "MCP server {} 响应 Content-Type 既不是 JSON 也不是 SSE（{content_type}）",
+                "MCP server {} response Content-Type is neither JSON nor SSE ({content_type})",
                 self.name
             )),
         }
     }
 
-    /// SSE 流回包：边读边解码事件，找到 want_id 的响应即返回；
-    /// 流内 server→client 请求另开 POST 回 -32601；流耗尽未配对 = 连接断开语义
+    /// SSE streaming reply: decode events while reading, return as soon as the response for want_id is found;
+    /// server-to-client requests within the stream get a separate POST reply of -32601; a stream exhausted without a match means the connection dropped
     async fn read_sse_response(
         &self,
         response: reqwest::Response,
@@ -203,12 +212,12 @@ impl HttpTransport {
         let mut total = 0usize;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| format!("MCP server {} SSE 流读取失败: {e}", self.name))?;
+            let chunk = chunk
+                .map_err(|e| format!("MCP server {} SSE stream read failed: {e}", self.name))?;
             total += chunk.len();
             if total > MAX_BODY_BYTES {
                 return Err(format!(
-                    "MCP server {} SSE 流超过 {} KB 上限",
+                    "MCP server {} SSE stream exceeded the {} KB limit",
                     self.name,
                     MAX_BODY_BYTES / 1024
                 ));
@@ -225,33 +234,35 @@ impl HttpTransport {
             }
         }
         Err(format!(
-            "MCP server {} SSE 流结束但未收到本请求响应（连接已断开）",
+            "MCP server {} SSE stream ended without a response to this request (connection closed)",
             self.name
         ))
     }
 
-    /// 处理流内单条消息：是本请求响应 → Ok(Some)；是 server→client 请求 → 回 -32601 后 Ok(None)；
-    /// 其余（通知/别 id 响应）忽略。payload 非法 JSON → Err（流畸形，整调用失败）
+    /// Handle a single message within the stream: a response to this request -> Ok(Some); a server-to-client request -> reply -32601 then Ok(None);
+    /// everything else (notifications / responses with other ids) is ignored. An invalid JSON payload -> Err (malformed stream, the whole call fails)
     fn handle_stream_message(
         &self,
         payload: &str,
         want_id: u64,
     ) -> Result<Option<Result<Value, String>>, String> {
         let message: Value = serde_json::from_str(payload)
-            .map_err(|e| format!("MCP server {} SSE 事件非合法 JSON: {e}", self.name))?;
+            .map_err(|e| format!("MCP server {} SSE event is not valid JSON: {e}", self.name))?;
         let id = message.get("id").and_then(Value::as_u64);
         if id == Some(want_id)
             && (message.get("result").is_some() || message.get("error").is_some())
         {
-            return Ok(Some(rpc_result(&message).expect("result/error 已判定")));
+            return Ok(Some(
+                rpc_result(&message).expect("result/error already decided"),
+            ));
         }
         if id.is_some() && message.get("method").is_some() {
-            // server→client 请求（roots/elicitation/sampling 等，不支持但不能干等）：
-            // 按规范另开 POST 回 JSON-RPC 响应（对端回 202）
+            // server-to-client request (roots/elicitation/sampling etc.; unsupported but we cannot just wait):
+            // per the spec, open a separate POST to reply with a JSON-RPC response (the peer replies 202)
             let reply = json!({
                 "jsonrpc": "2.0",
                 "id": message["id"],
-                "error": {"code": -32601, "message": "pig-code 暂不支持服务端请求"},
+                "error": {"code": -32601, "message": "pig-code does not support server-initiated requests"},
             });
             let client = self.client.clone();
             let url = self.url.clone();
@@ -272,17 +283,17 @@ impl HttpTransport {
 impl HttpTransport {
     pub(super) async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(format!("MCP server {} 连接已断开", self.name));
+            return Err(format!("MCP server {} connection is closed", self.name));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        // 与 stdio 同口径：单次调用一个超时，覆盖建连+发送+读完整响应
+        // Same policy as stdio: one timeout per call, covering connect + send + reading the full response
         let call = async {
             let response = self.post(&message).await?;
-            // 通知口径的 202（无响应体）不该出现在带 id 请求上
+            // A notification-style 202 (no response body) must not appear on a request carrying an id
             if response.status().as_u16() == 202 {
                 Err(format!(
-                    "MCP server {} 对请求回了 202（无响应体），协议违规",
+                    "MCP server {} replied 202 (no response body) to a request — protocol violation",
                     self.name
                 ))
             } else {
@@ -292,27 +303,31 @@ impl HttpTransport {
         match tokio::time::timeout(self.timeout, call).await {
             Ok(result) => result,
             Err(_) => Err(format!(
-                "MCP server {} 调用 {method} 超时（{} ms）",
+                "MCP server {} call to {method} timed out after {} ms",
                 self.name,
                 self.timeout.as_millis()
             )),
         }
     }
 
-    pub(super) async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    pub(super) async fn notify(&self, method: &str, params: Value) -> Result<(), CoreError> {
         let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        let failure = |detail: String| CoreError::McpNotifyWrite {
+            name: self.name.clone(),
+            method: method.to_string(),
+            detail,
+        };
         match tokio::time::timeout(self.timeout, self.post(&message)).await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(format!(
-                "MCP server {} 通知 {method} 超时（{} ms）",
-                self.name,
+            Ok(Err(e)) => Err(failure(e)),
+            Err(_) => Err(failure(format!(
+                "timed out after {} ms",
                 self.timeout.as_millis()
-            )),
+            ))),
         }
     }
 
-    /// DELETE 终止会话尽力而为：只在协商出会话 id 后发；任何失败都吞掉
+    /// Best-effort DELETE to terminate the session: only sent once a session id has been negotiated; any failure is swallowed
     pub(super) async fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         if self.session_id.lock().expect("session lock").is_none() {
@@ -337,39 +352,45 @@ impl HttpTransport {
     }
 }
 
-/// JSON-RPC 响应消息 → Result（result/error 都不存在 → None）
+/// JSON-RPC response message -> Result (neither result nor error present -> None)
 fn rpc_result(message: &Value) -> Option<Result<Value, String>> {
     if let Some(error) = message.get("error") {
         return Some(Err(format!(
-            "MCP 错误 {}: {}",
+            "MCP error {}: {}",
             error["code"].as_i64().unwrap_or(-1),
-            error["message"].as_str().unwrap_or("未知错误")
+            error["message"].as_str().unwrap_or("unknown error")
         )));
     }
     message.get("result").map(|result| Ok(result.clone()))
 }
 
-/// 有上限地读响应体：Content-Length 预检 + 流式累计超限即断
+/// Read the response body with a cap: Content-Length precheck + abort as soon as the cumulative streaming total exceeds the cap
 async fn read_body_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
     if let Some(len) = response.content_length()
         && len > cap as u64
     {
-        return Err(format!("响应体 {} KB 超过上限", len / 1024));
+        return Err(format!(
+            "Response body of {} KB exceeds the limit",
+            len / 1024
+        ));
     }
     let mut buf = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("读取响应体失败: {e}"))?;
+        let chunk = chunk.map_err(|e| format!("Failed to read the response body: {e}"))?;
         if buf.len() + chunk.len() > cap {
-            return Err(format!("响应体超过 {} KB 上限", cap / 1024));
+            return Err(format!(
+                "Response body exceeded the {} KB limit",
+                cap / 1024
+            ));
         }
         buf.extend_from_slice(&chunk);
     }
     Ok(buf)
 }
 
-/// 增量 SSE 解码器：只产出事件 data 载荷（多行 data 按 \n 拼接；空行派发；
-/// `:` 注释/keepalive 与 event/id/retry 字段忽略）；容忍 CRLF
+/// Incremental SSE decoder: only emits event data payloads (multi-line data joined with \n; dispatched on a blank line;
+/// `:` comments/keepalives and event/id/retry fields are ignored); CRLF-tolerant
 #[derive(Default)]
 struct SseDecoder {
     buf: Vec<u8>,
@@ -392,7 +413,7 @@ impl SseDecoder {
         events
     }
 
-    /// 流收尾：缓冲里剩余的不完整行也按行处理（容忍尾事件缺空行）
+    /// Stream end: the leftover incomplete line in the buffer is processed as a line too (tolerates a trailing event without a blank line)
     fn finish(mut self) -> Vec<String> {
         let mut events = Vec::new();
         if !self.buf.is_empty() {
@@ -421,7 +442,7 @@ impl SseDecoder {
             }
             self.data.push_str(payload);
         }
-        // 其余字段（event:/id:/retry:/注释）与本协议用法无关，忽略
+        // Other fields (event:/id:/retry:/comments) are irrelevant to this protocol usage; ignored
     }
 }
 
@@ -435,14 +456,14 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// 假 server 响应形态：直接 JSON / SSE 流
+    /// Fake server response shape: direct JSON / SSE stream
     #[derive(Clone, Copy, PartialEq)]
     enum Shape {
         Json,
         Sse,
     }
 
-    /// 假 server 观察到的请求事实（断言会话协商/自定义头/DELETE 用）
+    /// Request facts observed by the fake server (used to assert session negotiation / custom headers / DELETE)
     #[derive(Default)]
     struct Seen {
         initialize_auth: bool,
@@ -450,9 +471,9 @@ mod tests {
         delete_seen: bool,
     }
 
-    /// 用 tokio TcpListener 手搓的极简 HTTP server：每连接处理一个请求即关闭。
-    /// 要求：自定义头 Authorization: Bearer t（initialize 时校验）、
-    /// 非 initialize 的 POST 必须带 Mcp-Session-Id: sess-1。
+    /// A hand-rolled minimal HTTP server on a tokio TcpListener: handles one request per connection, then closes.
+    /// Requires: custom header Authorization: Bearer t (checked on initialize), and
+    /// any non-initialize POST must carry Mcp-Session-Id: sess-1.
     async fn spawn_fake_server(shape: Shape) -> (String, Arc<Mutex<Seen>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
@@ -477,7 +498,7 @@ mod tests {
         shape: Shape,
         seen: &Mutex<Seen>,
     ) -> Result<(), String> {
-        // 读头部（请求行 + headers 到空行）
+        // Read the head (request line + headers up to the blank line)
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         let header_end = loop {
@@ -487,13 +508,13 @@ mod tests {
             let n = socket
                 .read(&mut chunk)
                 .await
-                .map_err(|e| format!("读失败: {e}"))?;
+                .map_err(|e| format!("read failed: {e}"))?;
             if n == 0 {
-                return Err("连接提前关闭".to_string());
+                return Err("connection closed early".to_string());
             }
             buf.extend_from_slice(&chunk[..n]);
             if buf.len() > 64 * 1024 {
-                return Err("头部过大".to_string());
+                return Err("headers too large".to_string());
             }
         };
         let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
@@ -508,20 +529,20 @@ mod tests {
             .get("content-length")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        // 读体（可能已随头部到达一部分）
+        // Read the body (part of it may have already arrived with the head)
         let mut body = buf[header_end + 4..].to_vec();
         while body.len() < content_length {
             let n = socket
                 .read(&mut chunk)
                 .await
-                .map_err(|e| format!("读体失败: {e}"))?;
+                .map_err(|e| format!("body read failed: {e}"))?;
             if n == 0 {
                 break;
             }
             body.extend_from_slice(&chunk[..n]);
         }
         if body.len() < content_length {
-            return Err("请求体不完整".to_string());
+            return Err("incomplete request body".to_string());
         }
 
         if method == "DELETE" {
@@ -542,11 +563,11 @@ mod tests {
         }
 
         let message: Value = serde_json::from_slice(&body[..content_length])
-            .map_err(|e| format!("请求体非 JSON: {e}"))?;
+            .map_err(|e| format!("request body is not JSON: {e}"))?;
         let rpc_method = message["method"].as_str().unwrap_or("").to_string();
         let id = message["id"].clone();
 
-        // 自定义头校验：initialize 必须带 Authorization
+        // Custom header check: initialize must carry Authorization
         if rpc_method == "initialize" {
             seen.lock().expect("seen").initialize_auth =
                 headers.get("authorization").map(String::as_str) == Some("Bearer t");
@@ -566,7 +587,7 @@ mod tests {
             .await;
         }
 
-        // 通知：202 空体
+        // Notification: 202 with an empty body
         if id.is_null() {
             return write_response(socket, 202, "Accepted", "text/plain", b"".as_slice(), &[])
                 .await;
@@ -580,7 +601,7 @@ mod tests {
             "ping" => json!({}),
             "tools/list" => json!({"tools": [{
                 "name": "echo",
-                "description": "回显 text 参数",
+                "description": "Echoes the text parameter",
                 "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
                 "annotations": {"readOnlyHint": true}
             }]}),
@@ -598,7 +619,7 @@ mod tests {
         write_rpc(socket, shape, &reply, rpc_method == "initialize").await
     }
 
-    /// 按形态写 JSON-RPC 响应：initialize 响应带 Mcp-Session-Id 协商头
+    /// Write a JSON-RPC response per the shape: the initialize response carries the Mcp-Session-Id negotiation header
     async fn write_rpc(
         socket: &mut tokio::net::TcpStream,
         shape: Shape,
@@ -623,9 +644,9 @@ mod tests {
                 .await
             }
             Shape::Sse => {
-                // 注释 keepalive + CRLF + 多行 data 切片，顺便压测解码器边界。
-                // 多行 data 以 \n 拼接，切点必须在 JSON token 间隙（逗号处），
-                // 否则拼出的串是非法 JSON
+                // Comment keepalive + CRLF + multi-line data splitting also stress-tests the decoder's edges.
+                // Multi-line data is joined with \n; the split point must fall in a gap between JSON tokens (at a comma),
+                // otherwise the rejoined string is invalid JSON
                 let payload = reply.to_string();
                 let mid = payload.find(',').unwrap_or(payload.len());
                 let body = format!(
@@ -668,11 +689,11 @@ mod tests {
         socket
             .write_all(head.as_bytes())
             .await
-            .map_err(|e| format!("写响应失败: {e}"))?;
+            .map_err(|e| format!("write response failed: {e}"))?;
         socket
             .write_all(body)
             .await
-            .map_err(|e| format!("写响应失败: {e}"))?;
+            .map_err(|e| format!("write response failed: {e}"))?;
         Ok(())
     }
 
@@ -694,8 +715,8 @@ mod tests {
         }
     }
 
-    /// 全链路（两种响应形态共用）：initialize（协商会话 id + 自定义头）→
-    /// tools/list → tools/call → ping → shutdown（DELETE 尽力）
+    /// Full round trip (shared by both response shapes): initialize (negotiates the session id + custom headers) ->
+    /// tools/list -> tools/call -> ping -> shutdown (best-effort DELETE)
     async fn roundtrip(shape: Shape) {
         let (url, seen) = spawn_fake_server(shape).await;
         let (client, specs) = McpClient::connect(&http_config(url), std::path::Path::new("."))
@@ -706,21 +727,24 @@ mod tests {
         assert!(specs[0].annotations.is_read_only());
 
         let result = client
-            .call_tool("echo", json!({"text": "你好 http"}))
+            .call_tool("echo", json!({"text": "hello http"}))
             .await
             .expect("call_tool");
-        assert_eq!(result["content"][0]["text"], "你好 http");
+        assert_eq!(result["content"][0]["text"], "hello http");
         client.ping().await.expect("ping");
         client.shutdown().await;
 
         let seen = seen.lock().expect("seen");
-        assert!(seen.initialize_auth, "自定义 Authorization 头必须到达");
+        assert!(
+            seen.initialize_auth,
+            "custom Authorization header must arrive"
+        );
         assert!(
             seen.post_without_session.is_empty(),
-            "非 initialize 请求必须带会话 id: {:?}",
+            "non-initialize requests must carry the session id: {:?}",
             seen.post_without_session
         );
-        assert!(seen.delete_seen, "shutdown 应发 DELETE");
+        assert!(seen.delete_seen, "shutdown should send DELETE");
     }
 
     #[tokio::test]
@@ -740,7 +764,7 @@ mod tests {
         assert!(dec.push(b"event: message\r\ndata: {\"a").is_empty());
         let events = dec.push(b":1}\r\ndata: second\r\n\r\n");
         assert_eq!(events, vec!["{\"a:1}\nsecond".to_string()]);
-        // 尾部无空行的事件在 finish 时派发
+        // An event with no trailing blank line is dispatched at finish
         let mut dec = SseDecoder::default();
         assert!(dec.push(b"data: tail").is_empty());
         assert_eq!(dec.finish(), vec!["tail".to_string()]);
@@ -752,14 +776,15 @@ mod tests {
             url: "http://127.0.0.1/".to_string(),
             headers: HashMap::from([("content-length".to_string(), "5".to_string())]),
         };
-        assert!(
-            HttpTransport::new("t", &config, Duration::from_secs(1))
-                .err()
-                .expect("黑名单 header 应拒绝")
-                .contains("content-length")
-        );
+        assert!(matches!(
+            HttpTransport::new("t", &config, Duration::from_secs(1)).err(),
+            Some(CoreError::McpHeaderBlocked { key }) if key == "content-length"
+        ));
         config.headers = HashMap::from([("bad name".to_string(), "v".to_string())]);
-        assert!(HttpTransport::new("t", &config, Duration::from_secs(1)).is_err());
+        assert!(matches!(
+            HttpTransport::new("t", &config, Duration::from_secs(1)).err(),
+            Some(CoreError::McpHeaderNameInvalid { .. })
+        ));
         config.headers = HashMap::from([("X-Ok".to_string(), "v".to_string())]);
         assert!(HttpTransport::new("t", &config, Duration::from_secs(1)).is_ok());
     }

@@ -1,8 +1,8 @@
 use super::*;
 
 impl Sidebar {
-    /// 头部「列表管理」菜单：视图二选一（平铺列表 / 按工作区分组），
-    /// 勾选标记在右侧（对齐 ZCode）
+    /// Header "list management" menu: choose one of two views (flat list / grouped
+    /// by workspace), with the check mark on the right (aligned with ZCode)
     pub(crate) fn view_menu(
         view: &WeakEntity<Self>,
         current: SidebarView,
@@ -10,7 +10,9 @@ impl Sidebar {
     {
         let view = view.clone();
         move |menu, _, _| {
-            let item = |label: &'static str, icon: AssetsIconName, target: SidebarView| {
+            let item = |label: std::borrow::Cow<'static, str>,
+                        icon: AssetsIconName,
+                        target: SidebarView| {
                 let view = view.clone();
                 PopupMenuItem::new(label)
                     .icon(icon)
@@ -22,10 +24,14 @@ impl Sidebar {
                         });
                     })
             };
-            menu.label("视图")
-                .item(item("平铺列表", AssetsIconName::List, SidebarView::Flat))
+            menu.label(rust_i18n::t!("sidebar.view"))
                 .item(item(
-                    "按工作区分组",
+                    rust_i18n::t!("sidebar.view_flat"),
+                    AssetsIconName::List,
+                    SidebarView::Flat,
+                ))
+                .item(item(
+                    rust_i18n::t!("sidebar.view_grouped"),
                     AssetsIconName::FolderKanban,
                     SidebarView::Workspace,
                 ))
@@ -33,7 +39,8 @@ impl Sidebar {
         }
     }
 
-    /// 会话行的右键菜单：重命名 / 置顶 / 归档 / 删除（清库+rollout，不可恢复）
+    /// Session row context menu: rename / pin / archive / delete (clears the
+    /// database plus the rollout, unrecoverable)
     pub(crate) fn session_menu(
         view: &WeakEntity<Self>,
         session: &SidebarSession,
@@ -54,40 +61,61 @@ impl Sidebar {
             let archive_id = id.clone();
             let delete_view = view.clone();
             let delete_id = id.clone();
-            menu.item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
-                let _ = rename_view.update(cx, |this, cx| {
-                    this.start_session_rename(rename_id.clone(), rename_title.clone(), window, cx);
-                });
-            }))
-            .item(
-                PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" }).on_click(
-                    move |_, _, cx| {
-                        let _ = pin_view.update(cx, |_, cx| {
-                            cx.emit(SidebarEvent::SetPinned(pin_id.clone(), !pinned));
+            menu.item(
+                PopupMenuItem::new(rust_i18n::t!("sidebar.rename")).on_click(
+                    move |_, window, cx| {
+                        let _ = rename_view.update(cx, |this, cx| {
+                            this.start_session_rename(
+                                rename_id.clone(),
+                                rename_title.clone(),
+                                window,
+                                cx,
+                            );
                         });
                     },
                 ),
             )
             .item(
-                PopupMenuItem::new(if archived { "取消归档" } else { "归档" }).on_click(
-                    move |_, _, cx| {
-                        let _ = archive_view.update(cx, |_, cx| {
-                            cx.emit(SidebarEvent::SetArchived(archive_id.clone(), !archived));
-                        });
-                    },
-                ),
+                PopupMenuItem::new(if pinned {
+                    rust_i18n::t!("sidebar.unpin")
+                } else {
+                    rust_i18n::t!("sidebar.pin")
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = pin_view.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::SetPinned(pin_id.clone(), !pinned));
+                    });
+                }),
+            )
+            .item(
+                PopupMenuItem::new(if archived {
+                    rust_i18n::t!("sidebar.unarchive")
+                } else {
+                    rust_i18n::t!("sidebar.archive")
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = archive_view.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::SetArchived(archive_id.clone(), !archived));
+                    });
+                }),
             )
             .separator()
-            .item(PopupMenuItem::new("删除会话").on_click(move |_, _, cx| {
-                let _ = delete_view.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::DeleteSession(delete_id.clone()));
-                });
-            }))
+            .item(
+                PopupMenuItem::new(rust_i18n::t!("sidebar.delete_session")).on_click(
+                    move |_, _, cx| {
+                        let _ = delete_view.update(cx, |_, cx| {
+                            cx.emit(SidebarEvent::DeleteSession(delete_id.clone()));
+                        });
+                    },
+                ),
+            )
         }
     }
 
-    /// 工作区行的选项菜单（行尾 “...” 按钮与右键共用）：
-    /// 复制路径 / 重命名 / 移除工作区（从侧栏隐藏，会话数据保留）。
+    /// Workspace row options menu (shared by the row-tail "..." button and
+    /// right-click):
+    /// copy path / rename / remove workspace (hidden from the sidebar, session data
+    /// kept).
     pub(crate) fn workspace_menu(
         view: &WeakEntity<Self>,
         path: &str,
@@ -101,20 +129,30 @@ impl Sidebar {
             let rename_path = path.clone();
             let remove_view = view.clone();
             let remove_path = path.clone();
-            menu.item(PopupMenuItem::new("复制路径").on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
-            }))
-            .item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
-                let _ = rename_view.update(cx, |this, cx| {
-                    this.start_rename(rename_path.clone(), window, cx);
-                });
-            }))
+            menu.item(
+                PopupMenuItem::new(rust_i18n::t!("sidebar.copy_path")).on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                }),
+            )
+            .item(
+                PopupMenuItem::new(rust_i18n::t!("sidebar.rename")).on_click(
+                    move |_, window, cx| {
+                        let _ = rename_view.update(cx, |this, cx| {
+                            this.start_rename(rename_path.clone(), window, cx);
+                        });
+                    },
+                ),
+            )
             .separator()
-            .item(PopupMenuItem::new("移除工作区").on_click(move |_, _, cx| {
-                let _ = remove_view.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::RemoveWorkspace(remove_path.clone()));
-                });
-            }))
+            .item(
+                PopupMenuItem::new(rust_i18n::t!("sidebar.remove_workspace")).on_click(
+                    move |_, _, cx| {
+                        let _ = remove_view.update(cx, |_, cx| {
+                            cx.emit(SidebarEvent::RemoveWorkspace(remove_path.clone()));
+                        });
+                    },
+                ),
+            )
         }
     }
 }

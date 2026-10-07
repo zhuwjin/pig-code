@@ -1,5 +1,5 @@
-//! MCP 工具的 Tool trait 适配：命名 `mcp__<server>__<tool>`（清洗 + 64 字符截断），
-//! annotations.readOnlyHint 映射只读判定，输出按 30KB 预算头/尾截断。
+//! Tool trait adapter for MCP tools: naming `mcp__<server>__<tool>` (sanitized + truncated to 64 chars),
+//! annotations.readOnlyHint maps to the read-only decision, output is truncated head/tail against a 30KB budget.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,12 +10,12 @@ use crate::mcp::client::{McpClient, McpToolSpec};
 use crate::mcp::naming;
 use crate::tool::{Tool, ToolContext, ToolEffect};
 
-/// 单次调用输出字符预算（对齐 Bash 的 30KB）：超出头/尾预览
+/// Character budget for a single call's output (aligned with Bash's 30KB): beyond it, a head/tail preview
 const MAX_MCP_OUTPUT_CHARS: usize = 30 * 1024;
 const HEAD_CHARS: usize = 20 * 1024;
 const TAIL_CHARS: usize = 8 * 1024;
 
-/// MCP tool annotations（2024-11-05）：readOnly 驱动审批，其余 hint 保留供后续权限细化
+/// MCP tool annotations (2024-11-05): readOnly drives approval, other hints are kept for future permission refinement
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct McpToolAnnotations {
@@ -26,18 +26,18 @@ pub struct McpToolAnnotations {
 }
 
 impl McpToolAnnotations {
-    /// 只读判定：仅 readOnlyHint == true；无 annotations 保守按非只读（自然走审批）
+    /// Read-only decision: only readOnlyHint == true; missing annotations conservatively count as non-read-only (thus go through approval)
     pub fn is_read_only(&self) -> bool {
         self.read_only_hint.unwrap_or(false)
     }
 }
 
-/// 一个 MCP tool 的 Tool 包装：调用经 Arc<McpClient> 进 server 子进程
+/// Tool wrapper for one MCP tool: calls go through Arc<McpClient> into the server subprocess
 #[derive(Clone)]
 pub struct McpTool {
-    /// 清洗后的组合名（intern 成 &'static，同串只泄漏一次）
+    /// Sanitized combined name (interned as &'static; the same string leaks only once)
     name: &'static str,
-    /// 原始 MCP 工具名（tools/call 的 params.name）
+    /// Original MCP tool name (params.name of tools/call)
     tool_name: String,
     description: String,
     input_schema: Value,
@@ -51,7 +51,7 @@ impl McpTool {
             name: naming::intern(naming::tool_name(server_name, &spec.name)),
             description: spec
                 .description
-                .unwrap_or_else(|| format!("MCP server {server_name} 的工具 {}", spec.name)),
+                .unwrap_or_else(|| format!("Tool {} from MCP server {server_name}", spec.name)),
             input_schema: spec.input_schema,
             annotations: spec.annotations,
             client,
@@ -59,7 +59,7 @@ impl McpTool {
         }
     }
 
-    /// annotations 原文（供后续权限矩阵使用：destructive/idempotent/openWorld）
+    /// Raw annotations (for a future permission matrix: destructive/idempotent/openWorld)
     pub fn annotations(&self) -> &McpToolAnnotations {
         &self.annotations
     }
@@ -100,7 +100,7 @@ impl Tool for McpTool {
                     if tail.is_empty() {
                         e
                     } else {
-                        format!("{e}\n\nserver stderr 尾部：\n{tail}")
+                        format!("{e}\n\nserver stderr tail:\n{tail}")
                     }
                 })?;
             let (text, is_error) = render_result(&result);
@@ -118,7 +118,7 @@ impl Tool for McpTool {
     }
 }
 
-/// tools/call result → (文本, isError)：text 拼接；image/audio/resource 占位描述（不内联 base64）
+/// tools/call result -> (text, isError): text parts joined; image/audio/resource get placeholder descriptions (base64 not inlined)
 fn render_result(result: &Value) -> (String, bool) {
     let is_error = result["isError"].as_bool().unwrap_or(false);
     let mut parts: Vec<String> = Vec::new();
@@ -127,36 +127,38 @@ fn render_result(result: &Value) -> (String, bool) {
             "text" => parts.push(item["text"].as_str().unwrap_or("").to_string()),
             "image" | "audio" => {
                 let kind = if item["type"] == "image" {
-                    "图片"
+                    "image"
                 } else {
-                    "音频"
+                    "audio"
                 };
-                let mime = item["mimeType"].as_str().unwrap_or("未知类型");
+                let mime = item["mimeType"].as_str().unwrap_or("unknown");
                 let kb = item["data"].as_str().map(str::len).unwrap_or(0) * 3 / 4 / 1024;
                 parts.push(format!(
-                    "[{kind} content: {mime}，约 {kb} KB，二进制内容不内联]"
+                    "[{kind} content: {mime}, ~{kb} KB, binary content not inlined]"
                 ));
             }
             "resource" => {
                 let resource = &item["resource"];
                 let uri = resource["uri"].as_str().unwrap_or("?");
                 match resource["text"].as_str() {
-                    Some(text) => parts.push(format!("[资源 {uri}]\n{text}")),
+                    Some(text) => parts.push(format!("[resource {uri}]\n{text}")),
                     None => {
-                        let mime = resource["mimeType"].as_str().unwrap_or("未知类型");
-                        parts.push(format!("[资源 {uri}: {mime}，二进制内容不内联]"));
+                        let mime = resource["mimeType"].as_str().unwrap_or("unknown");
+                        parts.push(format!(
+                            "[resource {uri}: {mime}, binary content not inlined]"
+                        ));
                     }
                 }
             }
-            other => parts.push(format!("[未知 content 类型: {other}]")),
+            other => parts.push(format!("[unknown content type: {other}]")),
         }
     }
     let text = parts.join("\n");
     let text = if text.is_empty() {
         if is_error {
-            "MCP 工具返回错误（无详情）".to_string()
+            "MCP tool returned an error (no details)".to_string()
         } else {
-            "（无输出）".to_string()
+            "(no output)".to_string()
         }
     } else {
         text
@@ -164,7 +166,7 @@ fn render_result(result: &Value) -> (String, bool) {
     (truncate_output(text), is_error)
 }
 
-/// 超预算头/尾预览（Bash 同款思路；MCP 无 spill 文件，省略段直接丢弃）
+/// Over-budget head/tail preview (same idea as Bash; MCP has no spill file, the omitted section is simply dropped)
 fn truncate_output(text: String) -> String {
     let total = text.chars().count();
     if total <= MAX_MCP_OUTPUT_CHARS {
@@ -173,7 +175,7 @@ fn truncate_output(text: String) -> String {
     let head: String = text.chars().take(HEAD_CHARS).collect();
     let tail = crate::task::tail_chars(&text, TAIL_CHARS);
     let omitted = total - head.chars().count() - tail.chars().count();
-    format!("{head}\n\n[...中间省略 {omitted} 字符...]\n\n{tail}")
+    format!("{head}\n\n[... {omitted} characters omitted ...]\n\n{tail}")
 }
 
 #[cfg(test)]
@@ -217,13 +219,16 @@ mod tests {
     #[test]
     fn render_text_join_and_image_placeholder() {
         let (text, is_error) = render_result(&json!({"content": [
-            {"type": "text", "text": "第一行"},
+            {"type": "text", "text": "first line"},
             {"type": "image", "data": "a".repeat(1024), "mimeType": "image/png"},
-            {"type": "text", "text": "第二行"}
+            {"type": "text", "text": "second line"}
         ]}));
         assert!(!is_error);
-        assert!(text.contains("第一行\n[图片 content: image/png"), "{text}");
-        assert!(text.ends_with("第二行"));
+        assert!(
+            text.contains("first line\n[image content: image/png"),
+            "{text}"
+        );
+        assert!(text.ends_with("second line"));
     }
 
     #[test]
@@ -232,17 +237,17 @@ mod tests {
             render_result(&json!({"isError": true, "content": [{"type": "text", "text": "boom"}]}));
         assert!(is_error);
         assert_eq!(text, "boom");
-        // 空 content 的兜底文案
+        // Fallback text for empty content
         let (text, is_error) = render_result(&json!({"isError": true}));
         assert!(is_error);
-        assert_eq!(text, "MCP 工具返回错误（无详情）");
+        assert_eq!(text, "MCP tool returned an error (no details)");
     }
 
     #[test]
     fn truncate_long_output() {
         let long = "x".repeat(MAX_MCP_OUTPUT_CHARS + 4096);
         let (text, _) = render_result(&json!({"content": [{"type": "text", "text": long}]}));
-        assert!(text.contains("[...中间省略"), "{text}");
+        assert!(text.contains("characters omitted"), "{text}");
         assert!(text.len() < MAX_MCP_OUTPUT_CHARS + 4096);
     }
 }

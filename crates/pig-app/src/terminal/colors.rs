@@ -1,14 +1,15 @@
-//! ANSI 16/256 色 → gpui 颜色的解析。
+//! ANSI 16/256-color → gpui color resolution.
 //!
-//! 暗色 16 色全抄 tty7 `src/terminal/palette.rs` 的 DARK_ANSI16；
-//! 亮色 16 色取 tty7 `src/ui/presets.rs` 内建 "light" 主题的 ansi16；
-//! 216 色立方 + 24 级灰阶的排布与 tty7 build() 相同（xterm 标准）。
+//! The dark 16 colors are a verbatim port of DARK_ANSI16 in tty7
+//! `src/terminal/palette.rs`; the light 16 colors come from the ansi16 of the
+//! built-in "light" theme in tty7 `src/ui/presets.rs`; the 216-color cube plus
+//! 24 grayscale levels are laid out the same as tty7's build() (xterm standard).
 
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
 use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::{App, Hsla, Rgba};
 
-/// tty7 palette.rs 的暗色 ANSI 16 色
+/// Dark ANSI 16 colors from tty7 palette.rs
 const DARK_ANSI16: [(u8, u8, u8); 16] = [
     (0x2c, 0x2a, 0x26),
     (0xec, 0x6a, 0x78),
@@ -28,7 +29,7 @@ const DARK_ANSI16: [(u8, u8, u8); 16] = [
     (0xf6, 0xf3, 0xec),
 ];
 
-/// tty7 presets.rs 内建 "light" 主题的亮色 ANSI 16 色
+/// Light ANSI 16 colors from the built-in "light" theme in tty7 presets.rs
 const LIGHT_ANSI16: [(u8, u8, u8); 16] = [
     (0x24, 0x29, 0x2e),
     (0xd1, 0x24, 0x2f),
@@ -48,7 +49,7 @@ const LIGHT_ANSI16: [(u8, u8, u8); 16] = [
     (0x8c, 0x95, 0x9f),
 ];
 
-/// 完整 256 色表：16 主题色 + 6x6x6 立方 + 24 灰阶
+/// Full 256-color table: 16 theme colors plus a 6x6x6 cube plus 24 grays
 pub(crate) fn build(dark: bool) -> [Rgb; 256] {
     let mut p = [Rgb { r: 0, g: 0, b: 0 }; 256];
     let ansi16 = if dark { DARK_ANSI16 } else { LIGHT_ANSI16 };
@@ -80,7 +81,7 @@ pub(crate) fn build(dark: bool) -> [Rgb; 256] {
     p
 }
 
-/// 参考 tty7 palette.rs:12（Hsla → alacritty Rgb）
+/// See tty7 palette.rs:12 (Hsla → alacritty Rgb)
 pub(crate) fn hsla_to_rgb(c: Hsla) -> Rgb {
     let rgba = Rgba::from(c);
     Rgb {
@@ -100,8 +101,9 @@ pub(crate) fn rgb_to_hsla(c: Rgb) -> Hsla {
     .into()
 }
 
-/// 一帧渲染用的全部颜色（参考 tty7 element.rs 的 PaintColors::resolve，
-/// 砍掉搜索/link 高亮色）。默认前景/背景跟随 pig-app 主题。
+/// All colors used for one frame of rendering (see PaintColors::resolve in tty7
+/// element.rs; search/link highlight colors dropped). Default foreground and
+/// background follow the pig-app theme.
 pub(crate) struct TermColors {
     pub default_fg: Hsla,
     pub default_bg: Hsla,
@@ -117,7 +119,7 @@ impl TermColors {
         let theme: &Theme = cx.theme();
         let default_fg = theme.foreground;
         let default_bg = theme.background;
-        // 选区色 = 前景 24% 透明（tty7 同款比例）
+        // Selection color = foreground at 24% opacity (same ratio as tty7)
         let selection_bg = default_fg.opacity(0.24);
         Self {
             default_fg,
@@ -131,8 +133,9 @@ impl TermColors {
     }
 }
 
-/// alacritty 颜色 → (RGB, 是否默认色)。默认前景/背景解析到主题色，
-/// 其余进 256 色表（参考 tty7 element.rs:125 的 resolve）。
+/// alacritty color → (RGB, whether it is a default color). Default
+/// foreground/background resolve to theme colors; everything else indexes the
+/// 256-color table (see the resolve at tty7 element.rs:125).
 pub(crate) fn resolve(
     color: AnsiColor,
     palette: &[Rgb; 256],

@@ -1,38 +1,42 @@
-//! 会话分叉（ZCode forkAssistant 同语义）：以源会话前 N 个回合的历史派生
-//! 新会话——纯对话复制，不动工作区、不中断源会话在飞回合（rollout 每行
-//! flush，读盘即一致快照）。boundary 含第 N 回合本身。
+//! Session fork (same semantics as ZCode's forkAssistant): derive a new session from the first
+//! N turns of the source session's history — a pure conversation copy; does not touch the workspace
+//! and does not interrupt the source session's in-flight turn (rollout flushes every line, so
+//! reading from disk is a consistent snapshot). The boundary includes the Nth turn itself.
 //!
-//! v1 明确不做（见 docs/PLAN.md）：`.agents/` 子代理上下文不复制
-//!（task-notification 里的 record/result 绝对路径仍指源会话目录，源未删就能
-//! 打开）；`.model-io.jsonl` 调试轨迹不复制；父会话不加分叉标记；子会话无
-//! 「从对话中派生」回跳行（标题后缀「（分叉）」辨识）。
+//! Explicitly out of scope for v1 (see docs/PLAN.md): `.agents/` subagent contexts are not copied
+//! (the absolute record/result paths in task notifications still point into the source session's
+//! directory; they remain openable while the source exists); the `.model-io.jsonl` debug trace is
+//! not copied; the parent session gets no fork marker; the child session has no "derived from
+//! conversation" jump-back row (identified by the " (fork)" title suffix).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use pig_protocol::SessionMeta;
+use pig_protocol::{CoreError, SessionMeta};
 
 use crate::rollout::{Rollout, RolloutRecord, media_dir, now_secs};
 use crate::store::Store;
 
-/// 派生新会话并落库，返回新 session id（调用方按 OpenSession 冷路径打开）。
-/// `turns` = 保留的回合数：截断在第 N+1 条 User 记录之前（TurnStats/
-/// TurnChanges/StepUsage/Compact 随回合自然保留；ToolCall 记录自带回执无
-/// 配对问题）。turns=0 钳为 1；超过源回合总数 = 全量复制。
+/// Derive a new session and persist it, returning the new session id (the caller opens it via the OpenSession cold path).
+/// `turns` = number of turns to keep: truncation happens before the (N+1)-th User record (TurnStats/
+/// TurnChanges/StepUsage/Compact are naturally kept with their turns; ToolCall records carry their
+/// own receipts, so there is no pairing problem). turns=0 is clamped to 1; exceeding the source's total turn count = full copy.
 pub fn fork_session(
     sessions_dir: &Path,
     store: &Arc<Mutex<Store>>,
     src_id: &str,
     turns: usize,
     id_counter: &mut u64,
-) -> Result<String, String> {
+) -> Result<String, CoreError> {
     let src_path = sessions_dir.join(format!("{src_id}.jsonl"));
     let records = Rollout::load(&src_path)?;
     let src_meta = store
         .lock()
         .expect("store lock")
         .get_session(src_id)
-        .ok_or_else(|| format!("源会话不存在: {src_id}"))?;
+        .ok_or_else(|| CoreError::ForkSourceMissing {
+            id: src_id.to_string(),
+        })?;
 
     let turns = turns.max(1);
     let mut kept = truncate_after_turns(&records, turns).to_vec();
@@ -40,16 +44,22 @@ pub fn fork_session(
     *id_counter += 1;
     let new_id = format!("s{}-{}", now_secs(), id_counter);
 
-    // 图片是含源会话 id 的绝对路径（{sessions}/{src}.media/N.ext）：
-    // 复制被引用文件到新媒体目录并改写记录，源会话删除后分叉图仍可用
+    // Images are absolute paths containing the source session id ({sessions}/{src}.media/N.ext):
+    // copy the referenced files into the new media directory and rewrite the records, so forked images stay usable after the source session is deleted
     let src_media = media_dir(sessions_dir, src_id);
     let new_media = media_dir(sessions_dir, &new_id);
     copy_referenced_media(&src_media, &new_media, &mut kept)?;
 
     let meta = SessionMeta {
         id: new_id.clone(),
-        title: format!("{}（分叉）", src_meta.title),
-        // 分叉标题固定：自动命名不覆盖
+        // The fork title is persisted data (written into the sessions table/rollout meta) with a fixed English suffix;
+        // an empty title (new-session seed) gets no suffix, preserving the empty-string sentinel semantics
+        title: if src_meta.title.is_empty() {
+            String::new()
+        } else {
+            format!("{} (fork)", src_meta.title)
+        },
+        // Fork titles are fixed: auto-naming does not override them
         title_custom: true,
         cwd: src_meta.cwd.clone(),
         created_at: now_secs(),
@@ -66,7 +76,7 @@ pub fn fork_session(
     };
     let mut rollout = Rollout::create(sessions_dir, &meta)?;
     for record in &kept {
-        // 旧 Meta 行跳过：Rollout::create 已按新 meta 写入
+        // Old Meta lines are skipped: Rollout::create already wrote the new meta
         if matches!(record, RolloutRecord::Meta { .. }) {
             continue;
         }
@@ -76,7 +86,7 @@ pub fn fork_session(
     Ok(new_id)
 }
 
-/// 截断到前 N 个回合（含第 N 回合的全部记录）
+/// Truncate to the first N turns (including all records of the Nth turn)
 fn truncate_after_turns(records: &[RolloutRecord], turns: usize) -> &[RolloutRecord] {
     let mut user_seen = 0usize;
     let cut = records
@@ -93,12 +103,12 @@ fn truncate_after_turns(records: &[RolloutRecord], turns: usize) -> &[RolloutRec
     &records[..cut]
 }
 
-/// 只复制被截断记录引用的媒体文件，并把 ImageRef.path 改写进新目录
+/// Copy only the media files referenced by the kept records, rewriting ImageRef.path into the new directory
 fn copy_referenced_media(
     src_media: &Path,
     new_media: &Path,
     records: &mut [RolloutRecord],
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let names: Vec<std::ffi::OsString> = records
         .iter()
         .flat_map(|record| match record {
@@ -110,12 +120,16 @@ fn copy_referenced_media(
     if names.is_empty() {
         return Ok(());
     }
-    std::fs::create_dir_all(new_media).map_err(|e| format!("创建分叉媒体目录失败: {e}"))?;
+    std::fs::create_dir_all(new_media).map_err(|e| CoreError::ForkMediaDirCreate {
+        detail: e.to_string(),
+    })?;
     for name in &names {
         let src = src_media.join(name);
         if src.is_file() {
-            std::fs::copy(&src, new_media.join(name))
-                .map_err(|e| format!("复制分叉媒体 {} 失败: {e}", src.display()))?;
+            std::fs::copy(&src, new_media.join(name)).map_err(|e| CoreError::ForkMediaCopy {
+                path: src.display().to_string(),
+                detail: e.to_string(),
+            })?;
         }
     }
     for record in records.iter_mut() {
@@ -159,17 +173,17 @@ mod tests {
                 title: "t".into(),
                 created_at: 1,
             },
-            user("问1"),
-            text("答1"),
-            user("问2"),
-            text("答2"),
-            user("问3"),
+            user("q1"),
+            text("a1"),
+            user("q2"),
+            text("a2"),
+            user("q3"),
         ];
         let kept = truncate_after_turns(&records, 1);
-        assert_eq!(kept.len(), 3, "Meta + 第一回合");
+        assert_eq!(kept.len(), 3, "Meta + first turn");
         let kept = truncate_after_turns(&records, 2);
-        assert_eq!(kept.len(), 5, "Meta + 前两回合");
-        // 超过回合总数 = 全量
+        assert_eq!(kept.len(), 5, "Meta + first two turns");
+        // Exceeding the total turn count = full copy
         let kept = truncate_after_turns(&records, 9);
         assert_eq!(kept.len(), records.len());
     }
@@ -181,9 +195,9 @@ mod tests {
         let new_media = tmp.join("new.media");
         std::fs::create_dir_all(&src_media).unwrap();
         std::fs::write(src_media.join("1.png"), b"png").unwrap();
-        std::fs::write(src_media.join("2.png"), "未被引用".as_bytes()).unwrap();
+        std::fs::write(src_media.join("2.png"), "unreferenced".as_bytes()).unwrap();
         let mut records = vec![RolloutRecord::User {
-            text: "带图".into(),
+            text: "with image".into(),
             files: vec![],
             images: vec![crate::rollout::ImageRef {
                 path: src_media.join("1.png"),
@@ -194,15 +208,18 @@ mod tests {
         }];
         copy_referenced_media(&src_media, &new_media, &mut records).unwrap();
         let RolloutRecord::User { images, .. } = &records[0] else {
-            panic!("应是 User 记录");
+            panic!("should be a User record");
         };
         assert_eq!(
             images[0].path,
             new_media.join("1.png"),
-            "路径应改写进新目录"
+            "path should be rewritten into the new directory"
         );
         assert_eq!(std::fs::read(new_media.join("1.png")).unwrap(), b"png");
-        assert!(!new_media.join("2.png").exists(), "未引用的文件不复制");
+        assert!(
+            !new_media.join("2.png").exists(),
+            "unreferenced files are not copied"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

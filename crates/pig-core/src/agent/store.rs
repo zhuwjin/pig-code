@@ -1,6 +1,6 @@
 use super::*;
 
-/// agents-state.json：运行时可写的子代理覆盖（设置页改子代理模型用）
+/// agents-state.json: runtime-writable subagent overrides (for changing subagent models in the settings page)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct AgentsState {
     #[serde(default)]
@@ -19,7 +19,7 @@ pub(crate) fn state_path(data_dir: &Path) -> PathBuf {
     data_dir.join("agents-state.json")
 }
 
-/// 文件不存在/解析失败 = 空 state（不致命）
+/// Missing file / parse failure = empty state (non-fatal)
 pub(crate) fn load_agents_state(data_dir: &Path) -> AgentsState {
     let Ok(raw) = std::fs::read_to_string(state_path(data_dir)) else {
         return AgentsState::default();
@@ -27,8 +27,8 @@ pub(crate) fn load_agents_state(data_dir: &Path) -> AgentsState {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-/// 读-改-写 agents-state.json：两个键都给 None 时删除该 name 条目。
-/// 写前 create_dir_all，序列化 pretty。设置页 UI 用。
+/// Read-modify-write agents-state.json: passing None for both keys deletes the entry for
+/// that name. create_dir_all before writing; serialized pretty. Used by the settings page UI.
 pub fn set_model_override(
     data_dir: &Path,
     name: &str,
@@ -36,7 +36,7 @@ pub fn set_model_override(
     thought_level: Option<&str>,
 ) -> Result<(), String> {
     let mut state = load_agents_state(data_dir);
-    // 空白串按 None 处理
+    // Blank strings are treated as None
     let model = model.map(str::trim).filter(|m| !m.is_empty());
     let thought_level = thought_level.map(str::trim).filter(|l| !l.is_empty());
     match (model, thought_level) {
@@ -53,38 +53,42 @@ pub fn set_model_override(
             );
         }
     }
-    std::fs::create_dir_all(data_dir)
-        .map_err(|e| format!("创建数据目录失败 {}: {e}", data_dir.display()))?;
+    std::fs::create_dir_all(data_dir).map_err(|e| {
+        format!(
+            "Failed to create data directory {}: {e}",
+            data_dir.display()
+        )
+    })?;
     let raw = serde_json::to_string_pretty(&state)
-        .map_err(|e| format!("序列化 agents-state 失败: {e}"))?;
+        .map_err(|e| format!("Failed to serialize agents-state: {e}"))?;
     std::fs::write(state_path(data_dir), raw)
-        .map_err(|e| format!("写入 agents-state.json 失败: {e}"))
+        .map_err(|e| format!("Failed to write agents-state.json: {e}"))
 }
 
-/// 加载全部子代理档案：内置 → 用户级 → 项目级，按 name 后者覆盖前者；
-/// 再应用 agents-state.json 的模型覆盖；最终按 name 排序输出。
+/// Load all subagent profiles: built-in -> user -> project, later ones overriding earlier
+/// by name; then apply the agents-state.json model overrides; finally sort the output by name.
 pub fn load_profiles(cwd: &Path, data_dir: &Path) -> Vec<AgentProfile> {
     let mut by_name: HashMap<String, AgentProfile> = HashMap::new();
     for profile in builtin_profiles() {
         by_name.insert(profile.name.clone(), profile);
     }
-    // 目录优先级：项目级 > 用户级 > 内置；同名整体替换
+    // Directory precedence: project > user > built-in; same name replaces wholesale
     for (dir, source) in [
         (data_dir.join("agents"), AgentSource::User),
         (cwd.join(".pigcode").join("agents"), AgentSource::Project),
     ] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue; // 目录不存在 = 空
+            continue; // missing directory = empty
         };
         let mut files: Vec<PathBuf> = entries
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
             .collect();
-        files.sort(); // 同目录内按文件名稳定顺序，行为可预测
+        files.sort(); // stable order by file name within a directory for predictable behavior
         for path in files {
             let Ok(content) = std::fs::read_to_string(&path) else {
-                continue; // 读取失败跳过，不致命
+                continue; // skip read failures, non-fatal
             };
             match parse_agent_markdown(&content) {
                 Ok(mut profile) => {
@@ -92,13 +96,18 @@ pub fn load_profiles(cwd: &Path, data_dir: &Path) -> Vec<AgentProfile> {
                     by_name.insert(profile.name.clone(), profile);
                 }
                 Err(e) => {
-                    eprintln!("[agent] 跳过无法解析的子代理档案 {}: {e}", path.display());
+                    eprintln!(
+                        "[agent] skipping unparsable subagent profile {}: {e}",
+                        path.display()
+                    );
                 }
             }
         }
     }
-    // state 覆盖：仅对「frontmatter 未显式指定 model」的档案生效（内置必然生效），
-    // 因此在覆盖合并完成后统一应用——用户/项目档案同名替换内置也不会丢覆盖。
+    // State overrides: they apply only to profiles "whose frontmatter does not explicitly
+    // specify a model" (built-ins always qualify), so they are applied uniformly after the
+    // override merge — user/project profiles replacing built-ins by name still keep their
+    // overrides.
     let state = load_agents_state(data_dir);
     for (name, profile) in by_name.iter_mut() {
         if profile.model.is_some() {
@@ -122,7 +131,7 @@ pub fn load_profiles(cwd: &Path, data_dir: &Path) -> Vec<AgentProfile> {
     profiles
 }
 
-/// 归一化：小写 + 去空白/破折号/下划线（"My Agent" ≈ "my-agent" ≈ "my_agent"）
+/// Normalization: lowercase + drop whitespace/hyphens/underscores ("My Agent" ≈ "my-agent" ≈ "my_agent")
 pub(crate) fn normalize_name(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')

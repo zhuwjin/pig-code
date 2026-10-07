@@ -1,0 +1,738 @@
+_version: 2
+
+# 设置页文案（settings.rs 及 settings/ 子模块）。键命名：settings.页面.名；插值用 %{name}。
+# zh-CN 与转换前硬编码文案逐字节一致（既有测试断言中文）。
+
+settings:
+  # 跨页面共用（取消/删除直接用 common.yml 的 common.cancel/common.delete）
+  common:
+    save:
+      zh-CN: 保存
+      en: Save
+    close:
+      zh-CN: 关闭
+      en: Close
+    refresh:
+      zh-CN: 刷新
+      en: Refresh
+    confirm_delete:
+      zh-CN: 确认删除？
+      en: Confirm delete?
+    scope:
+      zh-CN: 作用域
+      en: Scope
+    field_name:
+      zh-CN: 名称
+      en: Name
+    scope_user:
+      zh-CN: 用户级
+      en: User
+    scope_project:
+      zh-CN: 项目级
+      en: Project
+    scope_project_named:
+      zh-CN: 项目级（%{name}）
+      en: Project (%{name})
+    project_unavailable_hint:
+      zh-CN: 用户级视图只写用户级；在列表上方切换到具体工作区后可写项目级
+      en: The user-level view only writes user-level entries; switch to a specific workspace above the list to write project-level entries
+    workspace_section:
+      zh-CN: 工作区
+      en: Workspaces
+    current_session:
+      zh-CN: 当前会话
+      en: Current session
+    not_created:
+      zh-CN: （未创建）
+      en: (not created)
+
+  appearance:
+    title:
+      zh-CN: 外观
+      en: Appearance
+    description:
+      zh-CN: 主题模式与全局字体。
+      en: Theme mode and global fonts.
+    group_interface:
+      zh-CN: 界面
+      en: Interface
+    group_code:
+      zh-CN: 代码
+      en: Code
+    theme_mode:
+      zh-CN: 主题模式
+      en: Theme mode
+    theme_mode_description:
+      zh-CN: 应用的整体配色；跟随系统时随系统外观自动切换。
+      en: Overall color scheme of the app; switches automatically with the system appearance when following the system.
+    theme_dark:
+      zh-CN: 暗色
+      en: Dark
+    theme_light:
+      zh-CN: 亮色
+      en: Light
+    font_default:
+      zh-CN: 系统默认
+      en: System default
+    ui_font:
+      zh-CN: 界面字体
+      en: Interface font
+    ui_font_description:
+      zh-CN: 界面文本使用的字体，选择后立即生效并保存。
+      en: Font used for interface text; applies immediately and is saved.
+    mono_font:
+      zh-CN: 等宽字体
+      en: Monospace font
+    mono_font_description:
+      zh-CN: 代码块、diff 与命令行使用的字体，选择后立即生效并保存。
+      en: Font used for code blocks, diffs and the command line; applies immediately and is saved.
+
+  terminal:
+    title:
+      zh-CN: 终端
+      en: Terminal
+    description:
+      zh-CN: 内嵌终端的启动 shell。
+      en: Startup shell of the embedded terminal.
+    shell_path:
+      zh-CN: Shell 路径
+      en: Shell path
+    shell_path_description:
+      zh-CN: 启动终端使用的 shell（如 /bin/zsh、/opt/homebrew/bin/fish）；留空 = 系统默认 shell。对之后新建的终端标签生效。
+      en: The shell used to start terminals (e.g. /bin/zsh, /opt/homebrew/bin/fish); empty = system default shell. Applies to terminal tabs created afterwards.
+
+  models:
+    title:
+      zh-CN: 模型设置
+      en: Models
+    description:
+      zh-CN: 管理自定义模型供应商，配置后可在聊天时选择使用。
+      en: Manage custom model providers; once configured they can be selected in chat.
+    providers:
+      zh-CN: 供应商
+      en: Providers
+    add_provider:
+      zh-CN: 添加供应商
+      en: Add provider
+    picker_description:
+      zh-CN: 从预设选择自动填充端点与模型，或自定义端点；API Key 需自行填写。
+      en: Pick a preset to auto-fill the endpoint and models, or use a custom endpoint; the API key must be filled in yourself.
+    custom_provider:
+      zh-CN: 自定义供应商
+      en: Custom provider
+    custom_provider_hint:
+      zh-CN: 手动填写端点与密钥
+      en: Fill in the endpoint and API key manually
+    select_or_add:
+      zh-CN: 选择或添加一个供应商
+      en: Select or add a provider
+    api_format:
+      zh-CN: API 格式
+      en: API format
+    get_api_key:
+      zh-CN: 获取密钥
+      en: Get API key
+    models:
+      zh-CN: 模型
+      en: Models
+    add_model:
+      zh-CN: 添加模型
+      en: Add model
+    no_models:
+      zh-CN: 暂无模型，点击「添加模型」创建
+      en: No models yet; click "Add model" to create one
+    vision:
+      zh-CN: 视觉
+      en: Vision
+    edit_title:
+      zh-CN: 编辑模型配置
+      en: Edit model configuration
+    model_id:
+      zh-CN: 模型 ID
+      en: Model ID
+    lookup_pending:
+      zh-CN: 正在查询 models.dev…
+      en: Querying models.dev…
+    lookup_not_found:
+      zh-CN: models.dev 未收录该 ID，回车可重试
+      en: This ID is not listed on models.dev; press Enter to retry
+    lookup_hint:
+      zh-CN: 输入后回车，自动填充上下文/输出/推理等级（models.dev）
+      en: Press Enter after typing to auto-fill context/output/reasoning levels (models.dev)
+    context_window:
+      zh-CN: 上下文窗口
+      en: Context window
+    max_output:
+      zh-CN: 最大输出 Token
+      en: Max output tokens
+    enable_model:
+      zh-CN: 启用该模型
+      en: Enable this model
+    advanced:
+      zh-CN: 高级配置
+      en: Advanced
+    input_image:
+      zh-CN: 图片
+      en: Image
+    input_video:
+      zh-CN: 视频
+      en: Video
+    cap_structured:
+      zh-CN: 结构化输出
+      en: Structured output
+    cap_web_search:
+      zh-CN: 原生联网搜索
+      en: Native web search
+    cap_system_msg:
+      zh-CN: 对话中系统消息
+      en: System messages in conversation
+    reasoning_levels:
+      zh-CN: 推理等级
+      en: Reasoning levels
+    default_level:
+      zh-CN: 默认思考等级（新会话与切换模型的初始档）
+      en: Default reasoning level (initial level for new sessions and model switches)
+    level_unset:
+      zh-CN: 不设置
+      en: Not set
+    params_mapping:
+      zh-CN: 推理参数映射（JSON：等级 → 请求体合并参数）
+      en: "Reasoning params mapping (JSON: level -> request body merge params)"
+    reset_form:
+      zh-CN: 重置表单
+      en: Reset form
+    err_id_empty:
+      zh-CN: 模型 ID 不能为空
+      en: Model ID cannot be empty
+    err_context:
+      zh-CN: 上下文窗口必须是正整数
+      en: Context window must be a positive integer
+    err_max_tokens:
+      zh-CN: 最大输出 Token 必须是正整数
+      en: Max output tokens must be a positive integer
+    err_params_json:
+      zh-CN: '推理参数映射不是合法 JSON 对象: %{error}'
+      en: 'Reasoning params mapping is not a valid JSON object: %{error}'
+    new_level_placeholder:
+      zh-CN: 等级名，如 high
+      en: Level name, e.g. high
+    new_label_placeholder:
+      zh-CN: 显示名（可选），如 最高
+      en: Display name (optional), e.g. Max
+    # 供应商「测试连接」结果（Event::TestResult；失败时直接显示上游英文 detail 原文）
+    test_ok:
+      zh-CN: 连接成功（HTTP %{status}）
+      en: Connected (HTTP %{status})
+    test_timeout:
+      zh-CN: 连接超时（10s）
+      en: Connection timed out (10s)
+
+  # 思考档显示名（预设带入与 models.dev 自动填充共用；写入 config 的 reasoning_labels）
+  reasoning:
+    none:
+      zh-CN: 无
+      en: None
+    disabled:
+      zh-CN: 关
+      en: Off
+    enabled:
+      zh-CN: 开
+      en: On
+    minimal:
+      zh-CN: 极简
+      en: Minimal
+    low:
+      zh-CN: 低
+      en: Low
+    medium:
+      zh-CN: 中
+      en: Medium
+    high:
+      zh-CN: 高
+      en: High
+    xhigh:
+      zh-CN: 超高
+      en: Very high
+    max:
+      zh-CN: 最高
+      en: Max
+
+  mcp:
+    title:
+      zh-CN: MCP 服务器
+      en: MCP servers
+    description:
+      zh-CN: 管理用户级与项目级 mcp.json；服务器在每个会话首个回合后按需连接。
+      en: Manage user-level and project-level mcp.json; servers connect on demand after the first turn of each session.
+    header_hint:
+      zh-CN: 用户级与项目级条目合并展示，同名项目级覆盖。
+      en: User-level and project-level entries are shown merged; project-level entries with the same name take precedence.
+    new_server:
+      zh-CN: 新建服务器
+      en: New server
+    search_placeholder:
+      zh-CN: 搜索服务器…
+      en: Search servers…
+    loading:
+      zh-CN: 正在读取配置…
+      en: Loading configuration…
+    no_match:
+      zh-CN: 没有匹配的 MCP 服务器
+      en: No matching MCP servers
+    server_count:
+      zh-CN: 服务器（%{n}）
+      en: Servers (%{n})
+    server_count_one:
+      zh-CN: 服务器（%{n}）
+      en: Server (%{n})
+    empty_title:
+      zh-CN: 尚未配置 MCP 服务器
+      en: No MCP servers configured yet
+    new_mcp_server:
+      zh-CN: 新建 MCP 服务器
+      en: New MCP server
+    help_title:
+      zh-CN: MCP 配置说明
+      en: MCP configuration
+    config_files:
+      zh-CN: 配置文件
+      en: Config files
+    manual_edit:
+      zh-CN: 手动编辑
+      en: Manual editing
+    manual_edit_hint:
+      zh-CN: 参考以下格式（项目级覆盖用户级同名条目）：
+      en: 'Reference format (project-level entries override same-named user-level entries):'
+    effective_hint:
+      zh-CN: 配置对之后新建的会话生效（会话级懒连接，首个回合时连接）。
+      en: Configuration applies to sessions created afterwards (lazy per-session connection, established on the first turn).
+    scope_user_hint:
+      zh-CN: 全局配置，对所有工作区生效
+      en: Global configuration; applies to all workspaces
+    status_other_workspace:
+      zh-CN: 正在查看其他工作区的项目级配置；连接状态仅对当前会话的工作区显示。
+      en: Viewing project-level configuration of another workspace; connection status is only shown for the workspace of the current session.
+    status_no_session:
+      zh-CN: 未打开会话：连接状态在打开会话后显示。
+      en: 'No session open: connection status appears after a session is opened.'
+    status_querying:
+      zh-CN: 正在查询连接状态…
+      en: Querying connection status…
+    status_lazy:
+      zh-CN: 当前会话尚未发起 MCP 连接（在首个回合按需建立）。
+      en: The current session has not initiated MCP connections yet (established on demand on the first turn).
+    status_connected:
+      zh-CN: 当前会话已连接 %{connected}/%{total} 个服务器（未连接 = 连接失败或已停用）。
+      en: The current session has %{connected}/%{total} servers connected (not connected = connection failed or disabled).
+    state_disabled:
+      zh-CN: 已停用
+      en: Disabled
+    state_invalid:
+      zh-CN: 配置无效
+      en: Invalid configuration
+    state_connected:
+      zh-CN: 已连接
+      en: Connected
+    state_failed:
+      zh-CN: 连接失败
+      en: Connection failed
+    state_disconnected:
+      zh-CN: 未连接
+      en: Not connected
+    tool_count:
+      zh-CN: '%{n} 个工具'
+      en: '%{n} tools'
+    tool_count_one:
+      zh-CN: '%{n} 个工具'
+      en: '%{n} tool'
+    overrides_user:
+      zh-CN: 覆盖用户级同名配置
+      en: Overrides the same-named user-level entry
+    timeout_default:
+      zh-CN: '超时 %{secs}s（默认）'
+      en: 'Timeout %{secs}s (default)'
+    timeout_secs:
+      zh-CN: '超时 %{secs}s'
+      en: 'Timeout %{secs}s'
+    timeout_ms:
+      zh-CN: '超时 %{ms}ms'
+      en: 'Timeout %{ms}ms'
+    invalid_prefix:
+      zh-CN: 配置无效：%{reason}
+      en: 'Invalid configuration: %{reason}'
+    failed_prefix:
+      zh-CN: 连接失败：%{error}
+      en: 'Connection failed: %{error}'
+    edit_title:
+      zh-CN: 编辑 MCP 服务器「%{name}」
+      en: 'Edit MCP server "%{name}"'
+    form_mode:
+      zh-CN: 表单
+      en: Form
+    name_hint:
+      zh-CN: 工具名前缀 mcp__<名称>__<工具>；编辑时不可改名（删除后重建）
+      en: Tool name prefix mcp__<name>__<tool>; cannot be renamed while editing (delete and recreate)
+    field_type:
+      zh-CN: 类型
+      en: Type
+    transport_stdio:
+      zh-CN: stdio（本地命令）
+      en: stdio (local command)
+    transport_http:
+      zh-CN: HTTP（远程端点）
+      en: HTTP (remote endpoint)
+    field_command:
+      zh-CN: 命令
+      en: Command
+    field_args:
+      zh-CN: 参数（空格分隔）
+      en: Arguments (space-separated)
+    args_hint:
+      zh-CN: 含空格的参数请用 JSON 模式填写 args 数组
+      en: For arguments containing spaces, fill the args array in JSON mode
+    field_timeout:
+      zh-CN: 超时（毫秒）
+      en: Timeout (ms)
+    env_optional:
+      zh-CN: 环境变量（可选，JSON）
+      en: Environment variables (optional, JSON)
+    headers_optional:
+      zh-CN: 请求头（可选，JSON）
+      en: Headers (optional, JSON)
+    env_example:
+      zh-CN: '如 {"MY_API_KEY": "your-key"}'
+      en: 'e.g. {"MY_API_KEY": "your-key"}'
+    headers_example:
+      zh-CN: '如 {"Authorization": "Bearer your-token"}'
+      en: 'e.g. {"Authorization": "Bearer your-token"}'
+    json_hint:
+      zh-CN: '支持粘贴 {"server-name": {…}} 或 Claude 风格 {"mcpServers": {…}}；一次只编辑一个 server'
+      en: 'Paste {"server-name": {…}} or Claude-style {"mcpServers": {…}}; edit one server at a time'
+    name_placeholder:
+      zh-CN: 例如 filesystem
+      en: e.g. filesystem
+    timeout_placeholder:
+      zh-CN: 30000（默认）
+      en: 30000 (default)
+    source_pick_workspace:
+      zh-CN: 选择工作区后显示其项目级配置
+      en: The project-level configuration is shown after a workspace is selected
+    err_name_empty:
+      zh-CN: 名称不能为空
+      en: Name cannot be empty
+    err_stdio_command:
+      zh-CN: stdio 形态需要填写命令
+      en: The stdio form requires a command
+    err_http_url:
+      zh-CN: HTTP 形态需要填写 URL
+      en: The HTTP form requires a URL
+    err_url_scheme:
+      zh-CN: URL 须以 http:// 或 https:// 开头
+      en: The URL must start with http:// or https://
+    err_timeout:
+      zh-CN: 超时必须是正整数（毫秒）
+      en: Timeout must be a positive integer (milliseconds)
+    err_not_loaded:
+      zh-CN: 配置尚未加载完成，请稍后重试
+      en: Configuration has not finished loading; please retry shortly
+    err_project_unavailable:
+      zh-CN: 项目级路径不可用（会话已关闭），请改用用户级
+      en: Project-level path unavailable (session closed); use the user level instead
+    err_project_delete_unavailable:
+      zh-CN: 项目级路径不可用（会话已关闭），删除已取消
+      en: Project-level path unavailable (session closed); deletion cancelled
+    write_failed:
+      zh-CN: 写入 %{path} 失败：%{error}
+      en: 'Failed to write %{path}: %{error}'
+    delete_failed:
+      zh-CN: 删除失败（%{path}）：%{error}
+      en: 'Deletion failed (%{path}): %{error}'
+    err_sse:
+      zh-CN: legacy SSE（HTTP+SSE）传输暂不支持，请用 streamable HTTP 端点
+      en: Legacy SSE (HTTP+SSE) transport is not supported yet; use a streamable HTTP endpoint
+    err_unknown_type:
+      zh-CN: 未知 type "%{other}"（支持 stdio/http）
+      en: 'Unknown type "%{other}" (supports stdio/http)'
+    err_missing_command_or_url:
+      zh-CN: 缺少 command（stdio 形态）或 url（远程形态）
+      en: Missing command (stdio form) or url (remote form)
+    err_stdio_missing_command:
+      zh-CN: stdio 形态缺少 command
+      en: The stdio form is missing command
+    err_remote_missing_url:
+      zh-CN: 远程形态缺少 url
+      en: The remote form is missing url
+    err_url_prefix:
+      zh-CN: 'url 须以 http:// 或 https:// 开头: %{url}'
+      en: 'The url must start with http:// or https://: %{url}'
+    err_existing_invalid_json:
+      zh-CN: '既有 mcp.json 不是合法 JSON，拒绝改写: %{error}'
+      en: 'The existing mcp.json is not valid JSON; refusing to rewrite: %{error}'
+    err_existing_not_object:
+      zh-CN: 既有 mcp.json 顶层不是对象，拒绝改写
+      en: The existing mcp.json top level is not an object; refusing to rewrite
+    err_json_empty:
+      zh-CN: JSON 配置不能为空
+      en: JSON configuration cannot be empty
+    err_invalid_json:
+      zh-CN: '不是合法 JSON: %{error}'
+      en: 'Not valid JSON: %{error}'
+    err_top_not_object:
+      zh-CN: 顶层必须是对象
+      en: The top level must be an object
+    err_mcpservers_not_object:
+      zh-CN: mcpServers 字段必须是对象
+      en: The mcpServers field must be an object
+    err_json_single_server:
+      zh-CN: JSON 模式一次只编辑一个 server（顶层恰好一个键值对）
+      en: JSON mode edits one server at a time (exactly one key-value pair at the top level)
+    err_json_name_empty:
+      zh-CN: 服务器名（JSON 键）不能为空
+      en: Server name (JSON key) cannot be empty
+    err_server_config_object:
+      zh-CN: server 配置必须是对象
+      en: The server configuration must be an object
+    err_rename:
+      zh-CN: 编辑时不能改名（JSON 键必须是 "%{editing}"）
+      en: 'Cannot rename while editing (the JSON key must be "%{editing}")'
+    err_config_missing_command_url:
+      zh-CN: 配置缺少 command（stdio 形态）或 url（远程形态）
+      en: The configuration is missing command (stdio form) or url (remote form)
+    env_label:
+      zh-CN: 环境变量
+      en: Environment variables
+    headers_label:
+      zh-CN: 请求头
+      en: Headers
+    err_label_not_json:
+      zh-CN: '%{label}不是合法 JSON: %{error}'
+      en: '%{label} is not valid JSON: %{error}'
+    err_label_must_be_object:
+      zh-CN: '%{label}必须是 {"KEY": "value"} 形式的对象'
+      en: '%{label} must be an object of the form {"KEY": "value"}'
+
+  websearch:
+    title:
+      zh-CN: 网络搜索
+      en: Web Search
+    description:
+      zh-CN: WebSearch 工具的搜索后端状态，经环境变量配置。
+      en: Status of the WebSearch tool backends, configured via environment variables.
+    role_primary:
+      zh-CN: 优先
+      en: Primary
+    role_fallback:
+      zh-CN: 备选
+      en: Fallback
+    configured:
+      zh-CN: 已配置
+      en: Configured
+    not_configured:
+      zh-CN: 未配置
+      en: Not configured
+    active_backend:
+      zh-CN: 当前生效后端：%{name}（同时配置时优先 Tavily）。
+      en: 'Active backend: %{name} (Tavily takes precedence when both are configured).'
+    no_backend:
+      zh-CN: 当前无生效后端：两个环境变量都未配置，WebSearch 工具不可用。
+      en: 'No active backend: neither environment variable is configured, so the WebSearch tool is unavailable.'
+    env_hint:
+      zh-CN: 在启动应用的环境（shell / 启动器）中设置后重启生效：
+      en: 'Set these in the environment that launches the app (shell / launcher), then restart:'
+    env_example:
+      zh-CN: "export TAVILY_API_KEY=<密钥>   # tavily.com\nexport BRAVE_API_KEY=<密钥>     # brave.com/search/api"
+      en: "export TAVILY_API_KEY=<key>   # tavily.com\nexport BRAVE_API_KEY=<key>     # brave.com/search/api"
+
+  skills:
+    title:
+      zh-CN: 技能
+      en: Skills
+    description:
+      zh-CN: 管理用户级与项目级技能（SKILL.md）；清单注入系统提示词，正文由 Skill 工具按需加载，改动对新建会话生效。
+      en: Manage user-level and project-level skills (SKILL.md); the list is injected into the system prompt, bodies are loaded on demand by the Skill tool, and changes apply to new sessions.
+    header_hint:
+      zh-CN: 清单注入系统提示词，正文按需加载；改动对新建会话生效。
+      en: The list is injected into the system prompt and bodies load on demand; changes apply to new sessions.
+    new_skill:
+      zh-CN: 新建技能
+      en: New skill
+    search_placeholder:
+      zh-CN: 搜索技能…
+      en: Search skills…
+    loading:
+      zh-CN: 正在读取技能目录…
+      en: Loading skill directories…
+    no_match:
+      zh-CN: 没有匹配的技能
+      en: No matching skills
+    skill_count:
+      zh-CN: 技能（%{n}）
+      en: Skills (%{n})
+    skill_count_one:
+      zh-CN: 技能（%{n}）
+      en: Skill (%{n})
+    empty_title:
+      zh-CN: 当前作用域还没有技能
+      en: No skills in the current scope yet
+    scope_user_hint:
+      zh-CN: 全局技能，对所有工作区生效
+      en: Global skills; apply to all workspaces
+    state_enabled:
+      zh-CN: 已启用
+      en: Enabled
+    state_disabled:
+      zh-CN: 已停用
+      en: Disabled
+    overrides_user:
+      zh-CN: 覆盖用户级同名技能
+      en: Overrides the same-named user-level skill
+    no_description:
+      zh-CN: （无描述——建议在编辑里补充，清单里只显示名称）
+      en: (No description — add one via edit; only the name is shown in the list)
+    no_frontmatter:
+      zh-CN: SKILL.md 无 frontmatter：name 取目录名、description 为空，建议编辑补写
+      en: 'SKILL.md has no frontmatter: name falls back to the directory name and description is empty; consider filling them via edit'
+    when_to_use:
+      zh-CN: 适用场景：%{when}
+      en: 'When to use: %{when}'
+    help_title:
+      zh-CN: 技能说明
+      en: About skills
+    skill_dirs:
+      zh-CN: 技能目录
+      en: Skill directories
+    manual_edit:
+      zh-CN: 手动编写
+      en: Writing manually
+    manual_edit_hint:
+      zh-CN: 每个技能是一个目录，内含 SKILL.md（frontmatter 写 name/description）；项目级覆盖用户级同名技能：
+      en: 'Each skill is a directory containing SKILL.md (frontmatter sets name/description); project-level skills override same-named user-level skills:'
+    effective_hint:
+      zh-CN: 技能清单注入系统提示词（仅名称+描述，会话开始时冻结），正文由 Skill 工具按需加载；改动对新建会话生效。
+      en: The skill list is injected into the system prompt (name + description only, frozen at session start); bodies load on demand via the Skill tool; changes apply to new sessions.
+    edit_title:
+      zh-CN: 编辑技能「%{name}」
+      en: 'Edit skill "%{name}"'
+    name_hint:
+      zh-CN: 模型经 Skill 工具按名调用；编辑时不可改名（删除后重建），目录名取名称归一小写
+      en: The model invokes the skill by name via the Skill tool; it cannot be renamed while editing (delete and recreate); the directory name is the normalized lowercase name
+    field_description:
+      zh-CN: 描述
+      en: Description
+    description_hint:
+      zh-CN: 写进系统提示词的技能清单，说明这个技能做什么；建议一句话+适用边界
+      en: Shown in the skill list injected into the system prompt, describing what the skill does; one sentence plus applicable boundaries recommended
+    field_when_to_use:
+      zh-CN: 适用场景（可选）
+      en: When to use (optional)
+    when_to_use_hint:
+      zh-CN: when_to_use：什么情况下应该用这个技能，拼在清单描述后面
+      en: 'when_to_use: in which cases this skill should be used, appended after the list description'
+    field_body:
+      zh-CN: 正文（SKILL.md body）
+      en: Body (SKILL.md body)
+    body_hint:
+      zh-CN: 技能的完整说明：步骤、约束、示例；相对路径相对技能目录，可用 ${SKILL_DIR} 占位
+      en: 'Full instructions of the skill: steps, constraints, examples; relative paths resolve against the skill directory, and the ${SKILL_DIR} placeholder is available'
+    name_placeholder:
+      zh-CN: 例如 commit-helper
+      en: e.g. commit-helper
+    when_to_use_placeholder:
+      zh-CN: 可选：什么场景下用这个技能
+      en: 'Optional: in which scenarios this skill should be used'
+    default_body:
+      zh-CN: "# 用途\n\n（这个技能做什么、怎么用）\n"
+      en: "# Purpose\n\n(What this skill does and how to use it)\n"
+    example:
+      zh-CN: |
+        ---
+        name: commit-helper
+        description: 按仓库惯例生成提交信息并提交
+        when_to_use: 用户要求提交代码时
+        ---
+
+        # 提交助手
+
+        1. 用 git diff 了解本次改动
+        2. 按仓库现有提交风格写提交信息
+        3. 用户确认后提交
+      en: |
+        ---
+        name: commit-helper
+        description: Generate a commit message following repo conventions and commit
+        when_to_use: When the user asks to commit code
+        ---
+
+        # Commit helper
+
+        1. Use git diff to review the changes
+        2. Write the commit message in the repo's existing style
+        3. Commit after user confirmation
+    err_name_empty:
+      zh-CN: 技能名不能为空
+      en: Skill name cannot be empty
+    err_name_charset:
+      zh-CN: 技能名只允许字母、数字、- 和 _（将作为目录名与调用名）
+      en: Skill names may only contain letters, digits, - and _ (used as the directory name and invocation name)
+    err_not_loaded:
+      zh-CN: 技能目录尚未加载完成，请稍后重试
+      en: Skill directories have not finished loading; please retry shortly
+    err_project_unavailable:
+      zh-CN: 项目级路径不可用（未选择工作区），请改用用户级
+      en: Project-level path unavailable (no workspace selected); use the user level instead
+    err_dir_name:
+      zh-CN: 无法从技能名生成合法目录名（仅字母/数字/-）
+      en: Cannot derive a valid directory name from the skill name (letters/digits/- only)
+    err_dir_exists:
+      zh-CN: '目录已存在: %{path}'
+      en: 'Directory already exists: %{path}'
+    err_create_dir:
+      zh-CN: '创建目录失败 %{path}: %{error}'
+      en: 'Failed to create directory %{path}: %{error}'
+    err_write_skill:
+      zh-CN: '写入 SKILL.md 失败: %{error}'
+      en: 'Failed to write SKILL.md: %{error}'
+    err_delete_refused:
+      zh-CN: '拒绝删除 %{path}: 不在受控的技能目录（skills/ 的直接子目录）内'
+      en: 'Refusing to delete %{path}: not inside a managed skills directory (a direct child of skills/)'
+    err_delete_failed:
+      zh-CN: '删除失败: %{error}'
+      en: 'Deletion failed: %{error}'
+    source_pick_workspace:
+      zh-CN: 选择工作区后显示其项目级技能目录
+      en: The project-level skill directory is shown after a workspace is selected
+
+  archived:
+    title:
+      zh-CN: 已归档的会话
+      en: Archived sessions
+    description:
+      zh-CN: 查看已归档会话，确认其所属工作区路径、会话名称和归档时间，并可恢复到会话列表。
+      en: View archived sessions with their workspace paths, titles and archive times, and restore them to the session list.
+    search_placeholder:
+      zh-CN: 搜索已归档会话
+      en: Search archived sessions
+    all_workspaces:
+      zh-CN: 所有工作区
+      en: All workspaces
+    sort_archived:
+      zh-CN: 归档时间
+      en: Archive time
+    sort_created:
+      zh-CN: 创建时间
+      en: Creation time
+    sort_alpha:
+      zh-CN: 按字母顺序
+      en: Alphabetical
+    empty_none:
+      zh-CN: 还没有归档的会话
+      en: No archived sessions yet
+    empty_no_match:
+      zh-CN: 没有匹配的归档会话
+      en: No matching archived sessions
+    restore_tooltip:
+      zh-CN: 恢复到会话列表
+      en: Restore to session list
+    delete_tooltip:
+      zh-CN: 删除会话（不可恢复）
+      en: Delete session (cannot be undone)

@@ -1,17 +1,17 @@
-//! 文本管线：磁盘字节 ↔ 模型视图（UTF-8、LF）双向转换。
+//! Text pipeline: bidirectional conversion between on-disk bytes and the model view (UTF-8, LF).
 //!
-//! decode 判定顺序：BOM → 无 BOM 的 UTF-16 启发式 → NUL 二进制嗅探 →
-//! 控制字符占比嗅探 → 严格 UTF-8 → GBK round-trip。encode 按原编码/行尾还原字节，
-//! GBK 遇到不可编码字符直接拒绝，避免静默破坏文件。
+//! decode detection order: BOM -> BOM-less UTF-16 heuristic -> NUL binary sniffing ->
+//! control-character ratio sniffing -> strict UTF-8 -> GBK round-trip. encode restores bytes by
+//! the original encoding/line ending; GBK rejects unencodable characters outright to avoid silently corrupting files.
 
-/// 文件主导行尾符
+/// The file's dominant line ending
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
     Lf,
     Crlf,
 }
 
-/// 识别出的文件编码
+/// The detected file encoding
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileEncoding {
     Utf8,
@@ -21,7 +21,7 @@ pub enum FileEncoding {
 }
 
 impl FileEncoding {
-    /// 面向模型输出的编码名
+    /// Encoding name for model-facing output
     pub fn label(self) -> &'static str {
         match self {
             Self::Utf8 => "UTF-8",
@@ -32,14 +32,14 @@ impl FileEncoding {
     }
 }
 
-/// decode 产物：`text` 为模型视图（CRLF 已归一为 LF），其余字段供写回时还原。
+/// decode output: `text` is the model view (CRLF normalized to LF); the other fields restore the original form on write-back.
 #[derive(Debug)]
 pub struct TextDocument {
     pub text: String,
     pub encoding: FileEncoding,
     pub bom: bool,
     pub line_ending: LineEnding,
-    /// 解码发生了 U+FFFD 替换（编码识别可能有误）
+    /// Decoding involved U+FFFD replacement (encoding detection may be wrong)
     pub lossy: bool,
 }
 
@@ -51,29 +51,29 @@ pub fn decode(bytes: &[u8]) -> Result<TextDocument, String> {
         (FileEncoding::Utf16Le, true, body)
     } else if let Some(body) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         (FileEncoding::Utf16Be, true, body)
-    // 2. 无 BOM 的 UTF-16 启发式（kimi-code 做法）
+    // 2. BOM-less UTF-16 heuristic (kimi-code approach)
     } else if let Some(encoding) = guess_utf16(bytes) {
         (encoding, false, bytes)
-    // 3. 原始字节含 NUL → 二进制
+    // 3. Raw bytes contain NUL -> binary
     } else if bytes.contains(&0) {
-        return Err("二进制文件，无法作为文本读取".to_string());
-    // 4. 控制字符占比嗅探（前 512 字节）
+        return Err("Binary file; cannot be read as text".to_string());
+    // 4. Control-character ratio sniffing (first 512 bytes)
     } else if looks_binary(bytes) {
-        return Err("二进制文件，无法作为文本读取".to_string());
-    // 5. 严格 UTF-8
+        return Err("Binary file; cannot be read as text".to_string());
+    // 5. Strict UTF-8
     } else if std::str::from_utf8(bytes).is_ok() {
         (FileEncoding::Utf8, false, bytes)
-    // 6. GBK round-trip（ZCode 做法）：解码再编码与原始字节完全相等才接受
+    // 6. GBK round-trip (ZCode approach): accepted only if decode-then-encode exactly equals the original bytes
     } else if gbk_roundtrip(bytes) {
         (FileEncoding::Gbk, false, bytes)
     } else {
         return Err(
-            "无法识别的文本编码（非 UTF-8/UTF-16/GBK）：如确认是文本，请先用 iconv 转为 UTF-8"
+            "Unrecognized text encoding (not UTF-8/UTF-16/GBK); if this is text, convert it to UTF-8 with iconv first"
                 .to_string(),
         );
     };
 
-    // 7. 按编码解码（UTF-16 失败降级 lossy；UTF-8 严格失败已在 5/6 分流，不会走到这）
+    // 7. Decode by encoding (UTF-16 failure degrades to lossy; strict UTF-8 failure was already diverted in 5/6 and cannot reach here)
     let (text, lossy) = match encoding {
         FileEncoding::Utf8 => match std::str::from_utf8(body) {
             Ok(text) => (text.to_string(), false),
@@ -97,7 +97,7 @@ pub fn decode(bytes: &[u8]) -> Result<TextDocument, String> {
     })
 }
 
-/// 写回：先防御性归一入参为 LF，再按 line_ending 还原，最后按编码出字节。
+/// Write-back: defensively normalize the input to LF first, restore by line_ending, then emit bytes by encoding.
 pub fn encode(
     text_lf: &str,
     encoding: FileEncoding,
@@ -124,7 +124,7 @@ pub fn encode(
             let (bytes, _, had_errors) = encoding_rs::GBK.encode(&text);
             if had_errors {
                 return Err(
-                    "内容包含 GBK 无法编码的字符，已拒绝写入以免破坏文件；请先转换文件编码"
+                    "The content contains characters that GBK cannot encode; the write was refused to avoid corrupting the file — convert the file encoding first"
                         .to_string(),
                 );
             }
@@ -133,8 +133,8 @@ pub fn encode(
     }
 }
 
-/// 无 BOM 的 UTF-16 启发式：前 512 字节（取偶数长度）统计偶/奇数位的 0x00；
-/// zeros 总数 ≥ 2 且一侧为 0 或 ≥ 另一侧 3 倍 → 判 UTF-16（偶数位零多 = BE，奇数位零多 = LE）。
+/// BOM-less UTF-16 heuristic: over the first 512 bytes (rounded to an even length), count 0x00 at
+/// even/odd positions; total zeros >= 2 and one side is 0 or >= 3x the other -> UTF-16 (more even-position zeros = BE, more odd-position zeros = LE).
 fn guess_utf16(bytes: &[u8]) -> Option<FileEncoding> {
     let len = bytes.len().min(512);
     let len = len - len % 2;
@@ -165,7 +165,7 @@ fn guess_utf16(bytes: &[u8]) -> Option<FileEncoding> {
     }
 }
 
-/// 控制字符占比：前 512 字节中 < 0x09 或 0x0e..=0x1f 的字节超过 30% 判二进制。
+/// Control-character ratio: if bytes < 0x09 or in 0x0e..=0x1f exceed 30% of the first 512 bytes, judge as binary.
 fn looks_binary(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(512)];
     if sample.is_empty() {
@@ -178,14 +178,14 @@ fn looks_binary(bytes: &[u8]) -> bool {
     controls * 10 > sample.len() * 3
 }
 
-/// GBK round-trip：解码再编码与原始字节完全相等才接受为 GBK。
+/// GBK round-trip: accepted as GBK only if decode-then-encode exactly equals the original bytes.
 fn gbk_roundtrip(bytes: &[u8]) -> bool {
     let (text, _, _) = encoding_rs::GBK.decode(bytes);
     let (encoded, _, had_errors) = encoding_rs::GBK.encode(&text);
     !had_errors && encoded.as_ref() == bytes
 }
 
-/// u16 单元按端序组装；失败降级 lossy，奇数尾字节丢弃。返回 (text, lossy)。
+/// Assemble u16 units by endianness; failure degrades to lossy, the trailing odd byte is dropped. Returns (text, lossy).
 fn decode_utf16(body: &[u8], little_endian: bool) -> (String, bool) {
     let (chunks, remainder) = body.as_chunks::<2>();
     let units: Vec<u16> = chunks
@@ -225,7 +225,7 @@ fn encode_utf16(text: &str, little_endian: bool, bom: bool) -> Vec<u8> {
     out
 }
 
-/// 统计 \r\n 与孤立 \n 定主导行尾；模型视图一律把 \r\n 归一为 \n（孤立 \r 保留）。
+/// Count \r\n vs lone \n to decide the dominant line ending; the model view always normalizes \r\n to \n (lone \r preserved).
 fn normalize_line_endings(text: String) -> (String, LineEnding) {
     let crlf = text.matches("\r\n").count();
     let lf = text.matches('\n').count() - crlf;
@@ -237,11 +237,11 @@ fn normalize_line_endings(text: String) -> (String, LineEnding) {
     (text.replace("\r\n", "\n"), dominant)
 }
 
-/// 子进程字节流 → 文本：UTF-8 严格优先；出现确定无效字节时 Windows 上按 GBK
-/// 回退（中文 Windows 的原生工具如 ipconfig 输出 OEM 代码页 cp936 字节，
-/// Git Bash 只能保证 bash 自身与 coreutils 输出 UTF-8），其余平台退化为
-/// U+FFFD 替换。跨 chunk 的不完整 UTF-8 尾部与 GBK 双字节对的后半字节
-/// 都挂起等待下一块；每块独立判定，兼容「UTF-8 工具 && GBK 工具」混排输出。
+/// Subprocess byte stream -> text: strict UTF-8 first; on definitely invalid bytes, Windows falls back to GBK
+/// (native tools on Chinese Windows such as ipconfig emit OEM code page cp936 bytes, while Git Bash can only
+/// guarantee UTF-8 from bash itself and coreutils); other platforms degrade to U+FFFD replacement. Incomplete
+/// UTF-8 tails and the second byte of a GBK double-byte pair spanning chunks are held pending the next chunk;
+/// each chunk is judged independently, tolerating mixed "UTF-8 tool && GBK tool" output.
 #[derive(Default)]
 pub struct StreamDecoder {
     pending: Vec<u8>,
@@ -252,7 +252,7 @@ impl StreamDecoder {
         Self::default()
     }
 
-    /// 喂入一块字节，返回当前可确定的文本（不完整尾部留在内部等下一块）。
+    /// Feed one chunk of bytes, returning the text that can be resolved now (incomplete tails stay inside awaiting the next chunk).
     pub fn push(&mut self, chunk: &[u8]) -> String {
         self.pending.extend_from_slice(chunk);
         match std::str::from_utf8(&self.pending) {
@@ -264,14 +264,14 @@ impl StreamDecoder {
             Err(error) => {
                 let valid = error.valid_up_to();
                 let mut out = std::str::from_utf8(&self.pending[..valid])
-                    .expect("valid_up_to 前缀必为合法 UTF-8")
+                    .expect("valid_up_to prefix must be valid UTF-8")
                     .to_string();
                 match error.error_len() {
-                    // 尾部是不完整的多字节序列：挂起，拼下一块再判
+                    // Tail is an incomplete multibyte sequence: hold it and re-judge with the next chunk
                     None => {
                         self.pending.drain(..valid);
                     }
-                    // 确定无效：整段余量走兜底解码
+                    // Definitely invalid: the whole remainder goes through fallback decoding
                     Some(_) => {
                         let rest = self.pending.split_off(valid);
                         out.push_str(&Self::fallback_decode(&rest, &mut self.pending));
@@ -282,8 +282,8 @@ impl StreamDecoder {
         }
     }
 
-    /// 流结束：残留字节按平台兜底出清（不再有下一块可等，孤立的
-    /// 不完整序列由解码器有损处理）。
+    /// Stream end: flush leftover bytes through the platform fallback (no next chunk to wait for;
+    /// isolated incomplete sequences are handled lossily by the decoder).
     pub fn finish(&mut self) -> String {
         let pending = std::mem::take(&mut self.pending);
         if !cfg!(target_os = "windows") {
@@ -293,8 +293,8 @@ impl StreamDecoder {
         text.into_owned()
     }
 
-    /// 无效字节的兜底：Windows 上 GBK，其余平台 UTF-8 有损替换。
-    /// `pending` 回传挂起字节。
+    /// Fallback for invalid bytes: GBK on Windows, lossy UTF-8 replacement elsewhere.
+    /// `pending` passes back held bytes.
     fn fallback_decode(bytes: &[u8], pending: &mut Vec<u8>) -> String {
         if !cfg!(target_os = "windows") {
             return String::from_utf8_lossy(bytes).into_owned();
@@ -306,9 +306,9 @@ impl StreamDecoder {
     }
 }
 
-/// GBK 双字节配对扫描：返回「完整 GBK 序列」的字节长度——
-/// ASCII 单字节过；0x81..=0xFE 引导字节吃一个续字节（0x40..=0xFE 非 0x7F）；
-/// 末尾孤立引导字节（续字节在下一块）不计入，留给挂起。
+/// GBK double-byte pairing scan: returns the byte length of the "complete GBK sequences" —
+/// ASCII single bytes pass; a 0x81..=0xFE lead byte consumes one continuation byte (0x40..=0xFE excluding 0x7F);
+/// a trailing lone lead byte (its continuation is in the next chunk) is not counted and left pending.
 fn gbk_complete_prefix(bytes: &[u8]) -> usize {
     let mut i = 0;
     while i < bytes.len() {
@@ -319,7 +319,7 @@ fn gbk_complete_prefix(bytes: &[u8]) -> usize {
         }
         match bytes.get(i + 1) {
             Some(next) if (0x40..=0xfe).contains(next) && *next != 0x7f => i += 2,
-            // 无续字节（流截断在双字节中间）：到此为止完整
+            // No continuation byte (stream truncated mid-double-byte): complete up to here
             _ => return i,
         }
     }
@@ -330,18 +330,23 @@ fn gbk_complete_prefix(bytes: &[u8]) -> usize {
 mod tests {
     use super::StreamDecoder;
 
-    /// 多字节 UTF-8 字符跨 chunk 分割：前半挂起、后半拼上后完整还原。
+    /// Multibyte UTF-8 char split across chunks: the first half is held; the second half completes the restoration.
     #[test]
     fn decoder_holds_incomplete_utf8_across_chunks() {
         let mut decoder = StreamDecoder::new();
-        let bytes = "中文".as_bytes(); // 每字 3 字节
-        assert_eq!(decoder.push(&bytes[..4]), "中", "前 4 字节只应出第一个字");
+        let bytes = "中文".as_bytes(); // 3 bytes per char
+        assert_eq!(
+            decoder.push(&bytes[..4]),
+            "中",
+            "the first 4 bytes should emit only the first char"
+        );
         assert_eq!(decoder.push(&bytes[4..]), "文");
         assert_eq!(decoder.finish(), "");
     }
 
-    /// 确定无效的字节：Windows 走 GBK 回退（D6 D0 CE C4 = GBK 的「中文」，
-    /// 选这段是因为它必然不是合法 UTF-8——「目录」(C4BF C2BC) 恰好是）。
+    /// Definitely invalid bytes: Windows falls back to GBK (D6 D0 CE C4 is the GBK encoding of
+    /// the two CJK chars asserted below — chosen because it can never be valid UTF-8, whereas
+    /// the sequence C4BF C2BC happens to be).
     #[cfg(windows)]
     #[test]
     fn decoder_falls_back_to_gbk_on_windows() {
@@ -350,34 +355,52 @@ mod tests {
         let mut chunk = b"zh: ".to_vec();
         chunk.extend_from_slice(&gbk);
         let out = decoder.push(&chunk);
-        assert_eq!(out, "zh: 中文", "GBK 字节应整段回退解码");
+        assert_eq!(
+            out, "zh: 中文",
+            "GBK bytes should fall back to whole-segment decoding"
+        );
     }
 
-    /// GBK 双字节字符跨 chunk 分割：孤立引导字节挂起，下一块补全。
+    /// GBK double-byte char split across chunks: the lone lead byte is held; the next chunk completes it.
     #[cfg(windows)]
     #[test]
     fn decoder_holds_gbk_lead_byte_across_chunks() {
         let mut decoder = StreamDecoder::new();
-        assert_eq!(decoder.push(&[0xd6]), "", "孤立 D6 按不完整序列挂起");
+        assert_eq!(
+            decoder.push(&[0xd6]),
+            "",
+            "a lone D6 is held as an incomplete sequence"
+        );
         assert_eq!(decoder.push(&[0xd0, b'a']), "中a");
     }
 
-    /// 非 Windows：无效字节退化为 U+FFFD，不尝试 GBK。
+    /// Non-Windows: invalid bytes degrade to U+FFFD; GBK is not attempted.
     #[cfg(not(windows))]
     #[test]
     fn decoder_lossy_on_unix() {
         let mut decoder = StreamDecoder::new();
         let out = decoder.push(&[0xd6, 0xd0]);
-        assert_eq!(out.chars().count(), 2, "两个无效字节各出一个替换字符");
+        assert_eq!(
+            out.chars().count(),
+            2,
+            "two invalid bytes each emit one replacement char"
+        );
         assert!(out.chars().all(|c| c == '\u{fffd}'));
     }
 
-    /// 流在多字节序列中间结束：finish 出清，不丢字节。
+    /// Stream ends in the middle of a multibyte sequence: finish flushes it without losing bytes.
     #[test]
     fn decoder_finish_flushes_partial() {
         let mut decoder = StreamDecoder::new();
         assert_eq!(decoder.push("abc".as_bytes()), "abc");
-        assert_eq!(decoder.push(&[0xe4, 0xb8]), "", "「一」的前两字节应挂起");
-        assert!(!decoder.finish().is_empty(), "残留字节应出清（有损）");
+        assert_eq!(
+            decoder.push(&[0xe4, 0xb8]),
+            "",
+            "the first two bytes of the 3-byte char should be held"
+        );
+        assert!(
+            !decoder.finish().is_empty(),
+            "leftover bytes should be flushed (lossy)"
+        );
     }
 }

@@ -2,7 +2,7 @@ use super::*;
 
 impl Composer {
     pub fn set_todos(&mut self, todos: Vec<TodoItem>, cx: &mut Context<Self>) {
-        // 清单清空时收起对应弹层，避免 popup 状态悬置
+        // Collapse the popup when the list empties, avoiding a dangling popup state
         if todos.is_empty() && matches!(self.popup, Some((Popup::Todos, _))) {
             self.popup = None;
         }
@@ -10,8 +10,8 @@ impl Composer {
         cx.notify();
     }
 
-    /// 自测用：(「后台 Bash」chip 可见, 「后台 Agent」chip 可见)——
-    /// chip 显隐由任务快照按 agent_id 类型分派
+    /// For self-test: ("background Bash" chip visible, "background Agent" chip
+    /// visible); chip visibility is dispatched by agent_id type from the task snapshot
     pub fn debug_task_chips(&self) -> (bool, bool) {
         (
             self.tasks.iter().any(|t| t.agent_id.is_none()),
@@ -19,7 +19,7 @@ impl Composer {
         )
     }
 
-    /// 自测用：Agent 任务行的 agent_id 列表
+    /// For self-test: the agent_id list of Agent task rows
     pub fn debug_agent_task_ids(&self) -> Vec<String> {
         self.tasks
             .iter()
@@ -27,22 +27,24 @@ impl Composer {
             .collect()
     }
 
-    /// 自测用：模拟点开「后台 Agent」chip 弹层（复现 palette_open 漏 AgentTasks
-    /// 导致 render_popup 踩 unreachable 的崩溃路径）；返回弹层是否打开
+    /// For self-test: simulate opening the "background Agent" chip popup (reproduces
+    /// the crash path where palette_open misses AgentTasks and render_popup hits
+    /// unreachable); returns whether the popup is open
     pub fn debug_open_agent_tasks_popup(&mut self, cx: &mut Context<Self>) -> bool {
         self.popup = Some((Popup::AgentTasks, 0));
         cx.notify();
         matches!(self.popup, Some((Popup::AgentTasks, _)))
     }
 
-    /// 自测用：收起任意弹层
+    /// For self-test: collapse any popup
     pub fn debug_close_popup(&mut self, cx: &mut Context<Self>) {
         self.popup = None;
         cx.notify();
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<TaskSummary>, cx: &mut Context<Self>) {
-        // 对应类别的任务清空时收起对应弹层（chip 按 agent_id 拆分后各自判定）
+        // Collapse the matching popup when that category's tasks empty (chips are
+        // split by agent_id and judged separately)
         if !tasks.iter().any(|t| t.agent_id.is_none())
             && matches!(self.popup, Some((Popup::Tasks, _)))
         {
@@ -57,7 +59,7 @@ impl Composer {
         cx.notify();
     }
 
-    /// 改动统计 + 文件列表（ReviewPanel 快照）
+    /// Change stats + file list (ReviewPanel snapshot)
     pub fn set_changes(
         &mut self,
         added: u32,
@@ -70,13 +72,15 @@ impl Composer {
         cx.notify();
     }
 
-    /// 自测用：返回 (used, total)。
+    /// For self-test: returns (used, total).
     pub fn debug_context_usage(&self) -> Option<(u64, u64)> {
         self.context_usage.map(|(used, total, _, _)| (used, total))
     }
 
-    /// 底部工具栏芯片：图标 + 文本 + 下拉箭头，样式与 hero 区工作区/分支芯片一致。
-    /// `color` 非 None 时图标与文本着色（模式芯片按危险程度着色用），箭头保持 muted。
+    /// Bottom toolbar chip: icon + text + dropdown arrow, styled the same as the
+    /// hero area's workspace/branch chips.
+    /// When `color` is not None, the icon and text are tinted (used by mode chips
+    /// colored by danger level); the arrow stays muted.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_bar_chip(
         &self,
@@ -131,7 +135,8 @@ impl Composer {
             .max_h(px(280.))
             .overflow_y_scroll();
         for item in &self.todos {
-            // 进行中用 Spinner（旋转动画），其余状态静态图标
+            // In-progress uses a Spinner (rotating animation); other states use
+            // static icons
             let icon = match item.status {
                 TodoStatus::Done => Icon::new(AssetIconName::CircleCheck)
                     .size_4()
@@ -163,7 +168,14 @@ impl Composer {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("当前进度 {done}/{}", self.todos.len())),
+                        .child(
+                            rust_i18n::t!(
+                                "composer.todo_progress",
+                                done = done,
+                                total = self.todos.len()
+                            )
+                            .to_string(),
+                        ),
                 )
                 .child(list),
             cx,
@@ -177,9 +189,11 @@ impl Composer {
         )
     }
 
-    /// 后台任务弹层（按 kind 拆成「后台 Bash / 后台 Agent」两个独立面板）：
-    /// Bash 行点击展开输出尾部（现状）；Agent 行点击开右侧子代理对话 tab
-    ///（收起弹层 + ComposerEvent::OpenSubagent 上冒给 AppView）
+    /// Background task popup (split by kind into two independent panels: "background
+    /// Bash / background Agent"): clicking a Bash row expands the output tail (as
+    /// today); clicking an Agent row opens the subagent conversation tab on the
+    /// right (collapse the popup plus ComposerEvent::OpenSubagent bubbles up to
+    /// AppView)
     pub(crate) fn render_tasks_panel(
         &self,
         kind: TaskChipKind,
@@ -192,9 +206,9 @@ impl Composer {
             .count();
         let title = kind.label(running);
 
-        // 过滤 tab：进行中 / 已完成 / 全部
+        // Filter tabs: running / completed / all
         let mut tabs = h_flex().gap_1();
-        for (ix, (filter, label)) in TaskFilter::TABS.iter().enumerate() {
+        for (ix, filter) in TaskFilter::TABS.iter().enumerate() {
             let active = self.task_filter == *filter;
             let filter = *filter;
             tabs = tabs.child(
@@ -212,7 +226,7 @@ impl Composer {
                         this.task_filter = filter;
                         cx.notify();
                     }))
-                    .child(*label),
+                    .child(filter.label()),
             );
         }
 
@@ -237,8 +251,8 @@ impl Composer {
             .overflow_y_scroll();
         if visible.is_empty() {
             let empty = match kind {
-                TaskChipKind::Bash => "无后台 Bash 任务",
-                TaskChipKind::Agent => "无后台 Agent 任务",
+                TaskChipKind::Bash => rust_i18n::t!("composer.no_bash_tasks"),
+                TaskChipKind::Agent => rust_i18n::t!("composer.no_agent_tasks"),
             };
             list = list.child(
                 div()
@@ -283,8 +297,9 @@ impl Composer {
                     .cursor_pointer()
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        // Agent 行：点击开右侧子代理对话 tab（收弹层 + 上冒事件）；
-                        // Bash 行：展开/收起输出尾部
+                        // Agent row: clicking opens the subagent conversation tab on
+                        // the right (collapse the popup plus bubble the event);
+                        // Bash row: expand/collapse the output tail
                         if let Some((agent_id, title)) = &agent_open {
                             this.popup = None;
                             cx.emit(ComposerEvent::OpenSubagent {
@@ -325,7 +340,8 @@ impl Composer {
                             .text_color(cx.theme().muted_foreground),
                     ),
             );
-            // 输出尾部展开仅 Bash 行（Agent 的完整对话在右侧 tab 看）
+            // Output tail expansion is for Bash rows only (an Agent's full
+            // conversation lives in the right tab)
             if kind == TaskChipKind::Bash && expanded {
                 row = row.child(
                     div()
@@ -341,7 +357,7 @@ impl Composer {
                         .font_family(cx.theme().mono_font_family.clone())
                         .text_color(cx.theme().muted_foreground)
                         .child(if task.output_tail.is_empty() {
-                            "（暂无输出）".to_string()
+                            rust_i18n::t!("composer.no_output_yet").to_string()
                         } else {
                             task.output_tail.clone()
                         }),
@@ -350,9 +366,10 @@ impl Composer {
             list = list.child(row);
         }
 
-        // 固定宽：有/无内容同宽。宽度不许超过 popup_shell 内层容器的 max_w(360)——
-        // 超出部分没有 hitbox（可视正常但点击被判 outside 触发弹层关闭）；
-        // 命令文本超长走省略（行内 text_ellipsis）
+        // Fixed width: same width with or without content. The width must not exceed
+        // popup_shell's inner container max_w(360): the overhang has no hitbox
+        // (renders fine, but clicks are judged outside and close the popup);
+        // overlong command text is ellipsized (text_ellipsis on the row)
         let content = self
             .aux_panel_shell(
                 v_flex()

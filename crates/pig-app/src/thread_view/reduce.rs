@@ -4,7 +4,7 @@ impl ThreadView {
     pub fn reduce_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::SessionConfigured { .. } => {}
-            // 模式 chip 与计划 chip 在 composer（main.rs/events.rs 处理）；消息流无需响应
+            // Mode chip and plan chip live in the composer (handled in main.rs/events.rs); the message flow need not respond
             Event::ExecModeChanged { .. } => {}
             Event::PlanModeChanged { .. } => {}
             Event::TurnStarted { turn_id, .. } => {
@@ -15,7 +15,7 @@ impl ThreadView {
             }
             Event::ReasoningDelta { item_id, delta, .. } => {
                 if !self.item_index.contains_key(&item_id) {
-                    // 新一段思考开始 = 上一段思考结束
+                    // A new thinking segment starting = the previous thinking segment ending
                     self.finish_thinking();
                 }
                 let six = self.find_or_create(&item_id, || Segment::Thinking {
@@ -39,8 +39,9 @@ impl ThreadView {
                 }) = self.current_segment(six)
                 {
                     text.push_str(&delta);
-                    // 纵滚状态机只喂进行中的段：回放/已收尾的段不显示滚动行，
-                    // 喂了也只会白起定时器
+                    // The vertical-scroll state machine only feeds in-progress
+                    // segments: replayed/settled segments show no scrolling line,
+                    // and feeding them would only start timers for nothing
                     if duration.is_none()
                         && !replay
                         && let Some(target) = ticker_target_line(text)
@@ -80,7 +81,8 @@ impl ThreadView {
                     *text = full_text.clone();
                     state.update(cx, |state, cx| state.set_text(&full_text, cx));
                 }
-                // 搜索开着：段内容落定后重跑（revision 没变的段会直接复用缓存）
+                // Search open: rerun once segment content settles (segments whose
+                // revision did not change reuse the cache directly)
                 if self.search_open {
                     self.run_search(cx);
                 }
@@ -94,7 +96,8 @@ impl ThreadView {
             } => {
                 self.finish_thinking();
                 if tool == "ExitPlanMode" {
-                    // 计划卡：detail = 完整参数 JSON（live/回放同路径），解出 plan 全文
+                    // Plan card: detail = the full args JSON (same path for
+                    // live/replay); extract the full plan text
                     let args: serde_json::Value = serde_json::from_str(&detail).unwrap_or_default();
                     let plan = args["plan"].as_str().unwrap_or("").to_string();
                     self.find_or_create(&item_id, || Segment::Plan {
@@ -115,7 +118,8 @@ impl ThreadView {
                     output: String::new(),
                     is_error: false,
                     done: false,
-                    // Swarm 面板的折叠态也用这个字段（代理卡无输出展开区），默认展开
+                    // The Swarm panel's collapsed state also uses this field
+                    // (agent cards have no output expansion area); expanded by default
                     expanded: tool == "AgentSwarm",
                     edit: None,
                     live_note: None,
@@ -160,9 +164,9 @@ impl ThreadView {
                     ..
                 }) = self.current_segment(six)
                 {
-                    // 计划卡收尾：决议结果写三态（回放同路径）
+                    // Plan card settles: the decision writes the tri-state (same path for replay)
                     *done = true;
-                    *approved = output.contains("计划已批准");
+                    *approved = output.contains("Plan approved");
                     *err = is_error;
                     self.auto_scroll();
                     return cx.notify();
@@ -181,9 +185,9 @@ impl ThreadView {
                     *err = is_error;
                     *done = true;
                     *slot = edit;
-                    // 收尾清掉实时进度行（卡片回到静态摘要）
+                    // Settling clears the live progress line (the card returns to its static summary)
                     *live_note = None;
-                    // 失败的调用直接展开输出，省去用户多点一下
+                    // Failed calls expand the output directly, sparing the user an extra click
                     if is_error {
                         *expanded = true;
                     }
@@ -210,9 +214,11 @@ impl ThreadView {
                 self.auto_scroll();
             }
             Event::SubagentProgress { item_id, note, .. } => {
-                // 前台子代理的实时进度写独立字段 live_note（渲染在摘要行下方），
-                // 不动 summary——原摘要在运行中保留，收尾后也不丢；
-                // 卡片不存在（回放/乱序）或已收尾时忽略
+                // Foreground subagent live progress goes to the separate
+                // live_note field (rendered under the summary line), leaving
+                // summary untouched — the original summary is kept while running
+                // and not lost after settling; ignored when the card is absent
+                // (replay/out-of-order) or already settled
                 if let Some(&six) = self.item_index.get(&item_id)
                     && let Some(Segment::ToolCall {
                         live_note,
@@ -232,9 +238,11 @@ impl ThreadView {
                 background,
                 ..
             } => {
-                // 代理卡：先于 ToolCallEnd 到达（回放时紧挨 Begin 重发）；同一工具卡
-                // 可有多张（AgentSwarm 每个子代理一张，同 agent_id 去重更新——
-                // 乱序/重复防御允许补写已 done 的卡，运行态字段保留）
+                // Agent card: arrives before ToolCallEnd (on replay it is re-sent
+                // right after Begin); one tool card can hold several (one per
+                // AgentSwarm subagent, deduplicated by agent_id — the
+                // out-of-order/duplicate defense allows patching already-done
+                // cards, keeping the running-state fields)
                 if let Some(&six) = self.item_index.get(&item_id)
                     && let Some(Segment::ToolCall { agent_cards, .. }) = self.current_segment(six)
                 {
@@ -264,11 +272,16 @@ impl ThreadView {
                 finished,
                 ..
             } => {
-                // 代理卡的运行态由子代理真实生命周期驱动：找最近一张匹配的
-                // 代理卡——finished 落卡终态（前台/后台都收：前台 Swarm 每个
-                // 子代理独立完成，单卡到点即落终态，不等整批工具调用收尾）；
-                // 活动项进度行只写后台卡（前台进度走段级 SubagentProgress）。
-                // 同一工具卡可有多张（AgentSwarm），逐卡独立
+                // The agent card's running state is driven by the subagent's real
+                // lifecycle: find the most recent matching agent card — finished
+                // lands the card's terminal state (collected for both foreground
+                // and background: each foreground Swarm subagent completes
+                // independently, a single card lands its terminal state on
+                // arrival without waiting for the whole batch's tool call to
+                // settle); activity-item progress lines are only written to
+                // background cards (foreground progress goes through the
+                // segment-level SubagentProgress). One tool card can hold
+                // several (AgentSwarm), each independent
                 let target = self
                     .messages
                     .iter_mut()
@@ -281,26 +294,33 @@ impl ThreadView {
                             .find(|c| c.agent_id == agent_id && (finished || c.background)),
                         _ => None,
                     });
-                // 找不到卡（面板独占/回放外的迟到事件）忽略
+                // No card found (panel-exclusive / late event outside replay): ignored
                 if let Some(card) = target {
                     if finished {
-                        // 记录完成次序（Swarm 面板完成优先排序用；回放无此事件，
-                        // 保持 None 落回发起序）。agent_finish_seq 与 messages 是
-                        // 不相交字段，card 借用存活期间可直接自增
+                        // Record the finish order (used by the Swarm panel's
+                        // completion-first sort; replay has no such event, so it
+                        // stays None and falls back to spawn order).
+                        // agent_finish_seq and messages are disjoint fields, so
+                        // it can be incremented directly while the card borrow lives
                         self.agent_finish_seq += 1;
                         card.finished_seq = Some(self.agent_finish_seq);
                         card.finished = true;
                         card.live_note = None;
                         self.auto_scroll();
                     } else if let Some(item) = item {
-                        // 活动项 → 进度行文本：tool → "工具名 摘要"；assistant → 正文首行；
-                        // user 忽略。统一压单行截 60 字符
+                        // Activity item → progress line text: tool → "tool name
+                        // summary"; assistant → first line of the body; user
+                        // ignored. Uniformly flattened to one line, truncated to
+                        // 60 chars
                         let note = match item.role.as_str() {
-                            "tool" => Some(format!(
-                                "{} {}",
-                                item.tool.as_deref().unwrap_or("工具"),
-                                item.text
-                            )),
+                            "tool" => {
+                                let tool_fallback = rust_i18n::t!("thread.tool_fallback");
+                                Some(format!(
+                                    "{} {}",
+                                    item.tool.as_deref().unwrap_or(tool_fallback.as_ref()),
+                                    item.text
+                                ))
+                            }
                             "assistant" => item.text.lines().next().map(str::to_string),
                             _ => None,
                         }
@@ -328,8 +348,9 @@ impl ThreadView {
                         }
                     }
                 }
-                // duration_ms=0 是会话回放的收尾事件：只退出流式状态，不写用时脚注；
-                // stats 有值的历史回合（TurnStats 回放）仍写完整统计脚注
+                // duration_ms=0 is the session replay's closing event: only leave
+                // the streaming state, no duration footer; historical turns with
+                // stats (TurnStats replay) still get the full stats footer
                 let duration = stats
                     .as_ref()
                     .map(|s| s.duration_ms)
@@ -338,10 +359,14 @@ impl ThreadView {
                 if duration_ms > 0 || stats.is_some() {
                     let stats_part = stats.as_ref().map(format_turn_stats).unwrap_or_default();
                     if let Some(message) = self.messages.last_mut() {
-                        message.footer = Some(format!(
-                            "回合结束 · 用时 {:.1}s{stats_part}",
-                            duration as f64 / 1000.0
-                        ));
+                        message.footer = Some(
+                            rust_i18n::t!(
+                                "thread.turn_end",
+                                n = duration as f64 / 1000.0 : {:.1},
+                                stats = stats_part
+                            )
+                            .to_string(),
+                        );
                     }
                 }
                 self.settle_work_rows(WorkState::Completed {
@@ -352,11 +377,14 @@ impl ThreadView {
             Event::TurnAborted { .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;
-                // 中止可能发生在压缩摘要请求期间（收不到 ContextCompacted），兜底清标记
+                // An abort can happen during the compact summary request
+                // (ContextCompacted never arrives); clear the flag as a fallback
                 self.compacting = false;
-                // 中止收尾：没等到 ToolCallEnd 的工具卡停在「执行中」转圈——
-                // 全部落定（清实时进度行，无输出置「已停止」）。只有最后一条
-                // assistant 消息可能有未完成段，遍历全部消息只是防御乱序
+                // Abort wrap-up: tool cards that never saw ToolCallEnd are stuck
+                // spinning as "running" — settle them all (clear the live
+                // progress line; with no output, set "stopped"). Only the last
+                // assistant message can have unfinished segments; iterating all
+                // messages is just out-of-order defense
                 for message in &mut self.messages {
                     for segment in &mut message.segments {
                         if let Segment::ToolCall {
@@ -370,13 +398,13 @@ impl ThreadView {
                             *done = true;
                             *live_note = None;
                             if output.is_empty() {
-                                *output = "已停止".to_string();
+                                *output = rust_i18n::t!("thread.stopped").to_string();
                             }
                         }
                     }
                 }
                 if let Some(message) = self.messages.last_mut() {
-                    message.footer = Some("已停止".to_string());
+                    message.footer = Some(rust_i18n::t!("thread.stopped").to_string());
                 }
                 self.settle_work_rows(WorkState::Stopped);
                 self.set_streaming(false, cx);
@@ -405,13 +433,19 @@ impl ThreadView {
             }
             Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
             }
-            // 右侧「子代理」tab 的数据（AppView 直接路由给面板，消息流不展示）
+            // Data for the right "Subagents" tab (AppView routes it straight to the panel; the message flow does not show it)
             Event::SubagentHistory { .. } => {}
-            Event::UserMessage { text, files, .. } => {
-                // 链接尾巴不进队列匹配（queued 里是用户输入原文）
-                let (body, _) = split_image_links(text.as_str());
-                let trimmed = body.trim().to_string();
-                self.append_user_message(text.clone(), files, cx);
+            Event::UserMessage {
+                text,
+                files,
+                image_nums,
+                ..
+            } => {
+                // The event body is already clean text (attachment links are no
+                // longer embedded), and queued holds the user's raw input too, so
+                // match directly; thumbnails load by image_nums
+                let trimmed = text.trim().to_string();
+                self.append_user_message(text.clone(), files, image_nums, cx);
                 if let Some(pos) = self
                     .queued
                     .iter()
@@ -423,7 +457,7 @@ impl ThreadView {
             Event::MessageQueued { text, .. } => {
                 self.queued.push(text);
             }
-            // 这些事件由 AppView::route_event 拦截处理，不到这里
+            // These events are intercepted by AppView::route_event and never reach here
             Event::SessionList { .. }
             | Event::SessionTitleChanged { .. }
             | Event::FileSearchResults { .. }
@@ -441,22 +475,27 @@ impl ThreadView {
             | Event::McpServerList { .. }
             | Event::ModelInfo { .. }
             | Event::WorkspaceList { .. } => {}
-            Event::Error { message, .. } => {
+            Event::Error { error, .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;
                 self.settle_work_rows(WorkState::Stopped);
                 self.set_streaming(false, cx);
-                self.messages
-                    .push(ChatMessage::system(format!("⚠ {message}")));
+                // Core structured error → localized text (detail is the English original as a note)
+                self.messages.push(ChatMessage::system(format!(
+                    "⚠ {}",
+                    crate::errors::core_error_text(&error)
+                )));
             }
         }
         cx.notify();
     }
 
-    /// 回合结束（完成/中断/错误）时落定工作行：该轮的思考块与工具卡折叠成
-    /// 「已工作 N 秒 ›」一行。从消息末尾向前标到 User 消息为止（跳过 System——
-    /// 压缩分隔条可能插在回合中间）；is_none 守卫保证回放里 TurnStats 补发的
-    /// TurnComplete（带真实耗时）与收尾 TurnComplete（duration_ms=0）不互相覆盖
+    /// Settle work rows when the turn ends (complete/abort/error): the turn's
+    /// thinking blocks and tool cards collapse into one "worked N s ›" row. Marks
+    /// backward from the last message up to the User message (skipping System —
+    /// a compact divider can sit mid-turn); the is_none guard ensures the
+    /// replayed TurnStats top-up TurnComplete (with the real duration) and the
+    /// closing TurnComplete (duration_ms=0) do not overwrite each other
     fn settle_work_rows(&mut self, state: WorkState) {
         for message in self.messages.iter_mut().rev() {
             if message.role == Role::User {
@@ -475,8 +514,9 @@ impl ThreadView {
         }
     }
 
-    /// 收尾当前消息里还在计时的思考段，定格用时。
-    /// 回放重建的回合没有真实时钟（事件在一瞬间到达），保持 None 显示「持续了几秒」。
+    /// Settle the still-ticking thinking segments in the current message, fixing
+    /// their durations. Turns rebuilt by replay have no real clock (events arrive
+    /// in an instant), so they keep None and show "lasted a few seconds".
     pub(crate) fn finish_thinking(&mut self) {
         if self.replay_turn {
             return;
@@ -494,7 +534,7 @@ impl ThreadView {
         }
     }
 
-    /// 在当前助手消息里按 item_id 找 segment，找不到则用 `create` 追加。
+    /// Find a segment by item_id in the current assistant message; append via `create` when not found.
     pub(crate) fn find_or_create(
         &mut self,
         item_id: &str,
@@ -521,10 +561,13 @@ impl ThreadView {
         self.messages.last_mut()?.segments.get_mut(six)
     }
 
-    /// 思考滚动行的滚动间隔定时器（ZCode QueuedSummaryContent 的 promote 定时器）：
-    /// 到点滚入下一条排队行，还有排队则续期。代次不符（段已 reset/又滚过）的
-    /// 旧定时器直接作废。在播思考段恒在最后一条消息里，current_segment 够用；
-    /// 找不到说明段已收尾/不属于当前轮，定时器链自然终止。
+    /// Scroll-interval timer for the thinking scrolling line (ZCode
+    /// QueuedSummaryContent's promote timer): on expiry roll in the next queued
+    /// line, re-arming while the queue is non-empty. Stale timers with
+    /// mismatched generations (segment already reset or scrolled again) are
+    /// discarded. The playing thinking segment is always in the last message, so
+    /// current_segment suffices; not finding it means the segment settled or
+    /// belongs to another turn, and the timer chain ends naturally.
     fn spawn_ticker_timer(&mut self, six: usize, cx: &mut Context<Self>) {
         let Some(Segment::Thinking { ticker, .. }) = self.current_segment(six) else {
             return;

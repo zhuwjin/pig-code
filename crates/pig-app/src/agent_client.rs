@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use pig_protocol::{ApprovalDecision, ExecMode, Op};
 
-/// UI 侧对 agent 线程的薄封装（多会话；所有操作带 session_id）。
+/// Thin UI-side wrapper around the agent thread (multi-session; all operations
+/// carry a session_id).
 #[derive(Clone)]
 pub struct AgentClient {
     ops: async_channel::Sender<Op>,
@@ -62,7 +63,7 @@ impl AgentClient {
         });
     }
 
-    /// 手动重命名（core 置 title_custom，自动命名不再覆盖）
+    /// Manual rename (core sets title_custom; auto-naming no longer overrides it)
     pub fn rename_session(&self, session_id: &str, title: &str) {
         self.send(Op::UpdateSessionMeta {
             session_id: session_id.to_string(),
@@ -78,7 +79,8 @@ impl AgentClient {
         });
     }
 
-    /// 会话分叉：以源会话前 turns 个回合的历史派生新会话并切换过去
+    /// Session fork: derive a new session from the source session's first
+    /// `turns` turns of history and switch to it
     pub fn fork_session(&self, session_id: &str, turns: usize) {
         self.send(Op::ForkSession {
             session_id: session_id.to_string(),
@@ -107,7 +109,8 @@ impl AgentClient {
         self.send(Op::Interrupt { session_id });
     }
 
-    /// 加载后台子代理的完整对话（右侧「子代理」tab 只读展示）
+    /// Load a background subagent's full conversation (read-only display in the
+    /// right "Subagent" tab)
     pub fn load_subagent(&self, session_id: String, agent_id: String) {
         self.send(Op::LoadSubagent {
             session_id,
@@ -157,7 +160,8 @@ impl AgentClient {
         self.send(Op::SetExecMode { session_id, mode });
     }
 
-    /// 计划模式开关（与执行模式正交；core 写穿 store，不回事件）
+    /// Plan mode toggle (orthogonal to exec mode; core writes through to the
+    /// store, no event back)
     pub fn set_plan_mode(&self, session_id: String, enabled: bool) {
         self.send(Op::SetPlanMode {
             session_id,
@@ -173,7 +177,8 @@ impl AgentClient {
         });
     }
 
-    /// 审批决议回复（feedback 仅计划「修改」路径非 None，kimi Revise 携带给模型）
+    /// Reply with an approval decision (feedback is non-None only on the plan
+    /// "Revise" path; kimi Revise carries it to the model)
     pub fn approval_reply(
         &self,
         request_id: String,
@@ -209,7 +214,8 @@ impl AgentClient {
         });
     }
 
-    /// 查询会话已连接的 MCP server 名清单（设置页展示用）
+    /// Query the list of MCP server names connected for a session (shown in the
+    /// settings page)
     pub fn list_mcp_servers(&self, session_id: String) {
         self.send(Op::ListMcpServers { session_id });
     }

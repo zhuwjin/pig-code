@@ -5,9 +5,10 @@ use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
 use std::time::Duration;
 
-/// 会话分叉：两回合的会话 fork turns=1 → 新会话按冷路径打开（SessionConfigured
-/// + replay），回放只含第一回合；store meta 继承模型选择、标题带「（分叉）」
-/// 且 title_custom（自动命名不覆盖）。
+/// Session fork: a two-turn session forked with turns=1 opens the new session
+/// via the cold path (SessionConfigured + replay); the replay contains only the
+/// first turn; store meta inherits the model choice, the title carries the
+/// " (fork)" suffix, and title_custom is set (auto-naming must not overwrite).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_session_truncates_and_switches() {
     let (config_path, cwd, data_dir) = setup("fork");
@@ -16,7 +17,7 @@ async fn fork_session_truncates_and_switches() {
     let events = agent.events.clone();
     let session_id = new_session(&agent, cwd.clone()).await;
 
-    for content in ["读一下 mock 文件并总结", "再总结一遍"] {
+    for content in ["Read the mock file and summarize", "Summarize once more"] {
         agent
             .ops
             .send(Op::SendMessage {
@@ -55,14 +56,18 @@ async fn fork_session_truncates_and_switches() {
         ..
     }) = configured.last()
     else {
-        panic!("分叉后应有新会话的 SessionConfigured: {configured:?}");
+        panic!("fork should produce a SessionConfigured for the new session: {configured:?}");
     };
     let fork_id = fork_id.clone();
-    assert_eq!(model, "mock-model", "模型解析应继承源会话（配置默认）");
-    assert_eq!(provider_name, "Mock 供应商");
+    assert_eq!(
+        model, "mock-model",
+        "model resolution should inherit the source session (config default)"
+    );
+    assert_eq!(provider_name, "Mock Provider");
 
-    // 回放（含第一回合 TurnStats 的 TurnComplete 与 duration_ms=0 的收尾
-    // TurnComplete）全部排完再断言内容
+    // Let the replay (including the first turn's TurnStats-carrying TurnComplete
+    // and the closing TurnComplete with duration_ms=0) drain fully before
+    // asserting content
     let replay = recv_until(&events, Duration::from_secs(10), |e| {
         matches!(e, Event::TurnComplete { stats: None, .. })
     })
@@ -77,41 +82,44 @@ async fn fork_session_truncates_and_switches() {
     assert_eq!(
         user_msgs.len(),
         1,
-        "回放应只有第一回合的用户消息: {user_msgs:?}"
+        "replay should contain only the first turn's user message: {user_msgs:?}"
     );
-    assert!(user_msgs[0].contains("读一下"));
+    assert!(user_msgs[0].contains("Read the mock"));
     assert!(
         replay.iter().any(|e| matches!(e, Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER))),
-        "回放应含第一回合的助手回复"
+        "replay should contain the first turn's assistant reply"
     );
-    // 第二回合的记录不得进入分叉 rollout
+    // The second turn's records must not enter the forked rollout
     let rollout =
         std::fs::read_to_string(data_dir.join("sessions").join(format!("{fork_id}.jsonl")))
             .unwrap();
     assert!(
-        !rollout.contains("再总结一遍"),
-        "分叉 rollout 不应含第二回合"
+        !rollout.contains("Summarize once more"),
+        "fork rollout must not contain the second turn"
     );
 
-    // 索引：分叉补发的 SessionList 在 C1 批里（先于 SessionConfigured 到达）
+    // Index: the SessionList re-emitted for the fork arrives in the C1 batch (before SessionConfigured)
     let listed = configured
         .iter()
         .find_map(|e| match e {
             Event::SessionList { sessions } => Some(sessions),
             _ => None,
         })
-        .expect("分叉应补发 SessionList");
+        .expect("fork should re-emit SessionList");
     let meta = listed
         .iter()
         .find(|s| s.id == fork_id)
-        .expect("列表应有分叉会话");
+        .expect("list should contain the forked session");
     assert!(
-        meta.title.contains("（分叉）"),
-        "标题应带分叉后缀: {}",
+        meta.title.ends_with(" (fork)"),
+        "title should carry the fork suffix (persisted English constant): {}",
         meta.title
     );
-    assert!(meta.title_custom, "分叉标题应固定（自动命名不覆盖）");
-    assert!(!meta.pinned, "置顶不继承");
+    assert!(
+        meta.title_custom,
+        "fork title should be fixed (auto-naming must not overwrite)"
+    );
+    assert!(!meta.pinned, "pinned flag must not be inherited");
 
     agent.shutdown();
 }

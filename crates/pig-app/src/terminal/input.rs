@@ -1,26 +1,29 @@
-//! 键盘映射与 IME 输入处理。
+//! Keyboard mapping and IME input handling.
 //!
-//! 核心抄 tty7 `src/terminal/input.rs`：keystroke_to_bytes（kitty CSI-u +
-//! legacy 命名键表 + xterm 修饰参数 + Ctrl 字母映射 C0）、TerminalInputHandler。
-//! 砍掉的部分：
-//! - `local_conpty` 分支（ConPTY Ctrl+J 特殊编码）——macOS 优先，Windows 留 TODO；
-//! - `reshape_option_keystroke` / `defer_to_ime` / `meta_chord_bypasses_ime`
-//!   ——Option-as-Meta 依赖 tty7 的 gpui fork patch（`prefers_ime_for_printable_keys`），
-//!   gpui-pre 没有该 API，走默认 IME 路径（可打印字符经 key_char 直写 PTY）。
+//! Core ported from tty7 `src/terminal/input.rs`: keystroke_to_bytes (kitty
+//! CSI-u plus the legacy named-key table plus xterm modifier params plus
+//! Ctrl-letter C0 mapping) and TerminalInputHandler.
+//! Dropped parts:
+//! - the `local_conpty` branch (ConPTY Ctrl+J special encoding); macOS first,
+//!   Windows left as a TODO;
+//! - `reshape_option_keystroke` / `defer_to_ime` / `meta_chord_bypasses_ime`:
+//!   Option-as-Meta relies on a gpui fork patch in tty7
+//!   (`prefers_ime_for_printable_keys`); gpui-pre lacks that API, so the default
+//!   IME path is used (printable chars go straight to the PTY via key_char).
 
 use alacritty_terminal::term::TermMode;
 use gpui_kit::{App, Bounds, InputHandler, Keystroke, Pixels, UTF16Selection, Window};
 
 use super::view::TerminalView;
 
-/// 影响按键编码的终端状态：kitty 键盘协议各标志 + DECCKM 应用光标键模式
-/// （参考 tty7 input.rs 的 KeyFlags）
+/// Terminal state that affects key encoding: the kitty keyboard protocol flags
+/// plus the DECCKM application cursor keys mode (see KeyFlags in tty7 input.rs)
 #[derive(Clone, Copy, Default)]
 pub(crate) struct KeyFlags {
     disambiguate: bool,
     report_all_keys: bool,
     report_text: bool,
-    /// DECCKM。ncurses 程序经 smkx 打开后只认 SS3 形式的方向键
+    /// DECCKM. ncurses programs that enable it via smkx only accept arrow keys in SS3 form
     app_cursor: bool,
 }
 
@@ -53,8 +56,8 @@ pub(crate) fn keystroke_to_bytes(ks: &Keystroke, flags: KeyFlags) -> Option<Vec<
     legacy_keystroke_to_bytes(ks, flags)
 }
 
-/// xterm 的修饰键参数：1 + shift + 2*alt + 4*ctrl。
-/// platform（cmd）修饰键没有 xterm 编码，刻意不计入。
+/// xterm's modifier parameter: 1 + shift + 2*alt + 4*ctrl.
+/// The platform (cmd) modifier has no xterm encoding and is deliberately excluded.
 fn xterm_mods(m: &gpui_kit::Modifiers) -> u32 {
     1 + u32::from(m.shift) + 2 * u32::from(m.alt) + 4 * u32::from(m.control)
 }
@@ -80,8 +83,9 @@ fn encode_kitty(ks: &Keystroke, kitty: KeyFlags) -> Option<Vec<u8>> {
         return Some(csi_u(code, mods, None));
     }
 
-    // F3 是 kitty 协议与 terminfo 唯一不共享的功能键（详见 tty7 input.rs:165 的
-    // 长注）：协商过协议的程序只给 CSI 13~ 形式，legacy 路径仍发 \x1bOR。
+    // F3 is the only functional key the kitty protocol and terminfo do not
+    // share (see the long note at tty7 input.rs:165): programs that negotiated
+    // the protocol only take the CSI 13~ form, while the legacy path still sends \x1bOR.
     if ks.key.as_str() == "f3" {
         let s = if mods == 1 {
             "\x1b[13~".to_string()
@@ -124,11 +128,12 @@ fn csi_u(code: u32, mods: u32, text: Option<&[u32]>) -> Vec<u8> {
     s.into_bytes()
 }
 
-/// 光标/编辑/功能键，按我们公告的 `xterm-256color` terminfo 编码——ncurses
-/// 逐字节比对的正是这套序列。
+/// Cursor/editing/function keys, encoded per the `xterm-256color` terminfo we
+/// advertise; these are exactly the sequences ncurses compares byte for byte.
 ///
-/// 无修饰时方向键遵循 DECCKM：平时 CSI A，应用光标键模式开时 SS3 A。
-/// 带修饰时总是 CSI 1;<mods>A（xterm 在修饰键下不理会 DECCKM）。
+/// Unmodified arrow keys follow DECCKM: normally CSI A, SS3 A when application
+/// cursor keys mode is on. With modifiers it is always CSI 1;<mods>A (xterm
+/// ignores DECCKM under modifiers).
 fn functional_key(key: &str, mods: u32, app_cursor: bool) -> Option<Vec<u8>> {
     let letter = match key {
         "up" => Some('A'),
@@ -149,7 +154,7 @@ fn functional_key(key: &str, mods: u32, app_cursor: bool) -> Option<Vec<u8>> {
     }
     if let Some(form) = function_key(key) {
         let s = match form {
-            // kf1=\EOP .. kf4=\EOS；带修饰走 CSI 1;<mods>（kf13=\E[1;2P 即 Shift+F1）
+            // kf1=\EOP .. kf4=\EOS; with modifiers go CSI 1;<mods> (kf13=\E[1;2P, i.e. Shift+F1)
             FunctionKey::Ss3(l) if mods == 1 => format!("\x1bO{l}"),
             FunctionKey::Ss3(l) => format!("\x1b[1;{mods}{l}"),
             FunctionKey::Tilde(n) if mods == 1 => format!("\x1b[{n}~"),
@@ -175,19 +180,21 @@ fn functional_key(key: &str, mods: u32, app_cursor: bool) -> Option<Vec<u8>> {
     None
 }
 
-/// xterm-256color 给功能键的两种形态
+/// The two shapes xterm-256color gives functional keys
 enum FunctionKey {
-    /// 无修饰 SS3 <letter>，带修饰 CSI 1;<mods> <letter>
+    /// Unmodified SS3 <letter>, with modifiers CSI 1;<mods> <letter>
     Ss3(char),
-    /// CSI <n>~ 或 CSI <n>;<mods>~
+    /// CSI <n>~ or CSI <n>;<mods>~
     Tilde(u32),
 }
 
-/// f1..f12——gpui 全平台统一的键名，也是 xterm-256color 自有键的范围。
-/// 编号是 PC 风格表（从 15 起，跳过 16 与 22——VT220 键盘的 do/help），
-/// 猜连续区间是把 F6 发成 F5 的经典错误。F13 起刻意不收：terminfo 里
-/// kf13+ 是 F1..F8 的修饰形式，只有 kitty 协议能无歧义地表示它们
-/// （见 kitty_function_key）。
+/// f1..f12: the key names gpui uses uniformly across platforms, and exactly the
+/// range of keys xterm-256color natively defines. Numbering follows the PC-style
+/// table (starting at 15, skipping 16 and 22, the VT220 keyboard's do/help);
+/// guessing a contiguous range is the classic bug of sending F6 as F5. F13 and up
+/// are deliberately excluded: in terminfo, kf13+ are the modified forms of
+/// F1..F8, and only the kitty protocol can represent them unambiguously
+/// (see kitty_function_key).
 fn function_key(key: &str) -> Option<FunctionKey> {
     Some(match key {
         "f1" => FunctionKey::Ss3('P'),
@@ -206,7 +213,7 @@ fn function_key(key: &str) -> Option<FunctionKey> {
     })
 }
 
-/// f13..f24 只能走 kitty 协议（私有区码点 57376..57387）
+/// f13..f24 can only go through the kitty protocol (private-use code points 57376..57387)
 fn kitty_function_key(key: &str) -> Option<u32> {
     let n: u32 = key.strip_prefix('f')?.parse().ok()?;
     (13..=24).contains(&n).then(|| 57376 + (n - 13))
@@ -236,12 +243,14 @@ fn associated_text(ks: &Keystroke) -> Option<Vec<u32>> {
     (!cps.is_empty()).then_some(cps)
 }
 
-/// Ctrl+<key> 组合对应的 C0 控制字节。
+/// The C0 control byte for a Ctrl+<key> chord.
 ///
-/// 字母折叠到 0x01..=0x1A；其余是 VT-220 表（第 3.2.5 章）：数字 2..8 及
-/// 同键位的标点（Ctrl+^ 按 Ctrl+Shift+6 输入时 shift 已被吃掉）。
-/// Ctrl+/ 不在表里，是 xterm 以来的惯例 US（vim 的 <C-/>）。Ctrl+- 刻意
-/// 不收：macOS 之外它是缩小字号，readline 的 undo 由 Ctrl+_ 服务。
+/// Letters fold to 0x01..=0x1A; the rest is the VT-220 table (chapter 3.2.5):
+/// digits 2..8 plus the punctuation on the same key positions (for Ctrl+^ typed
+/// as Ctrl+Shift+6, shift is already consumed). Ctrl+/ is not in the table; it
+/// is the US convention inherited from xterm (vim's <C-/>). Ctrl+- is
+/// deliberately excluded: outside macOS it shrinks the font size, and readline's
+/// undo is served by Ctrl+_.
 fn ctrl_c0(key: &str) -> Option<u8> {
     if let [b] = key.as_bytes()
         && b.is_ascii_alphabetic()
@@ -269,9 +278,10 @@ fn legacy_keystroke_to_bytes(ks: &Keystroke, flags: KeyFlags) -> Option<Vec<u8>>
         && let Some(b) = ctrl_c0(key)
     {
         if b == b'\n' && !m.alt && !m.shift {
-            // Ctrl+J = LF。TODO(Windows): ConPTY 把裸 LF 解码成 Ctrl+Enter，
-            // tty7 对此发特殊 APC 序列（input.rs:43 legacy_newline_bytes），
-            // Windows 分支验证时再补
+            // Ctrl+J = LF. TODO(Windows): ConPTY decodes a bare LF as
+            // Ctrl+Enter; tty7 sends a special APC sequence for that
+            // (input.rs:43 legacy_newline_bytes), to be added when the Windows
+            // branch is validated
             return Some(b"\n".to_vec());
         }
         if m.alt {
@@ -303,7 +313,7 @@ fn legacy_keystroke_to_bytes(ks: &Keystroke, flags: KeyFlags) -> Option<Vec<u8>>
     if m.platform {
         return None;
     }
-    // 可打印字符优先用 key_char（IME 提交走 InputHandler，不进 key_down）
+    // Printable chars prefer key_char (IME commits go through InputHandler, not key_down)
     if let Some(ch) = &ks.key_char
         && !ch.is_empty()
     {
@@ -317,11 +327,12 @@ fn legacy_keystroke_to_bytes(ks: &Keystroke, flags: KeyFlags) -> Option<Vec<u8>>
     None
 }
 
-/// IME 输入处理器（参考 tty7 input.rs 的 TerminalInputHandler）。
-/// 每帧 paint 时经 `window.handle_input` 注册；只有 focus 在该终端上才生效。
+/// IME input handler (see TerminalInputHandler in tty7 input.rs).
+/// Registered via `window.handle_input` at every paint; only effective while
+/// this terminal holds focus.
 pub(crate) struct TerminalInputHandler {
     view: gpui_kit::Entity<TerminalView>,
-    /// 光标 cell 的屏幕坐标，IME 候选窗锚点（无光标时整个输入失灵，IME 用窗口默认位置）
+    /// Screen coordinates of the cursor cell, the anchor for the IME candidate window (with no cursor the whole input goes dead; the IME uses the window default position)
     cursor_bounds: Option<Bounds<Pixels>>,
 }
 

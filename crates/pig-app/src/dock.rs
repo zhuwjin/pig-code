@@ -1,28 +1,31 @@
 use super::*;
 
 impl AppView {
-    /// 安装 dock 布局（构造后由 main 调用，此时 AppView 实体已就位，面板可持
-    /// weak 引用）：左 dock = 侧栏，center = 会话区，右 dock = 改动面板。
-    /// 锁定布局防拖拽重排、只保留调宽；右 dock 默认收起（toggle 一次）。
+    /// Install the dock layout (called by main after construction, when the
+    /// AppView entity is in place and panels can hold weak references): left
+    /// dock = sidebar, center = session area, right dock = changes panel. The
+    /// layout is locked against drag-rearranging, keeping only width
+    /// adjustment; the right dock starts collapsed (one toggle).
     pub(crate) fn install_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::dock::DockLayout;
         let app = cx.weak_entity();
         let center = cx.new(|cx| DockCenterPanel {
             app: app.clone(),
             focus_handle: cx.focus_handle(),
-            _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
+            _app_observer: observe_app_notify(&app, cx).expect("AppView entity should be in place"),
         });
         let right = cx.new(|cx| DockRightPanel {
             app: app.clone(),
             focus_handle: cx.focus_handle(),
-            _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
+            _app_observer: observe_app_notify(&app, cx).expect("AppView entity should be in place"),
         });
-        // 底部 dock（终端）面板实体常驻 AppView：dock 全隐=移除，展开时
-        //（apply_dock_flags / mount_dock_edge）才把它挂回
+        // The bottom dock (terminal) panel entity lives in AppView permanently:
+        // the dock fully hidden = removed, and only remounted on expansion
+        // (apply_dock_flags / mount_dock_edge)
         self.dock_bottom_panel = Some(cx.new(|cx| DockBottomPanel {
             app: app.clone(),
             focus_handle: cx.focus_handle(),
-            _app_observer: observe_app_notify(&app, cx).expect("AppView 实体已就位"),
+            _app_observer: observe_app_notify(&app, cx).expect("AppView entity should be in place"),
         }));
         self.dock.update(cx, |dock, cx| {
             dock.set_center(
@@ -45,27 +48,34 @@ impl AppView {
             );
             dock.set_dock_size(DockPlacement::Right, px(self.right_w), window, cx);
             dock.set_locked(true, window, cx);
-            // 右侧面板默认收起：进会话不自动显示改动
+            // Right panel collapsed by default: entering a session does not
+            // auto-show changes
             dock.toggle_dock(DockPlacement::Right, window, cx);
         });
     }
 
-    /// 终端面板是否处于可见上下文（仅会话态；hero/无会话/设置页不挂底部 dock）。
-    /// 底部 dock 的开合标志位 = terminal_open && terminal_visible
+    /// Whether the terminal panel is in a visible context (session state only;
+    /// hero/no-session/settings pages do not mount the bottom dock).
+    /// The bottom dock's open flag = terminal_open && terminal_visible
     pub(crate) fn terminal_visible(&self, cx: &App) -> bool {
         !self.is_hero(cx) && self.current.is_some()
     }
 
-    /// dock 开合补间的渲染侧：开合标志位（sidebar_collapsed / right_open）是
-    /// 唯一事实源，翻转后登记一段宽度补间（见 [`DockSizeAnim`]），逐帧步进由
-    /// [`Self::schedule_dock_anim_frames`] 的 on_next_frame 链驱动——动画帧只
-    /// notify dock，与拖宽路径一致；若 notify AppView，dock 面板观察器会把
-    /// cached 的中心区/右面板连带标脏，整棵树每帧重建，纯浪费。补间期间 dock
-    /// 保持 open，dock_frame 自带的 overflow_hidden 裁掉出界内容，面板内容按
-    /// 目标宽锚定在分隔线一侧（Sidebar::render / render_right_dock_content），
-    /// 视觉上是滑出/滑入而非压缩重排，中心区宽度与面板同步连续变化（与拖宽
-    /// 同观感）。动画中途反向开关：从当前实际宽重新出发。reduce_motion 直接
-    /// 落终态。
+    /// Render side of the dock open/close tween: the open/close flags
+    /// (sidebar_collapsed / right_open) are the sole source of truth; after a
+    /// flip a width tween is registered (see [`DockSizeAnim`]), stepped frame by
+    /// frame by [`Self::schedule_dock_anim_frames`]'s on_next_frame chain.
+    /// Animation frames notify only the dock, same as the width-drag path;
+    /// notifying AppView would make the dock panel observers dirty the cached
+    /// center/right panels too, rebuilding the whole tree every frame — pure
+    /// waste. During the tween the dock stays open, dock_frame's built-in
+    /// overflow_hidden clips out-of-bounds content, and panel content anchors to
+    /// the divider side at the target width (Sidebar::render /
+    /// render_right_dock_content), so visually it slides out/in rather than
+    /// compressing and reflowing, and the center width changes continuously in
+    /// sync with the panel (same look as width dragging). Reversing the toggle
+    /// mid-animation restarts from the current actual width. reduce_motion lands
+    /// on the end state directly.
     pub(crate) fn step_dock_anim(
         &mut self,
         placement: DockPlacement,
@@ -76,17 +86,20 @@ impl AppView {
         let (flag_open, target_w) = match placement {
             DockPlacement::Left => (!self.sidebar_collapsed, self.sidebar_w),
             DockPlacement::Right => (self.right_open, self.right_w),
-            // 底部 dock = 终端面板：全隐语义（关闭即移除），且只在会话态可见
+            // Bottom dock = terminal panel: full-hide semantics (closed =
+            // removed), and visible only in session state
             DockPlacement::Bottom => (
                 self.terminal_open && self.terminal_visible(cx),
                 self.terminal_h,
             ),
             _ => return None,
         };
-        // 本侧边缘段进行中：方向一致等待其定时器收尾（展开段收尾会开 dock
-        // 并交接补间），方向相反撤段硬切。注意本函数每 render 对两侧各跑一
-        // 遍，动作必须限定在本侧确实要转换的分支里，否则会把刚起步的动画
-        // 在下一帧杀掉
+        // An edge phase is running on this side: with matching direction, wait
+        // for its timer to finish (the opening phase's finisher opens the dock
+        // and hands over to the tween); with opposite direction, drop the phase
+        // and hard-cut. Note this function runs once per side per render, so
+        // actions must stay within the branch where this side truly transitions,
+        // otherwise the just-started animation gets killed on the next frame
         if let Some(edge) = self.dock_edge
             && edge.placement == placement
         {
@@ -104,8 +117,10 @@ impl AppView {
                 dock.dock_size(placement).map(f32::from).unwrap_or(0.),
             )
         };
-        // 已有本侧补间在跑且目标仍一致：继续（中途的无关 render 不得重启或
-        // 清掉它——清了会让 dock 卡在半宽、被补钳硬拉回）
+        // A tween is already running on this side with a matching target:
+        // continue (unrelated mid-way renders must not restart or clear it —
+        // clearing would leave the dock stuck at half width and yanked back by
+        // the compensation clamp)
         if let Some(a) = anim {
             let want_to = if flag_open { target_w } else { DOCK_ANIM_MIN_W };
             if a.to == want_to {
@@ -113,7 +128,8 @@ impl AppView {
                 return Some(a);
             }
         }
-        // 稳态：无补间且 dock 开合已与标志位一致
+        // Steady state: no tween and the dock's open state already matches the
+        // flag
         if anim.is_none() && dock_open == flag_open {
             return None;
         }
@@ -121,8 +137,9 @@ impl AppView {
             self.apply_dock_flags(placement, window, cx);
             return None;
         }
-        // 走到这里 = 本侧确实要转换：另侧的展开边缘段还挂着（dock 延迟未开）
-        // 时先替它落终态，否则其标志位悬空
+        // Reaching here means this side truly transitions: if the other side's
+        // opening edge phase is still pending (dock opening deferred), land its
+        // end state first, otherwise its flag is left dangling
         if let Some(old) = self.dock_edge {
             if old.opening {
                 self.apply_dock_flags(old.placement, window, cx);
@@ -134,7 +151,9 @@ impl AppView {
         };
         if flag_open {
             if dock_open {
-                // 中途反向回展开（dock 已开在中间宽度）：从当前宽补间回目标
+                // Reversed back to expanding mid-way (dock already open at an
+                // intermediate width): tween from the current width back to the
+                // target
                 let anim = DockSizeAnim {
                     from: current,
                     to: target_w,
@@ -144,13 +163,18 @@ impl AppView {
                 self.schedule_dock_anim_frames(window, cx);
                 return Some(anim);
             }
-            // 展开前段：dock 保持关闭、中心区保持原宽，面板内容从窗口边滑入
-            // 下限位置（覆盖层），收尾定时器到点开 dock 并接中段补间
+            // Opening edge phase: the dock stays closed and the center keeps its
+            // width while panel content slides in from the window edge to the
+            // lower-bound position (overlay); the finisher timer then opens the
+            // dock and continues with the mid tween
             self.mount_dock_edge(placement, true, target_w, window, cx);
             return None;
         }
-        // 收起（新鲜收起或从展开补间反向）：中段补间 实际宽→下限，终态关
-        // dock 并挂后段滑出；时长按路程比例分摊，与前段/后段全程匀速
+        // Collapsing (fresh collapse or reversal from an expansion tween): the
+        // mid tween runs actual width → lower bound, and the end state closes
+        // the dock and mounts the closing slide-out; duration is apportioned by
+        // distance ratio, uniform with the leading/trailing phases across the
+        // whole motion
         let anim = DockSizeAnim {
             from: current,
             to: DOCK_ANIM_MIN_W,
@@ -161,10 +185,14 @@ impl AppView {
         Some(anim)
     }
 
-    /// 挂边缘段覆盖层并起收尾定时器（+20ms 余量保证 with_animation 先走完，
-    /// 早收尾会在透明层下露出双重内容）：展开段到点开 dock（下限宽）、接中
-    /// 段补间（from=下限读回实际值），收起段到点仅清层。定时器按代次与标志
-    /// 位双重校验，被反向抢占时安全空过。
+    /// Mount the edge phase overlay and start its finisher timer (+20ms
+    /// headroom so with_animation finishes first; finishing early would expose
+    /// doubled content under the transparent layer): when the opening phase
+    /// expires it opens the dock (at lower-bound width) and continues with the
+    /// mid tween (from = lower bound read back as the actual value); when the
+    /// closing phase expires it only clears the layer. The timer is
+    /// double-checked against generation and flag, safely turning into a no-op
+    /// when preempted by a reversal.
     pub(crate) fn mount_dock_edge(
         &mut self,
         placement: DockPlacement,
@@ -195,21 +223,24 @@ impl AppView {
                     }
                     this.dock_edge = None;
                     if edge.opening {
-                        // 标志位中途被反向则就此打住（dock 保持关闭 = 稳态）
+                        // If the flag was reversed mid-way, stop right here
+                        // (dock stays closed = steady state)
                         let flag_open_now = match edge.placement {
                             DockPlacement::Left => !this.sidebar_collapsed,
                             DockPlacement::Right => this.right_open,
                             DockPlacement::Bottom => {
                                 this.terminal_open && this.terminal_visible(cx)
                             }
-                            _ => unreachable!("edge 只产生于 Left/Right/Bottom"),
+                            _ => unreachable!("edge only originates from Left/Right/Bottom"),
                         };
                         if !flag_open_now {
                             cx.notify();
                             return;
                         }
-                        // 开 dock（下限宽）并接中段补间，交接帧与覆盖层内容
-                        // 像素一致。底部 dock 关闭即移除，需先挂回
+                        // Open the dock (at lower-bound width) and continue with
+                        // the mid tween; the handover frame matches the overlay
+                        // content pixel for pixel. The bottom dock is removed
+                        // when closed, so remount it first
                         if edge.placement == DockPlacement::Bottom
                             && !this.dock.read(cx).has_dock(edge.placement)
                         {
@@ -260,9 +291,13 @@ impl AppView {
         .detach();
     }
 
-    /// 边缘段覆盖层：容器固定在下限宽（100px）、贴窗口边，内容按目标宽、
-    /// 从「贴分隔线的交接位」向窗口外滑动（展开）/从窗外滑到交接位（收起），
-    /// 与中段补间同匀速（时长按路程比例分摊）。滑动边带 1px 分隔线色。
+    /// Edge phase overlay: the container is fixed at the lower-bound width
+    /// (100px) and flush with the window edge; the content, sized to the target
+    /// width, slides from the divider-aligned handover position out of the
+    /// window (opening), or from outside the window in to the handover position
+    /// (closing), at the same uniform speed as the mid tween (duration
+    /// apportioned by distance ratio). The sliding edge carries a 1px divider
+    /// color.
     pub(crate) fn render_dock_edge(
         &mut self,
         window: &mut Window,
@@ -272,14 +307,17 @@ impl AppView {
         let placement = edge.placement;
         let width = edge.width;
         let opening = edge.opening;
-        // 底部 dock 走垂直滑动版（容器在中央列底部横带，不跨左右 dock）
+        // The bottom dock uses the vertical slide variant (the container is a
+        // horizontal band at the bottom of the center column, not spanning the
+        // left/right docks)
         if placement == DockPlacement::Bottom {
             return Some(self.render_bottom_dock_edge(width, opening, window, cx));
         }
         let w = px(width);
-        // 内容实体只在覆盖层出现一次：边缘段两种时序下真实 dock 都不渲染它。
-        // 左=侧栏（自带 sidebar 底色）；右=面板内容（dock 皮肤平时铺的
-        // tab_bar 底色这里自铺）
+        // The content entity appears only once, in the overlay: under both edge
+        // phase timings the real dock does not render it. Left = sidebar
+        // (carries its own sidebar background); right = panel content (spreads
+        // the tab_bar background itself, which the dock skin normally spreads)
         let (bg, content): (Hsla, AnyElement) = match placement {
             DockPlacement::Left => (cx.theme().sidebar, self.sidebar.clone().into_any_element()),
             _ => (
@@ -308,19 +346,22 @@ impl AppView {
                         .left_0()
                         .w(w)
                         .bg(bg)
-                        // 滑动边 = 虚拟分隔线（边缘段期间 dock 未开，无把手线）
+                        // Sliding edge = virtual divider (during the edge phase
+                        // the dock is not open, no handle line)
                         .map(|this| match placement {
                             DockPlacement::Left => {
                                 this.border_r_1().border_color(cx.theme().border)
                             }
                             _ => this.border_l_1().border_color(cx.theme().border),
                         })
-                        // 默认 linear 缓动：与中段补间同匀速
+                        // Default linear easing: same uniform speed as the mid
+                        // tween
                         .with_animation(
                             ("dock-edge-slide", placement as usize),
                             Animation::new(duration),
                             move |el, delta| {
-                                // d = 内容从「完全出窗」到「交接位」的进度
+                                // d = content progress from "fully outside the
+                                // window" to the "handover position"
                                 let d = if opening { delta } else { 1. - delta };
                                 if slide_left {
                                     el.left(px(-width + DOCK_ANIM_MIN_W * d))
@@ -335,10 +376,12 @@ impl AppView {
         )
     }
 
-    /// 底部 dock 面板内容（终端面板）。
-    /// 开合补间/边缘段：内容固定目标高锚顶，dock 帧/覆盖层只裁剪（终端网格
-    /// 零 resize，防逐帧 SIGWINCH 重绘）；稳态（含官方把手拖拽）：填满 dock
-    /// 帧，终端跟随实时重排（真实终端的拖拽语义）
+    /// Bottom dock panel content (terminal panel).
+    /// During open/close tweens/edge phases: content holds the target height
+    /// anchored to the top while the dock frame/overlay only clips (zero
+    /// terminal grid resizes, avoiding per-frame SIGWINCH redraws); in the
+    /// steady state (including official handle drags): fill the dock frame,
+    /// with the terminal reflowing live (real terminal drag semantics)
     pub(crate) fn render_bottom_dock_content(
         &mut self,
         _window: &mut Window,
@@ -359,9 +402,12 @@ impl AppView {
         }
     }
 
-    /// 底部 dock 的边缘段覆盖层（垂直版）：容器 = 中央列底部 100px 横带
-    ///（让开左右 dock 当前占位），内容（终端面板，固定目标高）从窗底向
-    /// 交接位垂直滑动，与水平版同匀速同时长分摊。上缘带 1px 分隔线
+    /// Bottom dock edge phase overlay (vertical variant): the container is a
+    /// 100px horizontal band at the bottom of the center column (yielding to
+    /// the left/right docks' current extents); the content (terminal panel,
+    /// fixed target height) slides vertically from the window bottom to the
+    /// handover position, at the same uniform speed and duration apportionment
+    /// as the horizontal variant. The top edge carries a 1px divider
     fn render_bottom_dock_edge(
         &mut self,
         target_h: f32,
@@ -369,7 +415,9 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 左右 inset 取左右 dock 当前实际占位（其补间/边缘段期间是过渡值，近似即可）
+        // Left/right insets take the left/right docks' current actual extents
+        // (transition values during their tweens/edge phases, an approximation
+        // suffices)
         let (left_inset, right_inset) = {
             let dock = self.dock.read(cx);
             let inset = |p: DockPlacement| {
@@ -398,15 +446,17 @@ impl AppView {
                     .top_0()
                     .h(px(target_h))
                     .bg(cx.theme().background)
-                    // 滑动边 = 虚拟分隔线（边缘段期间 dock 未挂，无把手线）
+                    // Sliding edge = virtual divider (during the edge phase the
+                    // dock is not mounted, no handle line)
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    // 默认 linear 缓动：与中段补间同匀速
+                    // Default linear easing: same uniform speed as the mid tween
                     .with_animation(
                         ("dock-edge-slide", DockPlacement::Bottom as usize),
                         Animation::new(duration),
                         move |el, delta| {
-                            // d = 内容从「完全出窗」到「交接位」的进度
+                            // d = content progress from "fully outside the
+                            // window" to the "handover position"
                             let d = if opening { delta } else { 1. - delta };
                             el.top(px(DOCK_ANIM_MIN_W * (1. - d)))
                         },
@@ -416,8 +466,10 @@ impl AppView {
             .into_any_element()
     }
 
-    /// 注册 dock 开合动画的下一帧回调（on_next_frame 链）：回调里步进补间、
-    /// 按需自续。标记位防重复排队（左右两栏同帧起步 + 链自续都走这里）。
+    /// Register the next-frame callback for dock open/close animations (an
+    /// on_next_frame chain): the callback steps the tweens and self-continues as
+    /// needed. The flag prevents duplicate queuing (both panes starting on the
+    /// same frame plus chain self-continuation go through here).
     pub(crate) fn schedule_dock_anim_frames(
         &mut self,
         window: &mut Window,
@@ -431,7 +483,8 @@ impl AppView {
         window.on_next_frame(move |window, cx| {
             let Some(app) = app.upgrade() else { return };
             app.update(cx, |this, cx| {
-                // 回调已消费，先清标记再按需自续
+                // The callback is consumed: clear the flag first, then
+                // self-continue as needed
                 this.dock_anim_frames_scheduled = false;
                 if this.step_dock_anims_frame(window, cx) {
                     this.schedule_dock_anim_frames(window, cx);
@@ -440,11 +493,14 @@ impl AppView {
         });
     }
 
-    /// 补间步进一帧（左右两栏一起）：到点落终态并 notify AppView 一次（动画
-    /// 期间 AppView 树冻结，落定帧让树按终态重排）；否则匀速插值写 dock 宽——
-    /// 目标宽超出单帧步长封顶时按封顶走（掉帧不追帧），并取整像素（小数宽
-    /// 让分界线与内容抗锯齿发虚）。只 notify dock。返回是否还有活动补间
-    ///（false = 链终止）。
+    /// Step the tweens one frame (both panes together): on expiry, land the end
+    /// state and notify AppView once (the AppView tree is frozen during the
+    /// animation; the landing frame reflows the tree at the end state);
+    /// otherwise interpolate at uniform speed and write the dock width — when
+    /// the target exceeds the per-frame step cap, go by the cap (dropped frames
+    /// are not chased), and round to whole pixels (fractional widths make the
+    /// divider and content fuzzy with antialiasing). Notifies the dock only.
+    /// Returns whether any tween is still active (false = chain terminates).
     pub(crate) fn step_dock_anims_frame(
         &mut self,
         window: &mut Window,
@@ -483,18 +539,23 @@ impl AppView {
                     DockPlacement::Bottom => self.bottom_dock_anim = None,
                     _ => {}
                 }
-                // 收起后段：dock 已真正关闭（中心区瞬时补宽），剩余下限宽内
-                // 容由覆盖层同匀速滑出
+                // Closing phase: the dock is already truly closed (the center
+                // widens back instantly), and the remaining lower-bound-width
+                // content slides out via the overlay at the same uniform speed
                 if !flag_open && !cx.reduce_motion() {
                     self.mount_dock_edge(placement, false, target_w, window, cx);
                 }
-                // 动画期间 AppView 树冻结（不逐帧重渲染），落定补一次
+                // The AppView tree is frozen during the animation (no per-frame
+                // re-render); re-render once on landing
                 cx.notify();
                 continue;
             }
-            // 匀速线性插值：目标位置 = from→to 按时间。步长封顶朝「目标位
-            // 置」走且绝不倒退（单调向 to）——若朝 to 本身走，current 意外
-            // 超前（如 set_size 下限抬高了起点）会在终点附近来回修正抖动
+            // Uniform linear interpolation: target position = from→to by time.
+            // The step cap moves toward the "target position" and never
+            // regresses (monotonic toward to) — if it moved toward to itself, a
+            // current that unexpectedly runs ahead (e.g. set_size's lower bound
+            // raised the start) would jitter back and forth with corrections
+            // near the end
             let target = anim.from + (anim.to - anim.from) * t;
             let current = self
                 .dock
@@ -521,8 +582,8 @@ impl AppView {
         active
     }
 
-    /// 把一侧 dock 直接落到开合标志位对应的终态（跳过动画）：补间收尾、
-    /// reduce_motion 共用。
+    /// Land a dock side directly at the end state matching its open/close flag
+    /// (skipping the animation): shared by tween finishing and reduce_motion.
     pub(crate) fn apply_dock_flags(
         &mut self,
         placement: DockPlacement,
@@ -544,8 +605,10 @@ impl AppView {
         self.dock.update(cx, |dock, cx| {
             if flag_open {
                 if placement == DockPlacement::Bottom {
-                    // 底部 dock 全隐语义：关闭 = 移除，展开要先挂回（面板实体常驻
-                    // AppView，同一帧内 set_dock + set_size 不闪旧高）
+                    // Bottom dock full-hide semantics: closed = removed,
+                    // expansion must remount first (the panel entity lives in
+                    // AppView; set_dock + set_size within the same frame avoids
+                    // flashing the old height)
                     if !dock.has_dock(placement) {
                         let Some(panel) = bottom_panel else {
                             return;
@@ -556,102 +619,132 @@ impl AppView {
                             window,
                             cx,
                         );
-                        // 上游「拖到最小即收起到 29px 条」的手势与全隐模型冲突，禁用
+                        // The upstream "drag to minimum collapses into a 29px
+                        // strip" gesture conflicts with the full-hide model;
+                        // disable it
                         dock.set_dock_collapsible(placement, false, window, cx);
                     }
                     dock.set_dock_size(placement, px(target_w), window, cx);
                     return;
                 }
                 if !dock_open {
-                    // 先归零再 open：避免以旧宽先闪一帧
+                    // Zero the size before opening: avoid one frame flashing at
+                    // the old width
                     dock.set_dock_size(placement, px(0.), window, cx);
                     dock.toggle_dock(placement, window, cx);
                 }
-                // 精确落目标宽：补间最后一步按时间采样可能差几像素
+                // Land exactly on the target width: the tween's last
+                // time-sampled step may be off by a few pixels
                 dock.set_dock_size(placement, px(target_w), window, cx);
             } else if placement == DockPlacement::Bottom {
                 if dock.has_dock(placement) {
-                    // 全隐 = 移除（不用 toggle：closed 底部 dock 会留 29px 收起条）
+                    // Full hide = remove (not toggle: a closed bottom dock
+                    // leaves a 29px collapsed strip)
                     dock.remove_dock(placement, window, cx);
                 }
             } else if dock_open {
                 dock.toggle_dock(placement, window, cx);
-                // 关闭态宽度不参与布局，写回存储值供下次展开作目标
+                // The closed width does not participate in layout; write the
+                // stored value back as the next expansion's target
                 dock.set_dock_size(placement, px(target_w), window, cx);
             }
         });
     }
 
-    /// 右侧面板开关（标题栏面板按钮）：展开/收起，tab 状态保留。
-    /// 展开后没有激活 tab 时内容区显示面板首页（菜单页）。
+    /// Right panel toggle (title bar panel button): expand/collapse, tab state
+    /// is preserved. When expanded with no active tab, the content area shows
+    /// the panel home page (menu page).
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.right_open = !self.right_open;
         cx.notify();
     }
 }
 
-/// 三栏最小宽度（px）：侧栏 / 中心区 / 右面板。三者之和 = 窗口最小宽 960，
-/// 保证钳制区间恒非空（gpui-base 的拖拽钳制只有 PANEL_MIN_SIZE(100) 一档，
-/// 没有自定义区间 API，故在 render 里补钳）。
+/// Three-pane minimum widths (px): sidebar / center / right panel. Their sum
+/// equals the 960 minimum window width, keeping the clamp interval never empty
+/// (gpui-base's drag clamping has only the single PANEL_MIN_SIZE(100) tier and
+/// no custom-interval API, hence the extra clamp in render).
 pub(crate) const SIDEBAR_MIN_W: f32 = 200.;
 pub(crate) const CENTER_MIN_W: f32 = 480.;
 pub(crate) const RIGHT_PANEL_MIN_W: f32 = 280.;
 
-/// dock 开合宽度补间（中段）：dock 保持 open，宽度按时间从 from 匀速插值到
-/// to，由 on_next_frame 链每帧步进、每帧只 notify dock——与拖宽把手同一渲染
-/// 路径（中心区随之连续重排，拖宽实测流畅）。匀速 + 整数像素 + 单帧步长封
-/// 顶是关键：文本重排成本随单帧宽度增量超线性增长，缓动的速度峰值会让中间
-/// 某几帧突发重排（「中点顿一下」的根源），拖拽正是匀速小步长才流畅；掉帧
-/// 时封顶阻止追帧大步长，宁可动画略微拉长。面板内容按目标宽锚定在分隔线一
-/// 侧（Sidebar::render / render_right_dock_content），配合 dock_frame 的
-/// overflow_hidden 得到滑动而非压缩重排。
+/// Dock open/close width tween (mid phase): the dock stays open while the
+/// width interpolates uniformly over time from from to to, stepped every frame
+/// by the on_next_frame chain, notifying only the dock — the same render path
+/// as the drag handle (the center reflows continuously along with it; width
+/// dragging is measured smooth). Uniform speed + whole pixels + a per-frame
+/// step cap are the key: text reflow cost grows superlinearly with the
+/// per-frame width delta, and an eased speed peak would trigger bursts of
+/// reflow on a few middle frames (the root of the "midpoint hiccup"); dragging
+/// is smooth precisely because it is uniform with small steps. When frames
+/// drop, the cap prevents large catch-up steps — better to let the animation
+/// stretch slightly. Panel content anchors to the divider side at the target
+/// width (Sidebar::render / render_right_dock_content), which together with
+/// dock_frame's overflow_hidden yields a slide rather than a compressing
+/// reflow.
 #[derive(Clone, Copy)]
 pub(crate) struct DockSizeAnim {
     from: f32,
     to: f32,
-    /// 本段时长：与首尾边缘段（DockEdgePhase）按路程比例分摊总时长，全程
-    /// 匀速衔接
+    /// Duration of this phase: the total duration is apportioned by distance
+    /// ratio with the leading/trailing edge phases (DockEdgePhase), joining
+    /// uniformly across the whole motion
     duration: std::time::Duration,
     start: std::time::Instant,
 }
 
-/// dock 开合动画总时长（与拖宽一段侧栏的典型用时相当），中段补间与首尾边
-/// 缘段按路程比例分摊
+/// Total duration of dock open/close animations (comparable to typically
+/// dragging a sidebar through one stretch); the mid tween and the
+/// leading/trailing edge phases apportion it by distance ratio
 pub(crate) const DOCK_ANIM_DURATION: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// dock 开合单帧宽度步长封顶（px）
+/// Per-frame width step cap for dock open/close (px)
 pub(crate) const DOCK_ANIM_MAX_STEP: f32 = 32.;
 
-/// 补间宽度下限：gpui-base 的 `Dock::set_size` 有 PANEL_MIN_SIZE(100) 下限，
-/// 开着的 dock 无法更窄（拖宽同理，拖到 100 就到头）。首尾各 100px 因此走
-/// 覆盖层边缘段（见 DockEdgePhase），中段才补间真实宽度。
+/// Lower bound of the tween width: gpui-base's `Dock::set_size` enforces a
+/// PANEL_MIN_SIZE(100) floor, so an open dock cannot be narrower (same for
+/// width drags — 100 is the end of the road). The first and last 100px
+/// therefore go through the overlay edge phases (see DockEdgePhase), and only
+/// the middle phase tweens the real width.
 pub(crate) const DOCK_ANIM_MIN_W: f32 = 100.;
 
-/// dock 开合的边缘段覆盖层：补间宽度无法触达的 首/尾 100px 由绝对定位覆盖
-/// 层滑动补足（with_animation 样式补间，不失效任何视图缓存；面板内容实体
-/// 只在覆盖层出现一次——两种时序下真实 dock 都不渲染它）：
-/// - 展开前段（opening）：dock 保持关闭、中心区保持原宽，面板内容从窗口边
-///   滑入到下限位置；收尾定时器到点才开 dock（下限宽）并无缝交接给中段补
-///   间（交接帧两侧内容像素一致）；
-/// - 收起后段（!opening）：中段补间到下限时已真正关 dock（中心区瞬时补宽
-///   是「变宽」型重排，换行结构几乎不变、几乎不可见），覆盖层把剩余内容滑
-///   出去。
+/// Dock open/close edge phase overlay: the first/last 100px that the width
+/// tween cannot reach are covered by an absolutely positioned overlay slide (a
+/// with_animation style tween that invalidates no view caches; the panel
+/// content entity appears only once, in the overlay — under both timings the
+/// real dock does not render it):
+/// - Opening phase (opening): the dock stays closed and the center keeps its
+///   width while panel content slides in from the window edge to the
+///   lower-bound position; the finisher timer then opens the dock (at
+///   lower-bound width) and hands over seamlessly to the mid tween (the
+///   handover frame matches content on both sides pixel for pixel);
+/// - Closing phase (!opening): when the mid tween reaches the lower bound the
+///   dock is already truly closed (the center instantly widening back is a
+///   "widen"-type reflow whose line structure barely changes, nearly
+///   invisible), and the overlay slides the remaining content out.
 #[derive(Clone, Copy)]
 pub(crate) struct DockEdgePhase {
     placement: DockPlacement,
-    /// true = 展开前段（滑入，结束后开 dock 接补间）；false = 收起后段（滑出）
+    /// true = opening phase (slides in; opens the dock afterwards to continue
+    /// the tween); false = closing phase (slides out)
     opening: bool,
-    /// 面板内容固定宽（展开目标宽）
+    /// Fixed panel content width (the expansion target width)
     width: f32,
-    /// 代次：收尾定时器只处理自己这一代（可能被反向开关替换）
+    /// Generation: the finisher timer only handles its own generation (it may
+    /// be replaced by a reversed toggle)
     generation: u32,
 }
 
-/// 三栏宽度钳制：展开的栏不低于各自最小值，且为中心区保留 CENTER_MIN_W
-///（封顶 = 区域宽 - 中心最小值 - 对侧栏当前占位）。收起的栏占位为 0 不参与
-/// 预算，其存储宽度原样保留，重开后由后续 render 再钳。区域宽为 0（首帧
-/// 未测量）时不动作。顺序钳制——左先按右的当前占位钳，右再按钳后的左钳：
-/// 单侧越界只拉回单侧，两侧同时越界（窗口缩到最小）左栏先让位，一遍收敛。
+/// Three-pane width clamping: expanded panes stay above their minimums and
+/// reserve CENTER_MIN_W for the center (cap = area width - center minimum -
+/// the opposite pane's current extent). Collapsed panes have zero extent,
+/// skip the budget, and keep their stored widths as-is, re-clamped by a later
+/// render after reopening. No-op when the area width is 0 (unmeasured first
+/// frame). Sequential clamping — the left clamps first against the right's
+/// current extent, then the right clamps against the clamped left: a single
+/// out-of-range side pulls back only itself, and when both are out of range
+/// (window shrunk to minimum) the left pane yields first, converging in one
+/// pass.
 pub(crate) fn clamp_dock_widths(
     area: f32,
     left: f32,
@@ -682,25 +775,29 @@ pub(crate) fn clamp_dock_widths(
     (new_left, new_right)
 }
 
-/// dock 中心区面板：内容回读 AppView 构建（hero 或会话列）。
-/// dock 持有 panel 实体，渲染时经 weak 引用调 AppView 的 render 辅助。
+/// Dock center panel: content is built by reading back AppView (hero or the
+/// session column). The dock holds the panel entity; rendering calls AppView's
+/// render helpers through a weak reference.
 pub(crate) struct DockCenterPanel {
     app: WeakEntity<AppView>,
     pub(crate) focus_handle: FocusHandle,
     _app_observer: Subscription,
 }
 
-/// dock 右侧 dock 面板：tab 栏 + 改动/菜单页内容，同样回读 AppView。
+/// Dock right panel: tab bar + changes/menu page content, also reading back
+/// AppView.
 pub(crate) struct DockRightPanel {
     app: WeakEntity<AppView>,
     pub(crate) focus_handle: FocusHandle,
     _app_observer: Subscription,
 }
 
-/// dock 底部 dock 面板：终端面板容器，同样回读 AppView。
-/// 与左右 dock 不同，底部 dock 采用「全隐」语义——关闭即 remove_dock
-///（上游 toggle 关闭会留 29px 收起条，与标题栏按钮的开合模型不符），
-/// 因此面板实体常驻 AppView，只在展开时挂进 dock
+/// Dock bottom panel: terminal panel container, also reading back AppView.
+/// Unlike the left/right docks, the bottom dock uses "full hide" semantics —
+/// closing means remove_dock (upstream toggle close would leave a 29px
+/// collapsed strip, mismatching the title bar button's open/close model), so
+/// the panel entity lives in AppView and is mounted into the dock only when
+/// expanded
 pub(crate) struct DockBottomPanel {
     app: WeakEntity<AppView>,
     pub(crate) focus_handle: FocusHandle,
@@ -733,9 +830,10 @@ impl Render for DockBottomPanel {
 
 #[cfg(test)]
 mod tests {
-    // 注意：不能 `use super::*`——super 链会把 gpui 的 `test` 宏导进来，
-    // 遮蔽内置 #[test] 导致其展开递归（本文件顶部的 use super::* 同理，
-    // 故本模块全部显式导入）
+    // Note: no `use super::*` — the super chain imports gpui's `test` macro,
+    // which shadows the built-in #[test] and makes it expand recursively (same
+    // story for the use super::* at the top of this file, hence this module
+    // imports everything explicitly)
     use gpui_kit::component::dock::{
         BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
     };
@@ -745,7 +843,8 @@ mod tests {
         ParentElement as _, Render, Styled as _, Window, div, px,
     };
 
-    /// 复现「底部 dock 把手拖不动」的最小面板（chrome 全关，同 impl_dock_panel）
+    /// Minimal panel reproducing "bottom dock handle won't drag" (all chrome
+    /// off, same as impl_dock_panel)
     struct DummyPanel {
         focus_handle: FocusHandle,
     }
@@ -780,7 +879,8 @@ mod tests {
         }
     }
 
-    /// 与 AppView 完全一致的底部 dock 安装参数（locked + collapsible(false)）
+    /// Bottom dock installation parameters exactly matching AppView (locked +
+    /// collapsible(false))
     fn build_dock(window: &mut Window, cx: &mut App) -> Entity<DockArea> {
         let (dock, _skin) = DockSkin::dock_area("test-dock", None, window, cx);
         let center = cx.new(|cx| DummyPanel {
@@ -798,7 +898,8 @@ mod tests {
                 window,
                 cx,
             );
-            // 左 dock 作对照（侧栏把手在 App 里是可拖的）
+            // Left dock as the control (the sidebar handle is draggable in the
+            // App)
             dock.set_dock(
                 DockPlacement::Left,
                 DockLayout::tabs().panel_view(panel_handle(left), cx),
@@ -813,15 +914,17 @@ mod tests {
                 cx,
             );
             dock.set_dock_size(DockPlacement::Bottom, px(300.), window, cx);
-            // 与 AppView 一致：锁布局 + 底部禁用「拖到最小即收起」
+            // Match AppView: lock the layout + disable "drag to minimum
+            // collapses" for the bottom
             dock.set_locked(true, window, cx);
             dock.set_dock_collapsible(DockPlacement::Bottom, false, window, cx);
         });
         dock
     }
 
-    /// 窗口根视图：持有 dock 实体（TestAppContext::open_window 要求闭包返回
-    /// Render 值，不能直接给 Entity）
+    /// Window root view: holds the dock entity (TestAppContext::open_window
+    /// requires the closure to return a Render value; an Entity cannot be
+    /// given directly)
     struct DockProbe {
         dock: Entity<DockArea>,
     }
@@ -832,8 +935,10 @@ mod tests {
         }
     }
 
-    /// 贴近 App 形态：dock 套在「标题栏 + flex_1 容器」里且底部 dock 在首帧后
-    /// 才懒挂载（模拟终端首次展开），把手仍应可拖
+    /// Close to the App's shape: the dock sits inside a "title bar + flex_1
+    /// container" and the bottom dock is lazily mounted only after the first
+    /// frame (simulating the terminal's first expansion); the handle should
+    /// still drag
     #[test]
     fn bottom_dock_handle_drags_when_mounted_late() {
         let cx = &mut gpui_kit::TestAppContext::single();
@@ -856,12 +961,13 @@ mod tests {
         let dock = window
             .update(cx, |probe, _, _| probe.dock.clone())
             .expect("window alive");
-        // 首帧：无底部 dock
+        // First frame: no bottom dock
         cx.update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
         })
         .expect("window alive");
-        // 懒挂载底部 dock（同 App 首次展开的路径）+ 禁可收起
+        // Lazily mount the bottom dock (same path as the App's first
+        // expansion) + disable collapsibility
         cx.update_window(window.into(), |_, window, cx| {
             let panel = cx.new(|cx| DummyPanel {
                 focus_handle: cx.focus_handle(),
@@ -878,9 +984,11 @@ mod tests {
             });
             window.render_frame(cx);
             let before = dock.read(cx).dock_size(DockPlacement::Bottom);
-            assert!(before.is_some(), "底部 dock 应已挂载");
-            // 窗口 600 高，dock 区域贴满窗口（无标题栏），底部 dock 300 占
-            // [300,600]，把手吸顶 5px 带在其顶缘。从带内向上拖 80px
+            assert!(before.is_some(), "bottom dock should be mounted");
+            // Window is 600 tall, the dock area fills the window (no title
+            // bar), the 300-tall bottom dock occupies [300,600], and the
+            // handle's 5px snap-to-top band is at its top edge. Drag up 80px
+            // from inside the band
             window.drag(
                 gpui_kit::point(px(400.), px(302.)),
                 gpui_kit::point(px(400.), px(222.)),
@@ -889,15 +997,17 @@ mod tests {
             let after = dock.read(cx).dock_size(DockPlacement::Bottom);
             assert!(
                 after > before,
-                "懒挂载后拖拽仍应改高度：{before:?} → {after:?}"
+                "drag after lazy mount should still change height: {before:?} -> {after:?}"
             );
         })
         .expect("window alive");
     }
 
-    /// 验证官方把手拖拽能改 dock 高度（复现「底部 dock 把手拖不动」）。
-    /// 不用 #[gpui_kit::test] 宏：本模块若经 glob 导入 gpui 的 test 宏会遮蔽
-    /// 内置 #[test]，展开递归（见模块头注释），故手动驱动 TestAppContext
+    /// Verify that the official handle drag changes the dock height
+    /// (reproducing "bottom dock handle won't drag"). No #[gpui_kit::test]
+    /// macro: importing gpui's test macro via glob in this module would shadow
+    /// the built-in #[test] and make it expand recursively (see the module
+    /// header note), so drive TestAppContext manually
     #[test]
     fn bottom_dock_handle_drags() {
         let cx = &mut gpui_kit::TestAppContext::single();
@@ -911,8 +1021,10 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
             let before = dock.read(cx).dock_size(DockPlacement::Bottom);
-            // 底部 dock 高 300 占窗口 [300,600]，把手吸顶 5px 带在其顶缘。
-            // 从带内 (400,302) 向上拖 80px：dock 应变高（从窗底量起）
+            // The 300-tall bottom dock occupies window [300,600], and the
+            // handle's 5px snap-to-top band is at its top edge. Drag up 80px
+            // from inside the band at (400,302): the dock should get taller
+            // (measured from the window bottom)
             window.drag(
                 gpui_kit::point(px(400.), px(302.)),
                 gpui_kit::point(px(400.), px(222.)),
@@ -921,7 +1033,7 @@ mod tests {
             let after = dock.read(cx).dock_size(DockPlacement::Bottom);
             assert!(
                 after > before,
-                "拖拽后 dock 高度应增加：{before:?} → {after:?}"
+                "dock height should increase after drag: {before:?} -> {after:?}"
             );
         })
         .expect("window alive");

@@ -1,6 +1,8 @@
-//! 模拟 OpenAI Chat Completions + SSE 的 provider，行为对齐 GLM/DeepSeek：
-//! 首请求返回 Read 工具调用（arguments 分片），含工具结果后返回
-//! reasoning_content + Markdown 文本流。供集成测试、examples 与 GUI 自测复用。
+//! A provider simulating OpenAI Chat Completions + SSE, behavior-aligned with
+//! GLM/DeepSeek: the first request returns a Read tool call (arguments in
+//! chunks); once tool results are present, it returns reasoning_content + a
+//! Markdown text stream. Reused by integration tests, examples, and GUI
+//! self-testing.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -9,83 +11,95 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const MOCK_FILE_NAME: &str = "README.mock.md";
 pub const MOCK_FILE_CONTENT: &str =
-    "# mock 文件\n\n这是 pig-core mock provider 自测用的已知文件。\n";
-pub const MOCK_REASONING: &str = "用户让我读一个文件并总结。先调用 Read。";
+    "# mock file\n\nA known file used by the pig-core mock provider for self-testing.\n";
+pub const MOCK_REASONING: &str =
+    "The user asked me to read a file and summarize it. Call Read first.";
 pub const MOCK_REPLY_MARKER: &str = "MOCK_REPLY_OK";
 
-/// 场景 B：用户消息含此标记时，走 Write → Edit → Bash → 文本 的完整修改链。
+/// Scenario B: when the user message contains this marker, run the full modification chain Write → Edit → Bash → text.
 pub const SCENARIO_B_TRIGGER: &str = "SCENARIO_B";
 pub const SCENARIO_B_MARKER: &str = "MOCK_SCENARIO_B_OK";
 pub const SCENARIO_B_FILE: &str = "src/hello.txt";
 pub const SCENARIO_B_CONTENT: &str = "hello\nline2\nline3\n";
 pub const SCENARIO_B_BASH_MARKER: &str = "MOCK_BASH_OK";
 
-/// 思考滚动行演示场景：含此标记时直接流式输出**变速**多行思考（无工具调用）——
-/// 慢速长行（看钉尾横滚/渐隐）→ 快速连发短行（看纵滚排队/跳播）→ 匀速收尾
-/// （看逐行纵滚节奏）→ 文本含 marker。不走统一 50ms 写循环（每片自带延迟）。
+/// Thinking ticker demo scenario: when this marker is present, stream
+/// **variable-speed** multi-line thinking directly (no tool calls) — slow long
+/// lines (to watch tail-pinned horizontal scrolling/fade) → rapid-fire short
+/// lines (to watch vertical-scroll queueing/skipping) → steady finish (to
+/// watch the line-by-line vertical scroll rhythm) → text containing the
+/// marker. Does not use the unified 50ms write loop (each chunk carries its
+/// own delay).
 pub const SCENARIO_TICKER_TRIGGER: &str = "TICKER_SCENARIO";
 pub const TICKER_MARKER: &str = "MOCK_TICKER_DONE";
 
-/// TodoList 场景：含此标记时走 TodoList 写入 → 文本（测待办持久化用）。
+/// TodoList scenario: when this marker is present, run TodoList write → text (for testing todo persistence).
 pub const TODO_SCENARIO_TRIGGER: &str = "TODO_SCENARIO";
 pub const TODO_SCENARIO_MARKER: &str = "MOCK_TODO_OK";
-pub const TODO_SCENARIO_ITEM: &str = "持久化待办项";
+pub const TODO_SCENARIO_ITEM: &str = "persistent todo item";
 
-/// AskUserQuestion 场景：含此标记且无工具结果 → AskUserQuestion 调用（1 题 2 选项）；
-/// 有工具结果 → 文本含 marker。
+/// AskUserQuestion scenario: marker present and no tool results → an
+/// AskUserQuestion call (1 question, 2 options); with tool results → text
+/// containing the marker.
 pub const SCENARIO_Q_TRIGGER: &str = "SCENARIO_Q";
 pub const MOCK_Q_MARKER: &str = "MOCK_QUESTION_OK";
 
-/// 危险命令场景：含此标记时按 tool 结果数推进——0/1 个结果都发危险 Bash（第二条
-/// 用于验证 AlwaysAllow 对危险命令不记忆），≥2 → 文本含 marker。
-/// 命令选 mkfs：命中黑名单（mkfs 命令位）但执行无害——macOS 无此命令（exit 127），
-/// Linux 无参数调用只打印用法，不触碰磁盘。
+/// Dangerous command scenario: when this marker is present, advance by the
+/// number of tool results — 0/1 results both send a dangerous Bash (the second
+/// verifies that AlwaysAllow does not remember dangerous commands), ≥2 → text
+/// containing the marker. The command is mkfs: it hits the blocklist (the mkfs
+/// command slot) yet is harmless to run — macOS has no such command (exit 127),
+/// and a no-argument call on Linux only prints usage without touching the disk.
 pub const SCENARIO_DANGER_TRIGGER: &str = "DANGER_SCENARIO";
 pub const DANGER_COMMAND: &str = "mkfs";
 pub const DANGER_MARKER: &str = "MOCK_DANGER_DONE";
 
-/// subject 粒度场景（AlwaysAllow 细化验证）：Write a → Write a → Write b →
-/// Bash echo → Bash echo → Bash ls → 文本。同 subject 的第二次不应再弹审批。
+/// Subject granularity scenario (AlwaysAllow refinement check): Write a →
+/// Write a → Write b → Bash echo → Bash echo → Bash ls → text. The second call
+/// with the same subject should not trigger another approval popup.
 pub const SCENARIO_SUBJECT_TRIGGER: &str = "SUBJECT_SCENARIO";
 pub const SUBJECT_MARKER: &str = "MOCK_SUBJECT_DONE";
 pub const SUBJECT_FILE_A: &str = "subject_a.txt";
 pub const SUBJECT_FILE_B: &str = "subject_b.txt";
 
-/// 只读命令场景（AutoEdit 直通验证）：Bash ls → 文本。ls 在只读白名单内。
+/// Read-only command scenario (AutoEdit pass-through check): Bash ls → text. ls is inside the read-only allowlist.
 pub const SCENARIO_READONLY_TRIGGER: &str = "READONLY_SCENARIO";
 pub const READONLY_MARKER: &str = "MOCK_READONLY_DONE";
 
-/// 慢命令场景（工具执行中点停止的路径验证）：Bash sleep 30 → 文本收尾。
-/// 面向中断用例；不打断的用例别用（真等 30s）。
+/// Slow command scenario (verifies the stop-while-tool-running path): Bash
+/// sleep 30 → text finish. Intended for interruption cases; do not use it in
+/// non-interrupting cases (it really waits 30s).
 pub const SCENARIO_SLOW_TRIGGER: &str = "SLOW_BASH_SCENARIO";
 pub const SLOW_MARKER: &str = "MOCK_SLOW_DONE";
 
-/// 计划退出场景（ExitPlanMode 验证）：0 个结果 → ExitPlanMode；
-/// 1 个结果且含「已切换到」（用户 Allow）→ Write plan_exit.txt；否则文本收尾
-///（Reject 的结果不含切换文案 → 直接收尾）。
+/// Plan exit scenario (ExitPlanMode check): 0 results → ExitPlanMode; 1 result
+/// containing "Plan approved" (user Allow) → Write plan_exit.txt; otherwise a
+/// text finish (a Reject result lacks the approval text → finish directly).
 pub const SCENARIO_PLAN_EXIT_TRIGGER: &str = "PLAN_EXIT_SCENARIO";
 pub const PLAN_EXIT_MARKER: &str = "MOCK_PLAN_EXIT_DONE";
 pub const PLAN_EXIT_FILE: &str = "plan_exit.txt";
 
-/// 计划进入/恢复场景（EnterPlanMode 验证）：EnterPlanMode → Write（应被 Plan
-/// 硬拒）→ ExitPlanMode → Write（恢复原模式后执行）→ 文本。
+/// Plan enter/restore scenario (EnterPlanMode check): EnterPlanMode → Write
+/// (should be hard-rejected by Plan) → ExitPlanMode → Write (executed after the
+/// original mode is restored) → text.
 pub const SCENARIO_PLAN_ENTER_TRIGGER: &str = "PLAN_ENTER_SCENARIO";
 pub const PLAN_ENTER_MARKER: &str = "MOCK_PLAN_ENTER_DONE";
 pub const PLAN_ENTER_FILE: &str = "plan_enter.txt";
 
-/// 计划文件语义场景：裸 ExitPlanMode（不带 plan 参数 → core 读计划文件）。
-/// 批准后（结果含「计划已批准」）→ Write plan_file_exec.txt 验证执行。
+/// Plan file semantics scenario: bare ExitPlanMode (no plan argument → core
+/// reads the plan file). After approval (result contains "Plan approved") →
+/// Write plan_file_exec.txt to verify execution.
 pub const SCENARIO_PLAN_FILE_TRIGGER: &str = "PLAN_FILE_SCENARIO";
 pub const PLAN_FILE_EXEC_FILE: &str = "plan_file_exec.txt";
 
-/// 计划写门控场景：Write 计划目录（直通）→ Write 普通文件（应被硬拒）→ 文本。
+/// Plan write gating scenario: Write to the plans directory (pass-through) → Write a normal file (should be hard-rejected) → text.
 pub const SCENARIO_PLAN_WRITE_GATE_TRIGGER: &str = "PLAN_WRITE_GATE_SCENARIO";
 
-/// 计划文件语义场景：裸 ExitPlanMode（{} 无 plan 参数）；批准后接 Write。
+/// Plan file semantics scenario: bare ExitPlanMode ({} without a plan argument); after approval, a Write follows.
 fn plan_file_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks("call_pf_1", "ExitPlanMode", "{}", None),
-        1 if body.contains("计划已批准") => tool_call_chunks(
+        1 if body.contains("Plan approved") => tool_call_chunks(
             "call_pf_2",
             "Write",
             &serde_json::json!({"path": PLAN_FILE_EXEC_FILE, "content": "executed\n"}).to_string(),
@@ -98,7 +112,7 @@ fn plan_file_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 计划写门控场景：先写计划目录（直通），再写普通文件（应被硬拒）。
+/// Plan write gating scenario: first write the plans directory (pass-through), then a normal file (should be hard-rejected).
 fn plan_write_gate_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -121,30 +135,33 @@ fn plan_write_gate_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 图片工具场景（ReadMediaFile 验证）：0 个结果 → ReadMediaFile pic.png → 文本。
-/// 能力门控（input_image=false 时会话层直接报错不执行）与图片进上下文链路用。
+/// Media tool scenario (ReadMediaFile check): 0 results → ReadMediaFile
+/// pic.png → text. For capability gating (with input_image=false the session
+/// layer errors out without executing) and the image-into-context pipeline.
 pub const SCENARIO_MEDIA_TRIGGER: &str = "MEDIA_SCENARIO";
 pub const MEDIA_MARKER: &str = "MOCK_MEDIA_DONE";
 
-/// 子代理场景（父侧）：含此标记时发 Agent 工具调用；触发词后第一个词 = 行为令牌
-///（GREP/WRITE/BASH/LOOP/LONG/BG/BASHBG/BGSTOP/RESUME/RESUME_UNKNOWN/RESUME_RUNNING），
-/// 可选第二个词 = subagent_type（缺省：BASH/LOOP/LONG → general-purpose，其余 → explore）。
-/// Agent 结果回来后父侧文本收尾。
+/// Subagent scenario (parent side): when this marker is present, send an Agent
+/// tool call; the first word after the trigger = behavior token
+/// (GREP/WRITE/BASH/LOOP/LONG/BG/BASHBG/BGSTOP/RESUME/RESUME_UNKNOWN/RESUME_RUNNING),
+/// optional second word = subagent_type (default: BASH/LOOP/LONG →
+/// general-purpose, otherwise explore). Once the Agent result returns, the
+/// parent finishes with text.
 pub const SUBAGENT_TRIGGER: &str = "SUBAGENT_SCENARIO";
 pub const SUBAGENT_PARENT_DONE: &str = "MOCK_SUBAGENT_PARENT_DONE";
-/// 子代理最终结论文本的标记（父侧 Agent 结果里应带回来）
+/// Marker in the subagent's final conclusion text (should be carried back in the parent-side Agent result)
 pub const SUBAGENT_CHILD_DONE: &str = "MOCK_SUBAGENT_CHILD_DONE";
-/// resume 续跑后子代理新结论的标记
+/// Marker in the subagent's new conclusion after a resume run
 pub const SUBAGENT_RESUMED_DONE: &str = "MOCK_SUBAGENT_RESUMED_DONE";
-/// 子代理 prompt 的行为令牌前缀（子侧请求识别用；由父侧拼进 Agent.prompt）
+/// Behavior token prefix for subagent prompts (used to recognize child-side requests; spliced into Agent.prompt by the parent side)
 const SUBAGENT_CHILD_PREFIX: &str = "SUBAGENT_CHILD:";
 
-/// 起一个独立线程运行 tokio runtime 服务 mock SSE，返回监听端口。
+/// Start an independent thread running a tokio runtime that serves mock SSE; returns the listening port.
 pub fn start_mock_server() -> u16 {
     start_mock_server_with_log().0
 }
 
-/// 同上，但额外返回请求体日志（测试断言 reasoning_params merge 等用）。
+/// Same as above, but also returns a request body log (for test assertions such as reasoning_params merge).
 pub fn start_mock_server_with_log() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let port = start_mock_server_inner(Some(log.clone()));
@@ -189,15 +206,17 @@ fn sse_chunk(delta: serde_json::Value, finish_reason: Option<&str>) -> String {
     format!("data: {chunk}\n\n")
 }
 
-/// usage: Some((prompt, completion, total)) 时并入带 finish_reason 的末块
-///（provider 见到 finish_reason 即收尾，usage 必须同块到达，对齐真实 API）
+/// When usage: Some((prompt, completion, total)), it is merged into the final
+/// chunk carrying finish_reason (the provider finishes upon seeing
+/// finish_reason, so usage must arrive in the same chunk, aligned with the
+/// real API)
 fn tool_call_chunks(
     call_id: &str,
     name: &str,
     arguments: &str,
     usage: Option<(u64, u64, u64)>,
 ) -> Vec<String> {
-    // 分片点在字符边界上取（中文参数被切到多字节字符中间会 panic）
+    // The split point is taken on a char boundary (a Chinese argument cut mid multi-byte char would panic)
     let mut half = arguments.len() / 2;
     while !arguments.is_char_boundary(half) {
         half += 1;
@@ -247,8 +266,9 @@ fn tool_call_response() -> Vec<String> {
         .collect();
     let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
     let mut chunks = reasoning;
-    // 中间 step 也上报用量（真实 API 每次请求都带）：水位应以最后一步的 142 为准，
-    // 回合累计（turn_stats）则是各步之和
+    // Intermediate steps also report usage (the real API includes it on every
+    // request): the usage watermark should take the last step's 142, while the
+    // turn accumulation (turn_stats) is the sum of all steps
     chunks.extend(tool_call_chunks(
         "call_mock_1",
         "Read",
@@ -258,13 +278,18 @@ fn tool_call_response() -> Vec<String> {
     chunks
 }
 
-/// 思考滚动行演示场景的变速脚本：返回（片前延迟 ms，思考片）序列。
-/// 节奏设计（配合 UI 纵滚状态机的 800ms 间隔）：
-/// - 慢速长行：逐片看同行原位刷新；第二行故意超长，看钉尾横滚与左缘渐隐出现
-/// - 快速连发短行（间隔 <800ms）：看排队节流与中间条跳播
-/// - 匀速收尾：每行间隔 >800ms，逐行看清纵滚
+/// Variable-speed script for the thinking ticker demo scenario: returns a
+/// sequence of (pre-chunk delay ms, thinking chunk). Rhythm design (paired
+/// with the UI vertical-scroll state machine's 800ms interval):
+/// - Slow long lines: watch the same line refresh in place chunk by chunk; the
+///   second line is deliberately overlong to watch tail-pinned horizontal
+///   scrolling and the left-edge fade appear
+/// - Rapid-fire short lines (interval <800ms): watch queue throttling and
+///   middle-entry skipping
+/// - Steady finish: each line spaced >800ms to watch the vertical scroll line
+///   by line
 fn ticker_scenario_script() -> Vec<(u64, String)> {
-    // 慢速滴出：text 按每片 size 个字符切（字符边界，防切到多字节字符中间）
+    // Slow drip: split text into size-char chunks (on char boundaries, to avoid cutting mid multi-byte char)
     fn drip(pieces: &mut Vec<(u64, String)>, text: &str, size: usize, ms: u64, newline: bool) {
         let chars: Vec<char> = text.chars().collect();
         for piece in chars.chunks(size) {
@@ -289,7 +314,9 @@ fn ticker_scenario_script() -> Vec<(u64, String)> {
         100,
         true,
     );
-    // 快速连发六行（每行一整片，间隔约 180ms，全部落在停留期内 → 排队/跳播）
+    // Rapid-fire six lines (each a single chunk, ~180ms apart, all falling
+    // inside the dwell period → queueing/skipping). The six CJK fast-line
+    // strings below (numbered fast line 1..6) are functional demo data.
     for word in [
         "快速行一",
         "快速行二",
@@ -300,7 +327,8 @@ fn ticker_scenario_script() -> Vec<(u64, String)> {
     ] {
         pieces.push((180, format!("{word}\n")));
     }
-    // 匀速收尾：三行各滴出约 1s，行间隔 >800ms，逐行看清纵滚
+    // Steady finish: three lines each dripped over ~1s, spaced >800ms apart, to
+    // watch the vertical scroll line by line
     for line in [
         "连发结束，恢复逐行停留的节奏。",
         "再滚一行，确认节奏稳定。",
@@ -312,14 +340,15 @@ fn ticker_scenario_script() -> Vec<(u64, String)> {
     pieces
 }
 
-/// 思考滚动行演示场景（TICKER_SCENARIO）：不走统一 50ms 写循环——
-/// 思考片按脚本自带延迟写出，正文回复回到正常节奏。
+/// Thinking ticker demo scenario (TICKER_SCENARIO): does not use the unified
+/// 50ms write loop — thinking chunks are written with the script's own delays,
+/// and the body reply returns to the normal rhythm.
 async fn write_ticker_scenario(stream: &mut tokio::net::TcpStream) {
     for (ms, piece) in ticker_scenario_script() {
         if ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
-        // 行间隔占位片不产出内容（纯延迟）
+        // Line-spacing placeholder chunks produce no content (pure delay)
         if piece.is_empty() {
             continue;
         }
@@ -328,7 +357,7 @@ async fn write_ticker_scenario(stream: &mut tokio::net::TcpStream) {
             return;
         }
     }
-    let reply = format!("思考滚动演示完成：{TICKER_MARKER}。");
+    let reply = format!("Ticker demo finished: {TICKER_MARKER}.");
     let chars: Vec<char> = reply.chars().collect();
     for piece in chars.chunks(6) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -344,7 +373,7 @@ async fn write_ticker_scenario(stream: &mut tokio::net::TcpStream) {
     let _ = stream.shutdown().await;
 }
 
-/// 回显消息数（测试 resume 后历史重建用）：用户消息含 ECHO_HISTORY 时触发。
+/// Echo the message count (for testing history rebuilding after resume): triggered when the user message contains ECHO_HISTORY.
 fn echo_history_response(body: &str) -> Vec<String> {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let count = parsed["messages"]
@@ -358,29 +387,9 @@ fn echo_history_response(body: &str) -> Vec<String> {
     ]
 }
 
-/// 回显 system prompt（测试 AGENTS.md 注入用）：用户消息含 ECHO_SYSTEM 时触发。
-fn echo_system_response(body: &str) -> Vec<String> {
-    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let system = parsed["messages"]
-        .as_array()
-        .and_then(|msgs| msgs.iter().find(|m| m["role"].as_str() == Some("system")))
-        .and_then(|m| m["content"].as_str().map(str::to_string))
-        .unwrap_or_else(|| "(no system message)".to_string());
-    let system: String = system.chars().take(3000).collect();
-    let chars: Vec<char> = system.chars().collect();
-    let mut chunks: Vec<String> = chars
-        .chunks(40)
-        .map(|piece| {
-            let delta: String = piece.iter().collect();
-            sse_chunk(serde_json::json!({"content": delta}), None)
-        })
-        .collect();
-    chunks.push(sse_chunk(serde_json::json!({}), Some("stop")));
-    chunks
-}
-
-/// 场景 B 按历史里 tool 结果的数量推进：0→Write，1→Edit，2→Bash，≥3→文本。
-/// file 参数化避免多个自测会话改同一文件互相干扰。
+/// Scenario B advances by the number of tool results in history: 0→Write,
+/// 1→Edit, 2→Bash, ≥3→text. The file parameter avoids multiple self-test
+/// sessions mutating the same file and interfering with each other.
 fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -399,14 +408,14 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
         2 => tool_call_chunks(
             "call_b_bash",
             "Bash",
-            // printf 不在只读白名单（echo 在）：AutoEdit 审批语义靠这条命令覆盖
+            // printf is not in the read-only allowlist (echo is): AutoEdit approval semantics are covered by this command
             &serde_json::json!({"command": format!("printf '%s\\n' {SCENARIO_B_BASH_MARKER}")})
                 .to_string(),
             None,
         ),
         _ => {
             let markdown = format!(
-                "已完成：创建 `{SCENARIO_B_FILE}`、修改一行、执行 echo。\n\n**结果**: {SCENARIO_B_MARKER}\n"
+                "Done: created `{SCENARIO_B_FILE}`, edited one line, ran echo.\n\n**Result**: {SCENARIO_B_MARKER}\n"
             );
             let chars: Vec<char> = markdown.chars().collect();
             let mut chunks: Vec<String> = chars
@@ -416,7 +425,8 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
                     sse_chunk(serde_json::json!({"content": delta}), None)
                 })
                 .collect();
-            // 终步带 usage（真实 API 流末带用量；水位条/回合统计靠它）
+            // The final step carries usage (the real API includes usage at the
+            // stream end; the watermark bar/turn stats rely on it)
             chunks.push(format!(
                 "data: {}\n\n",
                 serde_json::json!({
@@ -433,7 +443,7 @@ fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
     }
 }
 
-/// 危险命令场景：0/1 个 tool 结果都发危险 Bash，≥2 → 文本收尾。
+/// Dangerous command scenario: 0/1 tool results both send a dangerous Bash, ≥2 → text finish.
 fn danger_scenario_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 | 1 => tool_call_chunks(
@@ -453,7 +463,7 @@ fn danger_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// subject 粒度场景：同 subject 第二次不弹（Write a 连写两次）、异 subject 弹。
+/// Subject granularity scenario: the second call with the same subject does not pop up (Write a twice in a row), a different subject pops up.
 fn subject_scenario_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 | 1 => tool_call_chunks(
@@ -496,7 +506,7 @@ fn subject_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 只读命令场景：Bash ls → 文本。
+/// Read-only command scenario: Bash ls → text.
 fn readonly_scenario_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -512,8 +522,9 @@ fn readonly_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 慢命令场景（工具执行中点停止的路径验证）：Bash sleep 30 → 文本收尾。
-/// 面向中断用例；不打断的用例别用（真等 30s）。
+/// Slow command scenario (verifies the stop-while-tool-running path): Bash
+/// sleep 30 → text finish. Intended for interruption cases; do not use it in
+/// non-interrupting cases (it really waits 30s).
 fn slow_bash_scenario_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -529,16 +540,17 @@ fn slow_bash_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 计划退出场景：按 tool 结果数推进；Allow 后（结果含「计划已批准」）接 Write。
+/// Plan exit scenario: advances by tool result count; after Allow (result contains "Plan approved") a Write follows.
 fn plan_exit_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
             "call_pe_1",
             "ExitPlanMode",
-            &serde_json::json!({"plan": "第一步：创建 plan_exit.txt 验证执行"}).to_string(),
+            &serde_json::json!({"plan": "Step 1: create plan_exit.txt to verify execution"})
+                .to_string(),
             None,
         ),
-        1 if body.contains("计划已批准") => tool_call_chunks(
+        1 if body.contains("Plan approved") => tool_call_chunks(
             "call_pe_2",
             "Write",
             &serde_json::json!({"path": PLAN_EXIT_FILE, "content": "executed\n"}).to_string(),
@@ -551,13 +563,13 @@ fn plan_exit_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 计划进入/恢复场景：纯按 tool 结果数推进（Write 被 Plan 硬拒也算一步）。
+/// Plan enter/restore scenario: advances purely by tool result count (a Write hard-rejected by Plan still counts as a step).
 fn plan_enter_scenario_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
             "call_pn_1",
             "EnterPlanMode",
-            &serde_json::json!({"reason": "改动范围大，先出计划"}).to_string(),
+            &serde_json::json!({"reason": "Large change scope; plan first"}).to_string(),
             None,
         ),
         1 => tool_call_chunks(
@@ -569,7 +581,7 @@ fn plan_enter_scenario_response(tool_results: usize) -> Vec<String> {
         2 => tool_call_chunks(
             "call_pn_3",
             "ExitPlanMode",
-            &serde_json::json!({"plan": "计划就绪"}).to_string(),
+            &serde_json::json!({"plan": "Plan ready"}).to_string(),
             None,
         ),
         3 => tool_call_chunks(
@@ -585,7 +597,7 @@ fn plan_enter_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 图片工具场景：ReadMediaFile pic.png → 文本。
+/// Media tool scenario: ReadMediaFile pic.png → text.
 fn media_scenario_response(tool_results: usize) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -601,7 +613,7 @@ fn media_scenario_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// 请求体里最后一条 user 消息的文本（父侧取行为令牌、子侧取 prompt 令牌共用）
+/// Text of the last user message in the request body (shared: the parent side takes the behavior token, the child side takes the prompt token)
 fn last_user_text(body: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     parsed["messages"]
@@ -615,13 +627,13 @@ fn last_user_text(body: &str) -> String {
         .unwrap_or_default()
 }
 
-/// tool 结果是否已应答（紧凑/带空格两种序列化形态）
+/// Whether a tool result has already been answered (both compact and spaced serialization forms)
 fn tool_answered(body: &str, call_id: &str) -> bool {
     body.contains(&format!("\"tool_call_id\":\"{call_id}\""))
         || body.contains(&format!("\"tool_call_id\": \"{call_id}\""))
 }
 
-/// 从请求体里提取「agent_id: a…」/「task_id: b…」（Agent 结果模板/后台回执里的行）
+/// Extract "agent_id: a..."/"task_id: b..." from the request body (lines in Agent result templates/background receipts)
 fn extract_marker_id(body: &str, marker: &str) -> Option<String> {
     let rest = body.split(marker).nth(1)?;
     let id: String = rest
@@ -643,20 +655,25 @@ fn subagent_agent_call(call_id: &str, args: serde_json::Value) -> Vec<String> {
 }
 
 fn child_prompt(behavior: &str) -> String {
-    format!("{SUBAGENT_CHILD_PREFIX}{behavior} 读取 {MOCK_FILE_NAME} 并总结")
+    format!("{SUBAGENT_CHILD_PREFIX}{behavior} read {MOCK_FILE_NAME} and summarize")
 }
 
-/// 子代理场景（父侧）：按行为令牌推进状态机——
-/// 普通令牌：call_agent_1（前台）→ 结果回 → 文本收尾；
-/// BG/BASHBG：call_agent_bg（run_in_background）→ running 回执 → 文本收尾；
-/// SWARMBG：call_swarm_bg（AgentSwarm run_in_background，2 个 item）→ 回执 → 文本收尾；
-/// BGSTOP：后台 LOOP → running 回执 → TaskStop → 文本收尾；
-/// RESUME：首条消息前台 GREP（call_agent_1），第二条消息 resume 原 id（call_agent_2）；
-/// RESUME_UNKNOWN：直接 resume 一个不存在的 id（call_agent_2）；
-/// RESUME_RUNNING：首条后台 LOOP（call_agent_bg），第二条 resume 同 id（call_agent_2，应撞冲突）。
+/// Subagent scenario (parent side): advances the state machine by behavior
+/// token —
+/// Normal tokens: call_agent_1 (foreground) → result returns → text finish;
+/// BG/BASHBG: call_agent_bg (run_in_background) → running receipt → text finish;
+/// SWARMBG: call_swarm_bg (AgentSwarm run_in_background, 2 items) → receipt →
+/// text finish;
+/// BGSTOP: background LOOP → running receipt → TaskStop → text finish;
+/// RESUME: first message foreground GREP (call_agent_1), second message
+/// resumes the original id (call_agent_2);
+/// RESUME_UNKNOWN: resume a nonexistent id directly (call_agent_2);
+/// RESUME_RUNNING: first message background LOOP (call_agent_bg), second
+/// message resumes the same id (call_agent_2, should hit the conflict).
 fn subagent_parent_response(body: &str) -> Vec<String> {
     let user_text = last_user_text(body);
-    // 唤醒回合：最后一条 user 是 <task-notification> 合成消息（不含触发词）→ 直接收尾
+    // Wake turn: the last user message is the synthetic <task-notification>
+    // message (no trigger) → finish directly
     if !user_text.contains(SUBAGENT_TRIGGER) {
         return subagent_parent_done();
     }
@@ -676,8 +693,8 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
                 "call_swarm_bg",
                 "AgentSwarm",
                 &serde_json::json!({
-                    "prompt_template": format!("{SUBAGENT_CHILD_PREFIX}GREP 处理 {{{{item}}}}"),
-                    "items": ["甲", "乙"],
+                    "prompt_template": format!("{SUBAGENT_CHILD_PREFIX}GREP handle {{{{item}}}}"),
+                    "items": ["item-a", "item-b"],
                     "run_in_background": true,
                 })
                 .to_string(),
@@ -696,7 +713,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             subagent_agent_call(
                 "call_agent_bg",
                 serde_json::json!({
-                    "description": "子代理自测委派",
+                    "description": "subagent selftest delegation",
                     "prompt": child_prompt(child),
                     "subagent_type": profile_arg.unwrap_or(profile),
                     "run_in_background": true,
@@ -708,7 +725,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
                 return subagent_parent_done();
             }
             if tool_answered(body, "call_agent_bg") {
-                // 后台子代理已在跑（LOOP 不停）：发 TaskStop 停掉它
+                // The background subagent is already running (LOOP never stops): send TaskStop to stop it
                 let task_id =
                     extract_marker_id(body, "task_id: ").unwrap_or_else(|| "b1".to_string());
                 return tool_call_chunks(
@@ -721,7 +738,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             subagent_agent_call(
                 "call_agent_bg",
                 serde_json::json!({
-                    "description": "子代理自测委派",
+                    "description": "subagent selftest delegation",
                     "prompt": child_prompt("LOOP"),
                     "subagent_type": profile_arg.unwrap_or("explore"),
                     "run_in_background": true,
@@ -729,17 +746,18 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             )
         }
         "RESUME" => {
-            // 触发词出现次数 = 已发消息数：第 1 条起新子代理，第 2 条 resume 原 id
+            // Trigger occurrence count = messages already sent: the 1st starts
+            // a new subagent, the 2nd resumes the original id
             if body.matches(SUBAGENT_TRIGGER).count() >= 2 {
                 if tool_answered(body, "call_agent_2") {
                     return subagent_parent_done();
                 }
                 let agent_id = extract_marker_id(body, "agent_id: ")
-                    .expect("resume 场景：历史里应有 agent_id");
+                    .expect("resume scenario: agent_id should be in history");
                 return subagent_agent_call(
                     "call_agent_2",
                     serde_json::json!({
-                        "description": "子代理续跑",
+                        "description": "subagent resume",
                         "prompt": child_prompt("RESUMED"),
                         "resume": agent_id,
                     }),
@@ -751,7 +769,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             subagent_agent_call(
                 "call_agent_1",
                 serde_json::json!({
-                    "description": "子代理自测委派",
+                    "description": "subagent selftest delegation",
                     "prompt": child_prompt("GREP"),
                     "subagent_type": profile_arg.unwrap_or("explore"),
                 }),
@@ -764,7 +782,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             subagent_agent_call(
                 "call_agent_2",
                 serde_json::json!({
-                    "description": "续跑不存在的子代理",
+                    "description": "resume nonexistent subagent",
                     "prompt": child_prompt("GREP"),
                     "resume": "a0-999",
                 }),
@@ -776,11 +794,11 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
                     return subagent_parent_done();
                 }
                 let agent_id = extract_marker_id(body, "agent_id: ")
-                    .expect("resume 场景：历史里应有 agent_id");
+                    .expect("resume scenario: agent_id should be in history");
                 return subagent_agent_call(
                     "call_agent_2",
                     serde_json::json!({
-                        "description": "续跑运行中的子代理",
+                        "description": "resume running subagent",
                         "prompt": child_prompt("GREP"),
                         "resume": agent_id,
                     }),
@@ -792,7 +810,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             subagent_agent_call(
                 "call_agent_bg",
                 serde_json::json!({
-                    "description": "子代理自测委派",
+                    "description": "subagent selftest delegation",
                     "prompt": child_prompt("LOOP"),
                     "subagent_type": profile_arg.unwrap_or("explore"),
                     "run_in_background": true,
@@ -810,7 +828,7 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
             subagent_agent_call(
                 "call_agent_1",
                 serde_json::json!({
-                    "description": "子代理自测委派",
+                    "description": "subagent selftest delegation",
                     "prompt": child_prompt(behavior),
                     "subagent_type": profile_arg.unwrap_or(default_type),
                 }),
@@ -819,9 +837,12 @@ fn subagent_parent_response(body: &str) -> Vec<String> {
     }
 }
 
-/// 子代理场景（子侧）：按 prompt（最后一条 user 消息）里的行为令牌出招——
-/// 0 个 tool 结果出工具调用（LOOP 永远出工具调用，逼父侧 max_turns 收尾；
-/// LONG 直接回 33K 字符长文；RESUMED 直接回续跑结论），否则回带标记的结论文本。
+/// Subagent scenario (child side): acts by the behavior token in the prompt
+/// (the last user message) — with 0 tool results it emits a tool call (LOOP
+/// always emits tool calls, forcing the parent to finish via max_turns; LONG
+/// replies directly with a 33K-char long text; RESUMED replies directly with
+/// the resume conclusion), otherwise it replies with the marker-bearing
+/// conclusion text.
 fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
     let user_text = last_user_text(body);
     let behavior = user_text
@@ -836,11 +857,15 @@ fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
         ]
     };
     match behavior {
-        "RESUMED" => done_text(format!("子代理续跑结论：任务完成。{SUBAGENT_RESUMED_DONE}")),
+        "RESUMED" => done_text(format!(
+            "Subagent resumed: task done. {SUBAGENT_RESUMED_DONE}"
+        )),
         "LONG" => {
-            // 33K 字符长文：验证父侧 32K 结果预算截断 + 全文落盘。
-            // 每片 2000 字符（mock 每片 sleep 50ms，片数必须少）
-            let text = format!("子代理长结果开头。{}", "密".repeat(33_000));
+            // 33K-char long text (a single repeated CJK char pads the body):
+            // verifies the parent's 32K result budget truncation + full-text
+            // persistence. 2000 chars per chunk (the mock sleeps 50ms per
+            // chunk, so the chunk count must stay low)
+            let text = format!("Subagent long result start. {}", "密".repeat(33_000));
             let chars: Vec<char> = text.chars().collect();
             let mut chunks: Vec<String> = chars
                 .chunks(2000)
@@ -878,13 +903,16 @@ fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
                 None,
             ),
         },
-        _ => done_text(format!("子代理结论：任务完成。{SUBAGENT_CHILD_DONE}")),
+        _ => done_text(format!(
+            "Subagent done: task complete. {SUBAGENT_CHILD_DONE}"
+        )),
     }
 }
 
-/// TodoList 场景：历史里还没有 TodoList 调用 → 写入；已执行 → 文本收尾。
-/// 不能按全局 tool 结果计数：请求体的 tools 声明与历史消息都会干扰，
-/// 直接解析 messages 里是否出现过 TodoList 调用。
+/// TodoList scenario: no TodoList call in history yet → write one; already
+/// executed → text finish. Cannot count global tool results: both the request
+/// body's tools declaration and history messages interfere, so directly parse
+/// whether a TodoList call appears in messages.
 fn todo_scenario_response(body: &str) -> Vec<String> {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let called = parsed["messages"].as_array().is_some_and(|msgs| {
@@ -906,8 +934,8 @@ fn todo_scenario_response(body: &str) -> Vec<String> {
             "call_todo_1",
             "TodoList",
             &serde_json::json!({"todos": [
-                {"content": format!("{TODO_SCENARIO_ITEM}一"), "status": "done"},
-                {"content": format!("{TODO_SCENARIO_ITEM}二"), "status": "in_progress"}
+                {"content": format!("{TODO_SCENARIO_ITEM} 1"), "status": "done"},
+                {"content": format!("{TODO_SCENARIO_ITEM} 2"), "status": "in_progress"}
             ]})
             .to_string(),
             None,
@@ -915,8 +943,9 @@ fn todo_scenario_response(body: &str) -> Vec<String> {
     }
 }
 
-/// AskUserQuestion 场景：历史里还没有 AskUserQuestion 调用 → 提问；已执行 → 文本收尾。
-///（同 TodoList 场景：直接扫 messages，不能按全局 tool 结果计数）
+/// AskUserQuestion scenario: no AskUserQuestion call in history yet → ask;
+/// already executed → text finish. (Same as the TodoList scenario: scan
+/// messages directly; cannot count global tool results)
 fn question_scenario_response(body: &str) -> Vec<String> {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let called = parsed["messages"].as_array().is_some_and(|msgs| {
@@ -939,19 +968,19 @@ fn question_scenario_response(body: &str) -> Vec<String> {
             "AskUserQuestion",
             &serde_json::json!({"questions": [
                 {
-                    "question": "选择实现方案",
-                    "header": "方案",
+                    "question": "Choose an implementation approach",
+                    "header": "Approach",
                     "options": [
-                        {"label": "方案 A", "description": "简单直接"},
-                        {"label": "方案 B", "description": "更完善但复杂"}
+                        {"label": "Option A", "description": "Simple and direct"},
+                        {"label": "Option B", "description": "More complete but complex"}
                     ]
                 },
                 {
-                    "question": "需要跑测试吗",
-                    "header": "测试",
+                    "question": "Should tests run?",
+                    "header": "Tests",
                     "options": [
-                        {"label": "要", "description": "改完跑一遍"},
-                        {"label": "不要", "description": "先不跑"}
+                        {"label": "Yes", "description": "Run after changes"},
+                        {"label": "No", "description": "Skip for now"}
                     ]
                 }
             ]})
@@ -963,10 +992,10 @@ fn question_scenario_response(body: &str) -> Vec<String> {
 
 fn text_response() -> Vec<String> {
     let markdown = format!(
-        "## 文件摘要\n\n`{MOCK_FILE_NAME}` 的内容如下：\n\n```text\n这是 pig-core mock provider 自测用的已知文件。\n```\n\n**结论**: {MOCK_REPLY_MARKER}\n"
+        "## File summary\n\nContents of `{MOCK_FILE_NAME}`:\n\n```text\nA known file used by the pig-core mock provider for self-testing.\n```\n\n**Conclusion**: {MOCK_REPLY_MARKER}\n"
     );
     let mut chunks = vec![sse_chunk(
-        serde_json::json!({"reasoning_content": "工具已返回文件内容，组织回答。"}),
+        serde_json::json!({"reasoning_content": "The tool returned the file content; composing the answer."}),
         None,
     )];
     let chars: Vec<char> = markdown.chars().collect();
@@ -991,11 +1020,11 @@ fn text_response() -> Vec<String> {
 pub const SCENARIO_C_TRIGGER: &str = "SCENARIO_C";
 pub const PLAN_MARKER: &str = "MOCK_PLAN_OK";
 pub const SUMMARY_MARKER: &str = "MOCK_SUMMARY_OK";
-/// 会话自动命名 sidecar 的 mock 标题（selftest 断言用）
-pub const MOCK_TITLE: &str = "自动命名自测标题";
+/// Mock title for the session auto-naming sidecar (for selftest assertions)
+pub const MOCK_TITLE: &str = "auto-title selftest";
 
-/// 非流式的自动命名响应：{"title": MOCK_TITLE}（两种 API 格式同内容）。
-/// 请求识别见 session::TITLE_PROMPT_MARKER
+/// Non-streaming auto-naming response: {"title": MOCK_TITLE} (same content for
+/// both API formats). Request recognition is in session::TITLE_PROMPT_MARKER
 async fn write_title_response(stream: &mut tokio::net::TcpStream, anthropic: bool) -> bool {
     let content = format!("{{\"title\":\"{MOCK_TITLE}\"}}");
     let json = if anthropic {
@@ -1027,13 +1056,14 @@ async fn write_title_response(stream: &mut tokio::net::TcpStream, anthropic: boo
     stream.write_all(resp.as_bytes()).await.is_ok()
 }
 
-/// 非流式响应（compact 摘要）。FAIL_COMPACT 触发 500 测试回退路径。
+/// Non-streaming response (compact summary). FAIL_COMPACT triggers a 500 to test the fallback path.
 async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) -> bool {
     if body.contains("FAIL_COMPACT") {
         let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}";
         return stream.write_all(resp.as_bytes()).await.is_ok();
     }
-    let content = format!("{SUMMARY_MARKER}：用户目标=mock 自测；已完成=读取/写入文件；待办=无。");
+    let content =
+        format!("{SUMMARY_MARKER}: goal=mock selftest; done=read/write files; todo=none.");
     let json = serde_json::json!({
         "id": "chatcmpl-mock",
         "object": "chat.completion",
@@ -1051,11 +1081,13 @@ async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) -> 
     stream.write_all(resp.as_bytes()).await.is_ok()
 }
 
-/// 场景 C：计划模式（kimi 文件语义）——Write 计划文件 → ExitPlanMode →
-/// 批准后接场景 B 工具链（与 live 全链路一致：Write 卡 → 计划行 → 审批面板 → 开工）
+/// Scenario C: plan mode (kimi file semantics) — Write a plan file →
+/// ExitPlanMode → after approval, the scenario B tool chain follows (same as
+/// the live full pipeline: Write card → plan line → approval panel → work
+/// starts)
 fn scenario_c_response(tool_results: usize) -> Vec<String> {
     let plan = format!(
-        "## 执行计划\n\n1. 创建 `src/hello.txt` 写入三行内容\n2. 将第二行改为大写\n3. 运行 echo 验证\n\n**计划就绪**: {PLAN_MARKER}\n"
+        "## Execution plan\n\n1. Create `src/hello.txt` with three lines\n2. Uppercase the second line\n3. Run echo to verify\n\n**Plan ready**: {PLAN_MARKER}\n"
     );
     match tool_results {
         0 => tool_call_chunks(
@@ -1075,7 +1107,7 @@ fn scenario_c_response(tool_results: usize) -> Vec<String> {
     }
 }
 
-/// ECHO_USAGE <n>：文本回复 + 指定 total_tokens（测试自动 compact 触发）。
+/// ECHO_USAGE <n>: text reply + the given total_tokens (for testing auto compact triggering).
 fn echo_usage_response(body: &str) -> Vec<String> {
     let usage: u64 = {
         let marker = "ECHO_USAGE";
@@ -1145,7 +1177,7 @@ async fn handle_connection(
         log.lock().expect("log lock").push(body.clone());
     }
 
-    // 重试测试：首个含 FAIL_ONCE_500 的请求返回 500（计数耗尽后正常）
+    // Retry test: the first request containing FAIL_ONCE_500 returns 500 (normal once the count is exhausted)
     static FAIL_ONCE_500: AtomicUsize = AtomicUsize::new(1);
     if body.contains("FAIL_ONCE_500")
         && FAIL_ONCE_500
@@ -1163,7 +1195,7 @@ async fn handle_connection(
         + body.matches("\"role\": \"tool\"").count()
         + body.matches("tool_result").count();
 
-    // 非流式 = 自动命名 / compact 摘要 / 连通性测试（必须在 SSE 响应头之前分支）
+    // Non-streaming = auto naming / compact summary / connectivity test (must branch before the SSE response head)
     if body.contains("\"stream\":false") {
         let ok = if body.contains(crate::session::TITLE_PROMPT_MARKER) {
             write_title_response(&mut stream, anthropic).await
@@ -1184,15 +1216,14 @@ async fn handle_connection(
     if stream.write_all(response_head.as_bytes()).await.is_err() {
         return;
     }
-    // 思考滚动行演示场景：变速吐字（每片自带延迟），不进统一 50ms 写循环
+    // Thinking ticker demo scenario: variable-speed emission (each chunk
+    // carries its own delay), not the unified 50ms write loop
     if !anthropic && body.contains(SCENARIO_TICKER_TRIGGER) {
         write_ticker_scenario(&mut stream).await;
         return;
     }
     let chunks = if anthropic {
         anthropic_chunks(&body, tool_results)
-    } else if body.contains("ECHO_SYSTEM") {
-        echo_system_response(&body)
     } else if body.contains("ECHO_USAGE") {
         echo_usage_response(&body)
     } else if body.contains("ECHO_HISTORY") {
@@ -1222,7 +1253,8 @@ async fn handle_connection(
     } else if body.contains(SCENARIO_MEDIA_TRIGGER) {
         media_scenario_response(tool_results)
     } else if body.contains(SUBAGENT_TRIGGER) {
-        // 父侧请求一定含原始触发词；子侧请求只有 prompt 里的行为令牌前缀
+        // Parent-side requests always contain the original trigger; child-side
+        // requests only have the behavior token prefix from the prompt
         subagent_parent_response(&body)
     } else if body.contains(SUBAGENT_CHILD_PREFIX) {
         subagent_child_response(&body, tool_results)
@@ -1245,7 +1277,7 @@ async fn handle_connection(
     let _ = stream.shutdown().await;
 }
 
-// ---------------- Anthropic 格式 ----------------
+// ---------------- Anthropic format ----------------
 
 fn a_sse(event: &str, data: serde_json::Value) -> String {
     format!("event: {event}\ndata: {data}\n\n")
@@ -1256,7 +1288,7 @@ fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str
         "content_block_start",
         serde_json::json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": id, "name": name}}),
     ));
-    // 分片点在字符边界上取（中文参数被切到多字节字符中间会 panic）
+    // The split point is taken on a char boundary (a Chinese argument cut mid multi-byte char would panic)
     let mut half = arguments.len() / 2;
     while !arguments.is_char_boundary(half) {
         half += 1;
@@ -1275,8 +1307,8 @@ fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str
     ));
 }
 
-/// Anthropic 版场景分发：无 tool_result → Read 工具调用；否则文本回复。
-/// 含 SCENARIO_B_TRIGGER 时走 Write→Edit→Bash 链。
+/// Anthropic scenario dispatch: no tool_result → Read tool call; otherwise a
+/// text reply. With SCENARIO_B_TRIGGER it runs the Write→Edit→Bash chain.
 fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     if body.contains(SCENARIO_B_TRIGGER) {
         return anthropic_scenario_b(tool_results);
@@ -1289,7 +1321,7 @@ fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
         serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 100}}}),
     )];
 
-    // 思考块
+    // Thinking block
     out.push(a_sse(
         "content_block_start",
         serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
@@ -1307,7 +1339,7 @@ fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     ));
 
     if tool_results == 0 {
-        // Read 工具调用，arguments 分片（分片点取字符边界）
+        // Read tool call with arguments in chunks (split point on a char boundary)
         let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
         let mut half = arguments.len() / 2;
         while !arguments.is_char_boundary(half) {
@@ -1335,7 +1367,7 @@ fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
         ));
     } else {
         let markdown = format!(
-            "## 文件摘要\n\n`{MOCK_FILE_NAME}` 的内容如下：\n\n```text\n这是 pig-core mock provider 自测用的已知文件。\n```\n\n**结论**: {MOCK_REPLY_MARKER}\n"
+            "## File summary\n\nContents of `{MOCK_FILE_NAME}`:\n\n```text\nA known file used by the pig-core mock provider for self-testing.\n```\n\n**Conclusion**: {MOCK_REPLY_MARKER}\n"
         );
         out.push(a_sse(
             "content_block_start",
@@ -1372,11 +1404,10 @@ fn anthropic_scenario_b(tool_results: usize) -> Vec<String> {
         1 => anthropic_tool_call(&mut out, 0, "call_b_edit", "Edit",
             &serde_json::json!({"path": SCENARIO_B_FILE, "old_string": "line2", "new_string": "LINE2"}).to_string()),
         2 => anthropic_tool_call(&mut out, 0, "call_b_bash", "Bash",
-            // 与 OpenAI 分支同口径：printf 不在只读白名单（echo 在）
+            // Same rationale as the OpenAI branch: printf is not in the read-only allowlist (echo is)
             &serde_json::json!({"command": format!("printf '%s\\n' {SCENARIO_B_BASH_MARKER}")}).to_string()),
         _ => {
-            let text = format!("场景B完成。**结果**: {SCENARIO_B_MARKER}
-");
+            let text = format!("Scenario B done. **Result**: {SCENARIO_B_MARKER}\n");
             out.push(a_sse(
                 "content_block_start",
                 serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
@@ -1398,7 +1429,7 @@ fn anthropic_scenario_b(tool_results: usize) -> Vec<String> {
     out
 }
 
-/// Anthropic 版 AskUserQuestion 场景：无 tool_result → 提问工具调用；否则文本含 marker。
+/// Anthropic AskUserQuestion scenario: no tool_result → the question tool call; otherwise text containing the marker.
 fn anthropic_question_scenario(tool_results: usize) -> Vec<String> {
     let mut out = vec![a_sse(
         "message_start",
@@ -1407,19 +1438,19 @@ fn anthropic_question_scenario(tool_results: usize) -> Vec<String> {
     if tool_results == 0 {
         let arguments = serde_json::json!({"questions": [
             {
-                "question": "选择实现方案",
-                "header": "方案",
+                "question": "Choose an implementation approach",
+                "header": "Approach",
                 "options": [
-                    {"label": "方案 A", "description": "简单直接"},
-                    {"label": "方案 B", "description": "更完善但复杂"}
+                    {"label": "Option A", "description": "Simple and direct"},
+                    {"label": "Option B", "description": "More complete but complex"}
                 ]
             },
             {
-                "question": "需要跑测试吗",
-                "header": "测试",
+                "question": "Should tests run?",
+                "header": "Tests",
                 "options": [
-                    {"label": "要", "description": "改完跑一遍"},
-                    {"label": "不要", "description": "先不跑"}
+                    {"label": "Yes", "description": "Run after changes"},
+                    {"label": "No", "description": "Skip for now"}
                 ]
             }
         ]})
@@ -1451,7 +1482,8 @@ async fn write_json_response_anthropic(stream: &mut tokio::net::TcpStream, body:
         let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\n\r\n{}";
         return stream.write_all(resp.as_bytes()).await.is_ok();
     }
-    let content = format!("{SUMMARY_MARKER}：用户目标=mock 自测；已完成=读取/写入文件；待办=无。");
+    let content =
+        format!("{SUMMARY_MARKER}: goal=mock selftest; done=read/write files; todo=none.");
     let json = serde_json::json!({
         "id": "msg-mock",
         "type": "message",

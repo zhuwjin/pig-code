@@ -1,15 +1,18 @@
 use super::*;
 
 impl ThreadView {
-    /// 惰性创建搜索输入框（首开时）。订阅：输入变化重跑搜索；
-    /// Enter=下一个、Shift+Enter=上一个（单行输入框的 Enter/Shift+Enter
-    /// 都发 PressEnter、不插换行，action 在输入框层就被消费，不会冒泡到
-    /// 输入区成发送——同 composer 用 PressEnter 发送的路径）
+    /// Lazily create the search input (on first open). Subscription: rerun the
+    /// search on input change; Enter=next, Shift+Enter=previous (the
+    /// single-line input emits PressEnter for both Enter/Shift+Enter and inserts
+    /// no newline; the action is consumed at the input layer and never bubbles
+    /// up to the composer as a send — same PressEnter-send path as the composer)
     pub(crate) fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_input.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("在会话中搜索…"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("thread.search_placeholder"))
+        });
         let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
             InputEvent::Change => this.run_search(cx),
             InputEvent::PressEnter { shift, .. } => this.goto_match(!shift, cx),
@@ -18,12 +21,13 @@ impl ThreadView {
         self.search_input = Some((input, subscription));
     }
 
-    /// 搜索输入框实体（仅首开以后存在）
+    /// The search input entity (exists only after first open)
     pub(crate) fn search_input(&self) -> Option<&Entity<InputState>> {
         self.search_input.as_ref().map(|(input, _)| input)
     }
 
-    /// 打开搜索条并聚焦输入框；已有 query 时重跑一次（内容可能已流式更新）
+    /// Open the search bar and focus the input; rerun once when a query exists
+    /// (content may have streamed on)
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_search_input(window, cx);
         self.search_open = true;
@@ -36,8 +40,9 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 关闭搜索条：清 query、清所有段高亮、清命中、复位活动下标。
-    /// set_value 不发 Change（上游 emit_events=false），这里全部显式复位
+    /// Close the search bar: clear the query, all segment highlights, matches,
+    /// and reset the active index. set_value emits no Change (upstream
+    /// emit_events=false), so everything is reset explicitly here
     pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = false;
         self.clear_search_highlights(cx);
@@ -51,21 +56,26 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 会话内搜索：大小写不敏感地命中所有 Markdown 段（rendered_text 与
-    /// query 都小写化后做字节级 match_indices）。无大小写的文字（中文等）
-    /// 小写化是恒等，区间即原文字节偏移；极少数小写化后字节数变化的字符
-    /// （如土耳其语 İ）区间会偏，该段整批被 set_range_highlights 拒绝
-    /// （Err 忽略）降级为无高亮，不影响其他段
+    /// In-session search: case-insensitively match all Markdown segments
+    /// (rendered_text and query are both lowercased, then byte-level
+    /// match_indices). Lowercasing is the identity for caseless scripts (CJK
+    /// etc.), so ranges are byte offsets into the original text; the rare
+    /// characters whose lowercasing changes byte length (Turkish İ for example)
+    /// skew ranges, and that whole segment is rejected by
+    /// set_range_highlights (Err ignored), degrading to no highlight without
+    /// affecting other segments
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
         let query = self
             .search_input()
             .map(|input| input.read(cx).value().to_string())
             .unwrap_or_default();
         let query_lc = query.to_lowercase();
-        // 复用条件：query 没变且段 revision 没变；query 变了全段重搜
+        // Reuse condition: query unchanged and the segment revision unchanged; a
+        // changed query rescans all segments
         let same_query = self.search_query.to_lowercase() == query_lc;
         self.search_query = query;
-        // 上轮有命中的段：本轮不再命中时要清掉旧高亮
+        // Segments that matched last round: clear stale highlights when they no
+        // longer match
         let mut touched: HashSet<EntityId> = self
             .search_cache
             .iter()
@@ -127,9 +137,11 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 重打某段的搜索高亮：活动命中更深的 accent 0.5，其余 0.25；无命中则清。
-    /// set_range_highlights 整批校验区间、任一非法整批拒绝——Err 忽略，
-    /// 该段降级为不高亮（区间坐标系说明见 run_search）
+    /// Re-apply a segment's search highlights: the active match gets the deeper
+    /// accent 0.5, the rest 0.25; cleared when there are none.
+    /// set_range_highlights validates ranges as a batch and rejects the whole
+    /// batch on any invalid one — Err is ignored and the segment degrades to no
+    /// highlight (range coordinate system explained in run_search)
     pub(crate) fn highlight_segment(&self, msg_ix: usize, seg_ix: usize, cx: &mut Context<Self>) {
         let Some(Segment::Markdown { state, .. }) = self
             .messages
@@ -165,7 +177,8 @@ impl ThreadView {
         });
     }
 
-    /// 清掉所有 Markdown 段的搜索高亮（段上没有高亮时上游是 no-op）
+    /// Clear search highlights on all Markdown segments (upstream is a no-op
+    /// when the segment has none)
     pub(crate) fn clear_search_highlights(&mut self, cx: &mut Context<Self>) {
         for message in &self.messages {
             for segment in &message.segments {
@@ -176,10 +189,12 @@ impl ThreadView {
         }
     }
 
-    /// 跳到下一个/上一个命中（回绕）：旧/新活动命中所在段重打高亮换色，
-    /// 目标行 reveal 进可视区。跳转 = 离开底部，暂停跟随；reveal 的滚动
-    /// 后续帧才生效，nav_jump 抑制一次「回到底部自动恢复跟随」（同导航条
-    /// 跳转的时序，见 render 里的恢复逻辑）
+    /// Jump to the next/previous match (wrapping): re-apply highlights on the
+    /// old/new active match's segments for the color change, and reveal the
+    /// target line into view. Jumping = leaving the bottom, so following pauses;
+    /// the reveal's scroll only takes effect on later frames, and nav_jump
+    /// suppresses one "back at bottom auto-resumes following" (same timing as
+    /// nav-bar jumps, see the resume logic in render)
     pub(crate) fn goto_match(&mut self, next: bool, cx: &mut Context<Self>) {
         if self.search_matches.is_empty() {
             return;
@@ -210,14 +225,16 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 会话内搜索条：输入框 + 命中计数 + 上/下一个 + 关闭（消息列表之上的
-    /// 固定行）。key_context("thread-search") 让 Esc → CloseThreadSearch
-    /// 绑定生效（输入框的 Escape action 默认 cx.propagate() 放行到该上下文，
-    /// 见 main.rs 键绑定）；关闭走 main.rs 转发回 close_search
+    /// In-session search bar: input + match counter + prev/next + close (a
+    /// pinned row above the message list). key_context("thread-search") lets
+    /// the Esc → CloseThreadSearch binding fire (the input's Escape action
+    /// defaults to cx.propagate() and releases into that context, see the
+    /// main.rs key bindings); closing is forwarded back to close_search in
+    /// main.rs
     pub(crate) fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let input = self.search_input()?;
         let total = self.search_matches.len();
-        // 无命中显示 0/0
+        // No matches shows 0/0
         let counter = if total == 0 {
             "0/0".to_string()
         } else {

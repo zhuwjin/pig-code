@@ -1,16 +1,17 @@
 use super::*;
 
-/// 单个 MCP server 的连接状态快照（设置页展示用）：
-/// 连接成功带工具数；连接失败 connected=false 且 error 为原因
+/// Connection status snapshot of a single MCP server (for settings page display):
+/// success carries the tool count; failure has connected=false and error as the
+/// structured reason
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerStatus {
     pub name: String,
     pub connected: bool,
     pub tool_count: usize,
-    pub error: Option<String>,
+    pub error: Option<CoreError>,
 }
 
-/// core → UI 事件
+/// core → UI events
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
     SessionConfigured {
@@ -18,15 +19,18 @@ pub enum Event {
         cwd: PathBuf,
         model: String,
         provider_name: String,
-        /// 会话当前的模型/思考等级/执行模式（重开恢复、新建继承的值）
+        /// Session's current model/reasoning level/exec mode (values restored on
+        /// reopen, inherited by new sessions)
         provider_id: Option<String>,
         model_id: Option<String>,
         reasoning_level: Option<String>,
         exec_mode: ExecMode,
-        /// 计划模式开关（重开恢复、新建继承的值；与 exec_mode 正交）
+        /// Plan mode switch (restored on reopen, inherited by new sessions;
+        /// orthogonal to exec_mode)
         #[serde(default)]
         plan_enabled: bool,
-        /// 会话级「工作区外读/写」开关（UI 模式菜单勾选态恢复用）
+        /// Session-level "read/write outside workspace" switches (to restore the
+        /// UI mode menu's checkbox states)
         #[serde(default)]
         fs_read_outside: bool,
         #[serde(default)]
@@ -35,7 +39,8 @@ pub enum Event {
     SessionList {
         sessions: Vec<SessionMeta>,
     },
-    /// 会话标题变化（自动命名 sidecar 完成 / 手动重命名后的列表同步）
+    /// Session title changed (list sync after the auto-naming sidecar finishes /
+    /// a manual rename)
     SessionTitleChanged {
         session_id: String,
         title: String,
@@ -48,16 +53,16 @@ pub enum Event {
     },
     TestResult {
         provider_id: String,
-        ok: bool,
-        message: String,
+        result: ConnTestResult,
     },
-    /// models.dev 模型元数据查询结果；info=None = 数据源里没有该 ID
+    /// models.dev model metadata lookup result; info=None = the ID is not in the source
     ModelInfo {
         id: String,
         info: Option<ModelRegistryInfo>,
     },
-    /// Op::ListMcpServers 的应答：该会话的 MCP server 状态清单
-    ///（None = 会话不存在或尚未发起懒连接——MCP 在首个回合采样前才连）
+    /// Reply to Op::ListMcpServers: the session's MCP server status list
+    /// (None = session missing or lazy connection not started yet — MCP connects
+    /// only before the first turn's sampling)
     McpServerList {
         session_id: String,
         servers: Option<Vec<McpServerStatus>>,
@@ -78,7 +83,7 @@ pub enum Event {
     },
     GitStatus {
         cwd: PathBuf,
-        /// false = 非 git 仓库（两列表为空）
+        /// false = not a git repo (both lists empty)
         is_git: bool,
         unstaged: Vec<GitFileChange>,
         staged: Vec<GitFileChange>,
@@ -87,31 +92,44 @@ pub enum Event {
         cwd: PathBuf,
         path: String,
         staged: bool,
+        /// Pure diff text (placeholder notes don't go here, see note)
         diff: String,
+        /// Structured note for an unavailable/truncated diff (UI localizes the
+        /// placeholder text by kind)
+        #[serde(default)]
+        note: Option<GitDiffNote>,
     },
-    /// 会话回合进行中到达的消息已排队；回合结束后自动接续
+    /// Messages arriving mid-turn are queued; auto-continued after the turn ends
     MessageQueued {
         session_id: String,
         seq: u64,
         text: String,
     },
-    /// resume 重放用户消息（新建消息不走事件，UI 本地追加）
+    /// Settled user messages from resume replay and new sends (live goes through
+    /// this event too; the UI appends uniformly)
     UserMessage {
         session_id: String,
         seq: u64,
+        /// Clean body text (attachment links no longer embed text; the UI renders
+        /// thumbnails via image_nums)
         text: String,
         files: Vec<String>,
-        /// 附带的图片张数（协议兼容保留；UI 展示用 text 末尾的
-        /// pig-code-composer://attachments/mN 链接，字节不在事件里）
+        /// Number of attached images (kept for protocol compatibility; display
+        /// uses image_nums)
         #[serde(default)]
         image_count: usize,
+        /// Media file numbers of the attached images (the N in
+        /// {sessions}/{id}.media/{N}.ext); the UI loads thumbnails from these,
+        /// consistent with image order
+        #[serde(default)]
+        image_nums: Vec<u32>,
     },
     TurnStarted {
         session_id: String,
         seq: u64,
         turn_id: String,
     },
-    /// 思考增量（GLM/DeepSeek 的 reasoning_content），live-only
+    /// Reasoning deltas (GLM/DeepSeek's reasoning_content), live-only
     ReasoningDelta {
         session_id: String,
         seq: u64,
@@ -124,7 +142,7 @@ pub enum Event {
         item_id: String,
         delta: String,
     },
-    /// 文本终值，可回放边界
+    /// Final text value, a replayable boundary
     TextDone {
         session_id: String,
         seq: u64,
@@ -137,7 +155,7 @@ pub enum Event {
         item_id: String,
         tool: String,
         input_summary: String,
-        /// 完整参数 JSON（审批卡展示用）
+        /// Full arguments JSON (for approval card display)
         detail: String,
     },
     ToolCallEnd {
@@ -146,20 +164,24 @@ pub enum Event {
         item_id: String,
         output: String,
         is_error: bool,
-        /// 写/改类工具的本次编辑 diff（卡片内联渲染用；会话累计 diff 走 FileChanged）
+        /// This invocation's edit diff for write/modify tools (for inline card
+        /// rendering; cumulative session diffs go through FileChanged)
         #[serde(default)]
         edit: Option<EditDiff>,
     },
-    /// 子代理实时进度（live-only，不落 rollout）：item_id = 父会话 Agent 工具卡片
+    /// Subagent live progress (live-only, not persisted to rollout):
+    /// item_id = the parent session's Agent tool card
     SubagentProgress {
         session_id: String,
         seq: u64,
         item_id: String,
         note: String,
     },
-    /// 子代理工具卡的「代理卡」元信息（live 直发 + rollout 持久化，回放经记录重建）：
-    /// item_id = 父会话 Agent 工具卡片；无此元信息（live 中本事件到达前的瞬时态）
-    /// 时 UI 按标准工具卡样式渲染
+    /// The "agent card" metadata of a subagent tool card (emitted live plus
+    /// persisted to rollout, rebuilt from the record on replay):
+    /// item_id = the parent session's Agent tool card; without this metadata (the
+    /// transient state before this event arrives live), the UI renders the
+    /// standard tool card style
     SubagentCard {
         session_id: String,
         seq: u64,
@@ -167,10 +189,12 @@ pub enum Event {
         agent_id: String,
         profile: String,
         description: String,
-        /// "{provider_name} · {model}"（档案带 thought_level 时追加「 · {level}」）
+        /// "{provider_name} · {model}" (appends " · {level}" when the profile
+        /// carries thought_level)
         model: String,
-        /// 本次运行为后台（run_in_background）：后台卡的运行态由子代理真实
-        /// 生命周期（SubagentActivity）驱动，而非工具调用的 done
+        /// Whether this run is in the background (run_in_background): a background
+        /// card's running state is driven by the subagent's real lifecycle
+        /// (SubagentActivity), not the tool call's done
         background: bool,
     },
     ContextUsage {
@@ -178,19 +202,22 @@ pub enum Event {
         seq: u64,
         used: u64,
         total: u64,
-        /// 会话累计（含 resume 恢复）：缓存命中的输入 token 与未命中的输入 token，
-        /// 平均缓存命中率 = cache_read_total / (cache_read_total + input_total)
+        /// Session totals (including resume-restored values): cache-hit input
+        /// tokens and cache-miss input tokens; average cache hit rate =
+        /// cache_read_total / (cache_read_total + input_total)
         #[serde(default)]
         cache_read_total: u64,
         #[serde(default)]
         input_total: u64,
     },
-    /// 压缩开始（手动 /compact 与采样前水位自动触发都会发；摘要是一次性阻塞
-    /// 请求，期间回合无其他事件，UI 靠它显示「正在压缩上下文」）
+    /// Compact started (emitted both for manual /compact and the automatic
+    /// pre-sampling watermark trigger; the summary is a one-shot blocking request
+    /// during which the turn has no other events — the UI relies on this to show
+    /// "compacting context")
     CompactStarted {
         session_id: String,
         seq: u64,
-        /// true = 采样前自动触发；false = 用户手动 /compact
+        /// true = triggered automatically pre-sampling; false = the user's manual /compact
         automatic: bool,
     },
     ContextCompacted {
@@ -198,32 +225,38 @@ pub enum Event {
         seq: u64,
         omitted: usize,
         note: String,
-        /// true = 采样前自动触发；false = 用户手动 /compact
+        /// true = triggered automatically pre-sampling; false = the user's manual /compact
         automatic: bool,
     },
-    /// core 阻塞等待 Op::ApprovalReply（同 request_id）
+    /// core blocks waiting for Op::ApprovalReply (same request_id)
     ApprovalRequested {
         session_id: String,
         seq: u64,
         request_id: String,
         tool: String,
-        /// Bash: 完整命令；Write/Edit: 路径 + diff 预览
+        /// Bash: the full command; Write/Edit: path + diff preview
         detail: String,
+        /// Reason key for high-risk commands (bash.rs DangerReason.key; the UI
+        /// localizes the warning line by key)
+        #[serde(default)]
+        danger_key: Option<String>,
     },
-    /// core 侧主动切换了执行模式（ExitPlanMode 确认后）：UI 同步模式 chip
+    /// core switched the exec mode on its own (after ExitPlanMode approval):
+    /// the UI syncs the mode chip
     ExecModeChanged {
         session_id: String,
         seq: u64,
         mode: ExecMode,
     },
-    /// 计划模式开关变化（模型经 EnterPlanMode/ExitPlanMode 自切时发出；
-    /// UI 主动切换走 Op::SetPlanMode，不回事件）
+    /// Plan mode switch changed (emitted when the model toggles it via
+    /// EnterPlanMode/ExitPlanMode; UI-initiated toggles go through Op::SetPlanMode
+    /// with no event back)
     PlanModeChanged {
         session_id: String,
         seq: u64,
         enabled: bool,
     },
-    /// AskUserQuestion：core 阻塞等待 Op::QuestionReply（同 request_id）
+    /// AskUserQuestion: core blocks waiting for Op::QuestionReply (same request_id)
     QuestionRequested {
         session_id: String,
         seq: u64,
@@ -243,13 +276,14 @@ pub enum Event {
         seq: u64,
         path: String,
     },
-    /// TodoList 工具写入成功后的待办快照（含新建/切换会话时的初始空快照）
+    /// Todo snapshot after the TodoList tool writes successfully (including the
+    /// initial empty snapshot on session create/switch)
     TodoListChanged {
         session_id: String,
         seq: u64,
         items: Vec<TodoItem>,
     },
-    /// 后台任务状态变化后的面板快照（启动/退出/停止）
+    /// Panel snapshot after a background task's status changes (start/exit/stop)
     TaskListChanged {
         session_id: String,
         seq: u64,
@@ -259,7 +293,7 @@ pub enum Event {
         session_id: String,
         seq: u64,
         duration_ms: u64,
-        /// 回合 token 统计（中断/无用量数据的回合为 None）
+        /// Turn token stats (None for aborted turns or turns without usage data)
         #[serde(default)]
         stats: Option<TurnUsageStats>,
     },
@@ -267,28 +301,33 @@ pub enum Event {
         session_id: String,
         seq: u64,
     },
-    /// 一轮结束：本轮 agent 的文件改动（每文件 本轮首次写前 → 当前 的净 diff，ZCode turn 头部面板口径）
+    /// End of a turn: the agent's file changes this turn (per file, the net diff
+    /// from just before its first write this turn to now, matching ZCode's turn
+    /// header panel)
     TurnFileChanges {
         session_id: String,
         seq: u64,
         files: Vec<EditDiff>,
     },
-    /// Op::LoadSubagent 的应答：子代理完整对话的只读投影（右侧「子代理」tab）
+    /// Reply to Op::LoadSubagent: a read-only projection of the subagent's full
+    /// conversation (the right-side "subagent" tab)
     SubagentHistory {
         session_id: String,
         seq: u64,
         agent_id: String,
-        /// meta.description（tab 标题/卡片标题用）
+        /// meta.description (for the tab title/card title)
         title: String,
         /// "{provider} · {model}"
         subtitle: String,
         items: Vec<SubagentItem>,
-        /// 加载时刻子代理仍在运行（任务注册表口径）：面板显示「运行中」指示
+        /// The subagent was still running at load time (per the task registry):
+        /// the panel shows a "running" indicator
         #[serde(default)]
         running: bool,
     },
-    /// 子代理实时展示项（live-only）：子代理每完成一批消息逐条发出；
-    /// item=None + finished=true 表示子代理结束（含取消/被杀），面板关「运行中」
+    /// Subagent live display items (live-only): emitted one by one as the subagent
+    /// finishes each batch of messages; item=None + finished=true means the
+    /// subagent ended (including cancel/kill), and the panel turns off "running"
     SubagentActivity {
         session_id: String,
         seq: u64,
@@ -299,6 +338,8 @@ pub enum Event {
     Error {
         session_id: Option<String>,
         seq: u64,
-        message: String,
+        /// Structured error (core is language-agnostic; the UI localizes by kind,
+        /// detail is the English original)
+        error: CoreError,
     },
 }

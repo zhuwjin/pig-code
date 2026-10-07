@@ -1,8 +1,10 @@
-//! alacritty Term 封装：EventProxy 事件代理 + PTY reader / 退出 waiter 线程。
+//! alacritty Term wrapper: the EventProxy event proxy plus the PTY reader and
+//! exit waiter threads.
 //!
-//! 参考 tty7 `src/terminal/remote.rs` 的 EventProxy（:37-60）、Term 构造
-//! （:1067-1068）与 reader 循环（:1207 起，分批放锁见 feed_grid :3665-3704），
-//! 砍掉 daemon 协议——读线程直接阻塞读 PTY master。
+//! Modeled on tty7 `src/terminal/remote.rs`'s EventProxy (:37-60), Term
+//! construction (:1067-1068), and the reader loop (:1207 onward; batched lock
+//! release in feed_grid :3665-3704), dropping the daemon protocol; the reader
+//! thread blocks reading the PTY master directly.
 
 use std::io::Read;
 use std::path::Path;
@@ -17,7 +19,7 @@ use portable_pty::PtySize;
 
 use super::pty::Pty;
 
-/// grid 尺寸（实现 alacritty Dimensions）。全抄 tty7 `src/terminal/size.rs`。
+/// Grid size (implements alacritty Dimensions). A verbatim port of tty7 `src/terminal/size.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TermSize {
     pub cols: usize,
@@ -45,9 +47,11 @@ impl alacritty_terminal::grid::Dimensions for TermSize {
     }
 }
 
-/// alacritty 事件 → UI 事件泵的桥（参考 tty7 remote.rs 的 EventProxy）。
-/// try_send 不阻塞：UI 卡顿时宁可丢事件也不能卡住 PTY 读线程——
-/// 丢 Wakeup 无碍（下一批输出会再发），队列是无界的，try_send 实际不会失败。
+/// Bridge from alacritty events to the UI event pump (see EventProxy in tty7
+/// remote.rs). try_send never blocks: when the UI stalls, dropping an event is
+/// preferable to stalling the PTY reader thread. A dropped Wakeup is harmless
+/// (the next batch of output sends another), the queue is unbounded, and
+/// try_send does not actually fail.
 #[derive(Clone)]
 pub(crate) struct EventProxy {
     tx: async_channel::Sender<AlacEvent>,
@@ -59,27 +63,29 @@ impl EventListener for EventProxy {
     }
 }
 
-/// 一条终端会话的全部非 UI 状态。term / pty 都是 Arc + 锁，渲染 prepaint
-/// 里直接 lock 调用是安全的（它们不是 Entity）。
+/// All non-UI state of one terminal session. term / pty are both Arc plus lock,
+/// so locking and calling them directly in the render prepaint is safe (they are
+/// not Entities).
 pub(crate) struct Terminal {
     pub(crate) term: Arc<FairMutex<Term<EventProxy>>>,
     pub(crate) events: async_channel::Receiver<AlacEvent>,
     pty: Arc<Pty>,
     size: Mutex<TermSize>,
-    /// 子进程已退出（waiter 线程上报后由 view 置位；写键前快速判断）
+    /// Child process exited (set by the view after the waiter thread reports; quick check before writing keys)
     exited: AtomicBool,
 }
 
 impl Terminal {
-    /// 起 shell：建 alacritty Term + 开 PTY + 读/等线程。
-    /// 初始 80x24，首帧 prepaint 测出真实 cell 尺寸后立即 resize。
+    /// Start a shell: build the alacritty Term, open the PTY, and start the
+    /// reader/waiter threads. Initially 80x24; resized as soon as the first
+    /// prepaint measures the real cell size.
     pub(crate) fn spawn(cwd: &Path, shell: Option<&str>) -> std::io::Result<Self> {
         let size = TermSize::new(80, 24);
         let (pty, reader) = Pty::spawn(cwd, pty_size(size, 0, 0), shell)?;
         Ok(Self::assemble(size, pty, reader))
     }
 
-    /// 测试用：起指定程序而非登录 shell
+    /// For tests: start the given program instead of a login shell
     #[cfg(test)]
     pub(crate) fn spawn_program(cwd: &Path, program: &str, args: &[&str]) -> std::io::Result<Self> {
         let size = TermSize::new(80, 24);
@@ -91,8 +97,9 @@ impl Terminal {
         let (tx, rx) = async_channel::unbounded::<AlacEvent>();
         let proxy = EventProxy { tx };
 
-        // kitty_keyboard 开才能协商 kitty 键盘协议（input.rs 已实现全套编码；
-        // 默认 false 会让现代 TUI 的 CSI >u 请求被静默忽略）
+        // kitty_keyboard must be on to negotiate the kitty keyboard protocol
+        // (input.rs implements the full encoding; the default false would leave
+        // a modern TUI's CSI >u request silently ignored)
         let config = Config {
             scrolling_history: 10_000,
             kitty_keyboard: true,
@@ -117,13 +124,13 @@ impl Terminal {
         self.pty.shell_name()
     }
 
-    /// 键盘 / 粘贴 / 应答字节写向 PTY
+    /// Write keyboard / paste / reply bytes to the PTY
     pub(crate) fn write(&self, bytes: &[u8]) {
         self.pty.write(bytes);
     }
 
-    /// cell 像素尺寸变化时同步 alacritty grid 与 PTY winsize
-    /// （prepaint 每帧调用，尺寸没变直接返回）
+    /// Sync the alacritty grid and PTY winsize when the cell pixel size changes
+    /// (called every frame in prepaint; returns immediately when unchanged)
     pub(crate) fn resize(&self, size: TermSize, cell_width: u16, cell_height: u16) {
         {
             let mut cur = self.size.lock().unwrap();
@@ -158,13 +165,16 @@ fn pty_size(size: TermSize, cell_width: u16, cell_height: u16) -> PtySize {
     }
 }
 
-/// 一次持锁喂给解析器的最大字节数。大批输出（cat 大文件）时分批放锁，
-/// 让渲染线程能插进来取锁画帧（参考 tty7 feed_grid 的 MAX_LOCKED_FEED）。
+/// Maximum bytes fed to the parser per lock hold. On large bursts (cat of a big
+/// file) the lock is released between batches so the render thread can slip in,
+/// take the lock, and draw a frame (see MAX_LOCKED_FEED in tty7 feed_grid).
 const MAX_LOCKED_FEED: usize = 64 * 1024;
 
-/// 读线程：阻塞读 PTY → ansi::Processor 喂进 Term → 每批发 Wakeup。
-/// EOF / 读错 = shell 侧全走完了，发最后一个 Wakeup + Exit（参考 tty7 的
-/// teardown：退出事件跟在内容之后，UI 先吃到尾部输出再标退出）。
+/// Reader thread: block reading the PTY, feed it into the Term via
+/// ansi::Processor, and send a Wakeup per batch. EOF / read error means the
+/// shell side is fully done, so send a final Wakeup plus Exit (see tty7's
+/// teardown: the exit event follows the content so the UI consumes the tail
+/// output before marking exited).
 fn spawn_reader(
     term: Arc<FairMutex<Term<EventProxy>>>,
     proxy: EventProxy,
@@ -200,12 +210,13 @@ fn spawn_reader(
         .expect("spawn pig-term-reader");
 }
 
-/// 退出检测线程：轮询 try_wait（100ms 一次，一个 waitpid 的开销）。
-/// Weak 持有 Pty——关 tab 后 Terminal/Pty 被 drop（Pty Drop 会 kill 子进程），
-/// upgrade 失败或见到 killed 标志即静默退出，不再上报。
-/// 退出事件发 Exit 而非 ChildExit：portable-pty 的 ExitStatus 是自有类型，
-/// 喂不进 alacritty 的 ChildExit(std::process::ExitStatus)，而 view 对两者
-/// 的处理相同（标记退出），退出码暂不展示。
+/// Exit detection thread: polls try_wait every 100ms (the cost of one waitpid).
+/// Holds the Pty via a Weak; after a tab closes, Terminal/Pty get dropped (Pty's
+/// Drop kills the child), and a failed upgrade or a seen killed flag means a
+/// silent exit with nothing further reported. The exit event is Exit rather than
+/// ChildExit: portable-pty's ExitStatus is its own type and does not fit into
+/// alacritty's ChildExit(std::process::ExitStatus), while the view handles both
+/// the same way (mark exited); the exit code is not shown for now.
 fn spawn_waiter(pty: Weak<Pty>, proxy: EventProxy) {
     std::thread::Builder::new()
         .name("pig-term-waiter".to_string())
@@ -231,8 +242,9 @@ fn spawn_waiter(pty: Weak<Pty>, proxy: EventProxy) {
 mod tests {
     use super::*;
 
-    /// 端到端冒烟（不开 GUI）：真 PTY 起 sh，验证 输出→读线程→解析进 grid
-    /// 与 子进程退出→waiter→Exit 事件 两条链路
+    /// End-to-end smoke test (no GUI): start sh on a real PTY, verifying both
+    /// chains: output → reader thread → parsed into the grid, and child exit →
+    /// waiter → Exit event
     #[test]
     fn 端到端跑通输出与退出() {
         let dir = std::env::temp_dir();
@@ -258,11 +270,11 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(saw_output, "没等到 sh 的 echo 输出");
-        assert!(saw_exit, "没等到子进程退出事件");
+        assert!(saw_output, "did not see the echo output from sh");
+        assert!(saw_exit, "did not see the child exit event");
     }
 
-    /// 写往 PTY 的键入应原样到达子进程 stdin（sh -c read 回显）
+    /// Keys written to the PTY must reach the child's stdin as-is (echoed by sh -c read)
     #[test]
     fn 写入到达子进程() {
         let dir = std::env::temp_dir();
@@ -283,6 +295,6 @@ mod tests {
             drop(t);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(saw, "sh 没收到写入的键入");
+        assert!(saw, "sh did not receive the written keystrokes");
     }
 }

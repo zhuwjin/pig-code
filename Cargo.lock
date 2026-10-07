@@ -5295,6 +5295,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
+ "ctor",
  "gpui-kit",
  "libc",
  "pig-core",
@@ -5302,7 +5303,9 @@ dependencies = [
  "portable-pty",
  "ropey",
  "rust-embed",
+ "rust-i18n",
  "serde_json",
+ "sys-locale",
  "time",
  "unicode-segmentation",
 ]

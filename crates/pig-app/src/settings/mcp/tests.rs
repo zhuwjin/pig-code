@@ -25,7 +25,7 @@ fn parse_stdio_and_remote() {
     );
     assert_eq!(fs.timeout_ms, Some(60_000));
     assert!(fs.invalid_reason.is_none());
-    // raw 保留完整条目（编辑回写保真的基础）
+    // raw keeps the full entry (the basis for faithful edit write-back)
     assert_eq!(fs.raw.get("env"), Some(&json!({"A": "1"})));
     let remote = servers.iter().find(|s| s.name == "remote").expect("remote");
     assert_eq!(
@@ -48,13 +48,17 @@ fn invalid_entries_kept_with_reason() {
         "unknowntype": {"type": "grpc", "url": "https://x.example/mcp"}
     }}"#;
     let servers = parse_servers(raw, McpSource::Project);
-    // 非法条目保留（页面标注原因、可进对话框修复），不再静默丢弃
+    // Invalid entries are kept (the page annotates the reason, the dialog can
+    // fix them), no longer silently dropped
     assert_eq!(servers.len(), 6);
     let good = servers.iter().find(|s| s.name == "good").expect("good");
     assert!(good.invalid_reason.is_none());
     for name in ["nocmd", "empty"] {
         let server = servers.iter().find(|s| s.name == name).expect(name);
-        assert!(server.invalid_reason.is_some(), "{name} 应有无效原因");
+        assert!(
+            server.invalid_reason.is_some(),
+            "{name} should have an invalid reason"
+        );
         assert!(server.transport.is_none());
     }
     let badurl = servers.iter().find(|s| s.name == "badurl").expect("badurl");
@@ -140,9 +144,9 @@ fn env_key_configured_semantics() {
     assert!(api_key_configured(Some("tvly-xxx".to_string())));
 }
 
-// ---------- mcp.json 写入 ----------
+// ---------- mcp.json writes ----------
 
-/// 每个用例独立的临时目录（结束后清理）
+/// Isolated temp directory per test case (cleaned up afterwards)
 fn temp_mcp_path(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pig-mcp-test-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -159,7 +163,8 @@ fn cleanup(path: &std::path::Path) {
 #[test]
 fn upsert_disable_delete_roundtrip() {
     let path = temp_mcp_path("roundtrip");
-    // 文件不存在 → 新建（含父目录）并 pretty + 换行结尾
+    // Missing file → created (with parent directories), pretty-printed plus a
+    // trailing newline
     upsert_mcp_server(
         &path,
         "fs",
@@ -173,7 +178,7 @@ fn upsert_disable_delete_roundtrip() {
     assert_eq!(servers[0].name, "fs");
     assert!(!servers[0].disabled);
 
-    // 停用 / 启用：写 disabled:true，再移除该键
+    // Disable / enable: write disabled:true, then remove the key
     set_mcp_disabled(&path, "fs", true).unwrap();
     let servers = parse_servers(&std::fs::read_to_string(&path).unwrap(), McpSource::User);
     assert!(servers[0].disabled);
@@ -183,7 +188,7 @@ fn upsert_disable_delete_roundtrip() {
     assert!(!servers[0].disabled);
     assert_eq!(servers[0].raw.get("disabled"), None);
 
-    // 追加远程条目 + 删除第一个
+    // Append a remote entry plus delete the first one
     upsert_mcp_server(
         &path,
         "remote",
@@ -197,7 +202,7 @@ fn upsert_disable_delete_roundtrip() {
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].name, "remote");
 
-    // 删除不存在的条目不出错
+    // Deleting a missing entry doesn't error
     delete_mcp_server(&path, "missing").unwrap();
     cleanup(&path);
 }
@@ -229,22 +234,25 @@ fn write_rejects_invalid_existing_file() {
     std::fs::write(&path, "not json").unwrap();
     let err = upsert_mcp_server(&path, "a", json!({"command": "srv"})).unwrap_err();
     assert!(err.to_string().contains("拒绝改写"));
-    // 内容保持原样
+    // Content stays untouched
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
     cleanup(&path);
 }
 
 #[test]
 fn object_json_parsing() {
-    assert!(parse_object_json("", "环境变量").unwrap().is_empty());
-    assert!(parse_object_json("  {}  ", "环境变量").unwrap().is_empty());
-    let map = parse_object_json(r#"{"A": "1", "B": "2"}"#, "环境变量").unwrap();
+    assert!(parse_object_json("", "env vars").unwrap().is_empty());
+    assert!(parse_object_json("  {}  ", "env vars").unwrap().is_empty());
+    let map = parse_object_json(r#"{"A": "1", "B": "2"}"#, "env vars").unwrap();
     assert_eq!(map.len(), 2);
     assert_eq!(map.get("A"), Some(&json!("1")));
-    assert!(parse_object_json(r#"["a"]"#, "环境变量").is_err());
-    assert!(parse_object_json("{bad", "环境变量").is_err());
-    let err = parse_object_json("42", "请求头").unwrap_err();
-    assert!(err.contains("请求头"), "错误信息应带字段标签: {err}");
+    assert!(parse_object_json(r#"["a"]"#, "env vars").is_err());
+    assert!(parse_object_json("{bad", "env vars").is_err());
+    let err = parse_object_json("42", "headers").unwrap_err();
+    assert!(
+        err.contains("headers"),
+        "error message should carry the field label: {err}"
+    );
 }
 
 #[test]

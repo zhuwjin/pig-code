@@ -1,0 +1,211 @@
+_version: 2
+
+# 会话消息流（thread_view*：工作行/工具卡/通知气泡/diff/灯箱/搜索/脚注统计）。
+# 注意：旧记录消息文本里 core 生成的「引用文件: 」后缀是持久化数据格式，不走这里——
+# 改解析会读不了旧记录。
+
+thread:
+  working:
+    zh-CN: 工作中
+    en: Working
+  worked:
+    zh-CN: 已工作
+    en: Worked
+  work_duration_seconds:
+    zh-CN: "%{prefix} %{s} 秒"
+    en: "%{prefix} %{s}s"
+  work_duration_minutes:
+    zh-CN: "%{prefix} %{m} 分 %{s} 秒"
+    en: "%{prefix} %{m}m %{s}s"
+  compacting:
+    zh-CN: 正在压缩上下文
+    en: Compacting context
+  empty_hint:
+    zh-CN: 空会话。输入消息开始对话，/ 查看命令，@ 引用文件。
+    en: Empty session. Type a message to start — / for commands, @ to reference files.
+  latest:
+    zh-CN: 最新消息
+    en: Latest
+  queued:
+    zh-CN: "排队中: %{text}"
+    en: "Queued: %{text}"
+  bg_subagent:
+    zh-CN: 后台子代理
+    en: Background subagent
+  failed:
+    zh-CN: 失败
+    en: Failed
+  completed:
+    zh-CN: 已完成
+    en: Completed
+  steps:
+    zh-CN: "%{n} 步"
+    en: "%{n} steps"
+  steps_one:
+    zh-CN: "%{n} 步"
+    en: "%{n} step"
+  duration:
+    zh-CN: "耗时 %{d}"
+    en: "took %{d}"
+  sent_by_background:
+    zh-CN: 由后台发送（Agent）
+    en: Sent from background (Agent)
+  record_deleted:
+    zh-CN: 记录已删除
+    en: Recording deleted
+  copied:
+    zh-CN: 已复制
+    en: Copied
+  copy_path:
+    zh-CN: 复制路径
+    en: Copy path
+  raw_payload:
+    zh-CN: 原始 payload
+    en: Raw payload
+  image_expired:
+    zh-CN: "[图片 %{n}（已失效）]"
+    en: "[Image %{n} (expired)]"
+  processed:
+    zh-CN: 已处理
+    en: Processed
+  stopped:
+    zh-CN: 已停止
+    en: Stopped
+  context_compacted:
+    zh-CN: 上下文已压缩
+    en: Context compacted
+  fork:
+    zh-CN: 分叉
+    en: Fork
+  no_text:
+    zh-CN: （无文本）
+    en: (no text)
+  generating:
+    zh-CN: 正在生成…
+    en: Generating…
+  no_text_reply:
+    zh-CN: （暂无文本回复）
+    en: (no text reply yet)
+  ttft:
+    zh-CN: " · 首字 %{n}s"
+    en: " · TTFT %{n}s"
+  turn_stats:
+    zh-CN: " · 输入 %{input}（未缓存）· 命中 %{hit}%{hit_rate} · 输出 %{output}%{ttft}%{speed}"
+    en: " · in %{input} (uncached) · cached %{hit}%{hit_rate} · out %{output}%{ttft}%{speed}"
+  notif_duration_seconds:
+    zh-CN: "%{n} 秒"
+    en: "%{n}s"
+  notif_duration_minutes:
+    zh-CN: "%{m} 分 %{s} 秒"
+    en: "%{m}m %{s}s"
+  thinking_done:
+    zh-CN: "思考 · 持续了 %{n} 秒"
+    en: "Thought for %{n}s"
+  thinking:
+    zh-CN: 正在思考
+    en: Thinking
+  thinking_unknown:
+    zh-CN: 思考 · 持续了几秒
+    en: Thought for a few seconds
+  plan_pending:
+    zh-CN: 待确认
+    en: Pending
+  plan_approved:
+    zh-CN: 已通过
+    en: Approved
+  plan_rejected:
+    zh-CN: 已拒绝
+    en: Rejected
+  plan:
+    zh-CN: 计划
+    en: Plan
+  tool_bash:
+    zh-CN: 终端
+    en: Terminal
+  tool_read:
+    zh-CN: 读取
+    en: Read
+  tool_write:
+    zh-CN: 写入
+    en: Write
+  tool_edit:
+    zh-CN: 编辑
+    en: Edit
+  tool_glob:
+    zh-CN: 查找文件
+    en: Find files
+  tool_grep:
+    zh-CN: 搜索
+    en: Search
+  tool_todo:
+    zh-CN: 待办
+    en: Todos
+  tool_fetch:
+    zh-CN: 抓取网页
+    en: Fetch web page
+  tool_bg_task:
+    zh-CN: 后台任务
+    en: Background task
+  tool_ask:
+    zh-CN: 提问
+    en: Ask
+  view_full_file:
+    zh-CN: 在右侧查看完整文件
+    en: View full file on the right
+  lines:
+    zh-CN: "%{n} 行"
+    en: "%{n} lines"
+  waiting_approval:
+    zh-CN: 等待批准
+    en: Waiting for approval
+  no_output:
+    zh-CN: 没有输出。
+    en: No output.
+  subagent:
+    zh-CN: 子代理
+    en: Subagent
+  ended:
+    zh-CN: 已结束
+    en: Ended
+  running:
+    zh-CN: 运行中
+    en: Running
+  bash_output:
+    zh-CN: 输出
+    en: Output
+  wrap:
+    zh-CN: 自动换行
+    en: Word wrap
+  omitted_lines:
+    zh-CN: "… 省略 %{n} 行 …"
+    en: "… %{n} lines omitted …"
+  read_omitted:
+    zh-CN: "… 省略 %{n} 行（点摘要行路径在右侧查看完整文件）…"
+    en: "… %{n} lines omitted (click the summary path to view the full file on the right) …"
+  files_modified:
+    zh-CN: "%{n} 个文件已修改"
+    en: "%{n} files modified"
+  collapse:
+    zh-CN: 收起
+    en: Collapse
+  more_files:
+    zh-CN: "还有 %{n} 个文件"
+    en: "%{n} more files"
+  open_file_right:
+    zh-CN: 在右侧打开文件
+    en: Open file on the right
+  image_label:
+    zh-CN: "图片 %{n}"
+    en: "Image %{n}"
+  lightbox_fit:
+    zh-CN: 适配
+    en: Fit
+  search_placeholder:
+    zh-CN: 在会话中搜索…
+    en: Search in session…
+  tool_fallback:
+    zh-CN: 工具
+    en: Tool
+  turn_end:
+    zh-CN: "回合结束 · 用时 %{n}s%{stats}"
+    en: "Turn ended · took %{n}s%{stats}"

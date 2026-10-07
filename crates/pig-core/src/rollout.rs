@@ -1,17 +1,18 @@
-//! JSONL 会话持久化（codex rollout 式）：`{data_dir}/sessions/{session_id}.jsonl`
-//! 首行 meta，之后每个 durable 单元一行；live delta 不落盘。
-//! 会话索引与面板当前态（待办/文件改动/原始快照）在 store.sqlite（见 store.rs）。
-//! 用户消息的图片字节在旁边的 `{session_id}.media/` 目录（ImageRef 按路径引用）。
+//! JSONL session persistence (codex-rollout style): `{data_dir}/sessions/{session_id}.jsonl`
+//! with a first meta line, then one line per durable unit; live deltas are not persisted.
+//! The session index and panel current state (todos/file changes/raw snapshots) live in
+//! store.sqlite (see store.rs). Image bytes of user messages live in the adjacent
+//! `{session_id}.media/` directory (ImageRef references them by path).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use pig_protocol::SessionMeta;
+use pig_protocol::{CoreError, SessionMeta};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{ChatImage, ChatMsg, ToolCall};
 
-/// 用户消息附带图片的落盘引用（媒体目录里的文件；不存 base64）
+/// Persisted reference to an image attached to a user message (a file in the media directory; base64 is not stored)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageRef {
     pub path: PathBuf,
@@ -20,13 +21,15 @@ pub struct ImageRef {
     pub height: u32,
 }
 
-/// 媒体目录：`{sessions}/{session_id}.media/`（与 jsonl 相邻）
+/// Media directory: `{sessions}/{session_id}.media/` (adjacent to the jsonl)
 pub fn media_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(format!("{session_id}.media"))
 }
 
-/// 媒体文件命名：目录内续排序号（1.png、2.png…；`N.orig.ext` 原图跟随主序号）。
-/// 不能按消息内序号命名——同会话后续回合会从 1 重排，覆盖旧 ImageRef 指向的文件。
+/// Media file naming: continuing sequence numbers inside the directory (1.png, 2.png...;
+/// `N.orig.ext` originals follow the main number). They must not be named by the in-message
+/// index — later turns in the same session renumber from 1 and would overwrite the files old
+/// ImageRefs point to.
 pub fn next_media_index(media_dir: &Path) -> usize {
     let Ok(rd) = std::fs::read_dir(media_dir) else {
         return 1;
@@ -42,7 +45,7 @@ pub fn next_media_index(media_dir: &Path) -> usize {
         + 1
 }
 
-/// ImageRef → ChatImage（replay 重建 history 用）；文件丢失 → None
+/// ImageRef -> ChatImage (for replay history rebuild); missing file -> None
 pub fn rehydrate_image(image_ref: &ImageRef) -> Option<ChatImage> {
     let bytes = std::fs::read(&image_ref.path).ok()?;
     let label = image_ref
@@ -56,28 +59,21 @@ pub fn rehydrate_image(image_ref: &ImageRef) -> Option<ChatImage> {
     })
 }
 
-/// 用户消息事件的 UI 展示文本：正文 + 每张图一个 markdown 附件链接
-///（`[图片 N](pig-code-composer://attachments/mN)`，N 取 media 文件名序号）。
-/// 仅事件文本带链接——进模型 history 与 rollout 的文本保持干净（模型拿图片 block）。
-pub fn user_display_text(text: &str, image_refs: &[ImageRef]) -> String {
-    let links: Vec<String> = image_refs
+/// Media-file numbers of the images attached to a user message (the N of
+/// {sessions}/{id}.media/{N}.ext): the UserMessage event uses them so the UI can load
+/// thumbnails (the link text is no longer embedded in the event text — clean body text goes
+/// to the model/rollout, the display layer renders by number, decoupled from the UI
+/// language).
+pub fn image_nums(image_refs: &[ImageRef]) -> Vec<u32> {
+    image_refs
         .iter()
-        .filter_map(|image_ref| {
-            let n: u32 = image_ref.path.file_stem()?.to_str()?.parse().ok()?;
-            Some(format!("[图片 {n}](pig-code-composer://attachments/m{n})"))
-        })
-        .collect();
-    if links.is_empty() {
-        return text.to_string();
-    }
-    if text.is_empty() {
-        return links.join(" ");
-    }
-    format!("{}\n\n{}", text, links.join(" "))
+        .filter_map(|image_ref| image_ref.path.file_stem()?.to_str()?.parse().ok())
+        .collect()
 }
 
-// 持久化格式以可读/可演进为先：ToolCall 变体（含批量代理卡列表）比其余变体大
-// 数百字节属预期，记录是瞬态序列化单元，不为省内存拆 Box
+// The persistence format favors readability/evolvability: the ToolCall variant (with the
+// batch agent-card list) being several hundred bytes larger than the other variants is
+// expected; records are transient serialization units, no Box split just to save memory
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -91,7 +87,7 @@ pub enum RolloutRecord {
     User {
         text: String,
         files: Vec<String>,
-        /// 附带的图片：媒体文件引用（字节在 {sessions}/{id}.media/ 下，不存 base64）
+        /// Attached images: media-file references (bytes under {sessions}/{id}.media/, base64 not stored)
         images: Vec<ImageRef>,
     },
     Reasoning {
@@ -103,27 +99,29 @@ pub enum RolloutRecord {
     ToolCall {
         tool: String,
         summary: String,
-        /// 原始参数 JSON（重建历史用）
+        /// Raw arguments JSON (for history rebuild)
         arguments: String,
         output: String,
         is_error: bool,
-        /// 本次编辑的 diff（回放时恢复工具卡片的内联 diff 视图）
+        /// Diff of this edit (restores the tool card's inline diff view on replay)
         edit: Option<pig_protocol::EditDiff>,
-        /// Agent 工具卡的代理卡元信息（回放重建代理卡）
+        /// Agent-card metadata for the Agent tool card (replay rebuilds the agent card)
         agent_card: Option<AgentCardRecord>,
-        /// AgentSwarm 工具卡的批量代理卡元信息（每个子代理一张，回放全部重建）；
-        /// #[serde(default)] 向后兼容：旧 JSONL 无此字段读为空列表
+        /// Agent-card metadata for the AgentSwarm tool card (one per subagent; replay rebuilds
+        /// all); #[serde(default)] for backward compatibility: old JSONL without this field
+        /// reads as an empty list
         #[serde(default)]
         agent_cards: Vec<AgentCardRecord>,
     },
-    /// 一轮的文件改动（回放恢复消息流里的每轮改动面板）
+    /// A turn's file changes (replay restores the per-turn changes panel in the message stream)
     TurnChanges {
         files: Vec<pig_protocol::EditDiff>,
     },
-    /// 一轮的 token 用量与耗时（回放恢复 footer 统计与会话累计；上下文水位由 StepUsage 恢复）。
-    /// duration_ms 为回合墙钟耗时；api_ms 为纯 provider 请求耗时，
-    /// ttft_ms 为其中等首 token 的时间之和、api_steps 为请求次数
-    ///（平均首字 = ttft_ms / api_steps；不含首字的解码速度用 api_ms - ttft_ms）
+    /// A turn's token usage and timing (replay restores footer stats and session totals; the
+    /// context usage watermark is restored by StepUsage). duration_ms is the turn's
+    /// wall-clock time; api_ms is pure provider request time; ttft_ms is the summed
+    /// time-to-first-token within it and api_steps the request count (average first token =
+    /// ttft_ms / api_steps; decode speed excluding the first token uses api_ms - ttft_ms)
     TurnStats {
         input: u64,
         cache_read: u64,
@@ -133,9 +131,10 @@ pub enum RolloutRecord {
         ttft_ms: u64,
         api_steps: u64,
     },
-    /// 单次 API 请求的 token 用量（每请求一条，随 Usage 事件即时落盘）。
-    /// 回放恢复上下文水位：按记录顺序逐条覆盖，最后一条的 used 生效。
-    /// 会话累计在 TurnStats 里，回放时本条不做累计。
+    /// Token usage of a single API request (one record per request, persisted immediately
+    /// with the Usage event). Replay restores the context usage watermark: applied record by
+    /// record in order, the last record's used wins. Session totals live in TurnStats; this
+    /// record is not accumulated at replay.
     StepUsage {
         input: u64,
         cache_read: u64,
@@ -145,26 +144,28 @@ pub enum RolloutRecord {
     Compact {
         note: String,
         omitted: usize,
-        /// true = 采样前水位自动触发；false = 用户手动 /compact（仅回放展示用）
+        /// true = auto-triggered at the pre-sampling watermark; false = user-initiated /compact (replay display only)
         #[serde(default)]
         automatic: bool,
-        /// 压缩后历史的估算 token 水位（回放恢复 last_total_tokens，避免
-        /// 重开后水位检查拿压缩前的旧高值立刻又触发一次自动压缩）
+        /// Estimated token usage watermark of the post-compact history (replay restores
+        /// last_total_tokens, so that after reopening, the watermark check does not
+        /// immediately fire another auto-compact on the stale pre-compact high value)
         #[serde(default)]
         used_after: Option<u64>,
     },
 }
 
-/// Agent 工具卡的代理卡元信息（随 RolloutRecord::ToolCall 持久化，回放重建用）
+/// Agent-card metadata for the Agent tool card (persisted with RolloutRecord::ToolCall, for replay rebuild)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCardRecord {
     pub agent_id: String,
     pub profile: String,
     pub description: String,
-    /// "{provider_name} · {model}"（可带思考档后缀）
+    /// "{provider_name} · {model}" (may carry a reasoning-level suffix)
     pub model: String,
-    /// 本次运行为后台：后台卡运行态由子代理生命周期驱动；
-    /// 回放后由 core 补发 SubagentActivity finished 落终态（任务不随进程存活）
+    /// This run is background: the background card's running state is driven by the subagent
+    /// lifecycle; after replay, core re-emits SubagentActivity finished to settle the final
+    /// state (tasks do not outlive the process)
     pub background: bool,
 }
 
@@ -173,34 +174,44 @@ pub struct Rollout {
 }
 
 impl Rollout {
-    pub fn create(dir: &Path, meta: &SessionMeta) -> Result<Self, String> {
-        std::fs::create_dir_all(dir).map_err(|e| format!("创建 sessions 目录失败: {e}"))?;
+    pub fn create(dir: &Path, meta: &SessionMeta) -> Result<Self, CoreError> {
+        std::fs::create_dir_all(dir).map_err(|e| CoreError::SessionsDirCreate {
+            detail: e.to_string(),
+        })?;
         let path = dir.join(format!("{}.jsonl", meta.id));
-        let mut file = std::fs::File::create(&path)
-            .map_err(|e| format!("创建 rollout 失败 {}: {e}", path.display()))?;
+        let mut file = std::fs::File::create(&path).map_err(|e| CoreError::RolloutCreate {
+            path: path.display().to_string(),
+            detail: e.to_string(),
+        })?;
         let record = RolloutRecord::Meta {
             id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             title: meta.title.clone(),
             created_at: meta.created_at,
         };
-        Self::write_line(&mut file, &record)?;
+        Self::write_line(&mut file, &record).map_err(|e| CoreError::RolloutCreate {
+            path: path.display().to_string(),
+            detail: e,
+        })?;
         Ok(Self { file })
     }
 
-    /// resume 续写：追加模式打开已有 rollout（不覆盖 meta 与历史行）
-    pub fn open_append(dir: &Path, id: &str) -> Result<Self, String> {
+    /// resume continuation: opens the existing rollout in append mode (does not overwrite meta or history lines)
+    pub fn open_append(dir: &Path, id: &str) -> Result<Self, CoreError> {
         let path = dir.join(format!("{id}.jsonl"));
         let file = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(&path)
-            .map_err(|e| format!("打开 rollout 失败 {}: {e}", path.display()))?;
+            .map_err(|e| CoreError::RolloutOpen {
+                path: path.display().to_string(),
+                detail: e.to_string(),
+            })?;
         Ok(Self { file })
     }
 
     pub fn append(&mut self, record: &RolloutRecord) {
-        // 持久化失败不致命：打日志继续
+        // Persistence failure is non-fatal: log and continue
         let _ = Self::write_line(&mut self.file, record);
     }
 
@@ -211,20 +222,28 @@ impl Rollout {
         file.flush().map_err(|e| e.to_string())
     }
 
-    pub fn load(path: &Path) -> Result<Vec<RolloutRecord>, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取 rollout 失败 {}: {e}", path.display()))?;
+    pub fn load(path: &Path) -> Result<Vec<RolloutRecord>, CoreError> {
+        let content = std::fs::read_to_string(path).map_err(|e| CoreError::RolloutRead {
+            path: path.display().to_string(),
+            detail: e.to_string(),
+        })?;
         content
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).map_err(|e| format!("rollout 行解析失败: {e}")))
+            .map(|line| {
+                serde_json::from_str(line).map_err(|e| CoreError::RolloutLineParse {
+                    detail: e.to_string(),
+                })
+            })
             .collect()
     }
 }
 
-/// 从 rollout 记录重建可继续对话的历史。
-/// 结构还原：text → assistant 消息；tool_call 依次挂到最近的 assistant 消息并追加 tool 结果；
-/// reasoning 挂到紧随其后的 assistant 消息上（Anthropic thinking 模式要求回传）。
+/// Rebuild a continuable conversation history from rollout records.
+/// Structure restoration: text -> assistant message; tool_call attaches to the nearest
+/// preceding assistant message in order, appending the tool result; reasoning attaches to
+/// the assistant message immediately following it (Anthropic thinking mode requires passing
+/// it back).
 pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg> {
     let mut history = vec![ChatMsg::system(system)];
     let mut pending_reasoning: Option<String> = None;
@@ -242,20 +261,21 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
                 files,
                 images,
             } => {
-                // 新用户消息前缓冲的思考不应跨轮误挂
+                // Buffered reasoning must not wrongly attach across turns before a new user message
                 pending_reasoning = None;
                 let mut text = text.clone();
                 if !files.is_empty() {
-                    // 与 live 同一指针形态（路径+大小，不读内容）；旧记录（正文
-                    // 内嵌 <file> 块或「引用文件」后缀）保持原样——历史即消息
+                    // Same pointer shape as live (path + size, no content read); old records
+                    // (body-embedded <file> blocks or a "Referenced files" suffix) stay
+                    // as-is — the history is the message
                     if let Some(cwd) = &meta_cwd {
                         text = crate::session::pointer_file_references(cwd, &text, files);
                     } else {
-                        text.push_str("\n\n引用文件: ");
+                        text.push_str("\n\nReferenced files: ");
                         text.push_str(&files.join(", "));
                     }
                 }
-                // 图片按 ImageRef 读回字节重建（ZCode 式 rehydrate）；丢失的文件占位
+                // Images are rebuilt by reading bytes back from ImageRef (ZCode-style rehydrate); missing files get a placeholder
                 let mut missing = 0usize;
                 let chat_images: Vec<ChatImage> = images
                     .iter()
@@ -268,7 +288,7 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
                     })
                     .collect();
                 if missing > 0 {
-                    text.push_str(&format!("\n\n[{missing} 张图片已失效]"));
+                    text.push_str(&format!("\n\n[{missing} image(s) no longer available]"));
                 }
                 let mut msg = ChatMsg::user(text);
                 msg.images = chat_images;
@@ -316,7 +336,7 @@ pub fn rebuild_history(records: &[RolloutRecord], system: String) -> Vec<ChatMsg
             RolloutRecord::Compact { note, .. } => {
                 history.push(ChatMsg::system(note.clone()));
             }
-            // 每轮改动面板是纯 UI 展示数据，不进模型历史
+            // The per-turn changes panel is pure UI display data, never enters model history
             RolloutRecord::TurnChanges { .. } => {}
         }
     }
@@ -334,11 +354,12 @@ pub fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
-    /// 旧格式（无 agent_cards 字段）的 ToolCall 行可读，agent_cards 落为空列表
+    /// A legacy ToolCall line (no agent_cards field) parses, with agent_cards reading as an empty list
     #[test]
     fn tool_call_without_agent_cards_reads_as_empty() {
-        let line = r#"{"type":"tool_call","tool":"AgentSwarm","summary":"子代理群（2 项）","arguments":"{}","output":"子代理群执行完成","is_error":false,"edit":null,"agent_card":null}"#;
-        let record: RolloutRecord = serde_json::from_str(line).expect("旧 JSONL 行可读");
+        let line = r#"{"type":"tool_call","tool":"AgentSwarm","summary":"subagent batch (2 items)","arguments":"{}","output":"subagent batch finished","is_error":false,"edit":null,"agent_card":null}"#;
+        let record: RolloutRecord =
+            serde_json::from_str(line).expect("legacy JSONL line should parse");
         let RolloutRecord::ToolCall {
             tool,
             agent_card,
@@ -346,40 +367,43 @@ mod tests {
             ..
         } = record
         else {
-            panic!("应为 ToolCall 记录");
+            panic!("should be a ToolCall record");
         };
         assert_eq!(tool, "AgentSwarm");
-        assert!(agent_card.is_none(), "单卡槽位保持 None");
-        assert!(agent_cards.is_empty(), "缺省字段读为空列表");
+        assert!(agent_card.is_none(), "single-card slot stays None");
+        assert!(agent_cards.is_empty(), "missing field reads as empty list");
     }
 
-    /// 批量卡随记录序列化/回读（swarm 回放重建的数据源）
+    /// Batch cards serialize/read back with the record (the data source for swarm replay rebuild)
     #[test]
     fn tool_call_agent_cards_roundtrip() {
         let card = |n: u32| AgentCardRecord {
             agent_id: format!("a1-{n}"),
             profile: "explore".into(),
-            description: format!("任务 {n}"),
+            description: format!("task {n}"),
             model: "p · m".into(),
             background: true,
         };
         let record = RolloutRecord::ToolCall {
             tool: "AgentSwarm".into(),
-            summary: "子代理群（2 项）".into(),
+            summary: "subagent batch (2 items)".into(),
             arguments: "{}".into(),
-            output: "回执".into(),
+            output: "receipt".into(),
             is_error: false,
             edit: None,
             agent_card: None,
             agent_cards: vec![card(1), card(2)],
         };
-        let line = serde_json::to_string(&record).expect("序列化");
-        let back: RolloutRecord = serde_json::from_str(&line).expect("回读");
+        let line = serde_json::to_string(&record).expect("serialize");
+        let back: RolloutRecord = serde_json::from_str(&line).expect("read back");
         let RolloutRecord::ToolCall { agent_cards, .. } = back else {
-            panic!("应为 ToolCall 记录");
+            panic!("should be a ToolCall record");
         };
         assert_eq!(agent_cards.len(), 2);
         assert_eq!(agent_cards[0].agent_id, "a1-1");
-        assert!(agent_cards[1].background, "background 标志随记录保留");
+        assert!(
+            agent_cards[1].background,
+            "background flag survives the roundtrip"
+        );
     }
 }

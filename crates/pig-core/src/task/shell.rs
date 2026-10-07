@@ -1,15 +1,18 @@
 use super::*;
 
-/// Windows shell 探测结果：优先 Git Bash（Unix 语法 + UTF-8 输出），
-/// 找不到回退 cmd（pig-code 的既有行为，零新增失败模式）。
+/// Windows shell detection result: prefer Git Bash (Unix syntax + UTF-8
+/// output); fall back to cmd when not found (existing pig-code behavior, zero
+/// new failure modes).
 #[derive(Clone, Debug)]
 pub enum WindowsShell {
     GitBash(PathBuf),
     Cmd,
 }
 
-/// 进程级缓存：探测链要跑 `git --exec-path`（子进程），不该每条命令重复；
-/// 结果在进程生命周期内不变，提示词 env 块也复用它做 Shell 标注。
+/// Process-level cache: the detection chain runs `git --exec-path` (a
+/// subprocess) and should not be repeated for every command; the result never
+/// changes within the process lifetime, and the prompt env block reuses it for
+/// the Shell label.
 pub(crate) static WINDOWS_SHELL: std::sync::OnceLock<WindowsShell> = std::sync::OnceLock::new();
 
 pub fn windows_shell() -> WindowsShell {
@@ -20,9 +23,11 @@ pub(crate) fn detect_windows_shell() -> WindowsShell {
     detect_git_bash().map_or(WindowsShell::Cmd, WindowsShell::GitBash)
 }
 
-/// Unix shell 探测（kimi-code environmentProbe 同款）：优先原生 bash——bashism
-///（`[[ ]]`/数组/进程替换）在 dash 系的 sh 下直接报错，行为不该取决于用户
-/// 发行版；候选路径都找不到回退 sh。进程级缓存（stat 结果进程内不变）。
+/// Unix shell detection (same as kimi-code environmentProbe): prefer native
+/// bash — bashisms (`[[ ]]`/arrays/process substitution) fail outright under
+/// dash-style sh, and behavior should not depend on the user's distro; fall
+/// back to sh when none of the candidate paths is found. Process-level cache
+/// (stat results never change within the process).
 pub(crate) fn unix_shell() -> &'static str {
     static UNIX_SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     UNIX_SHELL.get_or_init(|| {
@@ -33,10 +38,10 @@ pub(crate) fn unix_shell() -> &'static str {
     })
 }
 
-/// Git Bash 探测链（kimi-code 同款）：
-/// PIGCODE_SHELL_PATH 显式指定 → PATH 上的 bash.exe → PATH 上的 git.exe 反推
-/// 安装根（常规 cmd/bin 布局取上级；包管理器 shim 用 `git --exec-path` 穿透）
-/// → 常规安装位置。
+/// Git Bash detection chain (same as kimi-code):
+/// explicit PIGCODE_SHELL_PATH → bash.exe on PATH → git.exe on PATH to infer
+/// the install root (parent for the regular cmd/bin layout; package-manager
+/// shims are seen through via `git --exec-path`) → common install locations.
 pub(crate) fn detect_git_bash() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PIGCODE_SHELL_PATH") {
         let path = PathBuf::from(path);
@@ -87,7 +92,7 @@ pub(crate) fn detect_git_bash() -> Option<PathBuf> {
     None
 }
 
-/// git.exe → 同根 bash.exe 候选（常规安装布局：git 在 cmd\ 或 bin\ 下，取上上级为根）。
+/// git.exe → same-root bash.exe candidates (regular install layout: git sits under cmd\ or bin\, take the grandparent as the root).
 pub(crate) fn git_bash_candidates(git_exe: &Path) -> Vec<PathBuf> {
     let Some(parent) = git_exe.parent() else {
         return Vec::new();
@@ -108,8 +113,9 @@ pub(crate) fn git_bash_candidates(git_exe: &Path) -> Vec<PathBuf> {
     ]
 }
 
-/// `git --exec-path` 输出 → 安装根：…/Git/mingw64/libexec/git-core → …/Git。
-/// Scoop/Chocolatey/WinGet 的 shim 不在 cmd/bin 布局里，靠这一步定位真实安装根。
+/// `git --exec-path` output → install root: .../Git/mingw64/libexec/git-core → .../Git.
+/// Scoop/Chocolatey/WinGet shims do not follow the cmd/bin layout; this step
+/// locates the real install root.
 pub(crate) fn git_root_from_exec_path(git_exe: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new(git_exe)
         .no_console()
@@ -136,7 +142,7 @@ pub(crate) fn root_from_exec_path_text(text: &str) -> Option<PathBuf> {
             }
         }
     }
-    // 无 MINGW 段（非常规布局）：exec-path/libexec/git-core 往上两级兜底
+    // No MINGW segment (unusual layout): fall back two levels up from exec-path/libexec/git-core
     path.ancestors().nth(2).map(Path::to_path_buf)
 }
 
@@ -153,20 +159,21 @@ pub(crate) fn program_file_bases() -> Vec<PathBuf> {
     bases
 }
 
-/// 提示词 env 块的 Shell 标注：模型据此选择命令方言。
+/// Shell label for the prompt env block: the model picks the command dialect based on it.
 pub fn shell_label() -> String {
     if cfg!(target_os = "windows") {
         match windows_shell() {
-            WindowsShell::GitBash(_) => "Git Bash（bash -c，Unix 语法）".to_string(),
-            WindowsShell::Cmd => "cmd /C（Windows 语法）".to_string(),
+            WindowsShell::GitBash(_) => "Git Bash (bash -c, Unix syntax)".to_string(),
+            WindowsShell::Cmd => "cmd /C (Windows syntax)".to_string(),
         }
     } else {
-        format!("{} -c（Unix 语法）", unix_shell())
+        format!("{} -c (Unix syntax)", unix_shell())
     }
 }
 
-/// cmd 的 NUL 重定向改写为 /dev/null（Git Bash 下 NUL 设备不可用；kimi 同款）。
-/// 只改写 `>nul`/`>NUL`（含 `>>` 与空格形态），不影响作为普通参数的 NUL。
+/// Rewrite cmd's NUL redirects to /dev/null (the NUL device is unavailable
+/// under Git Bash; same as kimi). Only rewrites `>nul`/`>NUL` (including `>>`
+/// and spaced forms); NUL as a plain argument is untouched.
 pub(crate) fn rewrite_nul_redirects(command: &str) -> String {
     command
         .replace("> nul", "> /dev/null")
@@ -175,12 +182,15 @@ pub(crate) fn rewrite_nul_redirects(command: &str) -> String {
         .replace(">NUL", ">/dev/null")
 }
 
-/// 统一起 shell：Windows 优先 Git Bash（bash -c，探测见 windows_shell）、
-/// 回退 cmd /C；Unix 优先原生 bash、回退 sh（探测见 unix_shell）。
-/// 工作目录、stdin null、stdout/stderr piped、kill_on_drop。注入 NO_COLOR=1 / TERM=dumb / GIT_TERMINAL_PROMPT=0
-///（防 git 交互提问挂死）+ PYTHONIOENCODING/PYTHONUTF8=1（Python 子进程强制
-/// UTF-8 输出，ZCode 同款）；LANG 未设时补 C.UTF-8。
-/// unix 上 process_group(0) 让子进程自成进程组组长，stop_task 才能整组树杀。
+/// Unified shell spawn: Windows prefers Git Bash (bash -c, detection in
+/// windows_shell) and falls back to cmd /C; Unix prefers native bash and falls
+/// back to sh (detection in unix_shell). Working directory, stdin null,
+/// stdout/stderr piped, kill_on_drop. Injects NO_COLOR=1 / TERM=dumb /
+/// GIT_TERMINAL_PROMPT=0 (prevents git interactive prompts from hanging) +
+/// PYTHONIOENCODING/PYTHONUTF8=1 (forces UTF-8 output from Python subprocesses,
+/// same as ZCode); adds C.UTF-8 for LANG when unset. On unix, process_group(0)
+/// makes the child its own process group leader so stop_task can kill the whole
+/// tree.
 pub(crate) fn spawn_shell(cwd: &Path, command: &str) -> std::io::Result<tokio::process::Child> {
     let command = command.to_string();
     let mut shell = if cfg!(target_os = "windows") {

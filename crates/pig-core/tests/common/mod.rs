@@ -20,7 +20,7 @@ default_model = "mock-model"
 
 [[providers]]
 id = "mock"
-name = "Mock 供应商"
+name = "Mock Provider"
 base_url = "http://127.0.0.1:{port}/v1"
 api_key = "mock-key"
 api_format = "OpenAiChat"
@@ -56,7 +56,10 @@ pub async fn new_session(agent: &pig_core::AgentHandle, cwd: PathBuf) -> String 
     loop {
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), agent.events.recv()).await
         else {
-            assert!(Instant::now() < deadline, "等待 SessionConfigured 超时");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for SessionConfigured"
+            );
             continue;
         };
         if let Event::SessionConfigured { session_id, .. } = event {
@@ -83,7 +86,7 @@ pub async fn recv_until(
         }
     }
     panic!(
-        "等待事件超时（{}s），已收到: {collected:#?}",
+        "Timed out after {}s waiting for event, received: {collected:#?}",
         deadline.as_secs()
     );
 }

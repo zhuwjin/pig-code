@@ -1,5 +1,11 @@
-//! pig-code 的 agent 引擎：Session / turn 循环 / OpenAI 兼容 provider / 工具执行。
-//! 通过 `spawn_agent` 在独立线程的 tokio runtime 上运行，与 UI 用 channel 交换 Op/Event。
+//! pig-code's agent engine: Session / turn loop / OpenAI-compatible provider / tool execution.
+//! Runs on a dedicated tokio runtime thread via `spawn_agent`, exchanging Op/Event with the
+//! UI over channels.
+//!
+//! Language-agnostic (Clean/Hexagonal): core holds no i18n registry — errors are carried by
+//! pig-protocol's CoreError enum + English detail, with localization deferred to pig-app
+//! render points; model-facing text (prompts/tool results/refusal receipts) is always
+//! English constants (see the root AGENTS.md convention).
 
 pub mod agent;
 pub mod config;
@@ -27,7 +33,7 @@ use pig_protocol::{Event, Op};
 
 pub use pig_protocol::AppConfig;
 
-/// 数据目录：PIG_DATA_DIR 环境变量优先（自测隔离），默认 ~/.pigcode。
+/// Data directory: the PIG_DATA_DIR environment variable first (self-test isolation); default ~/.pigcode.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("PIG_DATA_DIR")
         .map(PathBuf::from)
@@ -40,9 +46,10 @@ pub fn data_dir() -> PathBuf {
         })
 }
 
-/// Windows release 是 GUI 子系统（无控制台）：每个控制台子程序（git/cmd/bash/
-/// npx.cmd…）spawn 时都会各弹一个控制台窗口——git 高频调用时表现为疯狂闪窗。
-/// 所有子进程统一经 `.no_console()` 加 CREATE_NO_WINDOW；非 Windows 为 no-op。
+/// Windows release is a GUI subsystem (no console): every console child process
+/// (git/cmd/bash/npx.cmd...) pops its own console window on spawn — with git's high call
+/// rate this shows up as frantic window flashing. All child processes uniformly go through
+/// `.no_console()` adding CREATE_NO_WINDOW; a no-op on non-Windows.
 #[cfg(windows)]
 pub(crate) trait NoConsoleExt {
     fn no_console(&mut self) -> &mut Self;
@@ -98,14 +105,15 @@ impl Drop for AgentHandle {
     }
 }
 
-/// 启动 agent 线程。`config_path` 为 None 时读默认 ~/.pigcode/config.toml。
+/// Start the agent thread. `config_path` None reads the default ~/.pigcode/config.toml.
 pub fn spawn_agent(config_path: Option<PathBuf>, cwd: PathBuf) -> AgentHandle {
     spawn_agent_with_data_dir(config_path, cwd, data_dir())
 }
 
-/// 完整链路网络探针（pig-app 的 PIG_NET_TEST=full 触发）：
-/// spawn_agent + 真实发送一条消息（含系统提示词与工具），
-/// 打印带时间戳的事件流直到回合结束，用于定位「回合不完成」类问题。
+/// Full-chain network probe (triggered by PIG_NET_TEST=full in pig-app):
+/// spawn_agent + a real message send (with system prompt and tools), printing the
+/// timestamped event stream until the turn ends, for diagnosing "turn does not complete"
+/// issues.
 pub fn net_test_full_turn(config_path: Option<PathBuf>) {
     let cwd = std::env::current_dir().expect("cwd");
     let agent = spawn_agent(config_path, cwd);
@@ -136,7 +144,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                 {
                     Ok(Ok(event)) => event,
                     _ => {
-                        println!("[net-test] 超时：90s 内回合未结束");
+                        println!("[net-test] timeout: turn did not finish within 90s");
                         break;
                     }
                 };
@@ -149,10 +157,12 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                     format!("SessionConfigured({sid})")
                 }
                 Event::TurnStarted { .. } => "TurnStarted".to_string(),
-                Event::TextDelta { delta, .. } => format!("TextDelta({}字)", delta.chars().count()),
+                Event::TextDelta { delta, .. } => {
+                    format!("TextDelta({} chars)", delta.chars().count())
+                }
                 Event::TextDone { .. } => "TextDone".to_string(),
                 Event::ReasoningDelta { delta, .. } => {
-                    format!("ReasoningDelta({}字)", delta.chars().count())
+                    format!("ReasoningDelta({} chars)", delta.chars().count())
                 }
                 Event::ToolCallBegin { tool, .. } => format!("ToolCallBegin({tool})"),
                 Event::ToolCallEnd { is_error, .. } => {
@@ -161,7 +171,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                 Event::ApprovalRequested {
                     request_id, tool, ..
                 } => {
-                    // 探针自动批准，让续轮请求（带 thinking 回传）真实发生
+                    // The probe auto-approves so continuation-turn requests (with thinking passed back) really happen
                     let request_id = request_id.clone();
                     agent
                         .ops
@@ -172,14 +182,14 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                         })
                         .await
                         .expect("send ApprovalReply");
-                    format!("ApprovalRequested({tool}) → 自动批准")
+                    format!("ApprovalRequested({tool}) -> auto-approved")
                 }
                 Event::ContextUsage { used, total, .. } => format!("ContextUsage({used}/{total})"),
                 Event::TurnComplete { duration_ms, .. } => {
                     format!("TurnComplete({duration_ms}ms)")
                 }
                 Event::TurnAborted { .. } => "TurnAborted".to_string(),
-                Event::Error { message, .. } => format!("Error({message})"),
+                Event::Error { error, .. } => format!("Error({error:?})"),
                 other => format!("{other:?}"),
             };
             println!("[net-test] +{elapsed}ms {label}");
@@ -189,7 +199,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                     .ops
                     .send(Op::SendMessage {
                         session_id: session_id.clone(),
-                        content: "用 Read 读取 Cargo.toml，然后一句话总结".to_string(),
+                        content: "Read Cargo.toml and summarize it in one sentence".to_string(),
                         files: vec![],
                         images: vec![],
                         mode: pig_protocol::ExecMode::AutoEdit,
@@ -208,7 +218,7 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
     agent.shutdown();
 }
 
-/// 同 `spawn_agent`，但显式指定数据目录（测试/自测隔离用）。
+/// Same as `spawn_agent`, but with an explicit data directory (for tests/self-test isolation).
 pub fn spawn_agent_with_data_dir(
     config_path: Option<PathBuf>,
     cwd: PathBuf,

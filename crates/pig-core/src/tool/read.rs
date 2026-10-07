@@ -14,14 +14,14 @@ impl Tool for ReadFile {
             "type": "function",
             "function": {
                 "name": "Read",
-                "description": "读取工作区内文件内容，输出带「行号\\t」前缀。path 相对工作目录；文件过长用 offset/limit 分页（单次约 10 万字符上限）；单行超 2000 字符用 column_offset 续读。UTF-16/GBK 文件自动转码显示，二进制文件会拒绝。超过 100MB 的文件会拒绝（用 Grep 定位或 Bash 分段查看）。相同参数重读未变化的文件会返回「文件未变化」而不重复输出全文。",
+                "description": "Read a workspace file's contents, prefixed with \"line-number\\t\" on each line. path is relative to the working directory; page long files with offset/limit (a ~100k character budget per call); continue lines longer than 2000 characters with column_offset. UTF-16/GBK files are transcoded automatically; binary files are refused. Files over 100MB are refused (locate content with Grep or page through with Bash). Re-reading an unchanged file with the same parameters returns a \"file unchanged\" notice instead of the full text.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "相对工作目录的文件路径" },
-                        "offset": { "type": "integer", "description": "起始行号（从 1 开始），默认 1" },
-                        "limit": { "type": "integer", "description": "最多读取行数，默认 2000" },
-                        "column_offset": { "type": "integer", "description": "每行起始字符列（0 起）。用于续读超 2000 字符的长行——截断提示会给出下一页的 column_offset 值" }
+                        "path": { "type": "string", "description": "File path relative to the working directory" },
+                        "offset": { "type": "integer", "description": "1-based starting line number (default 1)" },
+                        "limit": { "type": "integer", "description": "Maximum number of lines to read (default 2000)" },
+                        "column_offset": { "type": "integer", "description": "Zero-based starting character column applied to every line. Use it to continue reading lines longer than 2000 characters — the truncation note reports the next page's column_offset value" }
                     },
                     "required": ["path"]
                 }
@@ -35,17 +35,19 @@ impl Tool for ReadFile {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let path = args["path"].as_str().ok_or("缺少参数 path")?;
+            let path = args["path"]
+                .as_str()
+                .ok_or("Missing required parameter: path")?;
             let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }
-            // 体积护栏：先 stat 再读盘，防整文件进内存（NotFound 仍走引导文案）
+            // Size guard: stat before reading from disk to keep whole files out of memory (NotFound still goes through the guidance message)
             let meta = std::fs::metadata(&full).map_err(|e| read_io_error(path, &full, e))?;
             if let Some(err) = file_size_error(
                 meta.len(),
                 MAX_READ_FILE_BYTES,
-                "请用 Grep 搜索关键内容，或用 Bash（head/tail/grep）分段查看",
+                "use Grep to locate the key content, or page through it with Bash (head/tail/grep)",
             ) {
                 return Err(err);
             }
@@ -53,7 +55,7 @@ impl Tool for ReadFile {
             let doc = match crate::text::decode(&bytes) {
                 Ok(doc) => doc,
                 Err(error) => {
-                    // 图片给明确指引（魔数嗅探，不信任扩展名）
+                    // Give explicit guidance for images (magic-byte sniffing, does not trust the extension)
                     if let Some(mime) = sniff_image(&bytes) {
                         let label = match mime {
                             "image/png" => "PNG",
@@ -63,7 +65,7 @@ impl Tool for ReadFile {
                             _ => mime,
                         };
                         return Err(format!(
-                            "这是 {label} 图片，请改用 ReadMediaFile 读取（当前模型需支持图片输入）"
+                            "This is a {label} image; read it with ReadMediaFile instead (the current model must support image input)"
                         ));
                     }
                     return Err(error);
@@ -71,32 +73,32 @@ impl Tool for ReadFile {
             };
             if doc.text.is_empty() {
                 record_read_state(ctx.state, &full, &bytes, false, None);
-                return Ok(ToolEffect::plain("（空文件）".to_string()));
+                return Ok(ToolEffect::plain("(empty file)".to_string()));
             }
             let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
             let limit = args["limit"].as_u64().unwrap_or(MAX_READ_LINES as u64) as usize;
             let column_offset = args["column_offset"].as_u64().unwrap_or(0) as usize;
-            // 重复读短路（ZCode file_unchanged 同款）：同视图参数 + 内容 hash 未变
-            // → 不再输出全文，省 token。刷新流程用的是同一条 read_states 记录，
-            // hash 一致意味着新鲜度信息无需更新。
+            // Repeat-read short circuit (same as ZCode file_unchanged): same view parameters + unchanged content hash
+            // → skip re-outputting the full text, saving tokens. The refresh flow uses the same read_states record;
+            // an identical hash means the freshness information needs no update.
             let view = (offset, limit, column_offset);
             let unchanged = match ctx.state.read_states.lock() {
                 Ok(states) => states.get(&full).is_some_and(|r| {
-                    // 截断输出对同参数是确定性的，预算截断的读同样可短路
+                    // Truncated output is deterministic for the same parameters, so budget-truncated reads can short-circuit too
                     r.hash == hash_bytes(&bytes) && r.view == Some(view)
                 }),
                 Err(_) => false,
             };
             if unchanged {
                 return Ok(ToolEffect::plain(
-                    "（文件未变化：与上次 Read 参数相同且内容一致，无需重复读取）".to_string(),
+                    "(File unchanged: same parameters as the last Read and identical content — no need to re-read)".to_string(),
                 ));
             }
             let lines: Vec<&str> = doc.text.lines().collect();
             let total = lines.len();
             let start = (offset - 1).min(total);
-            // 逐行渲染（带行号），行数上限与字符预算（含行号前缀）先到先停；
-            // 超长行按 column_offset 起读，截断提示带续读参数
+            // Render line by line (with line numbers), stopping at whichever comes first: the line cap or the character budget (line-number prefixes included);
+            // overlong lines start reading at column_offset, with the truncation note carrying the continuation parameters
             let mut rendered: Vec<String> = Vec::new();
             let mut used_chars = 0usize;
             let mut end = start;
@@ -115,13 +117,13 @@ impl Tool for ReadFile {
                         .collect();
                     let next = column_offset + MAX_LINE_CHARS;
                     format!(
-                        "{taken} [...本行未完，已读第 {}-{next} 字符（共 {line_chars}），用 column_offset={next} 续读]",
+                        "{taken} [...line continues; read chars {}-{next} of {line_chars}; continue with column_offset={next}]",
                         column_offset + 1
                     )
                 } else if column_offset > 0 {
                     let taken: String = line.chars().skip(column_offset).collect();
                     format!(
-                        "{taken} [本行第 {}-{line_chars} 字符（共 {line_chars}）]",
+                        "{taken} [chars {}-{line_chars} of {line_chars} in this line]",
                         column_offset + 1
                     )
                 } else {
@@ -139,22 +141,24 @@ impl Tool for ReadFile {
             let mut out = rendered.join("\n");
             if end < total {
                 out.push_str(&format!(
-                    "\n\n[已截断: 显示 {}-{end} 行，共 {total} 行；用 offset 参数继续读取]",
+                    "\n\n[Truncated: showing lines {}-{end} of {total}; continue reading with the offset parameter]",
                     start + 1
                 ));
             }
-            // 元信息：仅非默认编码/行尾或 lossy 时提示
+            // Meta info: note only for non-default encoding/line ending or lossy decoding
             if doc.encoding != FileEncoding::Utf8 || doc.line_ending == LineEnding::Crlf {
-                let mut parts = vec![format!("编码={}", doc.encoding.label())];
+                let mut parts = vec![format!("encoding={}", doc.encoding.label())];
                 if doc.line_ending == LineEnding::Crlf {
-                    parts.push("行尾=CRLF（已转为 LF 显示，写回时还原）".to_string());
+                    parts.push(
+                        "line endings=CRLF (shown as LF; restored on write-back)".to_string(),
+                    );
                 }
-                out.push_str(&format!("\n\n[文件信息: {}]", parts.join(", ")));
+                out.push_str(&format!("\n\n[File info: {}]", parts.join(", ")));
             }
             if doc.lossy {
-                out.push_str("\n[警告: 解码存在替换字符，编码识别可能有误]");
+                out.push_str("\n[Warning: decoding produced replacement characters; the detected encoding may be wrong]");
             }
-            // ZCode 口径：只有被预算截断的「整读」才算 partial；显式分页读不算
+            // ZCode semantics: only a "full read" truncated by the budget counts as partial; explicitly paged reads do not
             let paged = args.get("offset").is_some() || args.get("limit").is_some();
             record_read_state(ctx.state, &full, &bytes, !paged && end < total, Some(view));
             Ok(ToolEffect::plain(out))
@@ -162,10 +166,10 @@ impl Tool for ReadFile {
     }
 }
 
-/// Read/Edit 共用的读盘报错：文件不存在时附父目录下最多 20 个文件名，引导模型修正路径
+/// Disk-read error shared by Read/Edit: on file-not-found, append up to 20 file names from the parent directory to guide the model to correct the path
 pub(crate) fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
-        let mut message = format!("文件不存在: {path}");
+        let mut message = format!("File not found: {path}");
         if let Some(parent) = full.parent()
             && let Ok(entries) = std::fs::read_dir(parent)
         {
@@ -177,7 +181,7 @@ pub(crate) fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> S
             names.truncate(20);
             if !names.is_empty() {
                 message.push_str(&format!(
-                    "。目录 {} 下有: {}",
+                    ". Directory {} contains: {}",
                     parent.display(),
                     names.join(", ")
                 ));
@@ -185,11 +189,11 @@ pub(crate) fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> S
         }
         message
     } else {
-        format!("读取失败 {}: {error}", full.display())
+        format!("Failed to read {}: {error}", full.display())
     }
 }
 
-/// 文件内容指纹（原始字节的 DefaultHasher）
+/// File content fingerprint (DefaultHasher over the raw bytes)
 fn hash_bytes(bytes: &[u8]) -> u64 {
     use std::hash::Hasher as _;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -197,8 +201,8 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// Read 成功登记 / Write/Edit 写盘后刷新 新鲜度状态（mtime 取写盘后的新值）。
-/// view：Read 携带本次视图参数（供重复读短路）；内部刷新传 None。
+/// Register on Read success / refresh the freshness state after Write/Edit hits the disk (mtime takes the new post-write value).
+/// view: Read carries this call's view parameters (for the repeat-read short circuit); internal refreshes pass None.
 pub(crate) fn record_read_state(
     state: &SessionToolState,
     full: &Path,
@@ -219,9 +223,9 @@ pub(crate) fn record_read_state(
     }
 }
 
-/// 写前新鲜度检查（ZCode read-file-state 同款）：文件不存在（新建）放行；
-/// 未读过 / 上次是不完整视图 / 读后磁盘被外部改动，一律拒绝。
-/// mtime 或 size 有变化才比 hash；hash 相同（内容逐字未变）放行并顺手更新状态。
+/// Pre-write freshness check (same as ZCode read-file-state): a nonexistent file (new creation) is allowed;
+/// never read / last view was incomplete / disk modified externally after the read — all rejected.
+/// The hash is compared only when mtime or size changed; an identical hash (content verbatim unchanged) is allowed and the state is updated along the way.
 pub(crate) fn check_fresh(
     state: &SessionToolState,
     full: &Path,
@@ -235,26 +239,27 @@ pub(crate) fn check_fresh(
         let states = state.read_states.lock().map_err(|e| e.to_string())?;
         let Some(read) = states.get(full) else {
             return Err(format!(
-                "文件已存在且本会话尚未读过；为避免覆盖他人改动，请先 Read 再{verb}"
+                "File exists but has not been read in this session; Read it before {verb} to avoid overwriting others' changes"
             ));
         };
         (read.mtime, read.size, read.hash, read.partial)
     };
     if partial {
         return Err(
-            "上次 Read 是不完整视图（输出被截断）；请用 offset/limit 分页读完或完整 Read 后再改"
+            "The last Read was an incomplete view (output was truncated); finish it with offset/limit pages or a full Read before editing"
                 .to_string(),
         );
     }
     let meta =
-        std::fs::metadata(full).map_err(|e| format!("读取文件状态失败 {}: {e}", full.display()))?;
+        std::fs::metadata(full).map_err(|e| format!("Failed to stat {}: {e}", full.display()))?;
     if meta.modified().ok() == read_mtime && meta.len() == read_size {
         return Ok(());
     }
-    let bytes = std::fs::read(full).map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
+    let bytes =
+        std::fs::read(full).map_err(|e| format!("Failed to read {}: {e}", full.display()))?;
     if hash_bytes(&bytes) == read_hash {
         record_read_state(state, full, &bytes, false, None);
         return Ok(());
     }
-    Err("文件自上次 Read 后已被外部修改，请先重新 Read 再改（避免覆盖他人改动）".to_string())
+    Err("The file was modified externally since the last Read; Read it again before editing (to avoid overwriting others' changes)".to_string())
 }

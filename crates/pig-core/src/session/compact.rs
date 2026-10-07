@@ -1,9 +1,9 @@
 use super::*;
 
 impl Session {
-    /// compact：优先模型摘要；失败回退朴素截断。返回 false = 被取消。
-    /// 历史重建为 system + 摘要消息 + 尾部原样消息（切在 user 边界，最多 4 条）。
-    /// instruction = 用户对本次摘要的特别要求（手动 /compact 续写；自动压缩为 None）
+    /// Compact: prefer a model summary; fall back to plain truncation on failure. Returns false = cancelled.
+    /// History is rebuilt as system + summary message + verbatim tail messages (cut at a user boundary, at most 4).
+    /// instruction = the user's special request for this summary (appended by manual /compact; None for automatic compaction)
     pub async fn run_compact(
         &mut self,
         config: Option<&ResolvedModel>,
@@ -19,7 +19,7 @@ impl Session {
                     session_id,
                     seq,
                     omitted: 0,
-                    note: "历史很短，无需压缩".to_string(),
+                    note: "History is short; no compaction needed.".to_string(),
                     automatic,
                 },
                 tx,
@@ -27,7 +27,7 @@ impl Session {
             return true;
         }
         let changed: Vec<String> = self.tracker.tracked_paths();
-        // 摘要是阻塞请求、期间无其他事件，先通知 UI 进入「正在压缩」态
+        // The summary is a blocking request with no other events in between; notify the UI to enter the "compacting" state first
         self.emit(
             |session_id, seq| Event::CompactStarted {
                 session_id,
@@ -48,7 +48,9 @@ impl Session {
                         return false;
                     }
                     Err(error) => {
-                        eprintln!("[pig-core] 摘要请求失败，回退截断: {error}");
+                        eprintln!(
+                            "[pig-core] summary request failed, falling back to truncation: {error:?}"
+                        );
                         None
                     }
                 }
@@ -57,32 +59,34 @@ impl Session {
         };
 
         let changed_note = if changed.is_empty() {
-            "期间无文件变更。".to_string()
+            "No files were changed in the meantime.".to_string()
         } else {
-            format!("期间修改的文件: {}", changed.join(", "))
+            format!("Files changed in the meantime: {}", changed.join(", "))
         };
         let tail = select_tail(&self.history, KEEP);
         let omitted = self.history.len() - 1 - tail.len();
         let note = match &summary {
             Some(summary) => format!(
-                "[前文已压缩{}·模型摘要] 省略 {omitted} 条消息。
+                "[Earlier context compacted{} — model summary] {omitted} messages omitted.
 
 {summary}
 
-使用说明：这份摘要是对前文对话的忠实记录——其中已完成的工作不要重做，其中已有的信息不要向用户重复询问；后台任务、文件内容等实时状态可能已变化，需要时用工具重新确认，不要凭摘要推断。{changed_note}",
-                if automatic { "（自动）" } else { "" },
+How to use this summary: it is a faithful record of the earlier conversation — do not redo work it marks as done, and do not re-ask the user for information it already contains. Live state such as background tasks and file contents may have changed since; re-verify with tools when needed instead of trusting the summary blindly. {changed_note}",
+                if automatic { " (automatic)" } else { "" },
             ),
             None => format!(
-                "[前文已压缩{}] 共 {omitted} 条消息被省略（摘要生成失败，已直接截断）。\
-                 被省略的内容已不在上下文中，需要细节时用 Read/Grep 重新查证，不要凭印象推断。{changed_note}",
-                if automatic { "（自动）" } else { "" },
+                "[Earlier context compacted{}] {omitted} messages were omitted (summary generation failed, \
+                 the history was truncated directly). The omitted content is no longer in context — \
+                 re-verify details with Read/Grep when needed instead of guessing from memory. {changed_note}",
+                if automatic { " (automatic)" } else { "" },
             ),
         };
 
         self.history = vec![self.history[0].clone(), ChatMsg::system(note.clone())];
         self.history.extend(tail);
-        // 水位重置为压缩后历史的估算值（下次真实采样校正）：不重置的话水位检查拿
-        // 压缩前的旧高值，下一回合开头会立刻又触发一次自动压缩，把刚生成的摘要再压一遍
+        // Reset the usage watermark to an estimate of the compacted history (corrected by the next real sample):
+        // without the reset the watermark check would see the pre-compaction high value and immediately trigger
+        // another automatic compaction at the start of the next turn, compacting the freshly generated summary again
         let used_after = estimate_history_tokens(&self.history);
         self.last_total_tokens = Some(used_after);
         self.record(&RolloutRecord::Compact {
@@ -91,7 +95,7 @@ impl Session {
             automatic,
             used_after: Some(used_after),
         });
-        // 容量 chip 即时刷新（模型未配置则无窗口可报，跳过）
+        // Refresh the capacity chip immediately (skipped when no model is configured; no window to report)
         if let Some(config) = config {
             let (cache_read_total, input_total) = (self.cache_read_total, self.input_total);
             let total = config.context_window;
@@ -122,12 +126,12 @@ impl Session {
     }
 }
 
-/// 压缩保留的尾部：最多 keep 条，且必须切在 user 边界上。
-/// - 开头是 assistant（含 tool_calls）：Anthropic 端点要求首条非 system 消息
-///   必须是 user（400），OpenAI 兼容端点也会拿到语义断裂的开头；
-/// - 开头是 tool：孤儿 tool_result（无 tool_use 前置），两家都拒；
-/// - 窗口内没有 user（自动压缩在长工具链中间触发）：退化为只保留最后一条
-///   user 消息——当前回合的用户请求必须留在原样上下文里，不能全靠摘要兜底。
+/// The tail kept by compaction: at most `keep` messages, and it must be cut at a user boundary.
+/// - Leading assistant (with tool_calls): the Anthropic endpoint requires the first non-system
+///   message to be user (400 otherwise), and OpenAI-compatible endpoints would also get a semantically broken head;
+/// - Leading tool: an orphan tool_result (no preceding tool_use); both providers reject it;
+/// - No user inside the window (automatic compaction triggered mid-tool-chain): degrade to keeping only
+///   the last user message — the current turn's user request must stay in the verbatim context, not rely entirely on the summary.
 fn select_tail(history: &[ChatMsg], keep: usize) -> Vec<ChatMsg> {
     let mut tail: Vec<ChatMsg> = history[history.len().saturating_sub(keep)..].to_vec();
     while !tail.is_empty() && tail[0].role != "user" {
@@ -141,9 +145,9 @@ fn select_tail(history: &[ChatMsg], keep: usize) -> Vec<ChatMsg> {
     tail
 }
 
-/// 粗略估算历史的 token 量（~4 字符/token + 每条消息 4 token 开销）：
-/// 只用于压缩后水位/容量显示的过渡值，偏低估——方向安全（不会误触发自动
-/// 压缩），下一次真实采样的 Usage 会校正它。
+/// Roughly estimate the history's token count (~4 chars/token + 4 tokens of overhead per message):
+/// only a transitional value for the post-compaction watermark/capacity display; underestimating is
+/// the safe direction (no false automatic-compaction triggers), and the next real Usage sample corrects it.
 fn estimate_history_tokens(history: &[ChatMsg]) -> u64 {
     let mut chars = 0usize;
     for msg in history {
@@ -159,16 +163,18 @@ fn estimate_history_tokens(history: &[ChatMsg]) -> u64 {
 }
 
 pub const COMPACTION_MARKER: &str = "[COMPACTION]";
-// ---- 会话自动命名（对齐 ZCode 的 title-generation sidecar）----
+// ---- Session auto-naming (aligned with ZCode's title-generation sidecar) ----
 
-/// 摘要请求消息：冻结 system + 历史逐字原样 + 末尾一条指令 user 消息。
-/// 与正常会话请求同一份 system/tools/历史字节 → 供应商前缀缓存命中上次回合
-/// 写入的缓存（ZCode 摘要走同一条投影管线 / kimi-code 复用同一 history 数组
-/// 的同款取舍；旧的「全部拼成单条大 user 消息 + 逐条截断」形态是缓存杀手，
-/// 每次压缩全价输入且长 tool 输出有损）。tools 字段照带对齐缓存前缀。
-/// 历史超预算时从头丢整条（kimi-code preShrink 同款），并裁到 user 边界——
-/// 不以 tool 开头（孤儿 tool_result）且 Anthropic 首条必须是 user；
-/// 自动压缩按构造不会超窗（触发点低于窗口减输出预留），这条路径主要护手动。
+/// Summary request messages: frozen system + verbatim history + one trailing instruction user message.
+/// The same system/tools/history bytes as the normal conversation request -> the provider's prefix cache
+/// hits the cache written by the last turn (ZCode routes its summary through the same projection pipeline /
+/// kimi-code reuses the same history array — the same trade-off; the old "concatenate everything into one
+/// big user message + truncate each entry" shape was a cache killer: every compaction paid full-price input
+/// and long tool output was lossy). The tools field is carried along to align the cache prefix.
+/// When history exceeds the budget, drop whole messages from the head (same as kimi-code preShrink) and trim
+/// to a user boundary — must not start with tool (orphan tool_result) and Anthropic requires the first
+/// message to be user; automatic compaction by construction never exceeds the window (the trigger point is
+/// below window minus output reserve), so this path mainly guards the manual case.
 fn build_summary_messages(
     history: &[ChatMsg],
     config: &ResolvedModel,
@@ -177,12 +183,12 @@ fn build_summary_messages(
     let budget = config
         .context_window
         .saturating_sub(config.max_output_tokens + 13_000);
-    let mut head = 1usize; // history[0] = 冻结 system，必保留
+    let mut head = 1usize; // history[0] = frozen system, always kept
     while history.len() - head > 1 && estimate_history_tokens(&history[head..]) > budget {
         head += 1;
     }
     let mut middle: Vec<ChatMsg> = history[head..].to_vec();
-    // 裁到 user 边界（砍头后首条可能是 assistant/tool，两家端点都拒）
+    // Trim to a user boundary (after the head drop the first message may be assistant/tool; both endpoints reject that)
     while !middle.is_empty() && middle[0].role != "user" {
         middle.remove(0);
     }
@@ -196,18 +202,20 @@ fn compaction_instruction(instruction: Option<&str>) -> String {
     let custom = instruction
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .map(|text| format!("\n另外，用户对本次摘要提出了特别要求，请在摘要中重点体现：{text}\n"))
+        .map(|text| {
+            format!("\nThe user added a special request for this summary — emphasize it: {text}\n")
+        })
         .unwrap_or_default();
     format!(
-        "{COMPACTION_MARKER} 请把以上编程助手对话历史压缩成一份交接摘要，供同一助手在压缩后的上下文里继续工作。用中文，按以下分节输出（无内容的节略过）：
-1. 用户目标：用户要做什么，明确提过的要求与偏好。
-2. 已完成：已做完的工作与已验证的结论。
-3. 文件变更：动过的文件（路径 + 一句话改动说明）。
-4. 关键决策：技术选型与理由、用户否决过或纠正过的方向。
-5. 进行中与待办：未完成的步骤、下一步计划、已知阻塞；如存在已批准或正在制定的实施计划，其步骤与结论必须完整保留（压缩后还要靠它继续执行）。
-6. 重要上下文：正在跑的命令/后台任务、关键报错原文、环境要点。
-只保留继续工作所需的信息；文件路径、命令、报错原文等硬信息原样保留，不要臆测补充。全文控制在 1200 字以内。{custom}
-不要调用任何工具，直接输出摘要文本。
+        "{COMPACTION_MARKER} Compress the coding-assistant conversation history above into a handoff summary for the same assistant to continue working with after compaction. Write it in the language the conversation has been using, with the following sections (skip sections that have no content):
+1. User goals: what the user wants, including explicitly stated requirements and preferences.
+2. Completed: work that is done and verified conclusions.
+3. File changes: files touched (path + one-line description of the change).
+4. Key decisions: technical choices and their rationale; directions the user rejected or corrected.
+5. In progress and pending: unfinished steps, next-step plans, known blockers; if an implementation plan has been approved or is being drafted, its steps and conclusions must be preserved in full (execution continues from it after compaction).
+6. Important context: running commands/background tasks, verbatim key error messages, environment essentials.
+Keep only what is needed to continue the work; preserve hard facts such as file paths, commands, and verbatim error messages — do not invent details. Keep the whole summary within 1200 characters.{custom}
+Do not call any tools; output the summary text directly.
 "
     )
 }
@@ -237,14 +245,14 @@ mod tests {
     }
 
     fn tool(id: &str) -> ChatMsg {
-        ChatMsg::tool_result(id, "输出".to_string())
+        ChatMsg::tool_result(id, "output".to_string())
     }
 
     fn roles(msgs: &[ChatMsg]) -> Vec<&str> {
         msgs.iter().map(|m| m.role.as_str()).collect()
     }
 
-    /// 窗口以 user 开头：原样保留（最常见的纯文本收尾形态）
+    /// Window starts at user: kept as-is (the most common plain-text tail shape)
     #[test]
     fn tail_starting_at_user_kept_as_is() {
         let history = vec![
@@ -260,8 +268,8 @@ mod tests {
         assert_eq!(roles(&tail), ["user", "assistant", "user", "assistant"]);
     }
 
-    /// 窗口以 tool/assistant 开头（工具链轮后）：裁到 user 边界——
-    /// Anthropic 首条必须是 user，且孤儿 tool_result 两家都拒
+    /// Window starts at tool/assistant (after a tool-chain round): trim to a user boundary —
+    /// Anthropic requires the first message to be user, and both providers reject orphan tool_results
     #[test]
     fn tail_trims_to_user_boundary() {
         let history = vec![
@@ -278,8 +286,8 @@ mod tests {
         assert_eq!(tail[0].content.as_deref(), Some("u2"));
     }
 
-    /// 窗口内没有 user（自动压缩在长工具链中间触发）：退化为只留最后一条
-    /// user 消息——当前回合的用户请求必须原样保留，不能全靠摘要兜底
+    /// No user inside the window (automatic compaction triggered mid-tool-chain): degrade to keeping only
+    /// the last user message — the current turn's user request must be preserved verbatim, not rely entirely on the summary
     #[test]
     fn tail_without_user_falls_back_to_last_user_message() {
         let history = vec![
@@ -295,7 +303,7 @@ mod tests {
         assert_eq!(tail[0].content.as_deref(), Some("u1"));
     }
 
-    /// 历史里一条 user 都没有（防御）：返回空，不造孤儿段
+    /// Not a single user in history (defensive): return empty, never fabricate an orphan segment
     #[test]
     fn tail_without_any_user_returns_empty() {
         let history = vec![
@@ -306,11 +314,11 @@ mod tests {
         assert!(select_tail(&history, 4).is_empty());
     }
 
-    /// 估算：覆盖正文/思考/工具参数与每条开销，单调增长
+    /// Estimate: covers content/reasoning/tool arguments and per-message overhead, monotonically increasing
     #[test]
     fn estimate_counts_content_reasoning_and_arguments() {
         let base = estimate_history_tokens(&[user("1234")]);
-        // 4 字符正文 /4 = 1 + 每条 4 = 5
+        // 4 chars of content / 4 = 1 + 4 per message = 5
         assert_eq!(base, 5);
         let with_reasoning = estimate_history_tokens(&[ChatMsg::assistant(
             "1234".into(),
@@ -320,7 +328,7 @@ mod tests {
         // (4+8)/4 = 3 + 4 = 7
         assert_eq!(with_reasoning, 7);
         let with_call = estimate_history_tokens(&[assistant_call("c1")]);
-        // 参数 "{}" 2 字符 + 调用常量 20 = 22/4 = 5 + 4 = 9
+        // arguments "{}" 2 chars + call constant 20 = 22/4 = 5 + 4 = 9
         assert_eq!(with_call, 9);
     }
 
@@ -340,8 +348,8 @@ mod tests {
         }
     }
 
-    /// 摘要请求形态：冻结 system 打头、历史逐字原样居中、指令 user 收尾——
-    /// 与会话请求前缀逐字节一致是缓存命中前提，不得拼盘/截断
+    /// Summary request shape: frozen system first, verbatim history in the middle, instruction user last —
+    /// byte-for-byte prefix equality with the conversation request is the precondition for cache hits; no reassembly/truncation
     #[test]
     fn summary_messages_wrap_verbatim_history() {
         let history = vec![
@@ -367,7 +375,7 @@ mod tests {
                 "user"
             ]
         );
-        // 中间段与历史逐条同内容（原样，无截断无重组）
+        // Middle segment matches history entry by entry (verbatim, no truncation or reassembly)
         for (a, b) in messages[1..messages.len() - 1].iter().zip(&history[1..]) {
             assert_eq!(a.content, b.content);
             assert_eq!(a.tool_call_id, b.tool_call_id);
@@ -375,15 +383,14 @@ mod tests {
         let instruction = &messages[messages.len() - 1];
         assert_eq!(instruction.role, "user");
         assert!(
-            instruction
-                .content
-                .as_deref()
-                .is_some_and(|c| c.contains(COMPACTION_MARKER) && c.contains("不要调用任何工具")),
-            "指令收尾: {instruction:?}"
+            instruction.content.as_deref().is_some_and(
+                |c| c.contains(COMPACTION_MARKER) && c.contains("Do not call any tools")
+            ),
+            "instruction should close the request: {instruction:?}"
         );
     }
 
-    /// 历史超预算：从头丢整条直到装下，且裁到 user 边界（不以 tool/assistant 开头）
+    /// History over budget: drop whole messages from the head until it fits, and trim to a user boundary (must not start with tool/assistant)
     #[test]
     fn summary_messages_pre_shrink_drops_from_head_at_user_boundary() {
         let history = vec![
@@ -395,22 +402,22 @@ mod tests {
             user("u2"),
             assistant_text("a2"),
         ];
-        // 预算极小：只装得下尾部一两条
+        // Tiny budget: only the last one or two messages fit
         let messages = build_summary_messages(&history, &test_model(1_100), None);
         assert_eq!(messages[0].role, "system");
         assert_eq!(
             messages[1].role,
             "user",
-            "砍头后首条必须是 user: {}",
+            "first message after head-drop must be user: {}",
             roles(&messages).join(",")
         );
         assert!(
             messages.len() < history.len() + 1,
-            "应已丢弃前缀: {messages:?}"
+            "prefix should have been dropped: {messages:?}"
         );
     }
 
-    /// 砍头+裁边后中间全空：只剩 system + 指令（摘要仍能产出，请求合法）
+    /// Head drop + boundary trim empties the middle: only system + instruction remain (the summary can still be produced; the request is valid)
     #[test]
     fn summary_messages_fallback_to_instruction_only() {
         let history = vec![
@@ -422,7 +429,7 @@ mod tests {
         assert_eq!(roles(&messages), ["system", "user"]);
     }
 
-    /// 自定义指令：/compact 续写的重点说明进摘要请求末尾指令；空白忽略
+    /// Custom instruction: the focus note appended by /compact enters the summary request's trailing instruction; blank is ignored
     #[test]
     fn summary_instruction_includes_custom_focus() {
         let history = vec![
@@ -431,24 +438,24 @@ mod tests {
             assistant_text("a1"),
         ];
         let messages =
-            build_summary_messages(&history, &test_model(128_000), Some("重点关注 README"));
+            build_summary_messages(&history, &test_model(128_000), Some("focus on the README"));
         let instruction = messages[messages.len() - 1]
             .content
             .as_deref()
             .unwrap_or_default();
         assert!(
-            instruction.contains("特别要求") && instruction.contains("重点关注 README"),
-            "自定义重点应进指令: {instruction}"
+            instruction.contains("special request") && instruction.contains("focus on the README"),
+            "custom focus should enter the instruction: {instruction}"
         );
-        // 空白 = 无自定义块
+        // Blank = no custom block
         let messages = build_summary_messages(&history, &test_model(128_000), Some("  "));
         let instruction = messages[messages.len() - 1]
             .content
             .as_deref()
             .unwrap_or_default();
         assert!(
-            !instruction.contains("特别要求"),
-            "空白指令应忽略: {instruction}"
+            !instruction.contains("special request"),
+            "blank instruction should be ignored: {instruction}"
         );
     }
 }

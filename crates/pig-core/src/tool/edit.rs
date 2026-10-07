@@ -10,14 +10,14 @@ impl Tool for EditFile {
             "type": "function",
             "function": {
                 "name": "Edit",
-                "description": "精确替换文件中的文本。old_string 必须在文件中唯一出现（replace_all=true 时替换全部出现）；先 Read 确认内容再改。行号前缀、弯直引号、字面 \\n 等转义序列的常见笔误有容错匹配（命中时输出会注明）。保留原文件的编码与行尾。超过 50MB 的文件会拒绝（大文件请用 Bash sed/awk）。",
+                "description": "Perform an exact text replacement in a file. old_string must appear exactly once in the file (replace_all=true replaces every occurrence); Read the file to confirm its content before editing. Tolerant matching covers common slips — line-number prefixes, curly vs straight quotes, and literal \\n escape sequences (the output notes when one kicks in). The file's original encoding and line endings are preserved. Files over 50MB are refused (use Bash sed/awk for large files).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "相对工作目录的文件路径" },
-                        "old_string": { "type": "string", "description": "要被替换的原文（须唯一出现；replace_all=true 时替换全部）" },
-                        "new_string": { "type": "string", "description": "替换后的新文本；为空且 old_string 占整行时连行尾换行一起删除，不留空行" },
-                        "replace_all": { "type": "boolean", "description": "true 时替换全部匹配（默认 false，要求唯一出现）" }
+                        "path": { "type": "string", "description": "File path relative to the working directory" },
+                        "old_string": { "type": "string", "description": "The original text to replace (must appear exactly once; with replace_all=true every occurrence is replaced)" },
+                        "new_string": { "type": "string", "description": "The replacement text; when empty and old_string spans whole lines, the trailing newline is deleted along with the match, leaving no blank line" },
+                        "replace_all": { "type": "boolean", "description": "true replaces every match (default false, which requires a unique occurrence)" }
                     },
                     "required": ["path", "old_string", "new_string"]
                 }
@@ -31,44 +31,52 @@ impl Tool for EditFile {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let path = args["path"].as_str().ok_or("缺少参数 path")?;
-            let old = args["old_string"].as_str().ok_or("缺少参数 old_string")?;
-            let new = args["new_string"].as_str().ok_or("缺少参数 new_string")?;
+            let path = args["path"]
+                .as_str()
+                .ok_or("Missing required parameter: path")?;
+            let old = args["old_string"]
+                .as_str()
+                .ok_or("Missing required parameter: old_string")?;
+            let new = args["new_string"]
+                .as_str()
+                .ok_or("Missing required parameter: new_string")?;
             if old.is_empty() {
-                return Err("old_string 不能为空；要创建文件请用 Write".to_string());
+                return Err("old_string must not be empty; use Write to create a file".to_string());
             }
             if old == new {
-                return Err("old_string 与 new_string 相同，无需修改".to_string());
+                return Err(
+                    "old_string and new_string are identical; nothing to change".to_string()
+                );
             }
             let replace_all = args["replace_all"].as_bool().unwrap_or(false);
             let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Write)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }
-            // 体积护栏放在新鲜度检查之前：大文件直接拒绝，不进整读整写
+            // The size guard runs before the freshness check: oversized files are rejected outright, never entering whole-read/whole-write
             if let Some(err) = std::fs::metadata(&full).ok().and_then(|m| {
                 file_size_error(
                     m.len(),
                     MAX_EDIT_FILE_BYTES,
-                    "不适合整文件编辑；请用 Bash（sed/awk）做局部修改，或先拆分文件",
+                    "not suitable for whole-file editing; use Bash (sed/awk) for localized changes, or split the file first",
                 )
             }) {
                 return Err(err);
             }
-            check_fresh(ctx.state, &full, full.exists(), "修改")?;
+            check_fresh(ctx.state, &full, full.exists(), "editing")?;
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
             let doc = crate::text::decode(&bytes)?;
             let content = doc.text;
-            // 匹配+替换计算抽在 compute_edit（审批预览共用，预览即所得）
+            // The match + replacement computation lives in compute_edit (shared with the approval preview; what the preview shows is what gets applied)
             let outcome = match compute_edit(&content, old, new, replace_all) {
                 Ok(outcome) => outcome,
                 Err(EditMatchError::NotFound) => {
                     let mut message = format!(
-                        "old_string 在 {path} 中未找到。请先用 Read 确认文件当前内容（注意缩进与换行需完全一致）。"
+                        "old_string not found in {path}. Read the file to confirm its current content first (indentation and line breaks must match exactly)."
                     );
                     if doc.line_ending == LineEnding::Crlf {
                         message.push_str(
-                            "该文件为 CRLF 行尾，Read 输出已转为 LF，old_string 请用 LF 换行。",
+                            " The file uses CRLF line endings; Read output is shown as LF, so use LF line breaks in old_string.",
                         );
                     }
                     return Err(message);
@@ -81,33 +89,33 @@ impl Tool for EditFile {
                             .iter()
                             .map(|l| l.to_string())
                             .collect::<Vec<_>>()
-                            .join("、");
+                            .join(", ");
                         if count > lines.len() {
-                            format!("（第 {joined} 行等）")
+                            format!(" (lines {joined}, among others)")
                         } else {
-                            format!("（第 {joined} 行）")
+                            format!(" (lines {joined})")
                         }
                     };
                     return Err(format!(
-                        "old_string 在 {path} 中出现 {count} 次{lines_note}，无法唯一定位。请扩大 old_string 范围使其唯一；如需全部替换，设 replace_all=true。"
+                        "old_string appears {count} times in {path}{lines_note} and cannot be located uniquely. Expand old_string until it is unique; to replace every occurrence, set replace_all=true."
                     ));
                 }
             };
             ctx.tracker.snapshot(&full)?;
-            // 匹配与替换都在 LF 视图（解码已归一）上做；写回时还原原编码/行尾
+            // Matching and replacement both happen on the LF view (already normalized by decoding); the original encoding/line ending is restored on write-back
             let after = outcome.after;
             let encoded = crate::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
             atomic_write(&full, &encoded)?;
-            // 写盘后刷新新鲜度：紧接着再改自己刚写的文件必须合法
+            // Refresh freshness after the write: immediately editing the file just written must be legal
             record_read_state(ctx.state, &full, &encoded, false, None);
             let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             let output = if replace_all {
-                format!("已修改 {path}（替换 {} 处）", outcome.replaced)
+                format!("Edited {path} (replaced {} occurrences)", outcome.replaced)
             } else if let Some(note) = outcome.tier_note {
-                format!("已修改 {path}（{note}）")
+                format!("Edited {path} ({note})")
             } else {
-                format!("已修改 {path}")
+                format!("Edited {path}")
             };
             Ok(ToolEffect {
                 output,
@@ -119,25 +127,26 @@ impl Tool for EditFile {
     }
 }
 
-/// Edit 匹配失败的两种形态（报错文案在调用方拼，那里才有 path/行尾上下文）。
-/// NotUnique 携带各匹配所在行号（1 起，最多 5 个，帮助模型扩大范围时定位）。
+/// The two match-failure shapes of Edit (error messages are assembled by the caller, which has the path/line-ending context).
+/// NotUnique carries the line numbers of the matches (1-based, up to 5, helping the model locate them while broadening the scope).
 #[derive(Debug)]
 pub enum EditMatchError {
     NotFound,
     NotUnique { count: usize, lines: Vec<usize> },
 }
 
-/// compute_edit 的产物：替换后文本、替换处数、容错梯队命中说明
+/// Product of compute_edit: post-replacement text, replacement count, and the tolerant-tier hit note
 pub struct EditOutcome {
     pub after: String,
     pub replaced: usize,
-    /// 「容错匹配：已剥离行号前缀」/「容错匹配：引号风格已跟随文件」；精确命中为 None
+    /// Tolerant-tier hit notes such as "tolerant match: line-number prefixes stripped" / "tolerant match: quote style
+    /// adjusted to match the file"; None on an exact match
     pub tier_note: Option<&'static str>,
 }
 
-/// Edit 的匹配+替换计算（LF 视图）：精确 → 剥离 Read 行号前缀 → 引号归一 →
-/// 反转义归一 四级梯队，每级各自做唯一性检查；replace_all 只走精确
-/// （宽匹配仅做单次替换）。审批预览与 Edit 执行共用，保证「预览即所得」。
+/// Edit's match + replacement computation (LF view): a four-level ladder — exact → strip Read line-number
+/// prefixes → quote normalization → unescape normalization — each level doing its own uniqueness check; replace_all goes exact-only
+/// (tolerant matches replace once). Shared by the approval preview and Edit execution, guaranteeing "what the preview shows is what gets applied".
 pub fn compute_edit(
     content_lf: &str,
     old: &str,
@@ -147,7 +156,7 @@ pub fn compute_edit(
     let mut effective_old = old.to_string();
     let mut effective_new = new.to_string();
     let mut quote_window: Option<(usize, usize)> = None;
-    // 引号归一多命中时的窗口起始行号（NotUnique 报错用）
+    // Window start line numbers when quote normalization hits multiple times (for the NotUnique error)
     let mut quote_multi_lines: Vec<usize> = Vec::new();
     let mut tier_note: Option<&'static str> = None;
     let mut count = content_lf.matches(old).count();
@@ -157,7 +166,7 @@ pub fn compute_edit(
             if stripped_count > 0 {
                 count = stripped_count;
                 effective_old = stripped;
-                tier_note = Some("容错匹配：已剥离行号前缀");
+                tier_note = Some("tolerant match: line-number prefixes stripped");
             }
         }
         if count == 0 {
@@ -167,7 +176,7 @@ pub fn compute_edit(
                 count = 1;
                 quote_window = Some((start, end));
                 effective_new = follow_quote_style(new, &content_lf[start..end]);
-                tier_note = Some("容错匹配：引号风格已跟随文件");
+                tier_note = Some("tolerant match: quote style adjusted to match the file");
             } else if windows.len() > 1 {
                 count = windows.len();
                 quote_multi_lines = windows
@@ -177,9 +186,9 @@ pub fn compute_edit(
                     .collect();
             }
         }
-        // 第 4 级：反转义归一——模型把字面 \n\t\r 等写进 old_string
-        //（从字符串字面量/JSON 复制时常见）；new_string 同步反转义（ZCode 同款）。
-        // 出现未识别转义或尾部孤立反斜杠时不应用（宁可不匹配也不乱改）。
+        // Level 4: unescape normalization — the model writes literal \n\t\r etc. into old_string
+        // (common when copying from string literals/JSON); new_string is unescaped in step (same as ZCode).
+        // Not applied on unrecognized escapes or a trailing lone backslash (better to miss the match than mangle the text).
         if count == 0
             && let Some(old_un) = unescape_literal(old)
         {
@@ -189,7 +198,7 @@ pub fn compute_edit(
                 count = un_count;
                 effective_old = old_un;
                 effective_new = new_un;
-                tier_note = Some("容错匹配：已反转义字面转义序列");
+                tier_note = Some("tolerant match: literal escape sequences unescaped");
             }
         }
     }
@@ -205,7 +214,7 @@ pub fn compute_edit(
         return Err(EditMatchError::NotUnique { count, lines });
     }
     let (after, replaced) = match quote_window {
-        // 引号归一命中：整段替换原文那 N 行
+        // Quote-normalization hit: replace those N original lines wholesale
         Some((start, end)) => {
             let mut out = String::with_capacity(content_lf.len());
             out.push_str(&content_lf[..start]);
@@ -222,9 +231,9 @@ pub fn compute_edit(
     })
 }
 
-/// 手动扫描替换（不用 String::replace，实现 ZCode 同款删除优化）：
-/// new 为空、old 不以 \n 结尾、且匹配位置后紧跟 \n 时，连这个 \n 一起删，不留空行。
-/// 返回 (替换后文本, 替换处数)。
+/// Manual scan-and-replace (not String::replace, implementing ZCode's deletion optimization):
+/// when new is empty, old does not end with \n, and the match position is immediately followed by \n, that \n is deleted too, leaving no blank line.
+/// Returns (post-replacement text, replacement count).
 fn apply_replacement(content: &str, old: &str, new: &str, replace_all: bool) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
@@ -245,9 +254,9 @@ fn apply_replacement(content: &str, old: &str, new: &str, replace_all: bool) -> 
     (out, replaced)
 }
 
-/// Edit 容错第 4 级：反转义字面转义序列（\n \t \r \" \' \` \$ \\ → 真实字符）。
-/// 未识别的转义组合保持原样；尾部孤立反斜杠返回 None（无法安全解释）；
-/// 完全不含转义序列也返回 None（该级无需参与）。
+/// Edit tolerant level 4: unescape literal escape sequences (\n \t \r \" \' \` \$ \\ → real characters).
+/// Unrecognized escape combinations stay as-is; a trailing lone backslash returns None (cannot be interpreted safely);
+/// input containing no escape sequences at all also returns None (this level need not participate).
 fn unescape_literal(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut escaped_any = false;
@@ -284,7 +293,7 @@ fn unescape_literal(s: &str) -> Option<String> {
     escaped_any.then_some(out)
 }
 
-/// needle 在 content 中各次出现的行号（1 起，取前 max 个）。
+/// Line numbers (1-based, first max taken) of each occurrence of needle in content.
 fn match_lines(content: &str, needle: &str, max: usize) -> Vec<usize> {
     let mut lines = Vec::new();
     let mut offset = 0usize;
@@ -298,13 +307,13 @@ fn match_lines(content: &str, needle: &str, max: usize) -> Vec<usize> {
     lines
 }
 
-/// 字节偏移 pos 所在行号（1 起）。
+/// Line number (1-based) containing byte offset pos.
 fn line_of(text: &str, pos: usize) -> usize {
     1 + text[..pos].matches('\n').count()
 }
 
-/// Edit 容错第 2 级：剥离 Read 输出的行号前缀（每行 ^\d+\t 或 ^\d+:）。
-/// 任一行不带合法前缀则整体不剥离（返回 None）；行尾单个 \n 视为终止符。
+/// Edit tolerant level 2: strip Read's line-number prefixes (^\d+\t or ^\d+: per line).
+/// If any line lacks a valid prefix, nothing is stripped (return None); a single trailing \n is treated as a terminator.
 fn strip_line_number_prefixes(s: &str) -> Option<String> {
     let (body, trailing_newline) = match s.strip_suffix('\n') {
         Some(body) => (body, true),
@@ -332,7 +341,7 @@ fn strip_line_number_prefixes(s: &str) -> Option<String> {
     })
 }
 
-/// Edit 容错第 3 级的弯引号归一：‘’→'，“”→"。
+/// Curly-quote normalization for Edit tolerant level 3: ‘’→', “”→".
 fn normalize_quotes(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -343,9 +352,9 @@ fn normalize_quotes(s: &str) -> String {
         .collect()
 }
 
-/// 引号归一后按行窗口匹配：content 与 old 各按行归一，逐行相等即命中。
-/// 返回各命中窗口在 content 里的字节区间（窗口覆盖整 N 行，不含尾随换行）。
-/// old 行尾单个 \n 视为终止符。
+/// Line-window matching after quote normalization: content and old are each normalized per line; a hit is line-by-line equality.
+/// Returns the byte range in content of each hit window (the window covers whole N lines, excluding the trailing newline).
+/// A single trailing \n in old is treated as a terminator.
 fn find_quote_normalized_windows(content: &str, old: &str) -> Vec<(usize, usize)> {
     let old_body = old.strip_suffix('\n').unwrap_or(old);
     let old_lines: Vec<String> = old_body.split('\n').map(normalize_quotes).collect();
@@ -354,7 +363,7 @@ fn find_quote_normalized_windows(content: &str, old: &str) -> Vec<(usize, usize)
     if n == 0 || content_lines.len() < n {
         return Vec::new();
     }
-    // 每行的字节起始偏移（split('\n') 的分隔符恰为 1 字节）
+    // Byte start offset of each line (the split('\n') separator is exactly 1 byte)
     let mut offsets = Vec::with_capacity(content_lines.len());
     let mut pos = 0usize;
     for line in &content_lines {
@@ -376,7 +385,7 @@ fn find_quote_normalized_windows(content: &str, old: &str) -> Vec<(usize, usize)
     hits
 }
 
-/// 跟随文件引号风格：原文匹配段含弯引号时，把 new_string 的直引号按出现顺序交替转弯。
+/// Follow the file's quote style: when the matched original segment contains curly quotes, new_string's straight quotes are alternately turned curly in order of appearance.
 fn follow_quote_style(new_string: &str, original_segment: &str) -> String {
     let curly_double =
         original_segment.contains('\u{201C}') || original_segment.contains('\u{201D}');

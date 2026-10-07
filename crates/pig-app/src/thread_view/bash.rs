@@ -1,19 +1,22 @@
-//! Bash 工具卡（ZCode 同款）：展开后是两张堆叠的代码卡——
-//! 命令卡（头部「Bash」+ 换行/复制按钮；命令带 bash 语法高亮）与
-//! 输出卡（头部「输出」+ 换行/复制按钮；输出纯文本不高亮，失败时红色）。
-//! 默认不折行（横向滚动 + 常显横向滚动条），两卡开关独立。
-//! 运行中/等审批仍走通用工具卡（实时输出），完成（含失败）后才切代码卡。
+//! Bash tool card (same as ZCode): expanded it is two stacked code cards — the
+//! command card (header "Bash" + wrap/copy buttons; the command gets bash
+//! syntax highlighting) and the output card (header "Output" + wrap/copy
+//! buttons; the output is plain text without highlighting, red on failure).
+//! No wrapping by default (horizontal scrolling + always-visible horizontal
+//! scrollbar); the two cards' toggles are independent. While running or
+//! awaiting approval the generic tool card is used (live output); the code
+//! cards take over once done (including failure).
 
 use super::*;
 
-/// 命令卡正文限高
+/// Command card body height cap
 const CMD_MAX_H: f32 = 160.;
-/// 输出卡正文限高
+/// Output card body height cap
 const OUT_MAX_H: f32 = 320.;
-/// 单卡渲染行数上限（Read 卡同款口径）
+/// Per-card render row cap (same measure as the Read card)
 const MAX_CARD_ROWS: usize = 600;
 
-/// 命令卡 / 输出卡（listeners 按它路由到对应的状态字段）
+/// Command card / output card (listeners route to the matching state field by it)
 #[derive(Clone, Copy)]
 enum SubCard {
     Cmd,
@@ -21,7 +24,7 @@ enum SubCard {
 }
 
 impl ThreadView {
-    /// Bash 工具的展开区：命令卡 + 输出卡堆叠
+    /// The Bash tool's expanded area: command card + output card stacked
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_bash_card(
         &self,
@@ -34,7 +37,8 @@ impl ThreadView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 内容缓存：主题切换经 Arc 判等重算（输出是 "text" 纯文本，只有量宽开销）
+        // Content cache: theme changes recompute via Arc equality (the output
+        // is "text" plain text, only width measuring costs)
         let theme = cx.theme().highlight_theme.clone();
         let content = {
             let mut cache = ui.cache.borrow_mut();
@@ -47,7 +51,7 @@ impl ThreadView {
                     out: PreparedCode::build(output.to_string(), "text", &theme, window, cx),
                 }));
             }
-            cache.clone().expect("刚填充")
+            cache.clone().expect("cache was just populated")
         };
 
         v_flex()
@@ -70,7 +74,7 @@ impl ThreadView {
             ))
             .child(self.render_bash_subcard(
                 ("bash-out", message_ix * 1024 + segment_ix),
-                "输出",
+                rust_i18n::t!("thread.bash_output").as_ref(),
                 &content.out,
                 is_error,
                 OUT_MAX_H,
@@ -86,8 +90,10 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 单张子卡：头部（标题 + 换行/复制）+ 正文（等宽行，无行号 gutter；
-    /// 不折行时显式量宽 + 横向滚动，滚动条内置随圆角补丁收角）
+    /// One subcard: header (title + wrap/copy) + body (monospace rows, no
+    /// line-number gutter; without wrapping it gets an explicit measured width
+    /// plus horizontal scrolling, scrollbars built in and rounded with the
+    /// corner patches)
     #[allow(clippy::too_many_arguments)]
     fn render_bash_subcard(
         &self,
@@ -107,7 +113,8 @@ impl ThreadView {
     ) -> AnyElement {
         let border = cx.theme().border;
         let card_bg = cx.theme().secondary;
-        // 卡片背后 = 页面底色（消息区自身透明，与 Root 的 tokens.background 同值）
+        // Behind the card = page background (the message area itself is
+        // transparent, same value as Root's tokens.background)
         let behind = cx.theme().background;
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
@@ -124,7 +131,7 @@ impl ThreadView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    // 标题用界面字体（正文才是等宽）
+                    // Title uses the UI font (the body is the monospace one)
                     .font_family(cx.theme().font_family.clone())
                     .text_sm()
                     .text_color(cx.theme().foreground)
@@ -136,7 +143,7 @@ impl ThreadView {
                     .xsmall()
                     .icon(AssetIconName::TextWrap)
                     .when(wrap, |this| this.text_color(cx.theme().foreground))
-                    .tooltip("自动换行")
+                    .tooltip(rust_i18n::t!("thread.wrap"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::ToolCall {
                             bash_ui: Some(ui), ..
@@ -163,7 +170,7 @@ impl ThreadView {
                         IconName::Copy
                     })
                     .when(copied, |this| this.text_color(cx.theme().success))
-                    .tooltip("复制")
+                    .tooltip(rust_i18n::t!("common.copy"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::ToolCall {
                             bash_ui: Some(ui), ..
@@ -193,7 +200,7 @@ impl ThreadView {
                     })),
             );
 
-        // 正文行（无行号）
+        // Body rows (no line numbers)
         let total = content.line_count();
         let shown = total.min(MAX_CARD_ROWS);
         let text_color = if is_error {
@@ -211,7 +218,7 @@ impl ThreadView {
                     .px_3()
                     .py_1()
                     .text_color(subtlest)
-                    .child("没有输出。".to_string())
+                    .child(rust_i18n::t!("thread.no_output").to_string())
                     .into_any_element(),
             ];
         }
@@ -222,7 +229,7 @@ impl ThreadView {
                     .py_1()
                     .text_center()
                     .text_color(subtlest)
-                    .child(format!("… 省略 {} 行 …", total - shown))
+                    .child(rust_i18n::t!("thread.omitted_lines", n = total - shown).to_string())
                     .into_any_element(),
             );
         }
@@ -232,15 +239,16 @@ impl ThreadView {
             .w_full()
             .max_h(px(max_h))
             .overflow_y_scroll()
-            // 滚轮锁定手势轴（Read 卡同款）：纵向滚轮只滚纵向，横向只滚横向
+            // Lock the wheel to the gesture axis (same as the Read card): the
+            // vertical wheel only scrolls vertically, horizontal only horizontally
             .restrict_scroll_to_axis()
             .track_scroll(v_scroll)
             .text_color(text_color)
             .child(if wrap {
                 v_flex().w_full().children(rows).into_any_element()
             } else {
-                // 无 gutter：内容宽 = 代码格 padding（24）+ 最大行宽；
-                // 底部预留横向滚动条车道
+                // No gutter: content width = code cell padding (24) + max line
+                // width; reserve a horizontal scrollbar lane at the bottom
                 let content_w = px(24.) + content.max_line_width;
                 div()
                     .id(format!("{}-body-x-{}", key.0, key.1))
@@ -259,9 +267,11 @@ impl ThreadView {
         div()
             .relative()
             .w_full()
-            // 滚动链：本卡内容能滚时吞掉滚轮（Bash 卡不走 cards.rs 共享的
-            // body_scroll 兜底——子卡句柄各自独立），不能滚时穿透给外层消息列表，
-            // 与其他工具卡行为一致
+            // Scroll chaining: swallow the wheel when this card's content can
+            // scroll (the Bash card does not use the shared body_scroll
+            // fallback in cards.rs — subcard handles are independent); chain
+            // through to the outer message list when it cannot, consistent with
+            // other tool cards
             .on_scroll_wheel(consume_scroll(v_scroll))
             .child(
                 v_flex()
@@ -275,14 +285,16 @@ impl ThreadView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(header)
                     .child(
-                        // 滚动条收进正文区域（不到头部）；角上由补丁收圆
+                        // Scrollbar tucked into the body area (not reaching the
+                        // header); corners rounded by patches
                         div()
                             .relative()
                             .w_full()
                             .child(body)
                             .child(Scrollbar::vertical(v_scroll))
                             .when(!wrap, |this| {
-                                // 常显：闲时淡出会让鼠标用户失去唯一的横滚入口
+                                // Always visible: idle fade-out would leave
+                                // mouse users without their only horizontal entry
                                 this.child(
                                     Scrollbar::horizontal(h_scroll).mode(ScrollbarMode::Always),
                                 )
@@ -299,7 +311,7 @@ impl ThreadView {
                 .absolute()
                 .inset_0(),
             )
-            // 补丁盖住了角上的描边，重描一遍圆角边框
+            // The patches cover the corner strokes; redraw the rounded border
             .child(
                 div()
                     .absolute()

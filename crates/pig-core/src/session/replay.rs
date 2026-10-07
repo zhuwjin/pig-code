@@ -1,11 +1,11 @@
 use super::*;
 
 impl Session {
-    /// resume 重放：按序发 durable 事件，UI 用同一 reduce 逻辑重建视图。
+    /// Resume replay: emit durable events in order; the UI rebuilds views with the same reduce logic.
     pub fn replay(&mut self, records: &[RolloutRecord], tx: &async_channel::Sender<Event>) {
         let mut in_assistant = false;
         let mut replay_turns = 0usize;
-        // 回放中遇到的后台子代理（去重）：回放结束后统一补 finished 落终态
+        // Background subagents encountered during replay (deduplicated): after replay ends, a unified finished pass settles their final state
         let mut replay_bg_agents: Vec<String> = vec![];
         for record in records {
             match record {
@@ -17,16 +17,17 @@ impl Session {
                 } => {
                     in_assistant = false;
                     let image_count = images.len();
-                    // 事件文本带附件链接（与 live 同形态）；rollout 里的原文保持干净
-                    let text = crate::rollout::user_display_text(text, images);
+                    // Clean body text + attachment numbers (same shape as live); the rollout's original text is the body
+                    let nums = crate::rollout::image_nums(images);
                     let files = files.clone();
                     self.emit(
                         |session_id, seq| Event::UserMessage {
                             session_id,
                             seq,
-                            text,
+                            text: text.clone(),
                             files,
                             image_count,
+                            image_nums: nums,
                         },
                         tx,
                     );
@@ -118,7 +119,7 @@ impl Session {
                         .unwrap_or_else(|_| arguments.clone());
                     let (tool, output) = (tool.clone(), output.clone());
                     let is_error = *is_error;
-                    // 回放统一从完整参数重算 summary，summary 逻辑演进后回放也一致
+                    // Replay always recomputes the summary from the full arguments, so replays stay consistent as summary logic evolves
                     let summary = tool::summarize(&crate::provider::ToolCall {
                         id: String::new(),
                         name: tool.clone(),
@@ -136,11 +137,12 @@ impl Session {
                         },
                         tx,
                     );
-                    // 代理卡元信息随记录回放重建（紧挨 ToolCallBegin、同一个回放合成
-                    // item_id）：agent_card 是 Agent 单卡槽位，agent_cards 是
-                    // AgentSwarm 批量卡（每张都重建）。后台代理的 agent_id 收集起来，
-                    // 回放结束后统一补 finished——后台任务不随进程存活，重开后一律
-                    // 视为已终结，否则回放的代理卡永转圈
+                    // Agent-card metadata is rebuilt from the record during replay (right after ToolCallBegin,
+                    // with the same synthesized replay item_id): agent_card is the single-card slot for Agent,
+                    // agent_cards is the AgentSwarm batch cards (each rebuilt). Background agents' agent_ids are
+                    // collected, and after replay ends a unified finished pass settles them — background tasks do
+                    // not outlive the process, so after reopening they are always considered terminated; otherwise
+                    // the replayed agent cards would spin forever
                     for card in agent_card.iter().chain(agent_cards.iter()) {
                         if card.background
                             && !replay_bg_agents.iter().any(|id| id == &card.agent_id)
@@ -180,8 +182,8 @@ impl Session {
                     automatic,
                     used_after,
                 } => {
-                    // 回放恢复压缩点的水位（used_after 是压缩后历史的估算值）并
-                    // 补发事件：UI 在消息流同一位置重建「上下文已压缩」分隔条
+                    // Replay restores the compaction point's usage watermark (used_after is the estimate of the
+                    // compacted history) and re-emits the event: the UI rebuilds the "context compacted" divider at the same spot in the message stream
                     if let Some(used) = used_after {
                         self.last_total_tokens = Some(*used);
                     }
@@ -206,7 +208,7 @@ impl Session {
                     ttft_ms,
                     api_steps,
                 } => {
-                    // 回放恢复：会话累计 + 历史回合的 footer 统计（水位由 StepUsage 恢复）
+                    // Replay restore: session totals + historical turns' footer stats (the usage watermark is restored by StepUsage)
                     self.input_total += input;
                     self.cache_read_total += cache_read;
                     let stats = pig_protocol::TurnUsageStats {
@@ -218,8 +220,8 @@ impl Session {
                         ttft_ms: *ttft_ms,
                         api_steps: *api_steps,
                     };
-                    // duration_ms=0 保持「回放收尾事件」语义（不触发计划模式待执行等
-                    // 新回合逻辑）；footer 的真实耗时从 stats 里取
+                    // duration_ms=0 preserves the "replay wrap-up event" semantics (does not trigger new-turn
+                    // logic such as plan-mode pending steps); the footer's real duration comes from stats
                     self.emit(
                         |session_id, seq| Event::TurnComplete {
                             session_id,
@@ -242,14 +244,14 @@ impl Session {
                     );
                 }
                 RolloutRecord::StepUsage { used, .. } => {
-                    // 水位 = 单次请求的总 token，逐条覆盖、最后一条生效
+                    // Usage watermark = total tokens of a single request; overwritten per record, the last one wins
                     self.last_total_tokens = Some(*used);
                 }
             }
         }
-        // SQLite 里的面板当前态在 JSONL 事件流之后补发：
-        // - todos 表 → 恢复待办并推快照
-        // - file_changes 表 → 按路径逐条补 FileChanged（UI upsert 重建改动列表）
+        // The panels' current state from SQLite is re-emitted after the JSONL event stream:
+        // - todos table -> restore todos and push the snapshot
+        // - file_changes table -> re-emit FileChanged per path (the UI upserts to rebuild the change list)
         let (todos_json, db_changes) = {
             let store = self.store.lock().expect("store lock");
             (store.get_todos(&self.id), store.file_changes(&self.id))
@@ -280,9 +282,9 @@ impl Session {
                 tx,
             );
         }
-        // 回放的历史回合以 TurnStarted 开头但记录里没有结尾事件；
-        // 用 duration_ms=0 的 TurnComplete 收尾，让 UI 退出流式状态
-        //（UI 据此跳过「回合结束·用时」脚注与计划模式待执行标记）
+        // Replayed historical turns start with TurnStarted but the records hold no closing event;
+        // close them with a duration_ms=0 TurnComplete so the UI exits streaming state
+        // (based on this the UI skips the "turn ended - elapsed" footer and the plan-mode pending marker)
         if in_assistant {
             self.emit(
                 |session_id, seq| Event::TurnComplete {
@@ -294,8 +296,9 @@ impl Session {
                 tx,
             );
         }
-        // 后台子代理的代理卡落终态：后台任务不随进程存活，重开后一律视为已终结
-        //（放在收尾 TurnComplete 之后，UI 已在非流式态）
+        // Background subagents' agent cards settle to their final state: background tasks do not outlive the
+        // process, so after reopening they are always considered terminated
+        // (emitted after the closing TurnComplete, when the UI is already non-streaming)
         for agent_id in replay_bg_agents {
             self.emit(
                 |session_id, seq| Event::SubagentActivity {

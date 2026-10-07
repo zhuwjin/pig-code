@@ -1,8 +1,11 @@
-//! 会话内上下文字节稳定性（缓存前缀契约）：
-//! 两个真实回合之间修改 AGENTS.md / 技能目录 / 子代理档案，发给模型的
-//! tools 与 system（乃至整个旧消息前缀）必须逐字节不变——变化只允许出现在
-//! 尾部新增的消息上（reminder 骑在最新用户消息前）。
-//! 这是「冻结 + reminder」架构的回归防线：谁把重扫引回热路径，这里先红。
+//! In-session context byte stability (cache-prefix contract):
+//! if AGENTS.md / the skills directory / subagent profiles are modified between
+//! two real turns, the tools and system sent to the model (and the entire old
+//! message prefix) must stay byte-identical — changes are only allowed in
+//! newly appended tail messages (the reminder rides ahead of the newest user
+//! message).
+//! This is the regression guard for the "freeze + reminder" architecture:
+//! whoever reintroduces a rescan into the hot path turns this red first.
 
 mod common;
 
@@ -11,8 +14,9 @@ use pig_core::spawn_agent_with_data_dir;
 use pig_protocol::{Event, Op};
 use std::time::Duration;
 
-/// 主循环请求 = messages[0] 是 pig-code 系统 prompt 且带 tools 数组
-/// （标题生成等旁路请求会被日志一并记录，需过滤）
+/// Main-loop request = messages[0] is the pig-code system prompt and carries a
+/// tools array (bypass requests such as title generation are also logged and
+/// must be filtered out)
 fn main_loop_requests(log: &[String]) -> Vec<serde_json::Value> {
     log.iter()
         .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
@@ -28,7 +32,7 @@ fn main_loop_requests(log: &[String]) -> Vec<serde_json::Value> {
 }
 
 fn messages_of(req: &serde_json::Value) -> &Vec<serde_json::Value> {
-    req["messages"].as_array().expect("messages 数组")
+    req["messages"].as_array().expect("messages array")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -40,16 +44,16 @@ async fn context_prefix_stable_across_turns_and_env_changes() {
     let data = dir.join("data");
     std::fs::create_dir_all(ws.join(".pigcode").join("agents")).unwrap();
     std::fs::create_dir_all(data.join("skills").join("demo")).unwrap();
-    // 会话开始前就存在的环境：AGENTS.md / 技能 / 自定义子代理档案
-    std::fs::write(ws.join("AGENTS.md"), "原始 AGENTS 规则").unwrap();
+    // Environment present before the session starts: AGENTS.md / skills / custom subagent profiles
+    std::fs::write(ws.join("AGENTS.md"), "Original AGENTS rules").unwrap();
     std::fs::write(
         data.join("skills").join("demo").join("SKILL.md"),
-        "---\nname: demo\ndescription: 演示技能\n---\n技能正文",
+        "---\nname: demo\ndescription: demo skill\n---\nSkill body",
     )
     .unwrap();
     std::fs::write(
         ws.join(".pigcode").join("agents").join("custom.md"),
-        "---\nname: custom\ndescription: 自定义档案\n---\n档案正文。",
+        "---\nname: custom\ndescription: custom profile\n---\nProfile body.",
     )
     .unwrap();
     std::fs::write(ws.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
@@ -62,7 +66,7 @@ default_model = "mock-model"
 
 [[providers]]
 id = "mock"
-name = "Mock 供应商"
+name = "Mock Provider"
 base_url = "http://127.0.0.1:{port}/v1"
 api_key = "mock-key"
 api_format = "OpenAiChat"
@@ -80,12 +84,12 @@ max_output_tokens = 8192
     let agent = spawn_agent_with_data_dir(Some(config_path), ws.clone(), data.clone());
     let session_id = common::new_session(&agent, ws.clone()).await;
 
-    // ---- 回合 1 ----
+    // ---- Turn 1 ----
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "读取 README.mock.md 并总结".to_string(),
+            content: "Read README.mock.md and summarize".to_string(),
             files: vec![],
             images: vec![],
             mode: pig_protocol::ExecMode::ConfirmBeforeEdit,
@@ -97,51 +101,54 @@ max_output_tokens = 8192
     })
     .await;
     let requests = main_loop_requests(&log.lock().unwrap());
-    assert!(!requests.is_empty(), "回合 1 应有主循环请求");
-    let turn1 = requests.last().expect("回合 1 最后一个请求").clone();
+    assert!(
+        !requests.is_empty(),
+        "turn 1 should have main-loop requests"
+    );
+    let turn1 = requests.last().expect("last request of turn 1").clone();
     let turn1_messages = messages_of(&turn1);
     let turn1_len = turn1_messages.len();
-    // 系统 prompt 应含冻结的环境段；首条用户消息带模式 reminder
+    // The system prompt should contain the frozen environment section; the first user message carries the mode reminder
     assert!(
         turn1_messages[0]["content"]
             .as_str()
             .unwrap()
-            .contains("原始 AGENTS 规则")
+            .contains("Original AGENTS rules")
     );
     assert!(
         turn1_messages[0]["content"]
             .as_str()
             .unwrap()
-            .contains("- demo: 演示技能")
+            .contains("- demo: demo skill")
     );
     assert!(
         turn1_messages[1]["content"]
             .as_str()
             .unwrap()
-            .contains("当前执行模式"),
-        "回合 1 用户消息前应有模式 reminder"
+            .contains("Current execution mode"),
+        "turn 1 user message should carry the mode reminder"
     );
 
-    // ---- 会话中途改环境：AGENTS.md 换内容、新增技能、新增子代理档案 ----
-    std::fs::write(ws.join("AGENTS.md"), "全新的 AGENTS 规则").unwrap();
+    // ---- Modify the environment mid-session: replace AGENTS.md content, add a skill, add a subagent profile ----
+    std::fs::write(ws.join("AGENTS.md"), "Brand-new AGENTS rules").unwrap();
     std::fs::create_dir_all(data.join("skills").join("second")).unwrap();
     std::fs::write(
         data.join("skills").join("second").join("SKILL.md"),
-        "---\nname: second\ndescription: 新技能\n---\n正文",
+        "---\nname: second\ndescription: new skill\n---\nBody",
     )
     .unwrap();
     std::fs::write(
         ws.join(".pigcode").join("agents").join("more.md"),
-        "---\nname: more\ndescription: 中途新增档案\n---\n档案正文。",
+        "---\nname: more\ndescription: profile added mid-session\n---\nProfile body.",
     )
     .unwrap();
 
-    // ---- 回合 2 ----
+    // ---- Turn 2 ----
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "继续".to_string(),
+            content: "Continue".to_string(),
             files: vec![],
             images: vec![],
             mode: pig_protocol::ExecMode::ConfirmBeforeEdit,
@@ -153,59 +160,67 @@ max_output_tokens = 8192
     })
     .await;
     let requests = main_loop_requests(&log.lock().unwrap());
-    let turn2 = requests.last().expect("回合 2 最后一个请求").clone();
+    let turn2 = requests.last().expect("last request of turn 2").clone();
     let turn2_messages = messages_of(&turn2);
 
-    // ---- 缓存前缀契约：system、tools、全部旧消息逐字节不变 ----
+    // ---- Cache-prefix contract: system, tools, and all old messages stay byte-identical ----
     assert_eq!(
         turn1_messages[0], turn2_messages[0],
-        "系统提示词跨回合+环境变更必须字节稳定"
+        "system prompt must stay byte-stable across turns and env changes"
     );
     assert_eq!(
         turn1["tools"], turn2["tools"],
-        "tools 数组跨回合+环境变更（含中途新增子代理档案/技能）必须字节稳定"
+        "tools array must stay byte-stable across turns and env changes (incl. mid-session subagent profiles/skills)"
     );
     assert!(
         turn2_messages.len() >= turn1_len,
-        "回合 2 只应在尾部追加消息，不该改写旧消息"
+        "turn 2 must only append messages at the tail, never rewrite old ones"
     );
     for (i, msg) in turn1_messages.iter().enumerate() {
         assert_eq!(
             msg, &turn2_messages[i],
-            "旧消息[{i}]被改写：缓存前缀从该处失效"
+            "old message[{i}] was rewritten: cache prefix invalidates from there"
         );
     }
 
-    // ---- 变化只出现在尾部：新用户消息 = reminder（AGENTS.md 变更推送）+ 原文 ----
-    // （回合 1 的收尾 assistant 文本也在前缀里，位置索引会漂移，按内容定位）
+    // ---- Changes only appear at the tail: new user message = reminder (AGENTS.md change notification) + original text ----
+    // (turn 1's closing assistant text is also in the prefix, so positional indexes drift; locate by content)
     let new_user = turn2_messages
         .iter()
         .rev()
-        .find(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.ends_with("继续")))
+        .find(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.ends_with("Continue"))
+        })
         .and_then(|m| m["content"].as_str())
-        .expect("回合 2 的新用户消息");
+        .expect("new user message of turn 2");
     assert!(
         new_user.starts_with("<system-reminder>"),
-        "reminder 应 prepend 到新用户消息，实际: {new_user}"
+        "reminder should be prepended to the new user message, actual: {new_user}"
     );
     assert!(
-        !new_user.contains("当前执行模式"),
-        "模式未变不应重复提醒（首轮一次 + 切换时一次），实际: {new_user}"
+        !new_user.contains("Current execution mode"),
+        "unchanged mode must not be re-notified (once on first turn + once on switch), actual: {new_user}"
     );
-    assert!(new_user.contains("AGENTS.md 内容有更新"));
+    assert!(new_user.contains("AGENTS.md content has been updated"));
     assert!(
-        new_user.contains("全新的 AGENTS 规则"),
-        "reminder 应携带最新 AGENTS.md 内容"
+        new_user.contains("Brand-new AGENTS rules"),
+        "reminder should carry the latest AGENTS.md content"
     );
-    assert!(new_user.ends_with("继续"), "原文保持在 reminder 之后");
-    // 新技能/新档案不进冻结段（对 system 的断言已隐含），也不进 tools（上面已断言）
+    assert!(
+        new_user.ends_with("Continue"),
+        "original text should stay after the reminder"
+    );
+    // New skills/profiles do not enter the frozen section (implied by the system assertion), nor tools (asserted above)
 
-    // ---- 回合 3：切换执行模式 → 下一回合 reminder 只带新模式行，前缀依旧稳定 ----
+    // ---- Turn 3: switch execution mode → the next turn's reminder carries only the new mode line, the prefix stays stable ----
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "再总结一次".to_string(),
+            content: "Summarize once more".to_string(),
             files: vec![],
             images: vec![],
             mode: pig_protocol::ExecMode::AutoEdit,
@@ -217,12 +232,12 @@ max_output_tokens = 8192
     })
     .await;
     let requests = main_loop_requests(&log.lock().unwrap());
-    let turn3 = requests.last().expect("回合 3 最后一个请求").clone();
+    let turn3 = requests.last().expect("last request of turn 3").clone();
     let turn3_messages = messages_of(&turn3);
     for (i, msg) in turn2_messages.iter().enumerate() {
         assert_eq!(
             msg, &turn3_messages[i],
-            "回合 3 改写了旧消息[{i}]：缓存前缀从该处失效"
+            "turn 3 rewrote old message[{i}]: cache prefix invalidates from there"
         );
     }
     let new_user3 = turn3_messages
@@ -232,21 +247,21 @@ max_output_tokens = 8192
             m["role"] == "user"
                 && m["content"]
                     .as_str()
-                    .is_some_and(|c| c.ends_with("再总结一次"))
+                    .is_some_and(|c| c.ends_with("Summarize once more"))
         })
         .and_then(|m| m["content"].as_str())
-        .expect("回合 3 的新用户消息");
+        .expect("new user message of turn 3");
     assert!(
         new_user3.starts_with("<system-reminder>"),
-        "模式切换后应有 reminder，实际: {new_user3}"
+        "mode switch should produce a reminder, actual: {new_user3}"
     );
     assert!(
-        new_user3.contains("当前执行模式: 自动编辑"),
-        "模式切换后应提醒新模式，实际: {new_user3}"
+        new_user3.contains("Current execution mode: auto-edit"),
+        "mode switch should notify the new mode, actual: {new_user3}"
     );
     assert!(
-        !new_user3.contains("AGENTS.md 内容有更新"),
-        "AGENTS.md 已提醒过不应重复，实际: {new_user3}"
+        !new_user3.contains("AGENTS.md content has been updated"),
+        "AGENTS.md was already notified and must not repeat, actual: {new_user3}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

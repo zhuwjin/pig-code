@@ -1,16 +1,16 @@
-//! 单独运行的 mock provider，供 GUI 手动自测：
+//! A standalone mock provider for GUI manual self-testing:
 //! `cargo run -p pig-core --example mock_provider`
-//! 然后在 ~/.pigcode/config.toml 指向打印出的 base_url 即可。
+//! then point ~/.pigcode/config.toml at the printed base_url.
 
 fn main() {
     let port = pig_core::mock::start_mock_server();
-    println!("mock provider 已启动: base_url = \"http://127.0.0.1:{port}/v1\"");
+    println!("mock provider started: base_url = \"http://127.0.0.1:{port}/v1\"");
     println!(
-        "行为: 首轮请求返回 Read 工具调用（读取 {}），含工具结果后返回流式 Markdown（带 reasoning_content）。",
+        "Behavior: the first request returns a Read tool call (reading {}); once the tool result is in, it streams Markdown (with reasoning_content).",
         pig_core::mock::MOCK_FILE_NAME
     );
     println!(
-        "agent 的工作目录里需要有 {} 文件。",
+        "The agent's working directory must contain the {} file.",
         pig_core::mock::MOCK_FILE_NAME
     );
     loop {

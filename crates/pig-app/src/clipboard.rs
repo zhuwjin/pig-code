@@ -1,29 +1,33 @@
-//! 剪贴板粘贴仲裁（composer 的 Textarea::on_paste 用）。
+//! Clipboard paste arbitration (used by the composer's Textarea::on_paste).
 //!
-//! gpui 的 ClipboardEntry 三变体：String / Image / ExternalPaths；
-//! macOS 后端 read_from_clipboard 的返回顺序是 ExternalPaths → String → Image，
-//! Image 条目的字节是编码后的文件字节（NSPasteboardTypePNG/TIFF 等原始数据）。
+//! gpui's ClipboardEntry has three variants: String / Image / ExternalPaths;
+//! the macOS backend's read_from_clipboard returns them ordered ExternalPaths
+//! → String → Image, and an Image entry's bytes are encoded file bytes (raw
+//! NSPasteboardTypePNG/TIFF data and the like).
 
 use gpui_kit::{ClipboardEntry, ClipboardItem, ImageFormat};
 
-/// 粘贴仲裁结果：外部文件路径 / 图片字节 / 文本 / 空
+/// Paste arbitration result: external file path / image bytes / text / nothing
 pub enum PasteArb {
-    /// ExternalPaths（Finder 复制的真实文件）：读字节嗅探后再决定 附件/路径文本
+    /// ExternalPaths (real files copied in Finder): sniff the bytes first, then decide attachment vs path text
     FilePath(std::path::PathBuf),
-    /// Image 条目：字节是编码后的文件字节
+    /// Image entry: the bytes are encoded file bytes
     ImageBytes {
         bytes: Vec<u8>,
         mime: &'static str,
     },
-    /// 普通文本粘贴（引擎插文本的现有行为）
+    /// Plain text paste (the engine's existing behavior for inserting text)
     Text,
     Nothing,
 }
 
-/// 剪贴板仲裁（kimi-code/ZCode 同款优先级）：
-/// 1. ExternalPaths 优先（Finder 文件复制同时带 String 路径文本，文件语义更强）；
-/// 2. 有实际内容的 String 优先于 Image（Excel 式多表示：含 tab/换行的表格文本）；
-/// 3. Image 条目按管线支持的格式（png/jpeg/webp/gif/tiff）出附件，其余格式丢弃。
+/// Clipboard arbitration (same priorities as kimi-code/ZCode):
+/// 1. ExternalPaths first (a Finder file copy also carries the path as String
+///    text, but the file semantics are stronger);
+/// 2. a String with real content beats Image (Excel-style multiple
+///    representations: table text with tabs/newlines);
+/// 3. an Image entry becomes an attachment in the formats the pipeline supports
+///    (png/jpeg/webp/gif/tiff); other formats are dropped.
 pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
     eprintln!(
         "[clipboard] received {} clipboard entr{}",
@@ -83,7 +87,7 @@ pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
             ImageFormat::Webp => "image/webp",
             ImageFormat::Gif => "image/gif",
             ImageFormat::Tiff => "image/tiff",
-            // Svg/Bmp/Ico/Pnm 不在粘贴压缩管线内：丢弃（引擎插入空文本，无行为变化）
+            // Svg/Bmp/Ico/Pnm are not in the paste-compression pipeline: dropped (the engine inserts empty text; no behavior change)
             _ => {
                 eprintln!(
                     "[clipboard] arbitration = Nothing (unsupported image format={})",
@@ -153,12 +157,12 @@ mod tests {
 
     #[test]
     fn clipboard_arbitration_priorities() {
-        // 纯文本 → 普通粘贴
+        // Plain text → normal paste
         assert!(matches!(
             arbitrate_clipboard(&ClipboardItem::new_string("hello".into())),
             PasteArb::Text
         ));
-        // 图片 → 附件（mime 按 gpui 的格式标记，不信扩展名）
+        // Image → attachment (mime from gpui's format tag, not trusting the extension)
         match arbitrate_clipboard(&ClipboardItem {
             entries: vec![image_entry(ImageFormat::Png)],
         }) {
@@ -166,17 +170,17 @@ mod tests {
                 assert_eq!(mime, "image/png");
                 assert_eq!(bytes, vec![0x89, 0x50]);
             }
-            _ => panic!("图片应为附件"),
+            _ => panic!("image should be an attachment"),
         }
-        // Excel 式多表示：有实际内容的文本优先于图片
+        // Excel-style multiple representations: text with real content beats the image
         let both = ClipboardItem {
             entries: vec![image_entry(ImageFormat::Png), string_entry("a\tb\nc")],
         };
         assert!(
             matches!(arbitrate_clipboard(&both), PasteArb::Text),
-            "表格文本优先于图片"
+            "table text should take precedence over the image"
         );
-        // 空白文本不算实际内容：仍取图片
+        // Whitespace-only text does not count as real content: the image still wins
         let blank = ClipboardItem {
             entries: vec![image_entry(ImageFormat::Png), string_entry("   ")],
         };
@@ -184,7 +188,7 @@ mod tests {
             arbitrate_clipboard(&blank),
             PasteArb::ImageBytes { .. }
         ));
-        // ExternalPaths（Finder 文件）最优先——即使带路径文本
+        // ExternalPaths (Finder files) wins first, even with path text alongside
         let files = ClipboardItem {
             entries: vec![
                 string_entry("/tmp/x.png"),
@@ -197,9 +201,9 @@ mod tests {
         };
         match arbitrate_clipboard(&files) {
             PasteArb::FilePath(path) => assert_eq!(path, std::path::PathBuf::from("/tmp/x.png")),
-            _ => panic!("文件路径优先"),
+            _ => panic!("file path should take precedence"),
         }
-        // 管线外的图片格式（Svg 等）丢弃
+        // Image formats outside the pipeline (Svg etc.) are dropped
         assert!(matches!(
             arbitrate_clipboard(&ClipboardItem {
                 entries: vec![image_entry(ImageFormat::Tiff)]
@@ -212,7 +216,7 @@ mod tests {
             }),
             PasteArb::Nothing
         ));
-        // 空剪贴板
+        // Empty clipboard
         assert!(matches!(
             arbitrate_clipboard(&ClipboardItem { entries: vec![] }),
             PasteArb::Nothing

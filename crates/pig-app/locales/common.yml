@@ -1,0 +1,51 @@
+_version: 2
+
+# 通用/跨模块文案。键命名：模块.场景.名；插值用 %{name}。
+
+common:
+  follow_system:
+    zh-CN: 跟随系统
+    en: Follow system
+  cancel:
+    zh-CN: 取消
+    en: Cancel
+  confirm:
+    zh-CN: 确定
+    en: OK
+  delete:
+    zh-CN: 删除
+    en: Delete
+  copy:
+    zh-CN: 复制
+    en: Copy
+  retry:
+    zh-CN: 重试
+    en: Retry
+  loading:
+    zh-CN: 加载中…
+    en: Loading…
+
+# 相对时间（main.rs RelativeTime）
+time:
+  just_now:
+    zh-CN: 刚刚
+    en: just now
+  minutes:
+    zh-CN: "%{n} 分钟"
+    en: "%{n} min"
+  hours:
+    zh-CN: "%{n} 小时"
+    en: "%{n} h"
+  days:
+    zh-CN: "%{n} 天"
+    en: "%{n} d"
+
+# 设置页 - 外观 - 语言
+settings:
+  language:
+    label:
+      zh-CN: 语言
+      en: Language
+    description:
+      zh-CN: 界面显示语言；跟随系统时按系统语言自动选择。
+      en: Display language of the interface; follows the system language when set to Follow system.

@@ -1,10 +1,10 @@
-//! SQLite 存储：{data_dir}/store.sqlite
-//! - sessions 表：会话索引（置顶/归档/标题都改这里）
-//! - workspaces 表：工作区注册表（别名、隐藏标记）
-//! - turn_usage 表：每回合 token 用量，供统计聚合
-//! - todos 表：会话待办清单当前态（整体 upsert；事件流不再落 JSONL）
-//! - file_changes 表：会话文件改动当前态（按路径 upsert，净额归零删行）
-//! - file_originals 表：改动文件的原始内容快照（跨重启 diff 基线 / revert）
+//! SQLite storage: {data_dir}/store.sqlite
+//! - sessions table: session index (pin/archive/title all write here)
+//! - workspaces table: workspace registry (alias, hidden flag)
+//! - turn_usage table: per-turn token usage for statistics aggregation
+//! - todos table: current session todo-list state (full upsert; the event stream no longer persists to JSONL)
+//! - file_changes table: current session file-change state (upsert by path; rows deleted when the net change is zero)
+//! - file_originals table: original-content snapshots of changed files (cross-restart diff baseline / revert)
 
 use std::path::{Path, PathBuf};
 
@@ -19,13 +19,14 @@ pub struct Store {
 
 impl Store {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(data_dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| format!("Failed to create data directory: {e}"))?;
         let path = data_dir.join("store.sqlite");
         let conn = Connection::open(&path)
-            .map_err(|e| format!("打开 store.sqlite 失败 {}: {e}", path.display()))?;
+            .map_err(|e| format!("Failed to open store.sqlite {}: {e}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .and_then(|_| conn.pragma_update(None, "busy_timeout", 5000u64))
-            .map_err(|e| format!("store.sqlite pragma 失败: {e}"))?;
+            .map_err(|e| format!("store.sqlite pragma failed: {e}"))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -81,8 +82,8 @@ impl Store {
                 PRIMARY KEY (session_id, path)
             );",
         )
-        .map_err(|e| format!("store.sqlite 建表失败: {e}"))?;
-        // 已有库的列补齐（幂等；旧库无 plan_enabled 列时加上，默认 0 = 关）
+        .map_err(|e| format!("store.sqlite create-table failed: {e}"))?;
+        // Backfill columns on existing databases (idempotent; older databases without the plan_enabled column get it added, default 0 = off)
         let has_plan: bool = conn
             .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'plan_enabled'")
             .and_then(|mut stmt| stmt.exists([]))
@@ -91,14 +92,14 @@ impl Store {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN plan_enabled INTEGER NOT NULL DEFAULT 0;",
             )
-            .map_err(|e| format!("store.sqlite 迁移失败: {e}"))?;
+            .map_err(|e| format!("store.sqlite migration failed: {e}"))?;
         }
         Ok(Self { conn })
     }
 
-    // ---- 会话索引 ----
+    // ---- Session index ----
 
-    /// exec_mode 存 serde 变体名（"AutoEdit" 等），解析失败回退默认
+    /// exec_mode is stored as the serde variant name ("AutoEdit" etc.); parse failure falls back to the default
     fn mode_from_row(raw: String) -> pig_protocol::ExecMode {
         serde_json::from_str(&format!("\"{raw}\"")).unwrap_or_default()
     }
@@ -126,7 +127,7 @@ impl Store {
     const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, plan_enabled, fs_read_outside, fs_write_outside";
 
     pub fn upsert_session(&self, meta: &SessionMeta) {
-        // exec_mode 存变体名（"AutoEdit" 等），读出时按 serde 变体名解析
+        // exec_mode is stored as the variant name ("AutoEdit" etc.) and parsed back as a serde variant name on read
         let mode_raw = format!("{:?}", meta.exec_mode);
         let result = self.conn.execute(
             "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, exec_mode, plan_enabled, fs_read_outside, fs_write_outside)
@@ -164,13 +165,13 @@ impl Store {
                 meta.fs_write_outside,
             ],
         );
-        // 写失败不能静默（列缺失曾导致新会话整批丢失）：至少打到控制台
+        // Write failures must not be silent (a missing column once dropped whole batches of new sessions): at least log to the console
         if let Err(error) = result {
-            eprintln!("[store] upsert_session 写入失败 {}: {error}", meta.id);
+            eprintln!("[store] upsert_session failed for {}: {error}", meta.id);
         }
     }
 
-    /// 读出-修改-写回；会话不存在则不动。
+    /// Read-modify-write; no-op when the session does not exist.
     pub fn update_session(&self, id: &str, f: impl FnOnce(&mut SessionMeta)) {
         if let Some(mut meta) = self.get_session(id) {
             f(&mut meta);
@@ -178,8 +179,8 @@ impl Store {
         }
     }
 
-    /// 删除会话：级联清 turn_usage / todos / file_changes / file_originals。
-    /// rollout JSONL 文件由调用方删（句柄可能仍在回合中）
+    /// Delete a session: cascade-clears turn_usage / todos / file_changes / file_originals.
+    /// The rollout JSONL file is deleted by the caller (the handle may still be in use mid-turn)
     pub fn delete_session(&self, id: &str) {
         let _ = self
             .conn
@@ -205,7 +206,7 @@ impl Store {
             .ok()
     }
 
-    /// 按 updated_at 倒序（侧栏列表顺序）。
+    /// Sorted by updated_at descending (sidebar list order).
     pub fn sorted_sessions(&self) -> Vec<SessionMeta> {
         let mut stmt = match self.conn.prepare(&format!(
             "SELECT {} FROM sessions ORDER BY updated_at DESC",
@@ -221,7 +222,7 @@ impl Store {
         }
     }
 
-    /// 工作区最近活跃的会话（新会话继承模型/模式/思考等级的种子）；归档的不算活跃
+    /// The workspace's most recently active session (the seed for new-session model/mode/reasoning-level inheritance); archived sessions do not count as active
     pub fn latest_active_in_workspace(&self, cwd: &Path) -> Option<SessionMeta> {
         self.conn
             .query_row(
@@ -237,7 +238,7 @@ impl Store {
             .ok()
     }
 
-    // ---- 工作区注册表 ----
+    // ---- Workspace registry ----
 
     pub fn workspaces(&self) -> Vec<WorkspaceMeta> {
         let mut stmt = match self
@@ -295,7 +296,7 @@ impl Store {
         );
     }
 
-    /// 幂等：已存在则仅取消隐藏。
+    /// Idempotent: if it already exists, only unhide it.
     pub fn add_workspace(&self, path: &Path) {
         match self.workspace(path) {
             Some(meta) if meta.hidden => {
@@ -314,7 +315,7 @@ impl Store {
         }
     }
 
-    /// 重命名显示名；不存在则补建条目。alias 为 None 恢复默认目录名。
+    /// Rename the display name; create the entry if missing. alias of None restores the default directory name.
     pub fn rename_workspace(&self, path: &Path, alias: Option<String>) {
         let meta = match self.workspace(path) {
             Some(meta) => WorkspaceMeta { alias, ..meta },
@@ -328,7 +329,7 @@ impl Store {
         self.put_workspace(&meta);
     }
 
-    /// 从侧栏移除 = 置为隐藏（条目与别名保留）；不存在则补建隐藏条目。
+    /// Removing from the sidebar = mark hidden (entry and alias kept); create a hidden entry if missing.
     pub fn hide_workspace(&self, path: &Path) {
         let meta = match self.workspace(path) {
             Some(meta) if !meta.hidden => WorkspaceMeta {
@@ -346,7 +347,7 @@ impl Store {
         self.put_workspace(&meta);
     }
 
-    /// 取消隐藏；返回是否有变化。
+    /// Unhide; returns whether anything changed.
     pub fn unhide_workspace(&self, path: &Path) -> bool {
         match self.workspace(path) {
             Some(meta) if meta.hidden => {
@@ -360,10 +361,10 @@ impl Store {
         }
     }
 
-    // ---- token 用量 ----
+    // ---- Token usage ----
 
-    /// 每回合结束记一行；统计聚合（按天/模型/工作区）都查这张表。
-    /// input_tokens 为未缓存命中的输入，cache_read_tokens 为缓存命中的输入。
+    /// One row per finished turn; statistics aggregation (by day/model/workspace) all query this table.
+    /// input_tokens is input that missed the cache; cache_read_tokens is input served from the cache.
     pub fn record_usage(
         &self,
         session_id: &str,
@@ -388,7 +389,7 @@ impl Store {
         );
     }
 
-    // ---- 会话待办（当前态，整体 upsert）----
+    // ---- Session todos (current state, full upsert) ----
 
     pub fn set_todos(&self, session_id: &str, items_json: &str) {
         let _ = self.conn.execute(
@@ -398,7 +399,7 @@ impl Store {
         );
     }
 
-    /// 无记录 → None（会话还没有过待办写入）
+    /// No record -> None (the session has never written todos)
     pub fn get_todos(&self, session_id: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -409,9 +410,9 @@ impl Store {
             .ok()
     }
 
-    // ---- 会话文件改动（当前态，按路径 upsert）----
+    // ---- Session file changes (current state, upsert by path) ----
 
-    /// 净额归零（改回原始内容）应由调用方走 delete_file_change。
+    /// A net change of zero (content reverted to the original) should go through delete_file_change by the caller.
     pub fn upsert_file_change(
         &self,
         session_id: &str,
@@ -438,7 +439,7 @@ impl Store {
         );
     }
 
-    /// (path, unified_diff, additions, deletions)，按路径排序保证回放顺序稳定
+    /// (path, unified_diff, additions, deletions), sorted by path for stable replay order
     pub fn file_changes(&self, session_id: &str) -> Vec<(String, String, u32, u32)> {
         let mut stmt = match self.conn.prepare(
             "SELECT path, unified_diff, additions, deletions
@@ -456,9 +457,9 @@ impl Store {
         }
     }
 
-    // ---- 文件原始快照（跨重启 diff 基线 / revert）----
+    // ---- Original file snapshots (cross-restart diff baseline / revert) ----
 
-    /// content 为 None 表示文件原本不存在（revert 时删除新建文件）
+    /// content of None means the file did not originally exist (revert deletes the newly created file)
     pub fn upsert_file_original(&self, session_id: &str, path: &str, content: Option<&str>) {
         let _ = self.conn.execute(
             "INSERT INTO file_originals (session_id, path, content) VALUES (?1, ?2, ?3)
@@ -474,7 +475,7 @@ impl Store {
         );
     }
 
-    /// (path, 原始内容；None = 原本不存在)
+    /// (path, original content; None = did not originally exist)
     pub fn file_originals(&self, session_id: &str) -> Vec<(String, Option<String>)> {
         let mut stmt = match self
             .conn
@@ -499,8 +500,8 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("pig-core-store-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建临时目录");
-        let store = Store::open(&dir).expect("打开 store");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let store = Store::open(&dir).expect("open store");
         (dir, store)
     }
 
@@ -530,12 +531,21 @@ mod tests {
         store.upsert_file_change("s1", "a.rs", "d", 1, 1);
         store.upsert_file_original("s1", "a.rs", Some("old"));
         store.delete_session("s1");
-        assert!(store.get_session("s1").is_none(), "sessions 行应删除");
-        assert!(store.sorted_sessions().is_empty(), "列表不再包含该会话");
-        assert!(store.get_todos("s1").is_none(), "todos 应级联删除");
+        assert!(
+            store.get_session("s1").is_none(),
+            "the sessions row should be deleted"
+        );
+        assert!(
+            store.sorted_sessions().is_empty(),
+            "the list no longer contains the session"
+        );
+        assert!(
+            store.get_todos("s1").is_none(),
+            "todos should cascade-delete"
+        );
         assert!(store.file_changes("s1").is_empty());
         assert!(store.file_originals("s1").is_empty());
-        // 再删一次不报错（幂等）
+        // Deleting again does not error (idempotent)
         store.delete_session("s1");
     }
 
@@ -565,7 +575,7 @@ mod tests {
         store.upsert_session(&meta);
         assert!(
             store.get_session("s1").unwrap().title_custom,
-            "手动重命名标记应持久化"
+            "the manual-rename flag should persist"
         );
     }
 
@@ -590,34 +600,43 @@ mod tests {
             fs_write_outside: false,
         };
         store.upsert_session(&meta);
-        let read = store.get_session("s1").expect("写入后可读");
-        assert!(read.fs_read_outside && !read.fs_write_outside, "新列读回");
-        assert!(!read.plan_enabled, "plan_enabled 默认关");
+        let read = store.get_session("s1").expect("readable after write");
+        assert!(
+            read.fs_read_outside && !read.fs_write_outside,
+            "new columns read back"
+        );
+        assert!(!read.plan_enabled, "plan_enabled defaults to off");
 
         meta.fs_write_outside = true;
         store.upsert_session(&meta);
         let read = store.get_session("s1").unwrap();
-        assert!(read.fs_read_outside && read.fs_write_outside, "写穿更新");
+        assert!(
+            read.fs_read_outside && read.fs_write_outside,
+            "updates write through"
+        );
 
-        // 重开同一库：CREATE TABLE IF NOT EXISTS 幂等，数据仍在
+        // Reopen the same database: CREATE TABLE IF NOT EXISTS is idempotent, data remains
         drop(store);
-        let store = Store::open(&dir).expect("重开同一库不报错");
+        let store = Store::open(&dir).expect("reopening the same database should not error");
         let read = store.get_session("s1").unwrap();
-        assert!(read.fs_read_outside && read.fs_write_outside, "重开后仍在");
+        assert!(
+            read.fs_read_outside && read.fs_write_outside,
+            "still present after reopen"
+        );
     }
 
     #[test]
     fn todos_upsert_and_read_back() {
         let (_dir, store) = open_test_store("todos");
-        assert_eq!(store.get_todos("s1"), None, "无写入时应为 None");
+        assert_eq!(store.get_todos("s1"), None, "None when nothing was written");
         store.set_todos("s1", "[{\"content\":\"a\",\"status\":\"pending\"}]");
         store.set_todos("s1", "[{\"content\":\"a\",\"status\":\"done\"}]");
         assert_eq!(
             store.get_todos("s1").as_deref(),
             Some("[{\"content\":\"a\",\"status\":\"done\"}]"),
-            "整体 upsert 后读到最新快照"
+            "the full upsert reads back the latest snapshot"
         );
-        assert_eq!(store.get_todos("s2"), None, "按会话隔离");
+        assert_eq!(store.get_todos("s2"), None, "isolated per session");
     }
 
     #[test]
@@ -633,11 +652,15 @@ mod tests {
                 ("a.rs".to_string(), "diff-a".to_string(), 3, 4),
                 ("b.rs".to_string(), "diff-b2".to_string(), 5, 6),
             ],
-            "同路径 upsert 覆盖、按路径排序"
+            "same-path upsert overwrites, sorted by path"
         );
         store.delete_file_change("s1", "a.rs");
-        assert_eq!(store.file_changes("s1").len(), 1, "删除后只剩一条");
-        assert!(store.file_changes("s2").is_empty(), "按会话隔离");
+        assert_eq!(
+            store.file_changes("s1").len(),
+            1,
+            "only one row left after deletion"
+        );
+        assert!(store.file_changes("s2").is_empty(), "isolated per session");
     }
 
     #[test]
@@ -653,7 +676,7 @@ mod tests {
                 ("/w/exists.rs".to_string(), Some("old content".to_string())),
                 ("/w/new.rs".to_string(), None),
             ],
-            "Some=原有内容，None=文件原本不存在"
+            "Some = original content, None = the file did not exist"
         );
         store.delete_file_original("s1", "/w/new.rs");
         assert_eq!(store.file_originals("s1").len(), 1);

@@ -8,8 +8,8 @@ pub(crate) fn anthropic_url(base: &str) -> String {
     }
 }
 
-/// 内部 ChatMsg 列表 → Anthropic messages 数组。
-/// system 抽顶层；assistant tool_calls → tool_use block；tool 结果并入 user 消息的 tool_result block。
+/// Internal ChatMsg list -> Anthropic messages array.
+/// system is hoisted to the top level; assistant tool_calls -> tool_use block; tool results merge into a user message's tool_result block.
 pub(crate) fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_json::Value>) {
     let mut system = String::new();
     let mut out: Vec<serde_json::Value> = vec![];
@@ -31,7 +31,7 @@ pub(crate) fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_
                         "content": msg.content.clone().unwrap_or_default(),
                     }));
                 } else {
-                    // 用户消息带图（粘贴发送）：图片块在前、文本在后
+                    // User message with images (sent by pasting): image blocks first, text after
                     let mut blocks: Vec<serde_json::Value> = msg
                         .images
                         .iter()
@@ -55,9 +55,9 @@ pub(crate) fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_
             }
             "assistant" => {
                 let mut blocks: Vec<serde_json::Value> = vec![];
-                // thinking 模式下 Anthropic 兼容端点（DeepSeek/Kimi）要求回传思考块，
-                // 且 thinking 必须在 text/tool_use 之前；这类端点不发 signature，
-                // 按非 Claude 端点惯例省略 signature 字段（参考 kimi-code）
+                // In thinking mode, Anthropic-compatible endpoints (DeepSeek/Kimi) require echoing the thinking block back,
+                // and thinking must come before text/tool_use; such endpoints send no signature,
+                // so the signature field is omitted per non-Claude-endpoint convention (see kimi-code)
                 if let Some(reasoning) = &msg.reasoning
                     && !reasoning.is_empty()
                 {
@@ -81,8 +81,8 @@ pub(crate) fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_
                 out.push(serde_json::json!({"role": "assistant", "content": blocks}));
             }
             "tool" => {
-                // 带图工具结果（ReadMediaFile）：content 从字符串改为 blocks 数组
-                //（图片块在前、文本摘要在后）；无图保持字符串原样（回归安全）
+                // Tool result with images (ReadMediaFile): content changes from a string to a blocks array
+                // (image blocks first, text summary after); imageless stays a plain string (regression-safe)
                 let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
                 let block = if msg.images.is_empty() {
                     serde_json::json!({
@@ -115,7 +115,7 @@ pub(crate) fn to_anthropic_messages(messages: &[ChatMsg]) -> (String, Vec<serde_
                         "content": blocks,
                     })
                 };
-                // 连续 tool 结果并入同一条 user 消息
+                // Consecutive tool results merge into the same user message
                 let merged = if let Some(last) = out.last_mut() {
                     if last["role"] == "user" && last["content"].is_array() {
                         last["content"]
@@ -153,8 +153,8 @@ pub(crate) fn to_anthropic_tools(tools: &[serde_json::Value]) -> Vec<serde_json:
         .collect()
 }
 
-/// 请求级工具清单组装（流式/非流式共用，防两处漂移）：
-/// OpenAI 线格式 → Anthropic 形态 + 能力开启时的服务端搜索工具。
+/// Request-level tool list assembly (shared by streaming/non-streaming, to prevent drift between the two):
+/// OpenAI wire shape -> Anthropic shape + the server-side search tool when the capability is on.
 pub(crate) fn anthropic_request_tools(
     config: &ResolvedModel,
     tools: &[serde_json::Value],
@@ -166,9 +166,9 @@ pub(crate) fn anthropic_request_tools(
     out
 }
 
-/// Anthropic 端点：能力开启时注入服务端搜索工具（web_search_tool 可自定义，
-/// 缺省 web_search_20250305）。服务端产出的 web_search_tool_result block 由
-/// SSE 解析器 fallthrough 忽略。
+/// Anthropic endpoint: inject the server-side search tool when the capability is on (web_search_tool can be customized,
+/// defaulting to web_search_20250305). The server-produced web_search_tool_result block is
+/// ignored by the SSE parser's fallthrough.
 pub fn anthropic_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Value> {
     if !config.cap_web_search {
         return None;
@@ -184,7 +184,7 @@ pub(crate) async fn stream_anthropic(
     tools: Vec<serde_json::Value>,
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let (system, messages) = to_anthropic_messages(&messages);
     let anthropic_tools = anthropic_request_tools(config, &tools);
     let mut body = serde_json::json!({
@@ -222,7 +222,9 @@ pub(crate) async fn stream_anthropic(
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
         let detail: String = detail.chars().take(500).collect();
-        return Err(format!("HTTP {status}: {detail}"));
+        return Err(CoreError::Internal {
+            detail: format!("HTTP {status}: {detail}"),
+        });
     }
 
     let mut byte_stream = response.bytes_stream();
@@ -230,7 +232,7 @@ pub(crate) async fn stream_anthropic(
     let mut event_type = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut total_input = 0u64;
-    // Anthropic：input_tokens 不含缓存部分；cache_creation 是本次新写入（未命中）
+    // Anthropic: input_tokens excludes the cached portion; cache_creation is newly written this time (a cache miss)
     let mut total_cache_read = 0u64;
     #[allow(unused_assignments)]
     let mut total_output = 0u64;
@@ -241,7 +243,9 @@ pub(crate) async fn stream_anthropic(
             _ = cancel.cancelled() => return Ok(()),
         };
         let Some(chunk) = chunk else { break };
-        let bytes = chunk.map_err(|e| format!("读取流失败: {e}"))?;
+        let bytes = chunk.map_err(|e| CoreError::StreamRead {
+            detail: e.to_string(),
+        })?;
         buffer.push_str(&String::from_utf8_lossy(&bytes));
 
         while let Some(pos) = buffer.find('\n') {
@@ -325,8 +329,13 @@ pub(crate) async fn stream_anthropic(
                     }
                 }
                 "error" => {
-                    let message = json["error"]["message"].as_str().unwrap_or("未知错误");
-                    return Err(format!("Anthropic error: {message}"));
+                    // The upstream error body text goes into detail verbatim; without a message field, fall back semantically to Unknown
+                    return Err(match json["error"]["message"].as_str() {
+                        Some(message) => CoreError::Internal {
+                            detail: format!("Anthropic error: {message}"),
+                        },
+                        None => CoreError::Unknown,
+                    });
                 }
                 _ => {}
             }
@@ -336,4 +345,4 @@ pub(crate) async fn stream_anthropic(
     Ok(())
 }
 
-// ---------------- 一次性请求（compact 摘要 / 连通性测试） ----------------
+// ---------------- One-shot requests (compact summary / connectivity test) ----------------

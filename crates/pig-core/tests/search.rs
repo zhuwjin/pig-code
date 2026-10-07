@@ -1,5 +1,6 @@
-//! Glob/Grep/search_files 遍历引擎测试（ignore crate：尊重 .gitignore、
-//! 包含隐藏文件、跳过 VCS 目录、敏感文件过滤、mtime 排序、ignore_case）。
+//! Glob/Grep/search_files walk-engine tests (ignore crate: respects
+//! .gitignore, includes hidden files, skips VCS directories, sensitive-file
+//! filtering, mtime ordering, ignore_case).
 
 use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
@@ -58,36 +59,45 @@ async fn glob_respects_gitignore_includes_hidden_skips_vcs() {
     std::fs::write(dir.join(".git/hooks/pre-commit.rs"), "vcs internals\n").unwrap();
     std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
 
-    // **/*.rs：gitignore 排除 target，.git 永不出现，顶层文件也命中
+    // **/*.rs: gitignore excludes target, .git never appears, top-level files also match
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.rs"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("src/a.rs"), "{out}");
-    assert!(out.contains("main.rs"), "** 应覆盖顶层文件: {out}");
-    assert!(!out.contains("target/x.rs"), "gitignore 排除: {out}");
-    assert!(!out.contains(".git/"), "VCS 目录永不出现: {out}");
+    assert!(
+        out.contains("main.rs"),
+        "** should cover top-level files: {out}"
+    );
+    assert!(!out.contains("target/x.rs"), "gitignore exclusion: {out}");
+    assert!(
+        !out.contains(".git/"),
+        "VCS directories never appear: {out}"
+    );
 
-    // 隐藏目录可见：.github/workflows 能被找到
+    // Hidden directories are visible: .github/workflows can be found
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.yml"})).await;
     assert!(!is_error, "{out}");
     assert!(
         out.contains(".github/workflows/ci.yml"),
-        "隐藏文件应包含: {out}"
+        "hidden files should be included: {out}"
     );
 
-    // 不含 / 的 pattern 只比文件名：嵌套文件照样命中
+    // A pattern without / matches file names only: nested files still match
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.rs"})).await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("src/a.rs"), "按文件名匹配嵌套文件: {out}");
+    assert!(
+        out.contains("src/a.rs"),
+        "nested files matched by file name: {out}"
+    );
     assert!(out.contains("main.rs"), "{out}");
 
-    // 非法 pattern 报错文案保留
+    // An invalid pattern keeps its error copy
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "["})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("无效 glob 模式"), "{out}");
+    assert!(out.contains("Invalid glob pattern"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -99,7 +109,7 @@ async fn glob_brace_expansion() {
     std::fs::write(dir.join("README.md"), "# t\n").unwrap();
     std::fs::write(dir.join("notes.txt"), "x\n").unwrap();
 
-    // 花括号交替：一次命中多个扩展名（glob crate 原生不支持，靠展开子模式）
+    // Brace alternation: match multiple extensions in one go (the glob crate does not support it natively; done by expanding sub-patterns)
     let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Glob",
@@ -112,14 +122,14 @@ async fn glob_brace_expansion() {
     assert!(out.contains("README.md"), "{out}");
     assert!(!out.contains("notes.txt"), "{out}");
 
-    // 不含 / 的花括号 pattern 仍只比文件名（嵌套文件命中）
+    // A brace pattern without / still matches file names only (nested files match)
     let (out, _, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.{toml,md}"})).await;
     assert!(out.contains("Cargo.toml"), "{out}");
     assert!(out.contains("README.md"), "{out}");
     assert!(!out.contains("a.rs"), "{out}");
 
-    // 嵌套花括号
+    // Nested braces
     std::fs::write(dir.join("icon.svg"), "<svg/>\n").unwrap();
     let (out, _, _, _, _) = run_tool(
         &dir,
@@ -132,11 +142,11 @@ async fn glob_brace_expansion() {
     assert!(out.contains("Cargo.toml"), "{out}");
     assert!(!out.contains("README.md"), "{out}");
 
-    // 未闭合的 { 是解析错误（globset UnclosedAlternates）：显式报错而非静默无匹配
+    // An unclosed { is a parse error (globset UnclosedAlternates): report explicitly instead of silently matching nothing
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.{rs"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("无效 glob 模式"), "{out}");
+    assert!(out.contains("Invalid glob pattern"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -147,20 +157,20 @@ async fn glob_star_does_not_cross_separator() {
     std::fs::write(dir.join("src/deep/b.rs"), "fn b() {}\n").unwrap();
     std::fs::write(dir.join("c.rs"), "fn c() {}\n").unwrap();
 
-    // gitignore 语义（ripgrep --glob/kimi-code 同款）：* 不跨 /，只命中直接子级
+    // gitignore semantics (same as ripgrep --glob/kimi-code): * does not cross /, matches direct children only
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "src/*.rs"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("src/a.rs"), "{out}");
-    assert!(!out.contains("deep/b.rs"), "* 不跨 /: {out}");
+    assert!(!out.contains("deep/b.rs"), "* must not cross /: {out}");
     assert!(!out.contains("c.rs"), "{out}");
 
-    // 跨层要用 **；**/ 前缀可覆盖零层目录
+    // Crossing levels requires **; the **/ prefix can cover zero directories
     let (out, _, _, _, _) = run_tool(&dir, "Glob", serde_json::json!({"pattern": "**/*.rs"})).await;
     assert!(out.contains("src/deep/b.rs"), "{out}");
     assert!(out.contains("c.rs"), "{out}");
 
-    // 不含 / 的 pattern 匹配任意深度文件名
+    // A pattern without / matches file names at any depth
     let (out, _, _, _, _) = run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.rs"})).await;
     assert!(out.contains("src/deep/b.rs"), "{out}");
     assert!(out.contains("c.rs"), "{out}");
@@ -195,9 +205,12 @@ async fn glob_sorts_by_mtime_desc() {
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Glob", serde_json::json!({"pattern": "*.rs"})).await;
     assert!(!is_error, "{out}");
-    let new_pos = out.find("new.rs").expect("new.rs 在结果中");
-    let old_pos = out.find("old.rs").expect("old.rs 在结果中");
-    assert!(new_pos < old_pos, "mtime 降序：最近修改的排前面: {out}");
+    let new_pos = out.find("new.rs").expect("new.rs present in results");
+    let old_pos = out.find("old.rs").expect("old.rs present in results");
+    assert!(
+        new_pos < old_pos,
+        "mtime descending: most recently modified first: {out}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -212,9 +225,9 @@ async fn glob_filters_sensitive_files() {
     assert!(out.contains("config.toml"), "{out}");
     assert!(
         !out.lines().any(|l| l.trim() == ".env"),
-        ".env 应被过滤: {out}"
+        ".env should be filtered out: {out}"
     );
-    assert!(out.contains("[已过滤 1 个敏感文件]"), "{out}");
+    assert!(out.contains("[Filtered out 1 sensitive file(s)]"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -235,20 +248,32 @@ async fn grep_hidden_gitignore_and_sensitive() {
     assert!(out.contains("src/main.rs:1:"), "{out}");
     assert!(
         out.contains(".github/config.txt:1:"),
-        "隐藏目录应可搜: {out}"
+        "hidden directories should be searchable: {out}"
     );
-    assert!(!out.contains("target/skip.txt"), "gitignore 排除: {out}");
-    assert!(!out.contains("TODO=secret"), ".env 内容不泄露: {out}");
-    assert!(out.contains("敏感 1"), "跳过统计应含敏感文件: {out}");
+    assert!(
+        !out.contains("target/skip.txt"),
+        "gitignore exclusion: {out}"
+    );
+    assert!(
+        !out.contains("TODO=secret"),
+        ".env content must not leak: {out}"
+    );
+    assert!(
+        out.contains("sensitive 1"),
+        "skip stats should include sensitive files: {out}"
+    );
 
-    // 显式 Grep 单个敏感文件同样被拦
+    // Explicitly grepping a single sensitive file is blocked too
     let (out, _, _, _, _) = run_tool(
         &dir,
         "Grep",
         serde_json::json!({"pattern": "TODO", "path": ".env"}),
     )
     .await;
-    assert!(!out.contains("TODO=secret"), "单文件敏感同样跳过: {out}");
+    assert!(
+        !out.contains("TODO=secret"),
+        "an explicit single sensitive file is also skipped: {out}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -259,7 +284,7 @@ async fn grep_ignore_case() {
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Grep", serde_json::json!({"pattern": "hello"})).await;
     assert!(!is_error, "{out}");
-    assert_eq!(out, "（无匹配内容）");
+    assert_eq!(out, "(no matches)");
 
     let (out, is_error, _, _, _) = run_tool(
         &dir,
@@ -286,38 +311,41 @@ fn search_files_respects_gitignore_includes_hidden() {
     assert!(all.iter().any(|p| p == "src/kept.rs"), "{all:?}");
     assert!(
         !all.iter().any(|p| p.contains("target/")),
-        "gitignore 文件不进 @ 补全: {all:?}"
+        "gitignored files stay out of @ completion: {all:?}"
     );
 
     let github = tool::search_files(&dir, "github", 50);
     assert!(
         github.iter().any(|p| p == ".github/workflows/ci.yml"),
-        "隐藏文件应进 @ 补全: {github:?}"
+        "hidden files enter @ completion: {github:?}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_truncates_overlong_matched_lines() {
     let dir = temp_dir("grep-longline");
-    // 1200 字符的命中行（模拟 minified 文件）：截断到 500 + 标注；短行原样
+    // A 1200-char matched line (simulating a minified file): truncated to 500 + annotation; short lines unchanged
     let long_line = format!("match {}", "x".repeat(1200));
     std::fs::write(dir.join("big.js"), format!("{long_line}\nshort match\n")).unwrap();
     let (out, is_error, ..) = run_tool(&dir, "Grep", serde_json::json!({"pattern": "match"})).await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("[...行超长已截断]"), "{out}");
+    assert!(out.contains("[...line too long; truncated]"), "{out}");
     let long_row = out
         .lines()
-        .find(|l| l.contains("行超长已截断"))
-        .expect("截断行仍在输出里");
+        .find(|l| l.contains("line too long; truncated"))
+        .expect("the truncated line is still in the output");
     assert!(
         long_row.chars().count() < 600,
-        "截断后仍过长（{} 字符）",
+        "still too long after truncation ({} chars)",
         long_row.chars().count()
     );
-    assert!(out.contains("short match"), "短行不受影响: {out}");
+    assert!(
+        out.contains("short match"),
+        "short lines are unaffected: {out}"
+    );
     assert!(
         !out.contains(&"x".repeat(600)),
-        "超长行未截断: {}",
+        "overlong line was not truncated: {}",
         &out[..out.chars().count().min(200)]
     );
 }
@@ -328,7 +356,7 @@ async fn grep_paginates_by_matched_lines() {
     let body: String = (1..=15).map(|i| format!("hit line {i}\n")).collect();
     std::fs::write(dir.join("page.txt"), body).unwrap();
 
-    // 第一页:5 行 + 续读提示
+    // First page: 5 lines + continuation hint
     let (out, is_error, ..) = run_tool(
         &dir,
         "Grep",
@@ -337,9 +365,9 @@ async fn grep_paginates_by_matched_lines() {
     .await;
     assert!(!is_error, "{out}");
     assert_eq!(out.lines().filter(|l| l.contains(": ")).count(), 5, "{out}");
-    assert!(out.contains("用 offset=5 续读"), "{out}");
+    assert!(out.contains("continue with offset=5"), "{out}");
 
-    // 中间页
+    // Middle page
     let (out, ..) = run_tool(
         &dir,
         "Grep",
@@ -347,9 +375,9 @@ async fn grep_paginates_by_matched_lines() {
     )
     .await;
     assert!(out.contains("hit line 6"), "{out}");
-    assert!(out.contains("用 offset=10 续读"), "{out}");
+    assert!(out.contains("continue with offset=10"), "{out}");
 
-    // 末页:自然扫完,显示总数
+    // Last page: scanned to the end naturally, shows the total
     let (out, ..) = run_tool(
         &dir,
         "Grep",
@@ -357,22 +385,22 @@ async fn grep_paginates_by_matched_lines() {
     )
     .await;
     assert!(out.contains("hit line 15"), "{out}");
-    assert!(out.contains("共 15 行"), "{out}");
+    assert!(out.contains("lines of 15"), "{out}");
 
-    // offset 超出
+    // offset beyond the end
     let (out, ..) = run_tool(
         &dir,
         "Grep",
         serde_json::json!({"pattern": "hit", "offset": 15}),
     )
     .await;
-    assert!(out.contains("超出命中总数 15"), "{out}");
+    assert!(out.contains("beyond the total of 15"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_context_lines_merge_windows() {
     let dir = temp_dir("grep-ctx");
-    // 行号:1 filler / 2 hit / 3 filler / 4 filler / 5 hit / 6 filler / 7 filler / 8 filler / 9 hit
+    // Line numbers: 1 filler / 2 hit / 3 filler / 4 filler / 5 hit / 6 filler / 7 filler / 8 filler / 9 hit
     std::fs::write(
         dir.join("ctx.txt"),
         "l1\nhit two\nl3\nl4\nhit five\nl6\nl7\nl8\nhit nine\n",
@@ -386,24 +414,39 @@ async fn grep_context_lines_merge_windows() {
     )
     .await;
     assert!(!is_error, "{out}");
-    // 命中 2(窗口 1-3)与命中 5(窗口 4-6)相邻:合并为 1-6;命中 9(窗口 8-9 后无)独立
+    // Hit 2 (window 1-3) and hit 5 (window 4-6) are adjacent: merged into 1-6; hit 9 (window 8-9, nothing after) is separate
     assert!(out.contains("ctx.txt:2: hit two"), "{out}");
-    assert!(out.contains("ctx.txt:1: l1"), "窗口含命中前行: {out}");
-    assert!(out.contains("ctx.txt:6: l6"), "合并窗口到 6: {out}");
-    assert!(!out.contains("ctx.txt:7:"), "合并窗口不应到 7: {out}");
-    // 恰好一个 -- 分隔(两个窗口)
+    assert!(
+        out.contains("ctx.txt:1: l1"),
+        "window includes the line before the hit: {out}"
+    );
+    assert!(
+        out.contains("ctx.txt:6: l6"),
+        "merged window reaches line 6: {out}"
+    );
+    assert!(
+        !out.contains("ctx.txt:7:"),
+        "merged window should not reach line 7: {out}"
+    );
+    // Exactly one -- separator (two windows)
     assert_eq!(out.lines().filter(|l| *l == "--").count(), 1, "{out}");
     assert!(out.contains("ctx.txt:9: hit nine"), "{out}");
 
-    // 显式 before=0 优先于 context
+    // Explicit before=0 takes precedence over context
     let (out, ..) = run_tool(
         &dir,
         "Grep",
         serde_json::json!({"pattern": "hit", "context": 1, "before": 0}),
     )
     .await;
-    assert!(!out.contains("ctx.txt:1: l1"), "before=0 不带前行: {out}");
-    assert!(out.contains("ctx.txt:3: l3"), "after=1 带后行: {out}");
+    assert!(
+        !out.contains("ctx.txt:1: l1"),
+        "before=0 omits preceding lines: {out}"
+    );
+    assert!(
+        out.contains("ctx.txt:3: l3"),
+        "after=1 includes following lines: {out}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -411,7 +454,7 @@ async fn grep_files_and_count_modes() {
     let dir = temp_dir("grep-modes");
     std::fs::write(dir.join("a.txt"), "needle here\nneedle again\nplain\n").unwrap();
     std::fs::write(dir.join("b.txt"), "no match\n").unwrap();
-    std::fs::write(dir.join("c.txt"), "one needle needle line\n").unwrap(); // 一行两次命中
+    std::fs::write(dir.join("c.txt"), "one needle needle line\n").unwrap(); // two hits on one line
 
     let (out, is_error, ..) = run_tool(
         &dir,
@@ -424,10 +467,10 @@ async fn grep_files_and_count_modes() {
     assert!(!out.contains("b.txt"), "{out}");
     assert!(
         !out.lines().any(|l| l.contains(": ")),
-        "files 模式只列路径不带行内容: {out}"
+        "files mode lists only paths without line content: {out}"
     );
 
-    // count:rg -c 口径——命中行数,一行两次命中算 1
+    // count: rg -c semantics — matched line count, two hits on one line count as 1
     let (out, ..) = run_tool(
         &dir,
         "Grep",
@@ -435,9 +478,12 @@ async fn grep_files_and_count_modes() {
     )
     .await;
     assert!(out.contains("a.txt:2"), "{out}");
-    assert!(out.contains("c.txt:1"), "一行两次命中算 1: {out}");
+    assert!(
+        out.contains("c.txt:1"),
+        "two hits on one line count as 1: {out}"
+    );
 
-    // files 模式分页单位是文件
+    // In files mode the pagination unit is files
     let (out, ..) = run_tool(
         &dir,
         "Grep",
@@ -446,19 +492,19 @@ async fn grep_files_and_count_modes() {
     .await;
     assert!(
         out.lines().filter(|l| !l.starts_with('[')).count() == 1,
-        "head_limit=1 只出一个文件: {out}"
+        "head_limit=1 yields a single file: {out}"
     );
-    assert!(out.contains("用 offset=1 续读"), "{out}");
+    assert!(out.contains("continue with offset=1"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_decodes_gbk_and_utf16_files() {
     let dir = temp_dir("grep-enc");
-    // GBK:「中文」= D6 D0 CE C4 + ASCII needle(手写字节,decode 走 GBK round-trip)
+    // GBK: "中文" = D6 D0 CE C4 + ASCII needle (hand-written bytes; decode goes through the GBK round-trip)
     let mut gbk = vec![0xd6, 0xd0, 0xce, 0xc4];
     gbk.extend_from_slice(b" needle tail\n");
     std::fs::write(dir.join("gbk.txt"), gbk).unwrap();
-    // UTF-16LE 带 BOM
+    // UTF-16LE with BOM
     let mut utf16 = vec![0xff, 0xfe];
     for unit in "utf16 needle line\n".encode_utf16() {
         utf16.extend_from_slice(&unit.to_le_bytes());
@@ -470,7 +516,7 @@ async fn grep_decodes_gbk_and_utf16_files() {
     assert!(!is_error, "{out}");
     assert!(
         out.contains("gbk.txt:1: 中文 needle tail"),
-        "GBK 文件应解码后命中: {out}"
+        "GBK files should hit after decoding: {out}"
     );
     assert!(out.contains("u16.txt:1: utf16 needle line"), "{out}");
 }
@@ -478,13 +524,13 @@ async fn grep_decodes_gbk_and_utf16_files() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_reports_skipped_files_by_reason() {
     let dir = temp_dir("grep-skip");
-    std::fs::write(dir.join(".env"), "needle secret\n").unwrap(); // 敏感
-    // 二进制：单侧孤立 NUL（避开 UTF-16 零字节奇偶启发式的模糊区）
+    std::fs::write(dir.join(".env"), "needle secret\n").unwrap(); // sensitive
+    // Binary: a lone one-sided NUL (avoids the ambiguous zone of the UTF-16 zero-byte parity heuristic)
     std::fs::write(dir.join("bin.dat"), b"\x00\x01\x02bin needle\n").unwrap();
     let big = dir.join("big.log");
     std::fs::write(&big, b"needle\n").unwrap();
     let f = std::fs::File::options().write(true).open(&big).unwrap();
-    f.set_len(3 * 1024 * 1024).unwrap(); // 超过 2MB（set_len 稀疏扩展）
+    f.set_len(3 * 1024 * 1024).unwrap(); // over 2MB (set_len sparse extension)
     drop(f);
     std::fs::write(dir.join("ok.txt"), "needle fine\n").unwrap();
 
@@ -492,15 +538,15 @@ async fn grep_reports_skipped_files_by_reason() {
         run_tool(&dir, "Grep", serde_json::json!({"pattern": "needle"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("ok.txt:1: needle fine"), "{out}");
-    assert!(out.contains("敏感 1"), "{out}");
-    assert!(out.contains("二进制/未知编码 1"), "{out}");
-    assert!(out.contains("超过 2MB 1"), "{out}");
+    assert!(out.contains("sensitive 1"), "{out}");
+    assert!(out.contains("binary/undecodable 1"), "{out}");
+    assert!(out.contains("over 2MB 1"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_char_budget_truncates_early() {
     let dir = temp_dir("grep-budget");
-    // 100 行 × ~600 字符:截断后每行 ~520,~58 行即超 30k 预算
+    // 100 lines × ~600 chars: after truncation each line is ~520, ~58 lines exceed the 30k budget
     let body: String = (1..=100)
         .map(|_| format!("needle{}\n", "x".repeat(600)))
         .collect();
@@ -513,10 +559,13 @@ async fn grep_char_budget_truncates_early() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("字符上限"), "{out}");
-    assert!(out.contains("下一页 offset="), "{out}");
+    assert!(out.contains("character budget"), "{out}");
+    assert!(out.contains("next page offset="), "{out}");
     let rows = out.lines().filter(|l| l.contains(": ")).count();
-    assert!(rows < 100, "应在预算处提前停止(实际 {rows} 行): {out}");
+    assert!(
+        rows < 100,
+        "should stop early at the budget (got {rows} rows): {out}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -537,7 +586,7 @@ async fn glob_paginates_with_offset() {
         3,
         "{out}"
     );
-    assert!(out.contains("用 offset=3 续读"), "{out}");
+    assert!(out.contains("continue with offset=3"), "{out}");
 
     let (out, ..) = run_tool(
         &dir,
@@ -548,7 +597,7 @@ async fn glob_paginates_with_offset() {
     assert_eq!(
         out.lines().filter(|l| l.starts_with("g")).count(),
         2,
-        "末页 2 个: {out}"
+        "last page has 2 items: {out}"
     );
-    assert!(out.contains("共 8 个"), "{out}");
+    assert!(out.contains("of 8"), "{out}");
 }

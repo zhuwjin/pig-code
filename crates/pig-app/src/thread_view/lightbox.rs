@@ -1,7 +1,8 @@
 use super::*;
 
 impl ThreadView {
-    /// 打开图片灯箱（缩略图点击）；失效附件没有 thumb 不会走到这
+    /// Open the image lightbox (thumbnail click); dead attachments have no
+    /// thumb and never get here
     pub(crate) fn open_lightbox(
         &mut self,
         message_ix: usize,
@@ -21,7 +22,8 @@ impl ThreadView {
         };
         self.lightbox = Some(Lightbox {
             image: thumb.clone(),
-            label: format!("图片 {}", message_image_number(image_ix)),
+            label: rust_i18n::t!("thread.image_label", n = message_image_number(image_ix))
+                .to_string(),
             dims: image.dims,
             position: (message_ix, image_ix),
             zoom: 1.0,
@@ -30,7 +32,7 @@ impl ThreadView {
             drag_capture: false,
             drag_moved: false,
         });
-        // Esc 关闭依赖焦点在灯箱上
+        // Esc-to-close relies on focus being on the lightbox
         self.lightbox_focus.focus(window, cx);
         cx.notify();
     }
@@ -84,7 +86,11 @@ impl ThreadView {
         };
         let lightbox = self.lightbox.as_mut().expect("lightbox");
         lightbox.image = image.1;
-        lightbox.label = format!("图片 {}", message_image_number(next_position.1));
+        lightbox.label = rust_i18n::t!(
+            "thread.image_label",
+            n = message_image_number(next_position.1)
+        )
+        .to_string();
         lightbox.dims = image.0.dims;
         lightbox.position = next_position;
         lightbox.zoom = 1.0;
@@ -160,7 +166,8 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 图片灯箱覆盖消息区：支持拖动、滚轮/触控板缩放、双击适配和工具栏控制。
+    /// The image lightbox overlaying the message area: supports dragging,
+    /// wheel/trackpad zoom, double-click fit, and toolbar controls.
     pub(crate) fn render_lightbox(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let lightbox = self.lightbox.as_ref().expect("lightbox");
         let (_, viewport) = lightbox_viewport(&self.scroll_handle, window);
@@ -274,7 +281,7 @@ impl ThreadView {
                 this.reset_lightbox_view(cx);
                 cx.stop_propagation();
             }))
-            .child("适配");
+            .child(rust_i18n::t!("thread.lightbox_fit"));
         let close = div()
             .id("image-lightbox-close")
             .cursor_pointer()
@@ -570,9 +577,12 @@ pub(crate) fn clamp_lightbox_pan(
     (pan.0.clamp(-max_x, max_x), pan.1.clamp(-max_y, max_y))
 }
 
-/// 滚动穿透：有滚动条（max_offset > 0，内容超出视口）时吞掉滚轮事件，不穿透到外层
-/// 消息列表（这版 gpui 的内置滚动监听不阻断冒泡，不吞的话外层会联动，到顶/到底也不放行）；
-/// 没有可滚空间时放行，滚轮直接滚动外层。
+/// Scroll leak-through: when a scrollbar exists (max_offset > 0, content beyond
+/// the viewport), swallow the wheel event instead of letting it leak to the
+/// outer message list (this gpui version's built-in scroll listener does not
+/// stop propagation; without swallowing, the outer list co-scrolls and never
+/// releases even at top/bottom); with no scrollable room, let it pass and the
+/// wheel scrolls the outer layer directly.
 pub(crate) fn consume_scroll(
     handle: &ScrollHandle,
 ) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {

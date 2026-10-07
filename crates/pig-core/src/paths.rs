@@ -1,11 +1,13 @@
-//! 工作区/会话路径的入口归一：`~` 展开 + 绝对化 + 词法规整（消化 `.`/`..`、
-//! 重复与结尾分隔符）。刻意不做大小写折叠、不解析符号链接——与 kimi-code/ZCode
-//! 一致：归组靠入口产出一致字符串，别名字段偏严不匹配，也不在大小写敏感卷上误并。
+//! Entry-point normalization for workspace/session paths: `~` expansion + absolutization +
+//! lexical cleanup (digesting `.`/`..`, duplicate and trailing separators). Deliberately no case
+//! folding and no symlink resolution — consistent with kimi-code/ZCode: grouping relies on the
+//! entry point producing identical strings; alias fields err on the strict side and never
+//! accidentally merge on case-sensitive volumes.
 
 use std::path::{Component, Path, PathBuf};
 
-/// 归一工作区路径。同一目录的不同写法（尾斜杠、相对路径、`~`）归到同一 key；
-/// 大小写变体与符号链接别名仍视为不同路径。
+/// Normalize a workspace path. Different spellings of the same directory (trailing slash, relative path, `~`) map to the same key;
+/// case variants and symlink aliases remain distinct paths.
 pub fn normalize_workspace_path(path: &Path) -> PathBuf {
     let expanded = expand_tilde(path);
     let absolute = if expanded.is_absolute() {
@@ -15,7 +17,7 @@ pub fn normalize_workspace_path(path: &Path) -> PathBuf {
             .map(|cwd| cwd.join(&expanded))
             .unwrap_or(expanded)
     };
-    // Path::components 已忽略重复分隔符与结尾分隔符（根除外）
+    // Path::components already ignores duplicate and trailing separators (except the root)
     let mut out = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -53,7 +55,7 @@ fn home_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// 绝对路径根：Unix 为 "/"，Windows 需要盘符（"/x" 在 Windows 上无盘符、不算绝对路径）
+    /// Absolute-path root: "/" on Unix; Windows needs a drive letter ("/x" has no drive on Windows and is not absolute)
     #[cfg(unix)]
     const ROOT: &str = "/";
     #[cfg(windows)]
@@ -85,7 +87,7 @@ mod tests {
             normalize_workspace_path(&rooted("Users/x/a/./b/../c")),
             rooted("Users/x/a/c")
         );
-        // 越过根的 .. 不炸，钳在根上
+        // .. above the root does not panic; clamped to the root
         assert_eq!(normalize_workspace_path(&rooted("a/../../b")), rooted("b"));
     }
 
@@ -107,7 +109,7 @@ mod tests {
 
     #[test]
     fn keeps_case_and_spelling() {
-        // 不折大小写、不做 realpath：词法不同的路径保持不同
+        // No case folding, no realpath: lexically different paths stay different
         assert_ne!(
             normalize_workspace_path(&rooted("Users/x/a")),
             normalize_workspace_path(&rooted("users/x/a"))

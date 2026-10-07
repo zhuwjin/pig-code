@@ -1,5 +1,6 @@
-//! 工作区外读/写开关（fs_read_outside / fs_write_outside）+ tmp 目录放行 +
-//! 区外 symlink/敏感文件语义 + Plan 模式正交性。
+//! Outside-workspace read/write switches (fs_read_outside / fs_write_outside)
+//! plus tmp directory allowance and outside symlink/sensitive-file semantics
+//! and plan-mode orthogonality.
 
 mod common;
 
@@ -44,7 +45,7 @@ async fn run(
     (out, is_error)
 }
 
-/// 区外文件：workspace 的父目录里（相对逃逸目标，非绝对 tmp 请求）
+/// Outside file: in the workspace's parent directory (a relative-escape target, not an absolute tmp request)
 fn outside_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     dir.parent()
         .unwrap()
@@ -69,8 +70,11 @@ async fn outside_blocked_by_default_with_menu_hint() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("越出工作目录"), "{out}");
-    assert!(out.contains("允许读取工作区外文件"), "读引导文案: {out}");
+    assert!(out.contains("Path escapes the working directory"), "{out}");
+    assert!(
+        out.contains("outside-workspace read access"),
+        "read guidance copy: {out}"
+    );
 
     let (out, is_error) = run(
         &dir,
@@ -81,8 +85,11 @@ async fn outside_blocked_by_default_with_menu_hint() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("越出工作目录"), "{out}");
-    assert!(out.contains("允许写入工作区外文件"), "写引导文案: {out}");
+    assert!(out.contains("Path escapes the working directory"), "{out}");
+    assert!(
+        out.contains("outside-workspace write access"),
+        "write guidance copy: {out}"
+    );
 
     let _ = std::fs::remove_file(&target);
 }
@@ -97,7 +104,7 @@ async fn outside_allowed_when_switch_on() {
     state.fs_write_outside.store(true, Ordering::Relaxed);
     state.fs_read_outside.store(true, Ordering::Relaxed);
 
-    // 区外写（新建）成功
+    // Outside write (create) succeeds
     let (out, is_error) = run(
         &dir,
         &mut tracker,
@@ -109,7 +116,7 @@ async fn outside_allowed_when_switch_on() {
     assert!(!is_error, "{out}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
 
-    // 区外读成功
+    // Outside read succeeds
     let (out, is_error) = run(
         &dir,
         &mut tracker,
@@ -127,7 +134,7 @@ async fn outside_allowed_when_switch_on() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmp_absolute_path_allowed_with_switches_off() {
     let dir = temp_dir("tmp-ok");
-    // 显式绝对路径指向系统 tmp（工作区外）：开关全关也放行
+    // An explicit absolute path into the system tmp (outside the workspace): allowed even with all switches off
     let target =
         std::env::temp_dir().join(format!("pig-core-tmp-scratch-{}.txt", std::process::id()));
     let target_str = target.to_string_lossy().to_string();
@@ -142,7 +149,7 @@ async fn tmp_absolute_path_allowed_with_switches_off() {
         serde_json::json!({"path": target_str, "content": "scratch\n"}),
     )
     .await;
-    assert!(!is_error, "tmp 写放行: {out}");
+    assert!(!is_error, "tmp write should be allowed: {out}");
 
     let (out, is_error) = run(
         &dir,
@@ -152,7 +159,7 @@ async fn tmp_absolute_path_allowed_with_switches_off() {
         serde_json::json!({"path": target_str}),
     )
     .await;
-    assert!(!is_error, "tmp 读放行: {out}");
+    assert!(!is_error, "tmp read should be allowed: {out}");
     assert!(out.contains("scratch"), "{out}");
 
     let _ = std::fs::remove_file(&target);
@@ -169,7 +176,7 @@ async fn outside_symlink_follows_the_switch() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // 关：拒绝
+    // Off: denied
     let (out, is_error) = run(
         &dir,
         &mut tracker,
@@ -179,9 +186,9 @@ async fn outside_symlink_follows_the_switch() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("越出工作目录"), "{out}");
+    assert!(out.contains("Path escapes the working directory"), "{out}");
 
-    // 开：同一个闸放行（含 symlink 指向区外）
+    // On: the same gate allows it (including symlinks pointing outside)
     state.fs_read_outside.store(true, Ordering::Relaxed);
     let (out, is_error) = run(
         &dir,
@@ -216,7 +223,10 @@ async fn outside_sensitive_file_still_blocked_with_switch_on() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("敏感文件"), "开关开后敏感文件仍拒: {out}");
+    assert!(
+        out.contains("sensitive file"),
+        "sensitive files must stay blocked even with the switch on: {out}"
+    );
     assert!(!out.contains("SECRET=1"), "{out}");
 
     let (out, is_error) = run(
@@ -228,13 +238,14 @@ async fn outside_sensitive_file_still_blocked_with_switch_on() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("敏感文件"), "{out}");
+    assert!(out.contains("sensitive file"), "{out}");
 
     let _ = std::fs::remove_dir_all(&outside);
 }
 
-/// Plan 模式硬拒与区外写开关正交：开关全开，Plan 下 Write 仍被整类硬拒。
-/// 顺带走 Op::SetFsAccess 链路（agent_loop 处理点）。
+/// Plan mode's hard deny is orthogonal to the outside-write switch: with all
+/// switches on, Write under Plan is still hard-denied wholesale.
+/// Also exercises the Op::SetFsAccess path (handled in agent_loop).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plan_mode_blocks_write_even_with_switch_on() {
     let (config_path, cwd, data_dir) = common::setup("fs-plan");
@@ -242,7 +253,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
     let session_id = common::new_session(&agent, cwd.clone()).await;
 
-    // 开关全开 + 计划模式（与执行模式正交：档保持 AutoEdit，计划硬拒照旧）
+    // All switches on + plan mode (orthogonal to execution mode: tier stays AutoEdit, the plan hard deny still applies)
     agent
         .ops
         .send(Op::SetFsAccess {
@@ -264,7 +275,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: format!("{} 改个文件", pig_core::mock::SCENARIO_B_TRIGGER),
+            content: format!("{} edit a file", pig_core::mock::SCENARIO_B_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -281,7 +292,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         !events
             .iter()
             .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-        "Plan 下不应弹审批"
+        "no approval should pop up in Plan mode"
     );
     let ends: Vec<&str> = events
         .iter()
@@ -292,27 +303,28 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
             _ => None,
         })
         .collect();
-    assert!(!ends.is_empty(), "工具调用发生了（被硬拒）");
+    assert!(!ends.is_empty(), "tool calls did happen (hard-denied)");
     assert!(
-        ends.iter().all(|out| out.contains("计划模式")),
-        "全部被 Plan 硬拒: {ends:?}"
+        ends.iter().all(|out| out.contains("Plan mode")),
+        "all hard-denied by Plan mode: {ends:?}"
     );
     assert!(
         !cwd.join(pig_core::mock::SCENARIO_B_FILE).exists(),
-        "Plan 下不应创建文件"
+        "no file should be created in Plan mode"
     );
     agent.shutdown();
 }
 
-/// 带额外只读根的会话状态（data_dir/sessions 白名单测试用）
+/// Session state with extra read-only roots (for the data_dir/sessions allowlist test)
 fn state_with_extra_roots(roots: Vec<std::path::PathBuf>) -> SessionToolState {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
     SessionToolState::new("test".to_string(), tx, wake_tx, roots)
 }
 
-/// 非 tmp 的 fixture 根：tmp 豁免会放行一切 tmp 内绝对路径，白名单边界在 tmp 下
-/// 测不出来；CARGO_TARGET_TMPDIR（target/tmp/）是 cargo 给集成测试的 scratch 目录。
+/// A non-tmp fixture root: the tmp exemption allows every absolute path inside
+/// tmp, so the allowlist boundary cannot be tested under tmp; CARGO_TARGET_TMPDIR
+/// (target/tmp/) is cargo's scratch directory for integration tests.
 fn scratch_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("pig-fs-{name}-{}", std::process::id()));
@@ -321,9 +333,12 @@ fn scratch_dir(name: &str) -> std::path::PathBuf {
     dir.canonicalize().unwrap()
 }
 
-/// extra_read_roots（data_dir/sessions 子树）始终可读：root 内绝对路径读放行、
-/// root 外（data_dir 根部 config.toml）绝对路径仍拒、root 内写仍拒（只放读）、
-/// 相对 ../ 逃逸进 root 不放行（与 tmp 豁免同口径：只对绝对路径请求生效）。
+/// extra_read_roots (the data_dir/sessions subtree) is always readable:
+/// absolute-path reads inside a root are allowed, absolute paths outside the
+/// root (config.toml at the data_dir root) are still denied, writes inside the
+/// root are still denied (reads only), and relative ../ escapes into the root
+/// are not allowed (same rule as the tmp exemption: applies only to
+/// absolute-path requests).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extra_read_roots_allow_read_only() {
     let base = scratch_dir("extra-roots");
@@ -332,13 +347,17 @@ async fn extra_read_roots_allow_read_only() {
     let record_dir = sessions.join("s1.agents");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&record_dir).unwrap();
-    std::fs::write(record_dir.join("a1.result.md"), "子代理结果全文\n").unwrap();
-    std::fs::write(base.join("data").join("config.toml"), "占位\n").unwrap();
+    std::fs::write(
+        record_dir.join("a1.result.md"),
+        "full subagent result text\n",
+    )
+    .unwrap();
+    std::fs::write(base.join("data").join("config.toml"), "placeholder\n").unwrap();
 
     let mut tracker = ChangeTracker::default();
     let state = state_with_extra_roots(vec![sessions.clone()]);
 
-    // 1. root 内绝对路径读：放行
+    // 1. Absolute-path read inside the root: allowed
     let result_md = record_dir.join("a1.result.md");
     let (out, is_error) = run(
         &workspace,
@@ -348,11 +367,14 @@ async fn extra_read_roots_allow_read_only() {
         serde_json::json!({"path": result_md.to_string_lossy()}),
     )
     .await;
-    assert!(!is_error, "白名单内读应放行: {out}");
-    assert!(out.contains("子代理结果全文"), "{out}");
+    assert!(
+        !is_error,
+        "read inside the whitelist should be allowed: {out}"
+    );
+    assert!(out.contains("full subagent result text"), "{out}");
 
-    // 2. root 外 data_dir 根部（config.toml）绝对路径：仍拒
-    //（真实布局即如此——config.toml 在 data_dir 根部不在 sessions/ 下，天然排除）
+    // 2. Absolute path at the data_dir root, outside the root (config.toml): still denied
+    // (that is the real layout — config.toml sits at the data_dir root, not under sessions/, so it is naturally excluded)
     let config = base.join("data").join("config.toml");
     let (out, is_error) = run(
         &workspace,
@@ -362,10 +384,13 @@ async fn extra_read_roots_allow_read_only() {
         serde_json::json!({"path": config.to_string_lossy()}),
     )
     .await;
-    assert!(is_error, "白名单外仍应拒绝: {out}");
-    assert!(out.contains("越出工作目录"), "{out}");
+    assert!(
+        is_error,
+        "outside the whitelist should still be denied: {out}"
+    );
+    assert!(out.contains("Path escapes the working directory"), "{out}");
 
-    // 3. root 内写（绝对路径）：仍拒（豁免只放读）
+    // 3. Write inside the root (absolute path): still denied (the exemption allows reads only)
     let new_file = record_dir.join("evil.md");
     let (out, is_error) = run(
         &workspace,
@@ -375,10 +400,13 @@ async fn extra_read_roots_allow_read_only() {
         serde_json::json!({"path": new_file.to_string_lossy(), "content": "x\n"}),
     )
     .await;
-    assert!(is_error, "白名单只放读、写仍拒: {out}");
-    assert!(!new_file.exists(), "写不应落地");
+    assert!(
+        is_error,
+        "whitelist only allows reads, writes still denied: {out}"
+    );
+    assert!(!new_file.exists(), "write must not land on disk");
 
-    // 4. 相对 ../ 逃逸进 root：不放行（对齐 tmp 的绝对路径口径）
+    // 4. Relative ../ escape into the root: not allowed (aligned with tmp's absolute-path rule)
     let (out, is_error) = run(
         &workspace,
         &mut tracker,
@@ -387,13 +415,16 @@ async fn extra_read_roots_allow_read_only() {
         serde_json::json!({"path": "../data/sessions/s1.agents/a1.result.md"}),
     )
     .await;
-    assert!(is_error, "相对逃逸不应吃白名单豁免: {out}");
-    assert!(out.contains("越出工作目录"), "{out}");
+    assert!(
+        is_error,
+        "relative escape must not get the whitelist exemption: {out}"
+    );
+    assert!(out.contains("Path escapes the working directory"), "{out}");
 
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// root 经 symlink 指入：构造期 canonicalize root 后，经链接路径的读仍放行。
+/// Root reached via a symlink: after construction-time canonicalization of the root, reads via the link path are still allowed.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extra_read_roots_root_via_symlink() {
@@ -402,8 +433,8 @@ async fn extra_read_roots_root_via_symlink() {
     let real_sessions = base.join("data").join("sessions");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&real_sessions).unwrap();
-    std::fs::write(real_sessions.join("a1.result.md"), "链接结果\n").unwrap();
-    // 用链接路径当 root 传入（new() 内 canonicalize），也用链接路径发起读
+    std::fs::write(real_sessions.join("a1.result.md"), "linked result\n").unwrap();
+    // Pass the link path as the root (canonicalized inside new()) and also issue the read via the link path
     let link = base.join("link-sessions");
     std::os::unix::fs::symlink(&real_sessions, &link).unwrap();
 
@@ -418,8 +449,11 @@ async fn extra_read_roots_root_via_symlink() {
         serde_json::json!({"path": target.to_string_lossy()}),
     )
     .await;
-    assert!(!is_error, "root 经 symlink 指入的读应放行: {out}");
-    assert!(out.contains("链接结果"), "{out}");
+    assert!(
+        !is_error,
+        "read via a symlinked root should be allowed: {out}"
+    );
+    assert!(out.contains("linked result"), "{out}");
 
     let _ = std::fs::remove_dir_all(&base);
 }

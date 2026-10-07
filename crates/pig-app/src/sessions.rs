@@ -4,7 +4,7 @@ impl AppView {
     pub(crate) fn sync_composer_state(&self, cx: &mut Context<Self>) {
         let Some(sid) = &self.current else { return };
         let streaming = self.running.contains(sid);
-        // 审批条显示队首那笔：并发审批按到达顺序逐笔答复
+        // The approval bar shows the head of the queue: concurrent approvals are answered one by one in arrival order
         let approval = self
             .pending_approvals
             .get(sid)
@@ -17,8 +17,9 @@ impl AppView {
         });
     }
 
-    /// 工作区列表 = 可见手动工作区 ∪ 会话 cwd（排除已移除/隐藏的工作区）；
-    /// 按最近活跃/添加时间倒序。
+    /// Workspace list = visible manual workspaces ∪ session cwds (excluding
+    /// removed/hidden workspaces); sorted by latest activity/add time, newest
+    /// first.
     pub(crate) fn compute_workspaces(&self) -> Vec<String> {
         let mut latest: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for meta in &self.metas {
@@ -63,7 +64,7 @@ impl AppView {
         }
     }
 
-    /// 设置页「已归档的会话」数据：归档会话清单（含工作区显示名）推给设置页
+    /// Data for the settings page's "archived sessions": the archived session list (with workspace display names) is pushed to the settings page
     pub(crate) fn sync_archived_page(&self, cx: &mut Context<Self>) {
         let rows: Vec<crate::settings::ArchivedSessionRow> = self
             .metas
@@ -93,13 +94,16 @@ impl AppView {
     pub(crate) fn switch_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         if self.views.contains_key(&session_id) {
             self.current = Some(session_id.clone());
-            // 快速路径不发 SessionConfigured：清上一个会话的水位，
-            // core 的 OpenSession 补发（有数据时）随后到达
+            // The fast path does not send SessionConfigured: clear the previous
+            // session's watermark; the one re-sent by core's OpenSession (when
+            // it has data) arrives right after
             self.composer.update(cx, |composer, cx| {
                 composer.clear_context_usage(cx);
             });
-            // 已打开过的会话走这条快速路径，core 不会再发 SessionConfigured——
-            // 必须按 meta 恢复会话级的模型/模式/思考等级，否则会带着上一个会话的值
+            // A previously opened session takes this fast path and core will not
+            // send SessionConfigured again, so the session-level model/mode/
+            // reasoning level must be restored from meta; otherwise the previous
+            // session's values would linger
             if let Some(meta) = self.metas.iter().find(|m| m.id == session_id).cloned() {
                 self.exec_mode = meta.exec_mode;
                 self.plan_enabled = meta.plan_enabled;
@@ -107,11 +111,12 @@ impl AppView {
                 let label = match (&meta.provider_id, &meta.model_id) {
                     (Some(p), Some(m)) => {
                         self.current_model = Some((p.clone(), m.clone()));
-                        Some(self.model_display_label(p, m))
+                        self.model_display_label(p, m)
                     }
+                    // Session with no configured model: show the "no model configured" placeholder (no leftover label from the previous session)
                     _ => {
                         self.current_model = None;
-                        None
+                        rust_i18n::t!("composer.no_model").to_string()
                     }
                 };
                 self.composer.update(cx, |composer, cx| {
@@ -119,25 +124,25 @@ impl AppView {
                     composer.set_plan_enabled(meta.plan_enabled, cx);
                     composer.set_reasoning_level(meta.reasoning_level.clone(), cx);
                     composer.set_fs_access(meta.fs_read_outside, meta.fs_write_outside, cx);
-                    if let Some(label) = label {
-                        composer.set_model_name(label, cx);
-                    }
+                    composer.set_model_name(label, cx);
                 });
             }
             self.sync_composer_state(cx);
             self.refresh_git_branch(self.current_cwd(), cx);
             self.refresh_sidebar(cx);
             cx.notify();
-            // 仍要通知 core：它按当前会话补发面板快照与上下文水位
-            //（SessionConfigured 的处理是幂等的，重复恢复无害）
+            // Still notify core: it re-sends the panel snapshot and context
+            // watermark for the current session (SessionConfigured handling is
+            // idempotent; restoring twice is harmless)
             self.agent.open_session(session_id);
         } else {
             self.agent.open_session(session_id);
         }
     }
 
-    /// 手动重命名会话：本地缓存即时更新（侧栏立刻生效），
-    /// core 落库（置 title_custom，自动命名不再覆盖）后发 SessionList 再同步
+    /// Manually rename a session: the local cache updates immediately (the
+    /// sidebar reflects it at once); core persists it (sets title_custom so
+    /// auto-naming no longer overwrites) then sends SessionList to re-sync
     pub(crate) fn rename_session(&mut self, id: &str, title: &str, cx: &mut Context<Self>) {
         if let Some(meta) = self.metas.iter_mut().find(|m| m.id == id) {
             meta.title = title.to_string();
@@ -147,8 +152,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// 删除会话：本地视图/缓存清理 + 通知 core 清库与 rollout 文件。
-    /// 删的是当前会话时切到最近的未归档会话，没有则回 hero
+    /// Delete a session: clean up local views/caches plus tell core to clear its
+    /// store and the rollout file. When the current session is deleted, switch to
+    /// the most recent unarchived session, or return to the hero screen if none
     pub(crate) fn delete_session(&mut self, id: &str, cx: &mut Context<Self>) {
         self.deleted_sessions.insert(id.to_string());
         self.views.remove(id);
@@ -171,8 +177,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// 标题栏分支：cwd=None（hero 态）或非 git 目录时不显示。
-    /// 一次查齐当前分支 + 本地分支列表（切换菜单用）
+    /// Title bar branch: hidden when cwd=None (hero state) or the directory is
+    /// not a git repo. Fetches the current branch plus the local branch list in
+    /// one go (for the switch menu)
     pub(crate) fn refresh_git_branch(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async move {
             let Some(cwd) = cwd else {
@@ -191,7 +198,7 @@ impl AppView {
         .detach();
     }
 
-    /// ConfigSnapshot → composer 模型列表（启用供应商的启用模型，按供应商分组平铺）
+    /// ConfigSnapshot → composer model list (enabled models of enabled providers, flattened grouped by provider)
     pub(crate) fn apply_config_to_composer(&self, cx: &mut Context<Self>) {
         let Some(config) = &self.config else { return };
         let models: Vec<crate::composer::ModelOption> = config
@@ -207,7 +214,7 @@ impl AppView {
                             p.name.clone(),
                             p.id.clone(),
                             m.id.clone(),
-                            // (等级 id, 显示名)——显示名缺省回退 id 本身
+                            // (level id, display name); the display name falls back to the id itself when absent
                             m.reasoning_levels
                                 .iter()
                                 .map(|lv| {
@@ -235,7 +242,7 @@ impl AppView {
         self.sync_archived_page(cx);
         self.refresh_mcp(cx);
         self.refresh_skills(cx);
-        // 主题模式可能在设置页关闭期间被系统外观改变，打开时重新同步下拉
+        // The theme mode may have changed via system appearance while the settings page was closed; re-sync the dropdown on open
         self.settings.update(cx, |settings, cx| {
             settings.appearance_dirty = true;
             cx.notify();
@@ -243,7 +250,7 @@ impl AppView {
         cx.notify();
     }
 
-    /// 把侧栏同口径的工作区清单喂给设置页（MCP/技能两页作用域选择器的候选）
+    /// Feed the settings page the workspace list computed the same way as the sidebar (candidates for the scope pickers on the MCP/skills pages)
     pub(crate) fn sync_scope_workspaces(&mut self, cx: &mut Context<Self>) {
         let aliases = self.workspace_aliases.clone();
         let entries: Vec<(std::path::PathBuf, String)> = self
@@ -262,13 +269,15 @@ impl AppView {
         });
     }
 
-    /// 设置页 MCP 数据刷新：按设置页作用域（用户级 / 指定工作区）重读 mcp.json，
-    /// 并查询当前会话的连接状态（无活动会话时不查询，页面只展示配置）
+    /// Refresh settings-page MCP data: re-read mcp.json per the settings page's
+    /// scope (user level / a chosen workspace), and query the current session's
+    /// connection state (no query without an active session; the page then shows
+    /// configuration only)
     pub(crate) fn refresh_mcp(&mut self, cx: &mut Context<Self>) {
         let session_id = self.current.clone();
         let session_cwd = self.current_cwd();
         let workspace = match self.settings.read(cx).mcp_scope().clone() {
-            // 用户级：不参与项目合并（页面只列用户级条目）
+            // User level: no project merge involved (the page lists user-level entries only)
             crate::settings::McpScope::User => None,
             crate::settings::McpScope::Workspace(path) => Some(path),
         };
@@ -281,8 +290,9 @@ impl AppView {
         }
     }
 
-    /// 设置页技能数据刷新：按设置页作用域（用户级 / 指定工作区）重读技能目录。
-    /// 技能是静态文件（无连接态），不需要向 core 查询
+    /// Refresh settings-page skills data: re-read the skills directory per the
+    /// settings page's scope (user level / a chosen workspace). Skills are
+    /// static files (no connection state), so no core query is needed
     pub(crate) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
         let workspace = match self.settings.read(cx).skills_scope().clone() {
             crate::settings::McpScope::User => None,

@@ -1,7 +1,8 @@
 use super::*;
 
-/// 预设模型条目：上下文/输出上限/视觉/结构化输出/思考档均按 ZCode 内置
-/// 供应商规则解析出的真实值带入（disabled/enabled 为开关型思考档）
+/// Preset model entry: context/output limits/vision/structured output/reasoning
+/// levels all carry the real values parsed from ZCode's built-in provider rules
+/// (disabled/enabled are toggle-style reasoning levels)
 pub(crate) struct PresetModel {
     pub(crate) id: &'static str,
     pub(crate) context: u64,
@@ -11,7 +12,8 @@ pub(crate) struct PresetModel {
     pub(crate) reasoning: &'static [&'static str],
 }
 
-/// PresetModel 的位置参数构造器（const 数组里逐条建模型用）
+/// Positional-argument constructor for PresetModel (for building models one by
+/// one inside const arrays)
 const fn pm(
     id: &'static str,
     context: u64,
@@ -30,33 +32,40 @@ const fn pm(
     }
 }
 
-/// 常用思考档的中文显示名（其余档位界面显示 id 本身）
-pub(crate) const REASONING_LABELS: &[(&str, &str)] = &[
-    ("none", "无"),
-    ("disabled", "关"),
-    ("enabled", "开"),
-    ("minimal", "极简"),
-    ("low", "低"),
-    ("medium", "中"),
-    ("high", "高"),
-    ("xhigh", "超高"),
-    ("max", "最高"),
-];
+/// Display names for common reasoning levels (other levels show the id itself in
+/// the UI); strings follow the UI language. Note: the display names are written
+/// into config's reasoning_labels when "create a provider from a preset",
+/// capturing the UI language at creation time; old values in stored configs
+/// stay unchanged
+pub(crate) fn reasoning_labels() -> [(&'static str, std::borrow::Cow<'static, str>); 9] {
+    [
+        ("none", rust_i18n::t!("settings.reasoning.none")),
+        ("disabled", rust_i18n::t!("settings.reasoning.disabled")),
+        ("enabled", rust_i18n::t!("settings.reasoning.enabled")),
+        ("minimal", rust_i18n::t!("settings.reasoning.minimal")),
+        ("low", rust_i18n::t!("settings.reasoning.low")),
+        ("medium", rust_i18n::t!("settings.reasoning.medium")),
+        ("high", rust_i18n::t!("settings.reasoning.high")),
+        ("xhigh", rust_i18n::t!("settings.reasoning.xhigh")),
+        ("max", rust_i18n::t!("settings.reasoning.max")),
+    ]
+}
 
-/// 预设供应商条目：base_url 按 pig 的拼接口径给定（OpenAI 格式追加
-/// /chat/completions、Anthropic 格式追加 /v1/messages），参照 ZCode 内置
-/// 供应商目录（config/provider/zcode-builtin.json）
+/// Preset provider entry: base_url follows pig's concatenation convention (OpenAI
+/// format appends /chat/completions, Anthropic format appends /v1/messages),
+/// referencing ZCode's built-in provider catalog (config/provider/zcode-builtin.json)
 pub(crate) struct PresetProvider {
     pub(crate) name: &'static str,
     pub(crate) base_url: &'static str,
     pub(crate) api_format: ApiFormat,
-    /// 密钥管理页（「获取密钥」入口）
+    /// Key management page (the "get key" entry)
     pub(crate) key_url: &'static str,
-    /// 品牌图标资产路径（rust-embed 嵌入，见 assets/provider-icons/）
+    /// Brand icon asset path (embedded via rust-embed, see assets/provider-icons/)
     pub(crate) icon: &'static str,
-    /// 暗色主题用的图标变体（仅 OpenRouter 有明/暗两版；None = 通用）
+    /// Icon variant for dark themes (only OpenRouter has light/dark versions;
+    /// None = universal)
     pub(crate) icon_dark: Option<&'static str>,
-    /// 预置模型（含上下文/能力/思考档真实值）
+    /// Preset models (with real context/capability/reasoning-level values)
     pub(crate) models: &'static [PresetModel],
 }
 
@@ -245,7 +254,7 @@ pub(crate) const PRESET_PROVIDERS: &[PresetProvider] = &[
         ],
     },
     PresetProvider {
-        name: "阿里云百炼（中国）",
+        name: "Alibaba Cloud Bailian (China)",
         icon: "provider-icons/alibaba.png",
         icon_dark: None,
         base_url: "https://dashscope.aliyuncs.com/apps/anthropic",
@@ -271,7 +280,7 @@ pub(crate) const PRESET_PROVIDERS: &[PresetProvider] = &[
         ],
     },
     PresetProvider {
-        name: "阿里云百炼（国际）",
+        name: "Alibaba Cloud Bailian (International)",
         icon: "provider-icons/alibaba.png",
         icon_dark: None,
         base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
@@ -326,7 +335,8 @@ pub(crate) const PRESET_PROVIDERS: &[PresetProvider] = &[
         name: "Anthropic",
         icon: "provider-icons/anthropic.png",
         icon_dark: None,
-        // pig 对 Anthropic 格式追加 /v1/messages，官方 base 不带 /v1 尾巴
+        // pig appends /v1/messages for the Anthropic format; the official base
+        // has no /v1 suffix
         base_url: "https://api.anthropic.com",
         api_format: ApiFormat::AnthropicMessages,
         key_url: "https://console.anthropic.com/settings/keys",
@@ -486,8 +496,9 @@ pub(crate) const PRESET_PROVIDERS: &[PresetProvider] = &[
 ];
 
 impl SettingsView {
-    /// 从预设建供应商：预填名称/端点/格式/密钥页；模型按预设真实值带入
-    /// 上下文/输出/视觉/结构化/思考档（参数映射按 API 格式生成）
+    /// Create a provider from a preset: prefill name/endpoint/format/key page;
+    /// models carry the preset's real context/output/vision/structured/reasoning
+    /// values (the params mapping is generated per API format)
     pub(crate) fn add_provider_from_preset(
         &mut self,
         preset: &PresetProvider,
@@ -511,12 +522,13 @@ impl SettingsView {
                     model.cap_structured = m.cap_structured;
                     let levels: Vec<String> = m.reasoning.iter().map(|s| s.to_string()).collect();
                     if !levels.is_empty() {
-                        for (id, label) in REASONING_LABELS {
-                            if levels.iter().any(|l| l == id) {
-                                model.reasoning_labels.insert((*id).into(), (*label).into());
+                        for (id, label) in reasoning_labels() {
+                            if levels.iter().any(|l| l.as_str() == id) {
+                                model.reasoning_labels.insert(id.into(), label.into());
                             }
                         }
-                        // 辅助函数返回 serde_json::Map，按字段类型转 HashMap
+                        // The helper returns a serde_json::Map; convert to HashMap
+                        // per the field's type
                         model.reasoning_params =
                             default_reasoning_params(&levels, preset.api_format)
                                 .into_iter()
@@ -535,12 +547,14 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 预设选择弹窗（参照 ZCode ProviderTemplatePicker：全部预设平铺一格一卡 +
-    /// 首格自定义端点入口；点击即建并关闭）
+    /// Preset picker dialog (modeled on ZCode's ProviderTemplatePicker: all
+    /// presets tiled one card per cell plus a custom-endpoint entry in the first
+    /// cell; clicking creates and closes)
     pub(crate) fn render_preset_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let card = |ix: usize| {
             let preset = &PRESET_PROVIDERS[ix];
-            // 暗色主题优先专用变体（OpenRouter 明/暗字形对比度不同）
+            // Prefer the dedicated variant in dark themes (OpenRouter's
+            // light/dark glyphs differ in contrast)
             let icon_path = preset
                 .icon_dark
                 .filter(|_| cx.theme().mode.is_dark())
@@ -549,7 +563,9 @@ impl SettingsView {
                 .size_8()
                 .flex_none()
                 .rounded_lg()
-                // 方形品牌图标统一裁成组件圆角，透明底字形不裁也不受影响
+                // Square brand icons are uniformly clipped to the component's
+                // corner radius; transparent-background glyphs are unaffected
+                // either way
                 .overflow_hidden()
                 .child(img(icon_path).size_full());
             h_flex()
@@ -626,12 +642,19 @@ impl SettingsView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().font_medium().child("自定义供应商"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(rust_i18n::t!("settings.models.custom_provider").to_string()),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("手动填写端点与密钥"),
+                            .child(
+                                rust_i18n::t!("settings.models.custom_provider_hint").to_string(),
+                            ),
                     ),
             )
             .into_any_element();
@@ -655,14 +678,17 @@ impl SettingsView {
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_lg().font_semibold().child("添加供应商"))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(rust_i18n::t!("settings.models.add_provider").to_string()),
+                    )
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(
-                                "从预设选择自动填充端点与模型，或自定义端点；API Key 需自行填写。",
-                            ),
+                            .child(rust_i18n::t!("settings.models.picker_description").to_string()),
                     )
                     .child(
                         h_flex()
@@ -676,7 +702,7 @@ impl SettingsView {
                             Button::new("cancel-preset-picker")
                                 .outline()
                                 .small()
-                                .label("取消")
+                                .label(rust_i18n::t!("common.cancel"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.preset_picker_open = false;
                                     cx.notify();

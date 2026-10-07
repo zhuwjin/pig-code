@@ -1,13 +1,13 @@
 use super::*;
 
-/// WebSearch 输出总字符预算（与 Grep/Glob 同级）
+/// WebSearch total output character budget (same tier as Grep/Glob)
 const MAX_SEARCH_OUTPUT: usize = 30 * 1024;
 const DEFAULT_MAX_RESULTS: u64 = 5;
 const MAX_RESULTS_LIMIT: u64 = 10;
 
-/// WebSearch：agent 级网络搜索（区别于 provider 服务端原生搜索 cap_web_search）。
-/// v1 直连两个固定 HTTPS 搜索 API（端点写死，无 SSRF 面）：环境变量
-/// TAVILY_API_KEY 优先（Tavily），否则 BRAVE_API_KEY（Brave）；都没有则报错引导。
+/// WebSearch: agent-level web search (distinct from the provider's server-side native search cap_web_search).
+/// v1 connects directly to two fixed HTTPS search APIs (endpoints hardcoded, no SSRF surface): the environment variable
+/// TAVILY_API_KEY takes priority (Tavily), otherwise BRAVE_API_KEY (Brave); with neither, an error with guidance is returned.
 pub struct WebSearch;
 
 enum SearchBackend {
@@ -28,8 +28,8 @@ impl SearchBackend {
             return Ok(Self::Brave { api_key: key });
         }
         Err(
-            "WebSearch 未配置搜索服务：请设置环境变量 TAVILY_API_KEY（tavily.com）或 \
-             BRAVE_API_KEY（brave.com/search/api）后重启会话。"
+            "WebSearch is not configured: set the TAVILY_API_KEY (tavily.com) or \
+             BRAVE_API_KEY (brave.com/search/api) environment variable, then restart the session."
                 .to_string(),
         )
     }
@@ -42,7 +42,7 @@ impl SearchBackend {
     }
 }
 
-/// 一条搜索结果（两 provider 归一化后的形状）
+/// One search result (the shape after normalizing both providers)
 struct SearchHit {
     title: String,
     url: String,
@@ -68,14 +68,14 @@ async fn search_tavily(api_key: &str, query: &str, max: u64) -> Result<Vec<Searc
         }))
         .send()
         .await
-        .map_err(|e| format!("Tavily 请求失败: {e}"))?;
+        .map_err(|e| format!("Tavily request failed: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("Tavily 返回 {}", response.status()));
+        return Err(format!("Tavily returned {}", response.status()));
     }
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("Tavily 响应解析失败: {e}"))?;
+        .map_err(|e| format!("Failed to parse Tavily response: {e}"))?;
     Ok(body["results"]
         .as_array()
         .map(|items| {
@@ -99,14 +99,14 @@ async fn search_brave(api_key: &str, query: &str, max: u64) -> Result<Vec<Search
         .query(&[("q", query), ("count", &max.to_string())])
         .send()
         .await
-        .map_err(|e| format!("Brave 请求失败: {e}"))?;
+        .map_err(|e| format!("Brave request failed: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("Brave 返回 {}", response.status()));
+        return Err(format!("Brave returned {}", response.status()));
     }
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("Brave 响应解析失败: {e}"))?;
+        .map_err(|e| format!("Failed to parse Brave response: {e}"))?;
     Ok(body["web"]["results"]
         .as_array()
         .map(|items| {
@@ -122,9 +122,12 @@ async fn search_brave(api_key: &str, query: &str, max: u64) -> Result<Vec<Search
         .unwrap_or_default())
 }
 
-/// 编号列表渲染 + 预算截断（预算内先到先得，超了标注剩余条数）
+/// Numbered-list rendering + budget truncation (first come first served within the budget; the remaining count is annotated past it)
 fn format_hits(provider: &str, query: &str, hits: &[SearchHit]) -> String {
-    let mut output = format!("「{query}」的搜索结果（{provider}，{} 条）\n\n", hits.len());
+    let mut output = format!(
+        "Search results for \"{query}\" ({provider}, {} results)\n\n",
+        hits.len()
+    );
     for (ix, hit) in hits.iter().enumerate() {
         let entry = format!(
             "{}. {}\n   {}\n   {}\n\n",
@@ -135,7 +138,7 @@ fn format_hits(provider: &str, query: &str, hits: &[SearchHit]) -> String {
         );
         if output.len() + entry.len() > MAX_SEARCH_OUTPUT {
             output.push_str(&format!(
-                "[... 剩余 {} 条超出输出预算已省略]",
+                "[... {} more result(s) omitted over the output budget]",
                 hits.len() - ix
             ));
             break;
@@ -159,14 +162,14 @@ impl Tool for WebSearch {
             "type": "function",
             "function": {
                 "name": "WebSearch",
-                "description": "联网搜索：返回标题/URL/摘要列表（需要环境变量 TAVILY_API_KEY 或 BRAVE_API_KEY）。用于查最新资讯、文档、报错信息；拿到 URL 后用 FetchURL 读全文。",
+                "description": "Search the web: returns a title/URL/snippet list (requires the TAVILY_API_KEY or BRAVE_API_KEY environment variable). Use it for up-to-date information, documentation, and error messages; follow up with FetchURL on a result URL to read the full page.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "搜索关键词" },
+                        "query": { "type": "string", "description": "Search query" },
                         "max_results": {
                             "type": "integer",
-                            "description": "返回条数（默认 5，上限 10）"
+                            "description": "Number of results to return (default 5, max 10)"
                         }
                     },
                     "required": ["query"]
@@ -183,7 +186,7 @@ impl Tool for WebSearch {
         Box::pin(async move {
             let query = args["query"].as_str().unwrap_or("").trim();
             if query.is_empty() {
-                return Err("WebSearch 缺少参数 query".to_string());
+                return Err("WebSearch is missing the query parameter".to_string());
             }
             let max = args["max_results"]
                 .as_u64()
@@ -196,7 +199,7 @@ impl Tool for WebSearch {
             };
             if hits.is_empty() {
                 return Ok(ToolEffect::plain(format!(
-                    "「{query}」未搜到结果（{}）",
+                    "No results for \"{query}\" ({})",
                     backend.provider_name()
                 )));
             }

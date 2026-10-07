@@ -1,8 +1,10 @@
-//! PTY 子进程管理：spawn / 读写 / resize / 退出检测。
+//! PTY child process management: spawn / read / write / resize / exit detection.
 //!
-//! 参考 tty7 `crates/tty7-core/src/daemon/pane.rs:1736-1819` 的 spawn 片段
-//! （openpty → spawn_command → drop slave → clone reader / take writer），
-//! 砍掉 daemon 协议与重连逻辑，进程内直接持有 portable-pty。
+//! Modeled on the spawn snippet of tty7
+//! `crates/tty7-core/src/daemon/pane.rs:1736-1819`
+//! (openpty → spawn_command → drop slave → clone reader / take writer), dropping
+//! the daemon protocol and reconnection logic; portable-pty is held directly
+//! in-process.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -11,24 +13,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
-/// 一个活 PTY：master（resize）、writer（键盘输入）、child（退出检测与 kill）。
+/// One live PTY: master (resize), writer (keyboard input), child (exit detection
+/// and kill).
 ///
-/// 全部经 Mutex 共享给 UI 线程（写键/resize）与 waiter 线程（try_wait）。
-/// Drop 时 kill 子进程——关 tab 即杀 shell。
+/// All of it is shared via Mutexes with the UI thread (writing keys / resize)
+/// and the waiter thread (try_wait). Drop kills the child process: closing a
+/// tab kills the shell.
 pub(crate) struct Pty {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
-    /// 已被主动 kill（Drop / 关 tab）；waiter 线程见到后静默退出，不再上报
+    /// Killed deliberately (Drop / closing a tab); the waiter thread exits silently upon seeing it and reports nothing further
     killed: AtomicBool,
-    /// tab 标签用的 shell 名（如 "zsh"）
+    /// Shell name used for the tab label (e.g. "zsh")
     shell_name: String,
 }
 
 impl Pty {
-    /// 开 PTY 并起 shell。`shell` 为 None 或空白时取系统默认（unix 登录 shell /
-    /// Windows pwsh→powershell→cmd）；指定路径时以 login shell 方式启动（unix 追加 -l）。
-    /// 返回 (Pty, reader)；reader 交给 term.rs 的读线程。
+    /// Open a PTY and start a shell. A None or blank `shell` takes the system
+    /// default (unix login shell / Windows pwsh→powershell→cmd); a given path is
+    /// started as a login shell (unix appends -l).
+    /// Returns (Pty, reader); the reader is handed to the reader thread in term.rs.
     pub(crate) fn spawn(
         cwd: &Path,
         size: PtySize,
@@ -42,7 +47,7 @@ impl Pty {
         Self::spawn_inner(cmd, cwd, size, None)
     }
 
-    /// 测试用：起指定程序而非登录 shell
+    /// For tests: start the given program instead of a login shell
     #[cfg(test)]
     pub(crate) fn spawn_program(
         cwd: &Path,
@@ -67,7 +72,7 @@ impl Pty {
             .map_err(std::io::Error::other)?;
 
         cmd.cwd(cwd);
-        // 参考 tty7 pane.rs apply_common_command_setup 的环境注入（精简版）
+        // Environment injection per apply_common_command_setup in tty7 pane.rs (trimmed)
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "pig-code");
@@ -78,7 +83,7 @@ impl Pty {
             .slave
             .spawn_command(cmd)
             .map_err(std::io::Error::other)?;
-        // slave 端必须立刻丢掉，否则 shell 退出后 master 读不到 EOF
+        // The slave end must be dropped immediately, otherwise the master cannot read EOF after the shell exits
         drop(pair.slave);
 
         let reader = pair
@@ -103,7 +108,7 @@ impl Pty {
         &self.shell_name
     }
 
-    /// 键盘输入写向 PTY。写失败（子进程已走）静默忽略——退出事件马上会到
+    /// Write keyboard input to the PTY. A failed write (child already gone) is silently ignored; the exit event arrives right away
     pub(crate) fn write(&self, bytes: &[u8]) {
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
@@ -117,7 +122,7 @@ impl Pty {
         }
     }
 
-    /// 非阻塞收割子进程；已退出返回其状态（portable-pty 自有 ExitStatus 类型）
+    /// Reap the child non-blockingly; returns its status once exited (portable-pty's own ExitStatus type)
     pub(crate) fn try_wait(&self) -> Option<ExitStatus> {
         self.child.lock().ok()?.try_wait().ok().flatten()
     }
@@ -140,11 +145,13 @@ impl Drop for Pty {
     }
 }
 
-/// tab 标签用的 shell 名：取 `resolve_login_shell()` 的 basename。
+/// Shell name for the tab label: the basename of `resolve_login_shell()`.
 ///
-/// 标签与真实起进程结果保证一致：默认命令由 portable-pty `new_default_prog`
-/// 解析，本函数与其内部完全同链（$SHELL 可执行校验 → passwd pw_shell 可执行
-/// 校验 → /bin/sh），同一进程环境、同一校验口径，不会分叉
+/// The label is guaranteed to match what actually gets spawned: the default
+/// command is resolved by portable-pty `new_default_prog`, and this function
+/// follows exactly the same chain as its internals ($SHELL executable check →
+/// passwd pw_shell executable check → /bin/sh), same process environment and
+/// same validation criteria, so they cannot diverge
 #[cfg(unix)]
 fn login_shell_label() -> String {
     let shell = resolve_login_shell();
@@ -155,10 +162,11 @@ fn login_shell_label() -> String {
         .unwrap_or_else(|| "sh".into())
 }
 
-/// unix 默认 shell 解析：与 portable-pty `new_default_prog` 的 `get_shell()`
-/// 完全同链——$SHELL（`access(X_OK)` 校验可执行）→ passwd 数据库 `getpwuid`
-/// 的 `pw_shell`（同校验，macOS 走 OpenDirectory 用户记录）→ `/bin/sh`。
-/// tty7 的 `login_shell()`（shells.rs:242）也是这条链
+/// Unix default shell resolution: exactly the same chain as portable-pty
+/// `new_default_prog`'s `get_shell()`: $SHELL (validated executable via
+/// `access(X_OK)`) → the passwd database `getpwuid`'s `pw_shell` (same
+/// validation; macOS goes through OpenDirectory user records) → `/bin/sh`.
+/// tty7's `login_shell()` (shells.rs:242) uses this chain too
 #[cfg(unix)]
 fn resolve_login_shell() -> String {
     fn executable(path: &str) -> bool {
@@ -173,7 +181,8 @@ fn resolve_login_shell() -> String {
     {
         return shell;
     }
-    // passwd 数据库；getpwuid 返回静态区指针，立即读取后不再触碰
+    // passwd database; getpwuid returns a pointer into static storage, read it
+    // immediately and never touch it again
     unsafe {
         let ent = libc::getpwuid(libc::getuid());
         if !ent.is_null()
@@ -187,20 +196,21 @@ fn resolve_login_shell() -> String {
     "/bin/sh".into()
 }
 
-/// unix：portable-pty 的 default prog = 登录 shell（$SHELL → passwd 回退），
-/// spawn 时 argv[0] 自动加 `-` 前缀以 login shell 方式启动（参考 tty7
-/// pane.rs:31-43 的 default_prog，完全同款）。
+/// Unix: portable-pty's default prog = login shell ($SHELL → passwd fallback);
+/// at spawn, argv[0] automatically gets a `-` prefix so it starts as a login
+/// shell (see the default_prog at tty7 pane.rs:31-43, exactly the same).
 #[cfg(unix)]
 fn default_shell_command() -> CommandBuilder {
     CommandBuilder::new_default_prog()
 }
 
-/// Windows：pwsh → powershell → cmd（参考 tty7 shells.rs:390 windows_default_shell）
+/// Windows: pwsh → powershell → cmd (see windows_default_shell in tty7 shells.rs:390)
 #[cfg(windows)]
 fn default_shell_command() -> CommandBuilder {
     for candidate in ["pwsh.exe", "powershell.exe"] {
-        // 仅靠 PATH 解析（spawn 时由 portable-pty search_path 完成）；
-        // 这里用 which 式探测：任一 ProgramFiles 下的 PowerShell 7 优先
+        // Resolution relies purely on PATH (done by portable-pty search_path at
+        // spawn); here we probe which-style: any PowerShell 7 under ProgramFiles
+        // wins
         if which_on_path(candidate) {
             return CommandBuilder::new(candidate);
         }
@@ -208,9 +218,10 @@ fn default_shell_command() -> CommandBuilder {
     CommandBuilder::new("cmd.exe")
 }
 
-/// 指定 shell 的自定义启动命令。unix 追加 `-l` 以 login shell 启动（zsh/bash/
-/// fish/sh/nu 均接受；默认分支 new_default_prog 的 argv[0] `-` 前缀是
-/// portable-pty 内部行为，自定义路径够不到，故用显式参数）
+/// Custom launch command for a specified shell. Unix appends `-l` to start a
+/// login shell (accepted by zsh/bash/fish/sh/nu alike); the default branch's
+/// new_default_prog argv[0] `-` prefix is internal portable-pty behavior that a
+/// custom path cannot reach, hence the explicit argument
 #[cfg(unix)]
 fn custom_shell_command(prog: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(prog);
@@ -218,7 +229,7 @@ fn custom_shell_command(prog: &str) -> CommandBuilder {
     cmd
 }
 
-/// Windows 自定义 shell 直接启动（不同终端程序参数各异，不盲加）
+/// Windows custom shells launch directly (terminal programs take different arguments; do not add blindly)
 #[cfg(windows)]
 fn custom_shell_command(prog: &str) -> CommandBuilder {
     CommandBuilder::new(prog)
@@ -232,8 +243,9 @@ fn which_on_path(program: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())
 }
 
-/// shell 名（tab 标签）：自定义命令取程序 basename（Windows 去 .exe）；
-/// 默认命令 argv 为空（程序在 spawn 时才解析），unix 回退 $SHELL 标签
+/// Shell name (tab label): for a custom command, the program basename (.exe
+/// stripped on Windows); the default command has an empty argv (the program is
+/// only resolved at spawn), so unix falls back to the $SHELL label
 fn shell_name_of(cmd: &CommandBuilder) -> String {
     if let Some(prog) = cmd.get_argv().first() {
         let prog = prog.to_string_lossy().into_owned();
@@ -272,21 +284,23 @@ mod tests {
         }
     }
 
-    /// 自定义 shell：标签取程序 basename；空白配置回退系统默认 shell
+    /// Custom shell: the label takes the program basename; blank config falls back to the system default shell
     #[test]
     fn 自定义shell标签与空白回退() {
         let dir = std::env::temp_dir();
         let (pty, _reader) = Pty::spawn(&dir, test_size(), Some("sh")).expect("spawn sh");
         assert_eq!(pty.shell_name(), "sh");
 
-        let (pty2, _r2) = Pty::spawn(&dir, test_size(), Some("   ")).expect("空白回退默认 shell");
+        let (pty2, _r2) = Pty::spawn(&dir, test_size(), Some("   "))
+            .expect("blank value falls back to the default shell");
         assert!(!pty2.shell_name().is_empty());
         #[cfg(unix)]
         assert_eq!(pty2.shell_name(), login_shell_label());
     }
 
-    /// 默认 shell 解析与 portable-pty 同链：$SHELL 有效时必须等于 $SHELL；
-    /// 结果始终是可执行文件路径（passwd 回退或 /bin/sh）
+    /// Default shell resolution matches portable-pty's chain: must equal $SHELL
+    /// when $SHELL is valid; the result is always an executable file path
+    /// (passwd fallback or /bin/sh)
     #[cfg(unix)]
     #[test]
     fn 默认shell解析与环境一致() {
@@ -295,15 +309,18 @@ mod tests {
         let c = std::ffi::CString::new(resolved.as_str()).unwrap();
         assert!(
             unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0,
-            "解析结果应可执行：{resolved}"
+            "resolved shell should be executable: {resolved}"
         );
         if let Ok(shell) = std::env::var("SHELL") {
             let sc = std::ffi::CString::new(shell.clone()).unwrap();
             if unsafe { libc::access(sc.as_ptr(), libc::X_OK) } == 0 {
-                assert_eq!(resolved, shell, "$SHELL 有效时应优先于 passwd 回退");
+                assert_eq!(
+                    resolved, shell,
+                    "$SHELL should take precedence over the passwd fallback when valid"
+                );
             }
         }
-        // 标签与解析结果的 basename 一致
+        // The label matches the basename of the resolved result
         let label = login_shell_label();
         assert_eq!(
             label,
@@ -314,7 +331,7 @@ mod tests {
         );
     }
 
-    /// 自定义 shell 以 login 方式（-l）启动且可用：写 echo 读回显
+    /// Custom shell starts as a login shell (-l) and works: write echo, read the echo back
     #[cfg(unix)]
     #[test]
     fn 自定义shell可执行并回显() {
@@ -337,7 +354,7 @@ mod tests {
             }
         }
         panic!(
-            "没等到自定义 shell 的回显：{}",
+            "did not see echo from the custom shell: {}",
             String::from_utf8_lossy(&out)
         );
     }

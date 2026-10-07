@@ -1,7 +1,12 @@
-//! 会话级 Bash 任务（前台/后台统一注册表）：读者收输出、watcher 等退出更新状态，
-//! 完成经 task_notify channel 通知 agent_loop 推送 TaskListChanged。不持久化。
-//! 前台超时自动转后台继续跑；spill 文件（.pigcode/tool-results/{id}.log）保存全量输出。
-//! 前台执行中的条目对快照隐藏（普通命令不是后台任务），超时转后台时翻转 foreground 才上屏。
+//! Session-scoped Bash tasks (one unified registry for foreground/background):
+//! readers collect output, the watcher waits for exit and updates status, and
+//! completion is reported to agent_loop via the task_notify channel to push
+//! TaskListChanged. Not persisted. Foreground tasks that time out automatically
+//! continue in the background; the spill file (.pigcode/tool-results/{id}.log)
+//! keeps the full output. Entries still running in the foreground are hidden
+//! from snapshots (a plain command is not a background task); foreground is
+//! flipped only when a timeout converts it to a background task, making it
+//! visible on screen.
 
 use crate::NoConsoleExt as _;
 use std::collections::HashMap;
@@ -15,31 +20,35 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::rollout::now_secs;
 use crate::tool::TodoHandle;
 
-/// Read 记录的文件新鲜度状态（ZCode read-file-state 同款）：
-/// Write/Edit 写前比对，防止基于过期视图覆盖外部改动。
+/// File freshness state recorded by Read (same as ZCode read-file-state):
+/// Write/Edit compares it before writing, preventing external changes from
+/// being overwritten based on a stale view.
 #[derive(Debug, Clone)]
 pub struct ReadState {
     pub mtime: Option<std::time::SystemTime>,
     pub size: u64,
-    /// 原始字节的 DefaultHasher 值
+    /// DefaultHasher over the raw bytes
     pub hash: u64,
-    /// 本次读取是否被预算截断（不完整视图）；显式 offset/limit 分页读不算
+    /// Whether this read was truncated by the budget (an incomplete view); explicit offset/limit paged reads do not count
     pub partial: bool,
-    /// 最近一次成功 Read 的视图参数（offset, limit, column_offset）：
-    /// 同参数重读且 hash 未变时短路返回「文件未变化」省 token。
-    /// Write/Edit/check_fresh 的内部刷新不带视图（None）。
+    /// View parameters of the last successful Read (offset, limit, column_offset):
+    /// re-reading with the same parameters and an unchanged hash short-circuits
+    /// with "file unchanged" to save tokens. Internal refreshes done by
+    /// Write/Edit/check_fresh carry no view (None).
     pub view: Option<(usize, usize, usize)>,
 }
 
-/// 注册表内 output 滚动上限（追加时从头部截断）。
+/// Rolling cap on in-registry output (truncated from the head on append).
 const MAX_TASK_OUTPUT: usize = 64 * 1024;
-/// 面板快照 output_tail 的尾部字符数。
+/// Number of tail characters for output_tail in panel snapshots.
 const SNAPSHOT_TAIL_CHARS: usize = 4000;
-/// spill 文件（全量输出落盘）上限 10MB，超出后停止写入。
+/// Spill file cap (full output persisted to disk) of 10MB; writing stops beyond it.
 const MAX_SPILL_BYTES: u64 = 10 * 1024 * 1024;
-/// 任务累计输出上限（stdout+stderr 合计）：超过即强制停止任务——
-/// 防「狂喷输出的命令」在超时窗口内吃满前台 sink 内存，或转后台后无限跑下去
-///（kimi-code 同款 16MiB 强杀；spill 的 10MB 落盘上限与此独立）。
+/// Total accumulated output cap per task (stdout+stderr combined): exceeding it
+/// force-stops the task — guards against "output-spewing commands" filling the
+/// foreground sink memory within the timeout window, or running forever after
+/// going to the background (same 16MiB hard kill as kimi-code; the spill 10MB
+/// persist cap is independent of this).
 const MAX_TASK_OUTPUT_TOTAL: usize = 16 * 1024 * 1024;
 
 pub struct TaskEntry {
@@ -50,40 +59,44 @@ pub struct TaskEntry {
     pub ended_at: Option<u64>,
     pub pid: Option<u32>,
     pub output: String,
-    /// 全量输出落盘路径（.pigcode/tool-results/{id}.log）
+    /// Path where the full output is persisted (.pigcode/tool-results/{id}.log)
     pub spill_path: Option<PathBuf>,
-    /// 子代理后台任务的驱动取消令牌（Bash 恒 None）；stop_task 优先走它而非杀进程树
+    /// Driver cancellation token for subagent background tasks (always None for Bash); stop_task prefers it over killing the process tree
     pub cancel: Option<tokio_util::sync::CancellationToken>,
-    /// 子代理后台任务的 agent_id（Bash 恒 None）；resume 运行中冲突检测用
+    /// agent_id of subagent background tasks (always None for Bash); used for resume-while-running conflict detection
     pub agent_id: Option<String>,
-    /// 前台执行中的普通命令：snapshot 对面板隐藏（它不是后台任务）；
-    /// 仅在超时转后台时翻转为 false，从此对快照可见
+    /// A plain command running in the foreground: hidden from panel snapshots
+    /// (it is not a background task); flipped to false only when a timeout
+    /// converts it to a background task, after which it is visible to snapshots
     pub foreground: bool,
 }
 
-/// 按会话保序的任务注册表（id = b{task_seq 递增}；移除条目不回收序号）。
+/// Per-session order-preserving task registry (id = b{incrementing task_seq}; removing an entry does not recycle its sequence number).
 pub type TaskRegistry = Arc<Mutex<Vec<TaskEntry>>>;
 
-/// 会话级工具共享状态：待办清单 + 任务注册表 + 完成通知 + 唤醒通道 + 任务序号 + 文件新鲜度。
-/// 全部字段可 Clone（Arc/atomic/sender），Session 与 agent_loop 的 SessionEntry 各持一份共享。
+/// Session-scoped shared tool state: todo list + task registry + completion
+/// notification + wake channel + task sequence + file freshness. All fields are
+/// Clone-able (Arc/atomic/sender); Session and agent_loop's SessionEntry each
+/// hold one shared copy.
 pub struct SessionToolState {
     pub todos: TodoHandle,
     pub tasks: TaskRegistry,
-    /// watcher 完成任务后发送 session_id，agent_loop 据此推 TaskListChanged
+    /// The watcher sends the session_id once a task finishes; agent_loop pushes TaskListChanged accordingly
     pub task_notify: UnboundedSender<String>,
-    /// 后台子代理完成唤醒通道：(session_id, 通知文本)，agent_loop 合成 user 消息起新回合
+    /// Wake channel for completed background subagents: (session_id, notification text); agent_loop synthesizes a user message to start a new turn
     pub wake_notify: UnboundedSender<(String, String)>,
     pub session_id: String,
-    /// 任务序号发生器（b1、b2…单调递增；前台任务完成移除后不复用）
+    /// Task sequence generator (b1, b2... monotonically increasing; not reused after foreground tasks are removed on completion)
     pub task_seq: Arc<AtomicUsize>,
-    /// Read 登记的文件新鲜度（key = resolve_checked 后的完整路径）
+    /// File freshness registered by Read (key = full path after resolve_checked)
     pub read_states: Arc<Mutex<HashMap<PathBuf, ReadState>>>,
-    /// 会话级开关：允许读取工作区外文件（tmp 目录始终放行；敏感文件永远拦截）
+    /// Session-level switch: allow reading files outside the workspace (the tmp directory is always allowed; sensitive files are always blocked)
     pub fs_read_outside: Arc<AtomicBool>,
-    /// 会话级开关：允许写入工作区外文件
+    /// Session-level switch: allow writing files outside the workspace
     pub fs_write_outside: Arc<AtomicBool>,
-    /// 始终可读的额外根（构造时尽量 canonicalize）：data_dir/sessions 子树
-    ///（子代理 result.md/上下文 jsonl），Read 豁免与 tmp 并列；只放读不放写
+    /// Extra always-readable roots (canonicalized when possible at
+    /// construction): the data_dir/sessions subtree (subagent result.md/context
+    /// jsonl), exempted for Read alongside tmp; read-only, never writable
     pub extra_read_roots: Vec<PathBuf>,
 }
 
@@ -121,7 +134,7 @@ impl SessionToolState {
             read_states: Arc::new(Mutex::new(HashMap::new())),
             fs_read_outside: Arc::new(AtomicBool::new(false)),
             fs_write_outside: Arc::new(AtomicBool::new(false)),
-            // 尽量 canonicalize（目录不存在则用原路径）：白名单比对在 canonical 口径下进行
+            // Canonicalize when possible (fall back to the original path if the directory does not exist): allowlist comparison is done in canonical terms
             extra_read_roots: extra_read_roots
                 .into_iter()
                 .map(|root| root.canonicalize().unwrap_or(root))
@@ -129,8 +142,9 @@ impl SessionToolState {
         }
     }
 
-    /// 测试用：session_id = "test"，notify/wake 的 receiver 直接丢弃（send 失败忽略）。
-    /// extra_read_roots 给 tmp 目录（tmp 本就豁免，不改变既有用例行为）。
+    /// For tests: session_id = "test"; notify/wake receivers are dropped
+    /// outright (send failures ignored). extra_read_roots gets the tmp directory
+    /// (tmp is already exempt, so existing test behavior is unchanged).
     pub fn for_test() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -138,7 +152,7 @@ impl SessionToolState {
     }
 }
 
-/// 输出尾部 max 字符（按字符边界截断）。
+/// The last max characters of the output (truncated at a char boundary).
 pub fn tail_chars(text: &str, max: usize) -> String {
     let total = text.chars().count();
     if total <= max {
@@ -147,8 +161,10 @@ pub fn tail_chars(text: &str, max: usize) -> String {
     text.chars().skip(total - max).collect()
 }
 
-/// 面板快照：output_tail 取尾部 4000 字符；前台执行中的条目不上屏
-///（普通命令不是后台任务，避免执行期间的任意 notify 把它推成「后台 Bash · 运行中」）。
+/// Panel snapshot: output_tail takes the last 4000 characters; entries still
+/// running in the foreground are not shown (a plain command is not a background
+/// task; this prevents an arbitrary notify during execution from surfacing it
+/// as "Background Bash · Running").
 pub fn snapshot(registry: &TaskRegistry) -> Vec<TaskSummary> {
     let tasks = registry.lock().expect("task registry lock");
     tasks
@@ -166,21 +182,23 @@ pub fn snapshot(registry: &TaskRegistry) -> Vec<TaskSummary> {
         .collect()
 }
 
-/// 任务序号：b1、b2…单调递增（前台任务完成会从注册表移除，len+1 有复用风险）
+/// Task sequence: b1, b2... monotonically increasing (foreground tasks are removed from the registry on completion, so len+1 risks reuse)
 fn next_task_id(seq: &AtomicUsize) -> String {
     format!("b{}", seq.fetch_add(1, Ordering::Relaxed) + 1)
 }
 
-/// 注册任务统一分配 spill 路径：{cwd}/.pigcode/tool-results/{task_id}.log
+/// Uniform spill path assignment for registered tasks: {cwd}/.pigcode/tool-results/{task_id}.log
 fn spill_path_for(cwd: &Path, task_id: &str) -> PathBuf {
     cwd.join(".pigcode")
         .join("tool-results")
         .join(format!("{task_id}.log"))
 }
 
-/// 注册表滚动 output（64KB 头部截断不变）；有 spill_path 同时追加落盘。
-/// raw 进 spill（字节保真，含挂起中的不完整序列）；text 是解码后的视图
-///（StreamDecoder 产出，Windows 上对非 UTF-8 输出按 GBK 回退）。
+/// Roll the registry output (unchanged 64KB head truncation); also append to
+/// the spill file when spill_path is set. raw goes to the spill (byte-faithful,
+/// including incomplete suspended sequences); text is the decoded view
+/// (produced by StreamDecoder, falling back to GBK for non-UTF-8 output on
+/// Windows).
 fn append_output(registry: &TaskRegistry, task_id: &str, raw: &[u8], text: &str) {
     let spill = {
         let mut tasks = registry.lock().expect("task registry lock");
@@ -202,7 +220,7 @@ fn append_output(registry: &TaskRegistry, task_id: &str, raw: &[u8], text: &str)
     }
 }
 
-/// spill 追加写（每次开闭）：超 10MB 停止写入，截断瞬间只补一次提示。
+/// Spill append write (opened/closed per chunk): writing stops past 10MB, and the notice is appended only once at the truncation moment.
 fn append_spill(path: &Path, chunk: &[u8]) {
     use std::io::Write as _;
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -224,11 +242,11 @@ fn append_spill(path: &Path, chunk: &[u8]) {
         let _ = file.write_all(chunk);
     } else {
         let _ = file.write_all(&chunk[..remaining]);
-        let _ = file.write_all("[输出超过 10MB，后续已丢弃]".as_bytes());
+        let _ = file.write_all("[Output exceeded 10MB; the rest was discarded]".as_bytes());
     }
 }
 
-/// 追加文本到 entry.output（沿用 64KB 头部截断；不写 spill）——子代理进度/结果用。
+/// Append text to entry.output (same 64KB head truncation; no spill write) — used for subagent progress/results.
 pub fn note_output(registry: &TaskRegistry, task_id: &str, line: &str) {
     let mut tasks = registry.lock().expect("task registry lock");
     let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
@@ -244,8 +262,10 @@ pub fn note_output(registry: &TaskRegistry, task_id: &str, line: &str) {
     }
 }
 
-/// 注册子代理后台任务条目（Running、无 pid/spill；cancel = 驱动取消令牌，
-/// agent_id 供 resume 运行中冲突检测与面板标识），立即 notify 让面板出现条目，返回 task_id。
+/// Register a subagent background task entry (Running, no pid/spill; cancel =
+/// the driver cancellation token, agent_id for resume-while-running conflict
+/// detection and panel labeling), notify immediately so the panel shows the
+/// entry, and return the task_id.
 pub fn register_agent_task(
     state: &SessionToolState,
     command: String,
@@ -274,21 +294,24 @@ pub fn register_agent_task(
     id
 }
 
-/// 子代理全局并发上限（后台 Agent 与 AgentSwarm 展开的子代理共享的信号量槽数）。
-/// 配置项需要动 pig-protocol 的 AppConfig（跨 crate），v1 先常量。
+/// Global subagent concurrency cap (semaphore slots shared between background
+/// Agent and the subagents fanned out by AgentSwarm). Making it configurable
+/// would require touching pig-protocol's AppConfig (cross-crate); a constant
+/// for v1.
 pub const MAX_CONCURRENT_SUBAGENTS: usize = 8;
 
-/// 子代理全局并发槽：进程级静态（跨会话共享），超限在 acquire 处排队。
+/// Global subagent concurrency slots: a process-level static (shared across sessions); over-limit requests queue at acquire.
 static SUBAGENT_SLOTS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_SUBAGENTS);
 
-/// 当前空闲并发槽数（排队提示用；瞬时值，与随后的 acquire 结果可能有出入）
+/// Number of currently free concurrency slots (for queueing hints; a transient value that may differ from the subsequent acquire result)
 pub fn subagent_slots_available() -> usize {
     SUBAGENT_SLOTS.available_permits()
 }
 
-/// 申领一个子代理并发槽：超限排队；等待中 cancel 触发返回 None（排队即放弃，不占槽）。
-/// permit 是 RAII 守卫：drop 即还槽。
+/// Acquire one subagent concurrency slot: over-limit requests queue; cancel
+/// firing while waiting returns None (giving up the queue without taking a
+/// slot). The permit is an RAII guard: dropping it returns the slot.
 pub async fn acquire_subagent_slot(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<tokio::sync::SemaphorePermit<'static>> {
@@ -298,25 +321,28 @@ pub async fn acquire_subagent_slot(
     }
 }
 
-/// 注册「排队中」的子代理任务：与 register_agent_task 同规格，command 带
-/// 「排队中 · 」前缀（TaskStatus 无 Pending 变体、协议不动——TaskList/面板经
-/// command 文本可见排队态）；并发槽到手后 mark_agent_task_started 摘前缀。
+/// Register a "queued" subagent task: same shape as register_agent_task, with
+/// the command carrying a "Queued · " prefix (TaskStatus has no Pending variant
+/// and the protocol stays untouched — TaskList/panel show the queued state via
+/// the command text); mark_agent_task_started strips the prefix once the
+/// concurrency slot is acquired.
 pub fn register_agent_task_queued(
     state: &SessionToolState,
     command: String,
     cancel: tokio_util::sync::CancellationToken,
     agent_id: String,
 ) -> String {
-    register_agent_task(state, format!("排队中 · {command}"), cancel, agent_id)
+    register_agent_task(state, format!("Queued · {command}"), cancel, agent_id)
 }
 
-/// 并发槽到手：摘掉「排队中 · 」前缀并 notify 刷新面板（started_at 不动，
-/// 耗时含排队——排队多久本来就是等待成本）。
+/// Concurrency slot acquired: strip the "Queued · " prefix and notify to
+/// refresh the panel (started_at stays; elapsed time includes queueing — how
+/// long it queued is part of the wait cost anyway).
 pub fn mark_agent_task_started(state: &SessionToolState, task_id: &str) {
     {
         let mut tasks = state.tasks.lock().expect("task registry lock");
         if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id)
-            && let Some(rest) = entry.command.strip_prefix("排队中 · ")
+            && let Some(rest) = entry.command.strip_prefix("Queued · ")
         {
             entry.command = rest.to_string();
         }
@@ -324,7 +350,7 @@ pub fn mark_agent_task_started(state: &SessionToolState, task_id: &str) {
     let _ = state.task_notify.send(state.session_id.clone());
 }
 
-/// 任务输出累计计量（stdout/stderr 两个读者共享）：越过总量上限只触发一次强停。
+/// Accumulated task output metering (shared by the two stdout/stderr readers): crossing the total cap triggers a force stop only once.
 #[derive(Default)]
 struct OutputMeter {
     total: AtomicUsize,
@@ -332,15 +358,17 @@ struct OutputMeter {
 }
 
 impl OutputMeter {
-    /// 累计 n 字节；返回 true 表示「本次越过上限且此前未标记」，调用方执行一次性强停。
+    /// Add n bytes; returns true meaning "crossed the cap this time and not previously flagged", so the caller performs the one-time force stop.
     fn add(&self, n: usize) -> bool {
         let prev = self.total.fetch_add(n, Ordering::Relaxed);
         prev + n > MAX_TASK_OUTPUT_TOTAL && !self.capped.swap(true, Ordering::Relaxed)
     }
 }
 
-/// 输出超限的一次性强停：置 Killed（watcher 只在仍为 Running 时才写 Exited，
-/// 不会覆写）、output 落提示（滚动窗口保尾，提示恰好留在末尾）、杀进程树。
+/// One-time force stop for exceeding the output cap: set Killed (the watcher
+/// writes Exited only when still Running, so it will not overwrite), append the
+/// notice to output (the rolling window keeps the tail, so the notice ends up
+/// last), and kill the process tree.
 fn cap_kill(registry: &TaskRegistry, task_id: &str) {
     let pid = {
         let mut tasks = registry.lock().expect("task registry lock");
@@ -353,7 +381,7 @@ fn cap_kill(registry: &TaskRegistry, task_id: &str) {
         }
         entry
             .output
-            .push_str("\n[输出超过 16MiB 上限，任务已被强制停止。请把大输出重定向到文件（如 command > out.txt）后用 Read/Grep 处理]");
+            .push_str("\n[Output exceeded the 16MiB limit; the task was force-stopped. Redirect large output to a file (e.g. command > out.txt) and process it with Read/Grep]");
         entry.pid
     };
     if let Some(pid) = pid {
@@ -361,8 +389,9 @@ fn cap_kill(registry: &TaskRegistry, task_id: &str) {
     }
 }
 
-/// 杀进程树：Windows taskkill /T（含子进程）；unix 先杀进程组再补杀 pid
-///（spawn_shell 里 process_group(0) 使子进程自成组长）。
+/// Kill the process tree: Windows taskkill /T (children included); unix kills
+/// the process group first, then the pid as a fallback (spawn_shell's
+/// process_group(0) makes the child its own group leader).
 fn kill_process_tree(pid: u32) {
     if cfg!(target_os = "windows") {
         let _ = std::process::Command::new("taskkill")
@@ -379,10 +408,12 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
-/// pipe 读者：chunk → 解码（StreamDecoder：UTF-8 优先/Windows GBK 回退/跨块挂起）
-/// → 注册表滚动 output + spill 落盘（原始字节）；sink 非空时另存一份全文
-///（前台 Completed 需要 stdout/stderr 分开渲染，注册表那份是合并流）。
-/// 越过 16MiB 总量上限时强停任务并停止读取。
+/// Pipe reader: chunk → decode (StreamDecoder: UTF-8 first / Windows GBK
+/// fallback / cross-chunk suspension) → registry rolling output + spill persist
+/// (raw bytes); when the sink is non-empty, also keep a full copy there
+/// (foreground Completed needs stdout/stderr rendered separately, while the
+/// registry copy is the merged stream). Crossing the 16MiB total cap
+/// force-stops the task and stops reading.
 async fn read_into<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     registry: TaskRegistry,
@@ -408,7 +439,7 @@ async fn read_into<R: tokio::io::AsyncRead + Unpin>(
             }
         }
     }
-    // 流结束：残留的不完整尾部字节出清（不进 spill——原始字节已按块落过盘）
+    // Stream ended: flush any leftover incomplete tail bytes (not to the spill — raw bytes were already persisted per chunk)
     let tail = decoder.finish();
     if !tail.is_empty() {
         append_output(&registry, &task_id, b"", &tail);
@@ -420,9 +451,10 @@ mod shell;
 pub(crate) use shell::*;
 pub use shell::{WindowsShell, shell_label, windows_shell};
 
-/// watcher：等子进程退出 + 排空两个读者 → 仅当状态仍是 Running 才置 Exited
-///（避免覆写 stop_task 先置的 Killed）→ task_notify 发 session_id。
-/// spawn_background 与 run_foreground 超时转后台共用。
+/// Watcher: wait for child exit + drain both readers → set Exited only when
+/// the status is still Running (avoiding overwriting the Killed set earlier by
+/// stop_task) → send the session_id via task_notify. Shared by spawn_background
+/// and run_foreground's timeout-to-background path.
 fn spawn_watcher(
     registry: TaskRegistry,
     notify: UnboundedSender<String>,
@@ -450,8 +482,10 @@ fn spawn_watcher(
     });
 }
 
-/// 后台启动 shell 命令：注册条目（Running、pid、spill 路径）后立即返回 task_id；
-/// 读者并发收 stdout/stderr（合并进注册表滚动 output + spill 落盘），watcher 等退出收尾。
+/// Start a shell command in the background: register the entry (Running, pid,
+/// spill path) and return the task_id immediately; readers concurrently collect
+/// stdout/stderr (merged into the registry rolling output + spill persist), and
+/// the watcher waits for exit to finish up.
 pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> String {
     let spawned = spawn_shell(cwd, command);
     let task_id = {
@@ -463,7 +497,7 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
                 TaskStatus::Exited(-1),
                 Some(now_secs()),
                 None,
-                format!("启动失败: {e}"),
+                format!("Failed to start: {e}"),
             ),
         };
         tasks.push(TaskEntry {
@@ -481,7 +515,7 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
         });
         id
     };
-    // 注册即 notify：chip/面板立刻上屏（启动失败同样推，让失败条目可见）
+    // Notify right after registration: chip/panel show it immediately (start failures are also pushed so the failed entry stays visible)
     let _ = state.task_notify.send(state.session_id.clone());
     let Ok(mut child) = spawned else {
         return task_id;
@@ -515,9 +549,11 @@ pub fn spawn_background(state: &SessionToolState, cwd: &Path, command: &str) -> 
     task_id
 }
 
-/// run_foreground 的取消收尾：执行中 future 被 drop（用户点停止、回合中止）时，
-/// 进程随 kill_on_drop 已杀，注册表条目与 spill 文件移除不留痕，notify 刷新面板。
-/// 正常完成/超时转后台路径在返回前 disarm（state 置 None），drop 时不再动作。
+/// Cancellation cleanup for run_foreground: when the in-flight future is
+/// dropped (user clicks stop, turn aborted), the process is already killed via
+/// kill_on_drop; remove the registry entry and spill file without a trace, and
+/// notify to refresh the panel. The normal-completion / timeout-to-background
+/// paths disarm before returning (state set to None), so drop does nothing.
 struct ForegroundCancelGuard {
     state: Option<SessionToolState>,
     task_id: String,
@@ -530,7 +566,7 @@ impl Drop for ForegroundCancelGuard {
         };
         let spill = {
             let mut tasks = state.tasks.lock().expect("task registry lock");
-            // 只收尾仍是前台状态的条目（已转后台/已移除的不归它管）
+            // Only clean up entries still in the foreground state (already backgrounded/removed ones are not its business)
             tasks
                 .iter()
                 .position(|t| t.id == self.task_id && t.foreground)
@@ -543,16 +579,18 @@ impl Drop for ForegroundCancelGuard {
     }
 }
 
-/// 前台执行结果。
+/// Foreground execution outcome.
 pub enum ForegroundOutcome {
-    /// 完成：output 已按「stdout + [stderr] 段」拼装；前台任务已从注册表移除（不留痕）。
-    /// 注册表 output 有 64KB 滚动上限，spill 文件才是全量（≤10MB）。
+    /// Completed: output is assembled as "stdout + [stderr] section"; the
+    /// foreground task has been removed from the registry (no trace). The
+    /// registry output has a 64KB rolling cap; the spill file is the full copy
+    /// (≤10MB).
     Completed {
         output: String,
         code: i32,
         spill_path: Option<PathBuf>,
     },
-    /// 超时：命令留在注册表继续跑（watcher 已接管），task_id 可查可停
+    /// Timed out: the command stays in the registry and keeps running (the watcher has taken over); the task_id can be queried and stopped
     TimedOut {
         task_id: String,
     },
@@ -561,9 +599,12 @@ pub enum ForegroundOutcome {
     },
 }
 
-/// 前台跑 shell 命令：注册 Running 条目 → 读者分流 stdout/stderr → 限时等退出。
-/// 完成则排空管道取全文（注册表移除不留痕）；超时则 watcher 接管、转后台继续跑；
-/// 执行中被取消（future drop）由 guard 收尾移除条目，不残留「运行中」。
+/// Run a shell command in the foreground: register a Running entry → readers
+/// split stdout/stderr → wait for exit within the timeout. On completion, drain
+/// the pipes for the full text (registry removed without a trace); on timeout,
+/// the watcher takes over and it keeps running in the background; cancellation
+/// mid-execution (future drop) is cleaned up by the guard, which removes the
+/// entry so no "running" leftover remains.
 pub async fn run_foreground(
     state: &SessionToolState,
     cwd: &Path,
@@ -622,7 +663,7 @@ pub async fn run_foreground(
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => {
             let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
-            // 先 join 读者排空管道，再取全文、移除注册表条目
+            // Join the readers first to drain the pipes, then take the full text and remove the registry entry
             let _ = read_out.await;
             let _ = read_err.await;
             let spill_path = {
@@ -634,7 +675,7 @@ pub async fn run_foreground(
                 tasks.retain(|t| t.id != task_id);
                 spill_path
             };
-            // 正常完成：guard 不再负责收尾
+            // Normal completion: the guard is no longer responsible for cleanup
             cancel_guard.state = None;
             let stdout = std::mem::take(&mut *stdout_sink.lock().expect("stream sink lock"));
             let stderr = std::mem::take(&mut *stderr_sink.lock().expect("stream sink lock"));
@@ -646,11 +687,13 @@ pub async fn run_foreground(
                 output.push_str("[stderr]\n");
                 output.push_str(&stderr);
             }
-            // 输出总量超限被强停：完成的输出尾部补说明（注册表那条提示
-            // 随条目一起移除了，模型只能看到这里的 sink 全文）
+            // Force-stopped for exceeding the total output cap: append an
+            // explanation to the completed output tail (the registry notice was
+            // removed together with the entry, so the model only sees the sink
+            // full text here)
             if meter.capped.load(Ordering::Relaxed) {
                 output.push_str(
-                    "\n\n[输出超过 16MiB 上限，命令已被强制停止。请把大输出重定向到文件（如 command > out.txt）后用 Read/Grep 处理]",
+                    "\n\n[Output exceeded the 16MiB limit; the command was force-stopped. Redirect large output to a file (e.g. command > out.txt) and process it with Read/Grep]",
                 );
             }
             ForegroundOutcome::Completed {
@@ -660,15 +703,18 @@ pub async fn run_foreground(
             }
         }
         Err(_) => {
-            // 超时转后台：条目从「前台隐藏」转为正式后台任务（快照可见），
-            // 立即 notify 上屏；watcher 接管 child 与读者（sink 随读者存活至进程退出）
+            // Timeout converts to background: the entry goes from "foreground
+            // hidden" to a proper background task (visible to snapshots); notify
+            // immediately to show it on screen; the watcher takes over the child
+            // and the readers (the sink lives with the readers until the process
+            // exits)
             {
                 let mut tasks = state.tasks.lock().expect("task registry lock");
                 if let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) {
                     entry.foreground = false;
                 }
             }
-            // 已转正为后台任务：guard 不再负责收尾
+            // Now a proper background task: the guard is no longer responsible for cleanup
             cancel_guard.state = None;
             spawn_watcher(
                 state.tasks.clone(),
@@ -685,11 +731,14 @@ pub async fn run_foreground(
     }
 }
 
-/// 停止任务：找不到 → Err；非 Running → Err「任务已结束」；先置 Killed + ended_at
-///（防 watcher/驱动覆写状态）。子代理任务（cancel 令牌在）走令牌取消——驱动循环
-/// 自己收尾，无进程可杀；Bash 任务树杀：unix 先 kill -9 整个进程组（spawn_shell 里
-/// process_group(0) 使子进程自成组长），再 kill -9 直接 pid 兜底（组已散时无妨）；
-/// windows taskkill /F /T。最后 notify。
+/// Stop a task: not found → Err; not Running → Err "task already finished";
+/// set Killed + ended_at first (to keep the watcher/driver from overwriting the
+/// status). Subagent tasks (cancel token present) go through token
+/// cancellation — the driver loop cleans up itself, with no process to kill;
+/// Bash tasks kill the tree: unix kill -9 the whole process group first
+/// (spawn_shell's process_group(0) makes the child its own group leader), then
+/// kill -9 the direct pid as a fallback (harmless if the group is already
+/// gone); Windows taskkill /F /T. Finally notify.
 pub fn stop_task(
     registry: &TaskRegistry,
     task_id: &str,
@@ -699,10 +748,10 @@ pub fn stop_task(
     let (pid, cancel) = {
         let mut tasks = registry.lock().expect("task registry lock");
         let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
-            return Err(format!("任务不存在: {task_id}"));
+            return Err(format!("Task not found: {task_id}"));
         };
         if !matches!(entry.status, TaskStatus::Running) {
-            return Err(format!("任务已结束: {task_id}"));
+            return Err(format!("Task already finished: {task_id}"));
         }
         entry.status = TaskStatus::Killed;
         entry.ended_at = Some(now_secs());
@@ -714,29 +763,32 @@ pub fn stop_task(
         kill_process_tree(pid);
     }
     let _ = notify.send(session_id.to_string());
-    Ok(format!("已停止任务 {task_id}"))
+    Ok(format!("Stopped task {task_id}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 排队注册：command 带前缀；槽到手摘前缀；未知 task_id 不 panic
+    /// Queued registration: the command carries the prefix; the prefix is stripped once the slot is acquired; an unknown task_id does not panic
     #[test]
     fn queued_registration_marks_pending() {
         let state = SessionToolState::for_test();
         let task_id = register_agent_task_queued(
             &state,
-            "子代理 explore: 查问题".to_string(),
+            "subagent explore: investigate the issue".to_string(),
             tokio_util::sync::CancellationToken::new(),
             "a1-1".to_string(),
         );
         {
             let tasks = state.tasks.lock().expect("task registry lock");
-            let entry = tasks.iter().find(|t| t.id == task_id).expect("条目存在");
+            let entry = tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .expect("entry exists");
             assert!(
-                entry.command.starts_with("排队中 · "),
-                "排队态经 command 前缀呈现: {}",
+                entry.command.starts_with("Queued · "),
+                "the queued state is shown via the command prefix: {}",
                 entry.command
             );
             assert!(matches!(entry.status, TaskStatus::Running));
@@ -744,30 +796,39 @@ mod tests {
         mark_agent_task_started(&state, &task_id);
         {
             let tasks = state.tasks.lock().expect("task registry lock");
-            let entry = tasks.iter().find(|t| t.id == task_id).expect("条目存在");
-            assert_eq!(entry.command, "子代理 explore: 查问题", "开始后摘前缀");
+            let entry = tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .expect("entry exists");
+            assert_eq!(
+                entry.command, "subagent explore: investigate the issue",
+                "the prefix is stripped once started"
+            );
         }
         mark_agent_task_started(&state, "b999");
     }
 
-    /// 并发槽：空槽立即可得、drop 还槽；占满时已取消的 token 排队即放弃不占槽。
-    ///（静态信号量全进程共享，整个测试套件只有这一个用例碰它，无并发干扰）
+    /// Concurrency slots: a free slot is acquired immediately and drop returns
+    /// it; when full, an already-cancelled token gives up the queue without
+    /// taking a slot. (The static semaphore is process-wide; this is the only
+    /// test in the whole suite that touches it, so there is no concurrent
+    /// interference)
     #[tokio::test]
     async fn subagent_slot_acquire_and_cancel() {
         let cancel = tokio_util::sync::CancellationToken::new();
         let permit = acquire_subagent_slot(&cancel)
             .await
-            .expect("空槽应立即可得");
+            .expect("a free slot should be available immediately");
         assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS - 1);
         drop(permit);
         assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS);
-        // 占满：已取消 token 的 acquire 立即返回 None
+        // Fill up: acquire with an already-cancelled token immediately returns None
         let mut held = Vec::new();
         for _ in 0..MAX_CONCURRENT_SUBAGENTS {
             held.push(
                 acquire_subagent_slot(&cancel)
                     .await
-                    .expect("占满前都应可得"),
+                    .expect("all slots acquirable before filling up"),
             );
         }
         assert_eq!(subagent_slots_available(), 0);
@@ -778,54 +839,56 @@ mod tests {
         assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS);
     }
 
-    /// `git --exec-path` 输出 → 安装根：MINGW 段定位（git 输出正斜杠路径）。
-    /// Windows 版：断言原生反斜杠形态（Path 相等按组件比较，`C:\...` 与函数
-    /// 返回的正斜杠 collect 结果组件一致）。
+    /// `git --exec-path` output → install root: MINGW segment lookup (git
+    /// outputs forward-slash paths). Windows version: asserts the native
+    /// backslash form (Path equality compares components, so `C:\...` matches
+    /// the components of the forward-slash path the function returns).
     #[cfg(windows)]
     #[test]
     fn exec_path_root_inference() {
         let root = root_from_exec_path_text("C:/Program Files/Git/mingw64/libexec/git-core\n")
-            .expect("常规布局应命中");
+            .expect("the standard layout should hit");
         assert_eq!(root, PathBuf::from("C:\\Program Files\\Git"));
 
         let root = root_from_exec_path_text("C:/Git/ucrt64/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("C:\\Git"));
 
-        // shim 布局：mingw 段在最前也能取到盘符根
+        // Shim layout: an mingw segment at the very front still yields the drive root
         let root = root_from_exec_path_text("D:/mingw64/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("D:\\"));
 
-        // 无 MINGW 段：往上两级兜底（libexec/git-core → 根）
+        // No MINGW segment: fall back two levels up (libexec/git-core → root)
         let root = root_from_exec_path_text("C:/x/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("C:\\x"));
 
         assert!(root_from_exec_path_text("").is_none());
     }
 
-    /// Unix 版：同逻辑用原生 Unix 路径验证（生产上此函数只在 Windows 探测链
-    /// 调用，这里保逻辑回归覆盖）。
+    /// Unix version: verifies the same logic with native Unix paths (in
+    /// production this function is only called on the Windows detection chain;
+    /// kept here for logic regression coverage).
     #[cfg(not(windows))]
     #[test]
     fn exec_path_root_inference() {
         let root = root_from_exec_path_text("/opt/Git/mingw64/libexec/git-core\n")
-            .expect("常规布局应命中");
+            .expect("the standard layout should hit");
         assert_eq!(root, PathBuf::from("/opt/Git"));
 
         let root = root_from_exec_path_text("/opt/Git/ucrt64/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("/opt/Git"));
 
-        // shim 布局：mingw 段紧随根也能取到根
+        // Shim layout: an mingw segment right after the root still yields the root
         let root = root_from_exec_path_text("/mingw64/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("/"));
 
-        // 无 MINGW 段：往上两级兜底（libexec/git-core → 根）
+        // No MINGW segment: fall back two levels up (libexec/git-core → root)
         let root = root_from_exec_path_text("/opt/x/libexec/git-core").unwrap();
         assert_eq!(root, PathBuf::from("/opt/x"));
 
         assert!(root_from_exec_path_text("").is_none());
     }
 
-    /// git.exe 布局反推 bash 候选：cmd/bin 下取上上级；其他布局不出候选。
+    /// Infer bash candidates from the git.exe layout: take the grandparent under cmd/bin; other layouts yield no candidates.
     #[test]
     fn git_bash_candidate_inference() {
         let candidates = git_bash_candidates(Path::new("C:/Git/cmd/git.exe"));
@@ -836,11 +899,11 @@ mod tests {
                 PathBuf::from("C:/Git/usr/bash.exe")
             ]
         );
-        // shim 目录（非 cmd/bin）不该出候选
+        // A shim directory (not cmd/bin) should yield no candidates
         assert!(git_bash_candidates(Path::new("C:/shim/git.exe")).is_empty());
     }
 
-    /// NUL 重定向改写：只动重定向目标，不动普通参数。
+    /// NUL redirect rewrite: only the redirect target is touched, not plain arguments.
     #[test]
     fn nul_redirect_rewrite() {
         assert_eq!(
@@ -854,7 +917,7 @@ mod tests {
         );
     }
 
-    /// Unix shell 探测：命中首个存在的 bash 候选路径，全无则回退 sh。
+    /// Unix shell detection: pick the first existing bash candidate path; fall back to sh when none exist.
     #[cfg(not(windows))]
     #[test]
     fn unix_shell_prefers_bash_falls_back_to_sh() {
@@ -865,9 +928,11 @@ mod tests {
         assert_eq!(unix_shell(), expected);
     }
 
-    /// 本机有 git 时（pig-code 硬依赖），探测必须找到 Git Bash。
-    /// Windows-only：探测链找的是 .exe/ProgramFiles 布局，Unix 上 spawn 直接走
-    /// sh 不经此链（在此跑必然失败，不是回归信号）。
+    /// When git is installed (a hard pig-code dependency), detection must find
+    /// Git Bash. Windows-only: the detection chain looks for .exe/ProgramFiles
+    /// layouts, while on Unix spawn goes straight to sh without this chain
+    /// (running it here would necessarily fail, which is not a regression
+    /// signal).
     #[cfg(windows)]
     #[test]
     fn detection_finds_bash_when_git_present() {
@@ -876,11 +941,11 @@ mod tests {
             .output()
             .is_ok_and(|out| out.status.success());
         if !git_on_path {
-            return; // 无 git 的机器（理论不存在：pig-code 硬依赖 git）跳过
+            return; // Skip on machines without git (theoretically nonexistent: pig-code hard-depends on git)
         }
         assert!(
             matches!(windows_shell(), WindowsShell::GitBash(_)),
-            "git 可用却没探测到 Git Bash"
+            "git is available but Git Bash was not detected"
         );
     }
 }

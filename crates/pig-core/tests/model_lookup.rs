@@ -1,8 +1,9 @@
-//! ModelLookup → ModelInfo 全链路集成测试（首次访问 models.dev 真实网络，
-//! 之后走磁盘缓存）。默认忽略，手动验证：cargo test -p pig-core -- --ignored
+//! ModelLookup → ModelInfo full-chain integration test (first access hits the
+//! real network at models.dev, afterwards served from the disk cache). Ignored
+//! by default; run manually: cargo test -p pig-core -- --ignored
 
 #[test]
-#[ignore = "访问 models.dev 真实网络"]
+#[ignore = "hits real network at models.dev"]
 fn lookup_then_cache_roundtrip() {
     let dir = std::env::temp_dir().join(format!("pig-lookup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -27,7 +28,7 @@ fn lookup_then_cache_roundtrip() {
             let event =
                 tokio::time::timeout(std::time::Duration::from_secs(60), agent.events.recv())
                     .await
-                    .expect("60s 内应有响应")
+                    .expect("should respond within 60s")
                     .expect("channel open");
             if let Event::ModelInfo { .. } = &event {
                 break event;
@@ -37,15 +38,15 @@ fn lookup_then_cache_roundtrip() {
             unreachable!()
         };
         assert_eq!(id, "claude-sonnet-4-6");
-        let info = info.expect("models.dev 收录 claude-sonnet-4-6");
-        assert!(info.context.expect("context 存在") > 100_000);
-        assert!(info.output.expect("output 存在") > 1_000);
+        let info = info.expect("models.dev lists claude-sonnet-4-6");
+        assert!(info.context.expect("context present") > 100_000);
+        assert!(info.output.expect("output present") > 1_000);
         assert!(
             !info.reasoning_levels.is_empty(),
-            "claude 应带推理等级: {info:?}"
+            "claude should carry reasoning levels: {info:?}"
         );
 
-        // 缓存文件已落盘；第二次查询命中缓存直接回
+        // Cache file persisted; the second lookup hits the cache and replies directly
         assert!(dir.join("models-dev-cache.json").exists());
         agent
             .ops
@@ -56,17 +57,17 @@ fn lookup_then_cache_roundtrip() {
             let event =
                 tokio::time::timeout(std::time::Duration::from_secs(10), agent.events.recv())
                     .await
-                    .expect("缓存命中应秒回")
+                    .expect("cache hit should reply immediately")
                     .expect("channel open");
             if let Event::ModelInfo { id, info } = &event {
                 assert_eq!(id, "gpt-4o");
-                let info = info.as_ref().expect("gpt-4o 收录");
+                let info = info.as_ref().expect("gpt-4o listed");
                 assert!(info.context.expect("context") > 100_000);
                 break;
             }
         }
 
-        // deepseek-flash：官方收录带 image 输入模态（UI 据此勾"图片"）
+        // deepseek-flash: officially listed with the image input modality (the UI ticks "image" accordingly)
         agent
             .ops
             .send(lookup("deepseek-flash"))
@@ -76,23 +77,23 @@ fn lookup_then_cache_roundtrip() {
             let event =
                 tokio::time::timeout(std::time::Duration::from_secs(10), agent.events.recv())
                     .await
-                    .expect("缓存命中应秒回")
+                    .expect("cache hit should reply immediately")
                     .expect("channel open");
             if let Event::ModelInfo { id, info } = &event {
                 assert_eq!(id, "deepseek-flash");
-                let info = info.as_ref().expect("deepseek-flash 收录");
+                let info = info.as_ref().expect("deepseek-flash listed");
                 assert!(
                     info.input_modalities.iter().any(|m| m == "image"),
-                    "deepseek-flash 应带 image 输入: {info:?}"
+                    "deepseek-flash should carry image input modality: {info:?}"
                 );
                 assert_eq!(
                     info.structured_output,
                     Some(true),
-                    "deepseek-flash 支持结构化输出: {info:?}"
+                    "deepseek-flash supports structured output: {info:?}"
                 );
                 assert!(
                     !info.reasoning_levels.is_empty(),
-                    "deepseek-flash 应带推理等级: {info:?}"
+                    "deepseek-flash should carry reasoning levels: {info:?}"
                 );
                 break;
             }

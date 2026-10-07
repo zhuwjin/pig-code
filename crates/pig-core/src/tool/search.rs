@@ -1,9 +1,9 @@
 use super::*;
 
-/// 白名单 glob（ripgrep `-g` / gitignore 语义，与 kimi-code 的 rg --glob 一致）：
-/// 支持 `{a,b}` 花括号（可嵌套）、`**` 跨层级、`*` 不跨 `/`、`!` 前缀黑名单；
-/// 不含 `/` 的模式匹配任意深度的文件名。未闭合的 `{`/`[` 是解析错误。
-/// err_prefix 区分调用方报错文案。
+/// Allowlist glob (ripgrep `-g` / gitignore semantics, matching kimi-code's rg --glob):
+/// supports `{a,b}` braces (nestable), `**` across levels, `*` not crossing `/`, `!` prefix blocklist;
+/// patterns without `/` match file names at any depth. Unclosed `{`/`[` is a parse error.
+/// err_prefix distinguishes the caller's error message.
 fn build_overrides(
     root: &Path,
     pattern: &str,
@@ -32,14 +32,14 @@ impl Tool for Glob {
             "type": "function",
             "function": {
                 "name": "Glob",
-                "description": "按文件名模式匹配工作区文件（如 **/*.rs）。尊重 .gitignore/.ignore，包含隐藏文件，按最近修改排序；敏感文件（.env/私钥等）自动过滤。head_limit/offset 分页（默认每页 200，0 = 不限）。",
+                "description": "Find workspace files by name pattern (e.g. **/*.rs), sorted by modification time (newest first). Respects .gitignore/.ignore, includes hidden files; sensitive files (.env, private keys, etc.) are always filtered out. head_limit/offset paginate (default 200 per page; 0 = unlimited).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "glob 模式（gitignore 语法，同 ripgrep --glob）：支持 {a,b} 花括号（可嵌套）、** 跨层级、! 前缀排除；* 不跨 /；含 / 时按相对搜索根的路径匹配，不含 / 时匹配任意深度的文件名" },
-                        "path": { "type": "string", "description": "搜索根目录（相对工作目录），默认为工作目录" },
-                        "head_limit": { "type": "integer", "description": "最多返回多少个文件，默认 200；0 = 不限条数（仍有字符预算兜底）" },
-                        "offset": { "type": "integer", "description": "跳过前 N 个结果（分页续读），默认 0" }
+                        "pattern": { "type": "string", "description": "Glob pattern (gitignore syntax, same as ripgrep --glob): {a,b} brace expansion (nestable), ** crosses directory levels, ! prefix excludes; * does not cross /; with / it matches paths relative to the search root, without / it matches file names at any depth" },
+                        "path": { "type": "string", "description": "Search root directory (relative to the working directory); defaults to the working directory" },
+                        "head_limit": { "type": "integer", "description": "Maximum number of files to return (default 200); 0 = unlimited (a character budget still applies)" },
+                        "offset": { "type": "integer", "description": "Skip the first N results (for pagination); default 0" }
                     },
                     "required": ["pattern"]
                 }
@@ -53,7 +53,9 @@ impl Tool for Glob {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or("Missing required parameter: pattern")?;
             let head_limit = args["head_limit"]
                 .as_u64()
                 .unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
@@ -62,11 +64,11 @@ impl Tool for Glob {
                 Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
                 None => ctx.cwd.to_path_buf(),
             };
-            // 遍历期过滤（Override 白名单）：不匹配的文件不进结果集，也省掉 mtime stat
-            let overrides = build_overrides(&root, pattern, "无效 glob 模式")?;
+            // Filtering during traversal (Override allowlist): non-matching files never enter the result set, and the mtime stat is skipped too
+            let overrides = build_overrides(&root, pattern, "Invalid glob pattern")?;
             let mut files = walk_workspace(&root, Some(overrides));
             sort_by_mtime_desc(&mut files);
-            // 分页状态机（Grep 同款）：want 多探 1 个确认下一页
+            // Pagination state machine (same as Grep): want probes 1 extra entry to confirm a next page
             let want = if head_limit == 0 {
                 usize::MAX
             } else {
@@ -91,7 +93,7 @@ impl Tool for Glob {
                     more_pages = true;
                     break;
                 }
-                // 输出相对 cwd（path 参数指向子目录时保留前缀）
+                // Output relative to cwd (the prefix is kept when the path parameter points to a subdirectory)
                 let display = file
                     .strip_prefix(ctx.cwd)
                     .map(|p| p.to_path_buf())
@@ -110,29 +112,31 @@ impl Tool for Glob {
             }
             if budget_hit {
                 parts.push(format!(
-                    "[输出已达 {} 字符上限；用更具体的 pattern/path，或 head_limit/offset 分页（下一页 offset={}）]",
+                    "[Output hit the {}-character budget; use a more specific pattern/path, or page with head_limit/offset (next page offset={})]",
                     MAX_GREP_OUTPUT_CHARS,
                     offset + results.len()
                 ));
             } else if more_pages {
                 parts.push(format!(
-                    "[显示 {}-{} 个，用 offset={} 续读]",
+                    "[Showing {}-{}; continue with offset={}]",
                     offset + 1,
                     offset + results.len(),
                     offset + results.len()
                 ));
             } else if offset > 0 {
                 parts.push(format!(
-                    "[显示 {}-{} 个，共 {seen} 个]",
+                    "[Showing {}-{} of {seen}]",
                     offset + 1,
                     offset + results.len()
                 ));
             }
             if filtered_sensitive > 0 {
-                parts.push(format!("[已过滤 {filtered_sensitive} 个敏感文件]"));
+                parts.push(format!(
+                    "[Filtered out {filtered_sensitive} sensitive file(s)]"
+                ));
             }
             let out = if parts.is_empty() {
-                "（无匹配文件）".to_string()
+                "(no matching files)".to_string()
             } else {
                 parts.join("\n\n")
             };
@@ -155,20 +159,20 @@ impl Tool for Grep {
             "type": "function",
             "function": {
                 "name": "Grep",
-                "description": "用正则搜索工作区文件内容，输出 文件:行号: 内容。尊重 .gitignore/.ignore，包含隐藏文件，跳过敏感文件（.env/私钥等），文件按最近修改优先；GBK/UTF-16 文件自动转码搜索（行号与 Read 一致）。head_limit/offset 按命中分页；before/after/context 附上下文行；output_mode 可选 content（默认）/files_with_matches（只列路径）/count（每文件命中行数）。",
+                "description": "Search workspace file contents with a regular expression; output is file:line: content. Respects .gitignore/.ignore, includes hidden files, skips sensitive files (.env, private keys, etc.); files are searched most-recently-modified first. GBK/UTF-16 files are transcoded automatically before searching (line numbers match Read). head_limit/offset paginate by match; before/after/context attach context lines; output_mode is content (default) / files_with_matches (paths only) / count (matching-line count per file).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "正则表达式" },
-                        "path": { "type": "string", "description": "搜索目录或单文件（相对工作目录），默认工作目录" },
-                        "include": { "type": "string", "description": "文件名过滤 glob（如 *.rs 或 *.{rs,toml}）" },
-                        "ignore_case": { "type": "boolean", "description": "true 时忽略大小写（默认 false）" },
-                        "head_limit": { "type": "integer", "description": "最多返回多少个命中（content 按命中行、其余按文件），默认 200；0 = 不限条数（仍有字符预算兜底）" },
-                        "offset": { "type": "integer", "description": "跳过前 N 个命中（分页续读），默认 0" },
-                        "before": { "type": "integer", "description": "每个命中前附带 N 行上下文（仅 content 模式）" },
-                        "after": { "type": "integer", "description": "每个命中后附带 N 行上下文（仅 content 模式）" },
-                        "context": { "type": "integer", "description": "前后各 N 行上下文；显式 before/after 优先" },
-                        "output_mode": { "type": "string", "enum": ["content", "files_with_matches", "count"], "description": "content 输出命中行（默认）；files_with_matches 只列命中文件路径；count 输出 每文件:命中行数（一行多次命中算 1）" }
+                        "pattern": { "type": "string", "description": "Regular expression" },
+                        "path": { "type": "string", "description": "Directory or single file to search (relative to the working directory); defaults to the working directory" },
+                        "include": { "type": "string", "description": "File-name filter glob (e.g. *.rs or *.{rs,toml})" },
+                        "ignore_case": { "type": "boolean", "description": "true to ignore case (default false)" },
+                        "head_limit": { "type": "integer", "description": "Maximum number of matches to return (matching lines in content mode, files otherwise); default 200; 0 = unlimited (a character budget still applies)" },
+                        "offset": { "type": "integer", "description": "Skip the first N matches (for pagination); default 0" },
+                        "before": { "type": "integer", "description": "Include N lines of context before each match (content mode only)" },
+                        "after": { "type": "integer", "description": "Include N lines of context after each match (content mode only)" },
+                        "context": { "type": "integer", "description": "N lines of context on both sides; explicit before/after take precedence" },
+                        "output_mode": { "type": "string", "enum": ["content", "files_with_matches", "count"], "description": "content outputs matching lines (default); files_with_matches lists only matching file paths; count outputs file:matching-line-count (multiple hits on one line count once)" }
                     },
                     "required": ["pattern"]
                 }
@@ -182,15 +186,17 @@ impl Tool for Grep {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let pattern = args["pattern"].as_str().ok_or("缺少参数 pattern")?;
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or("Missing required parameter: pattern")?;
             let ignore_case = args["ignore_case"].as_bool().unwrap_or(false);
             let regex = regex::RegexBuilder::new(pattern)
                 .case_insensitive(ignore_case)
                 .build()
-                .map_err(|e| format!("无效正则 {pattern}: {e}"))?;
+                .map_err(|e| format!("Invalid regex {pattern}: {e}"))?;
             let include = args["include"].as_str();
             let include_ov = match include {
-                Some(inc) => Some(build_overrides(ctx.cwd, inc, "无效 include 模式")?),
+                Some(inc) => Some(build_overrides(ctx.cwd, inc, "Invalid include pattern")?),
                 None => None,
             };
             let output_mode = args["output_mode"].as_str().unwrap_or("content");
@@ -198,7 +204,7 @@ impl Tool for Grep {
                 .as_u64()
                 .unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-            // 上下文行仅 content 模式生效；显式 before/after 优先于 context
+            // Context lines apply only in content mode; explicit before/after take precedence over context
             let mut before = args["before"].as_u64().unwrap_or(0) as usize;
             let mut after = args["after"].as_u64().unwrap_or(0) as usize;
             if let Some(both) = args["context"].as_u64().map(|n| n as usize) {
@@ -218,7 +224,7 @@ impl Tool for Grep {
                 None => ctx.cwd.to_path_buf(),
             };
 
-            // 单文件直接搜；目录走工作区遍历并按 mtime 降序（截断时保留最近改动的文件）
+            // Search a single file directly; directories go through workspace traversal sorted by mtime descending (truncation keeps the most recently modified files)
             let mut files = Vec::new();
             if root.is_file() {
                 files.push(root);
@@ -227,15 +233,15 @@ impl Tool for Grep {
                 sort_by_mtime_desc(&mut files);
             }
 
-            // 分页状态机：命中单位 = 行（content）或文件（files/count）。
-            // want 比「本页末尾」多探 1 个用于确认还有下一页；head_limit=0 不限条数。
+            // Pagination state machine: the hit unit = line (content) or file (files/count).
+            // want probes 1 entry past "the end of this page" to confirm a next page exists; head_limit=0 means no count limit.
             let want = if head_limit == 0 {
                 usize::MAX
             } else {
                 offset.saturating_add(head_limit).saturating_add(1)
             };
-            let mut seen = 0usize; // 已扫过的命中总数
-            let mut page_hits = 0usize; // 本页已收集的命中数
+            let mut seen = 0usize; // total hits scanned so far
+            let mut page_hits = 0usize; // hits collected for this page so far
             let mut more_pages = false;
             let mut budget_hit = false;
             let mut lines: Vec<String> = Vec::new();
@@ -248,7 +254,7 @@ impl Tool for Grep {
                     skipped_sensitive += 1;
                     continue;
                 }
-                // include 只比文件名（gitignore 无 / 模式的 basename 语义正好等价）
+                // include compares file names only (gitignore's basename semantics for /-less patterns is exactly equivalent)
                 if let Some(ov) = &include_ov {
                     let name = file.file_name().unwrap_or_default();
                     if !ov.matched(Path::new(name), false).is_whitelist() {
@@ -259,8 +265,8 @@ impl Tool for Grep {
                     skipped_oversize += 1;
                     continue;
                 }
-                // 复用文本管线：GBK/UTF-16 解码后搜索（行号与 Read 视图一致），
-                // 二进制/未知编码计数跳过（不再静默消失）
+                // Reuse the text pipeline: search after GBK/UTF-16 decoding (line numbers match the Read view);
+                // binary/unknown-encoding files are counted as skipped (no longer silently vanishing)
                 let doc = match std::fs::read(&file)
                     .ok()
                     .and_then(|b| crate::text::decode(&b).ok())
@@ -300,7 +306,7 @@ impl Tool for Grep {
                         page_hits += 1;
                     }
                     "count" => {
-                        // rg -c 口径：计命中行数，一行多次命中算 1
+                        // rg -c semantics: count matching lines; multiple hits on one line count once
                         let count = content.iter().filter(|l| regex.is_match(l)).count();
                         if count == 0 {
                             continue;
@@ -323,7 +329,7 @@ impl Tool for Grep {
                         page_hits += 1;
                     }
                     _ => {
-                        // 收集本页命中的行号（升序）
+                        // Collect this page's hit line numbers (ascending)
                         let mut page_hit_lines: Vec<usize> = Vec::new();
                         for (ix, line) in content.iter().enumerate() {
                             if !regex.is_match(line) {
@@ -340,7 +346,7 @@ impl Tool for Grep {
                             page_hit_lines.push(ix);
                         }
                         if page_hit_lines.is_empty() {
-                            // 无本页命中（全被 offset 跳过）；已触发下一页探测则就此打住
+                            // No hits for this page (all skipped by offset); if the next-page probe already triggered, stop right here
                             if more_pages {
                                 break 'files;
                             }
@@ -361,8 +367,8 @@ impl Tool for Grep {
                                 lines.push(row);
                             }
                         } else {
-                            // 命中窗口合并渲染：相邻（含相接）窗口合并，
-                            // 不相邻窗口之间以 rg 风格的裸 -- 分隔
+                            // Hit windows rendered merged: adjacent (including touching) windows are merged,
+                            // with a bare rg-style -- separator between non-adjacent windows
                             let mut windows: Vec<(usize, usize)> = Vec::new();
                             for &ix in &page_hit_lines {
                                 let start = ix.saturating_sub(before);
@@ -401,7 +407,7 @@ impl Tool for Grep {
                             }
                         }
                         page_hits += page_hit_lines.len();
-                        // 渲染完本文件再退出（probe 命中与本页命中常在同一文件）
+                        // Finish rendering this file before exiting (the probe hit and this page's hits are often in the same file)
                         if more_pages {
                             break 'files;
                         }
@@ -410,50 +416,50 @@ impl Tool for Grep {
             }
 
             let unit = if output_mode == "content" {
-                "行"
+                "lines"
             } else {
-                "个文件"
+                "files"
             };
             let mut footers: Vec<String> = Vec::new();
             if budget_hit {
                 footers.push(format!(
-                    "[输出已达 {} 字符上限，提前停止；缩小搜索范围，或用 head_limit/offset 分页（下一页 offset={}）]",
+                    "[Output hit the {}-character budget and stopped early; narrow the search, or page with head_limit/offset (next page offset={})]",
                     MAX_GREP_OUTPUT_CHARS,
                     offset + page_hits
                 ));
             } else if more_pages {
                 footers.push(format!(
-                    "[显示 {}-{} {unit}，用 offset={} 续读]",
+                    "[Showing {}-{} {unit}; continue with offset={}]",
                     offset + 1,
                     offset + page_hits,
                     offset + page_hits
                 ));
             } else if offset > 0 {
                 footers.push(format!(
-                    "[显示 {}-{} {unit}，共 {seen} {unit}]",
+                    "[Showing {}-{} {unit} of {seen}]",
                     offset + 1,
                     offset + page_hits
                 ));
             }
             let mut skipped_parts: Vec<String> = Vec::new();
             if skipped_sensitive > 0 {
-                skipped_parts.push(format!("敏感 {skipped_sensitive}"));
+                skipped_parts.push(format!("sensitive {skipped_sensitive}"));
             }
             if skipped_undecodable > 0 {
-                skipped_parts.push(format!("二进制/未知编码 {skipped_undecodable}"));
+                skipped_parts.push(format!("binary/undecodable {skipped_undecodable}"));
             }
             if skipped_oversize > 0 {
-                skipped_parts.push(format!("超过 2MB {skipped_oversize}"));
+                skipped_parts.push(format!("over 2MB {skipped_oversize}"));
             }
             if !skipped_parts.is_empty() {
-                footers.push(format!("[已跳过: {}]", skipped_parts.join("、")));
+                footers.push(format!("[Skipped: {}]", skipped_parts.join(", ")));
             }
 
             let mut out: Vec<String> = if lines.is_empty() {
                 vec![if offset > 0 && seen > 0 {
-                    format!("（offset={offset} 超出命中总数 {seen}）")
+                    format!("(offset={offset} is beyond the total of {seen} matches)")
                 } else {
-                    "（无匹配内容）".to_string()
+                    "(no matches)".to_string()
                 }]
             } else {
                 lines
@@ -464,10 +470,10 @@ impl Tool for Grep {
     }
 }
 
-/// 工作区遍历（ripgrep 同款 ignore 引擎）：尊重 .gitignore/.ignore/.git exclude，
-/// 包含隐藏文件，但始终跳过 VCS 目录（.git/.svn/.hg/.bzr/.jj/.sl）与 .pigcode。
-/// 只收集文件路径。`overrides` 为白名单 glob 时（Glob 工具），不匹配的文件
-/// 在遍历期就被排除。
+/// Workspace traversal (the same ignore engine as ripgrep): respects .gitignore/.ignore/.git exclude,
+/// includes hidden files, but always skips VCS directories (.git/.svn/.hg/.bzr/.jj/.sl) and .pigcode.
+/// Collects file paths only. When `overrides` is an allowlist glob (the Glob tool), non-matching files
+/// are excluded during traversal.
 pub(crate) fn walk_workspace(
     root: &Path,
     overrides: Option<ignore::overrides::Override>,
@@ -500,7 +506,7 @@ pub(crate) fn walk_workspace(
         .collect()
 }
 
-/// mtime（纳秒，UNIX 纪元起）；取不到当 0
+/// mtime (nanoseconds since the UNIX epoch); 0 when unavailable
 fn mtime_nanos(path: &Path) -> u128 {
     path.metadata()
         .and_then(|m| m.modified())
@@ -510,7 +516,7 @@ fn mtime_nanos(path: &Path) -> u128 {
         .unwrap_or(0)
 }
 
-/// ZCode/kimi 同款排序：mtime 降序，同 mtime 按路径字典序升序
+/// Same sort as ZCode/kimi: mtime descending, ties broken by path lexicographic ascending
 fn sort_by_mtime_desc(files: &mut Vec<PathBuf>) {
     let mut stamped: Vec<(u128, PathBuf)> = std::mem::take(files)
         .into_iter()
@@ -520,7 +526,7 @@ fn sort_by_mtime_desc(files: &mut Vec<PathBuf>) {
     files.extend(stamped.into_iter().map(|(_, path)| path));
 }
 
-/// @ 文件搜索：遍历工作区（尊重 .gitignore、含隐藏文件、跳过 VCS 目录），按子串匹配打分排序。
+/// @ file search: traverses the workspace (respects .gitignore, includes hidden files, skips VCS directories), scored and sorted by substring match.
 pub fn search_files(cwd: &Path, query: &str, limit: usize) -> Vec<String> {
     let files = walk_workspace(cwd, None);
     let query = query.to_lowercase();

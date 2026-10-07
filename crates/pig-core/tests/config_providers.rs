@@ -16,7 +16,7 @@ default_model = "mock-model"
 
 [[providers]]
 id = "mock"
-name = "Mock 供应商"
+name = "Mock Provider"
 base_url = "http://127.0.0.1:{port}/v1"
 api_key = "mock-key"
 api_format = "{format_str}"
@@ -30,7 +30,7 @@ max_output_tokens = 8192
     )
 }
 
-/// config v2 roundtrip：GetConfig / SaveConfig
+/// config v2 roundtrip: GetConfig / SaveConfig
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_v2_snapshot_and_save() {
     let port = mock::start_mock_server();
@@ -56,14 +56,14 @@ async fn config_v2_snapshot_and_save() {
         panic!()
     };
     assert_eq!(config.providers.len(), 1);
-    assert_eq!(config.providers[0].name, "Mock 供应商");
+    assert_eq!(config.providers[0].name, "Mock Provider");
     assert_eq!(config.providers[0].models[0].context_window, 128000);
 
-    // 加一个供应商并保存
+    // Add a provider and save
     let mut config = config.clone();
     config.providers.push(ProviderConfig {
         id: "second".into(),
-        name: "第二个".into(),
+        name: "Second provider".into(),
         base_url: "http://127.0.0.1:1".into(),
         api_key: "${TEST_NONEXISTENT_KEY}".into(),
         api_format: ApiFormat::AnthropicMessages,
@@ -85,19 +85,19 @@ async fn config_v2_snapshot_and_save() {
     )
     .await;
     assert!(
-        matches!(collected.last(), Some(Event::ConfigSnapshot { config, .. }) if config.providers[1].name == "第二个"),
-        "保存后应回发新快照"
+        matches!(collected.last(), Some(Event::ConfigSnapshot { config, .. }) if config.providers[1].name == "Second provider"),
+        "new snapshot should be sent back after save"
     );
     let raw = std::fs::read_to_string(&config_path).unwrap();
-    assert!(raw.contains("第二个"), "落盘: {raw}");
+    assert!(raw.contains("Second provider"), "persisted to disk: {raw}");
     assert!(
         raw.contains("${TEST_NONEXISTENT_KEY}"),
-        "api_key 不应被展开: {raw}"
+        "api_key must not be expanded: {raw}"
     );
     agent.shutdown();
 }
 
-/// Anthropic 格式完整 turn：Read 工具调用 → 结果 → 文本（走 /v1/messages + Anthropic SSE）
+/// A full turn in Anthropic format: Read tool call → result → text (via /v1/messages + Anthropic SSE)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_full_turn() {
     let port = mock::start_mock_server();
@@ -116,7 +116,7 @@ async fn anthropic_full_turn() {
         .ops
         .send(Op::SendMessage {
             session_id: sid,
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -136,27 +136,27 @@ async fn anthropic_full_turn() {
     assert!(
         collected.iter().any(|e| matches!(
             e,
-            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("已知文件")
+            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("known file")
         )),
-        "tool_use 工具链: {collected:#?}"
+        "tool_use tool chain: {collected:#?}"
     );
     assert!(
         collected.iter().any(|e| matches!(
             e,
             Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER)
         )),
-        "text_delta 文本"
+        "text_delta text"
     );
     assert!(
         collected
             .iter()
             .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
-        "usage 汇总 100+42"
+        "usage aggregated 100+42"
     );
     agent.shutdown();
 }
 
-/// reasoning_params merge：SetModel 带推理等级 → 请求体应包含对应 JSON
+/// reasoning_params merge: SetModel with a reasoning level → the request body should contain the matching JSON
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reasoning_params_merged() {
     let (port, log) = mock::start_mock_server_with_log();
@@ -211,7 +211,7 @@ high = {{ reasoning_effort = "high" }}
         .ops
         .send(Op::SendMessage {
             session_id: sid,
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -228,13 +228,13 @@ high = {{ reasoning_effort = "high" }}
         bodies
             .iter()
             .any(|body| body.contains("\"reasoning_effort\":\"high\"")),
-        "请求体应 merge reasoning_params: {:?}",
+        "request body should merge reasoning_params: {:?}",
         bodies.last()
     );
     agent.shutdown();
 }
 
-/// TestProvider：对 mock 成功，对死端口失败
+/// TestProvider: succeeds against the mock (Connected with HTTP status), fails against a dead port (Failed)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_provider_ok_and_fail() {
     let port = mock::start_mock_server();
@@ -245,7 +245,10 @@ async fn test_provider_ok_and_fail() {
         "mock-model",
     )
     .await;
-    assert!(ok.is_ok(), "{ok:?}");
+    assert!(
+        matches!(ok, pig_protocol::ConnTestResult::Connected { .. }),
+        "{ok:?}"
+    );
 
     let ok = pig_core::provider::test_provider(
         &format!("http://127.0.0.1:{port}/v1"),
@@ -254,15 +257,18 @@ async fn test_provider_ok_and_fail() {
         "mock-model",
     )
     .await;
-    assert!(ok.is_ok(), "Anthropic ping: {ok:?}");
+    assert!(
+        matches!(ok, pig_protocol::ConnTestResult::Connected { .. }),
+        "Anthropic ping: {ok:?}"
+    );
 
     let fail =
         pig_core::provider::test_provider("http://127.0.0.1:1", "x", ApiFormat::OpenAiChat, "x")
             .await;
-    assert!(fail.is_err());
+    assert!(matches!(fail, pig_protocol::ConnTestResult::Failed { .. }));
 }
 
-/// 指数退避重试：首个请求被 mock 返回 500 → 自动重试 → 正常完成，不冒 Error 事件
+/// Exponential backoff retry: the first request gets a 500 from the mock → auto-retry → completes normally without surfacing an Error event
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retry_on_server_error() {
     let port = mock::start_mock_server();
@@ -281,7 +287,7 @@ async fn retry_on_server_error() {
         .ops
         .send(Op::SendMessage {
             session_id: sid,
-            content: "FAIL_ONCE_500 读一下 mock 文件".into(),
+            content: "FAIL_ONCE_500 read the mock file".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -296,17 +302,18 @@ async fn retry_on_server_error() {
         collected
             .iter()
             .any(|e| matches!(e, Event::TextDone { .. })),
-        "500 后应自动重试并完成: {collected:#?}"
+        "should auto-retry after 500 and complete: {collected:#?}"
     );
     assert!(
         !collected.iter().any(|e| matches!(e, Event::Error { .. })),
-        "可重试的错误不应冒出 Error 事件: {collected:#?}"
+        "retryable errors must not surface an Error event: {collected:#?}"
     );
     agent.shutdown();
 }
 
-/// Anthropic thinking 模式：续轮请求的 assistant 历史必须回传 thinking 块
-///（DeepSeek /anthropic 端点缺了会 400：content[].thinking must be passed back）
+/// Anthropic thinking mode: continuation-turn requests must pass the thinking
+/// block back in the assistant history (DeepSeek's /anthropic endpoint returns
+/// 400 without it: content[].thinking must be passed back)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_thinking_echoed() {
     let (port, log) = mock::start_mock_server_with_log();
@@ -325,7 +332,7 @@ async fn anthropic_thinking_echoed() {
         .ops
         .send(Op::SendMessage {
             session_id: sid,
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -338,24 +345,24 @@ async fn anthropic_thinking_echoed() {
     .await;
 
     let bodies = log.lock().expect("log");
-    // 带工具结果的续轮请求：assistant 历史里必须有 thinking 块，且在 tool_use 之前
+    // The continuation request with tool results: the assistant history must contain a thinking block, placed before tool_use
     let continuation = bodies
         .iter()
         .find(|body| body.contains("tool_result"))
-        .unwrap_or_else(|| panic!("应有带 tool_result 的续轮请求: {bodies:?}"));
+        .unwrap_or_else(|| panic!("expected a continuation request with tool_result: {bodies:?}"));
     let thinking_pos = continuation.find("\"type\":\"thinking\"");
     let tool_use_pos = continuation.find("\"type\":\"tool_use\"");
     assert!(
         thinking_pos.is_some(),
-        "续轮请求缺少 thinking 块: {continuation}"
+        "continuation request is missing the thinking block: {continuation}"
     );
     assert!(
         continuation.contains(mock::MOCK_REASONING),
-        "thinking 块应包含思考原文: {continuation}"
+        "thinking block should contain the original reasoning text: {continuation}"
     );
     assert!(
         thinking_pos < tool_use_pos,
-        "thinking 必须在 tool_use 之前: {continuation}"
+        "thinking must come before tool_use: {continuation}"
     );
     agent.shutdown();
 }

@@ -1,10 +1,10 @@
 use super::*;
 
 impl ThreadView {
-    /// 思考折叠块（ZCode reasoning.tsx 同款）：无边框的一行 header（大脑图标 + 文案），
-    /// 进行中文案为扫光「正在思考」，后随 `·` + 滚动输出行（纵滚状态机提供：换行时旧行
-    /// 向上滚出、新行从下方滚入，钉尾显示最新内容、左缘渐隐遮罩；纵向滚轮冒泡给外层
-    /// 消息列表）；箭头悬停/展开时才显示；展开后正文以左侧竖线缩进展示，超高内部滚动。
+    /// Thinking collapsed block (same as ZCode reasoning.tsx): a borderless one-line header (brain icon + label);
+    /// in progress the label is a shimmering "Thinking", followed by `·` plus a rolling output line (provided by the vertical-roll state machine: on line change the old
+    /// line rolls up and out while the new line rolls in from below, tail-pinned to the latest content with a leading-edge fade mask; the vertical wheel bubbles to the outer
+    /// message list); the arrow shows only on hover/expand; expanded, the body is indented behind a left vertical line and scrolls internally past its height cap.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_thinking(
         &self,
@@ -23,13 +23,15 @@ impl ThreadView {
         let secs = |d: std::time::Duration| (d.as_secs_f64().ceil() as u64).max(1);
         let in_progress = duration.is_none() && self.streaming && !self.replay_turn;
         let label = match duration {
-            Some(d) => format!("思考 · 持续了 {} 秒", secs(d)),
-            // 进行中只显示「正在思考」（ZCode：秒数只在完成态出现）
-            None if self.streaming && !self.replay_turn => "正在思考".to_string(),
-            // 回放重建的历史段没有真实时钟
-            None => "思考 · 持续了几秒".to_string(),
+            Some(d) => rust_i18n::t!("thread.thinking_done", n = secs(d)).to_string(),
+            // In progress shows only "Thinking" (ZCode: the seconds count appears only in the done state)
+            None if self.streaming && !self.replay_turn => {
+                rust_i18n::t!("thread.thinking").to_string()
+            }
+            // History segments rebuilt by replay have no real clock
+            None => rust_i18n::t!("thread.thinking_unknown").to_string(),
         };
-        // 滚动输出行由段内纵滚状态机提供（TickerRoll，见 model.rs），折叠且进行中才显示
+        // The rolling output line comes from the segment's vertical-roll state machine (TickerRoll, see model.rs); shown only while collapsed and in progress
         let ticker_line = if in_progress && !open {
             ticker.displayed.clone()
         } else {
@@ -37,11 +39,11 @@ impl ThreadView {
         };
         let muted = cx.theme().muted_foreground;
         let subtlest = muted.opacity(0.6);
-        // ZCode：滚动行比标签亮一档（subtle vs subtlest）
+        // ZCode: the rolling line is one step brighter than the label (subtle vs subtlest)
         let ticker_color = muted.opacity(0.85);
         let group_id = format!("thinking-row-{message_ix}-{segment_ix}");
         let ticker_key = message_ix * 1024 + segment_ix;
-        // 滚动行钉尾：offset 右滚为负，钉尾 = -max（首帧未测量为 0，流式渲染中快速收敛）
+        // Rolling-line tail pin: offset goes negative when scrolled right, so tail pin = -max (0 before the first measure, converging quickly during streaming)
         if ticker_line.is_some() {
             let max = ticker_scroll.max_offset();
             ticker_scroll.set_offset(point(-max.x, px(0.)));
@@ -72,14 +74,14 @@ impl ThreadView {
                         linear_color_stop(to, 1.),
                     ))
             };
-            // 纵滚容器（ZCode QueuedSummaryContent 同款）：单行高、纵向裁切；退场行
-            // absolute 不参与布局（popLayout 同款）。构造抽成自由函数供布局回归测试复用，
-            // 语义见 ticker_roll_content
+            // Vertical-roll container (same as ZCode QueuedSummaryContent): single-line height, vertical clipping; the exiting
+            // line is absolute and takes no part in layout (same as popLayout). The construction is factored into a free function for reuse by layout regression tests;
+            // see ticker_roll_content for semantics
             let roll = ticker_roll_content(
                 ticker_key,
                 line_ix,
-                // 显式量宽：不显式给宽时滚动容器内的文本宽度被钳进可用空间，
-                // ScrollHandle 感知不到溢出（max_offset 恒 0），横向钉尾失效
+                // Explicit width: without one the text width inside the scroll container is clamped into the available space,
+                // the ScrollHandle never sees the overflow (max_offset stays 0), and horizontal tail pinning breaks
                 measure_ticker_width(&line, window, cx),
                 line,
                 ticker.exiting.as_ref(),
@@ -98,7 +100,7 @@ impl ThreadView {
                         .track_scroll(ticker_scroll)
                         .child(roll),
                 )
-                // 滚轮接管：横向滚动由本行消费，纵向滚轮冒泡给外层消息列表
+                // Wheel takeover: horizontal scrolling is consumed by this line; the vertical wheel bubbles to the outer message list
                 .child(
                     ScrollableMask::new(Axis::Horizontal, ticker_scroll)
                         .id(("thinking-ticker-mask", ticker_key)),
@@ -133,11 +135,11 @@ impl ThreadView {
                             *open = !*open;
                             open_now = *open;
                             *pinned = true;
-                            // 展开/收起都把滚动行重置到最新行（ZCode：展开时滚动行卸载，
-                            // 回折叠时以最新行重新挂载，不重播滚动）
+                            // Both expand and collapse reset the rolling line to the latest one (ZCode: the rolling line unmounts while expanded
+                            // and remounts on the latest line when back to collapsed, without replaying the roll)
                             ticker.reset_to(ticker_target_line(text));
                         }
-                        // 开合动画驱动（gen 重播 + 收起时保持挂载播滑收）
+                        // Expand/collapse animation driver (gen replays the animation; on collapse it stays mounted to play the slide-shut)
                         this.drive_expand_anim(message_ix, segment_ix, open_now, cx);
                         cx.notify();
                     }))
@@ -146,8 +148,8 @@ impl ThreadView {
                             .size_4()
                             .text_color(subtlest),
                     )
-                    // 思考进行中：shimmer 扫过高亮；id 必须稳定（默认动画 id 取文案，
-                    // 变化会导致扫光重启）
+                    // Thinking in progress: shimmer sweep highlight; the id must be stable (the default animation id derives from the label,
+                    // and any change would restart the sweep)
                     .child(if in_progress {
                         ShimmerText::new(label)
                             .id(("thinking-shimmer", message_ix * 1024 + segment_ix))
@@ -161,12 +163,12 @@ impl ThreadView {
                             .child(label)
                             .into_any_element()
                     })
-                    // 进行中的滚动输出行（ZCode reasoning trigger 同款）
+                    // In-progress rolling output line (same as the ZCode reasoning trigger)
                     .when(ticker.is_some(), |this| {
                         this.child(div().text_sm().text_color(subtlest).child("·"))
                     })
                     .children(ticker)
-                    // 箭头默认隐藏，行悬停或展开时显示
+                    // Arrow hidden by default, shown on row hover or when expanded
                     .child(
                         div()
                             .invisible()
@@ -184,7 +186,7 @@ impl ThreadView {
                     ),
             )
             .when(open || expand_anim.collapsing, |this| {
-                // 开合动画包装（滑开/滑收 + 淡入淡出）
+                // Expand/collapse animation wrap (slide open/shut plus fade in/out)
                 this.child(
                     self.expand_anim_wrap(
                         format!(
@@ -192,7 +194,7 @@ impl ThreadView {
                             expand_anim.generation
                         ),
                         expand_anim,
-                        // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
+                        // The wrap layer carries the scroll-chain handling: when the body can scroll it swallows the wheel, so the outer message list does not chain along
                         div()
                             .relative()
                             .on_scroll_wheel(consume_scroll(body_scroll))
@@ -218,8 +220,8 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// ExitPlanMode 计划卡（kimi「计划 待确认/已通过」同款）：收起一行三态，
-    /// chevron 展开看计划全文 markdown（TextView，超 480px 内部滚动）
+    /// ExitPlanMode plan card (same as kimi "Plan pending/approved"): a collapsed one-line row with three states,
+    /// the chevron expands to the full plan markdown (TextView, internal scrolling beyond 480px)
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_plan_row(
         &self,
@@ -234,11 +236,11 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (status, status_color) = if !done {
-            ("待确认", cx.theme().warning)
+            (rust_i18n::t!("thread.plan_pending"), cx.theme().warning)
         } else if approved {
-            ("已通过", cx.theme().success)
+            (rust_i18n::t!("thread.plan_approved"), cx.theme().success)
         } else {
-            ("已拒绝", cx.theme().danger)
+            (rust_i18n::t!("thread.plan_rejected"), cx.theme().danger)
         };
         let muted = cx.theme().muted_foreground;
         let subtlest = muted.opacity(0.6);
@@ -273,9 +275,14 @@ impl ThreadView {
                             .size_4()
                             .text_color(subtlest),
                     )
-                    .child(div().text_sm().text_color(subtlest).child("计划"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(subtlest)
+                            .child(rust_i18n::t!("thread.plan")),
+                    )
                     .child(div().text_sm().text_color(status_color).child(status))
-                    // 箭头默认隐藏，行悬停或展开时显示
+                    // Arrow hidden by default, shown on row hover or when expanded
                     .child(
                         div()
                             .invisible()
@@ -293,7 +300,7 @@ impl ThreadView {
                     ),
             )
             .when(open || expand_anim.collapsing, |this| {
-                // 开合动画包装（滑开/滑收 + 淡入淡出）
+                // Expand/collapse animation wrap (slide open/shut plus fade in/out)
                 this.child(
                     self.expand_anim_wrap(
                         format!(
@@ -301,7 +308,7 @@ impl ThreadView {
                             expand_anim.generation
                         ),
                         expand_anim,
-                        // 包装层携带滚动链处理：正文能滚时吞掉滚轮，避免外层消息列表联动
+                        // The wrap layer carries the scroll-chain handling: when the body can scroll it swallows the wheel, so the outer message list does not chain along
                         div()
                             .relative()
                             .on_scroll_wheel(consume_scroll(body_scroll))
@@ -325,14 +332,14 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 工具调用（ZCode 同款）：无边框摘要行（图标 + 中文工具名 + 单行摘要 + 状态词），
-    /// 箭头仅悬停/展开时显示；展开后是圆角描边卡片：完整输入（终端类带 `$` 前缀）+
-    /// 等宽输出，输出限高内部滚动。运行中不用 spinner，工具名扫光（ZCode 的取舍：
-    /// 流式期间工具多，持续动画耗渲染资源）。
-    /// `approval_pending`：该工具正在等待批准（行尾显示黄色「等待批准」）。
-    /// `agent_cards`：SubagentCard 写入的代理卡列表（Agent 一张、AgentSwarm 多张）。
-    /// `read_ui`：Read 工具代码卡的 UI 态（换行/复制/高亮缓存；仅 Read 有值）
-    /// `bash_ui`：Bash 工具代码卡的 UI 态（命令卡+输出卡；仅 Bash 有值）
+    /// Tool call (same as ZCode): a borderless summary row (icon + localized tool name + one-line summary + status word),
+    /// the arrow shows only on hover/expand; expanded it becomes a rounded outlined card: full input (terminal tools get a `$` prefix) plus
+    /// monospace output, with the output height-capped and internally scrollable. No spinner while running; the tool name shimmers instead (ZCode's tradeoff:
+    /// many tools run during streaming, and a persistent animation would burn rendering resources).
+    /// `approval_pending`: this tool is awaiting approval (a yellow "Waiting for approval" at the end of the row).
+    /// `agent_cards`: agent card list written by SubagentCard (one for Agent, several for AgentSwarm).
+    /// `read_ui`: UI state of the Read tool code card (wrap/copy/highlight caches; only set for Read)
+    /// `bash_ui`: UI state of the Bash tool code card (command card plus output card; only set for Bash)
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_tool_card(
         &self,
@@ -355,11 +362,11 @@ impl ThreadView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // AgentSwarm 工具卡升级为 Swarm 面板（kimi-code 同款）：可折叠汇总行
-        //（分支图标 + 「Swarm」+ 任务标题 + 完成计数 + 箭头），展开后是母卡
-        //（bot 图标方块 + 标题 + model 副标题 + 蓝色计数）+ 子代理列表（完成
-        // 优先排序、行号、逐行点击开右侧子代理 tab）。无卡（live 中 SubagentCard
-        // 事件到达前的瞬时态）回落下方标准工具卡渲染
+        // The AgentSwarm tool card upgrades to a Swarm panel (same as kimi-code): a collapsible summary row
+        // (branch icon + "Swarm" + task title + completion count + arrow); expanded it shows the parent card
+        // (bot icon tile + title + model subtitle + blue count) plus a subagent list (finished-first
+        // ordering, row numbers, click any row to open the right-side subagent tab). With no cards (the transient state in live before the SubagentCard
+        // event arrives) it falls back to the standard tool card rendering below
         if tool == "AgentSwarm" && !agent_cards.is_empty() {
             return self.render_swarm_panel(
                 message_ix,
@@ -373,11 +380,11 @@ impl ThreadView {
                 cx,
             );
         }
-        // 代理卡（A3c，kimi-code 同款气质）：带 SubagentCard 元信息的 Agent
-        // 工具卡升级为描述卡（bot 图标 + 任务标题 + profile · model），
-        // 点击开右侧子代理对话 tab；卡体不再提供展开区（完整结果与过程见右侧
-        // 「子代理」tab）。
-        // 无卡（live 中 SubagentCard 事件到达前的瞬时态）回落下方标准工具卡渲染。
+        // Agent cards (A3c, kimi-code style): Agent tool calls carrying SubagentCard
+        // metadata upgrade to description cards (bot icon + task title + profile · model);
+        // click to open the right-side subagent conversation tab; the card body no longer offers an expand area (full results and process live in the right-side
+        // "subagent" tab).
+        // With no cards (the transient state in live before the SubagentCard event arrives) it falls back to the standard tool card rendering below.
         if !agent_cards.is_empty() {
             return v_flex()
                 .w_full()
@@ -397,7 +404,7 @@ impl ThreadView {
                 }))
                 .into_any_element();
         }
-        // ZCode 三级文字层级：正文 > subtle(60%) > subtlest(30~40%)，靠层级而非边框/色彩造信息密度
+        // ZCode's three-tier text hierarchy: body > subtle(60%) > subtlest(30~40%), building information density through hierarchy rather than borders/color
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
         let group_id = format!("tool-row-{message_ix}-{segment_ix}");
@@ -415,19 +422,19 @@ impl ThreadView {
             _ => AssetIconName::Wrench,
         };
         let kind_label = match tool {
-            "Bash" => "终端",
-            "Read" => "读取",
-            "Write" => "写入",
-            "Edit" => "编辑",
-            "Glob" => "查找文件",
-            "Grep" => "搜索",
-            "TodoList" => "待办",
-            "FetchURL" => "抓取网页",
-            "TaskList" | "TaskOutput" | "TaskStop" => "后台任务",
-            "AskUserQuestion" => "提问",
-            _ => tool,
+            "Bash" => rust_i18n::t!("thread.tool_bash"),
+            "Read" => rust_i18n::t!("thread.tool_read"),
+            "Write" => rust_i18n::t!("thread.tool_write"),
+            "Edit" => rust_i18n::t!("thread.tool_edit"),
+            "Glob" => rust_i18n::t!("thread.tool_glob"),
+            "Grep" => rust_i18n::t!("thread.tool_grep"),
+            "TodoList" => rust_i18n::t!("thread.tool_todo"),
+            "FetchURL" => rust_i18n::t!("thread.tool_fetch"),
+            "TaskList" | "TaskOutput" | "TaskStop" => rust_i18n::t!("thread.tool_bg_task"),
+            "AskUserQuestion" => rust_i18n::t!("thread.tool_ask"),
+            _ => std::borrow::Cow::Borrowed(tool),
         };
-        // 摘要压成单行：多行命令的换行折叠为空格（否则折叠行会被撑成多行）
+        // Collapse the summary to one line: newlines in multi-line commands fold into spaces (otherwise the collapsed row would stretch into several lines)
         let summary_line = summary.split_whitespace().collect::<Vec<_>>().join(" ");
 
         v_flex()
@@ -451,15 +458,15 @@ impl ThreadView {
                             *expanded = !*expanded;
                             expanded_now = *expanded;
                         }
-                        // 开合动画驱动（gen 重播 + 收起时保持挂载播滑收）
+                        // Expand/collapse animation driver (gen replays the animation; on collapse it stays mounted to play the slide-shut)
                         this.drive_expand_anim(message_ix, segment_ix, expanded_now, cx);
                         cx.notify();
                     }))
                     .child(Icon::new(tool_icon).size_4().text_color(subtlest))
-                    // 工具运行中：工具名 shimmer 扫光（等批准/已结束回静态文本）。
-                    // 两个分支都禁收缩+禁折行：flex 收缩按基准宽比例分摊，长命令行会
-                    // 把标签挤窄几 px；中文任意字间断行，min-content 仅 1 字宽，
-                    // 「终端」会被挤成两行（截断只应发生在摘要上）
+                    // Tool running: the tool name shimmers (back to static text while awaiting approval or finished).
+                    // Both branches disable shrinking and wrapping: flex shrinking distributes by base width, so a long command line would
+                    // squeeze the label narrower by a few px; Chinese wraps between any two characters (min-content is one character wide),
+                    // so "Terminal" would be squeezed onto two lines (truncation should happen only on the summary)
                     .child(if running {
                         ShimmerText::new(kind_label)
                             .id(("tool-label-shimmer", message_ix * 1024 + segment_ix))
@@ -478,12 +485,12 @@ impl ThreadView {
                             .child(kind_label.to_string())
                             .into_any_element()
                     })
-                    // 成功不给标记；失败在行尾放叉号（悬停显示原因）
-                    // Read：路径保持原有单一全文展示（过长截断），可点击（右侧
-                    // 文件面板看全文），悬停高亮+下划线；完成后追加「N 行」。
-                    // 编辑类：文件名（亮一档）+ 目录路径（最暗，优先截断）；
-                    // 其余工具单行摘要。摘要只占内容宽（过长收缩截断），
-                    // 让统计/箭头跟在文字后面而非靠右
+                    // No marker on success; a cross at the row end on failure (hover shows the reason)
+                    // Read: the path keeps its single full-text display (truncated when too long), clickable (view the
+                    // full text in the right-side file panel), hover highlight plus underline; appends "N lines" when done.
+                    // Edit tools: file name (one step brighter) plus directory path (darkest, truncated first);
+                    // other tools get a one-line summary. The summary takes only content width (shrink-truncate when too long)
+                    // so the stats/arrow follow the text instead of hugging the right edge
                     .child(if tool == "Read" {
                         let key = message_ix * 1024 + segment_ix;
                         let path = summary.to_string();
@@ -510,7 +517,10 @@ impl ThreadView {
                                     .cursor_pointer()
                                     .hover(move |this| this.text_color(path_hover).underline())
                                     .tooltip(move |window, cx| {
-                                        Tooltip::new("在右侧查看完整文件").build(window, cx)
+                                        Tooltip::new(
+                                            rust_i18n::t!("thread.view_full_file").to_string(),
+                                        )
+                                        .build(window, cx)
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
@@ -538,7 +548,10 @@ impl ThreadView {
                                         .whitespace_nowrap()
                                         .text_sm()
                                         .text_color(subtlest)
-                                        .child(format!("{line_count} 行")),
+                                        .child(
+                                            rust_i18n::t!("thread.lines", n = line_count)
+                                                .to_string(),
+                                        ),
                                 )
                             })
                             .into_any_element()
@@ -578,7 +591,7 @@ impl ThreadView {
                             .child(summary_line)
                             .into_any_element()
                     })
-                    // 增删计数（等宽，为零的一侧不显示）
+                    // Additions/deletions count (monospace; the zero side is not shown)
                     .when_some(edit, |this, edit| {
                         this.child(
                             h_flex()
@@ -609,10 +622,10 @@ impl ThreadView {
                                 .whitespace_nowrap()
                                 .text_xs()
                                 .text_color(cx.theme().warning)
-                                .child("等待批准"),
+                                .child(rust_i18n::t!("thread.waiting_approval")),
                         )
                     })
-                    // 箭头默认隐藏，行悬停或展开时显示（保持行内干净）
+                    // Arrow hidden by default, shown on row hover or when expanded (keeps the row clean)
                     .child(
                         div()
                             .invisible()
@@ -628,7 +641,7 @@ impl ThreadView {
                                 .text_color(subtlest),
                             ),
                     )
-                    // 失败：行尾叉号常显，悬停展示失败原因（输出压单行并截断）
+                    // Failure: the row-end cross is always visible; hover shows the failure reason (output collapsed to one line and truncated)
                     .when(done && is_error, |this| {
                         let collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
                         const MAX_REASON_CHARS: usize = 200;
@@ -654,8 +667,8 @@ impl ThreadView {
                         )
                     }),
             )
-            // 前台子代理运行中的实时进度行（摘要行下方）：旋转小图标 + 单行省略，
-            // 左缩进对齐摘要行的图标列（图标 16px + gap 8px）；收尾/回放无此行
+            // Live progress row of a foreground subagent while running (below the summary row): small spinner plus single-line ellipsis,
+            // left-indented to align with the summary row's icon column (icon 16px + gap 8px); absent when finished or in replay
             .when(
                 !done && live_note.is_some_and(|note| !note.is_empty()),
                 |this| {
@@ -684,18 +697,18 @@ impl ThreadView {
                 },
             )
             .when(expanded || expand_anim.collapsing, |this| {
-                // Read 完成且输出是带行号的文件内容 → 代码卡（read.rs）；
-                // 运行中/报错/非内容输出（空文件、未变化）回落通用卡。
-                // Bash 收尾（含失败）→ 命令卡 + 输出卡（bash.rs）；
-                // 运行中/等审批走通用卡（实时输出）
+                // Read finished with line-numbered file content → code card (read.rs);
+                // running/error/non-content output (empty file, unchanged) falls back to the generic card.
+                // Bash finished (failure included) → command card plus output card (bash.rs);
+                // running or awaiting approval uses the generic card (live output)
                 let read_card = tool == "Read"
                     && done
                     && !is_error
                     && read_ui.is_some()
                     && is_read_code_output(output);
                 let bash_card = tool == "Bash" && done && bash_ui.is_some();
-                // 展开正文统一放进带滚动条的视口（track_scroll 持久滚动位置 + 可见滚动条）；
-                // 内容整体包一层开合动画（滑开/滑收 + 淡入淡出）
+                // The expanded body uniformly goes into a viewport with a scrollbar (track_scroll keeps the scroll position plus a visible scrollbar);
+                // the content as a whole is wrapped in the expand/collapse animation (slide open/shut plus fade in/out)
                 this.child(
                     div().relative().mt_2().w_full().child(
                         self.expand_anim_wrap(
@@ -707,9 +720,9 @@ impl ThreadView {
                             div()
                                 .relative()
                                 .w_full()
-                                // 滚动链：正文能滚时吞掉滚轮，避免外层消息列表联动
+                                // Scroll chain: when the body can scroll it swallows the wheel, so the outer message list does not chain along
                                 .on_scroll_wheel(consume_scroll(body_scroll))
-                                // 编辑类工具展开为内联 diff 代码卡；其余工具是通用输入+输出卡
+                                // Edit tools expand into an inline diff code card; other tools get the generic input+output card
                                 .child(if let Some(edit) = edit {
                                     Self::render_edit_diff(
                                         ("tool-body", message_ix * 1024 + segment_ix),
@@ -749,7 +762,7 @@ impl ThreadView {
                                         .bg(cx.theme().group_box)
                                         .px_4()
                                         .py_3()
-                                        // 完整输入：终端类带 `$` 前缀，其余工具直接全文（折叠行里被截断的部分）
+                                        // Full input: terminal tools get the `$` prefix; other tools show the full text (the part truncated in the collapsed row)
                                         .when(!summary.is_empty(), |this| {
                                             this.child(
                                                 h_flex()
@@ -788,14 +801,14 @@ impl ThreadView {
                                                     subtle
                                                 })
                                                 .child(if output.is_empty() && done {
-                                                    "没有输出。".to_string()
+                                                    rust_i18n::t!("thread.no_output").to_string()
                                                 } else {
                                                     output.to_string()
                                                 }),
                                         )
                                         .into_any_element()
                                 })
-                                // diff 卡与 Read/Bash 代码卡的滚动条已内置（随圆角补丁收角）；通用卡的补在这里
+                                // The diff card and Read/Bash code cards have built-in scrollbars (corners trimmed by the rounded-corner patches); the generic card gets its scrollbar here
                                 .when(edit.is_none() && !read_card && !bash_card, |this| {
                                     this.child(Scrollbar::vertical(body_scroll))
                                 })
@@ -807,13 +820,13 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 代理卡：子代理 Agent 工具卡的升级样式（A3c，kimi-code 同款气质）——
-    /// 圆角卡 + bot 图标方块 + 任务描述标题 + `{profile} · {model}` 副标题；
-    /// 前台运行中多一行实时进度（段级 live_note；后台卡用卡级 live_note）；
-    /// 右侧状态：等待批准/Spinner/成功勾/失败词。
-    /// 点击卡体开右侧子代理对话 tab（完整结果与过程在那里看，故不提供展开区）。
-    /// `card_ix`：同一工具卡里的第几张（防御多卡；Agent 恒为 0，AgentSwarm
-    /// 走 render_swarm_panel 不到这里）。
+    /// Agent card: the upgraded style of the subagent Agent tool card (A3c, kimi-code style):
+    /// rounded card + bot icon tile + task description title + `{profile} · {model}` subtitle;
+    /// a foreground run gains one live progress row while running (segment-level live_note; background cards use the card-level live_note);
+    /// right-side status: awaiting approval / Spinner / success check / failure word.
+    /// Clicking the card body opens the right-side subagent conversation tab (full results and process are viewed there, so no expand area is offered).
+    /// `card_ix`: which card within the same tool card (guards against multiple cards; Agent is always 0, and AgentSwarm
+    /// goes through render_swarm_panel and never reaches here).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_agent_card(
         &self,
@@ -829,17 +842,17 @@ impl ThreadView {
     ) -> AnyElement {
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
-        // 运行态真值表：后台卡的工具调用立即收尾（running 回执），真实运行态由
-        // 子代理生命周期驱动（SubagentActivity finished 置卡级 finished；回放由
-        // core 补发）；前台卡跟工具调用同生命周期（!done；等审批暂停转圈）——
-        // 前台 Swarm 的单卡同样由 finished 提前落终态（先完成的子代理不等整批）
+        // Run-state truth table: the background card's tool call ends immediately (running receipt), and the real run state is driven by the
+        // subagent lifecycle (SubagentActivity finished sets the card-level finished; replay re-emits it from
+        // core); the foreground card follows the tool call's lifecycle (!done; the spinner pauses while awaiting approval).
+        // A single card of a foreground Swarm likewise lands its terminal state early via finished (a subagent that finishes first does not wait for the whole batch)
         let running = if card.background {
             !card.finished
         } else {
             !done && !card.finished && !approval_pending
         };
-        // 后台卡的实时进度在卡级 live_note（SubagentActivity 按 agent_id 写入）；
-        // 前台卡走段级 live_note（SubagentProgress 按 item_id 写入）
+        // The background card's live progress lives in the card-level live_note (written by SubagentActivity keyed by agent_id);
+        // the foreground card uses the segment-level live_note (written by SubagentProgress keyed by item_id)
         let progress_note = if card.background {
             card.live_note.as_deref()
         } else {
@@ -847,12 +860,12 @@ impl ThreadView {
         };
         let failed = done && is_error;
         let title = if card.description.is_empty() {
-            "子代理".to_string()
+            rust_i18n::t!("thread.subagent").to_string()
         } else {
             card.description.clone()
         };
         let subtitle = if failed {
-            "失败".to_string()
+            rust_i18n::t!("thread.failed").to_string()
         } else if card.model.is_empty() {
             card.profile.clone()
         } else {
@@ -882,7 +895,7 @@ impl ThreadView {
                     title: title_click.clone(),
                 });
             }))
-            // bot 图标方块（圆角 info 淡底）
+            // Bot icon tile (rounded, faint info background)
             .child(
                 div()
                     .flex_shrink_0()
@@ -925,7 +938,7 @@ impl ThreadView {
                             .text_color(if failed { cx.theme().danger } else { subtle })
                             .child(subtitle),
                     )
-                    // 运行中的实时进度行（挪进卡里， spinner + 单行省略）
+                    // Live progress row while running (moved into the card: spinner plus single-line ellipsis)
                     .when(
                         running && progress_note.is_some_and(|note| !note.is_empty()),
                         |this| {
@@ -953,14 +966,14 @@ impl ThreadView {
                         },
                     ),
             )
-            // 右侧状态：等待批准（仅前台）/ 运行中 Spinner / 失败词 / 成功勾。
-            // 注意：SubagentActivity 的 finished 不带成败——后台卡终态的成败沿用
-            // 工具回执的 is_error（子代理失败由通知气泡呈现，卡上勾仅代表「跑完」）
+            // Right-side status: awaiting approval (foreground only) / running Spinner / failure word / success check.
+            // Note: SubagentActivity's finished carries no success flag; a background card's terminal outcome reuses
+            // the tool receipt's is_error (subagent failure is surfaced by a notification bubble; the check on the card only means "finished running")
             .child(if !card.background && approval_pending {
                 div()
                     .text_xs()
                     .text_color(cx.theme().warning)
-                    .child("等待批准")
+                    .child(rust_i18n::t!("thread.waiting_approval"))
                     .into_any_element()
             } else if running {
                 Spinner::new().small().color(subtlest).into_any_element()
@@ -968,7 +981,7 @@ impl ThreadView {
                 div()
                     .text_xs()
                     .text_color(cx.theme().danger)
-                    .child("失败")
+                    .child(rust_i18n::t!("thread.failed"))
                     .into_any_element()
             } else {
                 Icon::new(IconName::CircleCheck)
@@ -984,16 +997,16 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// Swarm 面板：AgentSwarm 工具卡的升级样式（kimi-code 同款）——
-    /// 可折叠汇总行（分支图标 + 「Swarm」+ 任务标题 + `{完成}/{总数}` + 箭头）；
-    /// 展开后（折叠态复用段级 `expanded`，Swarm 卡默认展开）是母卡（bot 图标
-    /// 方块 + 任务标题 + model 副标题 + 蓝色完成计数，点击同样折叠）+ 子代理
-    /// 列表（圆角描边容器，逐行「{子代理名} ({profile})」+ 状态 + 两位行号 +
-    /// 箭头；名字里的 #n 是发起方命名，UI 不追加序号）。子代理按完成先后排序
-    /// （finished_seq；回放无此事件落回发起序），行号跟随显示序。
-    /// 点击子行开右侧子代理对话 tab。
-    /// 标题/副标题取首张子代理卡（同一 swarm 的子代理同 template/profile/model，
-    /// 首卡即代表）；运行中汇总行标签扫光（与工具行同 idiom）。
+    /// Swarm panel: the upgraded style of the AgentSwarm tool card (same as kimi-code):
+    /// a collapsible summary row (branch icon + "Swarm" + task title + `{finished}/{total}` + arrow);
+    /// expanded (the collapsed state reuses the segment-level `expanded`; Swarm cards default to expanded) it is the parent card (bot icon
+    /// tile + task title + model subtitle + blue finished count; clicking collapses it too) plus the subagent
+    /// list (rounded outlined container, one row per "{subagent name} ({profile})" + status + two-digit row number +
+    /// arrow; the #n inside names comes from the launcher, and the UI appends no index). Subagents are ordered by finish time
+    /// (finished_seq; replay lacks this event and falls back to launch order), and row numbers follow the display order.
+    /// Clicking a row opens the right-side subagent conversation tab.
+    /// Title/subtitle come from the first subagent card (all subagents of one swarm share template/profile/model,
+    /// so the first card represents them); while running the summary row label shimmers (same idiom as the tool row).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_swarm_panel(
         &self,
@@ -1010,14 +1023,14 @@ impl ThreadView {
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
         let key = message_ix * 1024 + segment_ix;
-        // 行级终态：后台卡看子代理真实生命周期（card.finished）；前台卡随工具
-        // 调用收尾全体落终态（done；逐卡 finished 由 SubagentActivity 提前落位）
+        // Row-level terminal state: background cards follow the subagent's real lifecycle (card.finished); foreground cards all
+        // land their terminal state when the tool call ends (done; per-card finished is set early by SubagentActivity)
         let row_done = |card: &AgentCardMeta| card.finished || (done && !card.background);
         let finished_count = cards.iter().filter(|card| row_done(card)).count();
         let total = cards.len();
         let count_text = format!("{finished_count} / {total}");
         let running = finished_count < total;
-        // 标题/副标题取首卡为代表（同质 swarm 全卡同值）；空描述回退工具摘要
+        // Title/subtitle take the first card as the representative (a homogeneous swarm has identical values on every card); an empty description falls back to the tool summary
         let first = &cards[0];
         let title = if first.description.is_empty() {
             summary.to_string()
@@ -1029,15 +1042,15 @@ impl ThreadView {
         } else {
             first.model.clone()
         };
-        // 显示序：已结束的按完成次序在前，未完成的保持发起序在后；
-        // 回放没有 finished_seq（全 None）→ 稳定保持发起序
+        // Display order: finished ones come first by finish order, unfinished ones keep launch order behind them;
+        // replay has no finished_seq (all None) → stably keeps launch order
         let mut order: Vec<usize> = (0..total).collect();
         order.sort_by_key(|&ix| match cards[ix].finished_seq {
             Some(seq) => (0, seq),
             None => (1, ix as u64),
         });
-        // 汇总行/母卡共用同一个折叠开关（写段级 expanded）；listener 返回值不
-        // 可 Clone，两处各写一份
+        // The summary row and parent card share one collapse toggle (writing the segment-level expanded); listener return values are not
+        // Clone, so each site gets its own copy
         let header = h_flex()
             .id(("swarm-header", key))
             .w_full()
@@ -1063,7 +1076,7 @@ impl ThreadView {
                     .size_4()
                     .text_color(subtlest),
             )
-            // 运行中：标签 shimmer 扫光（与工具行同 idiom），收尾回静态文本
+            // While running: the label shimmers (same idiom as the tool row); back to static text when finished
             .child(if running {
                 ShimmerText::new("Swarm")
                     .id(("swarm-label-shimmer", key))
@@ -1105,8 +1118,8 @@ impl ThreadView {
                 .text_color(subtlest),
             );
 
-        // 母卡：bot 图标方块 + 标题/model 副标题 + 蓝色完成计数（点击折叠）。
-        // 底色之外再描边：group_box 与页面底色接近的主题下只靠填充卡面会「隐身」
+        // Parent card: bot icon tile + title/model subtitle + blue finished count (click to collapse).
+        // Outlined on top of the fill: in themes where group_box is close to the page background, a fill-only card would "vanish"
         let parent = h_flex()
             .id(("swarm-parent", key))
             .w_full()
@@ -1183,10 +1196,10 @@ impl ThreadView {
                     .child(count_text),
             );
 
-        // 子代理列表：圆角描边容器（行悬停底色越角处由补丁收住，与 diff 卡同款），
-        // 逐行「{子代理名} ({profile})」+ 状态 + 两位行号 + 箭头
+        // Subagent list: rounded outlined container (row-hover backgrounds are trimmed at the corners by patches, same as the diff card),
+        // one row per "{subagent name} ({profile})" + status + two-digit row number + arrow
         let border = cx.theme().border;
-        // 列表背后 = 页面底色（消息区自身透明，与 Root 的 tokens.background 同值）
+        // Behind the list = the page background (the message area itself is transparent, the same value as Root's tokens.background)
         let behind = cx.theme().background;
         let rows: Vec<AnyElement> = order
             .iter()
@@ -1194,19 +1207,19 @@ impl ThreadView {
             .map(|(row_ix, &ix)| {
                 let card = &cards[ix];
                 let card_done = row_done(card);
-                // 运行中的进度行：后台卡用卡级 live_note（SubagentActivity 写入），
-                // 前台卡共用段级 live_note（SubagentProgress 按 item_id 写入）
+                // Progress row while running: background cards use the card-level live_note (written by SubagentActivity),
+                // foreground cards share the segment-level live_note (written by SubagentProgress keyed by item_id)
                 let note = if card.background {
                     card.live_note.as_deref()
                 } else {
                     live_note
                 };
                 let base_title = if card.description.is_empty() {
-                    "子代理".to_string()
+                    rust_i18n::t!("thread.subagent").to_string()
                 } else {
                     card.description.clone()
                 };
-                // 标题即子代理名（名里带不带 #n 由发起方决定，UI 不追加序号）
+                // The title is the subagent name (whether #n is in the name is decided by the launcher; the UI appends no index)
                 let row_title = format!("{base_title} ({})", card.profile);
                 let tab_title = base_title.clone();
                 let agent_id = card.agent_id.clone();
@@ -1236,9 +1249,9 @@ impl ThreadView {
                             .text_color(cx.theme().foreground)
                             .child(row_title),
                     )
-                    // 右侧状态：已结束 = 绿勾 + 词；运行中 = Spinner + 进度行
-                    // （无进度回退「运行中」）。SubagentActivity finished 不带成败，
-                    // 勾仅代表「跑完」（子代理失败由通知气泡呈现）
+                    // Right-side status: finished = green check + word; running = Spinner + progress row
+                    // (falls back to "Running" without progress). SubagentActivity finished carries no success flag;
+                    // the check only means "finished running" (subagent failure is surfaced by a notification bubble)
                     .child(if card_done {
                         h_flex()
                             .flex_shrink_0()
@@ -1249,7 +1262,12 @@ impl ThreadView {
                                     .size_4()
                                     .text_color(cx.theme().success),
                             )
-                            .child(div().text_xs().text_color(subtle).child("已结束"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(subtle)
+                                    .child(rust_i18n::t!("thread.ended")),
+                            )
                             .into_any_element()
                     } else {
                         let note = note
@@ -1268,7 +1286,9 @@ impl ThreadView {
                                     .text_ellipsis()
                                     .text_xs()
                                     .text_color(subtle)
-                                    .child(note.unwrap_or_else(|| "运行中".to_string())),
+                                    .child(note.unwrap_or_else(|| {
+                                        rust_i18n::t!("thread.running").to_string()
+                                    })),
                             )
                             .into_any_element()
                     })
@@ -1311,7 +1331,7 @@ impl ThreadView {
                 .absolute()
                 .inset_0(),
             )
-            // 补丁盖住了角上的描边，重描一遍圆角边框
+            // The patches cover the corner strokes; re-stroke the rounded border once more
             .child(
                 div()
                     .absolute()
@@ -1325,12 +1345,12 @@ impl ThreadView {
             .w_full()
             .child(header)
             .when(open || expand_anim.collapsing, |this| {
-                // 开合动画包装（滑开/滑收 + 淡入淡出）
+                // Expand/collapse animation wrap (slide open/shut plus fade in/out)
                 this.child(
                     self.expand_anim_wrap(
                         format!("swarm-expand-{key}-{}", expand_anim.generation),
                         expand_anim,
-                        // 缩进用 padding 而非 margin：w_full 子级不会因外边距溢出
+                        // Indent with padding, not margin: a w_full child would not overflow via outer margins
                         div()
                             .w_full()
                             .pl(px(24.))
@@ -1343,11 +1363,11 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 给圆角卡片补四角：填充每个角落的"R×R 方形 − 半径 R 的四分之一圆"区域
-    /// （圆角缺口）。gpui 的 ContentMask 只有矩形裁剪，行底色/色条/滚动条
-    /// 都会越过圆角描边；用卡片**背后**的颜色补上缺口后，内容在视觉上
-    /// 即被圆角收住，不出框。曲线用二次贝塞尔逼近四分之一圆（控制点取外角，
-    /// 偏差 <0.5px）。调用方需在此之后再描一次圆角边框（补丁盖住了角上的描边）。
+    /// Patches the four corners of a rounded card: fills each corner's "R×R square minus the quarter circle of radius R" region
+    /// (the rounded-corner notch). gpui's ContentMask only clips rectangles, so row backgrounds/color bars/scrollbars
+    /// would all bleed past the rounded stroke; once the notches are filled with the color **behind** the card, the content is visually
+    /// gathered by the rounded corners and stays inside the frame. The curve approximates the quarter circle with a quadratic Bezier (control point at the outer corner,
+    /// deviation <0.5px). Callers must re-stroke the rounded border once more after this (the patches cover the corner strokes).
     pub(crate) fn paint_rounded_corner_patches(
         bounds: Bounds<Pixels>,
         radius: Pixels,
@@ -1358,22 +1378,22 @@ impl ThreadView {
         let w = bounds.size.width;
         let h = bounds.size.height;
         let mut path = PathBuilder::fill();
-        // 左上
+        // Top-left
         path.move_to(point(px(0.), px(0.)));
         path.line_to(point(r, px(0.)));
         path.curve_to(point(px(0.), r), point(px(0.), px(0.)));
         path.close();
-        // 右上
+        // Top-right
         path.move_to(point(w, px(0.)));
         path.line_to(point(w, r));
         path.curve_to(point(w - r, px(0.)), point(w, px(0.)));
         path.close();
-        // 左下
+        // Bottom-left
         path.move_to(point(px(0.), h));
         path.line_to(point(px(0.), h - r));
         path.curve_to(point(r, h), point(px(0.), h));
         path.close();
-        // 右下
+        // Bottom-right
         path.move_to(point(w, h));
         path.line_to(point(w, h - r));
         path.curve_to(point(w - r, h), point(w, h));
@@ -1385,16 +1405,16 @@ impl ThreadView {
     }
 }
 
-/// 思考滚动行的纵滚容器（从 render_thinking 抽出，布局回归测试复用同一构造）。
-/// 单行高、纵向裁切：滚入行自下方 +0.8em 起、滚出行向上 -0.8em 止，超高部分由
-/// 外层 viewport 的滚动 mask 裁掉（overflow 任一轴非 visible 即按 bounds 双轴裁剪，
-/// 见 gpui style::overflow_mask；容器自身不设 overflow，也不依赖它裁切）。
-/// 退场行 absolute 不参与布局（ZCode popLayout 同款）。
-/// 动画 id 含行号：换行号才重播，同行追加（同 id）原位刷新不重启动画。
+/// The vertical-roll container of the thinking rolling line (extracted from render_thinking; layout regression tests reuse the same construction).
+/// Single-line height, vertical clipping: the entering line starts at +0.8em from below and the exiting line stops at -0.8em upward; anything taller is
+/// clipped away by the outer viewport's scroll mask (overflow on any non-visible axis clips both axes by bounds,
+/// see gpui style::overflow_mask; the container itself sets no overflow and does not rely on it for clipping).
+/// The exiting line is absolute and takes no part in layout (same as ZCode popLayout).
+/// The animation id includes the line number: only a changed number replays; appending to the same line (same id) refreshes in place without restarting the animation.
 ///
-/// `width` 必须是调用方量出的文本自然宽（measure_ticker_width）：不显式给宽时，
-/// 滚动容器内的内容会被布局钳到视口宽，ScrollHandle 感知不到溢出（max_offset
-/// 恒 0），横向钉尾失效（sidebar 跑马灯同款坑，2026-09-30 在滚动行上重现）。
+/// `width` must be the natural text width measured by the caller (measure_ticker_width): without an explicit width,
+/// the content inside the scroll container is clamped by layout to the viewport width, the ScrollHandle never sees the overflow (max_offset
+/// stays 0), and horizontal tail pinning breaks (the same pitfall as the sidebar marquee, re-hit on the rolling line on 2026-09-30).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ticker_roll_content(
     ticker_key: usize,
@@ -1447,10 +1467,10 @@ pub(crate) fn ticker_roll_content(
     .into_any_element()
 }
 
-/// 用文本系统量出思考滚动行的自然单行宽度（sidebar 跑马灯 `measure_title_width`
-/// 同款）：不显式量宽时，滚动容器内的文本宽度会被布局钳进可用空间，ScrollHandle
-/// 感知不到溢出（max_offset 恒 0），横向钉尾失效。text_sm = 0.875rem；+2px 防
-/// 字宽取整误差
+/// Measures the natural single-line width of the thinking rolling line with the text system (same as the sidebar marquee's `measure_title_width`):
+/// without an explicit measurement, the text width inside the scroll container is clamped into the available space, the ScrollHandle
+/// never sees the overflow (max_offset stays 0), and horizontal tail pinning breaks. text_sm = 0.875rem; plus 2px to guard against
+/// font-width rounding error
 pub(crate) fn measure_ticker_width(text: &str, window: &Window, cx: &App) -> Pixels {
     let font_size = rems(0.875).to_pixels(window.rem_size());
     let font = Font {
@@ -1476,9 +1496,9 @@ pub(crate) fn measure_ticker_width(text: &str, window: &Window, cx: &App) -> Pix
         + px(2.)
 }
 
-/// 思考滚动行的纵滚缓动：ZCode QueuedSummaryContent 的 CSS cubic-bezier(0.4, 0, 0.2, 1)。
-/// gpui 无内置 cubic_bezier，这里按 CSS 语义实现：Newton-Raphson 解 x(t) = 输入进度，
-/// 再取对应 y(t)
+/// Vertical-roll easing of the thinking rolling line: the CSS cubic-bezier(0.4, 0, 0.2, 1) of ZCode's QueuedSummaryContent.
+/// gpui has no built-in cubic_bezier, so this follows the CSS semantics: Newton-Raphson solves x(t) = input progress,
+/// then the corresponding y(t) is taken
 fn ticker_roll_easing(x: f32) -> f32 {
     const X1: f32 = 0.4;
     const Y1: f32 = 0.0;

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 
-use pig_protocol::ExecMode;
+use pig_protocol::{CoreError, ExecMode};
 
 use crate::provider::ToolCall;
 use crate::task::SessionToolState;
@@ -11,38 +11,38 @@ use crate::text::{FileEncoding, LineEnding};
 
 const MAX_READ_LINES: usize = 2000;
 const MAX_READ_CHARS: usize = 100_000;
-/// Read 单行字符上限，超过则截断该行
+/// Read per-line character cap; longer lines are truncated
 const MAX_LINE_CHARS: usize = 2000;
 const MAX_MATCH_RESULTS: usize = 200;
-/// Bash 前台输出字符上限，超过则头尾预览 + 完整输出留 spill 文件
+/// Bash foreground output character cap; beyond it, a head/tail preview is returned and the full output goes to a spill file
 const MAX_BASH_OUTPUT: usize = 30 * 1024;
 const MAX_GREP_FILE_SIZE: u64 = 2 * 1024 * 1024;
-/// Grep 匹配行字符上限（对标 rg --max-columns）：minified JS/单行大 JSON
-/// 一次命中就能打爆上下文，超长行截断显示
+/// Grep matched-line character cap (mirrors rg --max-columns): a single hit on
+/// minified JS / a huge single-line JSON can blow up the context; overlong lines are truncated for display
 const MAX_GREP_LINE_CHARS: usize = 500;
-/// Grep/Glob 输出总字符预算：上下文行会放大输出（200 命中 × 11 行窗口），
-/// 预算内先到先得，超了停止扫描并提示分页
+/// Grep/Glob total output character budget: context lines amplify output (200 hits × an 11-line window);
+/// first come first served within the budget — past it, scanning stops with a pagination hint
 const MAX_GREP_OUTPUT_CHARS: usize = 30 * 1024;
 
-/// Grep 输出行截断（超 500 字符加标注）
+/// Truncate a Grep output line (annotate when over 500 characters)
 fn truncate_grep_line(line: &str) -> String {
     if line.chars().count() > MAX_GREP_LINE_CHARS {
         let taken: String = line.chars().take(MAX_GREP_LINE_CHARS).collect();
-        format!("{taken} [...行超长已截断]")
+        format!("{taken} [...line too long; truncated]")
     } else {
         line.to_string()
     }
 }
-/// Read 读盘前的文件体积上限：防止「先整个读进内存再做输出预算」撑爆内存
+/// File size cap before Read hits the disk: prevents "load the whole file into memory, then apply the output budget" from exhausting memory
 const MAX_READ_FILE_BYTES: u64 = 100 * 1024 * 1024;
-/// Edit 上限（整读+整写，比 Read 更保守）
+/// Edit cap (whole read + whole write, more conservative than Read)
 const MAX_EDIT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
-/// 体积护栏的报错构造：超上限返回 Some(文案)，调用方各自负责 stat 与 NotFound 文案。
+/// Size-guard error construction: returns Some(message) when over the cap; each caller handles stat and the NotFound message itself.
 fn file_size_error(len: u64, cap: u64, hint: &str) -> Option<String> {
     (len > cap).then(|| {
         format!(
-            "文件过大（{} MB，超过 {} MB 上限）；{hint}",
+            "File too large ({} MB, over the {} MB limit); {hint}",
             len / 1024 / 1024,
             cap / 1024 / 1024
         )
@@ -56,8 +56,8 @@ pub struct FileChange {
     pub deletions: u32,
 }
 
-/// 工具输出的图片（ReadMediaFile）：随 history 进模型上下文（Anthropic blocks /
-/// OpenAI 拆 user 消息），不进 protocol、不落 rollout
+/// Image output from a tool (ReadMediaFile): enters model context with history
+/// (Anthropic blocks / OpenAI split into user messages); never enters the protocol and is never persisted to the rollout
 pub struct ToolImage {
     pub media_type: String,
     pub data_base64: String,
@@ -68,10 +68,10 @@ pub struct ToolImage {
 pub struct ToolEffect {
     pub output: String,
     pub file_change: Option<FileChange>,
-    /// 本次编辑自身的 diff（「编辑前 → 编辑后」），UI 工具卡片内联渲染用；
-    /// `file_change` 是会话累计口径（review 面板用），两者粒度不同
+    /// The diff of this edit itself ("before edit → after edit"), rendered inline by the UI tool card;
+    /// `file_change` is the session-cumulative view (for the review panel) — the two differ in granularity
     pub edit_diff: Option<FileChange>,
-    /// 图片输出（ReadMediaFile）；其余工具恒为空
+    /// Image output (ReadMediaFile); always empty for other tools
     pub images: Vec<ToolImage>,
 }
 
@@ -97,7 +97,7 @@ impl From<FileChange> for pig_protocol::EditDiff {
     }
 }
 
-/// 计算单次编辑的 unified diff（编辑前 → 编辑后），相对路径归一化为 `/`。
+/// Compute the unified diff of a single edit (before edit → after edit), with relative paths normalized to `/`.
 pub(crate) fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) -> FileChange {
     let diff = similar::TextDiff::from_lines(before, after);
     let mut additions = 0;
@@ -129,12 +129,12 @@ pub(crate) fn per_edit_diff(cwd: &Path, full: &Path, before: &str, after: &str) 
     }
 }
 
-/// 会话级变更追踪：首次修改前快照原始字节，diff 始终是「原始 → 当前」（LF 视图）。
-/// 快照经 dirty 标记由 session 侧落盘（file_originals 表），重启后 restore 恢复基线。
-/// 快照存原始字节（非 String），GBK/UTF-16/二进制都能字节级 revert；
-/// 持久化边界仍是 String，经 snapshot_to_store/from_store 转换（非 UTF-8 走 hex）。
+/// Session-level change tracking: snapshots the original bytes before the first modification; the diff is always "original → current" (LF view).
+/// Snapshots are persisted on the session side via the dirty flag (file_originals table); restore rebuilds the baseline after restart.
+/// Snapshots store raw bytes (not String), so GBK/UTF-16/binary files can all be reverted at the byte level;
+/// the persistence boundary is still String, converted via snapshot_to_store/from_store (non-UTF-8 goes through hex).
 ///
-/// 另有一层**每轮**追踪（ZCode turn-file-changes 同款口径）：turn 内首次写前
+/// There is also a second, **per-turn** tracking layer (same shape as ZCode turn-file-changes): before the first write within a turn
 mod bash;
 mod bash_policy;
 mod edit;
@@ -150,8 +150,8 @@ mod websearch;
 mod write;
 pub(crate) use write::atomic_write;
 
-// 子模块整体提升到 crate 可见（根模块的 registry/工具间互引用）；对外 API
-// 的可见性以原先为准，由下方显式 pub use 钉住（调用点零改动）。
+// Submodules are lifted to crate visibility wholesale (the root module's registry / cross-tool references);
+// external API visibility stays as before, pinned by the explicit pub use below (zero call-site changes).
 pub(crate) use fetch::*;
 pub(crate) use media::*;
 pub(crate) use misc::*;
@@ -160,6 +160,7 @@ pub(crate) use read::*;
 pub(crate) use tracker::*;
 pub(crate) use websearch::*;
 
+pub use bash::DangerReason;
 pub use bash::is_dangerous_command;
 pub use bash_policy::is_readonly_command;
 pub use edit::{EditMatchError, EditOutcome, compute_edit};
@@ -176,7 +177,7 @@ pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
 
 pub use pig_protocol::{TodoItem, TodoStatus};
 
-/// 会话共享的待办清单（Arc 句柄，Session 与 ToolContext 共用）。
+/// Session-shared todo list (Arc handle, shared by Session and ToolContext).
 pub type TodoHandle = std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>;
 
 pub struct ToolContext<'a> {
@@ -188,7 +189,7 @@ pub struct ToolContext<'a> {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn schema(&self) -> serde_json::Value;
-    /// 只读工具在任何模式下都免审批
+    /// Read-only tools are exempt from approval in every mode
     fn read_only(&self) -> bool {
         false
     }
@@ -227,13 +228,13 @@ pub fn schemas() -> Vec<serde_json::Value> {
     all().iter().map(|tool| tool.schema()).collect()
 }
 
-/// 根会话工具集 = 全部内置工具 + Agent/AgentSwarm + Skill（子代理循环用
-/// all() 收窄后在 spawn 点单独补 Skill，天然无 Agent 防嵌套）。
-/// profiles 由调用方传**会话冻结快照**：档案清单内嵌在 Agent/AgentSwarm 的
-/// description 里，每步重扫磁盘会让编辑子代理档案打断 tools 前缀缓存
-/// （tools 在缓存前缀最前面，变了从第 0 字节起全量失效；kimi
-/// frozenCatalogProfiles / ZCode 启动装配同款取舍）。spawn 执行时另走
-/// load_profiles 现读，清单过期由"档案不存在"报错自愈
+/// Root session tool set = all built-in tools + Agent/AgentSwarm + Skill (subagent loops use a
+/// narrowed all() with Skill added separately at the spawn point, naturally excluding Agent to prevent nesting).
+/// profiles is a **session-frozen snapshot** passed by the caller: the profile list is embedded in the
+/// Agent/AgentSwarm descriptions, and re-scanning disk every step would let editing a subagent profile break the tools prefix cache
+/// (tools sit at the very front of the cache prefix; any change invalidates everything from byte 0; the same
+/// trade-off as kimi frozenCatalogProfiles / ZCode startup assembly). At spawn time execution re-reads
+/// via load_profiles, so a stale list self-heals through the "profile does not exist" error
 pub fn all_root(
     cwd: &Path,
     data_dir: &Path,
@@ -246,7 +247,7 @@ pub fn all_root(
     tools
 }
 
-/// 根会话工具 schema 集（含 Agent）；入参口径与 all_root 一致
+/// Root session tool schema set (including Agent); parameters match all_root
 pub fn schemas_root(
     cwd: &Path,
     data_dir: &Path,
@@ -258,19 +259,19 @@ pub fn schemas_root(
         .collect()
 }
 
-/// 审批判定：计划模式在更早处整类硬拒（与模式正交），这里只管权限档。
-/// Yolo 与 FullAccess 都不审批（危险命令强制弹窗在 session 层，Yolo 在那里也跳过）。
+/// Approval decision: plan mode hard-rejects whole categories earlier (orthogonal to modes); only the permission tier matters here.
+/// Neither Yolo nor FullAccess requires approval (the dangerous-command forced dialog lives in the session layer, which Yolo skips as well).
 pub fn requires_approval(tool: &dyn Tool, mode: ExecMode) -> bool {
-    // Agent/AgentSwarm 一律免审批：子代理内部每个写操作会自己走审批门，
-    // 不对委派调用本身二次审批（弹窗文案也没法描述整个子任务）
+    // Agent/AgentSwarm are always approval-free: each write operation inside the subagent goes through its own approval gate,
+    // so the delegated call itself is not approved twice (dialog copy could not describe the whole subtask anyway)
     if tool.name() == "Agent" || tool.name() == "AgentSwarm" {
         return false;
     }
     match mode {
         ExecMode::FullAccess | ExecMode::Yolo => false,
         ExecMode::ConfirmBeforeEdit => !tool.read_only(),
-        // MCP 工具无 annotations 时按非只读保守处理：AutoEdit 下也弹审批
-        //（is_shell 只覆盖 Bash，挡不住 MCP 写工具直通）
+        // MCP tools without annotations are treated conservatively as non-read-only: approval is shown even under AutoEdit
+        // (is_shell only covers Bash and cannot intercept MCP write tools passing through)
         ExecMode::AutoEdit => {
             tool.is_shell() || (tool.name().starts_with("mcp__") && !tool.read_only())
         }
@@ -288,21 +289,21 @@ pub fn summarize(call: &ToolCall) -> String {
         "Grep" => args["pattern"].as_str().unwrap_or("?").to_string(),
         "TodoList" => args["todos"]
             .as_array()
-            .map(|items| format!("更新待办（{} 项）", items.len()))
-            .unwrap_or_else(|| "查看待办".to_string()),
+            .map(|items| format!("update todos ({} items)", items.len()))
+            .unwrap_or_else(|| "view todos".to_string()),
         "FetchURL" => args["url"].as_str().unwrap_or("?").to_string(),
         "WebSearch" => args["query"].as_str().unwrap_or("?").to_string(),
         "Skill" => args["skill"].as_str().unwrap_or("?").to_string(),
-        "TaskList" => "列出后台任务".to_string(),
+        "TaskList" => "list background tasks".to_string(),
         "TaskOutput" | "TaskStop" => args["task_id"].as_str().unwrap_or("?").to_string(),
         "AskUserQuestion" => args["questions"][0]["question"]
             .as_str()
             .unwrap_or("?")
             .to_string(),
-        "ExitPlanMode" => "请求退出计划模式".to_string(),
-        "EnterPlanMode" => "请求进入计划模式".to_string(),
+        "ExitPlanMode" => "requesting to exit plan mode".to_string(),
+        "EnterPlanMode" => "requesting to enter plan mode".to_string(),
         "Agent" => format!(
-            "子代理 {}: {}",
+            "subagent {}: {}",
             args["subagent_type"]
                 .as_str()
                 .or_else(|| args["resume"].as_str())
@@ -310,7 +311,7 @@ pub fn summarize(call: &ToolCall) -> String {
             args["description"].as_str().unwrap_or("?")
         ),
         "AgentSwarm" => format!(
-            "子代理群（{} 项）",
+            "subagent swarm ({} items)",
             args["items"].as_array().map(|a| a.len()).unwrap_or(0)
                 + args["resume_agent_ids"]
                     .as_object()
@@ -319,12 +320,12 @@ pub fn summarize(call: &ToolCall) -> String {
         ),
         _ => args.to_string(),
     };
-    // 不在源头截断：折叠行由 UI 做单行省略，展开卡片要完整显示；
-    // 全文本就在 arguments 里随 rollout 持久化，摘要不再额外截短
+    // No truncation at the source: the UI ellipsizes the collapsed line to one row while the expanded card shows the full text;
+    // the full text is persisted in arguments with the rollout, so the summary is not shortened further
     raw
 }
 
-/// 兼容入口：仅内置工具（集成测试用）；运行时路径（门控/并发只读段）走 execute_with_extra
+/// Compatibility entry: built-in tools only (for integration tests); runtime paths (gating / concurrent read-only sections) go through execute_with_extra
 pub async fn execute(
     call: &ToolCall,
     ctx: ToolContext<'_>,
@@ -341,7 +342,7 @@ pub async fn execute(
 pub async fn execute_with_extra(
     call: &ToolCall,
     ctx: ToolContext<'_>,
-    // 内置以外的运行时工具（MCP）：按名查找的兜底清单
+    // Runtime tools beyond the built-ins (MCP): fallback list for lookup by name
     extra: &[Box<dyn Tool>],
 ) -> (
     String,
@@ -357,7 +358,13 @@ pub async fn execute_with_extra(
         .chain(extra.iter())
         .find(|tool| tool.name() == call.name)
     else {
-        return (format!("未知工具: {}", call.name), true, None, None, vec![]);
+        return (
+            format!("Unknown tool: {}", call.name),
+            true,
+            None,
+            None,
+            vec![],
+        );
     };
     match tool.execute(args, ctx).await {
         Ok(effect) => (
@@ -371,17 +378,17 @@ pub async fn execute_with_extra(
     }
 }
 
-/// resolve_core 的越界形态（供策略层区分处理；文案由调用方定）
+/// Out-of-bounds shapes from resolve_core (for the policy layer to distinguish; messages are decided by the caller)
 enum BoundFailure {
-    /// 父目录 canonical 后在工作区外
+    /// Parent directory, once canonicalized, lies outside the workspace
     ParentOutside {
         resolved: PathBuf,
     },
-    /// 目标已存在（含符号链接），canonical 后在工作区外
+    /// Target already exists (including symlinks) and canonicalizes outside the workspace
     TargetOutside {
         resolved: PathBuf,
     },
-    /// 悬空符号链接：fail-closed，策略层也不放行
+    /// Dangling symlink: fail-closed; the policy layer does not let it through either
     DanglingSymlink,
     Other(String),
 }

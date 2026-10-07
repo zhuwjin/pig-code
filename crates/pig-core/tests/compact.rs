@@ -40,7 +40,7 @@ async fn wait_turn(events: &async_channel::Receiver<Event>) -> Vec<Event> {
     .await
 }
 
-/// 模型摘要 compact：历史被摘要替换、rollout 有 compact 记录、续聊历史变短。
+/// Model-summary compact: history is replaced by the summary, the rollout contains a compact record, and follow-up history is shorter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_summary_compact() {
     let (config_path, cwd, data_dir) = setup("m5-compact");
@@ -49,10 +49,10 @@ async fn model_summary_compact() {
     let events = agent.events.clone();
     let sid = new_session(&agent, cwd).await;
 
-    // 两轮对话积累历史（7 条）
-    send(&events, &agent, &sid, "读一下 mock 文件并总结");
+    // Two conversation rounds to accumulate history (7 entries)
+    send(&events, &agent, &sid, "Read the mock file and summarize");
     wait_turn(&events).await;
-    send(&events, &agent, &sid, "再总结一下");
+    send(&events, &agent, &sid, "Summarize again");
     wait_turn(&events).await;
 
     agent
@@ -67,7 +67,7 @@ async fn model_summary_compact() {
         matches!(e, Event::ContextCompacted { .. })
     })
     .await;
-    // CompactStarted 必须先于 ContextCompacted 到达（UI「正在压缩」态配对）
+    // CompactStarted must arrive before ContextCompacted (pairs with the UI's "compacting" state)
     let started_pos = collected.iter().position(|e| {
         matches!(
             e,
@@ -79,7 +79,7 @@ async fn model_summary_compact() {
     });
     assert!(
         started_pos.is_some() && started_pos < collected.len().checked_sub(1),
-        "CompactStarted 应在 ContextCompacted 之前: {collected:#?}"
+        "CompactStarted must arrive before ContextCompacted: {collected:#?}"
     );
     let Some(Event::ContextCompacted {
         omitted,
@@ -88,22 +88,28 @@ async fn model_summary_compact() {
         ..
     }) = collected.last()
     else {
-        panic!("应有 ContextCompacted")
+        panic!("expected ContextCompacted")
     };
-    // 尾部切到 user 边界后保留 2 条（窗口 [T,A,u,A] 裁掉前两条）
+    // After cutting the tail back to a user boundary, 2 entries remain (window [T,A,u,A] drops the first two)
     assert_eq!(*omitted, 4);
-    assert!(!automatic, "手动 compact");
-    assert!(note.contains("模型摘要"), "应走模型摘要: {note}");
-    assert!(note.contains(mock::SUMMARY_MARKER), "应含摘要文本: {note}");
+    assert!(!automatic, "manual compact");
+    assert!(
+        note.contains("model summary"),
+        "should use model summary: {note}"
+    );
+    assert!(
+        note.contains(mock::SUMMARY_MARKER),
+        "should contain summary text: {note}"
+    );
 
-    // rollout 应有 compact 记录
+    // The rollout should contain a compact record
     let rollout =
         std::fs::read_to_string(data_dir.join("sessions").join(format!("{sid}.jsonl"))).unwrap();
     assert!(rollout.contains("\"type\":\"compact\""), "{rollout}");
     assert!(rollout.contains(mock::SUMMARY_MARKER));
     assert!(rollout.contains("\"used_after\""), "{rollout}");
 
-    // compact 后历史 = system + 摘要 + user 边界后 2 条 + 新 user = 5
+    // Post-compact history = system + summary + 2 entries after the user boundary + new user = 5
     send(&events, &agent, &sid, "ECHO_HISTORY");
     let collected = wait_turn(&events).await;
     let count = collected.iter().find_map(|e| match e {
@@ -116,7 +122,7 @@ async fn model_summary_compact() {
     agent.shutdown();
 }
 
-/// 自动 compact：usage 超阈值 → 下次采样前自动摘要。
+/// Auto compact: usage exceeds the threshold → automatically summarized before the next sampling.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_compact_on_high_usage() {
     let (config_path, cwd, data_dir) = setup("m5-auto");
@@ -124,14 +130,14 @@ async fn auto_compact_on_high_usage() {
     let events = agent.events.clone();
     let sid = new_session(&agent, cwd).await;
 
-    // 先一轮工具链攒历史（system+4 条）
-    send(&events, &agent, &sid, "读一下 mock 文件并总结");
+    // One tool-chain turn first to accumulate history (system + 4 entries)
+    send(&events, &agent, &sid, "Read the mock file and summarize");
     wait_turn(&events).await;
-    // mock 报告 usage=120000（阈值 = 128000-8192-13000 = 106808）
+    // mock reports usage=120000 (threshold = 128000-8192-13000 = 106808)
     send(&events, &agent, &sid, "ECHO_USAGE 120000");
     wait_turn(&events).await;
 
-    // 下一轮：采样前应先自动 compact（此时历史 7 条 > 保留 4+1）
+    // Next turn: auto compact should run before sampling (history is 7 entries > kept 4+1 at this point)
     send(&events, &agent, &sid, "ECHO_HISTORY");
     let collected = wait_turn(&events).await;
     let compact_pos = collected
@@ -140,13 +146,18 @@ async fn auto_compact_on_high_usage() {
     let complete_pos = collected
         .iter()
         .position(|e| matches!(e, Event::TurnComplete { .. }));
-    assert!(compact_pos.is_some(), "应自动 compact: {collected:#?}");
-    assert!(compact_pos < complete_pos, "compact 应在 TurnComplete 之前");
+    assert!(compact_pos.is_some(), "should auto-compact: {collected:#?}");
+    assert!(
+        compact_pos < complete_pos,
+        "compact must happen before TurnComplete"
+    );
     agent.shutdown();
 }
 
-/// 压缩后水位重置：ContextUsage 立即降为估算值；下一回合不再因旧高水位
-/// 触发重复自动压缩；重启回放补发压缩条与新水位。
+/// Post-compact watermark reset: ContextUsage immediately drops to an estimated
+/// value; the next turn no longer triggers a repeated auto-compact from the
+/// stale high watermark; restart replay re-emits the compact separator and the
+/// new watermark.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compact_usage_resets_and_replays() {
     let (config_path, cwd, data_dir) = setup("m5-usage-reset");
@@ -158,15 +169,15 @@ async fn compact_usage_resets_and_replays() {
     let events = agent.events.clone();
     let sid = new_session(&agent, cwd.clone()).await;
 
-    send(&events, &agent, &sid, "读一下 mock 文件并总结");
+    send(&events, &agent, &sid, "Read the mock file and summarize");
     wait_turn(&events).await;
-    // mock 报告 usage=120000（阈值 106808 之上），水位抬高
+    // mock reports usage=120000 (above the 106808 threshold), raising the watermark
     send(&events, &agent, &sid, "ECHO_USAGE 120000");
     let high = wait_turn(&events).await;
     assert!(
         high.iter()
             .any(|e| matches!(e, Event::ContextUsage { used: 120000, .. })),
-        "高水位应已生效: {high:#?}"
+        "high watermark should be in effect: {high:#?}"
     );
 
     agent
@@ -181,35 +192,37 @@ async fn compact_usage_resets_and_replays() {
         matches!(e, Event::ContextCompacted { .. })
     })
     .await;
-    // 压缩后应立即补发估算水位（远小于 120000）
+    // After compact, an estimated watermark should be re-emitted immediately (far below 120000)
     assert!(
         collected
             .iter()
             .any(|e| matches!(e, Event::ContextUsage { used, .. } if *used < 120000)),
-        "压缩后应补发估算水位: {collected:#?}"
+        "estimated usage should be re-emitted right after compact: {collected:#?}"
     );
 
-    // 下一回合：水位已重置，不得再触发自动压缩（旧逻辑会拿 120000 再压一次，
-    // 历史 ≤5 条时早退并多发一条「历史很短」ContextCompacted）
+    // Next turn: the watermark is reset, no further auto-compact may trigger
+    // (the old logic would re-compact using 120000 and, with history ≤5 entries,
+    // early-return while emitting an extra "history is short" ContextCompacted)
     send(&events, &agent, &sid, "ECHO_HISTORY");
     let collected = wait_turn(&events).await;
     assert!(
         !collected
             .iter()
             .any(|e| matches!(e, Event::ContextCompacted { .. })),
-        "水位重置后不得重复自动压缩: {collected:#?}"
+        "must not auto-compact again after watermark reset: {collected:#?}"
     );
-    // 本回合的真实用量 = 回放后的最终水位（压缩后的 step_usage 覆盖 used_after，
-    // 更近的真实值优先）
+    // This turn's real usage = the final watermark after replay (the
+    // post-compact step_usage overrides used_after; the more recent real value
+    // wins)
     let Some(last_used) = collected.iter().find_map(|e| match e {
         Event::ContextUsage { used, .. } => Some(*used),
         _ => None,
     }) else {
-        panic!("回合应有 ContextUsage: {collected:#?}")
+        panic!("turn should have ContextUsage: {collected:#?}")
     };
     agent.shutdown();
 
-    // 模拟重启：回放应补发「上下文已压缩」分隔条事件与压缩后的水位
+    // Simulate a restart: replay should re-emit the "context compacted" separator event and the post-compact watermark
     let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
     let events2 = agent2.events.clone();
     agent2
@@ -227,18 +240,18 @@ async fn compact_usage_resets_and_replays() {
         replay
             .iter()
             .any(|e| matches!(e, Event::ContextCompacted { omitted: 4, .. })),
-        "回放应含压缩条事件: {replay:#?}"
+        "replay should include the compact separator event: {replay:#?}"
     );
     assert!(
         replay
             .iter()
             .any(|e| matches!(e, Event::ContextUsage { used, .. } if *used == last_used)),
-        "回放后水位应为压缩后回合的真实值 {last_used}（而非压缩前的 120000）: {replay:#?}"
+        "replayed usage should be the real value {last_used} from the post-compact turn (not the pre-compact 120000): {replay:#?}"
     );
     agent2.shutdown();
 }
 
-/// 摘要请求失败 → 回退朴素截断，会话不挂。
+/// Summary request fails → falls back to plain truncation; the session does not die.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compact_failure_falls_back() {
     let (config_path, cwd, data_dir) = setup("m5-fallback");
@@ -246,10 +259,10 @@ async fn compact_failure_falls_back() {
     let events = agent.events.clone();
     let sid = new_session(&agent, cwd).await;
 
-    // 历史里带上 FAIL_COMPACT 标记 → mock 对摘要请求返回 500
-    send(&events, &agent, &sid, "FAIL_COMPACT 读一下 mock 文件");
+    // Carry the FAIL_COMPACT marker in history → mock returns 500 for the summary request
+    send(&events, &agent, &sid, "FAIL_COMPACT read the mock file");
     wait_turn(&events).await;
-    send(&events, &agent, &sid, "再来一轮");
+    send(&events, &agent, &sid, "One more round");
     wait_turn(&events).await;
 
     agent
@@ -265,13 +278,16 @@ async fn compact_failure_falls_back() {
     })
     .await;
     let Some(Event::ContextCompacted { omitted, note, .. }) = collected.last() else {
-        panic!("应有 ContextCompacted")
+        panic!("expected ContextCompacted")
     };
     assert!(*omitted > 0);
-    assert!(note.contains("前文已压缩"), "{note}");
-    assert!(!note.contains("模型摘要"), "摘要失败应回退截断: {note}");
+    assert!(note.contains("Earlier context compacted"), "{note}");
+    assert!(
+        !note.contains("model summary"),
+        "summary failure should fall back to truncation: {note}"
+    );
 
-    // 会话仍可继续
+    // The session can still continue
     send(&events, &agent, &sid, "ECHO_HISTORY");
     let collected = wait_turn(&events).await;
     assert!(
@@ -279,12 +295,12 @@ async fn compact_failure_falls_back() {
             e,
             Event::TextDone { full_text, .. } if full_text.contains("HISTORY_COUNT:")
         )),
-        "compact 失败回退后会话应可继续: {collected:#?}"
+        "session should continue after compact failure fallback: {collected:#?}"
     );
     agent.shutdown();
 }
 
-/// 场景 C：计划模式输出计划文本（无工具调用）。
+/// Scenario C: plan mode outputs plan text (no tool calls).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scenario_c_plan_mode() {
     let (config_path, cwd, data_dir) = setup("m5-plan");
@@ -305,17 +321,18 @@ async fn scenario_c_plan_mode() {
         &events,
         &agent,
         &sid,
-        "SCENARIO_C 给我一个改造计划",
+        "SCENARIO_C give me a refactoring plan",
         ExecMode::AutoEdit,
     );
-    // kimi 文件语义闭环：Write 计划文件（直通免审批）→ ExitPlanMode 弹审批 →
-    // 批准后场景 B 工具链（AutoEdit：仅 Bash 弹审批）→ 收尾
+    // kimi file-semantics closed loop: Write the plan file (pass-through,
+    // approval-free) → ExitPlanMode pops an approval → after approval the
+    // scenario B tool chain (AutoEdit: only Bash pops an approval) → wrap up
     let mut collected = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         assert!(
             deadline.elapsed() < Duration::from_secs(30),
-            "超时: {collected:#?}"
+            "timed out: {collected:#?}"
         );
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
         else {
@@ -338,33 +355,33 @@ async fn scenario_c_plan_mode() {
             break;
         }
     }
-    // 计划文件真实写入（直通无审批卡）
+    // The plan file is actually written (pass-through, no approval card)
     let plan_file = cwd.join(".pigcode/plans/plan-mock.md");
     assert!(
         plan_file.exists(),
-        "Write 计划文件应直通执行: {collected:#?}"
+        "Write of the plan file should go through without approval: {collected:#?}"
     );
-    // ExitPlanMode 弹窗 detail 含计划全文
+    // The ExitPlanMode popup detail contains the full plan
     assert!(
         collected.iter().any(|e| matches!(
             e,
             Event::ApprovalRequested { tool, detail, .. }
             if tool == "ExitPlanMode" && detail.contains(mock::PLAN_MARKER)
         )),
-        "ExitPlanMode 弹窗应含计划全文: {collected:#?}"
+        "ExitPlanMode approval dialog should contain the full plan: {collected:#?}"
     );
-    // 批准后计划关闭、模式档不变
+    // After approval the plan turns off, the mode tier stays unchanged
     assert!(
         collected
             .iter()
             .any(|e| matches!(e, Event::PlanModeChanged { enabled, .. } if !enabled)),
-        "批准后计划开关关闭"
+        "plan toggle should turn off after approval"
     );
     assert!(
         collected
             .iter()
             .any(|e| matches!(e, Event::TextDone { full_text, .. } if full_text.contains(mock::SCENARIO_B_MARKER))),
-        "批准后接场景 B 工具链收尾: {collected:#?}"
+        "after approval the scenario B tool chain should finish the turn: {collected:#?}"
     );
     agent.shutdown();
 }

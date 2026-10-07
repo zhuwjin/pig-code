@@ -1,14 +1,18 @@
-//! 终端渲染核心：自绘 Element。
+//! Terminal rendering core: a self-drawn Element.
 //!
-//! 参考 tty7 `src/terminal/element.rs`（4883 行）的精简移植，保留：
-//! - RenderCell / build_grid 快照（try_lock 拿不到画上一帧，首帧/resize 强制 lock）
-//! - cell 尺寸测量（shape_line("M") 量宽）
-//! - 背景 run 合并 paint_quad、按行分段 shape_line（force_width 等宽对齐）
-//! - block 光标反色、选区高亮、IME 预编辑下划线
+//! A trimmed port of tty7 `src/terminal/element.rs` (4883 lines), keeping:
+//! - RenderCell / build_grid snapshots (draw the previous frame when try_lock
+//!   fails; force a blocking lock on the first frame and after resize)
+//! - cell size measurement (shape_line("M") for the width)
+//! - merged background runs via paint_quad, per-row segmented shape_line
+//!   (force_width for monospace alignment)
+//! - inverted block cursor, selection highlight, and IME preedit underline
 //!
-//! 砍掉：powerline 字形、kitty 图片、boxdraw 自绘、搜索/link 高亮、dim/sliver、
-//! ink 测量与图标缩放、ligature drift 修正（已通过 calt/liga/clig=0 关死连字，
-//! 等宽字体的 ASCII run 不会漂移，越界部分由 content mask 裁掉）。
+//! Dropped: powerline glyphs, kitty images, self-drawn boxdraw, search/link
+//! highlights, dim/sliver, ink measurement and icon scaling, ligature drift
+//! correction (ligatures are already disabled via calt/liga/clig=0, so ASCII
+//! runs of a monospace font cannot drift; out-of-bounds parts are clipped by
+//! the content mask).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -30,7 +34,7 @@ use super::colors::{TermColors, resolve as resolve_color, rgb_to_hsla};
 use super::input::TerminalInputHandler;
 use super::view::TerminalView;
 
-/// SGR 2（暗淡）的不透明度（tty7 DIM_OPACITY）
+/// Opacity for SGR 2 dim (tty7 DIM_OPACITY)
 const DIM_OPACITY: f32 = 0.66;
 
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
@@ -44,7 +48,7 @@ enum UnderlineKind {
 #[derive(Clone)]
 pub(crate) struct RenderCell {
     c: char,
-    /// 零宽组合字符（alacritty 已聚类到 base cell 上）
+    /// Zero-width combining chars (already clustered onto the base cell by alacritty)
     marks: Option<Box<[char]>>,
     fg: Hsla,
     bg: Hsla,
@@ -54,7 +58,7 @@ pub(crate) struct RenderCell {
     strikeout: bool,
     underline: UnderlineKind,
     underline_color: Option<Hsla>,
-    /// 宽字符的右半占位 cell
+    /// Right-half placeholder cell of a wide char
     spacer: bool,
     selected: bool,
 }
@@ -78,8 +82,9 @@ impl Default for RenderCell {
     }
 }
 
-/// alacritty cell → 渲染快照（参考 tty7 element.rs:195 snapshot_cell，
-/// 砍掉 osc8/link/match；DOUBLE/DOTTED/DASHED 下划线近似为单线）
+/// alacritty cell → render snapshot (see snapshot_cell at tty7
+/// element.rs:195; osc8/link/match dropped; DOUBLE/DOTTED/DASHED underlines
+/// approximated as a single line)
 fn snapshot_cell(
     cell: &Cell,
     point: AlacPoint,
@@ -126,7 +131,7 @@ fn snapshot_cell(
                 | Flags::DOTTED_UNDERLINE
                 | Flags::DASHED_UNDERLINE,
         ) {
-            // 双线/点线/虚线没有 gpui 原生样式，近似单线（tty7 有自绘特殊下划线，砍掉）
+            // No native gpui style for double/dotted/dashed lines; approximate with a single line (tty7 self-draws special underlines, dropped here)
             UnderlineKind::Single
         } else {
             UnderlineKind::None
@@ -146,7 +151,7 @@ fn snapshot_cell(
     rc
 }
 
-/// 光标形态（alacritty CursorShape 的三态化简）
+/// Cursor shape (a three-state simplification of alacritty CursorShape)
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum CursorKind {
     Block,
@@ -178,7 +183,7 @@ pub(crate) struct GridSnapshot {
     any_selected: bool,
 }
 
-/// grid 的像素几何（参考 tty7 element.rs 的 CellGeom）
+/// Pixel geometry of the grid (see CellGeom in tty7 element.rs)
 #[derive(Clone, Copy)]
 struct CellGeom {
     origin: Point<Pixels>,
@@ -198,7 +203,8 @@ impl CellGeom {
         )
     }
 
-    /// 像素坐标 → (col, row, 是否左半)。越界钳到 grid 内，便于拖选画出边界
+    /// Pixel position → (col, row, whether left half). Out-of-range positions
+    /// are clamped into the grid so drag selection can still paint the boundary
     fn pos_to_cell(&self, pos: Point<Pixels>) -> (usize, usize, bool) {
         let lx = (pos.x - self.origin.x).as_f32().max(0.);
         let ly = (pos.y - self.origin.y).as_f32().max(0.);
@@ -220,11 +226,15 @@ impl TerminalElement {
         Self { view }
     }
 
-    /// 从 alacritty grid 取一帧快照（参考 tty7 element.rs:1839 build_grid）。
+    /// Take a one-frame snapshot from the alacritty grid (see build_grid at tty7
+    /// element.rs:1839).
     ///
-    /// 渲染不排队等 grid 锁——持锁的可能是正在喂大批输出的读线程，一个 pane
-    /// 的写入速度不应拖住整个窗口的帧率。拿不到锁就返回 None，调用方重画
-    /// 上一帧；只有首帧与 resize 后（旧帧形状不对）才 must_block 强等。
+    /// Rendering never queues on the grid lock; the holder may be the reader
+    /// thread feeding a large burst of output, and one pane's write speed must
+    /// not stall the whole window's frame rate. When the lock is unavailable,
+    /// return None and the caller redraws the previous frame; only the first
+    /// frame and the frame after a resize (when the old frame has the wrong
+    /// shape) use must_block to wait.
     fn build_grid(
         &self,
         colors: &TermColors,
@@ -240,7 +250,7 @@ impl TerminalElement {
             None if must_block => term_arc.lock(),
             None => return None,
         };
-        // 在锁内才清 buf：提前返回要保证上一帧内容原样留给调用方重画
+        // Clear buf only while holding the lock: early returns must leave the previous frame intact for the caller to redraw
         buf.clear();
         buf.resize(rows * cols, RenderCell::default());
 
@@ -265,7 +275,7 @@ impl TerminalElement {
             Some(GridCursor {
                 row: crow as usize,
                 col: cur.point.column.0,
-                // 程序藏光标（?25l）时 alacritty 报 Hidden——TUI 自己画假光标
+                // When the program hides the cursor (?25l) alacritty reports Hidden; the TUI draws its own fake cursor
                 hidden: matches!(cur.shape, CursorShape::Hidden),
                 kind: CursorKind::from_shape(cur.shape),
             })
@@ -278,8 +288,10 @@ impl TerminalElement {
         })
     }
 
-    /// 鼠标处理器挂在 paint 里（geom/hitbox 是当帧值）。只负责：按下聚焦 +
-    /// 起选区、拖动更新、松开结束（参考 tty7 element.rs:2079，砍掉 link/菜单）。
+    /// Mouse handlers are registered in paint (geom/hitbox are the current
+    /// frame's values). They only handle: press to focus and start a selection,
+    /// drag to update, release to finish (see tty7 element.rs:2079; link/menu
+    /// dropped).
     fn register_mouse_handlers(&self, geom: CellGeom, hitbox: HitboxId, window: &mut Window) {
         let view = self.view.clone();
         window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
@@ -368,11 +380,11 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // 等宽字体与字号跟随主题（设置里改了等宽字体/字号即时生效）
+        // Monospace font and size follow the theme (changes in settings take effect immediately)
         let font_size = cx.theme().mono_font_size;
         let base_font = font(cx.theme().mono_font_family.clone());
 
-        // 等宽字体：量 "M" 的宽即 cell 宽（tty7 同款测量）
+        // Monospace font: measure the width of "M" as the cell width (same measurement as tty7)
         let sample = window.text_system().shape_line(
             SharedString::new_static("M"),
             font_size,
@@ -397,7 +409,7 @@ impl Element for TerminalElement {
             .floor()
             .max(1.0) as usize;
 
-        // 尺寸有变才真的 resize（Term 与 PTY 都是 Arc/锁，prepaint 里调用安全）
+        // Only resize when the size actually changed (Term and PTY are both Arc/lock; safe to call in prepaint)
         self.view.update(cx, |view, _| {
             view.set_grid_size(cols, rows, cell_width, line_height, window.scale_factor());
         });
@@ -436,7 +448,7 @@ impl Element for TerminalElement {
         let focused = self.view.read(cx).focus_handle.is_focused(window);
         let cursor_visible = self.view.read(cx).cursor_visible;
 
-        // 借出本 pane 的上一帧：build_grid 拿到锁就覆盖它，拿不到就原样重画
+        // Borrow this pane's previous frame: build_grid overwrites it when it gets the lock, otherwise it is redrawn as-is
         let mut buf = self
             .view
             .update(cx, |view, _| std::mem::take(&mut view.grid_buf));
@@ -448,14 +460,14 @@ impl Element for TerminalElement {
             self.view.update(cx, |view, _| view.grid_snap = Some(snap));
         }
         let Some(snap) = built.or(previous) else {
-            // must_block 保证 build_grid 在这两条路上必然有值
+            // must_block guarantees build_grid returns a value on both of these paths
             self.view.update(cx, |view, _| view.grid_buf = buf);
             return;
         };
         let cursor = snap.cursor;
         let render_cursor = cursor.filter(|c| !c.hidden);
 
-        // block 光标在画背景前反色进 buf（反色视频），字形走正常路径盖在上面
+        // The block cursor is inverted into buf before painting backgrounds (reverse video); the glyph goes through the normal path on top
         if focused
             && cursor_visible
             && let Some(c) = render_cursor
@@ -506,8 +518,9 @@ impl Element for TerminalElement {
     }
 }
 
-/// 背景色 run：同行同色的连续 cell 合并成一个 quad（tty7 paint_backgrounds）。
-/// 宽字符的 spacer 被并入左侧 lead cell 的 run，两个半格一次涂满。
+/// Background color runs: consecutive same-color cells in a row are merged into
+/// one quad (tty7 paint_backgrounds). A wide char's spacer is folded into the run
+/// of the lead cell to its left, filling both halves at once.
 fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
     for row in 0..geom.rows {
         let mut col = 0;
@@ -532,7 +545,7 @@ fn paint_backgrounds(window: &mut Window, geom: &CellGeom, buf: &[RenderCell]) {
     }
 }
 
-/// 选区高亮 run（tty7 paint_cell_runs）
+/// Selection highlight runs (tty7 paint_cell_runs)
 fn paint_cell_runs(
     window: &mut Window,
     geom: &CellGeom,
@@ -609,17 +622,17 @@ fn is_blank(cell: &RenderCell) -> bool {
 
 #[derive(Debug, PartialEq)]
 enum RowSeg {
-    /// 同样式 ASCII 连续段（含中间跳过的空白，两端不含）
+    /// A contiguous run of same-style ASCII (including skipped blanks in the middle, excluding both ends)
     Run {
         start: usize,
         cells: usize,
         text: String,
     },
-    /// 宽字符（CJK/emoji），占 2 cell
+    /// Wide char (CJK/emoji), occupying 2 cells
     Wide { start: usize, text: SharedString },
-    /// 其他单 cell 非 ASCII 字符
+    /// Other single-cell non-ASCII chars
     Solo { col: usize },
-    /// 带零宽组合字符的 grapheme 聚类
+    /// Grapheme cluster carrying zero-width combining chars
     Cluster {
         col: usize,
         cells: usize,
@@ -633,8 +646,9 @@ fn push_cell(text: &mut String, cell: &RenderCell) {
     text.extend(cell.marks.iter().flat_map(|marks| marks.iter()));
 }
 
-/// 泰语 Sara Am 等特殊组合符：alacritty 把它放在独立 cell，但排版上必须
-/// 与前一个字符同形（参考 tty7 element.rs:736）
+/// Special combining marks such as Thai Sara Am: alacritty puts them in a
+/// separate cell, but typographically they must shape together with the
+/// preceding char (see tty7 element.rs:736)
 fn is_sara_am(c: char) -> bool {
     matches!(c, '\u{0E33}' | '\u{0EB3}')
 }
@@ -644,7 +658,7 @@ fn sara_am_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
         .filter(|cell| !cell.spacer && is_sara_am(cell.c))
 }
 
-/// 旗帜 emoji 的两个 regional indicator 必须聚成一个 grapheme
+/// The two regional indicators of a flag emoji must cluster into one grapheme
 fn is_regional_indicator(c: char) -> bool {
     matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
 }
@@ -654,7 +668,7 @@ fn regional_indicator_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> 
         .filter(|cell| !cell.spacer && is_regional_indicator(cell.c))
 }
 
-/// 一行 RenderCell 切成可绘制的分段（参考 tty7 element.rs:754 segment_row）
+/// Slice one row of RenderCell into paintable segments (see segment_row at tty7 element.rs:754)
 fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
     let mut segs = Vec::new();
     let mut col = 0;
@@ -670,7 +684,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                 col += 1;
                 continue;
             }
-            // 带下划线/删除线的空白也要画（装饰线跨过空格）
+            // Blanks carrying underline/strikethrough still need painting (decorations span spaces)
             let start = col;
             let mut text = String::new();
             while col < row.len()
@@ -688,7 +702,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
             });
             continue;
         }
-        // 旗帜对：任一组合符分支之前先合对，拆开会画成两个字母框
+        // Flag pairs: pair them before any combining-mark branch; splitting them would draw two letter boxes
         if is_regional_indicator(cell.c)
             && let Some(next) = regional_indicator_at(row, col + 1)
         {
@@ -794,8 +808,8 @@ thread_local! {
     static CHAR_STRINGS: RefCell<HashMap<char, SharedString>> = RefCell::new(HashMap::new());
 }
 
-/// 单字符的 SharedString 缓存：Solo/Wide 段每帧都构造，避免重复分配
-/// （tty7 element.rs:898 同款）
+/// SharedString cache for single chars: Solo/Wide segments are built every
+/// frame, avoiding repeated allocations (same as tty7 element.rs:898)
 fn char_string(c: char) -> SharedString {
     CHAR_STRINGS.with(|m| {
         let mut m = m.borrow_mut();
@@ -805,9 +819,10 @@ fn char_string(c: char) -> SharedString {
     })
 }
 
-/// 构造带粗斜体的字体（tty7 element.rs:149 build_font）。
-/// 终端必须关死连字：一个连字占一格会让整行漂移。gpui 自带的
-/// disable_ligatures 只关 calt，liga/clig 也得点名（tty7 :167 的长注）。
+/// Build a font with bold/italic applied (tty7 element.rs:149 build_font).
+/// Terminals must fully disable ligatures: one ligature occupying a single cell
+/// would make the whole line drift. gpui's built-in disable_ligatures only turns
+/// off calt, so liga/clig must be named as well (long note at tty7 :167).
 fn build_font(base: &Font, bold: bool, italic: bool) -> Font {
     let mut f = base.clone();
     f.weight = if bold {
@@ -834,9 +849,10 @@ fn ligatures_off() -> gpui_kit::FontFeatures {
     ]))
 }
 
-/// 按分段 shape + 绘制（tty7 paint_glyphs 的精简版：无 powerline/boxdraw 自绘、
-/// 无 ink 测量与缩放、无 drift 修正——连字已关，ASCII run 天然等宽，越界由
-/// content mask 裁掉）
+/// Shape and paint per segment (a trimmed tty7 paint_glyphs: no powerline/boxdraw
+/// self-drawing, no ink measurement or scaling, no drift correction; ligatures
+/// are off so ASCII runs are naturally monospace, and out-of-bounds parts are
+/// clipped by the content mask)
 fn paint_glyphs(
     window: &mut Window,
     cx: &mut App,
@@ -872,7 +888,7 @@ fn paint_glyphs(
                     start,
                     cells,
                     SharedString::from(text),
-                    // force_width=cell 宽：每个字形钳进自己的 cell（等宽对齐）
+                    // force_width = cell width: every glyph is clamped into its own cell (monospace alignment)
                     Some(geom.cell_width),
                 ),
                 RowSeg::Wide { start, text } => (start, 2, text, Some(geom.cell_width * 2.)),
@@ -905,7 +921,7 @@ fn paint_glyphs(
             let shaped = window
                 .text_system()
                 .shape_line(text, font_size, run_buf, force_width);
-            // 分段画进自己占据的 cell 矩形，超宽字形裁掉不外溢
+            // Paint each segment into the cell rect it occupies; oversized glyphs are clipped and do not spill
             let clip = Bounds::new(
                 point(x, y),
                 size(geom.cell_width * cells as f32, geom.line_height),
@@ -924,8 +940,9 @@ fn paint_glyphs(
     }
 }
 
-/// 把聚焦 block 光标下的 cell 改成反色视频：光标色实底 + 背景色字形
-/// （tty7 invert_cursor_cell，ink 简化为默认背景色）
+/// Turn the cell under the focused block cursor into reverse video: a solid
+/// cursor-color background plus a background-colored glyph (tty7
+/// invert_cursor_cell, with ink simplified to the default background color)
 fn invert_cursor_cell(
     buf: &mut [RenderCell],
     cols: usize,
@@ -933,7 +950,7 @@ fn invert_cursor_cell(
     col: usize,
     colors: &TermColors,
 ) {
-    // TUI 可能把光标停在宽字符右半；字形在 lead cell 上，退回去
+    // The TUI may park the cursor on the right half of a wide char; the glyph lives on the lead cell, so step back
     let col = match buf.get(row * cols + col) {
         Some(c) if c.spacer && col > 0 => col - 1,
         _ => col,
@@ -946,8 +963,9 @@ fn invert_cursor_cell(
     cell.fg = colors.default_bg;
 }
 
-/// 光标（tty7 paint_cursor）：失焦画空心框；聚焦且闪烁位为亮时按形态画，
-/// block 已在 buf 里反色，这里无事可做
+/// Cursor (tty7 paint_cursor): draw a hollow box when unfocused; when focused
+/// and the blink phase is on, draw by shape. Block is already inverted in buf,
+/// so there is nothing to do here
 fn paint_cursor(
     window: &mut Window,
     geom: &CellGeom,
@@ -987,8 +1005,9 @@ fn paint_cursor(
     }
 }
 
-/// 预编辑里有没有值得画的东西：纯空白/控制字符的组合（某些 IME 开了又
-/// 留空的 composition）不该在光标 cell 上挖个洞（参考 tty7 #966 的教训）
+/// Whether the preedit has anything worth painting: a mix of pure blanks/control
+/// chars (some IMEs open an empty composition) must not punch a hole in the
+/// cursor cell (a lesson from tty7 #966)
 fn preedit_has_ink(marked: &str) -> bool {
     use unicode_segmentation::UnicodeSegmentation as _;
     marked
@@ -996,8 +1015,8 @@ fn preedit_has_ink(marked: &str) -> bool {
         .any(|g| g.chars().any(|c| !c.is_whitespace() && !c.is_control()))
 }
 
-/// IME 预编辑文本：光标 cell 处画主题色底 + 下划线文本（tty7 paint_marked）
-#[allow(clippy::too_many_arguments)] // 绘制上下文参数打包反而更绕，按既有惯例放行
+/// IME preedit text: draw a theme-colored background plus underlined text at the cursor cell (tty7 paint_marked)
+#[allow(clippy::too_many_arguments)] // packing the paint-context params would be more convoluted; allowed per existing convention
 fn paint_marked(
     window: &mut Window,
     cx: &mut App,

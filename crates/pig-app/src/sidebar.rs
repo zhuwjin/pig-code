@@ -10,7 +10,8 @@ use gpui_kit::*;
 use crate::RelativeTime as _;
 use crate::anim::{EXPAND_ANIM_DUR, ExpandAnim};
 
-/// 侧栏会话行数据（AppView 汇总 SessionMeta + 运行时状态后传入）
+/// Sidebar session row data (assembled by AppView from SessionMeta plus runtime
+/// state, then passed in)
 pub struct SidebarSession {
     pub id: String,
     pub title: String,
@@ -22,7 +23,20 @@ pub struct SidebarSession {
     pub waiting_approval: bool,
 }
 
-/// 侧栏列表视图：平铺列表（跨工作区，行内标注所属工作区）/ 按工作区分组
+/// Display value of a session title: empty-string sentinel (new session's automatic
+/// naming not yet done) → localized "new task" placeholder.
+/// Rendering-only; search matching, rename initial values, etc. still use the raw
+/// title (the empty-string semantics are preserved).
+pub fn display_title(title: &str) -> String {
+    if title.is_empty() {
+        rust_i18n::t!("sidebar.untitled").to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+/// Sidebar list view: flat list (across workspaces, rows annotated with their
+/// workspace) / grouped by workspace
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarView {
     Flat,
@@ -33,21 +47,22 @@ pub(crate) enum SidebarView {
 pub enum SidebarEvent {
     Select(String),
     NewTask,
-    /// 在指定工作区目录下新建任务（hero 预设 cwd）
+    /// Create a new task under the given workspace directory (hero preset cwd)
     NewTaskInWorkspace(String),
     SetPinned(String, bool),
     SetArchived(String, bool),
-    /// 会话手动重命名（此后自动命名不再覆盖）
+    /// Manual session rename (automatic naming no longer overrides afterwards)
     RenameSession(String, String),
-    /// 删除会话（清库 + rollout 文件，不可恢复）
+    /// Delete the session (clears the database plus the rollout file,
+    /// unrecoverable)
     DeleteSession(String),
     RemoveWorkspace(String),
-    /// 重命名工作区显示名；None 恢复默认目录名
+    /// Rename the workspace display name; None restores the default directory name
     RenameWorkspace(String, Option<String>),
     OpenSettings,
 }
 
-/// 行内重命名的目标：工作区或会话（共用一个输入框实体）
+/// Target of inline rename: workspace or session (sharing one input entity)
 #[derive(Clone, PartialEq)]
 enum RenameTarget {
     Workspace(String),
@@ -56,7 +71,7 @@ enum RenameTarget {
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
-/// 悬停标题跑马灯的进行状态
+/// In-progress state of the hover title marquee
 struct TitleMarquee {
     session_id: String,
     position: f32,
@@ -64,45 +79,54 @@ struct TitleMarquee {
     hold_ticks: u8,
 }
 
-/// 跑马灯在两端的停留时长（16ms × 45 ≈ 0.7s）
+/// How long the marquee holds at either end (16ms × 45 ≈ 0.7s)
 const MARQUEE_HOLD_TICKS: u8 = 45;
-/// 悬停后先静止片刻再开始滚动
+/// Stay still briefly after hover before starting to scroll
 const MARQUEE_START_TICKS: u8 = 30;
-/// 工作区展开后每页展示的会话条数（默认一页，展开更多每次 +1 页）
+/// Sessions shown per page under an expanded workspace (one page by default, "show
+/// more" adds one page each time)
 const WORKSPACE_PAGE_SIZE: usize = 5;
 
 pub struct Sidebar {
     view: SidebarView,
     sessions: Vec<SidebarSession>,
-    /// 工作区列表 = 可见手动工作区 ∪ 会话 cwd（AppView 已排序、已排除隐藏工作区）
+    /// Workspace list = visible manual workspaces ∪ session cwds (already sorted by
+    /// AppView, hidden workspaces excluded)
     workspaces: Vec<String>,
-    /// 工作区路径 → 用户自定义显示名
+    /// Workspace path → user-defined display name
     aliases: std::collections::HashMap<String, String>,
-    /// 正在重命名的目标（工作区/会话共用输入框）
+    /// Rename target in progress (workspace/session share one input)
     renaming: Option<RenameTarget>,
     rename_input: Entity<InputState>,
     active: Option<String>,
     search_open: bool,
     search_input: Entity<InputState>,
     expanded: std::collections::HashSet<String>,
-    /// 工作区会话列表的开合动画态（crate::anim::ExpandAnim），key = 工作区路径
+    /// Expand/collapse animation state of a workspace's session list
+    /// (crate::anim::ExpandAnim), key = workspace path
     expand_anims: std::collections::HashMap<String, ExpandAnim>,
-    /// 分页「多出页」子块的开合动画态（展开更多 = 滑开、收起 = 滑收后删行），
-    /// key = 工作区路径
+    /// Expand/collapse animation state of the paginated "extra pages" sub-block
+    /// (show more = slide open, collapse = slide shut then remove rows),
+    /// key = workspace path
     paginate_anims: std::collections::HashMap<String, ExpandAnim>,
-    /// 悬停中的工作区行路径：行尾浮层（名字渐隐 + 按钮）仅悬停时渲染占位，
-    /// 未悬停时名字用满行宽、不裁减
+    /// Path of the hovered workspace row: the row-tail overlay (name fade + buttons)
+    /// only reserves space while hovered; when not hovered the name uses the full
+    /// row width, unclipped
     hovered_workspace: Option<String>,
-    /// 悬停中的会话行 id：渐隐底色与行尾按钮显隐跟随行悬停
+    /// Hovered session row id: the fade base color and row-tail button visibility
+    /// follow row hover
     hovered_session: Option<String>,
-    /// 工作区会话分页：路径 → 当前展示条数（缺省 = WORKSPACE_PAGE_SIZE）
+    /// Workspace session pagination: path → rows currently shown (default =
+    /// WORKSPACE_PAGE_SIZE)
     workspace_shown: std::collections::HashMap<String, usize>,
-    /// 会话标题的横向滚动把手（悬停跑马灯用），key = 会话 id；
-    /// render_session_row 只持 &self，故用 RefCell
+    /// Horizontal scroll handle for session titles (used by the hover marquee),
+    /// key = session id; render_session_row only holds &self, hence the RefCell
     title_scrolls: std::cell::RefCell<std::collections::HashMap<String, ScrollHandle>>,
     marquee: Option<TitleMarquee>,
-    /// dock 侧栏内容锚定宽（AppView 每次 render 推送）：开合动画期间 dock 实
-    /// 宽被补间，内容固定该宽并锚定分隔线一侧，滑出/滑入而非压缩重排
+    /// Anchored width of the dock sidebar content (pushed by AppView on every
+    /// render): during the open/close animation the dock's actual width is tweened,
+    /// while the content stays at this width anchored to the divider side, sliding
+    /// out/in instead of being squeezed and re-laid out
     panel_width: f32,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -117,8 +141,9 @@ mod views;
 
 impl Sidebar {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话或工作区…"));
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("sidebar.search_placeholder"))
+        });
         let rename_input = cx.new(|cx| InputState::new(window, cx));
         let _subscriptions = vec![
             cx.subscribe_in(
@@ -158,8 +183,8 @@ impl Sidebar {
             workspace_shown: std::collections::HashMap::new(),
             title_scrolls: std::cell::RefCell::new(std::collections::HashMap::new()),
             marquee: None,
-            // 与 AppView 的侧栏初始宽一致；AppView 每次 render 都会推送，这里
-            // 只是首帧前的兜底
+            // Matches AppView's initial sidebar width; AppView pushes on every
+            // render, this is just the fallback before the first frame
             panel_width: 220.,
             focus_handle: cx.focus_handle(),
             _subscriptions,
@@ -179,7 +204,8 @@ impl Sidebar {
         self.aliases = aliases;
         self.active = active;
         self.title_scrolls.borrow_mut().retain(|id, _| {
-            // 双行详情行的键带 "pinned-" 前缀（与同 id 的单行键不冲突）
+            // Two-line detail row keys carry a "pinned-" prefix (no clash with the
+            // same id's single-line key)
             let sid = id.strip_prefix("pinned-").unwrap_or(id.as_str());
             self.sessions.iter().any(|s| s.id == sid)
         });
@@ -201,8 +227,9 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// AppView 推送侧栏展开目标宽（拖宽/补钳后可能变化）：值变才 notify，
-    /// 开合动画帧不额外扰动侧栏重渲染
+    /// AppView pushes the sidebar's expanded target width (may change after drag or
+    /// clamping): notify only when the value changes, so open/close animation frames
+    /// do not needlessly disturb sidebar re-renders
     pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if self.panel_width != width {
             self.panel_width = width;
@@ -226,7 +253,7 @@ impl Sidebar {
         query.is_empty() || text.to_lowercase().contains(query)
     }
 
-    /// 工作区显示名：优先用户别名，否则取目录名。
+    /// Workspace display name: prefer the user alias, else the directory name.
     fn workspace_name(&self, path: &str) -> String {
         self.aliases.get(path).cloned().unwrap_or_else(|| {
             std::path::Path::new(path)
@@ -236,12 +263,12 @@ impl Sidebar {
         })
     }
 
-    /// 自测用：工作区列表。
+    /// For self-test: the workspace list.
     pub fn debug_workspaces(&self) -> &[String] {
         &self.workspaces
     }
 
-    /// 自测用：某工作区下的会话 id。
+    /// For self-test: session ids under a workspace.
     pub fn debug_workspace_sessions(&self, path: &str) -> Vec<String> {
         self.sessions
             .iter()
@@ -258,9 +285,12 @@ impl Render for Sidebar {
             SidebarView::Workspace => self.render_workspace_view(window, cx),
         };
 
-        // 开合动画锚定层：dock_frame 自带 overflow_hidden，开合补间期间 dock 实
-        // 宽小于内容宽；内容固定 panel_width 并右锚贴分隔线，收拢时整体左滑被
-        // 裁而非压缩重排。稳态实宽 == panel_width，绝对定位子层正好铺满
+        // Open/close animation anchoring layer: dock_frame has overflow_hidden, and
+        // during the open/close tween the dock's actual width is smaller than the
+        // content width; the content stays at panel_width anchored right against the
+        // divider, sliding left as a whole and getting clipped when collapsing
+        // rather than being squeezed and re-laid out. In steady state actual width
+        // == panel_width, and the absolutely positioned sub-layer fills it exactly
         div().relative().size_full().overflow_hidden().child(
             div()
                 .absolute()
@@ -272,8 +302,11 @@ impl Render for Sidebar {
                     v_flex()
                         .size_full()
                         .bg(cx.theme().sidebar)
-                        // 分隔线由 dock 把手自带线绘制：侧栏自画 border_r 会画在把手命中区
-                        // 右侧（gpui-base 的 Side::Left 把手命中区停在分界线左侧），线上不可拖
+                        // The divider is drawn by the dock handle's own line: a
+                        // sidebar-drawn border_r would land to the right of the
+                        // handle's hit area (gpui-base's Side::Left handle hit area
+                        // stops on the left side of the boundary line), making the
+                        // line undraggable
                         .child(self.render_action_rows(cx))
                         .child(self.render_list_header(cx))
                         .child(
@@ -300,7 +333,11 @@ impl Render for Sidebar {
                                             cx.emit(SidebarEvent::OpenSettings);
                                         }))
                                         .child(Icon::new(IconName::Settings).size_4())
-                                        .child(div().text_sm().child("设置")),
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .child(rust_i18n::t!("sidebar.settings")),
+                                        ),
                                 ),
                         ),
                 ),
@@ -308,7 +345,7 @@ impl Render for Sidebar {
     }
 }
 
-// dock 面板能力：侧栏自绘全部 chrome，不要 dock 的标题栏/内边距
+// Dock panel capability: the sidebar draws all of its own chrome; no dock title bar/padding
 impl Focusable for Sidebar {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()

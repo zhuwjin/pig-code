@@ -1,7 +1,10 @@
-//! MCP 客户端：JSON-RPC 2.0 会话（initialize 握手 → notifications/initialized →
-//! tools/list 分页；运行期 tools/call/ping）。传输层抽象为 [`Transport`]：
-//! stdio（子进程 newline JSON-RPC，本文件）与 streamable HTTP（`http` 模块）两种实现，
-//! 握手/分页/超时口径在 McpClient 统一。连接断开时全部 pending 请求以错误返回。
+//! MCP client: a JSON-RPC 2.0 session (initialize handshake →
+//! notifications/initialized → tools/list pagination; tools/call/ping at
+//! runtime). The transport layer is abstracted as [`Transport`]: two
+//! implementations, stdio (child process newline JSON-RPC, this file) and
+//! streamable HTTP (the `http` module); the handshake/pagination/timeout
+//! conventions are unified in McpClient. When the connection drops, all
+//! pending requests return with an error.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,21 +20,22 @@ use tokio::sync::oneshot;
 use crate::NoConsoleExt as _;
 use crate::mcp::config::{McpServerConfig, McpStdioConfig, McpTransport};
 use crate::mcp::tool::McpToolAnnotations;
+use pig_protocol::CoreError;
 
-/// initialize 握手的协议版本（stdio）；server 回复不同版本时记录并按其继续
+/// Protocol version for the initialize handshake (stdio); if the server replies with a different version, log it and continue with the server's
 const PROTOCOL_VERSION: &str = "2024-11-05";
-/// 单行 JSON-RPC 消息上限（防失控 server 撑爆内存）；超长行丢弃、连接不断
+/// Cap on a single-line JSON-RPC message (guards against a runaway server bloating memory); overlong lines are discarded while the connection stays up
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
-/// stderr 单行上限
+/// Per-line cap for stderr
 const MAX_STDERR_LINE_BYTES: usize = 4 * 1024;
-/// stderr 尾部保留量（连接/调用失败时随报错带出）
+/// Retained stderr tail (attached to the error when connection/calls fail)
 const STDERR_TAIL_CHARS: usize = 8 * 1024;
-/// tools/list 分页上限（防 cursor 死循环）
+/// tools/list pagination cap (guards against a cursor infinite loop)
 const MAX_LIST_PAGES: usize = 8;
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
-/// tools/list 通告的单个工具规格
+/// A single tool spec advertised by tools/list
 #[derive(Debug, Clone)]
 pub struct McpToolSpec {
     pub name: String,
@@ -40,9 +44,12 @@ pub struct McpToolSpec {
     pub annotations: McpToolAnnotations,
 }
 
-/// 传输层抽象：收发 JSON-RPC 消息。握手、tools/list 分页、调用超时口径在
-/// McpClient 统一实现；各实现自己保证 `request` 并发安全（stdio 靠 AtomicU64 id +
-/// Mutex pending map + stdin 写锁多路复用；http 每个请求独立 POST 天然并发）。
+/// Transport abstraction: send and receive JSON-RPC messages. The handshake,
+/// tools/list pagination, and call timeout conventions are implemented once in
+/// McpClient; each implementation guarantees `request` concurrency safety
+/// itself (stdio multiplexes via AtomicU64 id + Mutex pending map + stdin
+/// write lock; http is naturally concurrent with one independent POST per
+/// request).
 enum Transport {
     Stdio(StdioTransport),
     Http(super::http::HttpTransport),
@@ -51,7 +58,7 @@ enum Transport {
 }
 
 impl Transport {
-    /// 带 id 请求 → 等响应（单次调用超时；超时后迟到的响应丢弃）
+    /// Request with an id → await the response (per-call timeout; a late response after timeout is discarded)
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         match self {
             Self::Stdio(t) => t.request(method, params).await,
@@ -61,8 +68,8 @@ impl Transport {
         }
     }
 
-    /// notifications/*（无 id，不等响应）
-    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    /// notifications/* (no id, no response awaited); failures are structured errors (the connection boundary belongs to the MCP class)
+    async fn notify(&self, method: &str, params: Value) -> Result<(), CoreError> {
         match self {
             Self::Stdio(t) => t.notify(method, params).await,
             Self::Http(t) => t.notify(method, params).await,
@@ -71,7 +78,7 @@ impl Transport {
         }
     }
 
-    /// 关闭连接（stdio 杀子进程；http 尽力 DELETE 终止会话）；幂等
+    /// Close the connection (stdio kills the child process; http tries a DELETE to terminate the session); idempotent
     async fn shutdown(&self) {
         match self {
             Self::Stdio(t) => t.shutdown().await,
@@ -81,7 +88,7 @@ impl Transport {
         }
     }
 
-    /// 诊断尾部（stdio = server stderr 尾部；http 无 → 空串）
+    /// Diagnostic tail (stdio = the server stderr tail; http has none → empty string)
     fn diagnostic_tail(&self) -> String {
         match self {
             Self::Stdio(t) => t.diagnostic_tail(),
@@ -91,7 +98,7 @@ impl Transport {
         }
     }
 
-    /// initialize 握手宣告的协议版本（stdio 2024-11-05；http 2025-03-26 起）
+    /// Protocol version announced in the initialize handshake (stdio 2024-11-05; http 2025-03-26 onward)
     fn protocol_version(&self) -> &'static str {
         match self {
             Self::Stdio(_) => PROTOCOL_VERSION,
@@ -101,7 +108,7 @@ impl Transport {
         }
     }
 
-    /// initialize 完成后告知协商到的版本（http 后续请求要发 MCP-Protocol-Version 头）
+    /// Tell the transport the negotiated version once initialize completes (http sends the MCP-Protocol-Version header on subsequent requests)
     fn notify_negotiated(&self, server_version: &str) {
         if let Self::Http(t) = self {
             t.notify_negotiated(server_version);
@@ -109,20 +116,24 @@ impl Transport {
     }
 }
 
-/// 一个 MCP server 连接（具体传输 + JSON-RPC 会话）
+/// One MCP server connection (concrete transport + JSON-RPC session)
 pub struct McpClient {
     name: String,
     transport: Transport,
 }
 
 impl McpClient {
-    /// 建立连接 + initialize 握手 + tools/list；失败由调用方记录并跳过该 server。
-    /// workspace_root 作为 stdio 子进程的工作目录（args 里的相对路径按工作区根解析，
-    /// 与 Claude Code 同语义；http 传输不使用）
+    /// Establish the connection + initialize handshake + tools/list; on
+    /// failure the caller logs and skips this server. Errors are classified as
+    /// CoreError (connection boundary: carried directly in the state snapshot,
+    /// localized by the UI per kind). workspace_root serves as the stdio child
+    /// process's working directory (relative paths in args resolve against the
+    /// workspace root, same semantics as Claude Code; unused by the http
+    /// transport)
     pub async fn connect(
         config: &McpServerConfig,
         workspace_root: &Path,
-    ) -> Result<(Arc<Self>, Vec<McpToolSpec>), String> {
+    ) -> Result<(Arc<Self>, Vec<McpToolSpec>), CoreError> {
         let transport = match &config.transport {
             McpTransport::Stdio(stdio) => Transport::Stdio(
                 StdioTransport::spawn(&config.name, stdio, config.timeout, workspace_root).await?,
@@ -148,11 +159,11 @@ impl McpClient {
                 }),
             )
             .await
-            .map_err(|e| format!("initialize 失败: {e}"))?;
+            .map_err(|e| CoreError::McpInitialize { detail: e })?;
         let server_version = init["protocolVersion"].as_str().unwrap_or(announced);
         if server_version != announced {
             eprintln!(
-                "[mcp] {} 协议版本 {server_version}（客户端 {announced}），按 server 版本继续",
+                "[mcp] {} protocol version {server_version} (client {announced}), continuing with server version",
                 client.name
             );
         }
@@ -160,7 +171,11 @@ impl McpClient {
         client
             .notify("notifications/initialized", json!({}))
             .await?;
-        let tools = client.list_tools().await?;
+        // tools/list is done together with the handshake: failures belong to the same connection boundary, classified as initialize
+        let tools = client
+            .list_tools()
+            .await
+            .map_err(|e| CoreError::McpInitialize { detail: e })?;
         Ok((client, tools))
     }
 
@@ -168,25 +183,26 @@ impl McpClient {
         &self.name
     }
 
-    /// 诊断尾部快照（stdio = stderr 尾部；http = 空）
+    /// Diagnostic tail snapshot (stdio = stderr tail; http = empty)
     pub fn stderr_tail(&self) -> String {
         self.transport.diagnostic_tail()
     }
 
-    /// JSON-RPC ping（探活）
+    /// JSON-RPC ping (liveness probe)
     pub async fn ping(&self) -> Result<(), String> {
         self.request("ping", json!({})).await.map(|_| ())
     }
 
-    /// tools/call：渲染在 tool 适配层，这里透传原始 result。
-    /// 并发安全（&self）：stdio 多路复用单一连接（id 唯一 + pending map），
-    /// http 每请求独立 POST。
+    /// tools/call: rendering happens in the tool adapter layer; the raw result
+    /// is passed through here. Concurrency-safe (&self): stdio multiplexes a
+    /// single connection (unique id + pending map); http does one independent
+    /// POST per request.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
         self.request("tools/call", json!({"name": name, "arguments": arguments}))
             .await
     }
 
-    /// 关闭连接；stdio 正常 Drop 路径由 spawn 时的 kill_on_drop 兜底
+    /// Close the connection; the stdio normal Drop path is covered by kill_on_drop set at spawn
     pub async fn shutdown(&self) {
         self.transport.shutdown().await;
     }
@@ -195,11 +211,11 @@ impl McpClient {
         self.transport.request(method, params).await
     }
 
-    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), CoreError> {
         self.transport.notify(method, params).await
     }
 
-    /// tools/list（跟随 nextCursor 分页，页数封顶防死循环）
+    /// tools/list (follows nextCursor pagination, with a page cap to prevent an infinite loop)
     async fn list_tools(&self) -> Result<Vec<McpToolSpec>, String> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -213,7 +229,10 @@ impl McpClient {
             for entry in result["tools"].as_array().cloned().unwrap_or_default() {
                 match parse_tool_spec(&entry) {
                     Some(spec) => tools.push(spec),
-                    None => eprintln!("[mcp] {} 跳过无法解析的工具条目: {entry}", self.name),
+                    None => eprintln!(
+                        "[mcp] {} skipping unparsable tool entry: {entry}",
+                        self.name
+                    ),
                 }
             }
             let Some(next) = result["nextCursor"].as_str() else {
@@ -222,7 +241,7 @@ impl McpClient {
             pages += 1;
             if pages >= MAX_LIST_PAGES {
                 eprintln!(
-                    "[mcp] {} tools/list 分页超过 {MAX_LIST_PAGES} 页，截断",
+                    "[mcp] {} tools/list paging exceeded {MAX_LIST_PAGES} pages, truncating",
                     self.name
                 );
                 break;
@@ -232,7 +251,7 @@ impl McpClient {
         Ok(tools)
     }
 
-    /// 测试用假连接：不握手不收发，只提供 name 的占位传输
+    /// Fake connection for tests: no handshake, no traffic; a placeholder transport providing only the name
     #[cfg(test)]
     pub(crate) fn for_test(name: &str) -> Arc<Self> {
         Arc::new(Self {
@@ -242,7 +261,7 @@ impl McpClient {
     }
 }
 
-/// tools/list 单条目解析：name 必填；inputSchema 缺省补空 object；annotations 缺省全 None
+/// Parse one tools/list entry: name is required; a missing inputSchema defaults to an empty object; missing annotations default to all None
 fn parse_tool_spec(entry: &Value) -> Option<McpToolSpec> {
     let name = entry["name"].as_str()?.to_string();
     Some(McpToolSpec {
@@ -257,9 +276,9 @@ fn parse_tool_spec(entry: &Value) -> Option<McpToolSpec> {
     })
 }
 
-// ---------------- stdio 传输 ----------------
+// ---------------- stdio transport ----------------
 
-/// stdin 写端（reader 任务回 -32601 也走它）；Arc 与传输解耦生命周期
+/// stdin write side (the reader task's -32601 replies go through it too); Arc decouples its lifetime from the transport
 #[derive(Clone)]
 struct Writer {
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
@@ -267,24 +286,26 @@ struct Writer {
 
 impl Writer {
     async fn write_message(&self, message: &Value) -> Result<(), String> {
-        let mut line = serde_json::to_vec(message).map_err(|e| format!("序列化消息失败: {e}"))?;
+        let mut line =
+            serde_json::to_vec(message).map_err(|e| format!("Failed to serialize message: {e}"))?;
         line.push(b'\n');
         let mut stdin = self.stdin.lock().await;
         stdin
             .write_all(&line)
             .await
-            .map_err(|e| format!("写入 stdin 失败: {e}"))?;
+            .map_err(|e| format!("Failed to write to stdin: {e}"))?;
         stdin
             .flush()
             .await
-            .map_err(|e| format!("flush stdin 失败: {e}"))?;
+            .map_err(|e| format!("Failed to flush stdin: {e}"))?;
         Ok(())
     }
 }
 
-/// stdio 传输：子进程 + newline JSON-RPC。请求多路复用单一连接：
-/// id AtomicU64 唯一分配、pending map 按 id 配对、stdin 写互斥，
-/// `request` 全部 &self，并发调用安全。
+/// stdio transport: child process + newline JSON-RPC. Requests multiplex a
+/// single connection: id allocated uniquely via AtomicU64, pending map paired
+/// by id, stdin writes mutually exclusive; `request` is all &self, safe for
+/// concurrent calls.
 struct StdioTransport {
     name: String,
     timeout: Duration,
@@ -296,10 +317,13 @@ struct StdioTransport {
     stderr_tail: Arc<Mutex<String>>,
 }
 
-/// Windows 程序解析：在目录列表（通常为 PATH）中按「原名 → .exe → .cmd → .bat」
-/// 找到真实文件。npm 系工具是 .cmd 垫片，CreateProcess 只自动补 .exe 故直接
-/// spawn 裸名会 NotFound；解析为全路径后 std 会经 cmd.exe 启动并转义参数
-///（CVE-2024-24576 修复后的行为）。显式带扩展名但文件不存在的不再猜。
+/// Windows program resolution: find the real file in a directory list (usually
+/// PATH) as "bare name → .exe → .cmd → .bat". npm-family tools are .cmd
+/// shims; CreateProcess only appends .exe automatically, so spawning the bare
+/// name directly yields NotFound; once resolved to a full path, std launches
+/// it via cmd.exe and escapes arguments (behavior after the CVE-2024-24576
+/// fix). An explicit extension whose file does not exist is not guessed
+/// further.
 #[cfg(windows)]
 fn resolve_program(
     search_dirs: &[std::path::PathBuf],
@@ -311,8 +335,10 @@ fn resolve_program(
         if base.extension().is_some_and(|ext| !ext.is_empty()) {
             return base.is_file().then(|| base.to_path_buf());
         }
-        // 无扩展名：先按 Windows 可执行候选（exe/cmd/bat）。npm/fnm/scoop 的垫片
-        // 目录里同名无扩展文件是 POSIX sh 脚本，直接启动会「不是有效的 Win32 应用程序」
+        // No extension: try Windows executable candidates first (exe/cmd/bat).
+        // In npm/fnm/scoop shim directories the extensionless file of the same
+        // name is a POSIX sh script; launching it directly gives "not a valid
+        // Win32 application"
         ["exe", "cmd", "bat"]
             .into_iter()
             .map(|ext| base.with_extension(ext))
@@ -336,17 +362,20 @@ fn resolve_program(
 }
 
 impl StdioTransport {
-    /// spawn 子进程 + 读写泵；握手由 McpClient 统一做。
-    /// 工作目录 = 会话工作区根（相对路径 args 如 `.dbhub/dbhub.toml` 按工作区解析；
-    /// 不设置则继承应用进程的启动目录，相对路径会落错位置）
+    /// Spawn the child process + read/write pumps; the handshake is done
+    /// uniformly by McpClient. Working directory = the session workspace root
+    /// (relative-path args such as `.dbhub/dbhub.toml` resolve against the
+    /// workspace; without setting it the app process's startup directory is
+    /// inherited and relative paths land in the wrong place)
     async fn spawn(
         name: &str,
         config: &McpStdioConfig,
         timeout: Duration,
         workspace_root: &Path,
-    ) -> Result<Self, String> {
-        // Windows：CreateProcess 只自动补 .exe，npm 系工具（npx/pnpm/bunx…）实为
-        // .cmd/.bat 垫片，须按 PATH + 候选扩展解析出真实路径再启动
+    ) -> Result<Self, CoreError> {
+        // Windows: CreateProcess only appends .exe automatically; npm-family
+        // tools (npx/pnpm/bunx...) are actually .cmd/.bat shims, so resolve the
+        // real path via PATH + candidate extensions before launching
         #[cfg(windows)]
         let program = {
             let dirs = std::env::var_os("PATH")
@@ -367,9 +396,10 @@ impl StdioTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("启动失败（{}）: {e}", config.command))?;
+        let mut child = command.spawn().map_err(|e| CoreError::McpSpawn {
+            command: config.command.clone(),
+            detail: e.to_string(),
+        })?;
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -402,10 +432,10 @@ impl StdioTransport {
 }
 
 impl StdioTransport {
-    /// 带 id 请求：写一行 → 等响应（单次调用超时；超时后迟到的响应被丢弃）
+    /// Request with an id: write one line → await the response (per-call timeout; a late response after timeout is discarded)
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(format!("MCP server {} 连接已断开", self.name));
+            return Err(format!("MCP server {} connection is closed", self.name));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -415,15 +445,15 @@ impl StdioTransport {
             self.pending.lock().expect("pending lock").remove(&id);
             self.closed.store(true, Ordering::Release);
             fail_all(&self.pending);
-            return Err(format!("MCP server {} 写入失败: {e}", self.name));
+            return Err(format!("MCP server {} write failed: {e}", self.name));
         }
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!("MCP server {} 连接已断开", self.name)),
+            Ok(Err(_)) => Err(format!("MCP server {} connection is closed", self.name)),
             Err(_) => {
                 self.pending.lock().expect("pending lock").remove(&id);
                 Err(format!(
-                    "MCP server {} 调用 {method} 超时（{} ms）",
+                    "MCP server {} call to {method} timed out after {} ms",
                     self.name,
                     self.timeout.as_millis()
                 ))
@@ -431,15 +461,19 @@ impl StdioTransport {
         }
     }
 
-    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), CoreError> {
         let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
         self.writer
             .write_message(&message)
             .await
-            .map_err(|e| format!("MCP server {} 通知 {method} 写入失败: {e}", self.name))
+            .map_err(|e| CoreError::McpNotifyWrite {
+                name: self.name.clone(),
+                method: method.to_string(),
+                detail: e,
+            })
     }
 
-    /// 杀子进程并等待回收；正常 Drop 路径由 spawn 时的 kill_on_drop 兜底
+    /// Kill the child process and wait for reaping; the normal Drop path is covered by kill_on_drop set at spawn
     async fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         let mut child = self.child.lock().await;
@@ -453,16 +487,17 @@ impl StdioTransport {
     }
 }
 
-/// 连接终结：全部 pending 以错误返回（超时后已 remove 的不在内）
+/// Connection terminated: all pending return with an error (entries removed after timeout are not included)
 fn fail_all(pending: &PendingMap) {
     let drained: Vec<_> = pending.lock().expect("pending lock").drain().collect();
     for (_, tx) in drained {
-        let _ = tx.send(Err("MCP server 连接已断开".to_string()));
+        let _ = tx.send(Err("MCP server connection is closed".to_string()));
     }
 }
 
-/// stdout 读者：响应配对 pending；server→client 请求统一回 -32601（不支持
-/// roots/elicitation，但不能让对端干等）；通知忽略。EOF/出错时 pending 全部失败。
+/// stdout reader: match responses against pending; server→client requests
+/// uniformly get -32601 (roots/elicitation unsupported, but the peer must not
+/// wait forever); notifications are ignored. On EOF/error, all pending fail.
 async fn read_loop(
     name: String,
     stdout: ChildStdout,
@@ -476,7 +511,7 @@ async fn read_loop(
             Ok(Some(line)) => handle_line(&name, &line, &pending, &writer).await,
             Ok(None) => break,
             Err(e) => {
-                eprintln!("[mcp] {name} 读取 stdout 失败: {e}");
+                eprintln!("[mcp] {name} failed to read stdout: {e}");
                 break;
             }
         }
@@ -494,7 +529,7 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
         Ok(message) => message,
         Err(_) => {
             let preview: String = line.chars().take(120).collect();
-            eprintln!("[mcp] {name} 忽略非 JSON 行: {preview}");
+            eprintln!("[mcp] {name} ignoring non-JSON line: {preview}");
             return;
         }
     };
@@ -506,9 +541,9 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
             };
             let result = match message.get("error") {
                 Some(error) => Err(format!(
-                    "MCP 错误 {}: {}",
+                    "MCP error {}: {}",
                     error["code"].as_i64().unwrap_or(-1),
-                    error["message"].as_str().unwrap_or("未知错误")
+                    error["message"].as_str().unwrap_or("unknown error")
                 )),
                 None => Ok(message["result"].clone()),
             };
@@ -519,15 +554,15 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
             let reply = json!({
                 "jsonrpc": "2.0",
                 "id": message["id"],
-                "error": {"code": -32601, "message": format!("pig-code 暂不支持 {method}")},
+                "error": {"code": -32601, "message": format!("pig-code does not support {method}")},
             });
             let _ = writer.write_message(&reply).await;
         }
     }
-    // 其余（notifications/*）忽略
+    // The rest (notifications/*) are ignored
 }
 
-/// stderr 读者：逐行透传 eprintln + 保留尾部快照
+/// stderr reader: forward each line to eprintln + keep a tail snapshot
 async fn stderr_loop(name: String, stderr: ChildStderr, tail: Arc<Mutex<String>>) {
     let mut lines = LineReader::new(stderr, MAX_STDERR_LINE_BYTES, &name);
     while let Ok(Some(line)) = lines.next_line().await {
@@ -540,7 +575,7 @@ async fn stderr_loop(name: String, stderr: ChildStderr, tail: Arc<Mutex<String>>
         tail.push('\n');
         if tail.len() > STDERR_TAIL_CHARS {
             let excess = tail.len() - STDERR_TAIL_CHARS;
-            // 截到下一行首（'\n' 之后必为字符边界）
+            // Cut to the start of the next line (right after '\n' is always a char boundary)
             let cut = tail.as_bytes()[excess..]
                 .iter()
                 .position(|&b| b == b'\n')
@@ -551,7 +586,7 @@ async fn stderr_loop(name: String, stderr: ChildStderr, tail: Arc<Mutex<String>>
     }
 }
 
-/// 按行读取（\n 分隔，容忍 \r\n）；单行超上限丢弃该行并继续（连接不断）
+/// Line-oriented reading (\n separated, \r\n tolerated); a line over the cap is discarded and reading continues (the connection stays up)
 struct LineReader<R> {
     reader: tokio::io::BufReader<R>,
     buf: Vec<u8>,
@@ -598,7 +633,7 @@ impl<R: tokio::io::AsyncRead + Unpin> LineReader<R> {
             self.buf.extend_from_slice(&chunk[..n]);
             if self.buf.len() > self.max_line {
                 eprintln!(
-                    "[mcp] {} 单行超过 {} KB，丢弃该行",
+                    "[mcp] {} line exceeds {} KB, discarding the line",
                     self.label,
                     self.max_line / 1024
                 );
@@ -616,8 +651,9 @@ mod tests {
     use crate::tool::Tool as _;
     use std::io::{BufRead as _, Write as _};
 
-    /// 假 server 入口：以 PIG_MCP_FAKE_SERVER=1 重入当前测试二进制时扮演 MCP server
-    ///（harness 的 "running 1 test" 横幅会被对端当非 JSON 行忽略）
+    /// Fake server entry: re-enters the current test binary with
+    /// PIG_MCP_FAKE_SERVER=1 to act as an MCP server (the harness's "running 1
+    /// test" banner is ignored by the peer as a non-JSON line)
     #[test]
     fn fake_server_main() {
         if std::env::var_os("PIG_MCP_FAKE_SERVER").is_none() {
@@ -635,7 +671,7 @@ mod tests {
             };
             let id = message["id"].clone();
             if id.is_null() {
-                continue; // 通知不回
+                continue; // No reply to notifications
             }
             let result = match method {
                 "initialize" => json!({
@@ -646,7 +682,7 @@ mod tests {
                 "ping" => json!({}),
                 "tools/list" => json!({"tools": [{
                     "name": "echo",
-                    "description": "回显 text 参数",
+                    "description": "Echoes the text parameter",
                     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
                     "annotations": {"readOnlyHint": true, "idempotentHint": true}
                 }]}),
@@ -675,7 +711,8 @@ mod tests {
             name: "fake".to_string(),
             transport: McpTransport::Stdio(McpStdioConfig {
                 command: exe.to_string_lossy().into_owned(),
-                // --nocapture 必需：否则 harness 劫持 println，父进程看不到响应
+                // --nocapture is required: otherwise the harness hijacks
+                // println and the parent process never sees responses
                 args: vec![
                     "mcp::client::tests::fake_server_main".to_string(),
                     "--exact".to_string(),
@@ -688,7 +725,7 @@ mod tests {
         }
     }
 
-    /// 端到端：真子进程 stdio 握手 → tools/list → tools/call → ping → shutdown
+    /// End to end: real child process stdio handshake → tools/list → tools/call → ping → shutdown
     #[tokio::test]
     async fn stdio_echo_server_roundtrip() {
         let (client, specs) = McpClient::connect(&fake_server_config(), std::path::Path::new("."))
@@ -699,14 +736,14 @@ mod tests {
         assert!(specs[0].annotations.is_read_only());
 
         let result = client
-            .call_tool("echo", json!({"text": "你好 mcp"}))
+            .call_tool("echo", json!({"text": "hello mcp"}))
             .await
             .expect("call_tool");
-        assert_eq!(result["content"][0]["text"], "你好 mcp");
+        assert_eq!(result["content"][0]["text"], "hello mcp");
 
         client.ping().await.expect("ping");
 
-        // Tool 适配层：命名 / read_only / schema
+        // Tool adapter layer: naming / read_only / schema
         let tool = crate::mcp::tool::McpTool::new("fake", specs[0].clone(), client.clone());
         assert_eq!(tool.name(), "mcp__fake__echo");
         assert!(tool.read_only());
@@ -715,26 +752,28 @@ mod tests {
         client.shutdown().await;
     }
 
-    /// Windows 程序解析：.cmd 垫片 / .exe / 显式路径补扩展 / 裸名搜目录列表
+    /// Windows program resolution: .cmd shims / .exe / explicit paths with extension appended / bare names searched in the directory list
     #[cfg(windows)]
     #[test]
     fn resolve_program_finds_cmd_shim_and_exe() {
         let dir = std::env::temp_dir().join(format!("pig-mcp-prog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // npm/fnm 式垫片目录：同名无扩展 sh 脚本 + .cmd 垫片并存，必须选 .cmd
+        // An npm/fnm-style shim directory: an extensionless sh script and a
+        // .cmd shim coexist; the .cmd must be chosen
         std::fs::write(dir.join("npx"), "#!/bin/sh\n").unwrap();
         std::fs::write(dir.join("npx.cmd"), "@echo off\r\n").unwrap();
         std::fs::write(dir.join("tool.exe"), b"").unwrap();
         let dirs = vec![dir.clone()];
 
-        // 裸名按 exe→cmd→bat 优先于无扩展原名解析
+        // Bare names resolve as exe→cmd→bat, ahead of the extensionless original name
         assert_eq!(resolve_program(&dirs, "npx"), Some(dir.join("npx.cmd")));
         assert_eq!(resolve_program(&dirs, "tool"), Some(dir.join("tool.exe")));
         assert_eq!(resolve_program(&dirs, "missing"), None);
         assert_eq!(resolve_program(&dirs, "  "), None);
 
-        // 显式路径同样补扩展；带扩展名但不存在则不猜
+        // Explicit paths also get extensions appended; an explicit extension
+        // whose file is absent is not guessed
         let bare = dir.join("npx").to_string_lossy().into_owned();
         assert_eq!(resolve_program(&dirs, &bare), Some(dir.join("npx.cmd")));
         let full = dir.join("tool.exe").to_string_lossy().into_owned();
@@ -745,19 +784,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 并发安全核实：同一连接上并发 tools/call 多路复用——
-    /// 两个并发调用各自拿到与自己参数匹配的回显（id 配对不错串）
+    /// Concurrency safety check: concurrent tools/call multiplexed on the same
+    /// connection — two concurrent calls each get the echo matching their own
+    /// arguments (id pairing does not cross)
     #[tokio::test]
     async fn stdio_concurrent_calls_multiplexed() {
         let (client, _) = McpClient::connect(&fake_server_config(), std::path::Path::new("."))
             .await
             .expect("connect");
         let (a, b) = tokio::join!(
-            client.call_tool("echo", json!({"text": "甲"})),
-            client.call_tool("echo", json!({"text": "乙"})),
+            client.call_tool("echo", json!({"text": "first"})),
+            client.call_tool("echo", json!({"text": "second"})),
         );
-        assert_eq!(a.expect("call a")["content"][0]["text"], "甲");
-        assert_eq!(b.expect("call b")["content"][0]["text"], "乙");
+        assert_eq!(a.expect("call a")["content"][0]["text"], "first");
+        assert_eq!(b.expect("call b")["content"][0]["text"], "second");
         client.shutdown().await;
     }
 }

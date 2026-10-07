@@ -18,7 +18,12 @@ impl Sidebar {
                         cx.emit(SidebarEvent::NewTask);
                     }))
                     .child(Icon::new(IconName::Plus).size_4())
-                    .child(div().text_sm().flex_1().child("新建任务"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .flex_1()
+                            .child(rust_i18n::t!("sidebar.new_task")),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -39,7 +44,12 @@ impl Sidebar {
                         this.open_search(window, cx);
                     }))
                     .child(Icon::new(IconName::Search).size_4())
-                    .child(div().text_sm().flex_1().child("搜索"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .flex_1()
+                            .child(rust_i18n::t!("sidebar.search")),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -64,7 +74,8 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// 「会话」标题行：折叠/展开全部工作区（仅分组视图）+ 列表管理菜单
+    /// "Sessions" header row: collapse/expand all workspaces (grouped view only)
+    /// plus the list management menu
     pub(crate) fn render_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let any_expanded = self.workspaces.iter().any(|w| self.expanded.contains(w));
         let mut row = h_flex().pl_3().pr_2().py_1().gap_1().child(
@@ -72,7 +83,7 @@ impl Sidebar {
                 .flex_1()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child("会话"),
+                .child(rust_i18n::t!("sidebar.sessions")),
         );
         if self.view == SidebarView::Workspace {
             row = row.child(
@@ -85,22 +96,24 @@ impl Sidebar {
                         AssetsIconName::UnfoldVertical
                     })
                     .tooltip(if any_expanded {
-                        "折叠全部工作区"
+                        rust_i18n::t!("sidebar.collapse_all")
                     } else {
-                        "展开全部工作区"
+                        rust_i18n::t!("sidebar.expand_all")
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         let any_expanded =
                             this.workspaces.iter().any(|w| this.expanded.contains(w));
                         if any_expanded {
-                            // 折叠全部：即时卸载（不播动画），并取消进行中的收起态
+                            // Collapse all: unload immediately (no animation) and
+                            // cancel in-progress collapsing states
                             this.expanded.clear();
                             for anim in this.expand_anims.values_mut() {
                                 anim.collapsing = false;
                             }
                         } else {
-                            // 展开全部：逐个播滑开动画；generation+1 同时作废
-                            // 进行中的收起卸载计时器
+                            // Expand all: play the slide-open animation one by one;
+                            // generation+1 also invalidates in-progress collapse
+                            // unload timers
                             for w in &this.workspaces {
                                 this.expanded.insert(w.clone());
                                 let anim = this.expand_anims.entry(w.clone()).or_default();
@@ -117,7 +130,7 @@ impl Sidebar {
                 .ghost()
                 .xsmall()
                 .icon(AssetsIconName::SlidersHorizontal)
-                .tooltip("列表管理")
+                .tooltip(rust_i18n::t!("sidebar.list_manage"))
                 .dropdown_menu_with_anchor(
                     Anchor::TopRight,
                     Self::view_menu(&cx.entity().downgrade(), self.view),
@@ -135,7 +148,8 @@ impl Sidebar {
         let session = &self.sessions[ix];
         let id = session.id.clone();
         let active = self.active.as_deref() == Some(session.id.as_str());
-        // 状态指示：待审批黄点；运行中不画点，转圈占用行尾时间槽（见下）
+        // Status indicator: yellow dot for pending approval; while running no dot is
+        // drawn and the spinner takes the row-tail time slot (see below)
         let status_color = if session.waiting_approval {
             Some(cx.theme().warning)
         } else {
@@ -143,7 +157,8 @@ impl Sidebar {
         };
         let renaming = self.renaming == Some(RenameTarget::Session(session.id.clone()));
         let hovered = self.hovered_session.as_deref() == Some(session.id.as_str());
-        // 渐隐底色 = 行背景：选中与悬停同为 sidebar + accent 60%，常态 sidebar
+        // Fade base color = row background: selected and hovered both sidebar +
+        // accent 60%, otherwise plain sidebar
         let (fade_base, fade_tint) = if hovered || active {
             (cx.theme().sidebar, Some(cx.theme().accent.opacity(0.6)))
         } else {
@@ -174,7 +189,7 @@ impl Sidebar {
                 }
             }));
         if renaming {
-            // 行内重命名：只留输入框（回车/失焦提交，空值取消）
+            // Inline rename: keep only the input (Enter/blur commits, empty cancels)
             row = row.child(div().flex_1().child(Input::new(&self.rename_input).small()));
             return row.into_any_element();
         }
@@ -182,7 +197,7 @@ impl Sidebar {
             .child(self.render_title_scroll(
                 &session.id,
                 ("session-title", ix),
-                &session.title,
+                &display_title(&session.title),
                 fade_base,
                 fade_tint,
                 window,
@@ -192,7 +207,8 @@ impl Sidebar {
                 this.child(div().size_2().rounded_full().bg(color))
             });
         if !hovered {
-            // 悬停时行尾让位给置顶/归档按钮；运行中时间换成转圈
+            // On hover the row tail yields to the pin/archive buttons; while running
+            // the time becomes a spinner
             row = row.child(if session.running {
                 Spinner::new()
                     .xsmall()
@@ -207,7 +223,8 @@ impl Sidebar {
             });
         }
         if hovered {
-            // 悬停才渲染置顶/归档按钮：让出的宽度归标题，此时才裁减文字
+            // Pin/archive buttons render only on hover: the yielded width goes to
+            // the title, which is clipped only then
             row = row
                 .child({
                     let id = session.id.clone();
@@ -240,13 +257,14 @@ impl Sidebar {
                         }))
                 });
         }
-        // 右键菜单：重命名 / 置顶 / 归档 / 删除
+        // Context menu: rename / pin / archive / delete
         let menu = Self::session_menu(&cx.entity().downgrade(), session);
         row.context_menu(menu).into_any_element()
     }
 
-    /// 平铺列表：跨工作区的单一时间线，置顶会话在前（无小节头），
-    /// 行内第二行标注所属工作区；归档会话在设置页「已归档的会话」管理
+    /// Flat list: a single timeline across workspaces, pinned sessions first (no
+    /// section headers), with a second in-row line annotating the workspace;
+    /// archived sessions are managed on the settings page's "archived sessions"
     pub(crate) fn render_flat_view(
         &self,
         window: &Window,
@@ -273,7 +291,8 @@ impl Sidebar {
         pinned.sort_by(by_recency);
         rest.sort_by(by_recency);
 
-        // 归档会话不在侧栏渲染：设置页「已归档的会话」统一管理
+        // Archived sessions are not rendered in the sidebar: the settings page's
+        // "archived sessions" manages them uniformly
         pinned
             .into_iter()
             .chain(rest)
@@ -281,8 +300,9 @@ impl Sidebar {
             .collect()
     }
 
-    /// 双行详情会话行：标题 + 时间一行，所属工作区一行。用于置顶区
-    /// （跨工作区集中展示需标注归属）与平铺视图
+    /// Two-line detail session row: title + time on one line, workspace on the
+    /// other. Used by the pinned section (cross-workspace central display needs
+    /// ownership annotation) and the flat view
     pub(crate) fn render_detailed_session_row(
         &self,
         window: &Window,
@@ -293,7 +313,8 @@ impl Sidebar {
         let id = session.id.clone();
         let active = self.active.as_deref() == Some(session.id.as_str());
         let hovered = self.hovered_session.as_deref() == Some(session.id.as_str());
-        // 状态指示：待审批黄点；运行中不画点，转圈占用行尾时间槽（见下）
+        // Status indicator: yellow dot for pending approval; while running no dot is
+        // drawn and the spinner takes the row-tail time slot (see below)
         let status_color = if session.waiting_approval {
             Some(cx.theme().warning)
         } else {
@@ -312,7 +333,7 @@ impl Sidebar {
             .child(self.render_title_scroll(
                 &marquee_key,
                 ("pinned-title", ix),
-                &session.title,
+                &display_title(&session.title),
                 fade_base,
                 fade_tint,
                 window,
@@ -322,8 +343,9 @@ impl Sidebar {
                 this.child(div().size_2().rounded_full().bg(color))
             });
         if hovered {
-            // 悬停才渲染置顶/归档按钮（与单行会话行一致），时间让位不显示，
-            // 此时标题才让宽裁减
+            // Pin/archive buttons render only on hover (same as single-line session
+            // rows); the time yields and is hidden, and only then is the title
+            // clipped
             let pin_id = session.id.clone();
             let pinned = session.pinned;
             let archive_id = session.id.clone();
@@ -356,7 +378,7 @@ impl Sidebar {
                         })),
                 );
         } else if session.running {
-            // 运行中：时间槽显示转圈
+            // Running: the time slot shows a spinner
             line1 = line1.child(Spinner::new().xsmall().color(cx.theme().muted_foreground));
         } else {
             line1 = line1.child(
@@ -405,7 +427,7 @@ impl Sidebar {
                         ),
                 ),
             );
-        // 右键菜单：重命名 / 置顶 / 归档 / 删除
+        // Context menu: rename / pin / archive / delete
         let menu = Self::session_menu(&cx.entity().downgrade(), session);
         row.context_menu(menu).into_any_element()
     }
@@ -418,7 +440,8 @@ impl Sidebar {
         let query = self.query(cx);
         let mut out: Vec<AnyElement> = vec![];
 
-        // 置顶区：跨工作区集中展示置顶会话（归档的不显示），行内标注所属工作区
+        // Pinned section: pinned sessions across workspaces in one place (archived
+        // ones hidden), rows annotated with their workspace
         let mut pinned: Vec<usize> = self
             .sessions
             .iter()
@@ -434,7 +457,7 @@ impl Sidebar {
                     .py_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("置顶")
+                    .child(rust_i18n::t!("sidebar.pinned"))
                     .into_any_element(),
             );
             out.extend(
@@ -450,8 +473,9 @@ impl Sidebar {
                 continue;
             }
             let expanded = self.expanded.contains(workspace);
-            // 收起动画播放期间内容仍挂载：expanded 保持 true，open 立即翻 false
-            //（图标即时反馈；此时再点 = 取消收起重新展开）
+            // While the collapse animation plays the content stays mounted: expanded
+            // remains true while open flips to false immediately (instant icon
+            // feedback; clicking again now = cancel the collapse and re-expand)
             let collapsing = self
                 .expand_anims
                 .get(workspace)
@@ -460,7 +484,8 @@ impl Sidebar {
             let renaming = self.renaming == Some(RenameTarget::Workspace(workspace.to_string()));
             let workspace_path = workspace.clone();
 
-            // 该工作区下的会话：置顶（入置顶区）与归档的不在此列，按 updated 倒序
+            // Sessions under this workspace: pinned (moved to the pinned section)
+            // and archived ones excluded, sorted by updated descending
             let mut sessions: Vec<usize> = self
                 .sessions
                 .iter()
@@ -523,8 +548,10 @@ impl Sidebar {
                             .get(&workspace_path)
                             .is_some_and(|a| a.collapsing);
                         if this.expanded.contains(&workspace_path) && !collapsing {
-                            // 收起：内容保持挂载播滑收动画，计时器到期才卸载；
-                            // 期间再点开（代次不符）自动作废
+                            // Collapse: keep content mounted playing the slide-shut
+                            // animation, unload only when the timer expires;
+                            // clicking open again meanwhile (generation mismatch)
+                            // auto-invalidates it
                             let anim = this.expand_anims.entry(workspace_path.clone()).or_default();
                             anim.generation += 1;
                             anim.collapsing = true;
@@ -559,10 +586,14 @@ impl Sidebar {
                     }))
                     .context_menu(menu.clone());
                 if hovered {
-                    // 悬停才渲染行尾浮层：名字右端渐隐 + 选项（...）/新建任务（+）。
-                    // 浮层绝对定位不占位，未悬停时名字用满行宽不被裁减；渐隐与
-                    // 按钮托底各叠两层底色（sidebar + accent 60%），合成结果与行
-                    // .hover() 背景一致，浮层盖住文字处无色差
+                    // The row-tail overlay renders only on hover: name right-edge
+                    // fade + options (...)/new task (+).
+                    // The overlay is absolutely positioned and takes no space; when
+                    // not hovered the name uses the full row width unclipped; the
+                    // fade and the button backing each stack two layers of background
+                    // (sidebar + accent 60%), compositing to exactly the row's
+                    // .hover() background, so there is no color shift where the
+                    // overlay covers text
                     let sidebar_bg = cx.theme().sidebar;
                     let hover_tint = cx.theme().accent.opacity(0.6);
                     row = row.child(
@@ -618,10 +649,14 @@ impl Sidebar {
             }
 
             if expanded || collapsing {
-                // 分页：默认一页（5 条），展开更多每次 +1 页，收起回到一页。
-                // 基础页直排；「多出的页」独立子动画块——展开更多 = 滑开淡入、
-                // 收起 = 内容保持挂载滑收淡出（计时器到期才回一页），收/放全程
-                // 旧行被容器裁剪而不是瞬换
+                // Pagination: one page (5 rows) by default, "show more" adds one
+                // page each time, collapse returns to one page.
+                // The base page renders straight; the "extra pages" get an
+                // independent sub-animation block: show more = slide open and fade
+                // in, collapse = content stays mounted sliding shut and fading out
+                // (returns to one page only when the timer expires); throughout
+                // both directions, old rows are clipped by the container instead of
+                // being swapped instantly
                 let shown = self
                     .workspace_shown
                     .get(workspace)
@@ -636,8 +671,8 @@ impl Sidebar {
                 for ix in sessions.iter().take(shown.min(WORKSPACE_PAGE_SIZE)) {
                     block = block.child(
                         div()
-                            // 缩进 24px：会话文字与工作区名字对齐（行 mx+px 16 +
-                            // 图标 16 + gap 8 = 40）
+                            // Indent 24px: session text aligns with the workspace
+                            // name (row mx+px 16 + icon 16 + gap 8 = 40)
                             .pl_6()
                             .child(self.render_session_row(window, *ix, cx)),
                     );
@@ -684,7 +719,8 @@ impl Sidebar {
                                 .cursor_pointer()
                                 .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    // 展开更多：多出的行进子动画块滑开
+                                    // Show more: extra rows slide open in the
+                                    // sub-animation block
                                     *this
                                         .workspace_shown
                                         .entry(path.clone())
@@ -695,7 +731,7 @@ impl Sidebar {
                                     cx.notify();
                                 }))
                                 .child(Icon::new(IconName::ChevronDown).size_3())
-                                .child("展开更多")
+                                .child(rust_i18n::t!("sidebar.show_more"))
                                 .test_support(),
                         );
                     }
@@ -713,8 +749,10 @@ impl Sidebar {
                                 .cursor_pointer()
                                 .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    // 收起（分页）：多出的行保持挂载播滑收淡出，
-                                    // 计时器到期才回一页（期间再展开代次不符作废）
+                                    // Collapse (pagination): extra rows stay mounted
+                                    // playing slide-shut fade-out, returning to one
+                                    // page only when the timer expires (re-expanding
+                                    // meanwhile invalidates by generation mismatch)
                                     let anim = this.paginate_anims.entry(path.clone()).or_default();
                                     anim.generation += 1;
                                     anim.collapsing = true;
@@ -747,7 +785,7 @@ impl Sidebar {
                                     cx.notify();
                                 }))
                                 .child(Icon::new(IconName::ChevronUp).size_3())
-                                .child("收起")
+                                .child(rust_i18n::t!("sidebar.collapse"))
                                 .test_support(),
                         );
                     }
@@ -755,7 +793,9 @@ impl Sidebar {
                 }
                 match self.expand_anims.get(workspace) {
                     Some(anim) => out.push(
-                        // 观测包装（test_support 无 feature 时透传，测试用它量容器实高）
+                        // Observation wrapper (passes through without the
+                        // test_support feature; tests use it to measure the
+                        // container's actual height)
                         div()
                             .id(("ws-block", p_ix))
                             .test_support()

@@ -17,8 +17,8 @@ fn tag_for(kind: Popup) -> &'static str {
 }
 
 impl Composer {
-    /// 上下文容量面板：标题 + 用量/占比 + 进度条 + 平均缓存命中率，
-    /// 居中锚定在指示器芯片正上方（悬停展示）。
+    /// Context capacity panel: title + usage/ratio + progress bar + average cache
+    /// hit rate, anchored centered right above the indicator chip (shown on hover).
     pub(crate) fn render_context_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let (used, total, cache_read_total, input_total) =
             self.context_usage.unwrap_or((0, 1, 0, 0));
@@ -41,7 +41,12 @@ impl Composer {
             .child(
                 h_flex()
                     .w_full()
-                    .child(div().text_sm().font_medium().child("上下文容量"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(rust_i18n::t!("composer.context_capacity")),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -66,7 +71,8 @@ impl Composer {
                             div()
                                 .h_full()
                                 .w(relative(ratio))
-                                // 极小占比也保留可见的一截（0.1% 仅 0.3px，会被圆整掉）
+                                // Keep a visible sliver even for tiny ratios (0.1% is
+                                // only 0.3px and would be rounded away)
                                 .min_w(px(3.))
                                 .rounded_full()
                                 .bg(bar_color),
@@ -78,12 +84,15 @@ impl Composer {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "平均缓存命中率 {:.1}%（命中 {} / 输入 {}）",
-                            cache_read_total as f64 / cache_total as f64 * 100.0,
-                            Self::format_tokens_compact(cache_read_total),
-                            Self::format_tokens_compact(cache_total),
-                        )),
+                        .child(
+                            rust_i18n::t!(
+                                "composer.cache_hit_rate",
+                                rate = cache_read_total as f64 / cache_total as f64 * 100.0 : {:.1},
+                                hit = Self::format_tokens_compact(cache_read_total),
+                                total = Self::format_tokens_compact(cache_total),
+                            )
+                            .to_string(),
+                        ),
                 )
             })
             .into_any_element();
@@ -121,7 +130,8 @@ impl Composer {
             return;
         };
         let caret = self.input.read(cx).selected_range().start;
-        // 文档文本是完整 @path（发送时据此收集文件），展示文本只显示文件名
+        // The document text is the full @path (files are collected from it on send);
+        // the display text shows only the file name
         let file_name = path.rsplit('/').next().unwrap_or(path.as_str());
         let token =
             InlineToken::new(path.clone(), format!("@{path}")).with_label(format!("@{file_name}"));
@@ -130,10 +140,11 @@ impl Composer {
                 .replace_range_with_token(start..caret, token, window, cx)
                 .is_ok()
             {
-                // token API 不自动加分隔符：插入后选区已塌缩在 token 尾，补一个尾随空格
+                // The token API adds no separator: after insertion the selection
+                // collapses at the token's tail, so append a trailing space
                 input.replace(" ", window, cx);
             } else {
-                // token 校验失败等场景回落为纯文本插入
+                // Fall back to plain-text insertion when token validation fails, etc.
                 input.set_selected_range(start..caret, cx);
                 input.replace(format!("@{path} "), window, cx);
             }
@@ -207,6 +218,7 @@ impl Composer {
                     .collect()
             }
             Popup::Slash => Self::slash_filtered(&query)
+                .into_iter()
                 .enumerate()
                 .map(|(ix, (name, desc))| {
                     self.render_list_item(
@@ -232,7 +244,7 @@ impl Composer {
             | Popup::Tasks
             | Popup::AgentTasks => {
                 unreachable!(
-                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks/AgentTasks 由各自的专用面板渲染"
+                    "Cwd/Branch/ExecMode/Model/Reasoning/Context/Todos/Tasks/AgentTasks are rendered by their own dedicated panels"
                 )
             }
         };
@@ -265,10 +277,14 @@ impl Composer {
                             |el, delta| el.top(px(6.0 * (1.0 - delta))).opacity(delta),
                         )
                         .child(
-                            // 行是滚动容器的直接子元素：选中项才能随键盘导航
-                            // scroll_to_item 滚进视野（与消息列表同机制）。
-                            // overflow_y_scroll/track_scroll 是 StatefulInteractiveElement
-                            // 方法，滚动容器必须有 id；px_1 让选中高亮不贴弹层边框
+                            // Rows are direct children of the scroll container: only
+                            // then can the selected item scroll into view via
+                            // scroll_to_item during keyboard navigation (same
+                            // mechanism as the message list).
+                            // overflow_y_scroll/track_scroll are
+                            // StatefulInteractiveElement methods, so the scroll
+                            // container must have an id; px_1 keeps the selection
+                            // highlight off the popup border
                             div()
                                 .id("composer-popup-scroll")
                                 .max_h(px(228.))
@@ -282,11 +298,13 @@ impl Composer {
         )
     }
 
-    /// 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
-    /// `anchor` 为 Center 时弹层水平中线对齐芯片中线（定宽 360）；
-    /// 其余弹层宽度按内容伸缩（160 ~ 360）。
-    /// `hover_clear`：Command 面板是「悬停即选中」，鼠标移出面板后选中行的高亮
-    /// 会残留，传对应 CommandState 时在移出面板时清掉选中。
+    /// Popup shell: anchored right above the trigger chip, closes on outside click,
+    /// with an enter animation.
+    /// When `anchor` is Center, the popup's horizontal centerline aligns with the
+    /// chip's centerline (fixed width 360); other popups size to content (160-360).
+    /// `hover_clear`: Command panels are "hover to select"; after the mouse leaves
+    /// the panel the selected row's highlight lingers, so passing the corresponding
+    /// CommandState clears the selection when the pointer leaves the panel.
     pub(crate) fn popup_shell(
         &self,
         id: &'static str,
@@ -303,11 +321,13 @@ impl Composer {
             .map(|this| match anchor {
                 PopupAnchor::Left => this.left_0(),
                 PopupAnchor::Right => this.right_0(),
-                // 外层拉伸到芯片宽度，再由 flex 把固定宽的面板居中到芯片中线
+                // Stretch the outer layer to the chip's width, then flex centers the
+                // fixed-width panel on the chip's centerline
                 PopupAnchor::Center => this.left_0().right_0().flex().flex_row().justify_center(),
             })
-            // 滚轮事件不穿透到弹层背后的会话消息流；内容自身的滚动（Command 虚拟列表
-            // 等更深的滚动区）先消费事件，不受影响
+            // Scroll-wheel events do not pass through to the session message stream
+            // behind the popup; the content's own scrolling (Command virtual list
+            // and other deeper scroll areas) consumes events first and is unaffected
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 if let Some((kind, _)) = this.popup {
@@ -329,9 +349,11 @@ impl Composer {
                 div()
                     .relative()
                     .map(|this| match anchor {
-                        // 上下文容量面板内容固定（标题行 + 进度条），定宽居中
+                        // Context capacity panel content is fixed (title row +
+                        // progress bar), fixed width centered
                         PopupAnchor::Center => this.w(px(360.)),
-                        // 其余面板按内容伸缩：思考等级这类短列表不用撑满 360
+                        // Other panels size to content: short lists like reasoning
+                        // levels need not fill 360
                         _ => this.min_w(px(160.)).max_w(px(360.)),
                     })
                     .with_animation(
@@ -345,7 +367,8 @@ impl Composer {
             .into_any_element()
     }
 
-    /// Command 弹层外壳：锚定在触发芯片正上方，点击外部关闭，带进入动画。
+    /// Command popup shell: anchored right above the trigger chip, closes on outside
+    /// click, with an enter animation.
     pub(crate) fn command_popup_shell(
         &self,
         id: &'static str,
@@ -363,16 +386,19 @@ impl Composer {
         )
     }
 
-    /// 面板确认/取消的通用收尾：关闭弹层并回焦输入框。
+    /// Common tail for panel confirm/cancel: close the popup and refocus the composer.
     pub(crate) fn close_command_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.popup = None;
         self.input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
-    /// 芯片点击开合弹层：弹层打开时点击芯片会先触发弹层的 on_mouse_down_out 把它
-    /// 关掉（中间隔着一次重渲染，渲染时捕获的开合状态不可靠），这里按「同一次按压
-    /// 的按下位置」吞掉紧随其后的 click，避免收起又马上弹开。
+    /// Chip click toggles the popup: while the popup is open, clicking the chip
+    /// first triggers the popup's on_mouse_down_out which closes it (a re-render
+    /// sits in between, so the open/closed state captured at render time is
+    /// unreliable); here the immediately following click is swallowed by matching
+    /// "the down position of the same press", avoiding collapse followed by an
+    /// instant reopen.
     pub(crate) fn toggle_popup(
         &mut self,
         kind: Popup,

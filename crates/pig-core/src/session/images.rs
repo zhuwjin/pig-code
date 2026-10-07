@@ -1,6 +1,7 @@
-/// 压缩附注（kimi-code caption 思路）：图片被缩放/转码后附在文本里告知模型
-/// 细节可能丢失；原图同时落盘 `{n}.orig.{ext}`，需要高清局部可用 ReadMediaFile
-/// region 裁剪原图查看。图片未变（小图直通）→ None，不给文本加噪音。
+/// Compression note (kimi-code's caption idea): when an image is scaled/transcoded, a note is
+/// appended to the text telling the model details may be lost; the original is persisted as
+/// `{n}.orig.{ext}` so fine detail can be viewed via ReadMediaFile region cropping of the original.
+/// Unchanged image (small-image passthrough) -> None, adding no noise to the text.
 pub(crate) fn compression_note(
     ix: usize,
     pending: &pig_protocol::PendingImage,
@@ -22,22 +23,23 @@ pub(crate) fn compression_note(
     let orig_file = media_dir.join(format!("{n}.orig.{orig_ext}"));
     let orig_hint = match std::fs::write(&orig_file, &pending.bytes) {
         Ok(()) => format!(
-            "；原图已存到 {}，需要看清细节（例如小字）可用 ReadMediaFile 对该路径用 region 裁剪查看",
+            "; the original was saved to {} — use ReadMediaFile with region on that path for fine detail (e.g. small text)",
             orig_file.display()
         ),
-        Err(_) => "；原图未保留".to_string(),
+        Err(_) => "; the original was not kept".to_string(),
     };
     Some(format!(
-        "\n[图片 {ix} 已压缩以适应模型限制：原始 {ow}×{oh} {orig_mime} → 发送 {}×{} {}（{}KB），细节可能丢失{orig_hint}]",
+        "\n[Image {ix} was compressed to fit model limits: original {ow}×{oh} {orig_mime} → sent {}×{} {} ({}KB); details may be lost{orig_hint}]",
         comp.width,
         comp.height,
         comp.media_type,
         comp.bytes.len() / 1024,
     ))
 }
-/// 能力投影（ZCode 同款）：模型支持图片输入时 images 原样进 ChatMsg；
-/// 不支持时 images 清空、文本末尾追加占位。media_paths 与 chat_images 同序等长
-///（媒体文件先于投影落盘）：占位带上路径，模型知道有图、知道去哪读。
+/// Capability projection (same as ZCode): when the model supports image input, images enter the
+/// ChatMsg as-is; otherwise images are cleared and a placeholder is appended to the text.
+/// media_paths matches chat_images in order and length (media files are persisted before
+/// projection): the placeholder carries the paths, so the model knows images exist and where to read them.
 pub fn project_images(
     text: &mut String,
     chat_images: &mut Vec<crate::provider::ChatImage>,
@@ -49,9 +51,9 @@ pub fn project_images(
             .iter()
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
-            .join("、");
+            .join(", ");
         text.push_str(&format!(
-            "\n[图片 {} 张未随消息发送：当前模型不支持图片输入；文件在 {paths}，需要看哪张可用 ReadMediaFile 读取]",
+            "\n[{} image(s) were not sent with this message: the current model does not support image input; the files are at {paths} — use ReadMediaFile to view the one you need]",
             chat_images.len()
         ));
         chat_images.clear();

@@ -3,7 +3,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use pig_protocol::GitFileChange;
+use pig_protocol::{GitDiffNote, GitFileChange};
 
 pub struct FileChangeEntry {
     pub path: String,
@@ -12,8 +12,9 @@ pub struct FileChangeEntry {
     pub deletions: u32,
 }
 
-/// 面板数据源：git 工作区口径（未暂存 / 已暂存）。
-/// 会话改动面板已移到消息流每轮 turn 末尾（thread_view 的 TurnChanges 段）。
+/// Panel data source: git working tree scope (unstaged / staged).
+/// The session changes panel has moved to the end of each turn in the
+/// message stream (the TurnChanges section of thread_view).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ReviewSource {
     Unstaged,
@@ -21,26 +22,29 @@ pub enum ReviewSource {
 }
 
 impl ReviewSource {
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Unstaged => "未暂存",
-            Self::Staged => "已暂存",
+            Self::Unstaged => rust_i18n::t!("review.unstaged"),
+            Self::Staged => rust_i18n::t!("review.staged"),
         }
     }
 }
 
 #[derive(Clone)]
 pub enum ReviewEvent {
-    /// 请求刷新工作区 git 状态（面板切源或点刷新时发出，AppView 转发 Op::GitStatus）
+    /// Request a working tree git status refresh (emitted when the panel
+    /// switches source or refresh is clicked; AppView forwards
+    /// Op::GitStatus)
     RefreshGit,
-    /// 打开某 git 文件的 diff（AppView 转发 Op::GitDiff）
+    /// Open a git file's diff (AppView forwards Op::GitDiff)
     OpenGitDiff { path: String, staged: bool },
 }
 
 impl EventEmitter<ReviewEvent> for ReviewPanel {}
 
 pub struct ReviewPanel {
-    /// 会话改动快照（隐藏状态：侧栏会话 +N/-N 徽章与自测用，UI 不展示）
+    /// Session changes snapshot (hidden state: used by the sidebar's
+    /// session +N/-N badges and self-tests; not shown in the UI)
     files: Vec<FileChangeEntry>,
     diff_scroll: ScrollHandle,
     source: ReviewSource,
@@ -48,8 +52,9 @@ pub struct ReviewPanel {
     git_unstaged: Vec<GitFileChange>,
     git_staged: Vec<GitFileChange>,
     git_selected: Option<String>,
-    /// 当前打开的 git diff (path, 原文)
-    git_diff: Option<(String, String)>,
+    /// Currently open git diff (path, raw diff text, placeholder/truncation
+    /// note)
+    git_diff: Option<(String, String, Option<GitDiffNote>)>,
     git_diff_loading: bool,
 }
 
@@ -76,7 +81,8 @@ impl ReviewPanel {
         deletions: u32,
         cx: &mut Context<Self>,
     ) {
-        // 净额归零（改回到原始内容）：从列表移除，与 ZCode/kimi-code 口径一致
+        // Net delta back to zero (edited back to the original content):
+        // removed from the list, consistent with ZCode/kimi-code
         if additions == 0 && deletions == 0 {
             self.remove(&path, cx);
             return;
@@ -107,7 +113,8 @@ impl ReviewPanel {
             .fold((0, 0), |(a, d), e| (a + e.additions, d + e.deletions))
     }
 
-    /// 自测用：(文件数, 总新增, 总删除, 任一 diff 非空)
+    /// For self-tests: (file count, total additions, total deletions,
+    /// whether any diff is non-empty)
     pub fn debug_state(&self) -> (usize, u32, u32, bool) {
         let (adds, dels) = self.totals();
         (
@@ -118,7 +125,7 @@ impl ReviewPanel {
         )
     }
 
-    /// 工作区 git 状态到达（Op::GitStatus 的回应）
+    /// Working tree git status arrived (response to Op::GitStatus)
     pub fn set_git_status(
         &mut self,
         is_git: bool,
@@ -129,7 +136,7 @@ impl ReviewPanel {
         self.is_git = is_git;
         self.git_unstaged = unstaged;
         self.git_staged = staged;
-        // 选中项消失时清空 diff 视图
+        // Clear the diff view when the selected item disappears
         let list = self.git_list();
         if self
             .git_selected
@@ -142,10 +149,17 @@ impl ReviewPanel {
         cx.notify();
     }
 
-    /// 单文件 git diff 到达
-    pub fn set_git_diff(&mut self, path: String, diff: String, cx: &mut Context<Self>) {
+    /// Single-file git diff arrived (note is the structured placeholder
+    /// for truncated/too-large/binary)
+    pub fn set_git_diff(
+        &mut self,
+        path: String,
+        diff: String,
+        note: Option<GitDiffNote>,
+        cx: &mut Context<Self>,
+    ) {
         if self.git_selected.as_deref() == Some(path.as_str()) {
-            self.git_diff = Some((path, diff));
+            self.git_diff = Some((path, diff, note));
             self.git_diff_loading = false;
             cx.notify();
         }
@@ -166,10 +180,14 @@ impl ReviewPanel {
         (list.len(), a, d)
     }
 
-    /// 逐行渲染 unified diff：旧/新行号两列 + 增删行淡底色 + hunk 头底色。
-    /// 行号列宽按本 diff 的最大行号位数自适应（纯新增/纯删除文件的空列收成
-    /// 窄缝），不再固定 36px 留出大块空白；两列 flex_shrink_0 定宽防长行挤压。
-    /// 逐 hunk 接受/拒绝留 M6+。
+    /// Render a unified diff line by line: old/new line number columns +
+    /// faint backgrounds on added/deleted lines + a hunk header background.
+    /// Line number column widths adapt to this diff's max line number
+    /// digits (the empty column of a pure-add/pure-delete file shrinks to
+    /// a narrow slit) instead of a fixed 36px that leaves large blanks;
+    /// both columns are flex_shrink_0 fixed-width so long lines cannot
+    /// squeeze them.
+    /// Per-hunk accept/reject is left for M6+.
     fn render_diff(diff: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
         enum Kind {
             Meta,
@@ -232,7 +250,8 @@ impl ReviewPanel {
             });
         }
 
-        // 列宽按最大行号位数自适应；该列无行号（纯新增/纯删除）时收成窄缝
+        // Column width adapts to the max line number digits; a column with
+        // no line numbers (pure add/pure delete) shrinks to a narrow slit
         let col_w = |max: u32| {
             if max == 0 {
                 px(4.)
@@ -256,8 +275,10 @@ impl ReviewPanel {
                 h_flex()
                     .w_full()
                     .when_some(bg, |this, bg| this.bg(bg))
-                    // 行号列定宽不收缩：长行溢出时 flex 收缩会把行号列压窄，
-                    // 各行行号错位（有的靠前有的靠中）
+                    // Line number columns are fixed-width and do not
+                    // shrink: when a long line overflows, flex shrinking
+                    // would narrow them and misalign line numbers across
+                    // rows (some hug the left, some sit mid-column)
                     .child(
                         div()
                             .w(old_w)
@@ -286,7 +307,7 @@ impl ReviewPanel {
             .collect()
     }
 
-    /// 数据源切换 chip（未暂存 / 已暂存）
+    /// Data source switch chip (unstaged / staged)
     fn render_source_tab(&self, source: ReviewSource, cx: &mut Context<Self>) -> AnyElement {
         let active = self.source == source;
         let label = match source {
@@ -318,7 +339,8 @@ impl ReviewPanel {
             .into_any_element()
     }
 
-    /// git 改动行：状态字母 + 相对路径 + +N/-N（点击拉取 git diff）
+    /// Git change row: status letter + relative path + +N/-N (click fetches
+    /// the git diff)
     fn render_git_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let staged = self.source == ReviewSource::Staged;
         let entry = self.git_list()[ix].clone();
@@ -344,7 +366,7 @@ impl ReviewPanel {
                 this.git_selected = Some(row_path.clone());
                 this.git_diff = None;
                 this.git_diff_loading = true;
-                // 换文件从头看起
+                // Start from the top when switching files
                 this.diff_scroll.set_offset(Default::default());
                 cx.emit(ReviewEvent::OpenGitDiff {
                     path: row_path.clone(),
@@ -386,13 +408,18 @@ impl ReviewPanel {
 }
 
 impl ReviewPanel {
-    /// 列表视图：数据源 tab + 刷新 + 汇总，下面整片文件列表
+    /// List view: data source tabs + refresh + summary, with the full file
+    /// list below
     fn render_list_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let summary = if !self.is_git {
-            "非 git 仓库".to_string()
+            rust_i18n::t!("review.not_git_repo").to_string()
         } else {
             let (n, adds, dels) = self.git_totals();
-            format!("{n} 个文件 · +{adds} -{dels}")
+            if n == 1 {
+                rust_i18n::t!("review.summary_one", n = n, adds = adds, dels = dels).to_string()
+            } else {
+                rust_i18n::t!("review.summary", n = n, adds = adds, dels = dels).to_string()
+            }
         };
 
         let mut rows = Vec::new();
@@ -421,7 +448,7 @@ impl ReviewPanel {
                         Button::new("git-refresh")
                             .ghost()
                             .xsmall()
-                            .label("刷新")
+                            .label(rust_i18n::t!("review.refresh"))
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(ReviewEvent::RefreshGit);
                             })),
@@ -448,7 +475,7 @@ impl ReviewPanel {
                                 .py_2()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("当前工作区不是 git 仓库，git 改动不可用。"),
+                                .child(rust_i18n::t!("review.not_git_hint")),
                         )
                     })
                     .when(self.is_git && self.git_list().is_empty(), |this| {
@@ -458,15 +485,16 @@ impl ReviewPanel {
                                 .py_2()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("工作区干净，没有改动。"),
+                                .child(rust_i18n::t!("review.clean")),
                         )
                     }),
             )
             .into_any_element()
     }
 
-    /// diff 视图（点开文件后整面板切换）：顶部返回栏（← 返回列表 + 头部截断的
-    /// 路径 + 重新拉取）+ 全高 unified diff，不再与文件列表上下堆叠。
+    /// Diff view (the whole panel switches after opening a file): top back
+    /// bar (← back to list + head-truncated path + re-fetch) + a
+    /// full-height unified diff, no longer stacked above the file list.
     fn render_diff_view(&self, path: String, cx: &mut Context<Self>) -> AnyElement {
         let diff_rows: Vec<AnyElement> = if self.git_diff_loading {
             vec![
@@ -474,14 +502,30 @@ impl ReviewPanel {
                     .px_2()
                     .py_1()
                     .text_color(cx.theme().muted_foreground)
-                    .child("加载 diff 中…")
+                    .child(rust_i18n::t!("review.loading_diff"))
                     .into_any_element(),
             ]
         } else {
-            self.git_diff
+            let mut rows = self
+                .git_diff
                 .as_ref()
-                .map(|(_, diff)| Self::render_diff(diff, cx))
-                .unwrap_or_default()
+                .map(|(_, diff, _)| Self::render_diff(diff, cx))
+                .unwrap_or_default();
+            // Structured placeholder note (truncated/too-large/binary):
+            // localized and appended at the end of the diff rows (the diff
+            // field is pure diff text; when too-large/binary the diff is
+            // empty and this row is all the content)
+            if let Some(note) = self.git_diff.as_ref().and_then(|(_, _, note)| *note) {
+                rows.push(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(git_diff_note_text(note))
+                        .into_any_element(),
+                );
+            }
+            rows
         };
         let staged = self.source == ReviewSource::Staged;
         let refresh_path = path.clone();
@@ -565,13 +609,24 @@ impl ReviewPanel {
     }
 }
 
-/// 路径头部截断：太长时保留尾部（文件名最相关），截断点落在路径段边界
+/// GitDiffNote → localized placeholder text (the truncated/too-large/binary
+/// note of the git panel's diff view)
+fn git_diff_note_text(note: GitDiffNote) -> String {
+    match note {
+        GitDiffNote::Truncated => rust_i18n::t!("git.note.truncated").to_string(),
+        GitDiffNote::TooLarge => rust_i18n::t!("git.note.too_large").to_string(),
+        GitDiffNote::Binary => rust_i18n::t!("git.note.binary").to_string(),
+    }
+}
+
+/// Head truncation for paths: keeps the tail when too long (the file name
+/// matters most), with the cut landing on a path segment boundary
 pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
     let len = path.chars().count();
     if len <= max_chars {
         return path.to_string();
     }
-    let keep = max_chars.saturating_sub(2); // "…/" 占两字符
+    let keep = max_chars.saturating_sub(2); // "…/" takes two characters
     let byte_ix = path
         .char_indices()
         .nth(len - keep)
@@ -586,7 +641,8 @@ pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
 
 impl Render for ReviewPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 点开文件：整面板切到 diff 视图；← 返回文件列表
+        // Opening a file switches the whole panel to the diff view; ←
+        // returns to the file list
         match self.git_selected.clone() {
             Some(path) => self.render_diff_view(path, cx),
             None => self.render_list_view(cx),

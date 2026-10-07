@@ -1,0 +1,169 @@
+_version: 2
+
+# 右侧面板群（right_panel / trajectory 调用轨迹 / review 改动 / file_panel 文件查看 /
+# subagent_panel 子代理对话）。
+
+panel:
+  changes:
+    zh-CN: 改动
+    en: Changes
+  trajectory:
+    zh-CN: 调用轨迹
+    en: Trajectory
+  browser:
+    zh-CN: 浏览器
+    en: Browser
+  side_chat:
+    zh-CN: 侧边聊天
+    en: Side chat
+  subagent:
+    zh-CN: 子代理
+    en: Subagent
+  changes_empty:
+    zh-CN: 开始会话后，这里会显示工作区改动
+    en: Workspace changes will show here once a session starts
+  tool_fallback:
+    zh-CN: 工具
+    en: Tool
+  task_label:
+    zh-CN: 任务
+    en: Task
+  subagent_running:
+    zh-CN: 子代理运行中…
+    en: Subagent running…
+  latest:
+    zh-CN: 最新消息
+    en: Latest
+
+trajectory:
+  kind_system:
+    zh-CN: 系统提示词
+    en: System prompt
+  kind_user:
+    zh-CN: 用户消息
+    en: User message
+  kind_assistant:
+    zh-CN: 助手消息
+    en: Assistant message
+  kind_reasoning:
+    zh-CN: 思考过程
+    en: Thinking
+  kind_tool_call:
+    zh-CN: 工具调用
+    en: Tool call
+  kind_tool_result:
+    zh-CN: 工具结果
+    en: Tool result
+  source_main:
+    zh-CN: 主会话
+    en: Main session
+  source_subagent:
+    zh-CN: 子代理
+    en: Subagent
+  source_compact:
+    zh-CN: 上下文压缩
+    en: Context compaction
+  truncated:
+    zh-CN: "%{head}…（已截断）"
+    en: "%{head}… (truncated)"
+  empty:
+    zh-CN: 开始会话后，这里会显示模型调用记录
+    en: Model calls will show here once a session starts
+  summary:
+    zh-CN: "%{calls} 次调用 · %{tokens} tok"
+    en: "%{calls} calls · %{tokens} tok"
+  summary_models:
+    zh-CN: "%{calls} 次调用 · %{tokens} tok · %{models}"
+    en: "%{calls} calls · %{tokens} tok · %{models}"
+  read_failed:
+    zh-CN: "读取调用轨迹失败：%{error}"
+    en: "Failed to read trajectory: %{error}"
+  no_records:
+    zh-CN: 暂无模型调用记录（本会话还没有请求）
+    en: No model calls yet (no requests in this session)
+  finish_stop:
+    zh-CN: 正常结束
+    en: Completed
+  finish_tool_calls:
+    zh-CN: 工具调用
+    en: Tool calls
+  finish_cancelled:
+    zh-CN: 已取消
+    en: Cancelled
+  finish_failed:
+    zh-CN: 失败
+    en: Failed
+  calls_tools:
+    zh-CN: "[调用工具: %{tools}]"
+    en: "[calls tools: %{tools}]"
+  images:
+    zh-CN: "[图片 x%{n}]"
+    en: "[images x%{n}]"
+  input:
+    zh-CN: 输入
+    en: Input
+  output:
+    zh-CN: 输出
+    en: Output
+  error:
+    zh-CN: "错误：%{error}"
+    en: "Error: %{error}"
+
+review:
+  unstaged:
+    zh-CN: 未暂存
+    en: Unstaged
+  staged:
+    zh-CN: 已暂存
+    en: Staged
+  not_git_repo:
+    zh-CN: 非 git 仓库
+    en: Not a git repository
+  summary:
+    zh-CN: "%{n} 个文件 · +%{adds} -%{dels}"
+    en: "%{n} files · +%{adds} -%{dels}"
+  summary_one:
+    zh-CN: "%{n} 个文件 · +%{adds} -%{dels}"
+    en: "%{n} file · +%{adds} -%{dels}"
+  refresh:
+    zh-CN: 刷新
+    en: Refresh
+  not_git_hint:
+    zh-CN: 当前工作区不是 git 仓库，git 改动不可用。
+    en: The current workspace is not a git repository; git changes are unavailable.
+  clean:
+    zh-CN: 工作区干净，没有改动。
+    en: The workspace is clean — no changes.
+  loading_diff:
+    zh-CN: 加载 diff 中…
+    en: Loading diff…
+
+file_panel:
+  read_failed:
+    zh-CN: "读取失败 %{path}: %{error}"
+    en: "Failed to read %{path}: %{error}"
+  too_large:
+    zh-CN: "文件过大（%{size} MB），仅支持查看 %{max} MB 以内的文件"
+    en: "File too large (%{size} MB); only files up to %{max} MB can be viewed"
+  wrap:
+    zh-CN: 自动换行
+    en: Word wrap
+  copy_content:
+    zh-CN: 复制文件内容
+    en: Copy file contents
+  wrap_truncated:
+    zh-CN: "… 自动换行模式仅显示前 %{shown} 行（共 %{total} 行）；关闭换行可查看完整文件 …"
+    en: "… word wrap shows only the first %{shown} of %{total} lines; turn off wrap to view the full file …"
+
+# git 面板 diff 视图的占位/截断说明（Event::GitDiff.note：diff 字段保持纯 diff 文本）
+git:
+  note:
+    truncated:
+      zh-CN: … diff 超过 1MB，已截断 …
+      en: … diff over 1MB, truncated …
+    too_large:
+      zh-CN: （文件超过 1MB，无文本 diff）
+      en: (file over 1MB; no text diff)
+    binary:
+      zh-CN: （二进制文件，无文本 diff）
+      en: (binary file; no text diff)

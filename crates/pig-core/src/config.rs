@@ -1,34 +1,39 @@
 use std::path::PathBuf;
 
-use pig_protocol::AppConfig;
+use pig_protocol::{AppConfig, CoreError};
 
 pub fn default_path() -> PathBuf {
     crate::data_dir().join("config.toml")
 }
 
-/// 供应商 id 重复会让所有按 id 的查找命中第一个：模型解析落到错误供应商
-/// 的兜底模型、会话 meta/label 张冠李戴。加载时大声提醒，别让人查半天。
+/// Duplicate provider ids make every id-based lookup hit the first one: model resolution lands on
+/// the wrong provider's fallback model, and session meta/labels get mismatched. Warn loudly at load
+/// time so nobody has to hunt for this.
 fn warn_duplicate_provider_ids(config: &AppConfig) {
     let mut seen = std::collections::HashSet::new();
     for provider in &config.providers {
         if !seen.insert(&provider.id) {
             eprintln!(
-                "[config] 警告：供应商 id 重复 \"{}\"（{} 与其他供应商共用，请在设置里删掉重建受影响的供应商）",
+                "[config] warning: duplicate provider id \"{}\" ({} shares it with another provider; delete and recreate the affected providers in settings)",
                 provider.id, provider.name
             );
         }
     }
 }
 
-pub fn load(path: &std::path::Path) -> Result<AppConfig, String> {
-    // 文件不存在 = 空配置（不算错误）；只有解析失败才报错
+pub fn load(path: &std::path::Path) -> Result<AppConfig, CoreError> {
+    // Missing file = empty config (not an error); only parse failures are errors
     if !path.exists() {
         return Ok(AppConfig::default());
     }
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取配置失败 {}: {e}", path.display()))?;
-    let mut config = toml::from_str::<AppConfig>(&raw)
-        .map_err(|e| format!("解析配置失败 {}: {e}", path.display()))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| CoreError::ConfigRead {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    })?;
+    let mut config = toml::from_str::<AppConfig>(&raw).map_err(|e| CoreError::ConfigParseFile {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    })?;
     warn_duplicate_provider_ids(&config);
     expand_env_keys(&mut config);
     Ok(config)
@@ -54,10 +59,15 @@ pub fn expand_env(value: &str) -> String {
     out
 }
 
-pub fn save(path: &std::path::Path, config: &AppConfig) -> Result<(), String> {
+pub fn save(path: &std::path::Path, config: &AppConfig) -> Result<(), CoreError> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let raw = toml::to_string_pretty(config).map_err(|e| format!("序列化配置失败: {e}"))?;
-    std::fs::write(path, raw).map_err(|e| format!("写入配置失败 {}: {e}", path.display()))
+    let raw = toml::to_string_pretty(config).map_err(|e| CoreError::ConfigSerialize {
+        detail: e.to_string(),
+    })?;
+    std::fs::write(path, raw).map_err(|e| CoreError::ConfigWrite {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    })
 }

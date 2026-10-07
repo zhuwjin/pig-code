@@ -5,8 +5,10 @@ use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
 use std::time::Duration;
 
-/// 一轮写改（场景 B：Write + Edit 同一文件）结束后，应产出本轮改动事件：
-/// 文件按「本轮首次写前 → 当前」净额统计（新建 = 全量新增），并随 rollout 回放恢复。
+/// After a turn of writes ends (scenario B: Write + Edit on the same file), the
+/// per-turn change event should be emitted: each file is accounted as the net
+/// delta "before the first write this turn → now" (newly created = all
+/// additions), and it is restored on rollout replay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_file_changes_emitted_and_replayed() {
     let (config_path, cwd, data_dir) = setup("turn-changes");
@@ -22,7 +24,7 @@ async fn turn_file_changes_emitted_and_replayed() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: format!("{} 改个文件", mock::SCENARIO_B_TRIGGER),
+            content: format!("{} edit a file", mock::SCENARIO_B_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::FullAccess,
@@ -37,20 +39,24 @@ async fn turn_file_changes_emitted_and_replayed() {
         Event::TurnFileChanges { files, .. } => Some(files.clone()),
         _ => None,
     });
-    let files = files.expect("回合结束应产出 TurnFileChanges");
-    assert_eq!(files.len(), 1, "场景 B 只动一个文件: {files:?}");
+    let files = files.expect("turn end should emit TurnFileChanges");
+    assert_eq!(
+        files.len(),
+        1,
+        "scenario B touches exactly one file: {files:?}"
+    );
     let change = &files[0];
     assert_eq!(change.path, mock::SCENARIO_B_FILE);
-    // 本轮首次写前不存在 → 最终 3 行全为新增（Write 3 行 + Edit 改行不增行数）
+    // The file did not exist before the first write this turn → all 3 final lines count as additions (Write 3 lines + Edit modifies a line without adding one)
     assert_eq!(
         (change.additions, change.deletions),
         (3, 0),
-        "净额口径: {}",
+        "net-change accounting: {}",
         change.unified_diff
     );
     agent.shutdown();
 
-    // 模拟重启重开会话：每轮改动面板从 rollout 回放恢复
+    // Simulate a restart and reopen the session: the per-turn changes panel is restored from rollout replay
     let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let events2 = agent2.events.clone();
     agent2
@@ -61,8 +67,9 @@ async fn turn_file_changes_emitted_and_replayed() {
         .await
         .unwrap();
     let collected = recv_until(&events2, Duration::from_secs(20), |e| {
-        // 回放收尾哨兵：stats=None 的 TurnComplete（TurnStats 回放的 TurnComplete
-        // 同样 duration_ms=0，会在 TurnFileChanges 之前抢跑截断收集）
+        // Replay-end sentinel: the TurnComplete with stats=None (the replayed
+        // TurnComplete for TurnStats also has duration_ms=0 and can race ahead of
+        // TurnFileChanges, truncating collection early)
         matches!(
             e,
             Event::TurnComplete {
@@ -77,7 +84,7 @@ async fn turn_file_changes_emitted_and_replayed() {
         Event::TurnFileChanges { files, .. } => Some(files.clone()),
         _ => None,
     });
-    let replayed = replayed.expect("回放应恢复 TurnFileChanges");
+    let replayed = replayed.expect("replay should restore TurnFileChanges");
     assert_eq!(replayed.len(), 1);
     assert_eq!(replayed[0].path, mock::SCENARIO_B_FILE);
     assert_eq!((replayed[0].additions, replayed[0].deletions), (3, 0));

@@ -1,7 +1,7 @@
 use super::*;
 
 pub struct ModelDialog {
-    /// None = 新增模型
+    /// None = adding a new model
     pub(crate) editing: Option<usize>,
     pub(crate) id: Entity<InputState>,
     pub(crate) context_window: Entity<InputState>,
@@ -15,91 +15,107 @@ pub struct ModelDialog {
     pub(crate) cap_system_msg: bool,
     pub(crate) enabled: bool,
     pub(crate) reasoning_levels: Vec<String>,
-    /// 等级 id → 显示名（仅展示；随 chip 增删联动）
+    /// Level id → display name (display only; kept in sync as chips are
+    /// added/removed)
     pub(crate) reasoning_labels: std::collections::HashMap<String, String>,
-    /// 默认思考等级：新会话与切换模型的初始档；None = 不设置
+    /// Default reasoning level: the initial level for new sessions and model
+    /// switches; None = unset
     pub(crate) default_level: Option<String>,
     pub(crate) new_level: Entity<InputState>,
     pub(crate) new_label: Entity<InputState>,
     pub(crate) params_json: Entity<TextareaState>,
     pub(crate) params_error: Option<String>,
     pub(crate) snapshot: Option<ModelConfig>,
-    /// 已发起过 models.dev 查询的模型 ID（同 ID 不重查，改了 ID 才会再查）
+    /// Model ID already looked up on models.dev (the same ID is not re-queried;
+    /// only a changed ID triggers a new query)
     pub(crate) looked_up_id: Option<String>,
-    /// models.dev 查询状态（loading / 未收录提示）
+    /// models.dev lookup state (loading / not-found hint)
     pub(crate) lookup_state: LookupState,
-    /// 本次查询是否按「重置表单」语义填充：完全覆盖 + 缺字段回落默认值；
-    /// 回车/失焦触发的查询走温和填充（数据源有才覆盖，手配参数 JSON 保留）
+    /// Whether this lookup fills with "reset form" semantics: full overwrite plus
+    /// missing fields falling back to defaults; lookups triggered by Enter/blur
+    /// use gentle filling (overwrite only what the data source has, keep the
+    /// hand-tuned params JSON)
     pub(crate) lookup_overwrite: bool,
 }
 
-/// models.dev 查询进度：输入框旁的提示行三态
+/// models.dev lookup progress: three states of the hint row beside the input
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LookupState {
     #[default]
     Idle,
     Pending,
-    /// 查询完成但未收录（网络失败同样落这里，回车可重试）
+    /// Lookup finished but not listed (network failures land here too; Enter retries)
     NotFound,
 }
 
-/// MCP 新建/编辑对话框（表单/JSON 双模式，对齐 ZCode 的编辑器形态）
+/// MCP create/edit dialog (dual form/JSON modes, aligned with ZCode's editor shape)
 pub(crate) struct McpDialog {
-    /// 正在编辑的 server 名（None = 新建；编辑中名称与作用域锁定）
+    /// Name of the server being edited (None = creating; name and scope are
+    /// locked while editing)
     pub(crate) editing: Option<String>,
-    /// 写入目标文件层级
+    /// Target file level to write to
     pub(crate) scope: McpSource,
-    /// 项目级是否可选（未打开会话时项目级路径未知，不可用）
+    /// Whether project level is selectable (the project path is unknown without
+    /// an open session, so unavailable)
     pub(crate) project_available: bool,
-    /// 传输类型（stdio 本地命令 / HTTP 远程端点）
+    /// Transport kind (stdio local command / HTTP remote endpoint)
     pub(crate) kind: McpTransportKind,
     pub(crate) name: Entity<InputState>,
     pub(crate) command: Entity<InputState>,
-    /// stdio 参数（空格分隔；含空格的参数请走 JSON 模式）
+    /// stdio arguments (space-separated; for arguments containing spaces use
+    /// JSON mode)
     pub(crate) args: Entity<InputState>,
     pub(crate) url: Entity<InputState>,
-    /// 超时毫秒（空 = 默认 30s）
+    /// Timeout in milliseconds (blank = default 30s)
     pub(crate) timeout: Entity<InputState>,
-    /// 项目级目标的工作区显示名（作用域按钮展示「项目级（xxx）」；None = 未知
+    /// Workspace display name for a project-level target (the scope button shows
+    /// "project (xxx)"; None = unknown
     pub(crate) project_workspace: Option<String>,
     pub(crate) advanced_open: bool,
-    /// 环境变量（stdio）/ 请求头（HTTP）的 JSON 编辑框
+    /// JSON textarea for environment variables (stdio) / headers (HTTP)
     pub(crate) env_headers: Entity<TextareaState>,
-    /// env/headers 各留一份草稿：切换传输类型时交换编辑框内容
+    /// One draft each for env/headers: the textarea content is swapped when
+    /// switching transport kind
     pub(crate) env_draft: String,
     pub(crate) headers_draft: String,
     pub(crate) json_mode: bool,
     pub(crate) json_text: Entity<TextareaState>,
-    /// 删除两步确认
+    /// Two-step delete confirmation
     pub(crate) delete_armed: bool,
-    /// 编辑底稿：原条目 JSON，保存以其为底覆盖表单字段（oauth 等未知字段保真回写）
+    /// Edit base: the original entry JSON; saving overlays form fields on it
+    /// (unknown fields like oauth are written back faithfully)
     pub(crate) base: serde_json::Value,
-    /// 校验错误（保存/切换模式失败时填写，显示在页脚上方）
+    /// Validation error (filled on save/mode-switch failure, shown above the
+    /// footer)
     pub(crate) error: Option<String>,
 }
 
-/// 技能新建/编辑对话框（表单编辑 SKILL.md 的 frontmatter + 正文）
+/// Skill create/edit dialog (the form edits SKILL.md's frontmatter plus body)
 pub(crate) struct SkillDialog {
-    /// 正在编辑的技能目录名（None = 新建；编辑中名称与作用域锁定）
+    /// Directory name of the skill being edited (None = creating; name and scope
+    /// are locked while editing)
     pub(crate) editing: Option<String>,
-    /// 编辑目标目录（保存原目录重写；新建时 None）
+    /// Target directory of the edit (saving rewrites in place; None when creating)
     pub(crate) target_dir: Option<PathBuf>,
-    /// 新建时的写入目标层级
+    /// Target level to write to when creating
     pub(crate) scope: pig_core::skills::SkillSource,
-    /// 项目级是否可选（未选工作区时项目级路径未知，不可用）
+    /// Whether project level is selectable (the project path is unknown without
+    /// a selected workspace, so unavailable)
     pub(crate) project_available: bool,
-    /// 项目级目标的工作区显示名（作用域按钮展示「项目级（xxx）」；None = 未知）
+    /// Workspace display name for a project-level target (the scope button shows
+    /// "project (xxx)"; None = unknown)
     pub(crate) project_workspace: Option<String>,
     pub(crate) name: Entity<InputState>,
     pub(crate) description: Entity<TextareaState>,
-    /// frontmatter when_to_use（可选）
+    /// frontmatter when_to_use (optional)
     pub(crate) when_to_use: Entity<InputState>,
-    /// SKILL.md 正文
+    /// SKILL.md body
     pub(crate) body: Entity<TextareaState>,
-    /// 保真回写的额外 frontmatter 键（license 等，来自编辑底稿）
+    /// Extra frontmatter keys written back faithfully (license etc., from the
+    /// edit base)
     pub(crate) extra_frontmatter: Vec<(String, String)>,
-    /// 删除两步确认
+    /// Two-step delete confirmation
     pub(crate) delete_armed: bool,
-    /// 校验错误（保存失败时填写，显示在页脚上方）
+    /// Validation error (filled on save failure, shown above the footer)
     pub(crate) error: Option<String>,
 }

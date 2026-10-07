@@ -5,9 +5,10 @@ use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
 use std::time::Duration;
 
-/// 主会话每个 provider 步骤落盘一条调用轨迹（{session}.model-io.jsonl）：
-/// 发一轮消息后应至少有两条记录（含工具调用步 + 收尾步），字段齐且输入
-/// 含用户消息投影
+/// The main session persists one call-trace record per provider step
+/// ({session}.model-io.jsonl): after one sent message there should be at least
+/// two records (a tool-call step + a closing step), with complete fields, and
+/// the input should contain the projection of the user message
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_io_written_per_step() {
     let (config_path, cwd, data_dir) = setup("model-io");
@@ -20,7 +21,7 @@ async fn model_io_written_per_step() {
         .ops
         .send(Op::SendMessage {
             session_id: sid.clone(),
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize".into(),
             files: vec![mock::MOCK_FILE_NAME.into()],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -33,59 +34,68 @@ async fn model_io_written_per_step() {
     .await;
 
     let path = pig_core::model_io::model_io_path(&data_dir.join("sessions"), &sid);
-    assert!(path.exists(), "轨迹文件应已落盘: {}", path.display());
+    assert!(
+        path.exists(),
+        "trace file should be persisted: {}",
+        path.display()
+    );
     let records = pig_core::model_io::read_all(&path);
     assert!(
         records.len() >= 2,
-        "一轮含工具调用的对话至少两步，实际 {} 条",
+        "a turn with tool calls spans at least two steps, got {} records",
         records.len()
     );
     for record in &records {
         assert_eq!(record.source, "main");
-        assert_eq!(record.provider, "Mock 供应商");
+        assert_eq!(record.provider, "Mock Provider");
         assert_eq!(record.model, "mock-model");
         assert!(
             record.turn.starts_with('t'),
-            "turn 标识形如 {{turn}}-s{{step}}"
+            "turn id looks like {{turn}}-s{{step}}"
         );
         assert!(
             matches!(record.finish.as_str(), "stop" | "tool_calls"),
-            "结束原因应合法: {}",
+            "finish reason must be valid: {}",
             record.finish
         );
-        assert!(!record.input.is_empty(), "输入投影不应为空");
+        assert!(
+            !record.input.is_empty(),
+            "input projection must not be empty"
+        );
         assert!(record.duration_ms > 0 || record.usage.output > 0);
     }
-    // 首条输入应含 system 提示词与用户消息
+    // The first record's input should contain the system prompt and the user message
     assert_eq!(records[0].input[0].role, "system");
     assert!(
         records[0].input.iter().any(|m| m.role == "user"
             && m.content
                 .as_deref()
-                .is_some_and(|c| c.contains("mock 文件"))),
-        "输入投影应含用户消息"
+                .is_some_and(|c| c.contains("mock file"))),
+        "input projection should contain the user message"
     );
-    // 增量落盘：原始行不重复完整上下文（第二条起 input_offset > 0 且只存新增）；
-    // read_all 展开后每条都是完整序列（次条比首条长）
+    // Delta persistence: raw lines do not repeat the full context (from the
+    // second record on, input_offset > 0 and only the new part is stored);
+    // after read_all expansion each record is a full sequence (the second is
+    // longer than the first)
     let raw = std::fs::read_to_string(&path).unwrap();
     let deltas: Vec<serde_json::Value> = raw
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
     assert!(deltas.len() >= 2);
-    assert_eq!(deltas[0]["input_offset"], 0, "首条全量");
+    assert_eq!(deltas[0]["input_offset"], 0, "first record is full context");
     assert!(
         deltas[1]["input_offset"].as_u64().unwrap_or(0) > 0,
-        "第二条起应只存增量: {:?}",
+        "records after the first should store only the delta: {:?}",
         deltas[1]["input_offset"]
     );
     assert!(
         deltas[1]["input"].as_array().map(|a| a.len()).unwrap_or(0) < records[1].input.len(),
-        "原始 delta 条数应少于展开后的完整输入条数"
+        "raw delta entry count should be fewer than the expanded full input"
     );
     assert!(
         records[1].input.len() > records[0].input.len(),
-        "展开后次条输入包含新增消息"
+        "expanded second input should contain the new messages"
     );
     let _ = std::fs::remove_dir_all(data_dir.parent().unwrap().parent().unwrap());
 }

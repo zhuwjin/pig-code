@@ -2,59 +2,49 @@ use super::*;
 use pig_core::skills as skill_core;
 use std::path::Path;
 
-/// 空技能列表时的引导示例（标准 SKILL.md 形态）
-const SKILL_EXAMPLE: &str = r#"---
-name: commit-helper
-description: 按仓库惯例生成提交信息并提交
-when_to_use: 用户要求提交代码时
----
-
-# 提交助手
-
-1. 用 git diff 了解本次改动
-2. 按仓库现有提交风格写提交信息
-3. 用户确认后提交
-"#;
-
-/// 一个技能的展示投影（core skills::Skill + 启停状态 + 覆盖标记）
+/// Display projection of one skill (core skills::Skill plus enable state plus
+/// override flag)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SkillInfo {
-    /// 调用名（frontmatter name，缺省回退目录名）
+    /// Invocation name (frontmatter name, falling back to the directory name)
     pub name: String,
-    /// 技能目录名（文件操作身份）
+    /// Skill directory name (identity for file operations)
     pub dir_name: String,
-    /// 技能目录绝对路径
+    /// Absolute path of the skill directory
     pub directory: PathBuf,
-    /// SKILL.md 绝对路径（启停状态的 key）
+    /// Absolute path of SKILL.md (the key of the enable state)
     pub path: PathBuf,
     pub description: String,
     pub when_to_use: Option<String>,
     pub source: skill_core::SkillSource,
-    /// 启停状态（skills-state.json；默认启用）
+    /// Enable state (skills-state.json; enabled by default)
     pub enabled: bool,
-    /// 项目级技能覆盖了用户级同名技能
+    /// This project-level skill overrides a user-level skill with the same name
     pub overrides_user: bool,
-    /// SKILL.md 是否带 frontmatter（无则提示补写）
+    /// Whether SKILL.md has frontmatter (prompted to add one when missing)
     pub has_frontmatter: bool,
 }
 
-/// 两个技能根目录 + 合并后的技能清单（设置页技能页数据快照）
+/// The two skill roots plus the merged skill list (the settings skills page data
+/// snapshot)
 pub(crate) struct SkillsSnapshot {
     pub user_path: PathBuf,
     pub user_exists: bool,
-    /// None = 未选择工作区（项目级不参与）
+    /// None = no workspace selected (project level does not participate)
     pub project_path: Option<PathBuf>,
     pub project_exists: bool,
     pub skills: Vec<SkillInfo>,
 }
 
-/// 读用户级 `<data_dir>/skills/` + 项目级 `<workspace>/.pigcode/skills/`
-/// 并合并（项目级同名覆盖），启停状态取 `<data_dir>/skills-state.json`
+/// Read the user-level `<data_dir>/skills/` plus the project-level
+/// `<workspace>/.pigcode/skills/` and merge (project-level same-name overrides);
+/// the enable state comes from `<data_dir>/skills-state.json`
 pub(crate) fn load_skills_snapshot(workspace: Option<&Path>) -> SkillsSnapshot {
     load_skills_from(&pig_core::data_dir(), workspace)
 }
 
-/// 按显式 data_dir 加载（测试用；口径与 load_skills_snapshot 一致）
+/// Load with an explicit data_dir (for tests; same criteria as
+/// load_skills_snapshot)
 pub(crate) fn load_skills_from(data_dir: &Path, workspace: Option<&Path>) -> SkillsSnapshot {
     let user_path = skill_core::user_root(data_dir);
     let project_path = workspace.map(skill_core::project_root);
@@ -64,7 +54,8 @@ pub(crate) fn load_skills_from(data_dir: &Path, workspace: Option<&Path>) -> Ski
         .map(|root| discover_infos(root, skill_core::SkillSource::Project, &disabled))
         .unwrap_or_default();
     let mut skills = discover_infos(&user_path, skill_core::SkillSource::User, &disabled);
-    // 合并口径与 core discover 一致：项目级同名整体覆盖用户级
+    // Merge criteria match core's discover: a project-level same-name skill
+    // wholly replaces the user-level one
     for mut skill in project_skills {
         if let Some(existing) = skills.iter_mut().find(|s| s.name == skill.name) {
             skill.overrides_user = true;
@@ -112,9 +103,10 @@ fn discover_infos(
         .collect()
 }
 
-// ---------- 技能写入（新建/编辑/删除落盘，之后整页刷新） ----------
+// ---------- Skill writes (create/edit/delete persist, then the whole page refreshes) ----------
 
-/// 技能名 → 目录名：小写、空白/下划线归并为 `-`，只留 [a-z0-9-]，长度 1-64
+/// Skill name → directory name: lowercase, whitespace/underscores collapsed to
+/// `-`, only [a-z0-9-] kept, length 1-64
 pub(crate) fn sanitize_dir_name(name: &str) -> Option<String> {
     let mut out = String::new();
     let mut last_dash = false;
@@ -132,7 +124,8 @@ pub(crate) fn sanitize_dir_name(name: &str) -> Option<String> {
     (!trimmed.is_empty() && trimmed.len() <= 64).then_some(trimmed)
 }
 
-/// 新建技能：建目录 + 写 SKILL.md，返回目录路径。目录已存在时报错（不覆盖）
+/// Create a skill: make the directory plus write SKILL.md, returning the
+/// directory path. Errors when the directory already exists (no overwrite)
 pub(crate) fn create_skill_dir(
     root: &Path,
     dir_name: &str,
@@ -140,55 +133,75 @@ pub(crate) fn create_skill_dir(
 ) -> Result<PathBuf, String> {
     let dir = root.join(dir_name);
     if dir.exists() {
-        return Err(format!("目录已存在: {}", dir.display()));
+        return Err(
+            rust_i18n::t!("settings.skills.err_dir_exists", path = dir.display()).to_string(),
+        );
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败 {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        rust_i18n::t!(
+            "settings.skills.err_create_dir",
+            path = dir.display(),
+            error = e
+        )
+        .to_string()
+    })?;
     std::fs::write(dir.join(skill_core::SKILL_FILE), markdown)
-        .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
+        .map_err(|e| rust_i18n::t!("settings.skills.err_write_skill", error = e).to_string())?;
     Ok(dir)
 }
 
-/// 编辑保存：整文件重写 SKILL.md
+/// Edit save: rewrite the whole SKILL.md file
 pub(crate) fn write_skill_md(directory: &Path, markdown: &str) -> Result<(), String> {
-    std::fs::create_dir_all(directory)
-        .map_err(|e| format!("创建目录失败 {}: {e}", directory.display()))?;
+    std::fs::create_dir_all(directory).map_err(|e| {
+        rust_i18n::t!(
+            "settings.skills.err_create_dir",
+            path = directory.display(),
+            error = e
+        )
+        .to_string()
+    })?;
     std::fs::write(directory.join(skill_core::SKILL_FILE), markdown)
-        .map_err(|e| format!("写入 SKILL.md 失败: {e}"))
+        .map_err(|e| rust_i18n::t!("settings.skills.err_write_skill", error = e).to_string())
 }
 
-/// 删除技能目录。仅允许删两个受控根的直接子目录（root 自身/越界路径拒绝）
+/// Delete a skill directory. Only direct children of the two controlled roots
+/// may be deleted (the root itself/out-of-bounds paths are refused)
 pub(crate) fn delete_skill_dir(directory: &Path, roots: &[&Path]) -> Result<(), String> {
     let inside = roots
         .iter()
         .any(|root| directory.parent().is_some_and(|parent| parent == *root) && directory != *root);
     if !inside {
-        return Err(format!(
-            "拒绝删除 {}: 不在受控的技能目录（skills/ 的直接子目录）内",
-            directory.display()
-        ));
+        return Err(rust_i18n::t!(
+            "settings.skills.err_delete_refused",
+            path = directory.display()
+        )
+        .to_string());
     }
-    std::fs::remove_dir_all(directory).map_err(|e| format!("删除失败: {e}"))
+    std::fs::remove_dir_all(directory)
+        .map_err(|e| rust_i18n::t!("settings.skills.err_delete_failed", error = e).to_string())
 }
 
 impl SettingsView {
-    /// 刷新技能页：AppView 收到事件后重读技能目录
+    /// Refresh the skills page: on the event AppView re-reads the skill
+    /// directories
     pub(crate) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
         cx.emit(SettingsEvent::RefreshSkills);
         cx.notify();
     }
 
-    /// AppView 刷新快照时读取：当前选中的作用域
+    /// Read by AppView when refreshing the snapshot: the currently selected scope
     pub(crate) fn skills_scope(&self) -> &McpScope {
         &self.skills_scope
     }
 
-    /// 快照喂入（AppView 刷新时调用）
+    /// Snapshot feed (called when AppView refreshes)
     pub(crate) fn set_skills_config(&mut self, snapshot: SkillsSnapshot, cx: &mut Context<Self>) {
         self.skills_snapshot = Some(snapshot);
         cx.notify();
     }
 
-    /// 切换作用域：换目标后整页刷新（AppView 按新作用域重读快照）
+    /// Switch scope: refresh the whole page after changing the target (AppView
+    /// re-reads the snapshot for the new scope)
     fn set_skills_scope(&mut self, scope: McpScope, cx: &mut Context<Self>) {
         self.skills_scope_popup = false;
         if self.skills_scope == scope {
@@ -199,7 +212,8 @@ impl SettingsView {
         self.refresh_skills(cx);
     }
 
-    /// 启停开关：写 skills-state.json（全局状态，任意作用域一致），然后整页刷新
+    /// Enable/disable toggle: write skills-state.json (global state, consistent
+    /// across scopes), then refresh the whole page
     fn toggle_skill(&mut self, skill_path: &Path, enabled: bool, cx: &mut Context<Self>) {
         match skill_core::set_skill_enabled(&pig_core::data_dir(), skill_path, enabled) {
             Ok(()) => {
@@ -207,13 +221,15 @@ impl SettingsView {
                 self.refresh_skills(cx);
             }
             Err(e) => {
-                self.skills_write_error = Some(e);
+                // Structured CoreError → localized message (detail shown as a
+                // note of the English original)
+                self.skills_write_error = Some(crate::errors::core_error_text(&e));
                 cx.notify();
             }
         }
     }
 
-    /// 打开新建（name=None）/编辑对话框，按现有技能预填
+    /// Open the create (name=None)/edit dialog, prefilled from the existing skill
     pub(crate) fn open_skills_dialog(
         &mut self,
         name: Option<&str>,
@@ -226,7 +242,8 @@ impl SettingsView {
         let scope = existing
             .map(|skill| skill.source)
             .unwrap_or(skill_core::SkillSource::User);
-        // 编辑底稿：读现有 SKILL.md 解析（保真额外 frontmatter 键）
+        // Edit base: read and parse the existing SKILL.md (extra frontmatter
+        // keys kept faithfully)
         let (description, when_to_use, body, extra) = match existing {
             Some(skill) => match std::fs::read_to_string(&skill.path) {
                 Ok(content) => {
@@ -243,7 +260,8 @@ impl SettingsView {
             },
             None => (String::new(), None, String::new(), vec![]),
         };
-        // 项目级目标的工作区名（项目根上溯两级 = 工作区；显示名走别名表）
+        // Workspace name for a project-level target (two levels up from the
+        // project root = workspace; display name via the alias table)
         let project_root = snapshot
             .and_then(|s| s.project_path.as_ref())
             .and_then(|p| p.parent())
@@ -265,7 +283,7 @@ impl SettingsView {
             project_workspace,
             name: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("例如 commit-helper")
+                    .placeholder(rust_i18n::t!("settings.skills.name_placeholder"))
                     .default_value(existing.map(|skill| skill.name.clone()).unwrap_or_default())
             }),
             description: cx.new(|cx| {
@@ -275,14 +293,14 @@ impl SettingsView {
             }),
             when_to_use: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("可选：什么场景下用这个技能")
+                    .placeholder(rust_i18n::t!("settings.skills.when_to_use_placeholder"))
                     .default_value(when_to_use.unwrap_or_default())
             }),
             body: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(10, 24)
                     .default_value(if body.is_empty() {
-                        "# 用途\n\n（这个技能做什么、怎么用）\n".to_string()
+                        rust_i18n::t!("settings.skills.default_body").to_string()
                     } else {
                         body
                     })
@@ -295,7 +313,8 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 保存对话框：校验 → 生成 SKILL.md → 新建目录或原目录重写 → 刷新
+    /// Save the dialog: validate → generate SKILL.md → create a directory or
+    /// rewrite in place → refresh
     fn save_skills_dialog(&mut self, cx: &mut Context<Self>) {
         let name = {
             let Some(dialog) = self.skills_dialog.as_ref() else {
@@ -304,7 +323,7 @@ impl SettingsView {
             dialog.name.read(cx).value().trim().to_string()
         };
         if name.is_empty() {
-            self.set_skills_dialog_error("技能名不能为空");
+            self.set_skills_dialog_error(rust_i18n::t!("settings.skills.err_name_empty").as_ref());
             cx.notify();
             return;
         }
@@ -312,7 +331,9 @@ impl SettingsView {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
         {
-            self.set_skills_dialog_error("技能名只允许字母、数字、- 和 _（将作为目录名与调用名）");
+            self.set_skills_dialog_error(
+                rust_i18n::t!("settings.skills.err_name_charset").as_ref(),
+            );
             cx.notify();
             return;
         }
@@ -331,26 +352,32 @@ impl SettingsView {
             &body,
         );
         let Some(snapshot) = self.skills_snapshot.as_ref() else {
-            self.set_skills_dialog_error("技能目录尚未加载完成，请稍后重试");
+            self.set_skills_dialog_error(rust_i18n::t!("settings.skills.err_not_loaded").as_ref());
             cx.notify();
             return;
         };
         let result = match &dialog.target_dir {
-            // 编辑：原目录重写（名称锁定，目录不动）
+            // Editing: rewrite in the original directory (name locked,
+            // directory untouched)
             Some(dir) => write_skill_md(dir, &markdown).map(|_| dir.clone()),
-            // 新建：按作用域定位根目录，目录名取技能名归一
+            // Creating: locate the root by scope; the directory name is the
+            // normalized skill name
             None => {
                 let root: Option<PathBuf> = match dialog.scope {
                     skill_core::SkillSource::User => Some(snapshot.user_path.clone()),
                     skill_core::SkillSource::Project => snapshot.project_path.clone(),
                 };
                 let Some(root) = root else {
-                    self.set_skills_dialog_error("项目级路径不可用（未选择工作区），请改用用户级");
+                    self.set_skills_dialog_error(
+                        rust_i18n::t!("settings.skills.err_project_unavailable").as_ref(),
+                    );
                     cx.notify();
                     return;
                 };
                 let Some(dir_name) = sanitize_dir_name(&name) else {
-                    self.set_skills_dialog_error("无法从技能名生成合法目录名（仅字母/数字/-）");
+                    self.set_skills_dialog_error(
+                        rust_i18n::t!("settings.skills.err_dir_name").as_ref(),
+                    );
                     cx.notify();
                     return;
                 };
@@ -377,7 +404,8 @@ impl SettingsView {
         }
     }
 
-    /// 删除正在编辑的技能（两步确认）：仅受控根直接子目录
+    /// Delete the skill being edited (two-step confirm): only direct children
+    /// of the controlled roots
     fn delete_skills_dialog_skill(&mut self, cx: &mut Context<Self>) {
         let (armed, target) = {
             let Some(dialog) = &self.skills_dialog else {
@@ -422,7 +450,8 @@ impl SettingsView {
         }
     }
 
-    /// 切换作用域（仅新建时可选；项目级要求已选工作区）
+    /// Switch scope (only selectable when creating; project level requires a
+    /// selected workspace)
     fn set_skills_dialog_scope(&mut self, scope: skill_core::SkillSource, cx: &mut Context<Self>) {
         let Some(dialog) = self.skills_dialog.as_mut() else {
             return;
@@ -437,10 +466,13 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 作用域选择器（pill 按钮 + deferred 弹层，MCP 页同款）
+    /// Scope selector (pill button plus deferred popup, same as the MCP page)
     pub(crate) fn render_skills_scope(&self, cx: &mut Context<Self>) -> AnyElement {
         let (icon, label) = match &self.skills_scope {
-            McpScope::User => (IconName::User, "用户级".to_string()),
+            McpScope::User => (
+                IconName::User,
+                rust_i18n::t!("settings.common.scope_user").to_string(),
+            ),
             McpScope::Workspace(path) => {
                 let alias = self
                     .scope_workspaces
@@ -465,7 +497,9 @@ impl SettingsView {
                     .icon(icon)
                     .label(label)
                     .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                        // 弹层打开时点按钮：outside-close 先关掉，同按压的 click 按位置吞掉
+                        // Clicking the button while the popup is open:
+                        // outside-close closes it first, and the same press's
+                        // click is swallowed by position match
                         let down_pos = match event {
                             ClickEvent::Mouse(e) => Some(e.down.position),
                             _ => None,
@@ -487,7 +521,8 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 作用域下拉：用户级 + 工作区清单（会话所在工作区带「当前会话」标记）
+    /// Scope dropdown: user level plus the workspace list (the session's
+    /// workspace gets a "current session" badge)
     fn render_skills_scope_popup(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut popup = v_flex()
             .id("skills-scope-popup")
@@ -530,13 +565,20 @@ impl SettingsView {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().child("用户级"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(rust_i18n::t!("settings.common.scope_user").to_string()),
+                            )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .truncate()
-                                    .child("全局技能，对所有工作区生效"),
+                                    .child(
+                                        rust_i18n::t!("settings.skills.scope_user_hint")
+                                            .to_string(),
+                                    ),
                             ),
                     )
                     .when(self.skills_scope == McpScope::User, |this| {
@@ -555,7 +597,7 @@ impl SettingsView {
                     .py_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("工作区"),
+                    .child(rust_i18n::t!("settings.common.workspace_section").to_string()),
             );
             for (path, display) in self.scope_workspaces.clone() {
                 let selected = self.skills_scope == McpScope::Workspace(path.clone());
@@ -600,7 +642,12 @@ impl SettingsView {
                                                     .rounded_sm()
                                                     .bg(cx.theme().accent)
                                                     .flex_shrink_0()
-                                                    .child("当前会话"),
+                                                    .child(
+                                                        rust_i18n::t!(
+                                                            "settings.common.current_session"
+                                                        )
+                                                        .to_string(),
+                                                    ),
                                             )
                                         }),
                                 )
@@ -646,7 +693,11 @@ impl SettingsView {
                 .py_8()
                 .text_color(cx.theme().muted_foreground)
                 .child(Spinner::new().small())
-                .child(div().text_sm().child("正在读取技能目录…"))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(rust_i18n::t!("settings.skills.loading").to_string()),
+                )
                 .into_any_element();
         };
 
@@ -685,7 +736,7 @@ impl SettingsView {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .py_6()
-                    .child("没有匹配的技能"),
+                    .child(rust_i18n::t!("settings.skills.no_match").to_string()),
             );
         } else {
             page = page
@@ -693,7 +744,12 @@ impl SettingsView {
                     div()
                         .text_sm()
                         .font_semibold()
-                        .child(format!("技能（{}）", snapshot.skills.len())),
+                        .child(if snapshot.skills.len() == 1 {
+                            rust_i18n::t!("settings.skills.skill_count_one", n = 1).to_string()
+                        } else {
+                            rust_i18n::t!("settings.skills.skill_count", n = snapshot.skills.len())
+                                .to_string()
+                        }),
                 )
                 .children(
                     filtered
@@ -706,8 +762,10 @@ impl SettingsView {
         page.into_any_element()
     }
 
-    /// 帮助弹窗：SKILL.md 格式 + 技能目录路径 + 生效时机
-    ///（页头信息按钮弹出；目录未加载时省略路径段只显示格式说明）
+    /// Help dialog: SKILL.md format plus skill directory paths plus when changes
+    /// take effect (popped up by the header info button; when directories are
+    /// not loaded the paths section is omitted and only the format notes are
+    /// shown)
     pub(crate) fn render_skills_help_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .absolute()
@@ -728,16 +786,20 @@ impl SettingsView {
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_lg().font_semibold().child("技能说明"))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(rust_i18n::t!("settings.skills.help_title").to_string()),
+                    )
                     .when_some(self.skills_snapshot.as_ref(), |this, snapshot| {
                         this.child(
                             v_flex()
                                 .gap_1()
                                 .child(
-                                    div()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .child("技能目录"),
+                                    div().text_sm().font_semibold().child(
+                                        rust_i18n::t!("settings.skills.skill_dirs").to_string(),
+                                    ),
                                 )
                                 .child(self.render_skill_sources(snapshot, cx)),
                         )
@@ -745,12 +807,19 @@ impl SettingsView {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().font_semibold().child("手动编写"))
+                            .child(
+                                div().text_sm().font_semibold().child(
+                                    rust_i18n::t!("settings.skills.manual_edit").to_string(),
+                                ),
+                            )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("每个技能是一个目录，内含 SKILL.md（frontmatter 写 name/description）；项目级覆盖用户级同名技能："),
+                                    .child(
+                                        rust_i18n::t!("settings.skills.manual_edit_hint")
+                                            .to_string(),
+                                    ),
                             )
                             .child(
                                 div()
@@ -762,35 +831,32 @@ impl SettingsView {
                                     .text_xs()
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(SKILL_EXAMPLE),
+                                    .child(rust_i18n::t!("settings.skills.example").to_string()),
                             ),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("技能清单注入系统提示词（仅名称+描述，会话开始时冻结），正文由 Skill 工具按需加载；改动对新建会话生效。"),
+                            .child(rust_i18n::t!("settings.skills.effective_hint").to_string()),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("close-skills-help")
-                                    .primary()
-                                    .small()
-                                    .label("关闭")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.skills_help_open = false;
-                                        cx.notify();
-                                    })),
-                            ),
+                        h_flex().gap_2().child(div().flex_1()).child(
+                            Button::new("close-skills-help")
+                                .primary()
+                                .small()
+                                .label(rust_i18n::t!("settings.common.close"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.skills_help_open = false;
+                                    cx.notify();
+                                })),
+                        ),
                     ),
             )
             .into_any_element()
     }
 
-    /// 无技能时的引导：新建入口 + 示例 SKILL.md
+    /// Onboarding when no skills exist: create entry point plus example SKILL.md
     fn render_skills_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .gap_3()
@@ -805,13 +871,13 @@ impl SettingsView {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("当前作用域还没有技能"),
+                    .child(rust_i18n::t!("settings.skills.empty_title").to_string()),
             )
             .child(
                 Button::new("new-skill-empty")
                     .primary()
                     .icon(IconName::Plus)
-                    .label("新建技能")
+                    .label(rust_i18n::t!("settings.skills.new_skill"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_skills_dialog(None, window, cx);
                     })),
@@ -819,7 +885,8 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 目录来源两行：用户级/项目级路径与是否存在
+    /// Two directory source rows: user-level/project-level paths and whether
+    /// they exist
     fn render_skill_sources(
         &self,
         snapshot: &SkillsSnapshot,
@@ -828,20 +895,31 @@ impl SettingsView {
         v_flex()
             .gap_1()
             .child(skill_source_row(
-                "用户级",
+                rust_i18n::t!("settings.common.scope_user").as_ref(),
                 Some(&snapshot.user_path),
                 snapshot.user_exists,
                 cx,
             ))
             .child(match &snapshot.project_path {
-                Some(path) => skill_source_row("项目级", Some(path), snapshot.project_exists, cx),
-                None => skill_source_row("项目级", None, false, cx),
+                Some(path) => skill_source_row(
+                    rust_i18n::t!("settings.common.scope_project").as_ref(),
+                    Some(path),
+                    snapshot.project_exists,
+                    cx,
+                ),
+                None => skill_source_row(
+                    rust_i18n::t!("settings.common.scope_project").as_ref(),
+                    None,
+                    false,
+                    cx,
+                ),
             })
             .into_any_element()
     }
 
-    /// 单个技能卡片：状态点 + 名称 + 来源 chip + 编辑/启停，
-    /// 第二行描述，第三行目录（mono），无 frontmatter 时给提示行
+    /// One skill card: status dot plus name plus source chip plus
+    /// edit/enable-disable; second row the description, third row the directory
+    /// (mono); a hint row when frontmatter is missing
     fn render_skill_card(
         &self,
         ix: usize,
@@ -857,15 +935,21 @@ impl SettingsView {
                 .child(label.to_string())
         };
         let (dot, status_text) = if skill.enabled {
-            (cx.theme().success, "已启用")
+            (
+                cx.theme().success,
+                rust_i18n::t!("settings.skills.state_enabled").to_string(),
+            )
         } else {
-            (cx.theme().muted_foreground, "已停用")
+            (
+                cx.theme().muted_foreground,
+                rust_i18n::t!("settings.skills.state_disabled").to_string(),
+            )
         };
         let edit_name = skill.name.clone();
         let enabled = skill.enabled;
         let skill_path = skill.path.clone();
         let description = if skill.description.is_empty() {
-            "（无描述——建议在编辑里补充，清单里只显示名称）".to_string()
+            rust_i18n::t!("settings.skills.no_description").to_string()
         } else {
             skill.description.clone()
         };
@@ -890,13 +974,13 @@ impl SettingsView {
                             .text_color(cx.theme().muted_foreground)
                             .child(status_text),
                     )
-                    .child(chip(skill.source.label(), cx))
+                    .child(chip(&skill_source_label(skill.source), cx))
                     .when(skill.overrides_user, |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("覆盖用户级同名技能"),
+                                .child(rust_i18n::t!("settings.skills.overrides_user").to_string()),
                         )
                     })
                     .child(div().flex_1())
@@ -936,7 +1020,7 @@ impl SettingsView {
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .opacity(0.8)
-                        .child("SKILL.md 无 frontmatter：name 取目录名、description 为空，建议编辑补写"),
+                        .child(rust_i18n::t!("settings.skills.no_frontmatter").to_string()),
                 )
             })
             .when_some(
@@ -947,14 +1031,17 @@ impl SettingsView {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .opacity(0.8)
-                            .child(format!("适用场景：{when}")),
+                            .child(
+                                rust_i18n::t!("settings.skills.when_to_use", when = when)
+                                    .to_string(),
+                            ),
                     )
                 },
             )
             .into_any_element()
     }
 
-    /// 新建/编辑对话框（名称/作用域/描述/适用场景/正文）
+    /// Create/edit dialog (name/scope/description/when-to-use/body)
     pub(crate) fn render_skills_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(dialog) = &self.skills_dialog else {
             return div().into_any_element();
@@ -964,68 +1051,148 @@ impl SettingsView {
         let form = v_flex()
             .gap_3()
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("名称"))
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("settings.common.field_name").to_string()),
+                    )
                     .child(Input::new(&dialog.name).disabled(editing))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                        .child("模型经 Skill 工具按名调用；编辑时不可改名（删除后重建），目录名取名称归一小写")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .opacity(0.7)
+                            .child(rust_i18n::t!("settings.skills.name_hint").to_string()),
+                    ),
             )
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("作用域"))
+                v_flex()
+                    .gap_1()
                     .child(
-                        h_flex().gap_1()
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("settings.common.scope").to_string()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
                             .child(
                                 Button::new("skill-scope-user")
                                     .small()
-                                    .when(dialog.scope == skill_core::SkillSource::User, |this| this.primary())
-                                    .when(dialog.scope != skill_core::SkillSource::User, |this| this.outline())
+                                    .when(dialog.scope == skill_core::SkillSource::User, |this| {
+                                        this.primary()
+                                    })
+                                    .when(dialog.scope != skill_core::SkillSource::User, |this| {
+                                        this.outline()
+                                    })
                                     .disabled(editing)
-                                    .label("用户级")
+                                    .label(rust_i18n::t!("settings.common.scope_user"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_skills_dialog_scope(skill_core::SkillSource::User, cx);
+                                        this.set_skills_dialog_scope(
+                                            skill_core::SkillSource::User,
+                                            cx,
+                                        );
                                     })),
                             )
                             .child(
                                 Button::new("skill-scope-project")
                                     .small()
-                                    .when(dialog.scope == skill_core::SkillSource::Project, |this| this.primary())
-                                    .when(dialog.scope != skill_core::SkillSource::Project, |this| this.outline())
+                                    .when(
+                                        dialog.scope == skill_core::SkillSource::Project,
+                                        |this| this.primary(),
+                                    )
+                                    .when(
+                                        dialog.scope != skill_core::SkillSource::Project,
+                                        |this| this.outline(),
+                                    )
                                     .disabled(editing || !dialog.project_available)
                                     .label(match &dialog.project_workspace {
-                                        Some(name) => format!("项目级（{name}）"),
-                                        None => "项目级".to_string(),
+                                        Some(name) => rust_i18n::t!(
+                                            "settings.common.scope_project_named",
+                                            name = name
+                                        )
+                                        .to_string(),
+                                        None => rust_i18n::t!("settings.common.scope_project")
+                                            .to_string(),
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_skills_dialog_scope(skill_core::SkillSource::Project, cx);
+                                        this.set_skills_dialog_scope(
+                                            skill_core::SkillSource::Project,
+                                            cx,
+                                        );
                                     })),
                             ),
                     )
                     .when(!dialog.project_available, |this| {
-                        this.child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                            .child("用户级视图只写用户级；在列表上方切换到具体工作区后可写项目级"))
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .opacity(0.7)
+                                .child(
+                                    rust_i18n::t!("settings.common.project_unavailable_hint")
+                                        .to_string(),
+                                ),
+                        )
                     }),
             )
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("描述"))
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("settings.skills.field_description").to_string()),
+                    )
                     .child(Textarea::new(&dialog.description))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                        .child("写进系统提示词的技能清单，说明这个技能做什么；建议一句话+适用边界")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .opacity(0.7)
+                            .child(rust_i18n::t!("settings.skills.description_hint").to_string()),
+                    ),
             )
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("适用场景（可选）"))
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("settings.skills.field_when_to_use").to_string()),
+                    )
                     .child(Input::new(&dialog.when_to_use))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                        .child("when_to_use：什么情况下应该用这个技能，拼在清单描述后面")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .opacity(0.7)
+                            .child(rust_i18n::t!("settings.skills.when_to_use_hint").to_string()),
+                    ),
             )
             .child(
-                v_flex().gap_1()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("正文（SKILL.md body）"))
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("settings.skills.field_body").to_string()),
+                    )
                     .child(Textarea::new(&dialog.body))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).opacity(0.7)
-                        .child("技能的完整说明：步骤、约束、示例；相对路径相对技能目录，可用 ${SKILL_DIR} 占位")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .opacity(0.7)
+                            .child(rust_i18n::t!("settings.skills.body_hint").to_string()),
+                    ),
             );
 
         div()
@@ -1048,9 +1215,13 @@ impl SettingsView {
                     .border_1()
                     .border_color(cx.theme().border)
                     .child(div().text_lg().font_semibold().child(if editing {
-                        format!("编辑技能「{}」", dialog.editing.clone().expect("editing"))
+                        rust_i18n::t!(
+                            "settings.skills.edit_title",
+                            name = dialog.editing.clone().expect("editing")
+                        )
+                        .to_string()
                     } else {
-                        "新建技能".to_string()
+                        rust_i18n::t!("settings.skills.new_skill").to_string()
                     }))
                     .child(form)
                     .when_some(dialog.error.clone(), |this, error| {
@@ -1066,9 +1237,9 @@ impl SettingsView {
                                         .ghost()
                                         .small()
                                         .label(if dialog.delete_armed {
-                                            "确认删除？"
+                                            rust_i18n::t!("settings.common.confirm_delete")
                                         } else {
-                                            "删除"
+                                            rust_i18n::t!("common.delete")
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.delete_skills_dialog_skill(cx);
@@ -1080,7 +1251,7 @@ impl SettingsView {
                                 Button::new("skills-dialog-cancel")
                                     .outline()
                                     .small()
-                                    .label("取消")
+                                    .label(rust_i18n::t!("common.cancel"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.skills_dialog = None;
                                         cx.notify();
@@ -1090,7 +1261,7 @@ impl SettingsView {
                                 Button::new("skills-dialog-save")
                                     .primary()
                                     .small()
-                                    .label("保存")
+                                    .label(rust_i18n::t!("settings.common.save"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.save_skills_dialog(cx);
                                     })),
@@ -1101,7 +1272,20 @@ impl SettingsView {
     }
 }
 
-/// 目录来源行：级别标签 + 目录路径 + 「未创建」标注
+/// Skill source chip label. core's SkillSource::label is a Chinese constant
+/// (pig-core does not use the GUI registry), so GUI text uniformly comes from
+/// the local registry
+fn skill_source_label(source: skill_core::SkillSource) -> String {
+    match source {
+        skill_core::SkillSource::User => rust_i18n::t!("settings.common.scope_user").to_string(),
+        skill_core::SkillSource::Project => {
+            rust_i18n::t!("settings.common.scope_project").to_string()
+        }
+    }
+}
+
+/// One directory source row: level label plus directory path plus a "not
+/// created" note
 fn skill_source_row(
     label: &str,
     path: Option<&Path>,
@@ -1126,7 +1310,7 @@ fn skill_source_row(
                 .font_family(cx.theme().mono_font_family.clone())
                 .child(match path {
                     Some(path) => path.display().to_string(),
-                    None => "选择工作区后显示其项目级技能目录".to_string(),
+                    None => rust_i18n::t!("settings.skills.source_pick_workspace").to_string(),
                 }),
         )
         .when(path.is_some() && !exists, |this| {
@@ -1134,7 +1318,7 @@ fn skill_source_row(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("（未创建）"),
+                    .child(rust_i18n::t!("settings.common.not_created").to_string()),
             )
         })
 }

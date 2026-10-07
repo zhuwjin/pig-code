@@ -1,8 +1,10 @@
 use super::*;
 
 impl Composer {
-    /// 粘贴入口（Textarea::on_paste）：仲裁结果决定是否拦截默认文本插入。
-    /// 返回 true = 已作为附件处理，输入框不插文本；false = 交给引擎插文本。
+    /// Paste entry (Textarea::on_paste): the arbitration result decides whether to
+    /// intercept the default text insertion.
+    /// Returning true = handled as an attachment, no text inserted into the
+    /// composer; false = let the engine insert the text.
     pub(crate) fn handle_paste(
         &mut self,
         item: &ClipboardItem,
@@ -13,7 +15,8 @@ impl Composer {
         let entry_count = item.entries.len();
         match arbitrate_clipboard(item) {
             PasteArb::FilePath(path) => {
-                // >20MB 跳过到文本粘贴（粘贴路径文本）；读不出/非图片同样落回文本
+                // Over 20MB falls back to text paste (pasting the path as text);
+                // unreadable/non-image files likewise fall back to text
                 let Ok(meta) = std::fs::metadata(&path) else {
                     eprintln!("[clipboard] paste FilePath failed: metadata unavailable");
                     return false;
@@ -63,7 +66,8 @@ impl Composer {
         }
     }
 
-    /// 图片进附件列表（chip 条）：超上限只提示不附加；TIFF 在这里规范化为 PNG。
+    /// Add an image to the attachment list (chip strip): over the limit only shows a
+    /// notice without attaching; TIFF is normalized to PNG here.
     pub(crate) fn attach_image(
         &mut self,
         mut bytes: Vec<u8>,
@@ -75,7 +79,8 @@ impl Composer {
                 "[clipboard] attach_image skipped: already at max={} images",
                 MAX_PASTED_IMAGES
             );
-            self.paste_note = Some(format!("最多粘贴 {MAX_PASTED_IMAGES} 张图片"));
+            self.paste_note =
+                Some(rust_i18n::t!("composer.paste_limit", n = MAX_PASTED_IMAGES).to_string());
             cx.notify();
             return;
         }
@@ -95,7 +100,8 @@ impl Composer {
                 }
                 Err(error) => {
                     eprintln!("[clipboard] TIFF conversion failed: {error}");
-                    self.paste_note = Some(format!("TIFF 图片无法转换：{error}"));
+                    self.paste_note =
+                        Some(rust_i18n::t!("composer.tiff_failed", error = error).to_string());
                     cx.notify();
                     return;
                 }
@@ -121,9 +127,11 @@ impl Composer {
         cx.notify();
     }
 
-    /// 图片附件条：官方 AttachmentGroup（每图一个 Attachment：缩略图 + 尺寸/体积 +
-    /// 悬停删除钮）；paste_note 警告行跟在 Group 之后（样式不变）。
-    /// `surface` 是行背后的表面色（输入框容器色），用于 Group 的边缘渐隐。
+    /// Image attachment strip: the official AttachmentGroup (one Attachment per
+    /// image: thumbnail + dimensions/size + hover delete button); the paste_note
+    /// warning line follows the Group (style unchanged).
+    /// `surface` is the surface color behind the row (the composer container color),
+    /// used for the Group's edge fade.
     pub(crate) fn render_pasted_images(&self, surface: Hsla, cx: &mut Context<Self>) -> AnyElement {
         let attachments: Vec<AnyElement> = self
             .pasted_images
@@ -141,7 +149,7 @@ impl Composer {
                     bytes: (*image.bytes).clone(),
                     id: gpui_kit::hash(&(image.bytes.as_slice(), ix)),
                 });
-                let title = format!("图片 {}", ix + 1);
+                let title = rust_i18n::t!("composer.image_label", n = ix + 1).to_string();
                 let info = format!(
                     "{}×{} · {}KB",
                     image.width,
@@ -182,7 +190,7 @@ impl Composer {
     }
 }
 
-/// 剪贴板图片附件（chip 条展示；发送时转 PendingImage 下发）
+/// Clipboard image attachment (shown as a chip strip; converted to PendingImage on send)
 pub(crate) struct PastedImage {
     pub(crate) bytes: std::sync::Arc<Vec<u8>>,
     pub(crate) mime: String,
@@ -190,5 +198,5 @@ pub(crate) struct PastedImage {
     pub(crate) height: u32,
 }
 
-/// 粘贴图片上限（ZCode 同款）
+/// Pasted image limit (same as ZCode)
 pub(crate) const MAX_PASTED_IMAGES: usize = 8;

@@ -1,8 +1,9 @@
 use super::*;
 
-/// 右侧面板菜单项：(名称, 图标, 快捷键 action, 占位禁用, 点击打开的 tab)
+/// Right panel menu item: (name, icon, shortcut action, placeholder-disabled,
+/// tab to open on click)
 pub(crate) type RightMenuItem = (
-    &'static str,
+    std::borrow::Cow<'static, str>,
     AssetsIconName,
     Option<&'static dyn Action>,
     bool,
@@ -10,7 +11,8 @@ pub(crate) type RightMenuItem = (
 );
 
 impl AppView {
-    /// 右侧面板 tab 开关（快捷键用）：已激活时再次触发 = 收起面板；否则打开并激活该 tab。
+    /// Right panel tab toggle (for shortcuts): triggering on the active tab =
+    /// collapse the panel; otherwise open it and activate that tab.
     pub(crate) fn toggle_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         if self.right_open && self.right_active.as_ref() == Some(&tab) {
             self.right_open = false;
@@ -24,8 +26,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// 打开并激活右侧 tab（菜单点击用，纯打开不带收起语义）；
-    /// 「调用轨迹」打开时按当前会话重读落盘记录
+    /// Open and activate a right tab (for menu clicks, pure open with no
+    /// collapse semantics); when the trajectory tab opens, reread the
+    /// persisted records for the current session
     pub(crate) fn open_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         if !self.right_tabs.contains(&tab) {
             self.right_tabs.push(tab.clone());
@@ -38,15 +41,17 @@ impl AppView {
         cx.notify();
     }
 
-    /// 关闭右侧 tab：关掉激活 tab 时切到剩余最后一个；关掉的是最后一个 tab
-    /// 时面板没有内容可显示，自动收起（经 step_dock_anim 走收起动画）。
+    /// Close a right tab: when the active tab is closed, switch to the last
+    /// remaining one; when the last tab is closed the panel has no content to
+    /// show and collapses automatically (collapse animation via
+    /// step_dock_anim).
     pub(crate) fn close_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
         self.right_tabs.retain(|t| *t != tab);
-        // 「子代理」tab 的内容面板随 tab 关闭释放
+        // The "Subagent" tab's content panel is released when the tab closes
         if let RightTab::Subagent { agent_id } = &tab {
             self.subagent_tabs.remove(agent_id);
         }
-        // 「文件」tab 的内容面板随 tab 关闭释放
+        // The "File" tab's content panel is released when the tab closes
         if let RightTab::File { path } = &tab {
             self.file_tabs.remove(path);
         }
@@ -59,8 +64,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// 打开/聚焦「子代理」tab（通知卡点击）：未开则建面板实体并发加载请求；
-    /// 已开（同 agent_id）只聚焦，不重复加载。
+    /// Open/focus the "Subagent" tab (notification card click): if not open,
+    /// create the panel entity and send the load request; if already open
+    /// (same agent_id), just focus it without loading again.
     pub(crate) fn open_subagent_tab(
         &mut self,
         session_id: String,
@@ -82,9 +88,12 @@ impl AppView {
         cx.notify();
     }
 
-    /// 打开/聚焦「文件」tab（Read 卡路径点击）：路径相对会话 cwd 解析成绝对
-    /// 路径（canonical 去重）；已开则重读文件（拿到最新内容）并聚焦。
-    /// `line`：Read 输出首行号，加载完成后滚动定位到该行。
+    /// Open/focus the "File" tab (Read card path click): the path is resolved
+    /// against the session cwd into an absolute path (canonicalized for
+    /// dedup); if already open, reread the file (to get the latest content)
+    /// and focus it.
+    /// `line`: first line number from the Read output; scrolls to that line
+    /// after loading completes.
     pub(crate) fn open_file_tab(
         &mut self,
         session_id: &str,
@@ -106,8 +115,9 @@ impl AppView {
                 cwd.join(path)
             }
         };
-        // canonicalize 去重（./../符号链接归一）；文件不存在时回落原路径
-        //（面板显示「读取失败」错误态）
+        // canonicalize for dedup (normalizes ./ ../ and symlinks); fall back
+        // to the original path when the file does not exist (the panel shows
+        // a "read failed" error state)
         let full = joined.canonicalize().unwrap_or(joined);
         let key = full.to_string_lossy().to_string();
         match self.file_tabs.get(&key) {
@@ -127,10 +137,13 @@ impl AppView {
         cx.notify();
     }
 
-    /// 开关标签页栏 "+" 的加面板菜单。
+    /// Toggles the tab bar "+" add-panel menu.
     pub(crate) fn toggle_right_menu(&mut self, click: &ClickEvent, cx: &mut Context<Self>) {
-        // 菜单打开时点按钮：按下先触发菜单的 outside-close（记录按下位置），
-        // 紧随的 click 按同一按下位置吞掉，避免收起又马上弹开（composer 弹层同款处理）
+        // Clicking the button while the menu is open: the press first fires
+        // the menu's outside-close (recording the press position), and the
+        // immediately following click is swallowed by matching the same press
+        // position, avoiding collapse-then-instantly-reopen (same handling as
+        // the composer popup)
         let down_pos = match click {
             ClickEvent::Mouse(event) => Some(event.down.position),
             _ => None,
@@ -146,33 +159,35 @@ impl AppView {
         cx.notify();
     }
 
-    /// 浏览器/侧边聊天为占位禁用项，快捷键先展示，功能后续加。
-    /// （终端已落地为底部面板：标题栏按钮 / ctrl-`，见 terminal/，不在此菜单）
+    /// Browser/side chat are placeholder-disabled items; the shortcuts are
+    /// shown first and the features come later.
+    /// (The terminal already landed as a bottom panel: title bar button /
+    /// ctrl-`, see terminal/, not in this menu)
     pub(crate) fn right_menu_items() -> [RightMenuItem; 4] {
         [
             (
-                "改动",
+                rust_i18n::t!("panel.changes"),
                 AssetsIconName::GitBranch,
                 Some(&ToggleChanges),
                 false,
                 Some(RightTab::Changes),
             ),
             (
-                "调用轨迹",
+                rust_i18n::t!("panel.trajectory"),
                 AssetsIconName::FileText,
                 None,
                 false,
                 Some(RightTab::Trajectory),
             ),
             (
-                "浏览器",
+                rust_i18n::t!("panel.browser"),
                 AssetsIconName::Globe,
                 Some(&ToggleBrowser),
                 true,
                 None,
             ),
             (
-                "侧边聊天",
+                rust_i18n::t!("panel.side_chat"),
                 AssetsIconName::MessageCircle,
                 Some(&ToggleSideChat),
                 true,
@@ -181,9 +196,11 @@ impl AppView {
         ]
     }
 
-    /// 快捷键芯片组（ZCode 样式：每个键一个小芯片；未绑键时不显示）。
-    /// page = 面板首页：带边框的大号键帽，macOS 修饰键符号逐键拆分；
-    /// 否则（下拉菜单）：muted 底小芯片，macOS 符号串整体一个芯片。
+    /// Shortcut chip set (ZCode style: one small chip per key; hidden when no
+    /// key is bound).
+    /// page = panel home page: large bordered keycaps, macOS modifier symbols
+    /// split per key; otherwise (dropdown menu): small chips on a muted
+    /// background, the macOS symbol string as a single chip.
     pub(crate) fn render_shortcut_chips(
         &self,
         action: &dyn Action,
@@ -195,8 +212,10 @@ impl AppView {
             .highest_precedence_binding_for_action_in_context(action, KeyContext::default())?;
         let stroke = binding.keystrokes().first()?.as_keystroke().clone();
         let text = Kbd::format(&stroke);
-        // Windows 风格 "Ctrl+Shift+G" 按 + 拆成单键芯片；macOS 符号串无 +：
-        // page 模式逐修饰键拆帽（"⌃⇧G" → ⌃ | ⇧ | G），普通字符连续段合一
+        // Windows-style "Ctrl+Shift+G" splits on + into single-key chips;
+        // macOS symbol strings have no +: in page mode each modifier becomes
+        // its own keycap ("⌃⇧G" → ⌃ | ⇧ | G) and consecutive plain characters
+        // merge into one
         let keys: Vec<String> = if text.contains('+') {
             text.split('+').map(|s| s.to_string()).collect()
         } else if page {
@@ -251,9 +270,11 @@ impl AppView {
         )
     }
 
-    /// 菜单行：图标 + 名称 + 快捷键芯片；disabled 为占位项（不可点）。
-    /// page = 面板首页：整列居中、带边框键帽；否则（「+」下拉菜单）：
-    /// 紧凑行。两种模式快捷键都贴行右缘。
+    /// Menu row: icon + name + shortcut chips; disabled marks placeholder
+    /// items (not clickable).
+    /// page = panel home page: whole column centered, bordered keycaps;
+    /// otherwise (the "+" dropdown menu): compact rows. In both modes the
+    /// shortcut hugs the row's right edge.
     pub(crate) fn render_right_menu_row(
         &self,
         ix: usize,
@@ -304,10 +325,12 @@ impl AppView {
             .into_any_element()
     }
 
-    /// 面板首页（菜单页）：展开面板但没有打开的 tab 时显示——
-    /// 改动/浏览器/终端/侧边聊天四项（ZCode 同款，相当于面板的首页）。
-    /// 宽松大行整列居中：行宽上限 320、名称贴左键帽贴右；上限固定，
-    /// 面板拖宽时行不晃。
+    /// Panel home page (menu page): shown when the panel is expanded but no
+    /// tab is open — four items: changes/browser/terminal/side chat (same as
+    /// ZCode, effectively the panel's home page).
+    /// Spacious large rows, whole column centered: row width capped at 320,
+    /// names hug the left and keycaps the right; the cap is fixed so rows do
+    /// not wobble when the panel is dragged wider.
     pub(crate) fn render_right_menu_page(
         &self,
         window: &Window,
@@ -326,10 +349,13 @@ impl AppView {
             .into_any_element()
     }
 
-    /// 标签页栏 "+" 的加面板菜单：deferred 到窗口层绘制，`Positioner::side(Bottom)`
-    /// 锚定 "+" 按钮正下方（gpui-kit 的 dropdown_menu 走 corner 锚定，BottomRight
-    /// 会把菜单弹到按钮上方、超出窗口顶部；且弹层盖住标题栏 HTCAPTION 拖拽区时
-    /// 点击会被系统的窗口移动模态循环吞掉——故自绘，与 turn 导航条预览卡同一模式）。
+    /// The tab bar "+" add-panel menu: drawn deferred at the window layer,
+    /// `Positioner::side(Bottom)` anchored right below the "+" button
+    /// (gpui-kit's dropdown_menu uses corner anchoring, where BottomRight
+    /// pops the menu above the button and past the window top; and when the
+    /// popup covers the title bar's HTCAPTION drag area, clicks get swallowed
+    /// by the system's window-move modal loop — hence the hand-drawn menu,
+    /// same pattern as the turn navigation bar's preview card).
     pub(crate) fn render_right_menu_dropdown(
         &self,
         window: &Window,
@@ -368,29 +394,31 @@ impl AppView {
         .into_any_element()
     }
 
-    /// 右侧标签页栏的单个 tab：图标 + 名称 + 关闭按钮（点击激活，× 关闭）
+    /// A single tab in the right tab bar: icon + name + close button (click
+    /// to activate, × to close)
     pub(crate) fn render_right_tab(&self, tab: RightTab, cx: &mut Context<Self>) -> AnyElement {
         let active = self.right_active.as_ref() == Some(&tab);
-        // 「子代理」tab：Bot 图标 + 面板标题（description 截断）；「改动」「调用轨迹」为内置页
+        // "Subagent" tab: Bot icon + panel title (truncated description);
+        // "Changes" and "Trajectory" are built-in pages
         let (icon, label) = match &tab {
             RightTab::Changes => (
                 Icon::new(AssetsIconName::GitBranch)
                     .size_3p5()
                     .into_any_element(),
-                "改动".to_string(),
+                rust_i18n::t!("panel.changes").to_string(),
             ),
             RightTab::Trajectory => (
                 Icon::new(AssetsIconName::FileText)
                     .size_3p5()
                     .into_any_element(),
-                "调用轨迹".to_string(),
+                rust_i18n::t!("panel.trajectory").to_string(),
             ),
             RightTab::Subagent { agent_id } => {
                 let title = self
                     .subagent_tabs
                     .get(agent_id)
                     .map(|panel| panel.read(cx).title().to_string())
-                    .unwrap_or_else(|| "子代理".to_string());
+                    .unwrap_or_else(|| rust_i18n::t!("panel.subagent").to_string());
                 (
                     Icon::new(IconName::Bot).size_3p5().into_any_element(),
                     truncate_tab_label(&title),
@@ -441,7 +469,8 @@ impl AppView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_active = Some(tab.clone());
                 this.right_open = true;
-                // 调用轨迹 tab 激活时重读（切会话/新回合后数据可能已变）
+                // Reread when the trajectory tab is activated (data may have
+                // changed after switching sessions or a new turn)
                 if tab == RightTab::Trajectory {
                     this.reload_trajectory();
                 }
@@ -450,7 +479,8 @@ impl AppView {
             .into_any_element()
     }
 
-    /// 右侧面板顶部的标签页栏：tab 列表 + 末尾 "+"（加 tab 菜单）与收起按钮
+    /// Tab bar at the top of the right panel: tab list + trailing "+"
+    /// (add-tab menu) and the collapse button
     pub(crate) fn render_right_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
@@ -496,7 +526,8 @@ impl AppView {
             )
     }
 
-    /// 右 dock 面板内容：tab 栏 +（有激活 tab 显示其内容，没有则显示面板首页/菜单页）
+    /// Right dock panel content: tab bar + (the active tab's content if any,
+    /// otherwise the panel home/menu page)
     pub(crate) fn render_right_dock_content(
         &mut self,
         window: &mut Window,
@@ -514,7 +545,7 @@ impl AppView {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("开始会话后，这里会显示工作区改动"),
+                            .child(rust_i18n::t!("panel.changes_empty")),
                     )
                     .into_any_element(),
             },
@@ -529,9 +560,13 @@ impl AppView {
             },
             None => self.render_right_menu_page(window, cx),
         };
-        // 开合动画锚定层（同 Sidebar::render）：dock_frame 自带 overflow_hidden，
-        // 补间期间 dock 实宽小于内容宽；内容固定 right_w 并左锚贴分隔线，收拢时
-        // 整体右滑被裁而非压缩重排。稳态实宽 == right_w，绝对定位子层正好铺满
+        // Open/close animation anchor layer (same as Sidebar::render):
+        // dock_frame has overflow_hidden built in; during the tween the
+        // dock's real width is smaller than the content width. The content is
+        // fixed at right_w and left-anchored to the divider, so collapsing
+        // slides the whole thing right and gets clipped instead of being
+        // squeezed and re-laid out. In steady state the real width == right_w
+        // and the absolutely positioned child layer fills it exactly
         div()
             .relative()
             .size_full()
@@ -546,7 +581,8 @@ impl AppView {
                     .child(
                         v_flex()
                             .size_full()
-                            // 分隔线由 dock 把手自带线绘制（与侧栏一致，不再自画 border_l）
+                            // The divider is drawn by the dock handle itself
+                            // (same as the sidebar, no self-drawn border_l)
                             .child(self.render_right_tab_bar(cx))
                             .child(div().flex_1().min_h_0().child(content)),
                     ),

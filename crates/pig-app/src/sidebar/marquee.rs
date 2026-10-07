@@ -1,12 +1,13 @@
 use super::*;
 
 impl Sidebar {
-    /// 悬停超宽标题：启动跑马灯，把文字缓慢滚到末尾再折返
+    /// Hover an overflowing title: start the marquee, slowly scrolling the text to
+    /// the end and back
     pub(crate) fn begin_title_marquee(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(handle) = self.title_scrolls.borrow().get(session_id).cloned() else {
             return;
         };
-        // 未超宽（无横向溢出）不必滚动
+        // Not overflowing (no horizontal overflow) means no scrolling needed
         if f32::from(handle.max_offset().x) <= 1.0 {
             return;
         }
@@ -54,7 +55,7 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// 跑马灯推进一步；返回 false 表示循环该停了
+    /// Advance the marquee one step; returning false means the loop should stop
     pub(crate) fn tick_title_marquee(&mut self, session_id: &str, cx: &mut Context<Self>) -> bool {
         if self
             .marquee
@@ -99,10 +100,12 @@ impl Sidebar {
         true
     }
 
-    /// 用文本系统量出标题单行渲染宽度。
+    /// Measure the title's single-line render width with the text system.
     ///
-    /// gpui 的文本测量会把宽度钳制进可用空间，导致 ScrollHandle 感知不到
-    /// 溢出（实测 max_offset 恒为 0）；给内容显式真实宽度后滚动机制才生效。
+    /// gpui's text measurement clamps the width into the available space, leaving
+    /// ScrollHandle unable to sense the overflow (measured: max_offset stays 0); the
+    /// scrolling mechanism works only after the content is given an explicit true
+    /// width.
     pub(crate) fn measure_title_width(title: &str, window: &Window, cx: &App) -> Pixels {
         let font_size = rems(0.875).to_pixels(window.rem_size());
         let font = Font {
@@ -127,8 +130,10 @@ impl Sidebar {
             .width
     }
 
-    /// 会话标题端部的渐隐条：base 为行背景实色（常态 sidebar / 选中 accent），
-    /// tint 为悬停叠加层（accent 60%）；叠加后与行背景合成一致，尾端无色差
+    /// Fade strip at the ends of a session title: base is the row background solid
+    /// color (plain sidebar / accent when selected), tint is the hover overlay
+    /// (accent 60%); after compositing it matches the row background with no color
+    /// shift at the ends
     pub(crate) fn title_fade(leading: bool, base: Hsla, tint: Option<Hsla>) -> Div {
         let (from, to) = if leading {
             (base, base.opacity(0.))
@@ -164,9 +169,10 @@ impl Sidebar {
         }
     }
 
-    /// 会话标题区：横向滚动（悬停跑马灯）+ 两端渐隐。key 为 title_scrolls
-    /// 的键：单行会话行用会话 id，双行详情行用 "pinned-{id}"（同一会话在两
-    /// 种行的滚动状态互不干扰）
+    /// Session title area: horizontal scrolling (hover marquee) + fades at both
+    /// ends. key is the title_scrolls key: single-line session rows use the session
+    /// id, two-line detail rows use "pinned-{id}" (the same session's scroll state
+    /// in the two row kinds does not interfere)
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_title_scroll(
         &self,
@@ -185,10 +191,12 @@ impl Sidebar {
             .or_default()
             .clone();
         let hover_key = key.to_string();
-        // 显式真实宽度（+2px 余量防字宽取整误差），把溢出撑给 ScrollHandle
+        // Explicit true width (+2px slack against font width rounding), pushing the
+        // overflow to the ScrollHandle
         let title_width = Self::measure_title_width(title, window, cx) + px(2.);
-        // 渐隐显隐跟滚动位置（thread_view 思考滚动行同款）：右端还有未露出
-        // 的文字才渐隐，跑马灯滚出开头后左端也渐隐
+        // Fade visibility follows scroll position (same as thread_view's scrolling
+        // thinking rows): the right end fades while unexposed text remains; after
+        // the marquee scrolls past the start, the left end fades too
         let max = title_handle.max_offset().x;
         let offset = title_handle.offset().x;
         let hides_leading = max > px(1.) && offset < px(-1.);
@@ -202,8 +210,10 @@ impl Sidebar {
                     .id(element_id)
                     .text_sm()
                     .w_full()
-                    // 双轴滚动而非 overflow_x_scroll：gpui 对单轴滚动容器会把另一轴的
-                    // 滚轮增量折进来，双轴下纵向滚轮原样冒泡给会话列表，互不影响
+                    // Two-axis scrolling instead of overflow_x_scroll: for
+                    // single-axis scroll containers gpui folds the other axis's
+                    // wheel delta in; with two axes the vertical wheel bubbles to
+                    // the session list untouched, neither affecting the other
                     .overflow_scroll()
                     .whitespace_nowrap()
                     .track_scroll(&title_handle)

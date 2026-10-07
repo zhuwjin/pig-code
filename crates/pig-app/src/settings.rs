@@ -24,40 +24,59 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-/// 新建模型的默认上下文/输出上限：自动填充时数据源缺字段也回落到这组值
+/// Default context/output limits for a new model: fallback values when the
+/// auto-fill data source lacks fields
 const NEW_MODEL_CONTEXT: u64 = 128_000;
 const NEW_MODEL_MAX_OUTPUT: u64 = 8_192;
 
-/// 字体下拉首项：映射 config 里 ui_font/mono_font 的 None（跟随平台默认）。
-/// 不是合法字体名，不会与本机字体撞名
-const FONT_DEFAULT_LABEL: &str = "系统默认";
+/// First entry of the font dropdown (sentinel): maps the None of config's
+/// ui_font/mono_font (follow platform default). Not a valid font family name, so
+/// it never collides with local fonts; its label changes with the UI language, and
+/// options/backfill/confirm comparisons all take the string from this function
+/// (sync_appearance rebuilds options)
+fn font_default_label() -> String {
+    rust_i18n::t!("settings.appearance.font_default").to_string()
+}
 
-/// 主题模式下拉的三个选项（跟随系统 = 恢复跟随并立即对齐系统外观）
-const THEME_FOLLOW_LABEL: &str = "跟随系统";
-const THEME_DARK_LABEL: &str = "暗色";
-const THEME_LIGHT_LABEL: &str = "亮色";
+/// The three options of the theme mode dropdown (follow system = resume following
+/// and immediately align with system appearance). Labels change with the UI
+/// language; options/backfill/confirm comparisons all take strings from these
+/// three functions
+fn theme_follow_label() -> String {
+    rust_i18n::t!("common.follow_system").to_string()
+}
 
-/// 字体下拉状态类型（条目为字体家族名字符串，可搜索）
+fn theme_dark_label() -> String {
+    rust_i18n::t!("settings.appearance.theme_dark").to_string()
+}
+
+fn theme_light_label() -> String {
+    rust_i18n::t!("settings.appearance.theme_light").to_string()
+}
+
+/// State type of the font dropdown (entries are font family name strings, searchable)
 type TextSelectState = SelectState<SearchableVec<String>>;
 
-/// 字体设置槽位：界面字体 / 等宽字体
+/// Font setting slot: UI font / monospace font
 #[derive(Clone, Copy)]
 enum FontSlot {
     Ui,
     Mono,
 }
 
-/// API 格式下拉的两个选项文案（回填与选项构造共用）
+/// Labels of the two API format dropdown options (shared by backfill and option construction)
 pub(crate) const FORMAT_OPENAI_LABEL: &str = "OpenAI Chat Completions (/v1/chat/completions)";
 pub(crate) const FORMAT_ANTHROPIC_LABEL: &str = "Anthropic Messages (/v1/messages)";
 
-/// Select 式设置字段（官方 SettingFieldElement）：与输入框同款触发器风格
-///（text_sm、左对齐，规避 Button 的 16px 居中观感）；字体两项带搜索。
-/// SelectState 是有状态 Entity，由 SettingsView 持有跨帧存活（render_field
-/// 每帧调用不能现场建），选中事件经订阅回到本视图
+/// Select-style setting field (official SettingFieldElement): the same trigger
+/// style as the input fields (text_sm, left-aligned, avoiding Button's 16px
+/// centered look); the two font fields are searchable. SelectState is a stateful
+/// Entity held by SettingsView to survive across frames (render_field is called
+/// every frame and must not build it on the spot); confirm events come back to
+/// this view via subscription
 struct SearchSelectField {
     select: Entity<TextSelectState>,
-    /// 横排布局下的触发器宽度；None = 跟随容器全宽
+    /// Trigger width in horizontal layout; None = follow the container's full width
     width: Option<Pixels>,
     menu_width: Pixels,
 }
@@ -67,7 +86,7 @@ impl SettingFieldElement for SearchSelectField {
 
     fn render_field(&self, options: &RenderOptions, _: &mut Window, _: &mut App) -> Self::Element {
         Select::new(&self.select)
-            .placeholder(FONT_DEFAULT_LABEL)
+            .placeholder(rust_i18n::t!("settings.appearance.font_default"))
             .when(options.layout().is_vertical(), |this| this.w_full())
             .when_some(self.width, |this, w| this.w(w))
             .with_size(options.size())
@@ -79,15 +98,16 @@ impl SettingFieldElement for SearchSelectField {
 pub enum SettingsEvent {
     Save(AppConfig),
     TestProvider(String),
-    /// 模型 ID 输入完成（回车/失焦），查 models.dev 元数据
+    /// Model ID input confirmed (Enter/blur): look up models.dev metadata
     LookupModel(String),
-    /// MCP 页刷新：AppView 重读 mcp.json 并向 core 查询连接清单
+    /// MCP page refresh: AppView re-reads mcp.json and queries core for the
+    /// connection list
     RefreshMcp,
-    /// 技能页刷新：AppView 重读技能目录
+    /// Skills page refresh: AppView re-reads the skill directories
     RefreshSkills,
-    /// 归档页恢复会话到侧栏列表
+    /// Archived page: restore a session back to the sidebar list
     RestoreSession(String),
-    /// 归档页删除会话（清库 + rollout，不可恢复）
+    /// Archived page: delete a session (database + rollout, unrecoverable)
     DeleteSession(String),
     Close,
 }
@@ -117,77 +137,99 @@ pub struct SettingsView {
     api_key_input: Entity<InputState>,
     api_key_masked: bool,
     delete_armed: bool,
-    /// 详情表单 API 格式下拉（与输入框同款触发器；原 outline 按钮 16px 居中与表单不协调）
+    /// Detail form's API format dropdown (same trigger as the input fields; the
+    /// old outline button's 16px centering clashed with the form)
     format_select: Entity<TextSelectState>,
     test_results: std::collections::HashMap<String, (bool, String)>,
     model_dialog: Option<ModelDialog>,
-    /// 添加供应商的预设选择弹窗开合
+    /// Open/close state of the preset picker dialog for adding a provider
     preset_picker_open: bool,
-    /// MCP 页配置快照（AppView 经 RefreshMcp 事件喂入；None = 尚未读取）
+    /// MCP page config snapshot (fed by AppView via the RefreshMcp event;
+    /// None = not loaded yet)
     mcp_snapshot: Option<McpConfigSnapshot>,
-    /// 连接状态对应的会话（None = 未打开会话：只展示配置不展示状态）
+    /// Session the connection status belongs to (None = no open session: show
+    /// config only, no status)
     mcp_session: Option<String>,
-    /// 状态查询进度：None = 等待回包；Some(None) = 会话尚未发起懒连接；
-    /// Some(Some(statuses)) = 各 server 状态（含工具数与失败原因）
+    /// Status query progress: None = waiting for the reply; Some(None) = the
+    /// session has not started the lazy connection yet; Some(Some(statuses)) =
+    /// per-server statuses (with tool count and failure reason)
     mcp_connection: Option<Option<Vec<McpServerStatus>>>,
-    /// MCP 页搜索框（按名称/命令/URL 过滤）
+    /// MCP page search box (filters by name/command/URL)
     mcp_search: Entity<InputState>,
-    /// MCP 新建/编辑对话框（None = 关闭）
+    /// MCP create/edit dialog (None = closed)
     mcp_dialog: Option<McpDialog>,
-    /// mcp.json 写入失败提示（成功写入或下次刷新前保留）
+    /// mcp.json write failure message (kept until a successful write or the next
+    /// refresh)
     mcp_write_error: Option<String>,
-    /// MCP 页帮助卡（手动编辑格式 + 配置文件路径）开合；默认收起
+    /// MCP page help card (manual edit format + config file paths) open/close;
+    /// collapsed by default
     mcp_help_open: bool,
-    /// MCP 页作用域：用户级（默认）/ 指定工作区（AppView 按此加载快照）
+    /// MCP page scope: user-level (default) / a specific workspace (AppView loads
+    /// the snapshot accordingly)
     mcp_scope: McpScope,
-    /// 当前会话的工作区（MCP 连接状态适用性与两页作用域下拉的「当前会话」标记）
+    /// Workspace of the current session (governs MCP connection status
+    /// applicability and the "current session" badge in both pages' scope dropdowns)
     session_cwd: Option<PathBuf>,
-    /// 可选工作区清单（路径 + 显示名，侧栏同口径：可见工作区 ∪ 会话 cwd；
-    /// MCP/技能两页作用域下拉共用）
+    /// Selectable workspace list (path + display name, same source as the sidebar:
+    /// visible workspaces ∪ session cwd; shared by the MCP and skills pages'
+    /// scope dropdowns)
     scope_workspaces: Vec<(PathBuf, String)>,
-    /// 作用域下拉弹层开合
+    /// Scope dropdown popup open/close state
     mcp_scope_popup: bool,
-    /// 作用域按钮位置（deferred 弹层锚定用，每次 prepaint 更新）
+    /// Scope button bounds (for deferred popup anchoring, updated on every prepaint)
     mcp_scope_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// 弹层 outside-close 时的按下位置（同一次按压的 click 按位置吞掉）
+    /// Press position recorded on popup outside-close (the same press's click is
+    /// swallowed by position match)
     mcp_scope_outside_close: Option<Point<Pixels>>,
-    /// 技能页快照（AppView 经 RefreshSkills 事件喂入；None = 尚未读取）
+    /// Skills page snapshot (fed by AppView via the RefreshSkills event;
+    /// None = not loaded yet)
     skills_snapshot: Option<SkillsSnapshot>,
-    /// 技能页搜索框（按名称/描述过滤）
+    /// Skills page search box (filters by name/description)
     skills_search: Entity<InputState>,
-    /// 技能新建/编辑对话框（None = 关闭）
+    /// Skill create/edit dialog (None = closed)
     skills_dialog: Option<SkillDialog>,
-    /// 技能目录写入失败提示（成功写入或下次刷新前保留）
+    /// Skill directory write failure message (kept until a successful write or
+    /// the next refresh)
     skills_write_error: Option<String>,
-    /// 技能页帮助弹窗（SKILL.md 格式 + 技能目录路径）开合；默认收起
+    /// Skills page help dialog (SKILL.md format + skill directory paths)
+    /// open/close; collapsed by default
     skills_help_open: bool,
-    /// 技能页作用域：用户级（默认）/ 指定工作区
+    /// Skills page scope: user-level (default) / a specific workspace
     skills_scope: McpScope,
-    /// 技能页作用域下拉弹层三件套（同 mcp_scope_*）
+    /// Skills page scope dropdown popup trio (same as mcp_scope_*)
     skills_scope_popup: bool,
     skills_scope_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
     skills_scope_outside_close: Option<Point<Pixels>>,
     save_generation: u64,
-    /// 终端 shell 输入的防抖代次（与供应商表单分开，互不顶掉）
+    /// Debounce generation for the terminal shell input (separate from the
+    /// provider form so they don't evict each other)
     shell_save_generation: u64,
     form_dirty: bool,
-    /// 主题模式可能与全局状态脱节（设置页关闭期间系统外观被切），
-    /// 打开设置页时置位，render 前同步主题模式下拉
+    /// Theme mode may be out of sync with global state (system appearance changed
+    /// while the settings page was closed); set when the settings page opens, and
+    /// the theme mode dropdown is synced before render
     pub(crate) appearance_dirty: bool,
-    /// 外观页下拉（选项 = 「系统默认」+ 本机已装字体，见 FONT_DEFAULT_LABEL）
+    /// Appearance page dropdowns (options = the "system default" sentinel plus
+    /// locally installed fonts, see font_default_label)
     ui_font_select: Entity<TextSelectState>,
     mono_font_select: Entity<TextSelectState>,
-    /// 主题模式下拉（跟随系统/暗色/亮色，不可搜索；与字体下拉同款视觉）
+    /// Theme mode dropdown (follow system/dark/light, not searchable; same visual
+    /// as the font dropdowns)
     theme_select: Entity<TextSelectState>,
-    /// 「已归档的会话」页：归档会话清单（AppView 推送）
+    /// Language dropdown (follow system/Simplified Chinese/English; confirm writes
+    /// config + applies immediately + saves to disk)
+    language_select: Entity<TextSelectState>,
+    /// "Archived sessions" page: archived session list (pushed by AppView)
     archived_sessions: Vec<ArchivedSessionRow>,
-    /// 归档页搜索框（按标题过滤）
+    /// Archived page search box (filters by title)
     archived_search: Entity<InputState>,
-    /// 归档页工作区过滤下拉（「所有工作区」哨兵 + scope_workspaces 显示名）
+    /// Archived page workspace filter dropdown ("all workspaces" sentinel plus
+    /// scope_workspaces display names)
     archived_workspace: Entity<TextSelectState>,
-    /// 归档页排序（归档时间/创建时间/按字母顺序）
+    /// Archived page sort (archived time/created time/alphabetical)
     archived_sort: ArchivedSort,
-    /// scope_workspaces 变化置位，render 前重建归档页过滤下拉选项
+    /// Set when scope_workspaces changes; the archived page filter dropdown
+    /// options are rebuilt before render
     archived_ws_dirty: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -209,8 +251,11 @@ impl SettingsView {
                 },
             ));
         }
-        // MCP 搜索框：内容变化即重过滤列表
-        let mcp_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索服务器…"));
+        // MCP search box: any content change refilters the list
+        let mcp_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.mcp.search_placeholder"))
+        });
         _subscriptions.push(cx.subscribe_in(
             &mcp_search,
             window,
@@ -218,8 +263,11 @@ impl SettingsView {
                 cx.notify();
             },
         ));
-        // 技能搜索框：内容变化即重过滤列表
-        let skills_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索技能…"));
+        // Skills search box: any content change refilters the list
+        let skills_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.skills.search_placeholder"))
+        });
         _subscriptions.push(cx.subscribe_in(
             &skills_search,
             window,
@@ -227,9 +275,11 @@ impl SettingsView {
                 cx.notify();
             },
         ));
-        // 归档页搜索框：内容变化即重过滤列表
-        let archived_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索已归档会话"));
+        // Archived page search box: any content change refilters the list
+        let archived_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.archived.search_placeholder"))
+        });
         _subscriptions.push(cx.subscribe_in(
             &archived_search,
             window,
@@ -237,16 +287,16 @@ impl SettingsView {
                 cx.notify();
             },
         ));
-        // 归档页工作区过滤下拉：选项随 scope_workspaces 重建（archived_ws_dirty 同步），
-        // 确认即重过滤列表
+        // Archived page workspace filter dropdown: options rebuild with
+        // scope_workspaces (synced via archived_ws_dirty); confirm refilters the list
         let archived_workspace = cx.new(|cx| {
             let mut state = SelectState::new(
-                SearchableVec::new(vec!["所有工作区".to_string()]),
+                SearchableVec::new(vec![archived::all_workspaces_label()]),
                 None,
                 window,
                 cx,
             );
-            state.set_selected_value(&"所有工作区".to_string(), window, cx);
+            state.set_selected_value(&archived::all_workspaces_label(), window, cx);
             state
         });
         _subscriptions.push(cx.subscribe_in(
@@ -258,8 +308,10 @@ impl SettingsView {
                 }
             },
         ));
-        // 外观页字体下拉：首项「系统默认」+ 本机已装字体（枚举进程内缓存，仅首次 ~百毫秒）；
-        // 选中事件走 set_font（写配置+立即生效+保存），官方字段无 setter 通道
+        // Appearance page font dropdowns: first entry "system default" plus locally
+        // installed fonts (enumeration cached in-process, only ~100ms the first
+        // time); confirm events go through set_font (write config + apply
+        // immediately + save) since the official field has no setter channel
         let ui_font_select = Self::new_font_select(window, cx);
         let mono_font_select = Self::new_font_select(window, cx);
         for (slot, select) in [
@@ -276,14 +328,16 @@ impl SettingsView {
                 },
             ));
         }
-        // 主题模式下拉：三选项不可搜索（与字体下拉同款 Select 视觉）；确认即切换、
-        // 不落盘（会话级）。回填靠 appearance_dirty（外部状态可变）
+        // Theme mode dropdown: three non-searchable options (same Select visual as
+        // the font dropdowns); confirm switches immediately and is not persisted
+        // (session-level). Backfill relies on appearance_dirty (external state is
+        // mutable)
         let theme_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(vec![
-                    THEME_FOLLOW_LABEL.to_string(),
-                    THEME_DARK_LABEL.to_string(),
-                    THEME_LIGHT_LABEL.to_string(),
+                    theme_follow_label(),
+                    theme_dark_label(),
+                    theme_light_label(),
                 ]),
                 None,
                 window,
@@ -299,7 +353,29 @@ impl SettingsView {
                 }
             },
         ));
-        // API 格式下拉（两选项不可搜索）：确认即写回当前选中供应商并保存
+        // Language dropdown: follow system/Simplified Chinese/English; confirm
+        // writes config + applies immediately + saves to disk (the ConfigSnapshot
+        // flowing back applies it once more, idempotently). Options and backfill
+        // refresh with the UI language (sync_appearance)
+        let language_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(crate::i18n::language_options()),
+                None,
+                window,
+                cx,
+            )
+        });
+        _subscriptions.push(cx.subscribe_in(
+            &language_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, _, cx| {
+                if let SelectEvent::Confirm(Some(label)) = event {
+                    this.set_language(label, cx);
+                }
+            },
+        ));
+        // API format dropdown (two non-searchable options): confirm writes back to
+        // the currently selected provider and saves
         let format_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(vec![
@@ -361,6 +437,7 @@ impl SettingsView {
             ui_font_select,
             mono_font_select,
             theme_select,
+            language_select,
             archived_sessions: vec![],
             archived_search,
             archived_workspace,
@@ -370,27 +447,139 @@ impl SettingsView {
         }
     }
 
-    /// 建字体下拉状态：可搜索，无预选（占位「系统默认」，set_config 后由 sync_form 回填）
+    /// Build a font dropdown state: searchable, no preselection (placeholder is
+    /// the "system default" sentinel; backfilled by sync_form after set_config)
     fn new_font_select(window: &mut Window, cx: &mut Context<Self>) -> Entity<TextSelectState> {
-        let mut items = vec![FONT_DEFAULT_LABEL.to_string()];
+        let mut items = vec![font_default_label()];
         items.extend(crate::font::installed_font_names(cx).iter().cloned());
         cx.new(|cx| SelectState::new(SearchableVec::new(items), None, window, cx).searchable(true))
     }
 
-    /// 主题模式下拉与全局状态对齐（设置页关闭期间可能已被系统外观改）
+    /// Font dropdown options = the localized "system default" sentinel plus
+    /// locally installed fonts (enumeration cached in-process, only ~100ms the
+    /// first time). After a language switch the sentinel label changes;
+    /// sync_appearance rebuilds options and backfill from the same source
+    fn rebuild_font_items(
+        select: &Entity<TextSelectState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut items = vec![font_default_label()];
+        items.extend(crate::font::installed_font_names(cx).iter().cloned());
+        select.update(cx, |state, cx| {
+            state.set_items(SearchableVec::new(items), window, cx);
+        });
+    }
+
+    /// Font dropdown backfill: None is shown as the localized "system default" sentinel
+    fn sync_font_selects(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let ui_font = self
+            .config
+            .ui_font
+            .clone()
+            .unwrap_or_else(font_default_label);
+        let mono_font = self
+            .config
+            .mono_font
+            .clone()
+            .unwrap_or_else(font_default_label);
+        for (select, value) in [
+            (&self.ui_font_select, ui_font),
+            (&self.mono_font_select, mono_font),
+        ] {
+            select.update(cx, |state, cx| {
+                if state.selected_value() != Some(&value) {
+                    state.set_selected_value(&value, window, cx);
+                }
+            });
+        }
+    }
+
+    /// Align the theme mode dropdown with global state (system appearance may
+    /// have changed it while the settings page was closed); theme/font dropdown
+    /// options and the three search boxes' placeholder texts are rebuilt with the
+    /// UI language (labels are localized), and so are the language dropdown
+    /// options (the "follow system" label itself is localized)
     fn sync_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = Self::current_theme_mode(cx);
         self.theme_select.update(cx, |state, cx| {
+            state.set_items(
+                SearchableVec::new(vec![
+                    theme_follow_label(),
+                    theme_dark_label(),
+                    theme_light_label(),
+                ]),
+                window,
+                cx,
+            );
             if state.selected_value() != Some(&mode) {
                 state.set_selected_value(&mode, window, cx);
             }
         });
+        // Font dropdowns: the "system default" sentinel changes with the UI
+        // language; rebuild options, then backfill from config
+        Self::rebuild_font_items(&self.ui_font_select, window, cx);
+        Self::rebuild_font_items(&self.mono_font_select, window, cx);
+        self.sync_font_selects(window, cx);
+        // Language dropdown: options rebuilt with the UI language (the "follow
+        // system" label itself is localized), selection backfilled from config
+        self.language_select.update(cx, |state, cx| {
+            state.set_items(
+                SearchableVec::new(crate::i18n::language_options()),
+                window,
+                cx,
+            );
+            let label = crate::i18n::language_label(self.config.language.as_deref());
+            if state.selected_value() != Some(&label) {
+                state.set_selected_value(&label, window, cx);
+            }
+        });
+        // Search box placeholder texts refresh with the UI language (written at
+        // InputState construction, must be reset after a language switch)
+        self.mcp_search.update(cx, |input, cx| {
+            input.set_placeholder(rust_i18n::t!("settings.mcp.search_placeholder"), window, cx);
+        });
+        self.skills_search.update(cx, |input, cx| {
+            input.set_placeholder(
+                rust_i18n::t!("settings.skills.search_placeholder"),
+                window,
+                cx,
+            );
+        });
+        self.archived_search.update(cx, |input, cx| {
+            input.set_placeholder(
+                rust_i18n::t!("settings.archived.search_placeholder"),
+                window,
+                cx,
+            );
+        });
     }
 
-    /// 字体下拉确认：哨兵项归一为 None，写回配置、立即生效并保存
-    ///（core 落盘后的 ConfigSnapshot 回流会再应用一次，幂等无副作用）
+    /// Language dropdown confirm: write config (follow system → None) + apply
+    /// immediately + save (the flow-back applies once more, idempotently)
+    fn set_language(&mut self, label: &str, cx: &mut Context<Self>) {
+        let Some(value) = crate::i18n::language_value_for(label) else {
+            return;
+        };
+        if self.config.language == value {
+            return;
+        }
+        self.config.language = value;
+        crate::i18n::apply_config_language(&self.config, cx);
+        // After applying, the option language has changed (the "follow system"
+        // label); sync the dropdown itself immediately. The archived page workspace
+        // filter dropdown's "all workspaces" sentinel also changes with the language
+        self.appearance_dirty = true;
+        self.archived_ws_dirty = true;
+        cx.emit(SettingsEvent::Save(self.config.clone()));
+        cx.notify();
+    }
+
+    /// Font dropdown confirm: normalize the sentinel entry to None, write back to
+    /// config, apply immediately and save (the ConfigSnapshot flowing back after
+    /// core persists applies it once more, idempotent with no side effects)
     fn set_font(&mut self, slot: FontSlot, family: String, cx: &mut Context<Self>) {
-        let resolved = (family != FONT_DEFAULT_LABEL).then_some(family);
+        let resolved = (family != font_default_label()).then_some(family);
         match slot {
             FontSlot::Ui => self.config.ui_font = resolved,
             FontSlot::Mono => self.config.mono_font = resolved,
@@ -400,8 +589,9 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// API 格式下拉确认：写回当前选中供应商并保存；推理参数建议按格式生成，
-    /// 不在此联动（弹窗里按当前格式生成）
+    /// API format dropdown confirm: write back to the currently selected provider
+    /// and save; reasoning parameter suggestions are generated per format, not
+    /// linked here (the dialog generates them based on the current format)
     fn set_api_format(&mut self, label: &str, cx: &mut Context<Self>) {
         let Some(ix) = self.selected else { return };
         let format = if label == FORMAT_ANTHROPIC_LABEL {
@@ -416,38 +606,35 @@ impl SettingsView {
         }
     }
 
-    /// 主题模式 dropdown 确认：跟随系统 = 恢复同步并立即对齐当前系统外观
-    ///（window_appearance 免 window，官方 SettingField setter 只给 &mut App）；
-    /// 亮/暗 = 脱离跟随固定模式。主题不落盘（会话级设置）
+    /// Theme mode dropdown confirm: follow system = resume syncing and
+    /// immediately align with the current system appearance (window_appearance
+    /// needs no window; the official SettingField setter only provides &mut App);
+    /// light/dark = leave following and pin the mode. Theme is not persisted
+    /// (session-level setting)
     fn apply_theme_mode(mode: &str, cx: &mut App) {
-        match mode {
-            THEME_FOLLOW_LABEL => {
-                cx.set_global(crate::ThemeFollowSystem(true));
-                gpui_kit::component::Theme::change(cx.window_appearance(), None, cx);
-            }
-            THEME_DARK_LABEL => {
-                cx.set_global(crate::ThemeFollowSystem(false));
-                gpui_kit::component::Theme::change(ThemeMode::Dark, None, cx);
-            }
-            THEME_LIGHT_LABEL => {
-                cx.set_global(crate::ThemeFollowSystem(false));
-                gpui_kit::component::Theme::change(ThemeMode::Light, None, cx);
-            }
-            _ => {}
+        if mode == theme_follow_label() {
+            cx.set_global(crate::ThemeFollowSystem(true));
+            gpui_kit::component::Theme::change(cx.window_appearance(), None, cx);
+        } else if mode == theme_dark_label() {
+            cx.set_global(crate::ThemeFollowSystem(false));
+            gpui_kit::component::Theme::change(ThemeMode::Dark, None, cx);
+        } else if mode == theme_light_label() {
+            cx.set_global(crate::ThemeFollowSystem(false));
+            gpui_kit::component::Theme::change(ThemeMode::Light, None, cx);
         }
     }
 
-    /// 主题模式 dropdown 当前值：跟随系统 > 暗色 > 亮色
+    /// Theme mode dropdown current value: follow system > dark > light
     fn current_theme_mode(cx: &App) -> String {
         let follow = cx
             .try_global::<crate::ThemeFollowSystem>()
             .is_some_and(|flag| flag.0);
         if follow {
-            THEME_FOLLOW_LABEL.to_string()
+            theme_follow_label()
         } else if cx.theme().mode.is_dark() {
-            THEME_DARK_LABEL.to_string()
+            theme_dark_label()
         } else {
-            THEME_LIGHT_LABEL.to_string()
+            theme_light_label()
         }
     }
 
@@ -472,8 +659,9 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// MCP 页数据喂入（AppView 刷新时调用）：重置换页/刷新前的连接查询结果；
-    /// session_cwd 用于判断「查看的工作区 ≠ 会话工作区」时隐藏连接状态
+    /// MCP page data feed (called when AppView refreshes): resets the connection
+    /// query result from before the page switch/refresh; session_cwd is used to
+    /// hide connection status when "viewed workspace ≠ session workspace"
     pub fn set_mcp_config(
         &mut self,
         session_id: Option<String>,
@@ -488,7 +676,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// core 的 McpServerList 回包（AppView 已按当前会话过滤）
+    /// core's McpServerList reply (AppView has already filtered by the current session)
     pub fn set_mcp_status(
         &mut self,
         servers: Option<Vec<McpServerStatus>>,
@@ -507,29 +695,11 @@ impl SettingsView {
         self.config.providers.get(self.selected?)
     }
 
-    /// 表单回填需要 window（set_value），标记后到 render 时应用
+    /// Form backfill needs a window (set_value); marked here and applied at render time
     fn sync_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 字体下拉回填：None 显示为「系统默认」（无供应商时也要同步，先于早退）
-        let ui_font = self
-            .config
-            .ui_font
-            .clone()
-            .unwrap_or_else(|| FONT_DEFAULT_LABEL.to_string());
-        let mono_font = self
-            .config
-            .mono_font
-            .clone()
-            .unwrap_or_else(|| FONT_DEFAULT_LABEL.to_string());
-        self.ui_font_select.update(cx, |state, cx| {
-            if state.selected_value() != Some(&ui_font) {
-                state.set_selected_value(&ui_font, window, cx);
-            }
-        });
-        self.mono_font_select.update(cx, |state, cx| {
-            if state.selected_value() != Some(&mono_font) {
-                state.set_selected_value(&mono_font, window, cx);
-            }
-        });
+        // Font dropdown backfill: None is shown as the "system default" sentinel
+        // (sync even with no providers, before the early return)
+        self.sync_font_selects(window, cx);
         let Some(provider) = self.selected_provider().cloned() else {
             return;
         };
@@ -564,7 +734,7 @@ impl SettingsView {
         });
     }
 
-    /// 表单变更 500ms 防抖后自动保存
+    /// Auto-save form changes after a 500ms debounce
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.save_generation += 1;
         let generation = self.save_generation;
@@ -581,7 +751,7 @@ impl SettingsView {
         .detach();
     }
 
-    /// 把表单值写回 config 并发 Save。
+    /// Write form values back to config and emit Save.
     fn save_now(&mut self, cx: &mut Context<Self>) {
         let Some(ix) = self.selected else { return };
         if ix >= self.config.providers.len() {
@@ -597,8 +767,9 @@ impl SettingsView {
         cx.emit(SettingsEvent::Save(self.config.clone()));
     }
 
-    /// 终端 shell 路径确认：trim 后空白归一为 None，写回配置并防抖保存
-    ///（立即生效于之后新建的终端标签；已开的 tab 不变）
+    /// Terminal shell path confirm: trim then normalize blank to None, write back
+    /// to config and save with debounce (takes effect immediately for terminal
+    /// tabs created afterwards; already-open tabs are unchanged)
     fn set_shell(&mut self, value: &str, cx: &mut Context<Self>) {
         let value = value.trim();
         let resolved = (!value.is_empty()).then(|| value.to_string());
@@ -609,7 +780,8 @@ impl SettingsView {
         self.schedule_shell_save(cx);
     }
 
-    /// shell 变更 500ms 防抖后自动保存（与供应商表单分开的防抖代次）
+    /// Auto-save shell changes after a 500ms debounce (a debounce generation
+    /// separate from the provider form)
     fn schedule_shell_save(&mut self, cx: &mut Context<Self>) {
         self.shell_save_generation += 1;
         let generation = self.shell_save_generation;
@@ -626,9 +798,11 @@ impl SettingsView {
         .detach();
     }
 
-    /// 终端页：shell 路径（留空 = 系统默认）。官方 input 字段 getter 直读
-    /// config（外部变更自动回填，无需 sync_form 通道）；setter 只给 &mut App，
-    /// 经 WeakEntity 回到本视图写配置 + 防抖保存
+    /// Terminal page: shell path (blank = system default). The official input
+    /// field's getter reads config directly (external changes backfill
+    /// automatically, no sync_form channel needed); the setter only provides
+    /// &mut App, so it returns to this view via WeakEntity to write config plus
+    /// save with debounce
     fn terminal_page(weak: &WeakEntity<Self>) -> SettingPage {
         let get = {
             let weak = weak.clone();
@@ -651,23 +825,29 @@ impl SettingsView {
                 let _ = weak.update(cx, |this, cx| this.set_shell(&value, cx));
             }
         };
-        SettingPage::new("终端")
+        SettingPage::new(rust_i18n::t!("settings.terminal.title"))
             .icon(IconName::SquareTerminal)
-            .description("内嵌终端的启动 shell。")
+            .description(rust_i18n::t!("settings.terminal.description"))
             .group(
                 SettingGroup::new().title("Shell").item(
-                    SettingItem::new("Shell 路径", SettingField::input(get, set))
-                        .description(
-                            "启动终端使用的 shell（如 /bin/zsh、/opt/homebrew/bin/fish）；\
-                             留空 = 系统默认 shell。对之后新建的终端标签生效。",
-                        )
-                        .keywords(["terminal", "shell", "终端"]),
+                    SettingItem::new(
+                        rust_i18n::t!("settings.terminal.shell_path"),
+                        SettingField::input(get, set),
+                    )
+                    .description(rust_i18n::t!("settings.terminal.shell_path_description").as_ref())
+                    .keywords([
+                        "terminal",
+                        "shell",
+                        rust_i18n::t!("settings.terminal.title").as_ref(),
+                        rust_i18n::t!("settings.terminal.description").as_ref(),
+                    ]),
                 ),
             )
     }
 
-    /// 生成不与存量撞车的供应商 id（按「数量+1」会在删除后与存量撞车：
-    /// 撞车后所有按 id 的查找都命中第一个，模型解析/label/会话 meta 全乱）
+    /// Generate a provider id that does not collide with existing ones (a
+    /// "count+1" scheme collides after deletions: once collided, every id-based
+    /// lookup hits the first one, breaking model resolution/labels/session meta)
     fn next_provider_id(&self) -> String {
         let mut n = 1usize;
         loop {
@@ -684,7 +864,7 @@ impl SettingsView {
         let ix = self.config.providers.len();
         self.config.providers.push(ProviderConfig {
             id,
-            name: "自定义供应商".into(),
+            name: rust_i18n::t!("settings.models.custom_provider").to_string(),
             base_url: "https://".into(),
             api_key: String::new(),
             api_format: ApiFormat::OpenAiChat,
@@ -713,7 +893,7 @@ impl SettingsView {
         }
     }
 
-    // ---------- 模型弹窗 ----------
+    // ---------- Model dialog ----------
 }
 
 impl Render for SettingsView {
@@ -731,80 +911,96 @@ impl Render for SettingsView {
             self.sync_archived_ws_options(window, cx);
         }
 
-        // 官方 Settings 组件：自带侧栏（搜索 + 页导航，选中态按 id 持久）与
-        // 页面标题/描述/滚动；字段与自定义内容经 WeakEntity 回到本视图发事件
+        // Official Settings component: ships a sidebar (search + page navigation,
+        // selection persisted by id) plus page title/description/scrolling; fields
+        // and custom content return to this view via WeakEntity to emit events
         let weak = cx.entity().downgrade();
         let settings = Settings::new("pig-settings")
             .with_group_variant(GroupBoxVariant::Fill)
             .pages(vec![
-            // 外观：三个下拉统一用 Select（同宽 220/同款触发器与菜单视觉，
-            // 字体两项可搜索）；主题模式为有状态字段，回填经 appearance_dirty
-            SettingPage::new("外观")
-                .icon(IconName::Palette)
-                .description("主题模式与全局字体。")
-                .group(
-                    SettingGroup::new()
-                        .title("界面")
-                        .items(vec![
-                            SettingItem::new(
-                                "主题模式",
-                                SettingField::element(SearchSelectField {
-                                    select: self.theme_select.clone(),
-                                    width: Some(px(220.)),
-                                    menu_width: px(300.),
-                                }),
-                            )
-                            .description("应用的整体配色；跟随系统时随系统外观自动切换。"),
-                            self.font_item(FontSlot::Ui),
-                        ]),
-                )
-                .group(
-                    SettingGroup::new()
-                        .title("代码")
-                        .items(vec![self.font_item(FontSlot::Mono)]),
+                // Appearance: all three dropdowns use Select (same 220 width and
+                // same trigger/menu visual, the two font ones searchable); theme
+                // mode is a stateful field, backfilled via appearance_dirty
+                SettingPage::new(rust_i18n::t!("settings.appearance.title"))
+                    .icon(IconName::Palette)
+                    .description(rust_i18n::t!("settings.appearance.description"))
+                    .group(
+                        SettingGroup::new()
+                            .title(rust_i18n::t!("settings.appearance.group_interface"))
+                            .items(vec![
+                                SettingItem::new(
+                                    rust_i18n::t!("settings.appearance.theme_mode"),
+                                    SettingField::element(SearchSelectField {
+                                        select: self.theme_select.clone(),
+                                        width: Some(px(220.)),
+                                        menu_width: px(300.),
+                                    }),
+                                )
+                                .description(
+                                    rust_i18n::t!("settings.appearance.theme_mode_description")
+                                        .as_ref(),
+                                ),
+                                SettingItem::new(
+                                    rust_i18n::t!("settings.language.label").as_ref(),
+                                    SettingField::element(SearchSelectField {
+                                        select: self.language_select.clone(),
+                                        width: Some(px(220.)),
+                                        menu_width: px(300.),
+                                    }),
+                                )
+                                .description(
+                                    rust_i18n::t!("settings.language.description").as_ref(),
+                                ),
+                                self.font_item(FontSlot::Ui),
+                            ]),
+                    )
+                    .group(
+                        SettingGroup::new()
+                            .title(rust_i18n::t!("settings.appearance.group_code"))
+                            .items(vec![self.font_item(FontSlot::Mono)]),
+                    ),
+                Self::content_page(
+                    rust_i18n::t!("settings.models.title").as_ref(),
+                    IconName::Bot,
+                    rust_i18n::t!("settings.models.description").as_ref(),
+                    &["model", "provider"],
+                    &weak,
+                    Self::render_models_page,
                 ),
-            Self::content_page(
-                "模型设置",
-                IconName::Bot,
-                "管理自定义模型供应商，配置后可在聊天时选择使用。",
-                &["model", "provider", "模型", "供应商"],
-                &weak,
-                Self::render_models_page,
-            ),
-            Self::terminal_page(&weak),
-            Self::content_page(
-                "MCP 服务器",
-                IconName::Network,
-                "管理用户级与项目级 mcp.json；服务器在每个会话首个回合后按需连接。",
-                &["mcp", "服务器"],
-                &weak,
-                Self::render_mcp_page,
-            ),
-            Self::content_page(
-                "技能",
-                IconName::BookOpen,
-                "管理用户级与项目级技能（SKILL.md）；清单注入系统提示词，正文由 Skill 工具按需加载，改动对新建会话生效。",
-                &["skill", "技能"],
-                &weak,
-                Self::render_skills_page,
-            ),
-            Self::content_page(
-                "网络搜索",
-                IconName::Search,
-                "WebSearch 工具的搜索后端状态，经环境变量配置。",
-                &["websearch", "搜索"],
-                &weak,
-                Self::render_websearch,
-            ),
-            Self::content_page(
-                "已归档的会话",
-                IconName::Inbox,
-                "查看已归档会话，确认其所属工作区路径、会话名称和归档时间，并可恢复到会话列表。",
-                &["archive", "归档", "会话"],
-                &weak,
-                Self::render_archived_page,
-            ),
-        ]);
+                Self::terminal_page(&weak),
+                Self::content_page(
+                    rust_i18n::t!("settings.mcp.title").as_ref(),
+                    IconName::Network,
+                    rust_i18n::t!("settings.mcp.description").as_ref(),
+                    &["mcp"],
+                    &weak,
+                    Self::render_mcp_page,
+                ),
+                Self::content_page(
+                    rust_i18n::t!("settings.skills.title").as_ref(),
+                    IconName::BookOpen,
+                    rust_i18n::t!("settings.skills.description").as_ref(),
+                    &["skill"],
+                    &weak,
+                    Self::render_skills_page,
+                ),
+                Self::content_page(
+                    rust_i18n::t!("settings.websearch.title").as_ref(),
+                    IconName::Search,
+                    rust_i18n::t!("settings.websearch.description").as_ref(),
+                    &["websearch"],
+                    &weak,
+                    Self::render_websearch,
+                ),
+                Self::content_page(
+                    rust_i18n::t!("settings.archived.title").as_ref(),
+                    IconName::Inbox,
+                    rust_i18n::t!("settings.archived.description").as_ref(),
+                    &["archive"],
+                    &weak,
+                    Self::render_archived_page,
+                ),
+            ]);
 
         div()
             .size_full()
@@ -862,12 +1058,14 @@ impl Render for SettingsView {
 }
 
 impl SettingsView {
-    // ---------- 官方 Settings 组件的页面构建 ----------
+    // ---------- Page construction for the official Settings component ----------
 
-    /// 字体设置条目：scrollable_dropdown（本机字体数百项，弹层内滚动），
-    /// 哨兵「系统默认」映射 config 的 None；选项列表进程内缓存
-    /// 字体设置条目：自定义可搜索字段（FontSettingField），状态实体由本视图持有，
-    /// 选中经订阅走 set_font（写配置 + 立即生效 + 保存）
+    /// Font setting item: scrollable_dropdown (hundreds of local fonts, scrolling
+    /// inside the popup); the "system default" sentinel maps config's None; the
+    /// option list is cached in-process
+    /// Font setting item: custom searchable field (FontSettingField); the state
+    /// entity is held by this view, and confirm goes through set_font via
+    /// subscription (write config + apply immediately + save)
     fn font_item(&self, slot: FontSlot) -> SettingItem {
         let select = match slot {
             FontSlot::Ui => self.ui_font_select.clone(),
@@ -875,8 +1073,8 @@ impl SettingsView {
         };
         SettingItem::new(
             match slot {
-                FontSlot::Ui => "界面字体",
-                FontSlot::Mono => "等宽字体",
+                FontSlot::Ui => rust_i18n::t!("settings.appearance.ui_font"),
+                FontSlot::Mono => rust_i18n::t!("settings.appearance.mono_font"),
             },
             SettingField::element(SearchSelectField {
                 select,
@@ -885,13 +1083,20 @@ impl SettingsView {
             }),
         )
         .description(match slot {
-            FontSlot::Ui => "界面文本使用的字体，选择后立即生效并保存。",
-            FontSlot::Mono => "代码块、diff 与命令行使用的字体，选择后立即生效并保存。",
+            FontSlot::Ui => rust_i18n::t!("settings.appearance.ui_font_description").to_string(),
+            FontSlot::Mono => {
+                rust_i18n::t!("settings.appearance.mono_font_description").to_string()
+            }
         })
     }
 
-    /// 自定义内容页：现有整页渲染塞进单个条目（官方组件接管导航/标题/滚动）；
-    /// keywords 让无标题的自定义条目仍可被侧栏搜索命中
+    /// Custom content page: the existing whole-page render goes into a single item
+    /// (the official component handles navigation/title/scrolling); keywords let
+    /// the untitled custom item still be hit by sidebar search. The page title and
+    /// description (already resolved to the current locale via t!) are appended to
+    /// the keywords, so locale-specific search terms come from the translations and
+    /// adding a language needs no code change; `keywords` only carries language-
+    /// neutral technical synonyms.
     fn content_page(
         title: &str,
         icon: IconName,
@@ -901,6 +1106,8 @@ impl SettingsView {
         content: fn(&mut Self, &mut Context<Self>) -> AnyElement,
     ) -> SettingPage {
         let weak = weak.clone();
+        let mut all_keywords: Vec<&str> = keywords.to_vec();
+        all_keywords.extend([title, description]);
         SettingPage::new(title)
             .icon(icon)
             .description(description)
@@ -910,13 +1117,15 @@ impl SettingsView {
                         weak.update(cx, content)
                             .unwrap_or_else(|_| div().into_any_element())
                     })
-                    .keywords(keywords.iter().copied()),
+                    .keywords(all_keywords.iter().copied()),
                 ),
             )
     }
 
-    /// 模型设置页内容：左列（供应商列表）+ 右列（详情表单）各用官方 GroupBox
-    ///（Fill 变体，与官方 Settings 分组同一卡面色）；添加供应商按钮收进左列顶部
+    /// Model settings page content: left column (provider list) plus right column
+    /// (detail form), each in an official GroupBox (Fill variant, same card color
+    /// as the official Settings groups); the add-provider button sits at the top
+    /// of the left column
     fn render_models_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .w_full()
@@ -932,7 +1141,7 @@ impl SettingsView {
                             .text_sm()
                             .font_medium()
                             .text_color(cx.theme().muted_foreground)
-                            .child("供应商"),
+                            .child(rust_i18n::t!("settings.models.providers").to_string()),
                     )
                     .child(
                         Button::new("add-provider")
@@ -940,7 +1149,7 @@ impl SettingsView {
                             .small()
                             .w_full()
                             .icon(IconName::Plus)
-                            .label("添加供应商")
+                            .label(rust_i18n::t!("settings.models.add_provider"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.preset_picker_open = true;
                                 cx.notify();
@@ -961,7 +1170,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// MCP 页内容：页头（搜索/新建/刷新）+ 服务器列表
+    /// MCP page content: header (search/new/refresh) + server list
     fn render_mcp_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .gap_4()
@@ -974,9 +1183,11 @@ impl SettingsView {
                             .flex_1()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("用户级与项目级条目合并展示，同名项目级覆盖。"),
+                            .child(rust_i18n::t!("settings.mcp.header_hint").to_string()),
                     )
-                    // 页头控件统一 small 档，避免默认档下主按钮视觉盖过相邻控件
+                    // Header controls all use the small size, so the primary
+                    // button doesn't visually overwhelm neighbors at the default
+                    // size
                     .child(
                         div()
                             .w(px(180.))
@@ -987,7 +1198,7 @@ impl SettingsView {
                             .primary()
                             .small()
                             .icon(IconName::Plus)
-                            .label("新建服务器")
+                            .label(rust_i18n::t!("settings.mcp.new_server"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_mcp_dialog(None, window, cx);
                             })),
@@ -997,12 +1208,13 @@ impl SettingsView {
                             .outline()
                             .small()
                             .icon(IconName::RotateCw)
-                            .label("刷新")
+                            .label(rust_i18n::t!("settings.common.refresh"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_mcp(cx);
                             })),
                     )
-                    // 帮助开关：手动编辑格式与配置文件路径按需展开（主页不常驻）
+                    // Help toggle: the manual edit format and config file paths
+                    // expand on demand (not persistent on the main page)
                     .child(
                         Button::new("mcp-help")
                             .outline()
@@ -1018,7 +1230,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 技能页内容：页头（搜索/新建）+ 技能列表
+    /// Skills page content: header (search/new) + skill list
     fn render_skills_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .gap_4()
@@ -1031,7 +1243,7 @@ impl SettingsView {
                             .flex_1()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("清单注入系统提示词，正文按需加载；改动对新建会话生效。"),
+                            .child(rust_i18n::t!("settings.skills.header_hint").to_string()),
                     )
                     .child(
                         div()
@@ -1043,12 +1255,13 @@ impl SettingsView {
                             .primary()
                             .small()
                             .icon(IconName::Plus)
-                            .label("新建技能")
+                            .label(rust_i18n::t!("settings.skills.new_skill"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_skills_dialog(None, window, cx);
                             })),
                     )
-                    // 帮助开关：SKILL.md 格式与技能目录路径按需弹出（主页不常驻）
+                    // Help toggle: the SKILL.md format and skill directory paths
+                    // pop up on demand (not persistent on the main page)
                     .child(
                         Button::new("skills-help")
                             .outline()

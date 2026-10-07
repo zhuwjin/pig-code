@@ -1,39 +1,42 @@
-# pig-code 工作区说明
+# pig-code Workspace Guide
 
-图形化 AI Code Agent 桌面应用：Rust + gpui-kit（crates.io 版本）单进程双执行域，界面对标 ZCode。**动手前先读 `docs/PLAN.md`**——它是唯一的设计决策与实施记录（含历次「打磨」笔记与上游 bug 跟踪），改敏感区域（dock 布局、MCP、Windows 子进程、流式渲染）前必看相关段落。
+A graphical AI code-agent desktop app: Rust + gpui-kit (crates.io release), single process with two execution domains, UI benchmarked against ZCode. **Read `docs/PLAN.md` before touching anything** — it is the single source of design decisions and implementation records (including past "polish" notes and upstream bug tracking). Sensitive areas (dock layout, MCP, Windows subprocesses, streaming rendering) require reading the relevant sections first.
 
-## 常用命令
+## Common Commands
 
 ```bash
-cargo build                          # 全 workspace 构建（dev profile 对依赖开 opt-level=3，勿删）
-cargo run -p pig-app                 # 启动 GUI（二进制名 pig-code）
-cargo test -p pig-core               # 引擎集成测试（tests/ 目录，全绿才收工）
-cargo test -p pig-core --test <name> # 单个测试文件，如 --test bash、--test mcp（按文件名）
-cargo fmt && cargo clippy            # 无自定义 rustfmt/clippy 配置，用默认
-PIG_SELFTEST=1 cargo run -p pig-app  # GUI 全链路自测（内置 mock provider + 临时隔离数据目录）
-cargo run -p pig-core --example mock_provider  # 手动测试用独立 mock 服务，按打印的 base_url 配 ~/.pigcode/config.toml
+cargo build                          # Build the whole workspace (dev profile sets opt-level=3 for dependencies — do not remove)
+cargo run -p pig-app                 # Launch the GUI (binary name: pig-code)
+cargo test -p pig-core               # Engine integration tests (tests/ dir; all green before wrapping up)
+cargo test -p pig-core --test <name> # A single test file, e.g. --test bash, --test mcp (by file name)
+cargo fmt && cargo clippy            # No custom rustfmt/clippy config; use the defaults
+PIG_SELFTEST=1 cargo run -p pig-app  # GUI end-to-end selftest (built-in mock provider + isolated temp data dir)
+cargo run -p pig-core --example mock_provider  # Standalone mock server for manual testing; point ~/.pigcode/config.toml at the printed base_url
 ```
 
-## 架构与分层（红线）
+## Architecture & Layering (Hard Rules)
 
-三个 crate，依赖方向单向：`pig-app → pig-core → pig-protocol`。
+Three crates with one-way dependencies: `pig-app → pig-core → pig-protocol`.
 
-- **pig-protocol**：纯 serde 类型（`Op` UI→core 命令、`Event` core→UI 事件、配置模型），零业务逻辑、零重依赖。改协议时保持向后兼容（rollout 里存着旧记录，用 `#[serde(default)]` 渐进演进）。
-- **pig-core**：agent 引擎，跑在独立线程的 tokio runtime（入口 `spawn_agent`），与 UI 通过 `async-channel` 交换 Op/Event。**core 严禁 import 任何 gpui 类型**。核心设计：delta 事件（TextDelta 等）仅用于即时渲染不落盘，Done 事件携带全量值是 durable 边界；审批 = core 发 `ApprovalRequested`（带 request_id）后阻塞等 UI 回 `ApprovalReply`；会话持久化为 JSONL rollout（首行 meta + 每行一 item）。
-- **pig-app**：gpui-kit GUI，smol executor，`cx.spawn` 循环读 Event channel 后 reduce 进各 Entity 视图状态。
+- **pig-protocol**: pure serde types (`Op` UI→core commands, `Event` core→UI events, config models), zero business logic, zero heavy deps. Keep protocol changes backward compatible (rollouts store old records; evolve gradually with `#[serde(default)]`).
+- **pig-core**: the agent engine, running on a dedicated tokio-runtime thread (entry point `spawn_agent`), exchanging Op/Event with the UI over `async-channel`. **core must never import any gpui type**. Core design: delta events (TextDelta etc.) are for live rendering only and are never persisted; Done events carrying full values are the durable boundary; approval = core sends `ApprovalRequested` (with request_id) then blocks waiting for the UI's `ApprovalReply`; sessions persist as JSONL rollouts (first line meta + one item per line).
+- **pig-app**: the gpui-kit GUI, smol executor; `cx.spawn` loops read the Event channel and reduce into per-Entity view state.
 
-## 代码约定
+## Code Conventions
 
-- **实现 UI 前先查官方组件**：gpui-kit 组件目录见 https://gpui-kit.com/component （全部 77 个组件的用途速查表：[docs/gpui-kit-components.md](docs/gpui-kit-components.md)）。有现成组件不自研、用法照抄官方 story；确需自研的（如 diff 视图），先在 `docs/PLAN.md` 记录原因与上游跟踪。
-- **全仓中文**：注释、提交信息（`feat:`/`fix:`/`refactor:`/`docs:` 前缀 + 中文描述）、文档均用中文。
-- **提交前 fmt/clippy 必须干净**：`cargo fmt --check` 无 diff、`cargo clippy --all-targets -- -D warnings` 零警告（2026-09-30 已全量清零，保持住）。结构性 lint（如 `too_many_arguments`）按既有惯例 `#[allow]`，不为 lint 做伤筋动骨的重构。
-- **模块拆分惯例**：单文件超 ~1000 行即拆为同名目录 + 子模块（见 provider/、agent/、session/、thread_view/、composer/、sidebar/、settings/、task/、terminal/）。拆分坑：`use super::*` 会连带父模块的 `as _` trait 导入（子模块自己的导入反而 unused）；`pub(crate)` glob 会把可见性压到 crate 内——原 pub 项需显式 `pub use` 恢复。
-- 日志用 `eprintln!`（无 log crate；Windows GUI 子系统下写入被静默忽略，安全）。
-- 数据目录 `~/.pigcode`（`PIG_DATA_DIR` 环境变量可覆盖，自测靠它隔离）；配置 `~/.pigcode/config.toml`；MCP 配置用户级 `<data_dir>/mcp.json` + 项目级 `.pigcode/mcp.json`（项目覆盖用户同名条目）。
+- **English everywhere in code and docs**: comments (`//`, `///`, `//!`) and documentation (AGENTS.md, PLAN.md) are all English (docs switched 2026-10-07). **Commit messages stay Chinese for now**: `feat:`/`fix:`/`refactor:`/`docs:` prefix + Chinese description.
+- **pig-core is fully English and language-agnostic** (Clean/Hexagonal): errors are carried by pig-protocol's `CoreError` enum + English `detail`; rust-i18n is forbidden inside core (i18n.rs has a zero-reference guard test); localization happens at UI render points (pig-app `core_error_text`); upstream error text is passed through verbatim as English detail. The only Chinese left in core is deliberately kept functional CJK test data (mock ticker wide-char rendering lines, `"密".repeat` multibyte truncation, GBK/UTF-16 codec fixtures, and in-comment GBK byte references).
+- **Model-facing prompts are always English** (system prompt, tool descriptions, tool-result copy, reminders, built-in subagent profile bodies, compaction/title prompts — aligned with kimi-code/ZCode conventions; output language follows the user via the "Match the user's language" clause).
+- **GUI strings always go through pig-app's rust-i18n registry** (`rust_i18n::t!("module.key")` + `crates/pig-app/locales/*.yml`, adding both zh-CN and en) — same mechanism as gpui-component; no hardcoded natural-language strings. The completeness tests in i18n.rs catch missing translations and nonexistent keys. Count labels with plural-sensitive English use `<key>_one` for n == 1 (zh values identical); adding a language = one row in `SUPPORTED` plus translations.
+- **Check official components before building UI**: the gpui-kit component catalog is at https://gpui-kit.com/component (a quick-reference table of all 77 components: [docs/gpui-kit-components.md](docs/gpui-kit-components.md)). Use existing components over hand-rolled ones; copy usage from the official stories. Anything that must be custom (e.g. the diff view) gets its rationale and upstream tracking recorded in `docs/PLAN.md` first.
+- **fmt/clippy must be clean before committing**: `cargo fmt --check` with no diff, `cargo clippy --all-targets -- -D warnings` with zero warnings (fully zeroed 2026-09-30; keep it that way). Structural lints (e.g. `too_many_arguments`) are `#[allow]`ed per existing convention; no bone-breaking refactors for lints.
+- **Module splitting convention**: a single file over ~1000 lines splits into a same-named directory + submodules (see provider/, agent/, session/, thread_view/, composer/, sidebar/, settings/, task/, terminal/). Splitting gotchas: `use super::*` drags in the parent module's `as _` trait imports (the submodule's own imports then look unused); `pub(crate)` globs squeeze visibility down to the crate — former pub items need explicit `pub use` to restore it.
+- Logging uses `eprintln!` (no log crate; under the Windows GUI subsystem writes are silently dropped, which is safe). Log output is English.
+- Data dir `~/.pigcode` (`PIG_DATA_DIR` env var overrides it; the selftest relies on this for isolation); config at `~/.pigcode/config.toml`; MCP config is user-level `<data_dir>/mcp.json` + project-level `.pigcode/mcp.json` (project entries override same-named user entries).
 
-## 平台与上游坑
+## Platform & Upstream Gotchas
 
-- **License 红线**：gpui-kit 只走 crates.io，绝不切 zed gpui 的 git 依赖（会拉入 GPL-3.0）；zed `agent_ui` 只能读设计不能抄代码。
-- **Windows**：release 是 GUI 子系统（`windows_subsystem = "windows"`），**所有子进程 spawn 必须经 `NoConsoleExt`（CREATE_NO_WINDOW）**，否则 git/cmd 每次调用都弹新控制台窗口；MCP stdio 启动必须走 `resolve_program`（npx/pnpm 等是 .cmd 垫片，裸 `Command::new` 找不到）。
-- **gpui-kit 0.x API 会变**：升级前看 changelog，组件用法照抄官方 story；已知上游渲染 bug（如 #3293 表格全角标点行尾吞字）记录在 PLAN.md——遇到渲染异常先查是否上游问题，别在下游打补丁（例：表格 CELL_PAD_PX 参与列宽测量，改 padding 治标会引发别处折行）。
-- serde_json Map 迭代序受 preserve_order feature 影响，需要稳定顺序（如 resume 键）时显式 sort。
+- **License hard line**: gpui-kit comes from crates.io only; never switch to zed's gpui git dependency (it would pull in GPL-3.0). zed `agent_ui` may be read for design but never copied.
+- **Windows**: release builds use the GUI subsystem (`windows_subsystem = "windows"`); **every subprocess spawn must go through `NoConsoleExt` (CREATE_NO_WINDOW)**, otherwise git/cmd pops a new console window on every call; MCP stdio launches must go through `resolve_program` (npx/pnpm are .cmd shims; a bare `Command::new` won't find them).
+- **gpui-kit 0.x APIs change**: read the changelog before upgrading; copy component usage from official stories. Known upstream rendering bugs (e.g. #3293, table full-width punctuation swallowed at line ends) are recorded in PLAN.md — when rendering misbehaves, first check whether it's an upstream issue instead of patching downstream (e.g. table CELL_PAD_PX participates in column-width measurement; "fixing" the padding treats the symptom and breaks wrapping elsewhere).
+- serde_json Map iteration order depends on the preserve_order feature; sort explicitly when order must be stable (e.g. resume keys).

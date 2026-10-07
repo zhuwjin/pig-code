@@ -5,7 +5,7 @@ pub(crate) struct TodoListTool;
 impl TodoListTool {
     fn render(todos: &[TodoItem]) -> String {
         if todos.is_empty() {
-            return "当前没有待办事项".to_string();
+            return "The todo list is empty".to_string();
         }
         todos
             .iter()
@@ -37,17 +37,17 @@ impl Tool for TodoListTool {
             "type": "function",
             "function": {
                 "name": "TodoList",
-                "description": "管理会话级待办清单。多步任务开始时拆分为清单写入，执行中随时更新进度；省略 todos 参数读取当前清单，提供则整体替换（非增量）。同一时间至多一项 in_progress。",
+                "description": "Manage the session todo list. Break multi-step work into a list at the start and update progress as you go; omit the todos argument to read the current list, or provide todos to replace the whole list (not incremental). At most one item should be in_progress at a time.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "todos": {
                             "type": "array",
-                            "description": "完整的新待办清单（整体替换）",
+                            "description": "The complete new todo list (replaces the whole list)",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "content": { "type": "string", "description": "待办内容" },
+                                    "content": { "type": "string", "description": "Todo item content" },
                                     "status": { "type": "string", "enum": ["pending", "in_progress", "done"] }
                                 },
                                 "required": ["content", "status"]
@@ -73,7 +73,7 @@ impl Tool for TodoListTool {
                 Some(value) => {
                     let new: Vec<TodoItem> =
                         serde_json::from_value(value.clone()).map_err(|e| {
-                            format!("todos 格式非法: {e}（status 须为 pending/in_progress/done）")
+                            format!("Invalid todos: {e} (status must be pending/in_progress/done)")
                         })?;
                     let mut todos = ctx.state.todos.lock().map_err(|e| e.to_string())?;
                     *todos = new;
@@ -86,9 +86,9 @@ impl Tool for TodoListTool {
 
 fn task_status_label(status: pig_protocol::TaskStatus) -> String {
     match status {
-        pig_protocol::TaskStatus::Running => "运行中".to_string(),
-        pig_protocol::TaskStatus::Exited(code) => format!("已退出({code})"),
-        pig_protocol::TaskStatus::Killed => "已停止".to_string(),
+        pig_protocol::TaskStatus::Running => "running".to_string(),
+        pig_protocol::TaskStatus::Exited(code) => format!("exited({code})"),
+        pig_protocol::TaskStatus::Killed => "stopped".to_string(),
     }
 }
 
@@ -97,9 +97,9 @@ fn task_duration_label(started_at: u64, ended_at: Option<u64>) -> String {
         .unwrap_or_else(crate::rollout::now_secs)
         .saturating_sub(started_at);
     if secs < 60 {
-        format!("{secs} 秒")
+        format!("{secs}s")
     } else {
-        format!("{} 分", secs / 60)
+        format!("{}m", secs / 60)
     }
 }
 
@@ -119,7 +119,7 @@ impl Tool for TaskList {
             "type": "function",
             "function": {
                 "name": "TaskList",
-                "description": "列出当前会话的后台 Bash 任务（id、状态、命令、耗时）。",
+                "description": "List the background Bash tasks of this session (id, status, command, elapsed time).",
                 "parameters": {
                     "type": "object",
                     "properties": {}
@@ -136,13 +136,13 @@ impl Tool for TaskList {
         Box::pin(async move {
             let tasks = ctx.state.tasks.lock().map_err(|e| e.to_string())?;
             if tasks.is_empty() {
-                return Ok(ToolEffect::plain("没有后台任务".to_string()));
+                return Ok(ToolEffect::plain("No background tasks".to_string()));
             }
             let out = tasks
                 .iter()
                 .map(|entry| {
                     format!(
-                        "{} [{}] {}（{}）",
+                        "{} [{}] {} ({})",
                         entry.id,
                         task_status_label(entry.status),
                         entry.command,
@@ -172,11 +172,11 @@ impl Tool for TaskOutput {
             "type": "function",
             "function": {
                 "name": "TaskOutput",
-                "description": "查看后台 Bash 任务的输出（尾部节选）。",
+                "description": "Read a background Bash task's output (tail excerpt).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task_id": { "type": "string", "description": "后台任务 id（b1、b2…）" }
+                        "task_id": { "type": "string", "description": "Background task id (b1, b2, ...)" }
                     },
                     "required": ["task_id"]
                 }
@@ -190,19 +190,21 @@ impl Tool for TaskOutput {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let task_id = args["task_id"].as_str().ok_or("缺少参数 task_id")?;
+            let task_id = args["task_id"]
+                .as_str()
+                .ok_or("Missing required parameter: task_id")?;
             let tasks = ctx.state.tasks.lock().map_err(|e| e.to_string())?;
             let Some(entry) = tasks.iter().find(|t| t.id == task_id) else {
-                return Err(format!("任务不存在: {task_id}"));
+                return Err(format!("Task not found: {task_id}"));
             };
             let tail = crate::task::tail_chars(&entry.output, 16000);
             let tail = if tail.is_empty() {
-                "（暂无输出）".to_string()
+                "(no output yet)".to_string()
             } else {
                 tail
             };
             Ok(ToolEffect::plain(format!(
-                "任务 {}（{}，{}）输出：\n{tail}",
+                "Output of task {} ({}, {}):\n{tail}",
                 entry.id,
                 task_status_label(entry.status),
                 task_duration_label(entry.started_at, entry.ended_at)
@@ -218,8 +220,8 @@ impl Tool for TaskStop {
         "TaskStop"
     }
 
-    /// 杀的是本会话自己起的后台任务，风险等同会话内状态清理；
-    /// Plan 模式下也允许（与 TodoList 写操作同口径）
+    /// It kills only background tasks this session started itself — risk equivalent to in-session state cleanup;
+    /// also allowed in plan mode (same policy as TodoList write operations)
     fn read_only(&self) -> bool {
         true
     }
@@ -229,11 +231,11 @@ impl Tool for TaskStop {
             "type": "function",
             "function": {
                 "name": "TaskStop",
-                "description": "停止（kill）一个仍在运行的后台 Bash 任务。",
+                "description": "Stop (kill) a background Bash task that is still running.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task_id": { "type": "string", "description": "后台任务 id（b1、b2…）" }
+                        "task_id": { "type": "string", "description": "Background task id (b1, b2, ...)" }
                     },
                     "required": ["task_id"]
                 }
@@ -247,7 +249,9 @@ impl Tool for TaskStop {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let task_id = args["task_id"].as_str().ok_or("缺少参数 task_id")?;
+            let task_id = args["task_id"]
+                .as_str()
+                .ok_or("Missing required parameter: task_id")?;
             let result = crate::task::stop_task(
                 &ctx.state.tasks,
                 task_id,
@@ -261,15 +265,15 @@ impl Tool for TaskStop {
 
 pub(crate) struct AskUserQuestionTool;
 
-/// ExitPlanMode：模型请求退出计划模式。会话层在 Plan 硬拒之前拦截并强制弹窗
-/// （ZCode 同款）；工具实现只是防御性兜底，正常路径不会走到 execute。
+/// ExitPlanMode: the model requests exiting plan mode. The session layer intercepts it before plan mode's hard reject and forces a dialog
+/// (same as ZCode); the tool implementation is only a defensive fallback — the normal path never reaches execute.
 pub(crate) struct ExitPlanModeTool;
 impl Tool for ExitPlanModeTool {
     fn name(&self) -> &'static str {
         "ExitPlanMode"
     }
 
-    /// 只读标记：Plan 硬拒只拦非只读工具，本工具由会话层的专属弹窗接管
+    /// Read-only marker: the plan-mode hard reject only blocks non-read-only tools; this tool is taken over by the session layer's dedicated dialog
     fn read_only(&self) -> bool {
         true
     }
@@ -279,11 +283,11 @@ impl Tool for ExitPlanModeTool {
             "type": "function",
             "function": {
                 "name": "ExitPlanMode",
-                "description": "计划写入计划文件、准备开始执行时调用：请用户确认后退出计划模式。仅在计划模式下可用。",
+                "description": "Call when the plan has been written to the plan file and you are ready to execute: the user confirms, then plan mode exits. Only available in plan mode.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "plan": { "type": "string", "description": "可选。通常无需提供——默认读取计划文件 `.pigcode/plans/plan-<session_id>.md` 的全文；提供时覆盖文件内容" }
+                        "plan": { "type": "string", "description": "Optional. Usually omit it — by default the full text of the plan file `.pigcode/plans/plan-<session_id>.md` is used; providing it overrides the file content" }
                     }
                 }
             }
@@ -295,13 +299,13 @@ impl Tool for ExitPlanModeTool {
         _args: serde_json::Value,
         _ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
-        // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
-        Box::pin(async move { Err("ExitPlanMode 由会话层处理".to_string()) })
+        // Defensive: the normal path is intercepted in the session.rs tool loop; execution never gets here
+        Box::pin(async move { Err("ExitPlanMode is handled by the session layer".to_string()) })
     }
 }
 
-/// EnterPlanMode：模型主动进入计划模式（任务复杂/改动大时先调研出计划）。
-/// 进计划是自我收紧（只读化），会话层直接切换不弹窗；工具实现只是防御性兜底。
+/// EnterPlanMode: the model voluntarily enters plan mode (research first and produce a plan when the task is complex or the change is large).
+/// Entering plan mode is self-restriction (going read-only); the session layer switches directly without a dialog; the tool implementation is only a defensive fallback.
 pub(crate) struct EnterPlanModeTool;
 
 impl Tool for EnterPlanModeTool {
@@ -309,7 +313,7 @@ impl Tool for EnterPlanModeTool {
         "EnterPlanMode"
     }
 
-    /// 只读标记：免审批、Plan 下不被拦（幂等提示）
+    /// Read-only marker: approval-free and not blocked under plan mode (idempotent hint)
     fn read_only(&self) -> bool {
         true
     }
@@ -319,11 +323,11 @@ impl Tool for EnterPlanModeTool {
             "type": "function",
             "function": {
                 "name": "EnterPlanMode",
-                "description": "任务复杂或改动范围大时调用：进入计划模式（只读调研），计划写好后用 ExitPlanMode 请用户确认执行。",
+                "description": "Call when the task is complex or the change is large: enter plan mode (read-only research), then ask the user to confirm the written plan with ExitPlanMode.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": { "type": "string", "description": "为什么进入计划模式（可选，仅记录）" }
+                        "reason": { "type": "string", "description": "Why plan mode is being entered (optional; recorded only)" }
                     }
                 }
             }
@@ -335,15 +339,15 @@ impl Tool for EnterPlanModeTool {
         _args: serde_json::Value,
         _ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
-        // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
-        Box::pin(async move { Err("EnterPlanMode 由会话层处理".to_string()) })
+        // Defensive: the normal path is intercepted in the session.rs tool loop; execution never gets here
+        Box::pin(async move { Err("EnterPlanMode is handled by the session layer".to_string()) })
     }
 }
 
-/// Agent：委派子代理处理独立子任务。会话层在工具循环里拦截执行
-///（run_subagent 前台同步循环），工具实现只注册 schema 与描述。
+/// Agent: delegates a subagent to handle an independent subtask. The session layer intercepts execution in the tool loop
+/// (run_subagent, a synchronous foreground loop); the tool implementation only registers the schema and description.
 pub struct AgentTool {
-    /// 可用子代理类型清单（agent_description_list 结果），拼进 description
+    /// Available subagent type list (agent_description_list result), spliced into the description
     profiles_summary: String,
 }
 
@@ -360,7 +364,7 @@ impl Tool for AgentTool {
         "Agent"
     }
 
-    /// 非只读：让 Plan 硬拒语义成立（子代理可能修改文件）
+    /// Non-read-only: keeps the plan-mode hard-reject semantics sound (subagents may modify files)
     fn read_only(&self) -> bool {
         false
     }
@@ -371,14 +375,14 @@ impl Tool for AgentTool {
 
     fn schema(&self) -> serde_json::Value {
         let description = format!(
-            "启动子代理处理任务。子代理独立运行、有自己的上下文——它看不到本会话的任何消息，prompt 必须自包含（像给刚进门的同事做简报：说清目标、已知结论、确切文件路径）。\n\
-             好处：子代理的中间过程（大量文件读取/搜索）不进本会话上下文，你只收到它最后的结论。\n\
-             - 查找类任务给确切路径或命令；调查类任务给问题，不给死步骤。\n\
-             - 不要委派一两步就能完成的琐事；子代理运行中不要并行重做它的工作，也不要中途抛弃它自己手动完成。\n\
-             - 同一任务要批量作用于多个对象（一个模板 × N 个 item 的 fan-out）时用 AgentSwarm，一次铺开并发执行。\n\
-             - 子代理的结果只有你能看到（用户看不到），需要时自己转述。\n\
-             - run_in_background=true 立即返回（带 task_id）；完成后你会收到通知，**结果全文在通知给出的文件里，用 Read 读取**，不要轮询。优先用 resume 继续已有子代理而不是新起实例。\n\
-             可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
+            "Launch a subagent to handle a task. The subagent runs independently with its own context — it cannot see any messages from this session, so the prompt must be self-contained (brief it like a colleague who just walked in: state the goal, what you already know, and exact file paths).\n\
+             Benefit: the subagent's intermediate work (bulk file reads/searches) stays out of this context; you only receive its final conclusion.\n\
+             - For lookups, give exact paths or commands; for investigations, give the question, not prescribed steps.\n\
+             - Do not delegate trivial one-or-two-step tasks; while a subagent is running, do not redo its work in parallel, and do not abandon it midway to finish the job manually.\n\
+             - To apply one task to many objects (fan-out of one template x N items), use AgentSwarm to run them concurrently in a single call.\n\
+             - A subagent's result is visible only to you (the user cannot see it); relay it yourself when needed.\n\
+             - run_in_background=true returns immediately (with a task_id); you will be notified on completion — **the full result is in the file the notification points to; read it with Read** — do not poll. Prefer resuming an existing subagent with resume over starting a fresh instance.\n\
+             Available subagent types (default when subagent_type is omitted: general-purpose):\n\
              {}",
             self.profiles_summary
         );
@@ -390,11 +394,11 @@ impl Tool for AgentTool {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "description": { "type": "string", "description": "3-5 词任务简述，UI 显示用" },
-                        "prompt": { "type": "string", "description": "完整自包含的任务简报（子代理看不到本会话任何消息）" },
-                        "subagent_type": { "type": "string", "description": "子代理类型，省略默认 general-purpose；与 resume 互斥" },
-                        "run_in_background": { "type": "boolean", "description": "true 立即返回（带 task_id），子代理后台运行；完成后你会收到通知，结果全文在通知给出的文件里（用 Read 读取）" },
-                        "resume": { "type": "string", "description": "已有 agent_id，在其上下文上续跑（与 subagent_type 互斥）" }
+                        "description": { "type": "string", "description": "A 3-5 word task summary, shown in the UI" },
+                        "prompt": { "type": "string", "description": "The complete self-contained task brief (the subagent cannot see any messages from this session)" },
+                        "subagent_type": { "type": "string", "description": "Subagent type; defaults to general-purpose when omitted; mutually exclusive with resume" },
+                        "run_in_background": { "type": "boolean", "description": "true returns immediately (with a task_id) and runs the subagent in the background; you will be notified on completion and the full result is in the file the notification points to (read it with Read)" },
+                        "resume": { "type": "string", "description": "An existing agent_id to continue in its context (mutually exclusive with subagent_type)" }
                     },
                     "required": ["description", "prompt"]
                 }
@@ -407,16 +411,16 @@ impl Tool for AgentTool {
         _args: serde_json::Value,
         _ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
-        // 防御：正常路径在 session.rs 工具循环拦截（run_subagent），不会走到这里
-        Box::pin(async move { Err("Agent 由会话层处理".to_string()) })
+        // Defensive: the normal path is intercepted in the session.rs tool loop (run_subagent); execution never gets here
+        Box::pin(async move { Err("Agent is handled by the session layer".to_string()) })
     }
 }
 
-/// AgentSwarm：批量并行子代理（一个 prompt 模板 × N 个 item）。schema-only，
-/// 会话层在工具循环拦截后走 swarm 并发执行（agent/swarm.rs 准备 + task.rs
-/// 全局并发槽），工具实现只注册 schema 与描述。
+/// AgentSwarm: bulk parallel subagents (one prompt template × N items). Schema-only;
+/// the session layer intercepts it in the tool loop and runs the swarm concurrently (agent/swarm.rs preparation + task.rs
+/// global concurrency slots); the tool implementation only registers the schema and description.
 pub struct AgentSwarmTool {
-    /// 可用子代理类型清单（agent_description_list 结果），拼进 description
+    /// Available subagent type list (agent_description_list result), spliced into the description
     profiles_summary: String,
 }
 
@@ -433,7 +437,7 @@ impl Tool for AgentSwarmTool {
         "AgentSwarm"
     }
 
-    /// 非只读：让 Plan 硬拒语义成立（子代理可能修改文件）
+    /// Non-read-only: keeps the plan-mode hard-reject semantics sound (subagents may modify files)
     fn read_only(&self) -> bool {
         false
     }
@@ -444,13 +448,13 @@ impl Tool for AgentSwarmTool {
 
     fn schema(&self) -> serde_json::Value {
         let description = format!(
-            "批量并行子代理：一个 prompt 模板 × N 个 item——模板里的 {{{{item}}}} 占位符被每个 item 替换后各启动一个子代理，全部并发执行（全局并发上限，超限自动排队）。\n\
-             - 适用「同一任务批量作用于多个对象」（逐个审查这些文件/逐个迁移这些模块）；item 只放变化的部分（路径/名字/参数），背景与要求在模板里说全（子代理看不到本会话任何消息，prompt 必须自包含）。\n\
-             - 互不相同的一两个任务请改用 Agent；展开后的 prompt 两两不得相同；items 上限 {MAX_SWARM_ITEMS}。\n\
-             - resume_agent_ids 续跑已有子代理（已有 agent_id → 追加 prompt），可与 items 同用；纯续跑时 subagent_type 无意义。\n\
-             - 默认前台：阻塞至全部完成，返回聚合结果（失败项带错误原因；每项结果全文在聚合结果给出的 result.md 文件里，用 Read 读取），期间取消会取消全部子代理。\n\
-             - run_in_background=true 立即返回逐项回执（agent_id/task_id/状态），子代理群后台运行：每项完成或失败都会以 <task-notification> 逐个送达（结果全文在通知给出的文件里，用 Read 读取），不要轮询；后台子代理不随本会话回合取消，可用 TaskStop 逐个停止。\n\
-             可用子代理类型（省略 subagent_type 时默认 general-purpose）：\n\
+            "Parallel subagents in bulk: one prompt template x N items — the {{{{item}}}} placeholder in the template is replaced by each item and launches one subagent apiece, all running concurrently (a global concurrency cap queues the overflow).\n\
+             - Best for applying the same task to many objects (review these files one by one / migrate these modules one by one); items carry only what varies (path/name/argument), with the shared background and requirements spelled out in the template (subagents cannot see this session — prompts must be self-contained).\n\
+             - For one or two dissimilar tasks, use Agent instead; expanded prompts must be pairwise distinct; items are capped at {MAX_SWARM_ITEMS}.\n\
+             - resume_agent_ids continues existing subagents (existing agent_id -> appended prompt) and can be combined with items; subagent_type is meaningless for resume-only calls.\n\
+             - Foreground by default: blocks until all finish and returns aggregated results (failed items carry their error; each item's full result is in the result.md file named in the aggregated result — read it with Read); cancelling during the run cancels all subagents.\n\
+             - run_in_background=true returns immediately with per-item receipts (agent_id/task_id/status) and runs the swarm in the background: each item's completion or failure arrives as a <task-notification> (the full result is in the file the notification points to; read it with Read) — do not poll; background subagents are not cancelled with this session's turns and can be stopped individually with TaskStop.\n\
+             Available subagent types (default when subagent_type is omitted: general-purpose):\n\
              {}",
             self.profiles_summary
         );
@@ -462,19 +466,19 @@ impl Tool for AgentSwarmTool {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "prompt_template": { "type": "string", "description": "任务模板：{{item}} 占位符会被每个 item 替换；背景/要求/输出格式在这里说全" },
+                        "prompt_template": { "type": "string", "description": "Task template: the {{item}} placeholder is replaced by each item; spell out the background, requirements, and output format here" },
                         "items": {
                             "type": "array",
-                            "description": "批量对象清单：每个 item 启动一个子代理（纯 items 时至少 2 个）",
+                            "description": "The batch of objects: one subagent per item (at least 2 when using items alone)",
                             "items": { "type": "string" }
                         },
                         "resume_agent_ids": {
                             "type": "object",
-                            "description": "可选：已有 agent_id → 追加 prompt（续跑已有子代理，可与 items 同用）",
+                            "description": "Optional: existing agent_id -> appended prompt (resumes existing subagents; can be combined with items)",
                             "additionalProperties": { "type": "string" }
                         },
-                        "subagent_type": { "type": "string", "description": "子代理类型，省略默认 general-purpose；仅作用于 items 新起的子代理" },
-                        "run_in_background": { "type": "boolean", "description": "true 立即返回（逐项列出 agent_id/task_id），子代理群后台运行；每项完成/失败都会以 <task-notification> 逐个送达，结果全文在通知给出的文件里（用 Read 读取），不要轮询" }
+                        "subagent_type": { "type": "string", "description": "Subagent type; defaults to general-purpose when omitted; applies only to subagents newly launched from items" },
+                        "run_in_background": { "type": "boolean", "description": "true returns immediately (listing agent_id/task_id per item) and runs the swarm in the background; each item's completion/failure arrives as a <task-notification>, with the full result in the file the notification points to (read it with Read) — do not poll" }
                     },
                     "required": ["prompt_template"]
                 }
@@ -487,129 +491,134 @@ impl Tool for AgentSwarmTool {
         _args: serde_json::Value,
         _ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
-        // 防御：正常路径在 session.rs 工具循环拦截（run_swarm），不会走到这里
-        Box::pin(async move { Err("AgentSwarm 由会话层处理".to_string()) })
+        // Defensive: the normal path is intercepted in the session.rs tool loop (run_swarm); execution never gets here
+        Box::pin(async move { Err("AgentSwarm is handled by the session layer".to_string()) })
     }
 }
 
-/// AgentSwarm items 上限（展开后每个 item 一个子代理）
+/// AgentSwarm items cap (after expansion, one subagent per item)
 pub const MAX_SWARM_ITEMS: usize = 128;
 
-/// AgentSwarm 展开后的一个子任务
+/// One expanded AgentSwarm subtask
 #[derive(Debug)]
 pub struct SwarmTask {
-    /// 续跑目标（已有 agent_id）；None = 新起
+    /// Resume target (an existing agent_id); None = start fresh
     pub resume: Option<String>,
-    /// 子代理卡显示用的简述（item / 追加 prompt 的首行截断）
+    /// Brief summary for the subagent card display (first line of the item / appended prompt, truncated)
     pub description: String,
-    /// 最终 prompt：items 路径已展开 {{item}}；resume 路径为追加 prompt 原文
+    /// Final prompt: the items path has {{item}} expanded; the resume path is the appended prompt verbatim
     pub prompt: String,
 }
 
-/// AgentSwarm 解析结果（执行前的完整计划）
+/// AgentSwarm parse result (the complete plan before execution)
 #[derive(Debug)]
 pub struct SwarmPlan {
     pub tasks: Vec<SwarmTask>,
-    /// 新起子代理的档案查询名（缺省 general-purpose；纯续跑时无意义，校验已拒）
+    /// Profile lookup name for freshly launched subagents (default general-purpose; meaningless for resume-only calls, rejected by validation)
     pub subagent_type: String,
 }
 
 impl SwarmPlan {
-    /// 新起子任务数（items 展开；resume 条目不算）
+    /// Count of freshly launched subtasks (expanded from items; resume entries not counted)
     pub fn item_count(&self) -> usize {
         self.tasks.iter().filter(|t| t.resume.is_none()).count()
     }
 }
 
-/// 解析并校验 AgentSwarm 参数（纯函数以便单测；会话层拦截后执行）：
-/// items 与 resume_agent_ids 至少给一类；纯 items 时 ≥2 个；items 上限
-/// MAX_SWARM_ITEMS；模板必须含 {{item}} 占位符；展开后的 prompt 两两不得相同。
+/// Parse and validate AgentSwarm arguments (a pure function for unit testing; executed after the session layer intercepts):
+/// at least one of items / resume_agent_ids; items-only needs >= 2; items are capped at
+/// MAX_SWARM_ITEMS; the template must contain the {{item}} placeholder; expanded prompts must be pairwise distinct.
 pub fn parse_swarm_args(args: &serde_json::Value) -> Result<SwarmPlan, String> {
     let template = args["prompt_template"]
         .as_str()
-        .ok_or("缺少参数 prompt_template（含 {{item}} 占位符的任务模板）")?
+        .ok_or("Missing required parameter: prompt_template (the task template containing the {{item}} placeholder)")?
         .trim()
         .to_string();
-    // items：可选字符串数组；空白/非字符串元素报错（静默丢弃会让模型误判并发数）
+    // items: optional string array; blank/non-string elements error out (silently dropping them would make the model misjudge the concurrency)
     let mut items: Vec<String> = Vec::new();
     if !args["items"].is_null() {
         let array = args["items"]
             .as_array()
-            .ok_or("参数 items 须为字符串数组")?;
+            .ok_or("Parameter items must be an array of strings")?;
         for (ix, item) in array.iter().enumerate() {
             let item = item
                 .as_str()
-                .ok_or_else(|| format!("items 第 {} 个元素须为字符串", ix + 1))?
+                .ok_or_else(|| format!("items element {} must be a string", ix + 1))?
                 .trim();
             if item.is_empty() {
-                return Err(format!("items 第 {} 个元素不能为空", ix + 1));
+                return Err(format!("items element {} must not be empty", ix + 1));
             }
             items.push(item.to_string());
         }
     }
-    // resume_agent_ids：可选对象 map（agent_id → 追加 prompt）；下方显式按键排序，
-    // 任务顺序确定（serde_json Map 迭代序受 preserve_order feature 影响，不可依赖）
+    // resume_agent_ids: optional object map (agent_id → appended prompt); explicitly sorted by key below
+    // so task order is deterministic (serde_json Map iteration order is affected by the preserve_order feature and must not be relied upon)
     let mut resumes: Vec<(String, String)> = Vec::new();
     if !args["resume_agent_ids"].is_null() {
         let map = args["resume_agent_ids"]
             .as_object()
-            .ok_or("参数 resume_agent_ids 须为对象（agent_id → 追加 prompt）")?;
-        // serde_json Map 的迭代序受 preserve_order feature 影响（workspace 统一编译时
-        // 可能是插入序而非键序）——显式排序，保证任务顺序确定
+            .ok_or("Parameter resume_agent_ids must be an object (agent_id -> appended prompt)")?;
+        // serde_json Map iteration order is affected by the preserve_order feature (under a uniform workspace build it
+        // may be insertion order rather than key order) — sort explicitly to guarantee deterministic task order
         let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
         entries.sort_by_key(|(agent_id, _)| agent_id.as_str());
         for (agent_id, prompt) in entries {
             let agent_id = agent_id.trim();
             let prompt = prompt
                 .as_str()
-                .ok_or_else(|| format!("resume_agent_ids[\"{agent_id}\"] 须为字符串"))?
+                .ok_or_else(|| format!("resume_agent_ids[\"{agent_id}\"] must be a string"))?
                 .trim();
             if agent_id.is_empty() {
-                return Err("resume_agent_ids 存在空 agent_id 键".to_string());
+                return Err("resume_agent_ids contains an empty agent_id key".to_string());
             }
             if prompt.is_empty() {
                 return Err(format!(
-                    "resume_agent_ids[\"{agent_id}\"] 的追加 prompt 不能为空"
+                    "resume_agent_ids[\"{agent_id}\"] has an empty appended prompt"
                 ));
             }
             resumes.push((agent_id.to_string(), prompt.to_string()));
         }
     }
     if items.is_empty() && resumes.is_empty() {
-        return Err("items 与 resume_agent_ids 至少给一类".to_string());
+        return Err("Provide at least one of items or resume_agent_ids".to_string());
     }
     if resumes.is_empty() && items.len() < 2 {
-        return Err("纯 items 批量至少 2 个 item（单个任务请用 Agent 工具）".to_string());
+        return Err(
+            "An items-only batch needs at least 2 items (use the Agent tool for a single task)"
+                .to_string(),
+        );
     }
     if items.len() > MAX_SWARM_ITEMS {
         return Err(format!(
-            "items 总数上限 {MAX_SWARM_ITEMS}（收到 {}）",
+            "items is capped at {MAX_SWARM_ITEMS} (got {})",
             items.len()
         ));
     }
     let subagent_type = args["subagent_type"].as_str().unwrap_or("").trim();
     if items.is_empty() && !subagent_type.is_empty() {
         return Err(
-            "纯 resume 续跑时 subagent_type 无意义（续跑按各自档案现状重解析）".to_string(),
+            "subagent_type is meaningless for resume-only calls (resumed subagents re-resolve their own profiles)"
+                .to_string(),
         );
     }
     let mut tasks: Vec<SwarmTask> = Vec::new();
     if !items.is_empty() {
         if template.is_empty() {
-            return Err("prompt_template 不能为空".to_string());
+            return Err("prompt_template must not be empty".to_string());
         }
         if !template.contains("{{item}}") {
             return Err(
-                "prompt_template 缺少 {{item}} 占位符（每个 item 会替换进模板）".to_string(),
+                "prompt_template is missing the {{item}} placeholder (each item is substituted into the template)"
+                    .to_string(),
             );
         }
-        // 展开后两两去重：重复 prompt = 重复 item（占位符存在性已在上方校验）
+        // Pairwise dedup after expansion: a duplicate prompt = a duplicate item (placeholder presence already validated above)
         let mut seen = std::collections::HashSet::new();
         for item in &items {
             let prompt = template.replace("{{item}}", item);
             if !seen.insert(prompt.clone()) {
                 return Err(format!(
-                    "展开后的 prompt 重复：item \"{}\" 与其他 item 展开结果相同（检查是否有重复 item）",
+                    "Duplicate expanded prompt: item \"{}\" expands to the same prompt as another item (check for duplicate items)",
                     item.chars().take(60).collect::<String>()
                 ));
             }
@@ -637,23 +646,23 @@ pub fn parse_swarm_args(args: &serde_json::Value) -> Result<SwarmPlan, String> {
     })
 }
 
-/// 子代理卡简述：首行截断 60 字符（item / 追加 prompt 可能很长）
+/// Subagent card summary: first line truncated to 60 characters (the item / appended prompt may be very long)
 fn swarm_task_description(text: &str) -> String {
     let first_line = text.lines().next().unwrap_or("").trim();
     first_line.chars().take(60).collect()
 }
 
-/// 解析并校验 AskUserQuestion 参数：1-4 题；每题 question 非空、options 2-4 项、
-/// label 非空。纯函数以便单测；真正的请求/等待在 session.rs 工具循环拦截。
+/// Parse and validate AskUserQuestion arguments: 1-4 questions; per question, a non-empty question, 2-4 options,
+/// and non-empty labels. A pure function for unit testing; the actual request/wait is intercepted in the session.rs tool loop.
 pub fn parse_questions(
     args: &serde_json::Value,
 ) -> Result<Vec<pig_protocol::QuestionItem>, String> {
     let items = args["questions"]
         .as_array()
-        .ok_or("缺少参数 questions（数组）")?;
+        .ok_or("Missing required parameter: questions (array)")?;
     if items.is_empty() || items.len() > 4 {
         return Err(format!(
-            "questions 数量须在 1-4 之间（收到 {}）",
+            "questions must contain 1-4 items (got {})",
             items.len()
         ));
     }
@@ -662,7 +671,7 @@ pub fn parse_questions(
         let n = ix + 1;
         let question = item["question"].as_str().unwrap_or("").trim().to_string();
         if question.is_empty() {
-            return Err(format!("第 {n} 题 question 不能为空"));
+            return Err(format!("Question {n}: question must not be empty"));
         }
         let header = item["header"]
             .as_str()
@@ -671,10 +680,10 @@ pub fn parse_questions(
         let multi_select = item["multi_select"].as_bool().unwrap_or(false);
         let options = item["options"]
             .as_array()
-            .ok_or_else(|| format!("第 {n} 题缺少 options（数组）"))?;
+            .ok_or_else(|| format!("Question {n} is missing options (array)"))?;
         if options.len() < 2 || options.len() > 4 {
             return Err(format!(
-                "第 {n} 题 options 数量须在 2-4 之间（收到 {}）",
+                "Question {n}: options must contain 2-4 items (got {})",
                 options.len()
             ));
         }
@@ -682,7 +691,7 @@ pub fn parse_questions(
         for option in options {
             let label = option["label"].as_str().unwrap_or("").trim().to_string();
             if label.is_empty() {
-                return Err(format!("第 {n} 题存在空 label 的选项"));
+                return Err(format!("Question {n} has an option with an empty label"));
             }
             let description = option["description"].as_str().map(str::to_string);
             parsed_options.push(pig_protocol::QuestionOption { label, description });
@@ -711,31 +720,31 @@ impl Tool for AskUserQuestionTool {
             "type": "function",
             "function": {
                 "name": "AskUserQuestion",
-                "description": "需要用户决策时，给出 1-4 个结构化问题（每题 2-4 个选项）让用户选择，而不是用纯文本提问。每题可用 multi_select 允许多选；UI 会自动追加「其他」自由输入项。",
+                "description": "When a user decision is needed, ask 1-4 structured questions (2-4 options each) for the user to pick from, instead of asking in plain text. Each question may set multi_select to allow multiple choices; the UI automatically appends an \"Other\" free-text option.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "questions": {
                             "type": "array",
-                            "description": "1-4 个问题",
+                            "description": "1-4 questions",
                             "minItems": 1,
                             "maxItems": 4,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "question": { "type": "string", "description": "完整问题文本" },
-                                    "header": { "type": "string", "description": "可选短标签（≤12 字）" },
-                                    "multi_select": { "type": "boolean", "description": "可选，true 允许多选（默认 false）" },
+                                    "question": { "type": "string", "description": "The full question text" },
+                                    "header": { "type": "string", "description": "Optional short label (<=12 chars)" },
+                                    "multi_select": { "type": "boolean", "description": "Optional; true allows multiple selections (default false)" },
                                     "options": {
                                         "type": "array",
-                                        "description": "2-4 个选项",
+                                        "description": "2-4 options",
                                         "minItems": 2,
                                         "maxItems": 4,
                                         "items": {
                                             "type": "object",
                                             "properties": {
-                                                "label": { "type": "string", "description": "选项标签" },
-                                                "description": { "type": "string", "description": "可选补充说明" }
+                                                "label": { "type": "string", "description": "Option label" },
+                                                "description": { "type": "string", "description": "Optional supplementary description" }
                                             },
                                             "required": ["label"]
                                         }
@@ -756,8 +765,8 @@ impl Tool for AskUserQuestionTool {
         _args: serde_json::Value,
         _ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
-        // 防御：正常路径在 session.rs 工具循环拦截，不会走到这里
-        Box::pin(async move { Err("AskUserQuestion 由会话层处理".to_string()) })
+        // Defensive: the normal path is intercepted in the session.rs tool loop; execution never gets here
+        Box::pin(async move { Err("AskUserQuestion is handled by the session layer".to_string()) })
     }
 }
 
@@ -770,94 +779,109 @@ mod tests {
     #[test]
     fn swarm_expand_items() {
         let plan = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}，输出问题清单",
+            "prompt_template": "Review {{item}} and output the issue list",
             "items": ["src/a.rs", "src/b.rs"]
         }))
-        .expect("合法调用");
+        .expect("valid call");
         assert_eq!(plan.tasks.len(), 2);
-        assert_eq!(plan.tasks[0].prompt, "审查 src/a.rs，输出问题清单");
-        assert_eq!(plan.tasks[1].prompt, "审查 src/b.rs，输出问题清单");
+        assert_eq!(
+            plan.tasks[0].prompt,
+            "Review src/a.rs and output the issue list"
+        );
+        assert_eq!(
+            plan.tasks[1].prompt,
+            "Review src/b.rs and output the issue list"
+        );
         assert!(
             plan.tasks.iter().all(|t| t.resume.is_none()),
-            "items 路径不带 resume"
+            "items tasks carry no resume"
         );
-        assert_eq!(plan.subagent_type, "general-purpose", "缺省档案");
+        assert_eq!(plan.subagent_type, "general-purpose", "default profile");
         assert_eq!(plan.item_count(), 2);
-        // 多处占位符全部替换
+        // All placeholders are replaced
         let plan = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "读 {{item}} 并比对 {{item}} 的调用方",
+            "prompt_template": "Read {{item}} and compare the callers of {{item}}",
             "items": ["a", "b"]
         }))
-        .expect("多占位符");
-        assert_eq!(plan.tasks[0].prompt, "读 a 并比对 a 的调用方");
+        .expect("multiple placeholders");
+        assert_eq!(plan.tasks[0].prompt, "Read a and compare the callers of a");
     }
 
     #[test]
     fn swarm_missing_placeholder_err() {
         let err = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查这些文件",
+            "prompt_template": "review these files",
             "items": ["a", "b"]
         }))
         .unwrap_err();
-        assert!(err.contains("{{item}}"), "应点名缺占位符: {err}");
+        assert!(
+            err.contains("{{item}}"),
+            "the error should name the missing placeholder: {err}"
+        );
     }
 
     #[test]
     fn swarm_duplicate_expansion_err() {
         let err = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "a.rs"]
         }))
         .unwrap_err();
-        assert!(err.contains("重复"), "重复 item 应拒绝: {err}");
-        // item 首尾空白 trim 后展开相同，同样算重复
+        assert!(
+            err.contains("Duplicate"),
+            "duplicate items should be rejected: {err}"
+        );
+        // Items that expand identically after trimming surrounding whitespace also count as duplicates
         let err = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "  a.rs  "]
         }))
         .unwrap_err();
-        assert!(err.contains("重复"), "trim 后重复也应拒绝: {err}");
+        assert!(
+            err.contains("Duplicate"),
+            "duplicates after trim should also be rejected: {err}"
+        );
     }
 
     #[test]
     fn swarm_items_limit() {
         let items: Vec<String> = (0..MAX_SWARM_ITEMS).map(|i| format!("f{i}")).collect();
         let plan = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "处理 {{item}}",
+            "prompt_template": "Process {{item}}",
             "items": items
         }))
-        .expect("恰好上限应通过");
+        .expect("exactly at the cap should pass");
         assert_eq!(plan.tasks.len(), MAX_SWARM_ITEMS);
         let items: Vec<String> = (0..=MAX_SWARM_ITEMS).map(|i| format!("f{i}")).collect();
         let err = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "处理 {{item}}",
+            "prompt_template": "Process {{item}}",
             "items": items
         }))
         .unwrap_err();
-        assert!(err.contains("上限"), "超上限应报错: {err}");
+        assert!(err.contains("capped"), "over the cap should error: {err}");
     }
 
     #[test]
     fn swarm_shape_rules() {
-        // 两类都不给
+        // Neither category provided
         let err =
             parse_swarm_args(&serde_json::json!({"prompt_template": "x {{item}}"})).unwrap_err();
-        assert!(err.contains("至少给一类"), "{err}");
-        // 纯 items 单元素
+        assert!(err.contains("at least one of"), "{err}");
+        // items-only with a single element
         let err = parse_swarm_args(&serde_json::json!({
             "prompt_template": "x {{item}}",
             "items": ["only"]
         }))
         .unwrap_err();
-        assert!(err.contains("至少 2"), "{err}");
-        // 空 item / 非字符串 item
+        assert!(err.contains("at least 2"), "{err}");
+        // blank item / non-string item
         assert!(
             parse_swarm_args(&serde_json::json!({
                 "prompt_template": "x {{item}}",
                 "items": ["a", "  "]
             }))
             .is_err(),
-            "空白 item 应拒绝"
+            "blank items should be rejected"
         );
         assert!(
             parse_swarm_args(&serde_json::json!({
@@ -865,97 +889,97 @@ mod tests {
                 "items": ["a", 1]
             }))
             .is_err(),
-            "非字符串 item 应拒绝"
+            "non-string items should be rejected"
         );
-        // 空模板 + items
+        // empty template + items
         assert!(
             parse_swarm_args(&serde_json::json!({
                 "prompt_template": "  ",
                 "items": ["a", "b"]
             }))
             .is_err(),
-            "空模板应拒绝"
+            "an empty template should be rejected"
         );
     }
 
     #[test]
     fn swarm_resume_rules() {
-        // 纯 resume 合法（prompt_template schema 必填，此处被忽略）
+        // resume-only is valid (prompt_template is schema-required but ignored here)
         let plan = parse_swarm_args(&serde_json::json!({
             "prompt_template": "",
-            "resume_agent_ids": {"a2": "再查一下", "a1": "继续"}
+            "resume_agent_ids": {"a2": "check further", "a1": "continue"}
         }))
-        .expect("纯 resume");
+        .expect("resume-only call");
         assert_eq!(plan.tasks.len(), 2);
         assert_eq!(
             plan.tasks[0].resume.as_deref(),
             Some("a1"),
-            "对象 map 按键序迭代"
+            "the object map iterates in key order"
         );
         assert_eq!(plan.item_count(), 0);
-        // 纯 resume + subagent_type → 报错
+        // resume-only + subagent_type → error
         assert!(
             parse_swarm_args(&serde_json::json!({
                 "prompt_template": "",
-                "resume_agent_ids": {"a1": "继续"},
+                "resume_agent_ids": {"a1": "continue"},
                 "subagent_type": "explore"
             }))
             .is_err(),
-            "纯续跑给 subagent_type 应拒绝"
+            "subagent_type on a resume-only call should be rejected"
         );
-        // items + resume 混用：单 item 合法，items 排前
+        // items + resume mixed: a single item is valid; items come first
         let plan = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "处理 {{item}}",
+            "prompt_template": "Process {{item}}",
             "items": ["one"],
-            "resume_agent_ids": {"a1": "继续"},
+            "resume_agent_ids": {"a1": "continue"},
             "subagent_type": "explore"
         }))
-        .expect("混用单 item");
+        .expect("mixed with a single item");
         assert_eq!(plan.tasks.len(), 2);
-        assert!(plan.tasks[0].resume.is_none(), "items 子任务排前");
+        assert!(plan.tasks[0].resume.is_none(), "items tasks come first");
         assert_eq!(plan.tasks[1].resume.as_deref(), Some("a1"));
         assert_eq!(plan.subagent_type, "explore");
-        // 空追加 prompt
+        // empty appended prompt
         assert!(
             parse_swarm_args(&serde_json::json!({
                 "prompt_template": "",
                 "resume_agent_ids": {"a1": "  "}
             }))
             .is_err(),
-            "空追加 prompt 应拒绝"
+            "an empty appended prompt should be rejected"
         );
     }
 
     #[test]
     fn swarm_description_first_line_truncated() {
-        let long = format!("{}\n第二行不要", "字".repeat(100));
+        let long = format!("{}\nsecond line unused", "x".repeat(100));
         let plan = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "处理 {{item}}",
-            "items": [long, "短"]
+            "prompt_template": "Process {{item}}",
+            "items": [long, "short"]
         }))
-        .expect("长 item");
+        .expect("long item");
         assert_eq!(
             plan.tasks[0].description.chars().count(),
             60,
-            "简述取首行截 60 字符"
+            "the description takes the first line truncated to 60 chars"
         );
-        assert_eq!(plan.tasks[1].description, "短");
+        assert_eq!(plan.tasks[1].description, "short");
     }
 
     #[test]
     fn swarm_run_in_background_not_in_plan() {
-        // run_in_background 是执行方式开关，不进 SwarmPlan（校验规则不受影响）
+        // run_in_background is an execution-mode switch, not part of SwarmPlan (validation rules unaffected)
         let with = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "b.rs"],
             "run_in_background": true
         }))
-        .expect("带后台开关的合法调用");
+        .expect("valid call with the background switch");
         let without = parse_swarm_args(&serde_json::json!({
-            "prompt_template": "审查 {{item}}",
+            "prompt_template": "Review {{item}}",
             "items": ["a.rs", "b.rs"]
         }))
-        .expect("不带后台开关的合法调用");
+        .expect("valid call without the background switch");
         assert_eq!(with.tasks.len(), without.tasks.len());
         for (a, b) in with.tasks.iter().zip(without.tasks.iter()) {
             assert_eq!(a.prompt, b.prompt);

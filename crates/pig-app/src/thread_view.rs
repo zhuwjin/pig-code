@@ -46,30 +46,29 @@ use read::*;
 
 #[derive(Clone, Debug)]
 pub enum ThreadEvent {
-    /// 取消排队消息（文本匹配）
+    /// Cancel a queued message (matched by text)
     CancelQueued(String),
-    /// 点击后台子代理通知卡：打开右侧「子代理」tab（只读完整对话）
+    /// Click on a background subagent notification card: opens the right-side "subagent" tab (read-only full conversation)
     OpenSubagent {
         agent_id: String,
-        /// 展示标题（通知卡的 description）
+        /// Display title (the notification card's description)
         title: String,
     },
-    /// 点击 Read 卡的路径：打开右侧「文件」tab 查看完整内容；
-    /// line = Read 输出首行号（打开后滚动定位）
+    /// Click on the Read card's path: opens the right-side "file" tab to view the full content;
+    /// line = the first line number of the Read output (scrolled to after opening)
     OpenFile { path: String, line: Option<usize> },
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,
-        /// 反馈意见（kimi Revise：计划「修改」提交时携带；其余审批为 None）
+        /// Feedback (kimi Revise: carried when the plan's "Revise" is submitted; None for other approvals)
         feedback: Option<String>,
     },
-    /// 会话分叉：以该消息所在回合为止的历史派生新会话（turns = 保留回合数）
+    /// Session fork: derives a new session from the history ending at this message's turn (turns = the number of turns kept)
     Fork { turns: usize },
 }
 
-/// 会话内搜索的一次命中：定位到消息/段/段内字节区间。区间基于该段
-/// rendered_text 的 UTF-8 字节偏移，与 set_range_highlights / reveal_range
-/// 同一坐标系
+/// One in-session search hit: locates a message/segment/byte range within the segment. The range is based on that segment's
+/// rendered_text UTF-8 byte offsets, the same coordinate system as set_range_highlights / reveal_range
 #[derive(Clone)]
 struct SearchMatch {
     msg_ix: usize,
@@ -77,19 +76,25 @@ struct SearchMatch {
     range: Range<usize>,
 }
 
-/// 一段的上次搜索结果（见 ThreadView.search_cache）
+/// A segment's previous search result (see ThreadView.search_cache)
 struct SearchSegmentCache {
     snapshot: RenderedText,
     ranges: Vec<Range<usize>>,
 }
 
-/// 工作时长文案：「{prefix} N 秒」/「{prefix} M 分 S 秒」
-///（运行中的「工作中」与折叠行的「已工作」共用）
+/// Work duration label: "{prefix} N seconds" / "{prefix} M minutes S seconds"
+/// (shared by the running "Working" and the collapsed row's "Worked")
 pub(crate) fn fmt_work_duration(secs: u64, prefix: &str) -> String {
     if secs >= 60 {
-        format!("{prefix} {} 分 {} 秒", secs / 60, secs % 60)
+        rust_i18n::t!(
+            "thread.work_duration_minutes",
+            prefix = prefix,
+            m = secs / 60,
+            s = secs % 60
+        )
+        .to_string()
     } else {
-        format!("{prefix} {secs} 秒")
+        rust_i18n::t!("thread.work_duration_seconds", prefix = prefix, s = secs).to_string()
     }
 }
 
@@ -97,81 +102,81 @@ pub struct ThreadView {
     messages: Vec<ChatMessage>,
     item_index: HashMap<String, usize>,
     scroll_handle: ScrollHandle,
-    /// 跟随模式：输出时自动贴底。用户上翻暂停跟随（浮出「最新消息」按钮），
-    /// 回到底部（任意方式）或点击浮钮后恢复
+    /// Follow mode: automatically sticks to the bottom during output. The user scrolling up pauses following (a "Latest messages" button pops up),
+    /// and reaching the bottom (by any means) or clicking the floating button resumes it
     follow_bottom: bool,
     streaming: bool,
-    /// 上下文压缩进行中（CompactStarted → ContextCompacted/TurnAborted 之间）：
-    /// 列表末尾渲染「正在压缩上下文」分隔条
+    /// Context compaction in progress (between CompactStarted → ContextCompacted/TurnAborted):
+    /// renders a "Compacting context" divider at the end of the list
     compacting: bool,
     turn_started: Option<std::time::Instant>,
-    /// 当前回合由回放重建（turn_id 以 replay- 开头）：思考段不打真实用时
+    /// The current turn was rebuilt by replay (turn_id starts with replay-): thinking segments get no real duration
     replay_turn: bool,
-    /// 排队中的消息（FIFO）
+    /// Queued messages (FIFO)
     queued: Vec<String>,
-    /// turn 导航条：悬停的用户消息下标（驱动横条的山峰式加宽与高亮）
+    /// Turn nav: the hovered user message index (drives the bars' mountain-style widening and highlight)
     nav_hover: Option<usize>,
-    /// 预览卡当前为哪条消息打开（悬停稳定 120ms 才打开，离开 80ms 才关闭）
+    /// Which message the preview card is currently open for (opens after a stable 120ms hover, closes 80ms after leaving)
     nav_card: Option<usize>,
-    /// 预览卡的渲染数据快照（打开期间逐帧刷新；关闭一刻移入 nav_card_exit 播淡出，
-    /// 也是「切换横条不重播入场动画」的判据）
+    /// Render data snapshot of the preview card (refreshed frame by frame while open; moved into nav_card_exit at the moment of closing to play the fade-out,
+    /// and also the criterion for "switching bars does not replay the enter animation")
     nav_card_last: Option<NavCardData>,
-    /// 预览卡关闭时的出场快照（淡出动画播完即弃）
+    /// Exit snapshot when the preview card closes (dropped once the fade-out animation finishes)
     nav_card_exit: Option<NavCardData>,
-    /// 出场动画代次（进动画元素 id，每次关闭重播；清理计时器按代次作废）
+    /// Exit animation generation (goes into the animation element id, replays on each close; the cleanup timer is invalidated by generation)
     nav_card_exit_gen: u64,
-    /// 各导航横条的屏幕 bounds（on_prepaint 记录），预览卡按它做侧边锚定；
-    /// render 只持 &self，故用 RefCell
+    /// Screen bounds of each nav bar (recorded on_prepaint); the preview card side-anchors to them;
+    /// render holds only &self, hence the RefCell
     nav_bar_bounds: RefCell<HashMap<usize, Rc<Cell<Bounds<Pixels>>>>>,
-    /// 导航条自身的滚动句柄（turn 数超出可见高度时 rail 内部滚动）
+    /// The nav rail's own scroll handle (the rail scrolls internally when turns exceed the visible height)
     nav_rail_scroll: ScrollHandle,
-    /// 上一帧的活动导航项；活动项变化时让 rail 滚动到可见
+    /// The previous frame's active nav item; when the active item changes, the rail scrolls to keep it visible
     nav_last_active: Option<usize>,
-    /// 子代理完成次序计数器（SubagentActivity finished 逐个 +1，写入代理卡的
-    /// finished_seq；Swarm 面板按完成先后排序用）。随 clear 重置
+    /// Subagent finish sequence counter (SubagentActivity finished bumps it once each, written into the agent card's
+    /// finished_seq; used by the Swarm panel to order by finish time). Reset on clear
     agent_finish_seq: u64,
-    /// 导航点击后抑制一次「回到底部自动恢复跟随」：跳转滚动在 prepaint 才生效，
-    /// 生效前 offset 仍是旧值，贴着底会被误判成用户滚回了底部
+    /// After a nav click, suppress the "back-to-bottom auto-resume follow" once: the jump scroll only takes effect at prepaint,
+    /// and before that the offset is still the old value, which would be misread as the user scrolling back to the bottom
     nav_jump: bool,
-    /// 本会话的媒体目录（{data}/sessions/{id}.media）：用户消息图片缩略图来源；
-    /// None/目录不存在 → 附件链接整体按原文本降级显示
+    /// This session's media directory ({data}/sessions/{id}.media): the source of user message image thumbnails;
+    /// None or a missing directory → attachment links degrade to plain text as a whole
     media_dir: Option<std::path::PathBuf>,
-    /// 图片灯箱覆盖层（点用户消息缩略图打开；Esc/点遮罩/关闭钮关闭）
+    /// Image lightbox overlay (opened by clicking a user message thumbnail; closed by Esc/clicking the mask/the close button)
     lightbox: Option<Lightbox>,
-    /// 灯箱的焦点 handle（Esc 键监听挂在卡片上）
+    /// The lightbox's focus handle (the Esc key listener is attached to the card)
     lightbox_focus: FocusHandle,
-    /// 会话内搜索条是否打开（Ctrl+F / Esc）
+    /// Whether the in-session search bar is open (Ctrl+F / Esc)
     search_open: bool,
-    /// 搜索输入框：首开时惰性创建（InputState::new 需要 Window，
-    /// ThreadView::new 拿不到——ensure_views 在事件处理链里没有 Window 可传）；
-    /// 创建后跨开关复用，关闭只清值。Subscription 随元组存放保活
+    /// Search input: lazily created on first open (InputState::new needs a Window,
+    /// which ThreadView::new cannot get, since ensure_views has no Window to pass on the event-handling chain);
+    /// reused across open/close once created, and closing only clears the value. The Subscription stays alive stored in the tuple
     search_input: Option<(Entity<InputState>, Subscription)>,
-    /// 当前命中是为哪个 query 算出的（输入框原文；匹配时双方再小写化）
+    /// Which query the current matches were computed for (the input's raw text; both sides are lowercased when matching)
     search_query: String,
-    /// 全部命中，按消息/段/区间起点顺序
+    /// All matches, ordered by message/segment/range start
     search_matches: Vec<SearchMatch>,
-    /// 活动命中下标（goto_match 前进/回绕；计数显示 active+1/total）
+    /// Active match index (goto_match advances/wraps; the counter shows active+1/total)
     active_match: usize,
-    /// 每段的搜索缓存（key = 段 TextViewState 的 EntityId）：上次搜索时的
-    /// 渲染快照 + 该段命中区间。RenderedText 的 PartialEq 按 (owner, revision)
-    /// 比较——revision 没变 = 内容没变，同 query 重跑（流式 TextDone、重复
-    /// Ctrl+F）时直接复用命中区间，只对内容变了的段重新查找
+    /// Per-segment search cache (key = the segment TextViewState's EntityId): the render
+    /// snapshot from the last search + that segment's match ranges. RenderedText's PartialEq compares by (owner, revision);
+    /// an unchanged revision = unchanged content, so re-running the same query (streaming TextDone, repeated
+    /// Ctrl+F) reuses the match ranges directly and only re-searches segments whose content changed
     search_cache: HashMap<EntityId, SearchSegmentCache>,
     _ticker: Task<()>,
 }
 
 impl EventEmitter<ThreadEvent> for ThreadView {}
 
-/// 自测用：导航条活动项排查数据（nav_last_active, offset_y, max_offset_y,
-/// 容器高, 各用户消息行的 [top, bottom) 内容坐标）
+/// For self-tests: nav active-item diagnostics data (nav_last_active, offset_y, max_offset_y,
+/// container height, each user message row's [top, bottom) content coordinates)
 type NavActiveDetail = (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>);
 
-/// 自测用：后台子代理通知 meta（agent_id, 标题, 耗时毫秒, 记录路径, 结果路径）
+/// For self-tests: background subagent notification meta (agent_id, title, elapsed ms, record path, result path)
 type TaskNotificationMeta = (String, String, Option<u64>, Option<String>, Option<String>);
 
 impl ThreadView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // 每秒 tick：驱动"工作中 N 秒"计时刷新
+        // Tick every second: drives the "Working N seconds" timer refresh
         let ticker = cx.spawn(async move |this: WeakEntity<ThreadView>, cx| {
             loop {
                 cx.background_executor()
@@ -222,7 +227,7 @@ impl ThreadView {
         }
     }
 
-    /// 绑定会话媒体目录（ensure_views 创建时调用）：图片附件缩略图的文件来源
+    /// Bind the session media directory (called by ensure_views at creation): the file source of image attachment thumbnails
     pub fn set_media_dir(&mut self, dir: std::path::PathBuf) {
         self.media_dir = Some(dir);
     }
@@ -232,12 +237,12 @@ impl ThreadView {
         self.turn_started = streaming.then(std::time::Instant::now);
     }
 
-    /// 当前是否已在底部（offset.y ∈ [-max.y, 0]，距底 = offset.y + max.y）
+    /// Whether currently at the bottom (offset.y ∈ [-max.y, 0], distance to bottom = offset.y + max.y)
     fn at_bottom(&self) -> bool {
         self.scroll_handle.offset().y + self.scroll_handle.max_offset().y <= px(2.)
     }
 
-    /// 输出期自动滚动：仅跟随模式贴底；用户上翻后不打扰
+    /// Auto-scroll during output: stick to the bottom only in follow mode; do not disturb after the user scrolls up
     fn auto_scroll(&mut self) {
         if self.follow_bottom {
             self.scroll_handle.scroll_to_bottom();
@@ -248,7 +253,7 @@ impl ThreadView {
         self.messages.is_empty()
     }
 
-    /// 自测用。
+    /// For self-tests.
     pub fn debug_queued(&self) -> &[String] {
         &self.queued
     }
@@ -257,7 +262,7 @@ impl ThreadView {
         self.streaming
     }
 
-    #[allow(dead_code)] // 调试用
+    #[allow(dead_code)] // Debug only
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
@@ -266,29 +271,24 @@ impl ThreadView {
         &mut self,
         text: String,
         files: Vec<String>,
+        image_nums: Vec<u32>,
         cx: &mut Context<Self>,
     ) {
-        // 事件文本末尾的附件链接 → 缩略图；media 目录不可用（没附过图片的会话等）
-        // → 不拆分，原文整体保留（链接降级为文本显示）
-        let media_ready = self.media_dir.as_ref().is_some_and(|dir| dir.is_dir());
-        let (body, indices) = if media_ready {
-            split_image_links(&text)
-        } else {
-            (text, vec![])
-        };
-        let mut message = ChatMessage::user(body, files);
-        message.images = indices
+        // Thumbnails load directly by media index (image_nums); when the media directory is unavailable (sessions that never
+        // attached images, etc.) load_user_image returns the default and each image degrades to an "expired" chip
+        let mut message = ChatMessage::user(text, files);
+        message.images = image_nums
             .into_iter()
             .map(|n| self.load_user_image(n))
             .collect();
         self.messages.push(message);
-        // 用户自己发消息：强制回到底部并恢复跟随
+        // The user sent a message themselves: force back to the bottom and resume following
         self.follow_bottom = true;
         self.auto_scroll();
         cx.notify();
     }
 
-    /// 按序号加载媒体文件 `{N}.{ext}` → 缩略图数据；丢失/坏字节 → thumb None（降级 chip）
+    /// Load the media file `{N}.{ext}` by index → thumbnail data; missing/corrupt bytes → thumb None (fallback chip)
     fn load_user_image(&self, n: u32) -> UserImage {
         let missing = || UserImage {
             thumb: None,
@@ -324,7 +324,7 @@ impl ThreadView {
         }
     }
 
-    /// 自测用：turn 导航条可见条件——（用户消息数, 消息面板宽度 px）
+    /// For self-tests: the turn nav visibility condition (user message count, message panel width px)
     pub fn debug_nav_state(&self) -> (usize, f32) {
         let turns = self
             .messages
@@ -334,7 +334,7 @@ impl ThreadView {
         (turns, f32::from(self.scroll_handle.bounds().size.width))
     }
 
-    /// 自测用：导航条活动项排查（字段见 [`NavActiveDetail`]）
+    /// For self-tests: nav active-item diagnostics (fields in [`NavActiveDetail`])
     pub fn debug_nav_active_detail(&self) -> NavActiveDetail {
         let user_rows = self
             .messages
@@ -370,8 +370,8 @@ impl ThreadView {
         self.nav_jump = false;
         self.agent_finish_seq = 0;
         self.lightbox = None;
-        // 搜索命中/缓存随消息一并失效（高亮挂在段上，随段释放）；
-        // 搜索条本身与 query 保留，回放重建经 TextDone 重跑
+        // Search matches/cache are invalidated along with the messages (highlights hang on segments and are released with them);
+        // the search bar itself and the query survive, and replay rebuilds re-run via TextDone
         self.search_matches.clear();
         self.search_cache.clear();
         self.active_match = 0;
@@ -384,7 +384,7 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 压缩完成：分隔条样式（渲染为「🗄 上下文已压缩」，摘要全文留在 text 供自测断言）
+    /// Compaction finished: divider style (rendered as "🗄 Context compacted"; the full summary stays in text for self-test assertions)
     pub fn add_compact_note(&mut self, note: &str, cx: &mut Context<Self>) {
         self.messages.push(ChatMessage::system_with_kind(
             note.to_string(),
@@ -394,7 +394,7 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 压缩进行中标记：true → 列表末尾渲染「正在压缩上下文」分隔条
+    /// Compaction-in-progress flag: true → renders a "Compacting context" divider at the end of the list
     pub fn set_compacting(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.compacting == on {
             return;
@@ -404,12 +404,12 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 供自测断言用：压缩进行中标记。
+    /// For self-test assertions: the compaction-in-progress flag.
     pub fn debug_compacting(&self) -> bool {
         self.compacting
     }
 
-    /// 供自测断言用：所有系统提示条文本。
+    /// For self-test assertions: all system note texts.
     pub fn debug_system_notes(&self) -> Vec<String> {
         self.messages
             .iter()
@@ -418,7 +418,7 @@ impl ThreadView {
             .collect()
     }
 
-    /// 供自测断言用。
+    /// For self-test assertions.
     pub fn debug_last_assistant(&self) -> (bool, String, String, String) {
         let Some(message) = self
             .messages
@@ -451,7 +451,7 @@ impl ThreadView {
         (tool_done, text, thinking, tool_output)
     }
 
-    /// 任意消息中是否出现过某工具的工具卡（自测用）。
+    /// Whether a tool card of the given tool ever appeared in any message (for self-tests).
     pub fn debug_has_tool_call(&self, tool: &str) -> bool {
         self.messages.iter().any(|m| {
             m.segments.iter().any(|s| match s {
@@ -461,8 +461,8 @@ impl ThreadView {
         })
     }
 
-    /// 自测用：展开最近一张指定工具的工具卡（展开代码卡渲染路径），返回是否找到。
-    /// 展开后滚回底部：卡片加高会把视口顶离底部，follow_bottom 语义下保持贴底
+    /// For self-tests: expand the most recent tool card of the given tool (exercising the code-card render path), returning whether one was found.
+    /// After expanding, scroll back to the bottom: the card's extra height pushes the viewport off the bottom, and follow_bottom semantics keep it pinned
     pub fn debug_expand_tool(&mut self, tool: &str, cx: &mut Context<Self>) -> bool {
         let found = self
             .messages
@@ -482,8 +482,8 @@ impl ThreadView {
         if found {
             self.follow_bottom = true;
             self.scroll_handle.scroll_to_bottom();
-            // 开合动画期间内容持续长高，贴底标记若应用在动画半途会停在半路——
-            // 动画结束后再补一次贴底
+            // During the expand/collapse animation the content keeps growing taller; if the stick-to-bottom flag
+            // is applied mid-animation it stops halfway, so pin to the bottom once more after the animation ends
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(EXPAND_ANIM_DUR + std::time::Duration::from_millis(50))
@@ -501,7 +501,7 @@ impl ThreadView {
         found
     }
 
-    /// 首张 Agent/AgentSwarm 工具卡片的 (summary, live_note, done)（自测用）。
+    /// The first Agent/AgentSwarm tool card's (summary, live_note, done) (for self-tests).
     pub fn debug_agent_card(&self) -> Option<(String, Option<String>, bool)> {
         self.messages
             .iter()
@@ -520,16 +520,16 @@ impl ThreadView {
             })
     }
 
-    /// 是否出现过后台子代理的合成通知用户消息（自测用）。
+    /// Whether a background subagent's synthetic notification user message ever appeared (for self-tests).
     pub fn debug_has_task_notification(&self) -> bool {
         self.messages
             .iter()
             .any(|m| m.role == Role::User && as_task_notification(&m.text).is_some())
     }
 
-    /// 最近一条后台子代理通知的 meta（字段见 [`TaskNotificationMeta`]；自测用，
-    /// 无通知/通知缺 agent_id 为 None）。标题 = description（缺省回退「后台子代理」），
-    /// 与气泡渲染同口径。
+    /// The most recent background subagent notification's meta (fields in [`TaskNotificationMeta`]; for self-tests,
+    /// None with no notification or a notification missing agent_id). Title = description (falling back to "background subagent"),
+    /// the same convention as the bubble rendering.
     pub fn debug_task_notification_meta(&self) -> Option<TaskNotificationMeta> {
         self.messages.iter().rev().find_map(|m| {
             if m.role != Role::User {
@@ -539,7 +539,7 @@ impl ThreadView {
             let title = note
                 .description
                 .filter(|d| !d.is_empty())
-                .unwrap_or_else(|| "后台子代理".to_string());
+                .unwrap_or_else(|| rust_i18n::t!("thread.bg_subagent").to_string());
             Some((
                 note.agent_id?,
                 title,
@@ -550,8 +550,8 @@ impl ThreadView {
         })
     }
 
-    /// 首张代理卡的 (agent_id, 副标题文本)（自测用；无 SubagentCard 元信息为 None）。
-    /// 副标题 = `{profile} · {model}`，与代理卡渲染同口径。
+    /// The first agent card's (agent_id, subtitle text) (for self-tests; None without SubagentCard metadata).
+    /// Subtitle = `{profile} · {model}`, the same convention as the agent card rendering.
     pub fn debug_agent_card_meta(&self) -> Option<(String, String)> {
         self.messages
             .iter()
@@ -567,8 +567,8 @@ impl ThreadView {
             })
     }
 
-    /// 最近一张代理卡的 (agent_id, done, finished)（自测用：验证后台卡
-    /// 运行态机——工具收尾≠子代理结束）。无代理卡为 None。
+    /// The most recent agent card's (agent_id, done, finished) (for self-tests: verifies the background card
+    /// run-state machine; tool-call end ≠ subagent end). None without agent cards.
     pub fn debug_agent_card_state(&self) -> Option<(String, bool, bool)> {
         self.messages
             .iter()
@@ -584,7 +584,7 @@ impl ThreadView {
             })
     }
 
-    /// 当前待审批的 request_id（自测用）。
+    /// The currently pending approval's request_id (for self-tests).
     pub fn pending_approval(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| {
             m.segments.iter().find_map(|s| match s {
@@ -598,7 +598,7 @@ impl ThreadView {
         })
     }
 
-    /// 走与点击按钮相同的路径对待决议的审批卡做出决定（自测用）。
+    /// Decide a pending approval card through the same path as clicking the button (for self-tests).
     pub fn decide_pending(&mut self, decision: ApprovalDecision, cx: &mut Context<Self>) -> bool {
         let found = self.messages.iter().enumerate().rev().find_map(|(mix, m)| {
             m.segments.iter().enumerate().find_map(|(six, s)| match s {
@@ -613,9 +613,9 @@ impl ThreadView {
         true
     }
 
-    /// 按 request_id 定向决议审批卡（审批条路径）：并发审批排队时各笔
-    /// 各答各的，不受到达顺序影响；id 不在（已决议/迟到事件）则无操作。
-    /// feedback 仅计划「修改」路径非 None（其余审批为 None）
+    /// Decide an approval card targeted by request_id (the approval bar path): with concurrent approvals queued, each one
+    /// gets its own answer regardless of arrival order; a missing id (already decided/late event) is a no-op.
+    /// feedback is non-None only on the plan "Revise" path (None for other approvals)
     pub fn decide_approval_by_id(
         &mut self,
         request_id: &str,
@@ -666,7 +666,7 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 段级（Thinking/ToolCall/TurnChanges）的开合动画态
+    /// Segment-level (Thinking/ToolCall/TurnChanges) expand/collapse animation state
     pub(crate) fn expand_anim_at(
         &mut self,
         message_ix: usize,
@@ -685,8 +685,8 @@ impl ThreadView {
         }
     }
 
-    /// 开合切换的动画驱动：gen+1 重播动画；收起时进入 collapsing（内容保持
-    /// 挂载播滑收），计时器到期卸载——期间又展开的代次不符自动作废
+    /// Animation driver for expand/collapse toggling: gen+1 replays the animation; collapse enters collapsing (the content stays
+    /// mounted to play the slide-shut) and unmounts when the timer expires; re-expanding mid-way mismatches the generation and is auto-invalidated
     pub(crate) fn drive_expand_anim(
         &mut self,
         message_ix: usize,
@@ -721,9 +721,9 @@ impl ThreadView {
         .detach();
     }
 
-    /// 展开/收起内容的动画包装：展开 = 内容从 0 高滑开 + 淡入；收起 = 保持挂载
-    /// 滑收淡出（卸载见 drive_expand_anim 的计时器）。实现见 crate::anim（侧栏
-    /// 工作区开合同款共用）；id 含 gen，每次开合重播
+    /// Animation wrap for expanded/collapsed content: expand = the content slides open from 0 height + fades in; collapse = it stays mounted
+    /// to slide shut and fade out (unmounting is the timer in drive_expand_anim). Implementation in crate::anim (shared with the sidebar
+    /// workspace open/close); the id includes gen, replaying on each toggle
     pub(crate) fn expand_anim_wrap(
         &self,
         id: String,
@@ -736,19 +736,19 @@ impl ThreadView {
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 用户消息的选择 handle 惰性创建：订阅选择变化驱动拖动过程中的实时高亮，
-        // 订阅随 ChatMessage 存放，clear() 时一并释放
+        // User message selection handles are created lazily: the subscription drives live highlighting during the drag,
+        // is stored with the ChatMessage, and is released with it on clear()
         for message in &mut self.messages {
             if message.role == Role::User && message.selection.is_none() {
                 let handle = TextSelectionHandle::new(message.text.clone(), cx);
                 let subscription = handle.refresh_window_on_change(window, cx);
                 message.selection = Some((handle, subscription));
             }
-            // 通知卡 UI 态惰性创建 + 结果文件大小探测（每条消息只做一次，避免每帧 stat）
+            // Notification card UI state lazily created + result file size probing (once per message, avoiding a stat every frame)
             if message.notification_ui.is_none()
                 && let Some(note) = as_task_notification(&message.text)
             {
-                // 文件大小探测的目标：result.md（core 产物恒带 result 属性）
+                // The size probe targets result.md (core output always carries the result attribute)
                 let record_size = note
                     .result
                     .as_ref()
@@ -760,7 +760,7 @@ impl Render for ThreadView {
                     payload_scroll: ScrollHandle::new(),
                 });
             }
-            // Read/Bash 工具卡的 UI 态惰性创建（换行/复制/高亮缓存；render 路径只读）
+            // Read/Bash tool card UI state lazily created (wrap/copy/highlight caches; the render path only reads)
             for segment in &mut message.segments {
                 match segment {
                     Segment::ToolCall { tool, read_ui, .. }
@@ -786,12 +786,13 @@ impl Render for ThreadView {
             .turn_started
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
-        let working_label = fmt_work_duration(working_secs, "工作中");
+        let working_label =
+            fmt_work_duration(working_secs, rust_i18n::t!("thread.working").as_ref());
 
-        // 回到底部（滚轮/拖滚动条/键盘任意方式）自动恢复跟随
+        // Reaching the bottom (scroll wheel/dragging the scrollbar/keyboard, any means) auto-resumes following
         if !self.follow_bottom && self.at_bottom() {
-            // 导航跳转的 offset 在 prepaint 才更新，这一帧读到的还是旧位置；
-            // 跳过本次恢复，下一帧按真实位置再判断
+            // A nav jump's offset only updates at prepaint, so this frame still reads the old position;
+            // skip this resume and re-judge from the real position next frame
             if self.nav_jump {
                 self.nav_jump = false;
             } else {
@@ -799,9 +800,9 @@ impl Render for ThreadView {
             }
         }
 
-        // turn 导航条：一条用户消息 = 一个 turn 入口。消息列表的每条消息都是
-        // 滚动容器的直接子元素（见下），scroll_to_top_of_item / bounds_for_item
-        // 只按直接子元素记录，因此可按消息下标精确定位
+        // Turn nav: one user message = one turn entry. Every message in the message list is
+        // a direct child of the scroll container (see below); scroll_to_top_of_item / bounds_for_item
+        // only track direct children, so messages can be precisely located by index
         let user_ixs: Vec<usize> = self
             .messages
             .iter()
@@ -809,13 +810,13 @@ impl Render for ThreadView {
             .filter(|(_, message)| message.role == Role::User)
             .map(|(ix, _)| ix)
             .collect();
-        // 贴底 = 在读最新一轮：活动项恒为最后一条用户消息。底部视口里可能
-        // 同时可见多条用户消息，按「离顶最近」会把高亮钉在更早的轮次上
+        // Pinned to the bottom = reading the latest turn: the active item is always the last user message. The bottom viewport may
+        // show several user messages at once, and picking the "nearest to the top" would pin the highlight on an earlier turn
         let nav_active = if user_ixs.len() >= 2 && self.at_bottom() {
             user_ixs.last().copied()
-        // 活动项 = 离视口顶部最近的可见用户消息；都不可见时取视口顶之上最近
-        // 的一条（对齐 ZCode resolveConversationTurnNavigatorActiveQueryRowId，
-        // 不能用 topmost visible row：长回复的尾巴会把高亮钉在上一轮）
+        // Active item = the visible user message nearest the viewport top; when none is visible, take the nearest one
+        // above the viewport top (aligned with ZCode resolveConversationTurnNavigatorActiveQueryRowId;
+        // topmost visible row must not be used: a long reply's tail would pin the highlight on the previous turn)
         } else if user_ixs.len() >= 2 {
             let container = self.scroll_handle.bounds();
             let scroll_top = container.top() - self.scroll_handle.offset().y;
@@ -849,7 +850,7 @@ impl Render for ThreadView {
         } else {
             None
         };
-        // 活动项变化时 rail 跟随滚动，保持活动横条可见
+        // When the active item changes, the rail scrolls along to keep the active bar visible
         if let Some(active) = nav_active
             && self.nav_last_active != Some(active)
         {
@@ -858,26 +859,26 @@ impl Render for ThreadView {
                 self.nav_rail_scroll.scroll_to_item(pos);
             }
         }
-        // 首帧 paint 前面板宽度是零值：补一帧渲染让导航条出现；
-        // paint 后该条件自愈，不会形成渲染循环
+        // Before the first paint the panel width is zero: schedule an extra frame so the nav appears;
+        // after paint the condition heals itself, so no render loop forms
         let pane_width = self.scroll_handle.bounds().size.width;
         if user_ixs.len() >= 2 && pane_width <= px(0.) {
             cx.notify();
         }
-        // 内容列宽度必须纯布局驱动：paint 测得的面板宽度在面板开合后要滞后一帧
-        // 才更新，若用它算内容宽，每次开合面板内容列都会先按旧宽度错排一帧（抖动）。
-        // 因此 gutter 只看 turn 数（≥2 轮 = 导航条可能出现就先占住两侧各 48px，
-        // 对齐 ZCode w-[calc(100%-6rem)]），内容列恒为 min(860, 剩余宽度)。
-        // 导航条本体的显隐仍看测量宽度（12px 小横条晚一帧出现不可感知）。
+        // The content column width must be purely layout-driven: the panel width measured at paint lags one frame
+        // after a panel toggle, and using it for the content width would mis-lay-out the column at the old width for a frame on every toggle (jitter).
+        // So the gutter depends only on the turn count (≥2 turns = reserve 48px on each side whenever the nav could appear,
+        // aligned with ZCode w-[calc(100%-6rem)]), and the content column is always min(860, remaining width).
+        // The nav itself still shows/hides by the measured width (a 12px bar appearing one frame late is imperceptible).
         let nav_eligible = user_ixs.len() >= 2;
         let pane_wide = pane_width >= px(720.);
         let content_max_w = px(860.);
-        // 面板太窄时连 gutter 都留不出，隐藏导航条；turn 数 <2 也没有导航必要
+        // When the panel is too narrow there is no room even for the gutter, so hide the nav; <2 turns needs no navigation either
         let show_nav = nav_eligible && pane_wide;
 
         v_flex()
             .size_full()
-            // 会话内搜索条：消息列表之上的固定行（Ctrl+F 打开）
+            // In-session search bar: a fixed row above the message list (opened by Ctrl+F)
             .when(self.search_open, |this| {
                 this.when_some(self.render_search_bar(cx), ParentElement::child)
             })
@@ -892,9 +893,9 @@ impl Render for ThreadView {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll_handle)
-                            // 用户上翻：暂停跟随并浮出「最新消息」按钮（不吞事件，列表照常滚动）。
-                            // 内容没超高（max_offset=0，不可滚动）时上翻无意义——保持跟随，
-                            // 否则短会话里滚一下也会浮出按钮
+                            // User scrolls up: pause following and float the "Latest messages" button (events are not swallowed; the list scrolls as usual).
+                            // Scrolling up is meaningless when the content is not taller (max_offset=0, unscrollable), so keep following;
+                            // otherwise even a small scroll in a short session would float the button
                             .on_scroll_wheel(cx.listener(
                                 |this, event: &ScrollWheelEvent, window, cx| {
                                     let delta = event.delta.pixel_delta(window.line_height());
@@ -909,8 +910,8 @@ impl Render for ThreadView {
                             ))
                             .gap_4()
                             .py_4()
-                            // 每条消息（及流式指示/空状态）都是滚动容器的直接子行：
-                            // 导航条按消息下标 scroll_to_top_of_item 依赖这一结构
+                            // Every message (and the streaming indicator/empty state) is a direct child row of the scroll container:
+                            // the nav's scroll_to_top_of_item by message index depends on this structure
                             .children(items.into_iter().map(|item| {
                                 div()
                                     .w_full()
@@ -925,7 +926,7 @@ impl Render for ThreadView {
                                     )
                                     .into_any_element()
                             }))
-                            // 工作中指示：跟在最后一条消息之后，随对话一起滚动
+                            // Working indicator: follows the last message and scrolls with the conversation
                             .when(self.streaming, |this| {
                                 this.child(
                                     div()
@@ -957,8 +958,8 @@ impl Render for ThreadView {
                                         ),
                                 )
                             })
-                            // 压缩进行中分隔条：同挂列表末尾（自动压缩发生在回合中，
-                            // 与工作中指示可同时出现，分隔条排最后 = 最新状态）
+                            // Compaction-in-progress divider: also appended at the end of the list (auto-compaction happens mid-turn,
+                            // can appear alongside the working indicator, and the divider going last = the latest state)
                             .when(self.compacting, |this| {
                                 this.child(
                                     div()
@@ -971,11 +972,13 @@ impl Render for ThreadView {
                                                 .mx_auto()
                                                 .px_4()
                                                 .child(render_compact_divider(
-                                                    ShimmerText::new("正在压缩上下文")
-                                                        .id("compacting-shimmer")
-                                                        .text_sm()
-                                                        .text_color(cx.theme().foreground)
-                                                        .into_any_element(),
+                                                    ShimmerText::new(rust_i18n::t!(
+                                                        "thread.compacting"
+                                                    ))
+                                                    .id("compacting-shimmer")
+                                                    .text_sm()
+                                                    .text_color(cx.theme().foreground)
+                                                    .into_any_element(),
                                                     cx,
                                                 ))
                                                 .id("compacting-divider")
@@ -998,18 +1001,16 @@ impl Render for ThreadView {
                                                 .text_center()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child(
-                                                    "空会话。输入消息开始对话，/ 查看命令，@ 引用文件。",
-                                                ),
+                                                .child(rust_i18n::t!("thread.empty_hint")),
                                         ),
                                 )
                             }),
                     )
-                    // turn 导航条：左缘竖排小横条，见 render_turn_nav
+                    // Turn nav: small vertical bars on the left edge, see render_turn_nav
                     .when(show_nav, |this| {
                         this.child(self.render_turn_nav(&user_ixs, nav_active, cx))
                     })
-                    // 未跟随时浮出「最新消息」按钮：点击回到底部并恢复跟随
+                    // When not following, float the "Latest messages" button: click to return to the bottom and resume following
                     .when(!self.follow_bottom, |this| {
                         this.child(
                             h_flex()
@@ -1030,15 +1031,17 @@ impl Render for ThreadView {
                                         .border_1()
                                         .border_color(cx.theme().border)
                                         .shadow_md()
-                                        // 默认 hitbox 不拦下层：点击会穿透到下面的
-                                        // 工具卡/滚动区——挡掉穿透，滚轮仍透传给列表
+                                        // The default hitbox does not block the layer below: clicks would pass through to the
+                                        // tool cards/scroll area underneath; block the pass-through while the wheel still passes through to the list
                                         .block_mouse_except_scroll()
                                         .child(
                                             Icon::new(AssetIconName::ArrowDown)
                                                 .size_4()
                                                 .text_color(cx.theme().foreground),
                                         )
-                                        .child(div().text_sm().child("最新消息"))
+                                        .child(
+                                            div().text_sm().child(rust_i18n::t!("thread.latest")),
+                                        )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.follow_bottom = true;
                                             this.scroll_handle.scroll_to_bottom();
@@ -1047,7 +1050,7 @@ impl Render for ThreadView {
                                 ),
                         )
                     })
-                    // 图片灯箱：覆盖消息区（最后渲染 = 最顶层）
+                    // Image lightbox: covers the message area (rendered last = topmost)
                     .when(self.lightbox.is_some(), |this| {
                         this.child(self.render_lightbox(window, cx))
                     }),
@@ -1077,10 +1080,13 @@ impl Render for ThreadView {
                                     div()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "排队中: {}",
-                                            text.chars().take(20).collect::<String>()
-                                        )),
+                                        .child(
+                                            rust_i18n::t!(
+                                                "thread.queued",
+                                                text = text.chars().take(20).collect::<String>()
+                                            )
+                                            .to_string(),
+                                        ),
                                 )
                                 .child(
                                     div()

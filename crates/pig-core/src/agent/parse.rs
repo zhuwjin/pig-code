@@ -1,11 +1,11 @@
 use super::*;
 
-/// ^[a-zA-Z0-9-]{3,50}$（全 ASCII，字节数即字符数）
+/// ^[a-zA-Z0-9-]{3,50}$ (all ASCII, so byte length equals char count)
 pub(crate) fn valid_name(name: &str) -> bool {
     (3..=50).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// 剥离值两侧的成对引号（"..." 或 '...'）
+/// Strip the paired quotes around a value ("..." or '...')
 pub(crate) fn strip_quotes(value: &str) -> &str {
     let bytes = value.as_bytes();
     if bytes.len() >= 2
@@ -18,7 +18,7 @@ pub(crate) fn strip_quotes(value: &str) -> &str {
     }
 }
 
-/// model 字段：空 / inherit / main = 继承父会话（None）
+/// model field: empty / inherit / main = inherit the parent session (None)
 pub(crate) fn parse_model_value(raw: &str) -> Option<String> {
     let value = raw.trim();
     if value.is_empty() || value == "inherit" || value == "main" {
@@ -28,15 +28,19 @@ pub(crate) fn parse_model_value(raw: &str) -> Option<String> {
     }
 }
 
-/// 解析子代理 Markdown 档案：`---` 包围的 frontmatter + 正文（系统提示）。
-/// frontmatter 手写逐行解析（无 serde_yaml 依赖，ZCode 同款做法）：支持
-/// `key: value` 标量、`key:` + 后续缩进 `- item` 列表、行内 `[a, b]` 列表、
-/// `#` 注释行、值两侧引号剥离；未知字段忽略。
+/// Parse a subagent Markdown profile: `---`-delimited frontmatter + body (system prompt).
+/// The frontmatter is parsed line by line by hand (no serde_yaml dependency, same approach
+/// as ZCode): supports `key: value` scalars, `key:` + a following indented `- item` list,
+/// an inline `[a, b]` list, `#` comment lines, and quote stripping around values; unknown
+/// fields are ignored.
 pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let lines: Vec<&str> = content.lines().collect();
     if lines.first().map(|line| line.trim()) != Some("---") {
-        return Err("子代理档案格式错误：首行必须是 ---（frontmatter 起始）".to_string());
+        return Err(
+            "Invalid subagent profile format: the first line must be --- (frontmatter start)"
+                .to_string(),
+        );
     }
 
     let mut name: Option<String> = None;
@@ -56,18 +60,18 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
             i += 1;
             break;
         }
-        // 空行与 # 注释行跳过
+        // Skip blank lines and # comment lines
         if trimmed.is_empty() || trimmed.starts_with('#') {
             i += 1;
             continue;
         }
         let Some((key, value)) = trimmed.split_once(':') else {
-            i += 1; // 无法识别的行：宽容跳过
+            i += 1; // unrecognized line: skip leniently
             continue;
         };
         let key = key.trim();
         let value = value.trim();
-        // 值形态：行内 [a, b] 列表 / 后续缩进 `- item` 列表 / 标量
+        // Value shapes: inline [a, b] list / following indented `- item` list / scalar
         let mut list: Option<Vec<String>> = None;
         let scalar = strip_quotes(value).to_string();
         let mut consumed = 1;
@@ -110,12 +114,14 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
                 thought_level = (!scalar.is_empty()).then_some(scalar);
             }
             "maxTurns" | "max_turns" => {
-                // 0/负数/非数字都报错（负数以 usize 解析失败覆盖）
-                let turns: usize = scalar
-                    .parse()
-                    .map_err(|_| format!("maxTurns 必须是正整数，得到 \"{scalar}\""))?;
+                // 0/negative/non-numeric all error (negatives covered by the usize parse failure)
+                let turns: usize = scalar.parse().map_err(|_| {
+                    format!("maxTurns must be a positive integer, got \"{scalar}\"")
+                })?;
                 if turns == 0 {
-                    return Err("maxTurns 必须是正整数（0 不合法）".to_string());
+                    return Err(
+                        "maxTurns must be a positive integer (0 is not allowed)".to_string()
+                    );
                 }
                 max_turns = Some(turns);
             }
@@ -125,32 +131,36 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
                     "false" => false,
                     _ => {
                         return Err(format!(
-                            "injectAgentsMd 只接受 true/false，得到 \"{scalar}\""
+                            "injectAgentsMd only accepts true/false, got \"{scalar}\""
                         ));
                     }
                 };
             }
-            _ => {} // 未知字段忽略
+            _ => {} // unknown fields are ignored
         }
     }
     if !closed {
-        return Err("子代理档案格式错误：frontmatter 缺少收尾的 --- 行".to_string());
+        return Err(
+            "Invalid subagent profile format: frontmatter is missing its closing --- line"
+                .to_string(),
+        );
     }
 
     let name = name
         .filter(|n| !n.is_empty())
-        .ok_or_else(|| "frontmatter 缺少必填字段 name".to_string())?;
+        .ok_or_else(|| "frontmatter is missing required field name".to_string())?;
     if !valid_name(&name) {
         return Err(format!(
-            "子代理 name \"{name}\" 非法：需匹配 ^[a-zA-Z0-9-]{{3,50}}$（3-50 位字母/数字/破折号）"
+            "Invalid subagent name \"{name}\": must match ^[a-zA-Z0-9-]{{3,50}}$ \
+             (3-50 ASCII letters, digits, or hyphens)"
         ));
     }
     let description = description
         .filter(|d| !d.is_empty())
-        .ok_or_else(|| "frontmatter 缺少必填字段 description".to_string())?;
+        .ok_or_else(|| "frontmatter is missing required field description".to_string())?;
     let body = lines[i..].join("\n").trim().to_string();
     if body.is_empty() {
-        return Err("子代理档案正文（系统提示）为空".to_string());
+        return Err("Subagent profile body (system prompt) is empty".to_string());
     }
     Ok(AgentProfile {
         name,
@@ -161,6 +171,6 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
         max_turns,
         inject_agents_md,
         system_prompt: body,
-        source: AgentSource::BuiltIn, // 占位：load_profiles 按来源目录改写
+        source: AgentSource::BuiltIn, // placeholder: load_profiles rewrites it per source directory
     })
 }

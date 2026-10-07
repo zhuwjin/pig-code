@@ -1,5 +1,6 @@
-//! ReadMediaFile 全链路：缩放/裁剪/上限/敏感与区外防护、base64 与魔数嗅探、
-//! 能力门控（input_image=false）、rollout 不落 base64。
+//! ReadMediaFile full chain: resize/crop/limits/sensitive and outside-workspace
+//! guards, base64 and magic-number sniffing, capability gating
+//! (input_image=false), rollout stores no base64.
 
 use std::path::PathBuf;
 
@@ -23,7 +24,7 @@ fn temp_dir(name: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
-/// 程序化生成 PNG（rgb/rgba 可选）
+/// Programmatically generate a PNG (rgb/rgba optional)
 fn png_bytes(w: u32, h: u32, rgba: bool) -> Vec<u8> {
     let image = if rgba {
         image::DynamicImage::new_rgba8(w, h)
@@ -51,8 +52,9 @@ fn tiff_bytes(w: u32, h: u32) -> Vec<u8> {
     buf.into_inner()
 }
 
-/// 手工拼一个最小合法 PNG（IHDR 声明巨大尺寸 + 空 IEND，不带图像数据）：
-/// ReadMediaFile 的像素上限检查在解码前，读到尺寸就应拒绝。
+/// Hand-assemble a minimal valid PNG (IHDR declaring huge dimensions + empty
+/// IEND, no image data): ReadMediaFile's pixel-cap check runs before decoding;
+/// it should reject as soon as the dimensions are read.
 fn crafted_png_with_dims(w: u32, h: u32) -> Vec<u8> {
     fn crc32(bytes: &[u8]) -> u32 {
         let mut crc: u32 = 0xFFFF_FFFF;
@@ -82,7 +84,7 @@ fn crafted_png_with_dims(w: u32, h: u32) -> Vec<u8> {
     ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8bit truecolor
     let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
     out.extend(chunk(b"IHDR", &ihdr));
-    // png crate 读到 IDAT 才肯报尺寸；空 zlib 流占位（不解码，内容无所谓）
+    // The png crate only reports dimensions once it sees IDAT; an empty zlib stream as placeholder (not decoded, content irrelevant)
     out.extend(chunk(
         b"IDAT",
         &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
@@ -121,15 +123,15 @@ async fn resize_to_2000_and_summary_text() {
     assert_eq!(
         (images[0].width, images[0].height),
         (2000, 1500),
-        "等比缩放"
+        "aspect-ratio-preserving resize"
     );
     assert_eq!(images[0].media_type, "image/png");
     assert!(tool::sniff_image(&decode64(&images[0].data_base64)).is_some());
-    assert!(out.contains("原始 4000×3000"), "{out}");
-    assert!(out.contains("输出 2000×1500"), "{out}");
-    assert!(out.contains("KB）"), "{out}");
+    assert!(out.contains("original 4000×3000"), "{out}");
+    assert!(out.contains("output 2000×1500"), "{out}");
+    assert!(out.contains("KB)"), "{out}");
 
-    // full_resolution 不缩放
+    // full_resolution skips the resize
     let (out, is_error, images) = run(
         &dir,
         &state,
@@ -146,7 +148,7 @@ async fn region_crop_clamp_and_disjoint() {
     std::fs::write(dir.join("r.png"), png_bytes(1000, 800, false)).unwrap();
     let state = SessionToolState::for_test();
 
-    // 正常裁剪（原图坐标）
+    // Normal crop (original-image coordinates)
     let (out, is_error, images) = run(
         &dir,
         &state,
@@ -155,9 +157,9 @@ async fn region_crop_clamp_and_disjoint() {
     .await;
     assert!(!is_error, "{out}");
     assert_eq!((images[0].width, images[0].height), (500, 400), "{out}");
-    assert!(out.contains("裁剪"), "{out}");
+    assert!(out.contains("cropped"), "{out}");
 
-    // 越界夹紧：(900,700)+500×400 → 只到 (1000,800)
+    // Out-of-bounds clamping: (900,700)+500×400 → stops at (1000,800)
     let (out, is_error, images) = run(
         &dir,
         &state,
@@ -167,7 +169,7 @@ async fn region_crop_clamp_and_disjoint() {
     assert!(!is_error, "{out}");
     assert_eq!((images[0].width, images[0].height), (100, 100), "{out}");
 
-    // 完全不相交 → 报错
+    // Fully disjoint → error
     let (out, is_error, _) = run(
         &dir,
         &state,
@@ -175,7 +177,7 @@ async fn region_crop_clamp_and_disjoint() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("不相交"), "{out}");
+    assert!(out.contains("does not intersect"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -184,16 +186,16 @@ async fn jpeg_source_outputs_jpeg_and_pixel_cap() {
     std::fs::write(dir.join("photo.jpg"), jpeg_bytes(640, 480)).unwrap();
     let state = SessionToolState::for_test();
 
-    // 无 alpha 的 JPEG 源 → JPEG q85 输出
+    // A JPEG source without alpha → JPEG q85 output
     let (out, is_error, images) = run(&dir, &state, serde_json::json!({"path": "photo.jpg"})).await;
     assert!(!is_error, "{out}");
     assert_eq!(images[0].media_type, "image/jpeg", "{out}");
 
-    // 声明 12000×9000 的伪 PNG：解码前被像素上限拦下
+    // A fake PNG declaring 12000×9000: caught by the pixel cap before decoding
     std::fs::write(dir.join("huge.png"), crafted_png_with_dims(12000, 9000)).unwrap();
     let (out, is_error, _) = run(&dir, &state, serde_json::json!({"path": "huge.png"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("图片过大"), "{out}");
+    assert!(out.contains("Image too large"), "{out}");
     assert!(out.contains("12000×9000"), "{out}");
 }
 
@@ -201,19 +203,19 @@ async fn jpeg_source_outputs_jpeg_and_pixel_cap() {
 async fn non_image_sensitive_and_outside_guard() {
     let dir = temp_dir("guards");
     std::fs::write(dir.join("note.txt"), "plain text\n").unwrap();
-    // 名为 .env 的 PNG：敏感检查先于图片识别
+    // A PNG named .env: the sensitive check runs before image detection
     std::fs::write(dir.join(".env"), png_bytes(4, 4, false)).unwrap();
     let state = SessionToolState::for_test();
 
     let (out, is_error, _) = run(&dir, &state, serde_json::json!({"path": "note.txt"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("不是可识别的图片"), "{out}");
+    assert!(out.contains("Not a recognizable image"), "{out}");
 
     let (out, is_error, _) = run(&dir, &state, serde_json::json!({"path": ".env"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("敏感文件"), "{out}");
+    assert!(out.contains("sensitive file"), "{out}");
 
-    // 区外：开关关拒绝、开后放行
+    // Outside: denied with the switch off, allowed after turning it on
     let outside = temp_dir("guards-outside");
     std::fs::write(outside.join("o.png"), png_bytes(8, 8, false)).unwrap();
     let rel = format!(
@@ -222,7 +224,7 @@ async fn non_image_sensitive_and_outside_guard() {
     );
     let (out, is_error, _) = run(&dir, &state, serde_json::json!({"path": rel})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("越出工作目录"), "{out}");
+    assert!(out.contains("Path escapes the working directory"), "{out}");
     state
         .fs_read_outside
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -247,13 +249,13 @@ async fn read_tool_redirects_images() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("PNG 图片"), "{out}");
+    assert!(out.contains("PNG image"), "{out}");
     assert!(out.contains("ReadMediaFile"), "{out}");
 }
 
-// ---------- 纯函数 ----------
+// ---------- Pure functions ----------
 
-/// 测试用 base64 解码（对照手写 encoder）
+/// Test-only base64 decode (counterpart to the hand-written encoder)
 fn decode64(s: &str) -> Vec<u8> {
     let table: Vec<i32> = (0..256)
         .map(|c| {
@@ -301,15 +303,20 @@ fn sniff_image_magic_numbers() {
         Some("image/webp")
     );
     assert_eq!(tool::sniff_image(b"plain text"), None);
-    assert_eq!(tool::sniff_image(b"\x89PNG"), None, "截断头不算");
+    assert_eq!(
+        tool::sniff_image(b"\x89PNG"),
+        None,
+        "truncated header does not count"
+    );
 }
 
-// ---------- 端到端（mock 驱动） ----------
+// ---------- End-to-end (mock driven) ----------
 
 mod common;
 
-/// media 场景自搭环境：input_image 可配（缺省 false = 不声明该字段，
-/// [[providers.models]] 里显式给 true 才开）
+/// Self-assembled environment for the media scenario: input_image configurable
+/// (default false = the field is not declared; only an explicit true in
+/// [[providers.models]] enables it)
 fn setup_media(name: &str, input_image: bool) -> (PathBuf, PathBuf, PathBuf) {
     let port = pig_core::mock::start_mock_server();
     let dir = std::env::temp_dir().join(format!("pig-core-media-{name}-{}", std::process::id()));
@@ -357,7 +364,7 @@ async fn run_media_scenario(
         .ops
         .send(Op::SendMessage {
             session_id,
-            content: format!("{} 读图片", pig_core::mock::SCENARIO_MEDIA_TRIGGER),
+            content: format!("{} read the image", pig_core::mock::SCENARIO_MEDIA_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -378,16 +385,16 @@ async fn media_gate_blocks_when_model_lacks_input_image() {
         !events
             .iter()
             .any(|e| matches!(e, Event::ApprovalRequested { .. })),
-        "门控不弹审批"
+        "gate should not raise an approval"
     );
     let hit = events.iter().any(|e| {
         matches!(
             e,
             Event::ToolCallEnd { output, is_error, .. }
-                if *is_error && output.contains("不支持图片输入")
+                if *is_error && output.contains("does not support image input")
         )
     });
-    assert!(hit, "应收到能力引导错误: {events:?}");
+    assert!(hit, "expected the capability guidance error: {events:?}");
     agent.shutdown();
 }
 
@@ -402,28 +409,28 @@ async fn media_flows_and_rollout_stays_text_only() {
             } => Some((output.clone(), *is_error)),
             _ => None,
         })
-        .expect("有 ToolCallEnd");
+        .expect("expected a ToolCallEnd");
     assert!(!is_error, "{output}");
-    assert!(output.contains("已读取图片 pic.png"), "{output}");
+    assert!(output.contains("Read image pic.png"), "{output}");
     assert!(output.contains("64×48"), "{output}");
 
-    // rollout 只落文本摘要，不落 base64
+    // The rollout persists only the text summary, no base64
     let sessions_dir = data_dir.join("sessions");
     let rollout = std::fs::read_dir(&sessions_dir)
-        .expect("sessions 目录")
+        .expect("sessions directory")
         .flatten()
         .find(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .expect("rollout 文件");
+        .expect("rollout file");
     let raw = std::fs::read_to_string(rollout.path()).unwrap();
-    assert!(raw.contains("已读取图片"), "文本摘要落盘");
+    assert!(raw.contains("Read image"), "text summary persisted");
     assert!(
         !raw.contains("base64") && !raw.contains("iVBOR"),
-        "base64 不进 rollout"
+        "base64 must not enter the rollout"
     );
     agent.shutdown();
 }
 
-// ---------- 粘贴发送管线（压缩共享函数 / rollout ImageRef / 回放重建 / 能力投影） ----------
+// ---------- Paste-send pipeline (shared compression fn / rollout ImageRef / replay rebuild / capability projection) ----------
 
 #[test]
 fn tiff_clipboard_bytes_convert_to_png() {
@@ -437,23 +444,27 @@ fn tiff_clipboard_bytes_convert_to_png() {
 
 #[test]
 fn compress_image_for_model_pipeline() {
-    // 大图等比缩到 2000
+    // A large image is proportionally resized to 2000
     let big = png_bytes(4000, 3000, false);
     let comp = tool::compress_image_for_model(&big, "image/png").unwrap();
     assert_eq!((comp.width, comp.height), (2000, 1500));
     assert_eq!(comp.media_type, "image/png");
     assert_eq!(tool::sniff_image(&comp.bytes), Some("image/png"));
 
-    // JPEG 源出 JPEG；mime 空串时走魔数嗅探
+    // A JPEG source yields JPEG; an empty mime falls back to magic-number sniffing
     let comp = tool::compress_image_for_model(&jpeg_bytes(100, 80), "").unwrap();
     assert_eq!(comp.media_type, "image/jpeg");
-    assert_eq!((comp.width, comp.height), (100, 80), "小图不放大");
+    assert_eq!(
+        (comp.width, comp.height),
+        (100, 80),
+        "small image is not upscaled"
+    );
 
-    // RGBA 保 PNG（有 alpha 不转 JPEG）
+    // RGBA stays PNG (alpha present, no JPEG conversion)
     let comp = tool::compress_image_for_model(&png_bytes(64, 64, true), "image/png").unwrap();
     assert_eq!(comp.media_type, "image/png");
 
-    // 非图片/超像素上限
+    // Non-image / over the pixel cap
     assert!(tool::compress_image_for_model(b"not an image", "").is_err());
     assert!(tool::compress_image_for_model(&crafted_png_with_dims(12000, 9000), "").is_err());
 }
@@ -461,9 +472,9 @@ fn compress_image_for_model_pipeline() {
 #[test]
 fn rollout_user_images_serde_roundtrip_and_compat() {
     use pig_core::rollout::RolloutRecord;
-    // 新记录带 ImageRef 往返
+    // New record with ImageRef round-trips
     let rec = RolloutRecord::User {
-        text: "看图".into(),
+        text: "Look at the image".into(),
         files: vec![],
         images: vec![pig_core::rollout::ImageRef {
             path: PathBuf::from("/tmp/x.media/1.png"),
@@ -480,7 +491,7 @@ fn rollout_user_images_serde_roundtrip_and_compat() {
             assert_eq!(images.len(), 1);
             assert_eq!(images[0].width, 8);
         }
-        _ => panic!("类型往返"),
+        _ => panic!("type mismatch after roundtrip"),
     }
 }
 
@@ -492,7 +503,7 @@ fn rebuild_history_rehydrates_images_and_degrades_missing() {
     std::fs::write(media.join("1.png"), png_bytes(8, 8, false)).unwrap();
 
     let records = vec![pig_core::rollout::RolloutRecord::User {
-        text: "看图说话".into(),
+        text: "Describe the image".into(),
         files: vec![],
         images: vec![
             pig_core::rollout::ImageRef {
@@ -513,17 +524,20 @@ fn rebuild_history_rehydrates_images_and_degrades_missing() {
     let user = history
         .iter()
         .find(|m| m.role == "user")
-        .expect("user 消息");
-    assert_eq!(user.images.len(), 1, "存在的图重建");
+        .expect("user message");
+    assert_eq!(user.images.len(), 1, "existing image rehydrated");
     assert_eq!(user.images[0].media_type, "image/png");
     assert_eq!(
         tool::sniff_image(&decode64(&user.images[0].data_base64)),
         Some("image/png"),
-        "base64 往返字节级"
+        "byte-exact base64 roundtrip"
     );
     assert!(
-        user.content.as_deref().unwrap_or("").contains("图片已失效"),
-        "丢失的图占位: {:?}",
+        user.content
+            .as_deref()
+            .unwrap_or("")
+            .contains("no longer available"),
+        "placeholder for the missing image: {:?}",
         user.content
     );
 }
@@ -536,15 +550,15 @@ fn project_images_capability_projection() {
         data_base64: "QUJD".into(),
         label: None,
     };
-    // 支持图片：原样进 images
-    let mut text = "看这个".to_string();
+    // Image supported: goes into images unchanged
+    let mut text = "Look at this".to_string();
     let mut images = vec![img()];
     pig_core::session::project_images(&mut text, &mut images, &[], true);
     assert_eq!(images.len(), 1);
-    assert!(!text.contains("未随消息发送"), "{text}");
+    assert!(!text.contains("were not sent"), "{text}");
 
-    // 不支持：清空 images + 文本占位（带媒体路径，模型可用 ReadMediaFile 读）
-    let mut text = "看这个".to_string();
+    // Not supported: images cleared + text placeholder (carrying the media paths so the model can read them via ReadMediaFile)
+    let mut text = "Look at this".to_string();
     let mut images = vec![img(), img()];
     let paths = vec![
         PathBuf::from("/tmp/s1.media/1.png"),
@@ -552,18 +566,20 @@ fn project_images_capability_projection() {
     ];
     pig_core::session::project_images(&mut text, &mut images, &paths, false);
     assert!(images.is_empty());
-    assert!(text.contains("图片 2 张未随消息发送"), "{text}");
+    assert!(text.contains("2 image(s) were not sent"), "{text}");
     assert!(text.contains("ReadMediaFile"), "{text}");
     assert!(
         text.contains("/tmp/s1.media/1.png") && text.contains("/tmp/s1.media/2.png"),
-        "占位应带媒体路径: {text}"
+        "placeholder should carry the media paths: {text}"
     );
 }
 
-// ---------- 粘贴发送端到端（mock 驱动，请求体日志断言图片载荷） ----------
+// ---------- Paste-send end-to-end (mock driven; asserts the image payload via the request-body log) ----------
 
-/// 粘贴 e2e 环境：input_image 可配；返回（请求体日志， 工作目录， 数据目录， agent）。
-/// 用普通 Read 流程即可（mock 首请求发 Read 工具调用，第二请求带图的用户消息在 history 里）。
+/// Paste e2e environment: input_image configurable; returns (request-body log,
+/// working dir, data dir, agent).
+/// The plain Read flow suffices (the mock's first request issues a Read tool
+/// call; the second request has the image-bearing user message in history).
 fn setup_paste(
     name: &str,
     input_image: bool,
@@ -622,7 +638,7 @@ async fn send_paste_and_wait(
         .ops
         .send(Op::SendMessage {
             session_id: session_id.to_string(),
-            content: "这张图是什么".to_string(),
+            content: "What is this image".to_string(),
             files: vec![],
             images: vec![pig_protocol::PendingImage {
                 bytes: image,
@@ -644,58 +660,70 @@ async fn paste_flow_persists_media_and_ships_image_payload() {
     let session_id = common::new_session(&agent, dir.clone()).await;
     let events = send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
 
-    // 用户气泡事件带图片张数 + markdown 附件链接（m1 与 media 文件名序号一致）
-    let user_text = events
+    // The user bubble event carries the image count + attachment number (clean body without an inlined link; m1 matches the media file-name index)
+    let (user_text, nums) = events
         .iter()
         .find_map(|e| match e {
             Event::UserMessage {
-                text, image_count, ..
-            } if *image_count == 1 => Some(text.clone()),
+                text,
+                image_count,
+                image_nums,
+                ..
+            } if *image_count == 1 => Some((text.clone(), image_nums.clone())),
             _ => None,
         })
         .expect("UserMessage.image_count=1");
-    assert!(
-        user_text.contains("[图片 1](pig-code-composer://attachments/m1)"),
-        "事件文本带附件链接: {user_text}"
+    assert_eq!(
+        user_text, "What is this image",
+        "event text is the clean body (attachment link no longer inlined): {user_text}"
     );
-    // 媒体目录布局：{data}/sessions/{sid}.media/1.png
+    assert_eq!(
+        nums,
+        vec![1],
+        "attachment number m1 matches the media file name"
+    );
+    // Media directory layout: {data}/sessions/{sid}.media/1.png
     let stored = data_dir
         .join("sessions")
         .join(format!("{session_id}.media"))
         .join("1.png");
-    assert!(stored.exists(), "压缩字节落盘: {}", stored.display());
+    assert!(
+        stored.exists(),
+        "compressed bytes persisted: {}",
+        stored.display()
+    );
     let stored_bytes = std::fs::read(&stored).unwrap();
     assert_eq!(tool::sniff_image(&stored_bytes), Some("image/png"));
     assert_eq!(
         tool::image_dimensions(&stored_bytes),
         Some((64, 48)),
-        "小图不缩放"
+        "small image is not resized"
     );
-    // rollout：ImageRef 引用路径，不含 base64
+    // Rollout: ImageRef references the path, contains no base64
     let rollout = std::fs::read_to_string(
         data_dir
             .join("sessions")
             .join(format!("{session_id}.jsonl")),
     )
     .unwrap();
-    assert!(rollout.contains("1.png"), "ImageRef 落盘: {rollout}");
-    assert!(!rollout.contains("data_base64"), "rollout 不存 base64");
-    // 请求体（OpenAI 拆分）：user 消息里有 image_url data URL
+    assert!(rollout.contains("1.png"), "ImageRef persisted: {rollout}");
+    assert!(!rollout.contains("data_base64"), "rollout stores no base64");
+    // Request body (OpenAI split): the user message contains an image_url data URL
     let bodies = log.lock().unwrap().join("\n");
     assert!(
         bodies.contains("image_url"),
-        "图片载荷发出: 请求体应有 image_url"
+        "image payload sent: request body should contain image_url"
     );
     assert!(bodies.contains("data:image/png;base64,"), "{bodies}");
-    // 链接只对 UI 展示：进模型 history 的文本保持干净
+    // The link is UI-display-only: the text entering model history stays clean
     assert!(
         !bodies.contains("pig-code-composer"),
-        "history 不带附件链接: {bodies}"
+        "history carries no attachment link: {bodies}"
     );
-    // 小图直通（未缩放/转码）：不加压缩附注、不落原图
+    // Small image passes through (not resized/transcoded): no compression caption, no original persisted
     assert!(
-        !bodies.contains("已压缩以适应模型限制"),
-        "未变化的图不加附注: {bodies}"
+        !bodies.contains("compressed to fit model limits"),
+        "unchanged image gets no caption: {bodies}"
     );
     assert!(
         !data_dir
@@ -703,7 +731,7 @@ async fn paste_flow_persists_media_and_ships_image_payload() {
             .join(format!("{session_id}.media"))
             .join("1.orig.png")
             .exists(),
-        "未变化的图不落原图"
+        "unchanged image keeps no original file"
     );
     agent.shutdown();
 }
@@ -714,30 +742,39 @@ async fn paste_projection_when_model_lacks_input_image() {
     let session_id = common::new_session(&agent, dir.clone()).await;
     let _events = send_paste_and_wait(&agent, &session_id, png_bytes(32, 32, false)).await;
 
-    // 能力投影：请求体文本带占位、不带 image_url；媒体文件照样落盘（换模型后回放可见）
+    // Capability projection: the request body carries the placeholder text, no image_url; the media file is still persisted (visible on replay after switching models)
     let bodies = log.lock().unwrap().join("\n");
     assert!(
-        bodies.contains("未随消息发送"),
-        "投影占位进请求体: {bodies}"
+        bodies.contains("were not sent"),
+        "projection placeholder enters the request body: {bodies}"
     );
-    assert!(!bodies.contains("image_url"), "不支持时不发图片载荷");
+    assert!(
+        !bodies.contains("image_url"),
+        "no image payload when unsupported"
+    );
     let media = dir
         .join("data")
         .join("sessions")
         .join(format!("{session_id}.media"))
         .join("1.png");
-    assert!(media.exists(), "媒体文件仍落盘: {}", media.display());
+    assert!(
+        media.exists(),
+        "media file still persisted: {}",
+        media.display()
+    );
     agent.shutdown();
 }
 
-/// 压缩附注（kimi-code caption 思路）：缩放/转码改变了图 → 请求体文本带附注、
-/// 原图落 `{n}.orig.{ext}` 供 ReadMediaFile region 看高清局部；
-/// 同时回归媒体文件续排序号（第二轮粘贴不覆盖第一轮的 ImageRef 目标）。
+/// Compression caption (kimi-code caption idea): when resizing/transcoding
+/// changed the image → the request-body text carries a caption and the original
+/// lands at `{n}.orig.{ext}` so ReadMediaFile region can view the high-res
+/// part; also a regression check that media file numbering continues (the
+/// second paste does not overwrite the first paste's ImageRef target).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn paste_caption_orig_and_sequential_media_names() {
     let (log, dir, data_dir, agent) = setup_paste("caption", true);
     let session_id = common::new_session(&agent, dir.clone()).await;
-    // 大图触发缩放（2100×100，最长边超 2000）
+    // A large image triggers the resize (2100×100, longest side over 2000)
     let big = png_bytes(2100, 100, false);
     send_paste_and_wait(&agent, &session_id, big.clone()).await;
     let media = data_dir
@@ -747,29 +784,31 @@ async fn paste_caption_orig_and_sequential_media_names() {
     let dims = tool::image_dimensions(&compressed).unwrap();
     assert!(
         dims.0 <= 2000 && dims != (2100, 100),
-        "缩放到预算内（resize 保比例，取实际值）: {dims:?}"
+        "resized within budget (resize preserves ratio; use actual value): {dims:?}"
     );
     assert_eq!(
         std::fs::read(media.join("1.orig.png")).unwrap(),
         big,
-        "原图字节级落盘"
+        "original persisted byte-exact"
     );
     let bodies = log.lock().unwrap().join("\n");
     assert!(
-        bodies.contains("已压缩以适应模型限制"),
-        "压缩附注进请求体: {bodies}"
+        bodies.contains("compressed to fit model limits"),
+        "compression caption enters the request body: {bodies}"
     );
-    assert!(bodies.contains("1.orig.png"), "附注带原图路径: {bodies}");
+    assert!(
+        bodies.contains("1.orig.png"),
+        "caption carries the original path: {bodies}"
+    );
 
-    // 第二轮粘贴：文件名续排（2.png），不覆盖第一轮的 1.png（旧 ImageRef 仍有效）
+    // Second paste: file names continue (2.png → attachment number 2), the first paste's 1.png is not overwritten (the old ImageRef stays valid)
     let events2 = send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
     assert!(
         events2.iter().any(|e| matches!(
             e,
-            Event::UserMessage { text, .. }
-                if text.contains("[图片 2](pig-code-composer://attachments/m2)")
+            Event::UserMessage { image_nums, .. } if image_nums == &[2]
         )),
-        "第二轮链接序号续排 m2"
+        "second paste attachment number continues at m2"
     );
     assert!(media.join("1.png").exists() && media.join("2.png").exists());
     let rollout = std::fs::read_to_string(
@@ -780,20 +819,25 @@ async fn paste_caption_orig_and_sequential_media_names() {
     .unwrap();
     assert!(
         rollout.contains("1.png") && rollout.contains("2.png"),
-        "两条 User 记录各有 ImageRef: {rollout}"
+        "both User records carry their ImageRef: {rollout}"
     );
     agent.shutdown();
 }
 
-/// 重开 rehydrate e2e：paste → shutdown → 同 data_dir 起新 agent → OpenSession 回放
-/// → 再发消息。delete_media=true 时删掉媒体目录模拟丢失（降级占位、不再发图片载荷）。
+/// Reopen-rehydrate e2e: paste → shutdown → new agent on the same data_dir →
+/// OpenSession replay → send another message. With delete_media=true the media
+/// directory is removed to simulate loss (degrades to a placeholder, no
+/// further image payload).
 async fn paste_resume(name: &str, delete_media: bool) {
     let (log, dir, data_dir, agent) = setup_paste(name, true);
     let session_id = common::new_session(&agent, dir.clone()).await;
     send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
     let image_url_count = || log.lock().unwrap().join("\n").matches("image_url").count();
     let before = image_url_count();
-    assert!(before > 0, "paste 回合应发过图片载荷");
+    assert!(
+        before > 0,
+        "the paste turn should have sent the image payload"
+    );
     agent.shutdown();
 
     let media = data_dir
@@ -802,7 +846,7 @@ async fn paste_resume(name: &str, delete_media: bool) {
     if delete_media {
         std::fs::remove_dir_all(&media).unwrap();
     }
-    // 模拟重启：同一 data_dir 起新 manager（mock server 同一端口还活着）
+    // Simulate a restart: new manager on the same data_dir (the mock server is still alive on the same port)
     let agent2 = pig_core::spawn_agent_with_data_dir(
         Some(dir.join("config.toml")),
         dir.clone(),
@@ -822,23 +866,25 @@ async fn paste_resume(name: &str, delete_media: bool) {
     assert!(
         replay.iter().any(|e| matches!(
             e,
-            Event::UserMessage { image_count, text, .. }
-                if *image_count == 1
-                    && text.contains("[图片 1](pig-code-composer://attachments/m1)")
+            Event::UserMessage {
+                image_count,
+                image_nums,
+                ..
+            } if *image_count == 1 && image_nums == &[1]
         )),
-        "回放气泡带图片张数 + 附件链接（与 live 同形态）"
+        "replayed bubble carries image count + attachment number (same shape as live)"
     );
-    // 排空回放残余事件，避免干扰后面的 recv_until
+    // Drain leftover replay events to avoid interfering with later recv_until calls
     while tokio::time::timeout(std::time::Duration::from_millis(200), agent2.events.recv())
         .await
         .is_ok()
     {}
-    // 继续对话：history 由 rollout + 媒体目录重建
+    // Continue the conversation: history is rebuilt from the rollout + media directory
     agent2
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "接着说".to_string(),
+            content: "Continue".to_string(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -851,12 +897,19 @@ async fn paste_resume(name: &str, delete_media: bool) {
     .await;
     if delete_media {
         let bodies = log.lock().unwrap().join("\n");
-        assert!(bodies.contains("图片已失效"), "丢失降级占位: {bodies}");
-        assert_eq!(image_url_count(), before, "媒体丢失后不再发图片载荷");
+        assert!(
+            bodies.contains("no longer available"),
+            "missing media degrades to a placeholder: {bodies}"
+        );
+        assert_eq!(
+            image_url_count(),
+            before,
+            "no image payload after media loss"
+        );
     } else {
         assert!(
             image_url_count() > before,
-            "重开后历史重建带图（rehydrate）"
+            "reopened history rebuild includes the images (rehydrate)"
         );
     }
     agent2.shutdown();

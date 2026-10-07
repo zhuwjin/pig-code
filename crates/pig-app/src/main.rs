@@ -1,5 +1,6 @@
-// release 下隐藏控制台窗口（debug 保留，便于看日志）。GUI 子系统下无控制台时
-// stdout/stderr 写入由 std 静默忽略（已实测不 panic），pig-core 的 eprintln 安全
+// Hide the console window in release builds (kept in debug for reading logs).
+// With no console under the GUI subsystem, stdout/stderr writes are silently
+// ignored by std (verified not to panic), so pig-core's eprintln is safe
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_client;
@@ -8,14 +9,24 @@ mod assets;
 mod clipboard;
 mod code_view;
 mod composer;
+mod errors;
 mod file_panel;
 mod font;
+mod i18n;
 mod review_panel;
 mod settings;
 mod sidebar;
 mod subagent_panel;
 mod terminal;
 mod thread_view;
+
+// i18n registry for GUI strings (locales/; t! fetches strings, fallback = en
+// — English is the fallback primary language). Model-facing prompts do not
+// go through here (all English inside pig-core); core is language-neutral,
+// and the localized strings for its structured errors/status (CoreError etc.)
+// also live in this registry (errors.yml), mapped at render points via
+// errors.rs.
+rust_i18n::i18n!("locales", fallback = "en");
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -60,12 +71,15 @@ gpui_kit::actions!(
     ]
 );
 
-/// 主题是否跟随系统外观：默认跟随；手动切换亮/暗后本次运行内固定为所选模式。
+/// Whether the theme follows system appearance: follows by default; after a
+/// manual light/dark switch it stays pinned to the chosen mode for the rest
+/// of this run.
 pub struct ThemeFollowSystem(pub bool);
 
 impl Global for ThemeFollowSystem {}
 
-/// 相对时间显示（刚刚 / N分钟 / N小时 / N天）
+/// Relative time display (just now / N minutes / N hours / N days; i18n via
+/// t! interpolation)
 pub trait RelativeTime {
     fn relative(&self) -> String;
 }
@@ -78,10 +92,10 @@ impl RelativeTime for u64 {
             .unwrap_or(0);
         let diff = now.saturating_sub(*self);
         match diff {
-            0..=59 => "刚刚".to_string(),
-            60..=3599 => format!("{} 分钟", diff / 60),
-            3600..=86399 => format!("{} 小时", diff / 3600),
-            _ => format!("{} 天", diff / 86400),
+            0..=59 => rust_i18n::t!("time.just_now").to_string(),
+            60..=3599 => rust_i18n::t!("time.minutes", n = diff / 60).to_string(),
+            3600..=86399 => rust_i18n::t!("time.hours", n = diff / 3600).to_string(),
+            _ => rust_i18n::t!("time.days", n = diff / 86400).to_string(),
         }
     }
 }
@@ -102,9 +116,11 @@ struct SessionViews {
     review: Entity<ReviewPanel>,
 }
 
-/// 右侧面板 tab：「改动」「调用轨迹」为内置页；「子代理」每个 agent_id 一个
-/// （通知卡点击打开）；「文件」每个绝对路径一个（Read 卡路径点击打开）。
-/// 浏览器/终端/侧边聊天后续加。
+/// Right panel tabs: "Changes" and "Trajectory" are built-in pages;
+/// "Subagent" is one per agent_id (opened by clicking a notification card);
+/// "File" is one per absolute path (opened by clicking the path on a Read
+/// card).
+/// Browser/terminal/side chat to come later.
 #[derive(Clone, PartialEq, Eq)]
 enum RightTab {
     Changes,
@@ -112,14 +128,14 @@ enum RightTab {
     Subagent {
         agent_id: String,
     },
-    /// 文件查看器；path = 规范化后的绝对路径（file_tabs 的键）
+    /// File viewer; path = the normalized absolute path (the key in file_tabs)
     File {
         path: String,
     },
 }
 
 impl RightTab {
-    /// 元素 id 用的稳定唯一键
+    /// Stable unique key for element ids
     fn key(&self) -> String {
         match self {
             Self::Changes => "changes".to_string(),
@@ -130,7 +146,8 @@ impl RightTab {
     }
 }
 
-/// 「子代理」tab 标题截断（12 字符 + 省略号，标签页栏宽度有限）
+/// Truncates "Subagent" tab titles (12 chars + ellipsis; the tab bar has
+/// limited width)
 fn truncate_tab_label(title: &str) -> String {
     let mut chars = title.chars();
     let head: String = chars.by_ref().take(12).collect();
@@ -153,10 +170,13 @@ mod trajectory;
 use dock::*;
 use selftest::{run_selftest, setup_selftest};
 
-/// dock 皮肤用 `cached()` 包裹面板视图：缓存只在面板自身 notify 时失效。
-/// 子实体（thread/review/composer）的 notify 会沿 dispatch 树把面板祖先标脏，
-/// 自动失效；但纯 AppView 状态变化（hero↔会话切换、右侧 tab 开合）发生在祖先上，
-/// 传不下来——观察 AppView，把它的 notify 转成面板自己的。
+/// The dock skin wraps panel views with `cached()`: the cache invalidates
+/// only when the panel itself notifies. Notifications from child entities
+/// (thread/review/composer) travel up the dispatch tree, dirtying the panel
+/// ancestor and invalidating it automatically; but pure AppView state changes
+/// (hero↔session switch, right tab open/close) happen on the ancestor and do
+/// not propagate down — so observe AppView and turn its notifies into the
+/// panel's own.
 fn observe_app_notify<T: 'static>(
     app: &WeakEntity<AppView>,
     cx: &mut Context<T>,
@@ -181,7 +201,7 @@ macro_rules! impl_dock_panel {
             }
         }
 
-        // chrome 全关：tab 栏/标题栏由我们自己画
+        // All chrome off: we draw the tab bar/title bar ourselves
         impl gpui_kit::component::dock::Panel for $ty {
             fn title_bar(&self, _: &App) -> bool {
                 false
@@ -198,8 +218,10 @@ impl_dock_panel!(DockCenterPanel, "center");
 impl_dock_panel!(DockRightPanel, "right-dock");
 impl_dock_panel!(DockBottomPanel, "bottom-dock");
 
-/// 底部终端面板的默认高度（px）；用户可经 dock 把手拖拽调整（上游钳制
-/// [PANEL_MIN_SIZE, 区域高-100]），开合补间在 0↔当前高度间插值
+/// Default height of the bottom terminal panel (px); users can adjust it by
+/// dragging the dock handle (upstream clamps to [PANEL_MIN_SIZE, area
+/// height-100]), and the open/close tween interpolates between 0↔current
+/// height
 pub(crate) const TERMINAL_PANEL_DEFAULT_H: f32 = 300.;
 
 struct AppView {
@@ -209,42 +231,55 @@ struct AppView {
     current: Option<String>,
     metas: Vec<SessionMeta>,
     running: HashSet<String>,
-    /// 已删除的会话 id：迟到事件过滤用（id 含时间戳不复用，无需清理）
+    /// Deleted session ids: used to filter late events (ids embed a timestamp
+    /// and are never reused, no cleanup needed)
     deleted_sessions: HashSet<String>,
     approval_pending: HashSet<String>,
-    /// 各会话的待审批队列（审批条显示队首；并发审批逐笔答复逐笔出队，
-    /// 后到的请求不再顶掉先到的——同会话多个子代理同时等审批也不会丢）
+    /// Per-session pending approval queues (the approval bar shows the head;
+    /// concurrent approvals are answered and dequeued one by one, so a later
+    /// request never displaces an earlier one — even multiple subagents
+    /// awaiting approval in the same session are not lost)
     pending_approvals: HashMap<String, VecDeque<PendingApproval>>,
-    /// 待回答的结构化提问（问题条内容）：提交/跳过/回合结束时清除
+    /// Structured question awaiting an answer (question bar content): cleared
+    /// on submit/skip/turn end
     pending_questions: HashMap<String, PendingQuestion>,
-    /// 各会话的 TodoList/后台任务快照（core 推送缓存，切会话时同步给 composer）
+    /// Per-session TodoList/background task snapshots (core-pushed cache,
+    /// synced to the composer on session switch)
     todos_by_session: HashMap<String, Vec<pig_protocol::TodoItem>>,
     tasks_by_session: HashMap<String, Vec<pig_protocol::TaskSummary>>,
     agent: AgentClient,
     cwd: PathBuf,
     config_path: Option<PathBuf>,
     exec_mode: pig_protocol::ExecMode,
-    /// 计划模式开关（与 exec_mode 正交；SessionConfigured/PlanModeChanged 同步）
+    /// Plan mode toggle (orthogonal to exec_mode; synced by
+    /// SessionConfigured/PlanModeChanged)
     plan_enabled: bool,
     git_branch: Option<String>,
-    /// 标题栏分支切换器的分支列表（当前会话 cwd 的本地分支）
+    /// Branch list for the title bar branch switcher (local branches of the
+    /// current session's cwd)
     title_branches: Vec<String>,
-    /// 标题栏分支菜单是否打开
+    /// Whether the title bar branch menu is open
     title_branch_menu_open: bool,
-    /// 分支菜单因点击外部收起时的按下位置（吞掉同一次 click，防收起又弹开）
+    /// Press position when the branch menu collapsed via an outside click
+    /// (that same click is swallowed to prevent collapse-then-reopen)
     title_branch_outside_close: Option<Point<Pixels>>,
-    /// 分支 chip 的 bounds（on_prepaint 记录，菜单锚定用）
+    /// Bounds of the branch chip (recorded in on_prepaint, used to anchor
+    /// the menu)
     title_branch_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// 标题栏会话菜单（三个点）开合；三件套与分支菜单同模式
+    /// Title bar session menu (three dots) open/close; the trio follows the
+    /// same pattern as the branch menu
     session_menu_open: bool,
     session_menu_outside_close: Option<Point<Pixels>>,
     session_menu_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// 「在访达中打开」按钮的真实访达图标（macOS 后台取 NSWorkspace 图标，
-    /// 完成前/其余平台 None → 用 Lucide 文件夹兜底）
+    /// Real Finder icon for the "Open in Finder" button (NSWorkspace icon
+    /// fetched in the background on macOS; None before it arrives or on other
+    /// platforms → falls back to the Lucide folder icon)
     fm_icon: Option<std::sync::Arc<Image>>,
-    /// 调用轨迹弹窗（None = 关闭）：当前会话的 model-io 落盘记录
+    /// Trajectory popup (None = closed): persisted model-io records of the
+    /// current session
     trajectory: Option<TrajectoryState>,
-    /// hero 页选择的工作区目录；None = 未选择（显示"选择工作区"，发送时回落到启动目录）
+    /// Workspace directory chosen on the hero page; None = not chosen (shows
+    /// "choose workspace", falling back to the launch directory on send)
     hero_cwd: Option<PathBuf>,
     hero_branch: Option<String>,
     hero_branches: Vec<String>,
@@ -256,69 +291,95 @@ struct AppView {
         Vec<pig_protocol::PendingImage>,
         ExecMode,
     )>,
-    /// hero 态用户已显式选过模型：apply_hero_defaults 不再用工作区种子覆盖
-    ///（否则「切模型 → 选工作区 → 发送」会把选择冲回工作区旧模型）
+    /// The user explicitly picked a model in hero mode: apply_hero_defaults
+    /// no longer overwrites it with the workspace seed (otherwise "switch
+    /// model → choose workspace → send" would reset the pick back to the
+    /// workspace's old model)
     hero_model_dirty: bool,
     workspaces: Vec<String>,
-    /// 已移除（隐藏）的工作区路径：会话 cwd 不再让它们回到列表
+    /// Removed (hidden) workspace paths: session cwds can no longer bring
+    /// them back into the list
     hidden_workspaces: std::collections::HashSet<String>,
-    /// 工作区路径 → 用户自定义显示名
+    /// Workspace path → user-defined display name
     workspace_aliases: std::collections::HashMap<String, String>,
     settings: Entity<SettingsView>,
     settings_open: bool,
-    /// 「开启无管制模式？」确认框（每次切 Yolo 都弹，不记住选择）
+    /// "Enable unregulated mode?" confirmation dialog (pops on every switch
+    /// to Yolo; the choice is not remembered)
     yolo_confirm_open: bool,
-    /// 确认框焦点（Esc 取消用；打开时抢焦，取消键默认聚焦）
+    /// Confirmation dialog focus (for Esc cancel; steals focus when opened,
+    /// with the cancel button focused by default)
     yolo_confirm_focus: FocusHandle,
     sidebar_collapsed: bool,
-    /// 右侧面板是否展开（默认收起：进会话不自动显示改动）
+    /// Whether the right panel is expanded (collapsed by default: entering a
+    /// session does not auto-show changes)
     right_open: bool,
-    /// 侧栏 / 右面板展开目标宽（AppView 侧副本，兼作开合动画的内容锚定宽）。
-    /// 收起补间末段 dock 实际宽被插值到 0，展开目标不能读 dock_size，一律取
-    /// 副本；拖宽与窗口缩放的补钳也都作用在副本上
+    /// Sidebar / right panel expanded target widths (AppView-side copies,
+    /// doubling as the content anchor widths for open/close animations). In
+    /// the final phase of a collapse tween the dock's actual width is
+    /// interpolated to 0, so the expansion target must never read dock_size —
+    /// always take the copy; the compensation clamps for width drags and
+    /// window resizes also act on the copies
     sidebar_w: f32,
     right_w: f32,
-    /// 进行中的左右 dock 开合补间（None = 稳态；两栏可同时各跑一段）
+    /// In-progress left/right dock open/close tweens (None = steady state;
+    /// both panes can each run one at the same time)
     left_dock_anim: Option<DockSizeAnim>,
     right_dock_anim: Option<DockSizeAnim>,
-    /// 进行中的边缘段（首/尾 100px 覆盖层滑动；单份，跨侧替换时先替旧侧收尾）
+    /// In-progress edge phase (first/last 100px overlay slide; a single slot
+    /// — when replaced across sides, the old side is finalized first)
     dock_edge: Option<DockEdgePhase>,
-    /// 边缘段代次计数（配 DockEdgePhase::generation）
+    /// Edge phase generation counter (pairs with DockEdgePhase::generation)
     dock_edge_generation: u32,
-    /// dock 开合的下一帧回调已排队（防补间起步/链自续时重复注册导致回调链
-    /// 翻倍——左右两栏同帧起步、链自续都会再走注册路径）
+    /// A next-frame callback for dock open/close is already queued (prevents
+    /// duplicate registrations at tween start or chain self-continuation from
+    /// doubling the callback chain — both panes starting on the same frame
+    /// and chain self-continuation re-enter the registration path)
     dock_anim_frames_scheduled: bool,
-    /// 右侧面板打开的 tab（按打开顺序）；收起时保留
+    /// Open tabs of the right panel (in open order); preserved while
+    /// collapsed
     right_tabs: Vec<RightTab>,
-    /// 右侧面板当前激活的 tab（None = 显示面板首页/菜单页）
+    /// Currently active right panel tab (None = show the panel home/menu
+    /// page)
     right_active: Option<RightTab>,
-    /// 「子代理」tab 的内容面板（agent_id → 面板实体；tab 关闭时移除）
+    /// Content panels of "Subagent" tabs (agent_id → panel entity; removed
+    /// when the tab closes)
     subagent_tabs: HashMap<String, Entity<SubagentPanel>>,
-    /// 「文件」tab 的内容面板（规范化绝对路径 → 面板实体；tab 关闭时移除）
+    /// Content panels of "File" tabs (normalized absolute path → panel
+    /// entity; removed when the tab closes)
     file_tabs: HashMap<String, Entity<FileViewPanel>>,
-    /// 底部终端面板是否展开（默认收起）
+    /// Whether the bottom terminal panel is expanded (collapsed by default)
     terminal_open: bool,
-    /// 终端面板实体（懒创建；收起仅隐藏，tab 与 shell 进程保留）
+    /// Terminal panel entity (lazily created; collapsing only hides it, tabs
+    /// and the shell process are kept)
     terminal: Option<Entity<TerminalPanel>>,
-    /// 用户选定的面板高度（dock 把手拖拽后由稳态 render 同步实高；默认 300，收起时保留）
+    /// User-chosen panel height (synced from the actual height by a
+    /// steady-state render after a dock handle drag; defaults to 300,
+    /// preserved while collapsed)
     terminal_h: f32,
-    /// 底部 dock 的开合补间（与左右 dock 同一 step_dock_anim 体系）
+    /// Bottom dock open/close tween (same step_dock_anim system as the
+    /// left/right docks)
     bottom_dock_anim: Option<DockSizeAnim>,
-    /// 底部 dock 的面板实体（install_dock 创建并常驻；底部 dock 全隐=移除，
-    /// 展开时才挂回，故面板实体不能随 dock 生灭）
+    /// Bottom dock panel entity (created by install_dock and resident; the
+    /// bottom dock fully hidden = removed, and remounted only on expansion,
+    /// so the panel entity must not live and die with the dock)
     dock_bottom_panel: Option<Entity<DockBottomPanel>>,
-    /// 标签页栏 "+" 的加面板菜单是否打开
+    /// Whether the tab bar "+" add-panel menu is open
     right_menu_open: bool,
-    /// 菜单因点击外部收起时的按下位置：吞掉同一次按压触发的按钮 click，避免收起又弹开
+    /// Press position when the menu collapsed via an outside click: swallow
+    /// the button click fired by the same press, avoiding collapse-then-
+    /// reopen
     right_menu_outside_close: Option<Point<Pixels>>,
-    /// 标签页栏 "+" 按钮的屏幕 bounds（on_prepaint 记录，菜单锚定用）
+    /// Screen bounds of the tab bar "+" button (recorded in on_prepaint,
+    /// used to anchor the menu)
     tab_add_btn_bounds: Rc<Cell<Bounds<Pixels>>>,
     config: Option<pig_protocol::AppConfig>,
     /// (provider_id, model_id)
     current_model: Option<(String, String)>,
     reasoning_level: Option<String>,
-    /// 三栏布局引擎（dock）：左 dock=侧栏、center=会话区、右 dock=改动面板；
-    /// set_locked(true) 锁定防拖拽重排、只保留调宽
+    /// Three-pane layout engine (dock): left dock = sidebar, center = session
+    /// area, right dock = changes panel; set_locked(true) locks out
+    /// drag-rearranging, keeping only width adjustment
     dock: Entity<gpui_kit::component::dock::DockArea>,
     _agent_handle: pig_core::AgentHandle,
     _subscriptions: Vec<Subscription>,
@@ -336,7 +397,8 @@ impl AppView {
         let settings = cx.new(|cx| SettingsView::new(window, cx));
         let (dock, dock_skin) =
             gpui_kit::component::dock::DockSkin::dock_area("pig-dock", None, window, cx);
-        // tab 栏里的 dock 开合按钮不需要（有标题栏按钮），且我们的 tab 栏自绘
+        // The dock toggle button in the tab bar is unneeded (title bar
+        // buttons exist), and we draw our own tab bar
         dock_skin.set_toggle_button_visible(false, cx);
         let handle = pig_core::spawn_agent(config_path.clone(), cwd.clone());
         let agent = AgentClient::new(handle.ops.clone());
@@ -385,7 +447,8 @@ impl AppView {
             yolo_confirm_focus: cx.focus_handle(),
             sidebar_collapsed: false,
             right_open: false,
-            // 初始宽度单一来源：install_dock 的 set_dock_size 从这里取值
+            // Single source of initial widths: install_dock's set_dock_size
+            // reads from here
             sidebar_w: 220.,
             right_w: 300.,
             left_dock_anim: None,
@@ -457,7 +520,8 @@ impl AppView {
         }
         app.push_hero_info(cx);
         app.refresh_git_branch(None, cx);
-        // macOS：后台取访达真实图标（NSWorkspace，线程安全），完成前用 Lucide 文件夹兜底
+        // macOS: fetch the real Finder icon in the background (NSWorkspace,
+        // thread-safe); fall back to the Lucide folder icon until it arrives
         #[cfg(target_os = "macos")]
         {
             let task = cx
@@ -495,7 +559,8 @@ impl AppView {
         .detach();
     }
 
-    /// 模拟重启：关旧 manager、清内存视图、重 spawn（自测用）。
+    /// Simulated restart: close the old manager, clear in-memory views,
+    /// re-spawn (for selftest).
     fn restart_agent(&mut self, cx: &mut Context<Self>) {
         let handle = pig_core::spawn_agent(self.config_path.clone(), self.cwd.clone());
         self.agent = AgentClient::new(handle.ops.clone());
@@ -511,7 +576,7 @@ impl AppView {
         cx.notify();
     }
 
-    /// 当前会话的工作目录（SessionMeta.cwd）
+    /// Working directory of the current session (SessionMeta.cwd)
     fn current_cwd(&self) -> Option<PathBuf> {
         let sid = self.current.as_ref()?;
         self.metas
@@ -525,7 +590,8 @@ impl AppView {
             return;
         }
         let thread = cx.new(ThreadView::new);
-        // 用户消息图片附件的缩略图源：{data}/sessions/{id}.media（与 core 同源解析）
+        // Thumbnail source for user message image attachments:
+        // {data}/sessions/{id}.media (resolved the same way as in core)
         thread.update(cx, |thread, _| {
             thread.set_media_dir(pig_core::rollout::media_dir(
                 &pig_core::data_dir().join("sessions"),
@@ -543,8 +609,10 @@ impl AppView {
                 } => {
                     this.agent
                         .approval_reply(request_id.clone(), *decision, feedback.clone());
-                    // 只摘掉答复的这笔，队列里还有下一笔就接着显示；全答完
-                    // 才撤审批态恢复输入框（core 侧会把同合并键的等待者一并唤醒）
+                    // Remove only the answered entry; if another remains in
+                    // the queue keep showing it; only when all are answered is
+                    // the approval state cleared and the composer restored
+                    // (core wakes every waiter sharing the same merge key)
                     let mut answered_all = true;
                     if let Some(queue) = this.pending_approvals.get_mut(&sid) {
                         queue.retain(|p| p.request_id != *request_id);
@@ -562,15 +630,18 @@ impl AppView {
                     }
                 }
                 ThreadEvent::OpenSubagent { agent_id, title } => {
-                    // 通知卡所在会话 = 该 ThreadView 的会话（sid 为订阅时捕获）
+                    // The notification card's session = this ThreadView's
+                    // session (sid captured at subscribe time)
                     this.open_subagent_tab(sid.clone(), agent_id.clone(), title.clone(), cx);
                 }
                 ThreadEvent::OpenFile { path, line } => {
                     this.open_file_tab(&sid, path.clone(), *line, cx);
                 }
                 ThreadEvent::Fork { turns } => {
-                    // 分叉源 = 该 ThreadView 的会话；core 创建后按 OpenSession
-                    // 冷路径回 SessionConfigured，既有链路自动切到新会话
+                    // Fork source = this ThreadView's session; once core
+                    // creates it, the OpenSession cold path returns
+                    // SessionConfigured and the existing flow switches to the
+                    // new session automatically
                     this.agent.fork_session(&sid, *turns);
                 }
             }),
@@ -594,8 +665,9 @@ impl AppView {
             .insert(session_id.to_string(), SessionViews { thread, review });
     }
 
-    /// 模型 chip 显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id
-    /// 从 config 取模型的思考等级列表
+    /// Model chip display name: look up the provider name by provider_id in
+    /// config, degrading to model_id when not found
+    /// Fetch the model's reasoning level list from config
     fn model_reasoning_levels(&self, provider_id: &str, model_id: &str) -> Vec<String> {
         self.config
             .as_ref()
@@ -605,7 +677,8 @@ impl AppView {
             .unwrap_or_default()
     }
 
-    /// 模型配置的默认思考等级（已校验仍在等级表内才返回）
+    /// The model's configured default reasoning level (returned only after
+    /// checking it is still in the level list)
     fn model_default_reasoning_level(&self, provider_id: &str, model_id: &str) -> Option<String> {
         self.config
             .as_ref()
@@ -618,8 +691,10 @@ impl AppView {
             })
     }
 
-    /// 切换模型后当前等级不可用时的落点：high 优先（多数等级表的中间档），
-    /// 否则首个非关档，再否则首档；无等级 = 关（None）
+    /// Landing spot when the current level is unavailable after a model
+    /// switch: prefer high (the middle tier of most level lists), otherwise
+    /// the first non-off level, otherwise the first level; no levels = off
+    /// (None)
     fn fallback_reasoning_level(levels: &[String]) -> Option<String> {
         if levels.is_empty() {
             return None;
@@ -653,7 +728,7 @@ impl AppView {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("选择工作目录".into()),
+            prompt: Some(rust_i18n::t!("main.pick_directory_prompt").into()),
         });
         let view = cx.entity();
         cx.spawn_in(window, async move |_, window| {
@@ -670,7 +745,8 @@ impl AppView {
                         this.agent.git_info(picked.clone());
                         this.hero_cwd = Some(picked);
                         this.push_hero_info(cx);
-                        // 换了工作区：按新工作区最近活跃会话重铺默认值
+                        // Workspace changed: re-lay defaults from the new
+                        // workspace's most recently active session
                         this.apply_hero_defaults(cx);
                         cx.notify();
                     });
@@ -681,8 +757,10 @@ impl AppView {
         .detach();
     }
 
-    /// 同步更新 metas 缓存中当前会话的条目（与 core 写穿保持一致；
-    /// core 的 Set* 写穿不再发 SessionList，缓存不更新会导致切会话读到旧值）
+    /// Update the current session's entry in the metas cache in place
+    /// (consistent with core's write-through; core's Set* write-through no
+    /// longer emits SessionList, and a stale cache would make session
+    /// switches read old values)
     fn update_current_meta(&mut self, f: impl FnOnce(&mut SessionMeta)) {
         if let Some(sid) = &self.current
             && let Some(meta) = self.metas.iter_mut().find(|m| &m.id == sid)
@@ -691,8 +769,10 @@ impl AppView {
         }
     }
 
-    /// 应用执行模式：本地缓存 + core 下发 + composer 勾选态（直接选中路径是幂等重设，
-    /// Yolo 确认框路径靠它补上——拦截时 composer 的下标没动过）
+    /// Apply an exec mode: local cache + send to core + composer check state
+    /// (the direct-selection path is an idempotent re-set; the Yolo
+    /// confirmation path relies on it — when intercepted, the composer's
+    /// index was never touched)
     fn apply_exec_mode(&mut self, mode: ExecMode, cx: &mut Context<Self>) {
         self.exec_mode = mode;
         self.update_current_meta(|m| m.exec_mode = mode);
@@ -703,7 +783,8 @@ impl AppView {
         }
     }
 
-    /// 应用计划模式开关（与 exec_mode 正交）：本地缓存 + core 下发 + composer chip
+    /// Apply the plan mode toggle (orthogonal to exec_mode): local cache +
+    /// send to core + composer chip
     fn apply_plan_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.plan_enabled = enabled;
         self.update_current_meta(|m| m.plan_enabled = enabled);
@@ -714,13 +795,14 @@ impl AppView {
         }
     }
 
-    /// 自测用。
+    /// For selftest.
     pub fn debug_config(&self) -> Option<&pig_protocol::AppConfig> {
         self.config.as_ref()
     }
 
-    /// 自测用：当前激活的「子代理」tab 的 (标题, 已加载 items 数)；
-    /// 无激活子代理 tab 或内容未加载为 None
+    /// For selftest: (title, loaded item count) of the currently active
+    /// "Subagent" tab; None when no subagent tab is active or content is not
+    /// loaded
     pub fn debug_subagent_tab(&self, cx: &App) -> Option<(String, usize)> {
         let RightTab::Subagent { agent_id } = self.right_active.as_ref()? else {
             return None;
@@ -728,7 +810,8 @@ impl AppView {
         self.subagent_tabs.get(agent_id)?.read(cx).debug_state()
     }
 
-    /// 自测用：当前激活的「文件」tab 的 (路径, 已加载行数)；未激活/未加载为 None
+    /// For selftest: (path, loaded line count) of the currently active
+    /// "File" tab; None when inactive/not loaded
     pub fn debug_file_tab(&self, cx: &App) -> Option<(String, usize)> {
         let RightTab::File { path } = self.right_active.as_ref()? else {
             return None;
@@ -740,35 +823,43 @@ impl AppView {
             .map(|lines| (path.clone(), lines))
     }
 
-    /// 自测用：指定 agent_id 的「子代理」tab 的 (running, 行数含缓冲, 累计活动项数)；
-    /// 无 tab 为 None
+    /// For selftest: (running, line count including buffer, cumulative
+    /// activity item count) of the "Subagent" tab for the given agent_id;
+    /// None when no tab exists
     pub fn debug_subagent_live(&self, agent_id: &str, cx: &App) -> Option<(bool, usize, usize)> {
         self.subagent_tabs
             .get(agent_id)
             .map(|panel| panel.read(cx).debug_live())
     }
 
-    /// 自测用：指定 agent_id 的「子代理」tab 的 (following, at_bottom)；无 tab 为 None
+    /// For selftest: (following, at_bottom) of the "Subagent" tab for the
+    /// given agent_id; None when no tab exists
     pub fn debug_subagent_scroll(&self, agent_id: &str, cx: &App) -> Option<(bool, bool)> {
         self.subagent_tabs
             .get(agent_id)
             .map(|panel| panel.read(cx).debug_scroll())
     }
 
-    /// 焦点还给输入框（终端面板收起时调用）。
-    /// 经 Entity::update 走，避免 read 借用与 &mut App 冲突
+    /// Return focus to the composer (called when the terminal panel
+    /// collapses).
+    /// Done via Entity::update to avoid clashing a read borrow with &mut App
     fn refocus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         let composer = self.composer.clone();
         composer.update(cx, |composer, cx| composer.focus_input(window, cx));
     }
 
-    /// 底部终端面板开关（标题栏按钮 / ctrl-`）：展开/收起，tab 与 shell 进程保留。
-    /// 懒创建；新 tab 的工作目录取当前会话 cwd（无会话回落启动目录）；
-    /// 展开时焦点进终端（新建在 TerminalPanel::new 内 focus_active，重开在此补焦），
-    /// 收起时还给输入框。开合动画由 step_dock_anim(Bottom) 在 render 里登记/步进。
+    /// Bottom terminal panel toggle (title bar button / ctrl-`): expand/
+    /// collapse, tabs and the shell process are kept. Lazily created; a new
+    /// tab's working directory is the current session's cwd (falling back to
+    /// the launch directory with no session); on expand, focus goes into the
+    /// terminal (a fresh panel is focused via focus_active inside
+    /// TerminalPanel::new, a reopened one is re-focused here), on collapse
+    /// focus returns to the composer. The open/close animation is registered
+    /// and stepped in render by step_dock_anim(Bottom).
     pub(crate) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_open {
-            // 关闭前同步 dock 实高：把手拖过的高度重开时不丢
+            // Sync the dock's actual height before closing: a height set by
+            // handle drags is not lost on reopen
             if let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Bottom) {
                 self.terminal_h = f32::from(size).round();
             }
@@ -786,7 +877,8 @@ impl AppView {
                 }),
                 None => {
                     let panel = cx.new(|cx| TerminalPanel::new(cwd, shell, window, cx));
-                    // 标签页栏折叠钮：收起面板，焦点还输入框
+                    // Tab bar collapse button: collapse the panel and return
+                    // focus to the composer
                     self._subscriptions.push(cx.subscribe_in(
                         &panel,
                         window,
@@ -807,7 +899,8 @@ impl AppView {
         cx.notify();
     }
 
-    /// 中心区内容（dock center 面板调用）：hero / 会话列 / 空提示 + 换页动画
+    /// Center area content (called by the dock center panel): hero or the
+    /// session column or an empty hint, plus page transition animation
     fn render_center(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let hero = self.is_hero(cx) && self.pending_first_send.is_none();
         let current_views = self.current.as_ref().and_then(|id| self.views.get(id));
@@ -815,8 +908,9 @@ impl AppView {
         let center: AnyElement = if hero {
             self.render_hero(cx)
         } else if let Some(views) = current_views {
-            // 底部终端面板已迁入底部 dock（render_bottom_dock_content），
-            // 不在中心区 v_flex 里挂载
+            // The bottom terminal panel has moved into the bottom dock
+            // (render_bottom_dock_content); it is not mounted in the center
+            // v_flex
             v_flex()
                 .size_full()
                 .child(div().flex_1().min_h_0().child(views.thread.clone()))
@@ -831,7 +925,7 @@ impl AppView {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("新建任务或从左侧选择会话"),
+                        .child(rust_i18n::t!("main.empty_hint")),
                 )
                 .into_any_element()
         };
@@ -843,7 +937,8 @@ impl AppView {
         };
         div()
             .size_full()
-            // 不透明底：边缘段覆盖层滑动/页面淡入都叠在这层上
+            // Opaque base: edge phase overlay slides and page fade-ins all
+            // stack on this layer
             .bg(cx.theme().background)
             .with_animation(
                 format!("page-{page_tag}"),
@@ -857,19 +952,24 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // dock 开合同步：标志位（sidebar_collapsed / right_open）是唯一事实源
-        //（dock 不持久化显隐状态），翻转后经 step_dock_anim 补间过渡（见其文档）
+        // Dock open/close sync: the flags (sidebar_collapsed / right_open)
+        // are the sole source of truth (the dock persists no visibility
+        // state); after a flip, step_dock_anim tweens the transition (see its
+        // docs)
         self.left_dock_anim =
             self.step_dock_anim(DockPlacement::Left, self.left_dock_anim, window, cx);
         self.right_dock_anim =
             self.step_dock_anim(DockPlacement::Right, self.right_dock_anim, window, cx);
-        // 底部终端 dock 开合补间（与左右 dock 同一体系）
+        // Bottom terminal dock open/close tween (same system as the left/
+        // right docks)
         self.bottom_dock_anim =
             self.step_dock_anim(DockPlacement::Bottom, self.bottom_dock_anim, window, cx);
 
-        // 上游把手拖宽不经过 AppView：稳态（无补间/边缘段）render 先把目标宽
-        // 副本对齐 dock 实宽，拖拽结果才不会被下面的补钳写回冲掉；补间/边缘段
-        // 期间实宽是过渡值，不同步
+        // Upstream handle width drags bypass AppView: in the steady state (no
+        // tween/edge phase) render first aligns the target-width copies with
+        // the dock's actual width, so the drag result is not clobbered by the
+        // compensation-clamp write-back below; during a tween/edge phase the
+        // actual width is a transition value and is not synced
         if self.dock_edge.is_none() {
             if self.left_dock_anim.is_none()
                 && let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Left)
@@ -883,8 +983,10 @@ impl Render for AppView {
             {
                 self.right_w = f32::from(size).round();
             }
-            // 底部终端 dock 实高同步（官方把手拖高不经过 AppView）：无补间时
-            // 副本对齐实高，拖拽结果才不会被下次开合补间用旧目标高冲掉
+            // Bottom terminal dock actual-height sync (official handle height
+            // drags bypass AppView): with no tween the copy aligns to the
+            // actual height so the drag result is not clobbered by the next
+            // open/close tween using a stale target height
             if self.bottom_dock_anim.is_none()
                 && self.dock.read(cx).is_dock_open(DockPlacement::Bottom)
                 && let Some(size) = self.dock.read(cx).dock_size(DockPlacement::Bottom)
@@ -894,9 +996,12 @@ impl Render for AppView {
             }
         }
 
-        // 三栏最小宽度补钳：对展开目标宽副本钳（拖拽/window 缩放得越界宽度在
-        // paint 前拉回），收起的栏不参与预算、存储宽度原样保留；补间中的 dock
-        // 实宽由补间接管，不受钳。区域宽为 0（首帧未测量）时不动作
+        // Three-pane minimum width compensation clamp: applied to the expanded
+        // target-width copies (out-of-range widths from drags/window resizes
+        // are pulled back before paint); collapsed panes skip the budget and
+        // keep their stored widths as-is; a tweening dock's actual width is
+        // owned by the tween and not clamped. No-op when the area width is 0
+        // (unmeasured first frame)
         let area_w = f32::from(self.dock.read(cx).bounds().size.width);
         let (new_left, new_right) = clamp_dock_widths(
             area_w,
@@ -907,8 +1012,9 @@ impl Render for AppView {
         );
         self.sidebar_w = new_left;
         self.right_w = new_right;
-        // 稳态（无补间）时把钳后的宽度写回 dock；拖宽结果已在上面同步进副本，
-        // 这里只兜窗口缩放等被动越界
+        // In the steady state (no tween) write the clamped widths back to the
+        // dock; drag results were already synced into the copies above, so
+        // this only catches passive out-of-range cases like window resizes
         if self.left_dock_anim.is_none() {
             let left_actual = self
                 .dock
@@ -936,9 +1042,11 @@ impl Render for AppView {
             }
         }
 
-        // 侧栏内容宽推送：开合动画期间内容固定目标宽并锚定分隔线一侧（见
-        // Sidebar::render）才能滑出而非压缩；稳态两值相等，值变才 notify，
-        // 动画帧不额外扰动侧栏重渲染
+        // Push the sidebar content width: during open/close animations the
+        // content must hold the target width and anchor to the divider side
+        // (see Sidebar::render) to slide rather than compress; in steady
+        // state the two values are equal, notify fires only on change, and
+        // animation frames do not needlessly disturb sidebar re-renders
         let sidebar_w = self.sidebar_w;
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_panel_width(sidebar_w, cx));
@@ -954,8 +1062,10 @@ impl Render for AppView {
                 this.sidebar
                     .update(cx, |sidebar, cx| sidebar.open_search(window, cx));
             }))
-            // 会话内搜索：转发给当前会话的线程视图；Close 由 Esc 在搜索条的
-            // thread-search 上下文触发（输入框的 Escape action 会放行到该上下文）
+            // In-session search: forwarded to the current session's thread
+            // view; Close is triggered by Esc in the search bar's
+            // thread-search context (the composer's Escape action propagates
+            // through to that context)
             .on_action(cx.listener(|this, _: &FocusThreadSearch, window, cx| {
                 if let Some(sid) = &this.current
                     && let Some(views) = this.views.get(sid)
@@ -984,8 +1094,10 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal_panel(window, cx);
             }))
-            // 自愈兜底：选择手势的结束依赖收到 MouseUpEvent，而某些系统级按压
-            // （HTCAPTION、边框缩放）收不到。未按键的移动说明手势早已结束。
+            // Self-healing fallback: ending a selection gesture depends on
+            // receiving MouseUpEvent, which some system-level presses
+            // (HTCAPTION, border resizing) never deliver. A move with no
+            // button pressed means the gesture ended long ago.
             .on_mouse_move(cx.listener(|_, event: &MouseMoveEvent, window, cx| {
                 if event.pressed_button.is_none() {
                     gpui_kit::base::TextSelection::end(window, cx);
@@ -1000,19 +1112,22 @@ impl Render for AppView {
                     .size_full()
                     .relative()
                     .child(self.dock.clone())
-                    // 边缘段覆盖层最后渲染 = 最顶层（dock 已关，无把手条冲突）
+                    // The edge phase overlay renders last = topmost (the dock is
+                    // closed, no handle bar conflict)
                     .when_some(self.render_dock_edge(window, cx), ParentElement::child)
                     .into_any_element()
             }))
-            // 标签页栏 "+" 的加面板菜单：deferred 到窗口层，锚定 "+" 正下方
+            // Tab bar "+" add-panel menu: deferred to the window layer,
+            // anchored directly below the "+"
             .when(self.right_menu_open, |this| {
                 this.child(self.render_right_menu_dropdown(window, cx))
             })
-            // 标题栏三个点的会话菜单（deferred 弹层）
+            // Title bar three-dots session menu (deferred popup)
             .when(self.session_menu_open, |this| {
                 this.child(self.render_session_menu(cx))
             })
-            // Yolo 确认框：最后渲染 = 最顶层（覆盖 settings/dock/hero 全部内容）
+            // Yolo confirmation dialog: rendered last = topmost (covers all
+            // settings/dock/hero content)
             .when(self.yolo_confirm_open, |this| {
                 this.child(self.render_yolo_confirm(cx))
             })
@@ -1020,8 +1135,10 @@ impl Render for AppView {
 }
 
 fn main() {
-    // PIG_NET_TEST=1：不开窗口，用真实配置逐个测试供应商连通性（网络排障用）
-    // PIG_NET_TEST=full：再走一遍完整发消息链路（含系统提示词与工具），打印事件流
+    // PIG_NET_TEST=1: skip opening a window and test each provider's
+    // connectivity with the real config (for network troubleshooting)
+    // PIG_NET_TEST=full: additionally run the full message-sending flow
+    // (including system prompt and tools), printing the event stream
     if let Some(mode) = std::env::var_os("PIG_NET_TEST") {
         if mode == "full" {
             pig_core::net_test_full_turn(None);
@@ -1040,33 +1157,41 @@ fn main() {
     let config_path = setup.map(|s| s.config_path);
 
     gpui_kit::application()
-        // 先查 pig 自带资产（供应商图标），未命中回落 gpui-kit 官方组件资产
+        // Look up pig's own assets first (provider icons), falling back
+        // to gpui-kit official component assets on a miss
         .with_assets(crate::assets::ChainedAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            // 记录平台默认字体（字体设置「系统默认」档的恢复值）
+            // Record the platform default font (the restore value for the
+            // "system default" option in font settings)
             font::capture_defaults(cx);
             cx.set_global(ThemeFollowSystem(true));
 
             cx.bind_keys([
                 KeyBinding::new("ctrl-n", NewTask, None),
                 KeyBinding::new("ctrl-k", FocusSearch, None),
-                // 会话内搜索（普通输入框不消费 ctrl-f：上游 Search action 对
-                // 非 searchable 输入 cx.propagate() 放行到应用层）
+                // In-session search (plain inputs do not consume ctrl-f: the
+                // upstream Search action cx.propagate()s through for
+                // non-searchable inputs, reaching the app layer)
                 KeyBinding::new("ctrl-f", FocusThreadSearch, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
-                // 右侧面板：改动可用；浏览器/侧边聊天先绑键让菜单展示快捷键，功能后续加
+                // Right panel: Changes is available; browser/side chat keys
+                // are bound just to show shortcuts in the menu, features to
+                // come
                 KeyBinding::new("ctrl-shift-g", ToggleChanges, None),
                 KeyBinding::new("ctrl-t", ToggleBrowser, None),
                 KeyBinding::new("alt-ctrl-b", ToggleSideChat, None),
-                // 底部终端面板（对标终端类应用的 ctrl-` 惯例）
+                // Bottom terminal panel (matching the ctrl-` convention of
+                // terminal apps)
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("escape", CloseSearch, Some("search")),
                 KeyBinding::new("escape", CloseThreadSearch, Some("thread-search")),
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
-                // 输入框 / 和 @ 弹层的键盘导航：与输入框自身绑定同 context、注册在
-                // 后（同深度后注册者优先），弹层关闭时 Composer 的处理器
-                // cx.propagate() 放行回落到输入框原生行为（光标移动/缩进/Esc）
+                // Keyboard navigation for the composer's / and @ popups: same
+                // context as the composer's own bindings but registered later
+                // (at equal depth the later registration wins); when a popup
+                // is closed, Composer's handlers cx.propagate() and fall back
+                // to the input's native behavior (caret movement/indent/Esc)
                 KeyBinding::new("up", ComposerNavUp, Some("Input")),
                 KeyBinding::new("down", ComposerNavDown, Some("Input")),
                 KeyBinding::new("tab", ComposerNavNext, Some("Input")),
@@ -1074,8 +1199,10 @@ fn main() {
                 KeyBinding::new("escape", ComposerPopupClose, Some("Input")),
             ]);
 
-            // 初始窗口不超出显示器可用区域：GPUI 的尺寸是逻辑像素，缩放下
-            // 1280x800 可能比实际屏幕还大，底部会被任务栏挡住；给边框和任务栏留余量。
+            // Keep the initial window inside the display's usable area: GPUI
+            // sizes are logical pixels, so under scaling 1280x800 can be
+            // larger than the physical screen and the bottom would be hidden
+            // by the taskbar; leave headroom for the frame and taskbar.
             let mut window_size = size(px(1280.), px(800.));
             if let Some(display) = cx.primary_display() {
                 let bounds = display.bounds();
@@ -1084,9 +1211,12 @@ fn main() {
                     window_size.height.min(bounds.size.height - px(96.)),
                 );
             }
-            // 自检窗口贴右下角：与本机正在运行的同尺寸实例（同居中）错开——
-            // 窗口被完全遮挡时 macOS 判 occluded、绘制循环停摆，
-            // prepaint 不跑会让 selftest 的 bounds 断言全 0
+            // Pin the selftest window to the bottom-right corner: to offset
+            // it from a same-sized instance already running on this machine
+            // (both would be centered) — a fully covered window is judged
+            // occluded by macOS and the draw loop stalls, and without
+            // prepaint running the selftest's bounds assertions would all be
+            // 0
             let window_bounds = if selftest {
                 match cx.primary_display() {
                     Some(display) => {
@@ -1113,22 +1243,31 @@ fn main() {
                 };
 
                 cx.open_window(options, |window, cx| {
-                    // selftest 依赖真实绘制（bounds 在 prepaint 记录）：后台启动的
-                    // 窗口可能被遮挡/未激活导致渲染循环停摆，显式提到前台
+                    // selftest relies on real drawing (bounds are recorded in
+                    // prepaint): a window opened in the background may be
+                    // occluded or inactive, stalling the render loop —
+                    // explicitly bring it to front
                     window.activate_window();
-                    // 窗口若落在非当前 Space 会被系统判定遮挡、绘制循环停摆
-                    //（prepaint 不跑、selftest 的 bounds 断言全 0）；激活把 app 提到前台
+                    // If the window lands on a non-current Space the system
+                    // judges it occluded and the draw loop stalls (prepaint
+                    // does not run, and the selftest's bounds assertions
+                    // would all be 0); the activation brings the app to
+                    // front
                     cx.activate(true);
-                    // gpui-kit init 固定为亮色，开窗时按系统外观覆盖
+                    // gpui-kit init pins light mode; override by system
+                    // appearance when opening the window
                     Theme::sync_system_appearance(Some(window), cx);
                     let view =
                         cx.new(|cx| AppView::new(window, cx, config_path.clone(), cwd.clone()));
-                    // AppView 实体就位后安装 dock 布局（面板持有 AppView 的 weak 引用）
+                    // Install the dock layout once the AppView entity is in
+                    // place (panels hold weak references to AppView)
                     view.update(cx, |app, cx| app.install_dock(window, cx));
                     if selftest {
                         let view = view.clone();
-                        // 终端面板开关需要 &mut Window（spawn PTY/焦点），把窗口句柄
-                        // 带进自测协程，经 update_window 回到窗口上下文
+                        // Toggling the terminal panel needs &mut Window
+                        // (spawn PTY/focus), so carry the window handle into
+                        // the selftest coroutine and return to the window
+                        // context via update_window
                         let window_handle = window.window_handle();
                         cx.spawn(async move |cx| {
                             run_selftest(view, window_handle, cx).await;

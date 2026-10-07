@@ -1,8 +1,10 @@
-//! / 和 @ 弹层的键盘导航与命令分阶（staged command）headless 测试。
-//! 按键走真实派发链：keystroke → Input context 上后注册的应用绑定（抢过
-//! 输入框原生绑定）→ 动作冒泡到 Composer 根的 on_action。
-//! 注意：本文件必须显式导入——`use super::*` 会把 gpui 的 `test` 宏导进来
-//! 遮蔽内置 #[test] 并展开无限递归（dock.rs 踩过的同款坑）。
+//! Headless tests for keyboard navigation and staged commands in the / and @ popups.
+//! Key presses go through the real dispatch chain: keystroke → app bindings registered
+//! on the Input context (overtaking the composer's native bindings) → actions bubble
+//! to the Composer root's on_action.
+//! Note: this file must import explicitly, as `use super::*` pulls in gpui's `test`
+//! macro, shadowing the built-in #[test] and expanding into infinite recursion (the
+//! same trap hit in dock.rs).
 
 use super::{Composer, ComposerEvent, Popup};
 use crate::{ComposerNavDown, ComposerNavNext, ComposerNavPrev, ComposerNavUp, ComposerPopupClose};
@@ -11,8 +13,8 @@ use gpui_kit::{AppContext as _, KeyBinding};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// 与 main.rs 相同的 5 条 Input context 绑定（测试里 gpui_kit::init 之后注册，
-/// 同深度后注册者优先——复刻生产接线）
+/// The same 5 Input context bindings as main.rs (registered after gpui_kit::init in
+/// tests; at equal depth the later registration wins, replicating production wiring)
 fn bind_popup_keys(cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
         cx.bind_keys([
@@ -50,8 +52,9 @@ fn open_composer(cx: &mut gpui_kit::TestAppContext) -> gpui_kit::WindowHandle<Pr
     )
 }
 
-/// 捕获 Composer 事件（断言「分阶未发送/发送时按命令分派」），并把焦点放进输入框。
-/// 返回的 Subscription 必须活到测试结束（drop 即退订）
+/// Captures Composer events (asserting "staging sends nothing / dispatches by
+/// command when sent") and puts focus into the composer.
+/// The returned Subscription must live until the test ends (dropping unsubscribes)
 fn capture_events(
     window: &gpui_kit::WindowHandle<Probe>,
     cx: &mut gpui_kit::TestAppContext,
@@ -79,7 +82,7 @@ fn capture_events(
     (captured, subscription.expect("subscription"))
 }
 
-/// TestWindowExt 为 Window 实现：经 cx.update_window 拿 &mut Window 再派发
+/// TestWindowExt implements this for Window: get &mut Window via cx.update_window, then dispatch
 fn press(cx: &mut gpui_kit::TestAppContext, window: &gpui_kit::WindowHandle<Probe>, key: &str) {
     cx.update_window((*window).into(), |_, window, cx| window.press(key, cx))
         .expect("window alive");
@@ -111,7 +114,8 @@ fn read(
         .unwrap()
 }
 
-/// / 弹层：Tab/↑↓ 循环切换 → Enter 分阶为 chip（不发送）→ 续写 → Enter 按命令分派
+/// Slash popup: Tab/arrow keys cycle → Enter stages as a chip (nothing sent) → keep
+/// typing → Enter dispatches by command
 #[gpui_kit::test]
 fn slash_popup_nav_stages_then_dispatches(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::init);
@@ -119,61 +123,66 @@ fn slash_popup_nav_stages_then_dispatches(cx: &mut gpui_kit::TestAppContext) {
     let window = open_composer(cx);
     let (events, _events_sub) = capture_events(&window, cx);
 
-    // 输入 / 打开弹层（默认选中首项 /clear）
+    // Type / to open the popup (first item /clear selected by default)
     type_text(cx, &window, "/");
     let (popup, sel, _, _) = read(cx, &window);
     assert!(
         matches!(popup, Some((Popup::Slash, 0))),
-        "弹层应打开: {popup:?}"
+        "popup should be open: {popup:?}"
     );
     assert_eq!(sel, 0);
 
-    // Tab 循环：0 → 1 → 0；↓ 再 +1；↑ -1（回绕）
+    // Tab cycles: 0 → 1 → 0; down adds 1, up subtracts 1 (wraps around)
     press(cx, &window, "tab");
     let (_, sel, _, _) = read(cx, &window);
-    assert_eq!(sel, 1, "Tab 应切到 /compact");
+    assert_eq!(sel, 1, "Tab should move selection to /compact");
     press(cx, &window, "tab");
     let (_, sel, _, _) = read(cx, &window);
-    assert_eq!(sel, 0, "Tab 应回绕");
+    assert_eq!(sel, 0, "Tab should wrap around");
     press(cx, &window, "down");
     let (_, sel, _, _) = read(cx, &window);
-    assert_eq!(sel, 1, "↓ 应 +1");
+    assert_eq!(sel, 1, "down should advance selection by 1");
     press(cx, &window, "up");
     let (_, sel, _, _) = read(cx, &window);
-    assert_eq!(sel, 0, "↑ 应 -1");
+    assert_eq!(sel, 0, "up should move selection back by 1");
 
-    // 回到 /compact 按 Enter：分阶为 token chip，不发送任何事件
+    // Back on /compact, press Enter: staged as a token chip, no events sent
     press(cx, &window, "down");
     press(cx, &window, "enter");
     let (popup, _, value, tokens) = read(cx, &window);
-    assert!(popup.is_none(), "确认后弹层应关闭: {popup:?}");
+    assert!(
+        popup.is_none(),
+        "popup should close after confirm: {popup:?}"
+    );
     assert!(
         value.starts_with("/compact "),
-        "命令应分阶为 chip: {value:?}"
+        "command should be staged as a chip: {value:?}"
     );
-    assert_eq!(tokens, 1, "命令应是原子 token");
+    assert_eq!(tokens, 1, "command should be an atomic token");
     assert!(
         events.borrow().is_empty(),
-        "分阶不得发送: {:?}",
+        "staging must not send: {:?}",
         events.borrow().len()
     );
 
-    // chip 后续写重点说明，再按 Enter：按命令分派，附续写文本
-    type_text(cx, &window, "重点关注 README");
+    // After the chip, type extra instructions then press Enter: dispatched by
+    // command with the appended text
+    type_text(cx, &window, "focus on the README");
     press(cx, &window, "enter");
     let (_, _, value, _) = read(cx, &window);
-    assert_eq!(value, "", "发送后输入框应清空");
+    assert_eq!(value, "", "input should be cleared after send");
     let captured = events.borrow();
-    assert_eq!(captured.len(), 1, "应只发一次 Compact 事件");
+    assert_eq!(captured.len(), 1, "should emit exactly one Compact event");
     match &captured[0] {
         ComposerEvent::Compact { instruction } => {
-            assert_eq!(instruction.as_deref(), Some("重点关注 README"))
+            assert_eq!(instruction.as_deref(), Some("focus on the README"))
         }
-        _ => panic!("应为 Compact 事件"),
+        _ => panic!("expected a Compact event"),
     }
 }
 
-/// @ 弹层：↑↓ 切换 → Enter 插文件 token（不发送）；Esc 关闭弹层
+/// Mention popup: arrow keys navigate → Enter inserts a file token (nothing sent);
+/// Esc closes the popup
 #[gpui_kit::test]
 fn mention_popup_nav_inserts_and_escape_closes(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::init);
@@ -192,52 +201,60 @@ fn mention_popup_nav_inserts_and_escape_closes(cx: &mut gpui_kit::TestAppContext
     let (popup, sel, _, _) = read(cx, &window);
     assert!(
         matches!(popup, Some((Popup::Mention, _))),
-        "弹层应打开: {popup:?}"
+        "popup should be open: {popup:?}"
     );
     assert_eq!(sel, 0);
-    // 弹层必须真实渲染可见（不只是状态位）
+    // The popup must actually render visible (not just a state flag)
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     cx.update_window(window.into(), |_, window, _| {
         let snap = window.find("composer-popup");
-        assert!(snap.visible(), "弹层应可见");
+        assert!(snap.visible(), "popup should be visible");
         assert!(
             snap.bounds().size.width > gpui_kit::px(200.),
-            "弹层应铺满输入框宽度: {:?}",
+            "popup should span the input width: {:?}",
             snap.bounds()
         );
     })
     .unwrap();
 
-    // ↓ 选中第二项，Enter 插入文件 token（不发送）
+    // Down selects the second item; Enter inserts the file token (nothing sent)
     press(cx, &window, "down");
     press(cx, &window, "enter");
     let (popup, _, value, tokens) = read(cx, &window);
     assert!(popup.is_none());
-    assert!(value.contains("@src/b.rs"), "应插入第二项: {value:?}");
+    assert!(
+        value.contains("@src/b.rs"),
+        "the second item should be inserted: {value:?}"
+    );
     assert_eq!(tokens, 1);
-    // 不得发出消息/命令类事件（@ 触发的 SearchFiles 是正常搜索请求）
+    // No message/command events may be emitted (SearchFiles triggered by @ is a
+    // normal search request)
     assert!(
         events
             .borrow()
             .iter()
             .all(|e| matches!(e, ComposerEvent::SearchFiles(_))),
-        "插入 token 不得发送: {:?}",
+        "inserting a token must not send: {:?}",
         events.borrow().len()
     );
 
-    // 再次打开弹层，Esc 关闭且输入内容保留
+    // Reopen the popup; Esc closes it and the typed text is preserved
     type_text(cx, &window, "@");
     let (popup, _, _, _) = read(cx, &window);
     assert!(matches!(popup, Some((Popup::Mention, _))));
     press(cx, &window, "escape");
     let (popup, _, value, _) = read(cx, &window);
-    assert!(popup.is_none(), "Esc 应关闭弹层");
-    assert!(value.ends_with('@'), "Esc 只关弹层不动文本: {value:?}");
+    assert!(popup.is_none(), "Esc should close the popup");
+    assert!(
+        value.ends_with('@'),
+        "Esc should only close the popup, leaving text untouched: {value:?}"
+    );
 }
 
-/// 回归：删掉 chip/@token 的尾随空格后，弹层不得「复活」——
-/// 触发位置落在 token 范围内不算真触发符（用户实测反馈）
+/// Regression: after deleting the trailing space of a chip/@-token, the popup must
+/// not "revive"; a trigger position falling inside the token range does not count as
+/// a real trigger (user-reported issue)
 #[gpui_kit::test]
 fn token_tail_backspace_does_not_reopen_popup(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::init);
@@ -245,17 +262,22 @@ fn token_tail_backspace_does_not_reopen_popup(cx: &mut gpui_kit::TestAppContext)
     let window = open_composer(cx);
     let _events = capture_events(&window, cx);
 
-    // 命令 chip：/ → Enter 分阶（/clear + 尾随空格）→ 退格删空格
+    // Command chip: / → Enter stages (/clear plus a trailing space) → backspace
+    // deletes the space
     type_text(cx, &window, "/");
     press(cx, &window, "enter");
     let (popup, _, value, tokens) = read(cx, &window);
     assert!(popup.is_none() && value.starts_with("/clear ") && tokens == 1);
     press(cx, &window, "backspace");
     let (popup, _, value, _) = read(cx, &window);
-    assert_eq!(value, "/clear", "空格应被删掉: {value:?}");
-    assert!(popup.is_none(), "删空格后弹层不得复活: {popup:?}");
+    assert_eq!(value, "/clear", "the space should be deleted: {value:?}");
+    assert!(
+        popup.is_none(),
+        "popup must not reappear after deleting the space: {popup:?}"
+    );
 
-    // @token 同款：清空输入 → 插文件 → 退格删尾随空格
+    // Same for the @-token: clear input → insert file → backspace deletes the
+    // trailing space
     window
         .update(cx, |probe, window, cx| {
             probe.composer.update(cx, |this, cx| {
@@ -273,18 +295,23 @@ fn token_tail_backspace_does_not_reopen_popup(cx: &mut gpui_kit::TestAppContext)
     press(cx, &window, "backspace");
     let (popup, _, value, _) = read(cx, &window);
     assert_eq!(value, "@src/a.rs");
-    assert!(popup.is_none(), "@token 删空格后弹层不得复活: {popup:?}");
+    assert!(
+        popup.is_none(),
+        "popup must not reappear after deleting an @token's space: {popup:?}"
+    );
 }
 
-/// 计划开关（与权限档正交）：模式弹层顶部勾选「计划」→ SetPlanMode(true) +
-/// bar 出计划 chip；chip 点 X 关闭 → SetPlanMode(false) + chip 消失
+/// Plan toggle (orthogonal to the permission level): checking "Plan" at the top of
+/// the mode popup → SetPlanMode(true) and a plan chip appears in the bar; clicking
+/// the chip's X → SetPlanMode(false) and the chip disappears
 #[gpui_kit::test]
 fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::init);
     bind_popup_keys(cx);
 
-    // 模式弹层从 bar 向上展开：用压底布局把 composer 钉到窗口底部，
-    // 弹层才落在视口内可命中（顶对齐时弹层 y 为负被裁）
+    // The mode popup expands upward from the bar: use a bottom-pinned layout to pin
+    // the composer to the window bottom, so the popup lands inside the viewport and
+    // is hittable (with top alignment the popup's y goes negative and gets clipped)
     struct BottomProbe {
         composer: gpui_kit::Entity<Composer>,
     }
@@ -308,7 +335,8 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
             BottomProbe { composer }
         },
     );
-    // 事件捕获与聚焦（BottomProbe 与 Probe 结构同名不同型，单独订阅）
+    // Event capture and focus (BottomProbe and Probe share field names but differ in
+    // type; subscribe separately)
     let captured: Rc<RefCell<Vec<ComposerEvent>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = captured.clone();
     let mut subscription = None;
@@ -331,7 +359,8 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
         .unwrap();
     let _sub = subscription.expect("subscription");
 
-    // 打开模式弹层（bar chip 无 test_support 观测点，程序化开启——与点 chip 同渲染路径）
+    // Open the mode popup (the bar chip has no test_support observation point, so
+    // open it programmatically, same render path as clicking the chip)
     window
         .update(cx, |probe, _, cx| {
             probe.composer.update(cx, |this, cx| {
@@ -342,40 +371,43 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
         .unwrap();
     cx.update_window(*window, |_, window, cx| window.render_frame(cx))
         .unwrap();
-    // 弹层入场动画走真实墙钟：睡过它再渲一帧，命中区才生效
+    // The popup enter animation runs on the real wall clock: sleep past it and render
+    // another frame so the hit region takes effect
     std::thread::sleep(std::time::Duration::from_millis(250));
     cx.update_window(*window, |_, window, cx| window.render_frame(cx))
         .unwrap();
     cx.update_window(*window, |_, window, _| {
-        // 计划行与列表行的高亮块同宽同边距（回归：header 槽全宽，行要自带 mx_1）
+        // The plan row and list row highlight blocks share width and margins
+        // (regression: the header slot is full width, the row must carry its own mx_1)
         let plan = window.find("plan-mode-toggle");
         let row0 = window
             .try_find(gpui_kit::base::IndexPath::new(0))
-            .expect("列表首行");
+            .expect("first list row");
         assert_eq!(
             plan.bounds().origin.x,
             row0.bounds().origin.x,
-            "高亮块左缘应对齐: {:?} vs {:?}",
+            "highlight left edges should align: {:?} vs {:?}",
             plan.bounds(),
             row0.bounds()
         );
         assert_eq!(
             plan.bounds().size.width,
             row0.bounds().size.width,
-            "高亮块应同宽"
+            "highlight blocks should have equal width"
         );
         assert!(
             window.try_find("plan-mode-toggle").is_some(),
-            "弹层应有计划勾选行"
+            "popup should have the plan toggle row"
         );
         assert!(
             window.try_find("plan-chip").is_none(),
-            "未开启时无计划 chip"
+            "no plan chip when plan is not enabled"
         );
     })
     .unwrap();
 
-    // 勾选「计划」：事件 + chip 出现（弹层保持打开，与 fs 开关同款取舍）
+    // Check "Plan": event emitted and chip appears (popup stays open, same trade-off
+    // as the fs toggles)
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-mode-toggle", cx);
         window.render_frame(cx);
@@ -385,21 +417,21 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| {
             assert!(
                 probe.composer.read(cx).plan_enabled(),
-                "勾选后 plan_enabled"
+                "plan_enabled after checking"
             );
         })
         .unwrap();
     cx.update_window(*window, |_, window, _| {
         assert!(
             window.try_find("plan-chip").is_some(),
-            "开启后应出计划 chip"
+            "plan chip should appear after enabling"
         );
     })
     .unwrap();
 
-    // 弹层还开着，先关掉再点 chip 的 X
+    // The popup is still open; close it first, then click the chip's X
     cx.update_window(*window, |_, window, cx| {
-        window.click("plan-mode-toggle", cx); // 再点一次 = 关（同时验证来回切换）
+        window.click("plan-mode-toggle", cx); // clicking again = off (also verifies toggling back and forth)
         window.render_frame(cx);
     })
     .unwrap();
@@ -408,7 +440,7 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
             assert!(!probe.composer.read(cx).plan_enabled());
         })
         .unwrap();
-    // 重新打开再开计划，走 chip X 关闭路径
+    // Reopen, enable plan again, then exercise the chip X close path
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-mode-toggle", cx);
         window.render_frame(cx);
@@ -421,11 +453,17 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
     .unwrap();
     window
         .update(cx, |probe, _, cx| {
-            assert!(!probe.composer.read(cx).plan_enabled(), "X 关闭后应复位");
+            assert!(
+                !probe.composer.read(cx).plan_enabled(),
+                "should reset after closing via X"
+            );
         })
         .unwrap();
     cx.update_window(*window, |_, window, _| {
-        assert!(window.try_find("plan-chip").is_none(), "关闭后 chip 消失");
+        assert!(
+            window.try_find("plan-chip").is_none(),
+            "chip disappears after close"
+        );
     })
     .unwrap();
 
@@ -440,11 +478,12 @@ fn plan_mode_toggle_and_chip(cx: &mut gpui_kit::TestAppContext) {
     assert_eq!(
         plan_events,
         vec![true, false, true, false],
-        "开/关/开/关各发一次: {plan_events:?}"
+        "one event per on/off/on/off toggle: {plan_events:?}"
     );
 }
 
-/// 计划审批面板测试辅助：给 composer 注入一笔 ExitPlanMode 审批并渲一帧
+/// Plan approval panel test helper: inject an ExitPlanMode approval into the
+/// composer and render one frame
 fn set_plan_approval(
     cx: &mut gpui_kit::TestAppContext,
     window: &gpui_kit::WindowHandle<Probe>,
@@ -454,7 +493,8 @@ fn set_plan_approval(
         request_id: request_id.to_string(),
         session_id: "s1".to_string(),
         tool: "ExitPlanMode".to_string(),
-        detail: "# 实施计划\n\n1. 第一步：改协议\n2. 第二步：改引擎".to_string(),
+        detail: "# Implementation plan\n\n1. Step one: change the protocol\n2. Step two: change the engine".to_string(),
+        danger_key: None,
         cwd: "/tmp/proj".to_string(),
     };
     window
@@ -468,15 +508,17 @@ fn set_plan_approval(
         .unwrap();
 }
 
-/// 计划审批面板（kimi-code 同款）：ExitPlanMode 审批渲染 markdown 计划全文 +
-/// 修改/拒绝并退出/批准 plan 三按钮；批准=Allow，修改/拒绝=Reject；决议后
-/// plan_state 与审批态清空
+/// Plan approval panel (same as kimi-code): the ExitPlanMode approval renders the
+/// full markdown plan plus three buttons: revise / reject and exit / approve plan;
+/// approve=Allow, revise/reject=Reject; after the decision, plan_state and the
+/// approval state are cleared
 #[gpui_kit::test]
 fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::AppContext as _;
     cx.update(gpui_kit::init);
     bind_popup_keys(cx);
-    // 审批条整组替换输入区：窗口高一点，按钮才落在视口内可命中
+    // The approval bar replaces the whole input area: make the window taller so the
+    // buttons land inside the viewport and are hittable
     let window = cx.open_window(
         gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(700.)),
         |window, cx| {
@@ -490,18 +532,25 @@ fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(*window, |_, window, _| {
         assert!(
             window.try_find("plan-approval-detail").is_some(),
-            "计划面板正文应渲染"
+            "plan panel detail should render"
         );
-        assert!(window.try_find("plan-approve").is_some(), "批准按钮");
-        assert!(window.try_find("plan-revise").is_some(), "修改按钮");
-        assert!(window.try_find("plan-reject").is_some(), "拒绝并退出按钮");
-        assert!(window.try_find("plan-path").is_some(), "计划文件路径链接");
-        // 通用审批条的「本会话内批准」不应出现在计划面板
+        assert!(window.try_find("plan-approve").is_some(), "approve button");
+        assert!(window.try_find("plan-revise").is_some(), "revise button");
+        assert!(
+            window.try_find("plan-reject").is_some(),
+            "reject-and-exit button"
+        );
+        assert!(
+            window.try_find("plan-path").is_some(),
+            "plan file path link"
+        );
+        // The generic approval bar's "always allow in this session" must not appear
+        // in the plan panel
         assert!(window.try_find("approval-always").is_none());
     })
     .unwrap();
 
-    // 路径链接点击 → ComposerEvent::OpenFile（.pigcode/plans/plan-<sid>.md）
+    // Path link click → ComposerEvent::OpenFile (.pigcode/plans/plan-<sid>.md)
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-path", cx);
     })
@@ -518,11 +567,11 @@ fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
         assert_eq!(
             opened,
             vec!["/tmp/proj/.pigcode/plans/plan-s1.md"],
-            "路径链接应打开计划文件: {opened:?}"
+            "path link should open the plan file: {opened:?}"
         );
     }
 
-    // 批准 plan → Allow
+    // Approve plan → Allow
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-approve", cx);
     })
@@ -531,12 +580,13 @@ fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| {
             assert!(
                 probe.composer.read(cx).plan_state.is_none(),
-                "决议后 plan_state 清空"
+                "plan_state cleared after decision"
             );
         })
         .unwrap();
 
-    // 修改 → 输入态（取消一次回三按钮，再进输入态打字提交）
+    // Revise → input mode (cancel once to return to the three buttons, then enter
+    // input mode again, type, and submit)
     set_plan_approval(cx, &window, "req-2");
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-revise", cx);
@@ -546,32 +596,35 @@ fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(*window, |_, window, _| {
         assert!(
             window.try_find("plan-revise-submit").is_some(),
-            "修改后应出「提交并拒绝」"
+            "revise mode should show the submit-and-reject button"
         );
         assert!(
             window.try_find("plan-approve").is_none(),
-            "输入态隐藏三按钮"
+            "input mode hides the three buttons"
         );
     })
     .unwrap();
-    // 取消：回三按钮态
+    // Cancel: back to the three-button state
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-revise-cancel", cx);
         window.render_frame(cx);
     })
     .unwrap();
     cx.update_window(*window, |_, window, _| {
-        assert!(window.try_find("plan-approve").is_some(), "取消后回三按钮");
+        assert!(
+            window.try_find("plan-approve").is_some(),
+            "back to the three buttons after cancel"
+        );
     })
     .unwrap();
-    // 再进输入态：打字 → 提交并拒绝（带反馈）
+    // Enter input mode again: type → submit and reject (with feedback)
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-revise", cx);
         window.render_frame(cx);
     })
     .unwrap();
     cx.update_window(*window, |_, window, cx| {
-        window.input("第三步方案不对", cx);
+        window.input("step three is wrong", cx);
     })
     .unwrap();
     cx.update_window(*window, |_, window, cx| {
@@ -579,7 +632,7 @@ fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
     })
     .unwrap();
 
-    // 拒绝并退出 → Reject（无反馈）
+    // Reject and exit → Reject (no feedback)
     set_plan_approval(cx, &window, "req-3");
     cx.update_window(*window, |_, window, cx| {
         window.click("plan-reject", cx);
@@ -605,10 +658,49 @@ fn plan_approval_panel_decides(cx: &mut gpui_kit::TestAppContext) {
             (
                 "req-2",
                 pig_protocol::ApprovalDecision::Reject,
-                Some("第三步方案不对".to_string())
+                Some("step three is wrong".to_string())
             ),
             ("req-3", pig_protocol::ApprovalDecision::Reject, None),
         ],
-        "批准/修改带反馈拒绝/裸拒绝各就各位: {decisions:?}"
+        "approve / revise-with-feedback reject / bare reject each in place: {decisions:?}"
     );
+}
+
+/// Guard test for the danger_key static mapping: all six reason keys core already
+/// emits have localized text (zh via danger_reason_text, en via direct registry
+/// lookup of the dynamic key; both non-empty with no unreplaced placeholders);
+/// unknown keys (added by core in the future) return None and no warning line is
+/// shown. When core adds a new DangerReason, danger_reason_text's match arms and
+/// this table must be updated in sync.
+#[test]
+fn danger_reason_text_covers_all_known_keys() {
+    const KEYS: [&str; 6] = [
+        "fork_bomb",
+        "rm_rf_root",
+        "disk_format",
+        "dd_block",
+        "shutdown",
+        "chmod_root",
+    ];
+    for key in KEYS {
+        // zh: go through the production function (ctor already pins zh-CN)
+        let zh = super::danger_reason_text(key)
+            .unwrap_or_else(|| panic!("danger_key {key} should have a static mapping"));
+        assert!(
+            !zh.is_empty() && !zh.contains("%{"),
+            "{key} zh text is abnormal: {zh}"
+        );
+        // en: look the dynamic key up directly in the registry (do not flip the
+        // process-global locale, to avoid cross-contamination with concurrent tests)
+        let en_key = format!("approval.danger.{key}");
+        let en = rust_i18n::t!(en_key.as_str(), locale = "en");
+        assert!(
+            !en.is_empty() && !en.contains("%{") && !en.starts_with("approval.danger."),
+            "{key} en text is abnormal (t! echoes the key name when missing): {en}"
+        );
+    }
+    assert_eq!(super::danger_reason_text("future_new_reason"), None);
+    // The title key exists in both locales (used as the warning line prefix)
+    assert!(!rust_i18n::t!("approval.danger.high_risk").is_empty());
+    assert!(!rust_i18n::t!("approval.danger.high_risk", locale = "en").is_empty());
 }

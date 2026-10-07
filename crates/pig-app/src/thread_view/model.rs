@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) use crate::anim::{EXPAND_ANIM_DUR, ExpandAnim};
 
-/// 导航预览卡渲染数据（消息下标, 横条 bounds, 用户预览, 助手预览, 是否真实回复文本）
+/// Render data of a nav preview card (message index, bar bounds, user preview, assistant preview, whether it is real reply text)
 pub(crate) type NavCardData = (usize, Bounds<Pixels>, String, String, bool);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12,27 +12,27 @@ pub enum Role {
     System,
 }
 
-/// 代理卡（`Event::SubagentCard` 写入 Agent/AgentSwarm 工具卡；live 直发 +
-/// rollout 持久化回放重建）：元信息 + 后台运行态。无卡时（live 中 SubagentCard
-/// 事件到达前的瞬时态）回落标准工具卡样式
+/// Agent card (written into Agent/AgentSwarm tool cards by `Event::SubagentCard`; live direct delivery plus
+/// rebuild from the persisted rollout on replay): metadata + background run state. With no cards (the transient state in live before the SubagentCard
+/// event arrives) it falls back to the standard tool card style
 #[derive(Clone)]
 pub struct AgentCardMeta {
     pub agent_id: String,
     pub profile: String,
     pub description: String,
-    /// "{provider_name} · {model}"（可带思考档后缀）
+    /// "{provider_name} · {model}" (may carry a reasoning-tier suffix)
     pub model: String,
-    /// 本次运行为后台：后台 Agent/AgentSwarm 的工具调用立即返回回执，done 不代表
-    /// 子代理结束——运行态由子代理真实生命周期（SubagentActivity）驱动
+    /// This run is backgrounded: a background Agent/AgentSwarm's tool call returns its receipt immediately, so done does not mean
+    /// the subagent has ended; the run state is driven by the subagent's real lifecycle (SubagentActivity)
     pub background: bool,
-    /// 后台子代理已结束（SubagentActivity finished 置位；回放由 core 补发）；
-    /// 前台卡不看它——前台运行态跟工具调用 done 走
+    /// The background subagent has ended (set by SubagentActivity finished; replay re-emits it from core);
+    /// foreground cards ignore it; the foreground run state follows the tool call's done
     pub finished: bool,
-    /// 完成次序号（SubagentActivity finished 到达顺序）：Swarm 面板按它把已结束的
-    /// 子代理排在前面（先完成的在前）；回放没有该事件，恒 None → 保持发起序
+    /// Finish sequence number (arrival order of SubagentActivity finished): the Swarm panel uses it to move finished
+    /// subagents to the front (earlier finishers first); replay lacks this event and it stays None → keeps launch order
     pub finished_seq: Option<u64>,
-    /// 后台子代理的实时进度行（SubagentActivity item 写入，finished 时清空）；
-    /// 前台卡的进度走 SubagentProgress 写在段级 live_note，不用这个字段
+    /// Live progress row of the background subagent (written by SubagentActivity item, cleared on finished);
+    /// the foreground card's progress goes through SubagentProgress into the segment-level live_note, not this field
     pub live_note: Option<String>,
 }
 
@@ -40,19 +40,19 @@ pub enum Segment {
     Thinking {
         text: String,
         open: bool,
-        /// 用户手动展开/收过后为 true，自动折叠不再覆盖
+        /// True once the user has manually expanded/collapsed; automatic folding no longer overrides it
         pinned: bool,
-        /// 秒表起点（首个 delta 到达时刻）
+        /// Stopwatch start (the moment the first delta arrives)
         started: std::time::Instant,
-        /// 思考结束定格的用时；回放重建的历史段没有真实时钟，保持 None（显示「持续了几秒」）
+        /// Duration frozen when thinking ends; history segments rebuilt by replay have no real clock and keep None (shown as "lasted a few seconds")
         duration: Option<std::time::Duration>,
-        /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
+        /// Scroll handle of the expanded body (track_scroll keeps the scroll position persistent)
         body_scroll: ScrollHandle,
-        /// 进行中 header 滚动输出行的横向滚动句柄（钉尾显示最新内容）
+        /// Horizontal scroll handle of the in-progress header rolling output line (tail-pinned to show the latest content)
         ticker_scroll: ScrollHandle,
-        /// 滚动输出行的纵滚状态机（换行时旧行向上滚出、新行从下方滚入）
+        /// Vertical-roll state machine of the rolling output line (on line change the old line rolls up and out, the new one rolls in from below)
         ticker: TickerRoll,
-        /// 展开/收起动画状态（见 ExpandAnim）
+        /// Expand/collapse animation state (see ExpandAnim)
         expand_anim: ExpandAnim,
     },
     Markdown {
@@ -66,46 +66,46 @@ pub enum Segment {
         is_error: bool,
         done: bool,
         expanded: bool,
-        /// 写/改类工具的本次编辑 diff（内联 diff 卡片）
+        /// This run's edit diff for write/modify tools (inline diff card)
         edit: Option<EditDiff>,
-        /// 前台子代理的实时进度行（SubagentProgress 写入、ToolCallEnd 清空）；
-        /// 独立字段而非覆盖 summary：运行中原摘要（「子代理 explore: …」）要保留。
-        /// 回放没有该事件，恒为 None
+        /// Live progress row of the foreground subagent (written by SubagentProgress, cleared on ToolCallEnd);
+        /// a separate field rather than overwriting summary: the original summary ("subagent explore: …") must survive while running.
+        /// Replay lacks this event; always None
         live_note: Option<String>,
-        /// 代理卡列表（SubagentCard 事件按 item_id 追加：Agent 一张、AgentSwarm
-        /// 每个子代理一张；非空时按代理卡样式渲染，点击开右侧子代理对话 tab；
-        /// live 直发 + 回放经 rollout 记录重建）
+        /// Agent card list (appended per item_id by SubagentCard events: one for Agent, one
+        /// per subagent for AgentSwarm; when non-empty, rendered in the agent card style; click opens the right-side subagent conversation tab;
+        /// live direct delivery plus rebuild from rollout records on replay)
         agent_cards: Vec<AgentCardMeta>,
-        /// Read 工具代码卡的 UI 态（render 前惰性创建；见 read.rs）
+        /// UI state of the Read tool code card (lazily created before render; see read.rs)
         read_ui: Option<ReadCardUi>,
-        /// Bash 工具代码卡的 UI 态（命令卡 + 输出卡；render 前惰性创建，见 bash.rs）
+        /// UI state of the Bash tool code card (command card + output card; lazily created before render, see bash.rs)
         bash_ui: Option<BashCardUi>,
-        /// 展开/收起动画状态（见 ExpandAnim）
+        /// Expand/collapse animation state (see ExpandAnim)
         expand_anim: ExpandAnim,
-        /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
+        /// Scroll handle of the expanded body (track_scroll keeps the scroll position persistent)
         body_scroll: ScrollHandle,
     },
-    /// 一轮结束时的本轮文件改动面板（ZCode turn 头部文件更改同款）
+    /// The turn's file-changes panel shown at the end of a turn (same as the ZCode turn header file changes)
     TurnChanges {
         rows: Vec<TurnFileRow>,
         open: bool,
-        /// 展开/收起动画状态（见 ExpandAnim）
+        /// Expand/collapse animation state (see ExpandAnim)
         expand_anim: ExpandAnim,
     },
-    /// ExitPlanMode 计划卡（kimi「计划 待确认/已通过」同款）：
-    /// ToolCallBegin(tool=ExitPlanMode) 时由 detail JSON 解出 plan 建立，
-    /// live 与回放同路径；收起一行三态，chevron 展开看计划全文
+    /// ExitPlanMode plan card (same as kimi "Plan pending/approved"):
+    /// built at ToolCallBegin(tool=ExitPlanMode) by parsing the plan out of the detail JSON,
+    /// the same path for live and replay; a collapsed one-line row with three states, the chevron expands to the full plan
     Plan {
         state: Entity<TextViewState>,
-        /// 决议已出（ToolCallEnd 到达）
+        /// The decision has landed (ToolCallEnd arrived)
         done: bool,
-        /// 决议结果：回执含「计划已批准」
+        /// Decision outcome: the receipt contains "Plan approved"
         approved: bool,
         is_error: bool,
-        /// 展开态（默认收起一行）
+        /// Expanded state (collapsed to one line by default)
         open: bool,
         expand_anim: ExpandAnim,
-        /// 展开正文的滚动句柄（track_scroll 持久滚动位置）
+        /// Scroll handle of the expanded body (track_scroll keeps the scroll position persistent)
         body_scroll: ScrollHandle,
     },
     Approval {
@@ -114,16 +114,16 @@ pub enum Segment {
     },
 }
 
-/// Read 工具代码卡的 UI 态（render 前惰性创建；段存活期内保留）
+/// UI state of the Read tool code card (lazily created before render; kept for the segment's lifetime)
 pub struct ReadCardUi {
-    /// 自动换行（默认关：横向滚动）
+    /// Word wrap (off by default: horizontal scrolling)
     pub wrap: bool,
-    /// 复制按钮反馈（换勾，应用惯例不回弹）
+    /// Copy button feedback (swaps to a check; app convention is not to revert)
     pub copied: bool,
-    /// 不折行模式的横向滚动句柄
+    /// Horizontal scroll handle for no-wrap mode
     pub h_scroll: ScrollHandle,
-    /// 解析 + 高亮缓存（首次展开时构建；RefCell：render 走 &self 不可变借用。
-    /// 主题切换经 HighlightedCode.theme 的 Arc 指针判等重算）
+    /// Parsing + highlight cache (built on first expand; RefCell: render goes through &self as an immutable borrow.
+    /// Theme switches recompute via Arc pointer equality on HighlightedCode.theme)
     pub cache: std::cell::RefCell<Option<std::rc::Rc<ReadCardContent>>>,
 }
 
@@ -138,35 +138,35 @@ impl ReadCardUi {
     }
 }
 
-/// Read 输出的解析 + 高亮结果（ReadCardUi.cache 的内容）
+/// Parsed + highlighted result of the Read output (contents of ReadCardUi.cache)
 pub struct ReadCardContent {
-    /// (文件行号, 行内容)
+    /// (file line number, line content)
     pub lines: Vec<(usize, String)>,
-    /// 尾部标注行（[已截断…]/[文件信息…]/[警告…]）
+    /// Trailing annotation lines ([truncated…]/[file info…]/[warning…])
     pub notes: Vec<String>,
-    /// 供高亮的拼接文本（行内容以 \n 相连，不含行号前缀）
+    /// Concatenated text for highlighting (line contents joined with \n, without the line-number prefix)
     pub code: String,
     pub highlighted: crate::code_view::HighlightedCode,
-    /// 不折行模式的内容显式宽度（横向滚动驱动；量宽见 code_view）
+    /// Explicit content width in no-wrap mode (drives horizontal scrolling; measurement in code_view)
     pub max_line_width: Pixels,
 }
 
-/// Bash 工具代码卡的 UI 态（render 前惰性创建；段存活期内保留）
+/// UI state of the Bash tool code card (lazily created before render; kept for the segment's lifetime)
 pub struct BashCardUi {
-    /// 命令卡/输出卡各自的自动换行开关（默认关：横向滚动）
+    /// Word-wrap toggles of the command card/output card (off by default: horizontal scrolling)
     pub cmd_wrap: bool,
     pub out_wrap: bool,
-    /// 复制按钮反馈（换勾，应用惯例不回弹）
+    /// Copy button feedback (swaps to a check; app convention is not to revert)
     pub cmd_copied: bool,
     pub out_copied: bool,
-    /// 命令卡/输出卡各自的纵向滚动句柄
+    /// Vertical scroll handles of the command card/output card
     pub cmd_scroll: ScrollHandle,
     pub out_scroll: ScrollHandle,
-    /// 各自的横向滚动句柄（不折行模式）
+    /// Their horizontal scroll handles (no-wrap mode)
     pub cmd_h_scroll: ScrollHandle,
     pub out_h_scroll: ScrollHandle,
-    /// 命令（bash 高亮）与输出（纯文本）的内容缓存（RefCell：render 只读借用；
-    /// 主题切换经 PreparedCode.highlighted.theme 的 Arc 指针判等重算）
+    /// Content cache of the command (bash highlight) and output (plain text) (RefCell: render borrows read-only;
+    /// theme switches recompute via Arc pointer equality on PreparedCode.highlighted.theme)
     pub cache: std::cell::RefCell<Option<std::rc::Rc<BashCardContent>>>,
 }
 
@@ -186,63 +186,63 @@ impl BashCardUi {
     }
 }
 
-/// Bash 卡内容缓存：命令（bash 语法高亮）+ 输出（"text" 纯文本，仅量宽）
+/// Bash card content cache: command (bash syntax highlight) + output ("text" plain text, width-measured only)
 pub struct BashCardContent {
     pub cmd: crate::code_view::PreparedCode,
     pub out: crate::code_view::PreparedCode,
 }
 
-/// 思考滚动行的纵滚时序（ZCode QueuedSummaryContent 常量）：300ms 滚动 + 500ms 停留
+/// Vertical-roll timing of the thinking rolling line (ZCode QueuedSummaryContent constants): 300ms roll + 500ms hold
 pub(crate) const TICKER_ROLL_TRANSITION: std::time::Duration =
     std::time::Duration::from_millis(300);
-/// 两次滚动的最小间隔（滚动 300 + 停留 500）
+/// Minimum interval between two rolls (300 roll + 500 hold)
 pub(crate) const TICKER_ROLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(800);
-/// 定时器晚到超过该值时，队列里过期的中间条被跳过，只播最新一条
+/// When the timer is late by more than this, stale intermediate queued entries are skipped and only the latest one plays
 pub(crate) const TICKER_ROLL_DRIFT_SKIP: std::time::Duration =
     std::time::Duration::from_millis(250);
-/// 纵滚位移 ≈ 0.8em（text_sm 14px）
+/// Vertical-roll offset ≈ 0.8em (text_sm 14px)
 pub(crate) const TICKER_ROLL_OFFSET_PX: f32 = 11.0;
 
-/// 思考滚动行的纵滚状态机（ZCode QueuedSummaryContent 同款）：
-/// 滚动行 = 累计思考全文最后一个非空行，行号是滚动的 key。行号不变 → 原位刷新
-/// 文本；行号变 → 纵滚（旧行向上滚出、新行从下方滚入，300ms），之后至少停留
-/// 500ms 才滚下一条；停留期间连发的新行排队（最多 2 条：下一条 + 可替换的
-/// 最新条），定时器漂移超阈值时跳过中间条直接播最新。
+/// Vertical-roll state machine of the thinking rolling line (same as ZCode QueuedSummaryContent):
+/// the rolling line = the last non-empty line of the accumulated thinking text, and its line number is the roll key. Unchanged number → refresh the
+/// text in place; changed number → roll vertically (old line rolls up and out, new line rolls in from below, 300ms), then hold at least
+/// 500ms before rolling the next one; new lines arriving during the hold are queued (at most 2: the next one + a replaceable
+/// latest one); when timer drift exceeds the threshold, intermediate entries are skipped and the latest plays directly.
 #[derive(Default)]
 pub(crate) struct TickerRoll {
-    /// 当前显示行（行号, 压单行的文本）
+    /// Currently displayed line (line number, single-line-collapsed text)
     pub displayed: Option<(usize, String)>,
-    /// 退场中的上一行（滚入后 300ms 内叠渲染）
+    /// The previous line while exiting (overlaid for 300ms after the roll-in)
     pub exiting: Option<(usize, String)>,
-    /// 待滚队列：[0] = 下一条（不可覆盖），[1] = 可插队条（新的覆盖旧的）
+    /// Pending roll queue: [0] = the next entry (not overwritable), [1] = the queue-jumping entry (new overwrites old)
     pub(crate) queue: Vec<(usize, String)>,
-    /// 距上次滚入不足一个间隔（800ms 定时器在跑）
+    /// Less than one interval since the last roll-in (the 800ms timer is running)
     pub(crate) rolling: bool,
-    /// 定时器代次：promote/reset 各 +1，作废在途旧定时器
+    /// Timer generation: promote/reset each bump it by 1, invalidating stale in-flight timers
     pub(crate) generation: u64,
-    /// 上次滚入的墙钟时刻（定时器漂移检测）
+    /// Wall-clock moment of the last roll-in (timer drift detection)
     pub(crate) promoted_at: Option<std::time::Instant>,
-    /// 当前显示行是否经滚动入场（首行直接出现，无动画）
+    /// Whether the current line rolled in (the first line appears directly, no animation)
     pub rolled_in: bool,
 }
 
 impl TickerRoll {
-    /// 喂入最新目标行；返回 true = 发生了立即滚动（调用方需起滚动间隔定时器）
+    /// Feed the latest target line; returns true = an immediate roll happened (the caller must start the roll-interval timer)
     pub(crate) fn feed(&mut self, target: (usize, String)) -> bool {
         match &mut self.displayed {
-            // 首行直接显示，不播入场动画（ZCode AnimatePresence initial={false}）
+            // The first line displays directly, without an enter animation (ZCode AnimatePresence initial={false})
             None => {
                 self.displayed = Some(target);
                 false
             }
-            // 同一行号：同行追加，原位刷新文本
+            // Same line number: appended to the same line, refresh the text in place
             Some((ix, text)) if *ix == target.0 => {
                 *text = target.1;
                 false
             }
             _ => {
                 if self.rolling {
-                    // 停留期内入队：同 key 覆盖；否则保第一条，新条占/换第二格
+                    // Enqueued during the hold: same key overwrites; otherwise keep the first entry, and the new entry takes/swaps the second slot
                     if let Some(slot) = self.queue.iter_mut().find(|(ix, _)| *ix == target.0) {
                         *slot = target;
                     } else if self.queue.len() < 2 {
@@ -259,16 +259,16 @@ impl TickerRoll {
         }
     }
 
-    /// 滚动间隔定时器到点：清退场行，按漂移裁剪队列后滚入下一条；
-    /// 返回 true = 滚了新行（调用方续期定时器）
+    /// The roll-interval timer fired: clear the exiting line, trim the queue for drift, then roll in the next entry;
+    /// returns true = a new line rolled (the caller renews the timer)
     pub(crate) fn fire(&mut self, generation: u64, now: std::time::Instant) -> bool {
         if generation != self.generation {
             return false;
         }
         self.exiting = None;
         self.rolling = false;
-        // 主线程繁忙时定时器晚到：继续逐条补播过期行会让用户在卡顿恢复后看到
-        // 一串过期状态，体感更卡——跳过中间条直接播最新
+        // The timer fires late when the main thread is busy: replaying stale lines one by one would show the user
+        // a string of stale states once the stutter clears, feeling even more janky; skip intermediate entries and play the latest directly
         let drifted = self
             .promoted_at
             .is_some_and(|t| now.duration_since(t) > TICKER_ROLL_INTERVAL + TICKER_ROLL_DRIFT_SKIP);
@@ -285,8 +285,8 @@ impl TickerRoll {
         true
     }
 
-    /// 展开/收起切换时重置到最新行（ZCode：滚动行随展开卸载、回折叠时以最新行
-    /// 重新挂载，不重播滚动）；代次 +1 作废在途定时器
+    /// Reset to the latest line on expand/collapse toggle (ZCode: the rolling line unmounts while expanded and remounts
+    /// on the latest line when back to collapsed, without replaying the roll); bump the generation by 1 to invalidate in-flight timers
     pub(crate) fn reset_to(&mut self, target: Option<(usize, String)>) {
         self.displayed = target;
         self.exiting = None;
@@ -307,12 +307,12 @@ impl TickerRoll {
     }
 }
 
-/// 滚动行目标行：累计思考全文的最后一个非空 trimmed 行压成单行，返回（行号, 文本）
-/// ——行号是纵滚的 key（ZCode resolveReasoningStreamingSummary 同款）。
-/// lines() 只按 \n 切行：裸回车 \r（后无 \n）会留在行内，渲染层却按换行断行，
-/// 滚动行被拆成多行——所有制表/回车类空白压成单空格
+/// The rolling line's target line: the last non-empty trimmed line of the accumulated thinking text collapsed to a single line, returning (line number, text);
+/// the line number is the vertical-roll key (same as ZCode resolveReasoningStreamingSummary).
+/// lines() splits on \n only: a bare carriage return \r (with no following \n) stays inside the line, yet the render layer breaks on it,
+/// splitting the rolling line into several lines; all tab/return-class whitespace is collapsed to single spaces
 pub(crate) fn ticker_target_line(text: &str) -> Option<(usize, String)> {
-    // Lines 是双端迭代器但 enumerate 后不再是，先数总行数再从尾部找
+    // Lines is a double-ended iterator but not after enumerate; count the total lines first, then search from the tail
     let total = text.lines().count();
     text.lines()
         .rev()
@@ -326,96 +326,96 @@ pub(crate) fn ticker_target_line(text: &str) -> Option<(usize, String)> {
         })
 }
 
-/// 每轮改动面板里的单文件行
+/// One file row in the per-turn changes panel
 pub struct TurnFileRow {
     pub(crate) edit: EditDiff,
 }
 
-/// 用户消息的图片附件：事件文本末尾的 `pig-code-composer://attachments/mN`
-/// 链接解析而来（mN 的 N 与 media 目录文件名序号一致）
+/// Image attachments of a user message: thumbnails are loaded by the event's image_nums (the media directory's file-name index N, mapping to `{N}.{ext}`);
+/// the indexes match the image order (the UI display numbering starts at 1 in order, see message_image_number)
 pub struct UserImage {
-    /// 缩略图（加载/解码失败 = None → 渲染降级文本 chip）
+    /// Thumbnail (load/decode failure = None → renders a fallback text chip)
     pub(crate) thumb: Option<std::sync::Arc<Image>>,
-    /// 原图尺寸（缩略图等比缩放用）
+    /// Original image dimensions (for aspect-preserving thumbnail scaling)
     pub(crate) dims: (u32, u32),
 }
 
-/// 图片灯箱（点缩略图打开的大图覆盖层）的当前态
+/// Current state of the image lightbox (the large-image overlay opened by clicking a thumbnail)
 pub(crate) struct Lightbox {
     pub(crate) image: std::sync::Arc<Image>,
-    /// 顶部标签（「图片 N」）
+    /// Top label ("Image N")
     pub(crate) label: String,
-    /// 原图尺寸（等比缩放到窗口可用区域内用）
+    /// Original image dimensions (for aspect-fitting into the window's usable area)
     pub(crate) dims: (u32, u32),
-    /// 来源消息下标与消息内图片下标
+    /// Source message index and image index within the message
     pub(crate) position: (usize, usize),
-    /// 相对于适配窗口尺寸的缩放倍率
+    /// Zoom factor relative to the window-fitted size
     pub(crate) zoom: f32,
-    /// 相对于视口中心的平移量（像素）
+    /// Pan offset relative to the viewport center (pixels)
     pub(crate) pan: (f32, f32),
-    /// 拖动开始时的鼠标位置和图片偏移
+    /// Mouse position and image offset when the drag started
     pub(crate) drag_start: Option<((f32, f32), (f32, f32))>,
-    /// 当前拖动是否由图片边框内启动
+    /// Whether the current drag started inside the image bounds
     pub(crate) drag_capture: bool,
-    /// 本次手势是否已经移动，避免拖动被当作点击
+    /// Whether this gesture has already moved, so a drag is not mistaken for a click
     pub(crate) drag_moved: bool,
 }
 
-/// 回合工作行状态（对齐 ZCode AssistantHistoryStatus）：回合结束时落在该轮
-/// assistant 消息上，工作段（思考块 + 工具卡）折叠成一行「已工作 N 秒 ›」
+/// Turn work-row state (aligned with ZCode AssistantHistoryStatus): lands on that turn's
+/// assistant message when the turn ends, collapsing the work segments (thinking blocks + tool cards) into one "Worked for N seconds ›" line
 #[derive(Clone, Copy)]
 pub enum WorkState {
-    /// 正常完成；duration 为 None 的是回放里无 TurnStats 的历史回合（文案「已处理」）
+    /// Completed normally; duration None marks a history turn without TurnStats in replay (label "Processed")
     Completed {
         duration: Option<std::time::Duration>,
     },
-    /// 中断或错误收尾（文案「已停止」，与 footer 用词一致）
+    /// Interrupted or error ending (label "Stopped", consistent with the footer wording)
     Stopped,
 }
 
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
-    /// 系统提示条种类（仅 System 角色有意义）：普通文本 / 「上下文已压缩」分隔条
-    ///（压缩条渲染成带图标的分隔行，摘要全文仍留在 text 供自断言与排查）
+    /// System note kind (only meaningful for the System role): plain text / "Context compacted" divider
+    /// (the compact divider renders as an icon-bearing divider row; the full summary stays in text for self-assertions and debugging)
     pub system_kind: SystemNoteKind,
-    /// 用户消息的选择 handle + 刷新订阅（拖动选择时驱动实时高亮），仅 User 角色有
+    /// Selection handle + refresh subscription of a user message (drives live highlighting during drag-selection); only the User role has it
     pub selection: Option<(TextSelectionHandle, Subscription)>,
     pub files: Vec<String>,
-    /// 用户消息的图片附件（链接已从 text 剥出；仅 User 角色非空）
+    /// Image attachments of a user message (loaded by image_nums; non-empty only for the User role)
     pub images: Vec<UserImage>,
     pub segments: Vec<Segment>,
     pub footer: Option<String>,
-    /// 回合工作行状态（仅 Assistant 角色有意义）：None = 回合未结束或无工作段
+    /// Turn work-row state (only meaningful for the Assistant role): None = the turn has not ended or has no work segments
     pub work_state: Option<WorkState>,
-    /// 工作行展开态（true = 工作段内联可见；false = 折叠成一行）
+    /// Work-row expanded state (true = work segments visible inline; false = collapsed into one line)
     pub work_open: bool,
-    /// 操作行「复制」已点击（按钮换勾 + 成功色，1.2s 后回弹——ZCode 同款）
+    /// The action row's "Copy" was clicked (button swaps to a check + success color, reverting after 1.2s; same as ZCode)
     pub copied: bool,
-    /// 回弹计时器代次：每次点击 +1，到期代次不符作作废（连点不重提前回弹）
+    /// Revert timer generation: each click bumps it by 1; a mismatched generation at expiry is discarded (rapid clicks do not cause premature reverts)
     pub copied_gen: u64,
-    /// 后台子代理通知卡的 UI 态（render 前惰性创建；仅 <task-notification> 消息为 Some）
+    /// UI state of the background subagent notification card (lazily created before render; Some only for <task-notification> messages)
     pub notification_ui: Option<NotificationUi>,
 }
 
-/// 系统提示条种类
+/// System note kind
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SystemNoteKind {
     Plain,
-    /// 「上下文已压缩」分隔条（分隔线 + Archive 图标 + 短文案，不渲染摘要全文）
+    /// "Context compacted" divider (divider line + Archive icon + short label; does not render the full summary)
     Compacted,
 }
 
-/// 后台子代理通知卡的 UI 态（随消息存放，clear() 随消息一并释放）
+/// UI state of the background subagent notification card (stored with the message, released with it on clear())
 pub struct NotificationUi {
-    /// 「原始 payload」折叠区展开态
+    /// Expanded state of the "raw payload" collapsed area
     pub payload_open: bool,
-    /// 「复制路径」已点击（按钮换「已复制」）
+    /// "Copy path" was clicked (button swaps to "Copied")
     pub copied: bool,
-    /// 记录文件大小缓存：None = 无 record 属性；Some(None) = 文件已消失；
-    /// Some(Some(n)) = 字节数（render 前探测一次，避免每帧 stat）
+    /// Record file size cache: None = no record attribute; Some(None) = the file is gone;
+    /// Some(Some(n)) = bytes (probed once before render, avoiding a stat every frame)
     pub record_size: Option<Option<u64>>,
-    /// payload 展开区的滚动句柄
+    /// Scroll handle of the payload expanded area
     pub payload_scroll: ScrollHandle,
 }
 
@@ -479,66 +479,32 @@ impl ChatMessage {
     }
 }
 
-/// 事件文本 → (正文, 图片序号列表)：剥出末尾的附件链接行
-///（core 生成形态：正文 + "\n\n" + 空格分隔的 `[图片 N](pig-code-composer://attachments/mN)`；
-/// 纯图消息没有正文前缀，整段就是链接行）。
-/// 注意 label「图片 N」自带空格，token 边界按 `)` 切而不是空格。
-/// 尾行混入任何非链接 token（含用户手打的相似文本）→ 整体不拆、原文保留。
-pub(crate) fn split_image_links(text: &str) -> (String, Vec<u32>) {
-    let (body, tail) = match text.rsplit_once("\n\n") {
-        Some((body, tail)) => (body, tail.trim()),
-        None => ("", text.trim()),
-    };
-    let mut indices = Vec::new();
-    for chunk in tail.split_inclusive(')') {
-        let Some(n) = parse_image_link(chunk.trim()) else {
-            return (text.to_string(), vec![]);
-        };
-        indices.push(n);
-    }
-    if indices.is_empty() {
-        return (text.to_string(), vec![]);
-    }
-    (body.to_string(), indices)
-}
-
-/// `[图片 N](pig-code-composer://attachments/mN)` → N（label 与 URL 序号须一致）
-pub(crate) fn parse_image_link(token: &str) -> Option<u32> {
-    let inner = token.strip_prefix("[图片 ")?.strip_suffix(')')?;
-    let (label, url) = inner.split_once("](")?;
-    let n: u32 = url
-        .strip_prefix("pig-code-composer://attachments/m")?
-        .parse()
-        .ok()?;
-    (label.parse::<u32>().ok()? == n).then_some(n)
-}
-
-/// 后台子代理完成/失败时 core 注入的合成用户消息（live 与回放同文）的解析结果。
-/// 开标签带结构化属性（`<task-notification agent_id=".." status=".." …>`）；
-/// 属性逐个独立解析、缺失为 None（解析健壮性），渲染侧逐字段走缺省。
+/// Parsed result of the synthetic user message core injects when a background subagent finishes/fails (identical text in live and replay).
+/// The opening tag carries structured attributes (`<task-notification agent_id=".." status=".." …>`);
+/// each attribute parses independently and a missing one is None (parse robustness), with the render side defaulting per field.
 pub(crate) struct TaskNotification {
     pub(crate) agent_id: Option<String>,
     pub(crate) status: Option<String>,
     pub(crate) turns: Option<String>,
     pub(crate) description: Option<String>,
-    /// 子代理实际耗时（毫秒）
+    /// The subagent's actual elapsed time (milliseconds)
     pub(crate) duration_ms: Option<u64>,
-    /// 子代理上下文 JSONL 记录文件的绝对路径
+    /// Absolute path of the subagent context JSONL record file
     pub(crate) record: Option<String>,
-    /// 子代理结果全文文件的绝对路径（{agent_id}.result.md；文件行优先指它）
+    /// Absolute path of the subagent's full-result file ({agent_id}.result.md; the file row prefers it)
     pub(crate) result: Option<String>,
 }
 
-/// 整段被 `<task-notification…>…</task-notification>` 包裹时识别为通知并解析
-/// 开标签属性。只用于显示层分流：消息原文（含标签）不动，payload 折叠区也渲染原文。
+/// Recognizes a notification when the whole text is wrapped in `<task-notification…>…</task-notification>` and parses
+/// the opening-tag attributes. Used only for display-layer routing: the message text (tags included) is untouched, and the payload collapsed area also renders the original text.
 pub(crate) fn as_task_notification(text: &str) -> Option<TaskNotification> {
     let rest = text.trim().strip_prefix("<task-notification")?;
-    // 前缀后必须紧跟 '>' 或空白（防 <task-notification-foo> 误判）
+    // The prefix must be immediately followed by '>' or whitespace (guards against misreading <task-notification-foo>)
     if !rest.starts_with('>') && !rest.starts_with(char::is_whitespace) {
         return None;
     }
     let (attrs, after) = rest.split_once('>')?;
-    // 闭标签校验（strip_suffix 只剥最外层：内层同名标签不影响识别）
+    // Closing-tag check (strip_suffix only strips the outermost one: inner same-name tags do not affect recognition)
     after.strip_suffix("</task-notification>")?;
     Some(TaskNotification {
         agent_id: notification_attr(attrs, "agent_id"),
@@ -551,7 +517,7 @@ pub(crate) fn as_task_notification(text: &str) -> Option<TaskNotification> {
     })
 }
 
-/// 从开标签属性段抽 `name="value"`（简单串搜；值不含引号——core 侧已消毒）
+/// Extracts `name="value"` from the opening-tag attribute section (simple substring search; values contain no quotes, core sanitizes them)
 pub(crate) fn notification_attr(attrs: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=\"");
     let start = attrs.find(&needle)? + needle.len();
@@ -560,16 +526,21 @@ pub(crate) fn notification_attr(attrs: &str, name: &str) -> Option<String> {
     Some(value[..end].to_string())
 }
 
-/// 通知卡耗时格式化：<60s → "X.X 秒"；≥60s → "m 分 ss 秒"
+/// Notification-card duration formatting: <60s → "X.X s"; ≥60s → "m min ss s"
 pub(crate) fn format_notification_duration(ms: u64) -> String {
     if ms < 60_000 {
-        format!("{:.1} 秒", ms as f64 / 1000.0)
+        rust_i18n::t!("thread.notif_duration_seconds", n = ms as f64 / 1000.0 : {:.1}).to_string()
     } else {
-        format!("{} 分 {:02} 秒", ms / 60_000, (ms % 60_000) / 1000)
+        rust_i18n::t!(
+            "thread.notif_duration_minutes",
+            m = ms / 60_000,
+            s = (ms % 60_000) / 1000 : {:02}
+        )
+        .to_string()
     }
 }
 
-/// 记录文件路径中段省略（保留首字符与末尾两段）：…/sessions/{sid}.agents/{id}.jsonl 式
+/// Elides the middle of a record file path (keeps the first character and the last two segments): the …/sessions/{sid}.agents/{id}.jsonl shape
 pub(crate) fn elide_record_path(path: &str) -> String {
     const MAX_CHARS: usize = 48;
     if path.chars().count() <= MAX_CHARS {
@@ -583,7 +554,7 @@ pub(crate) fn elide_record_path(path: &str) -> String {
     format!("{head}…/{parent}/{file}")
 }
 
-/// 文件大小格式化（<1KB 显示 B，否则一位小数 KB/MB）
+/// File size formatting (<1KB shows B, otherwise one-decimal KB/MB)
 pub(crate) fn format_file_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")

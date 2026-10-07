@@ -1,6 +1,6 @@
 use super::*;
 
-/// 自测环境：mock provider + 临时配置/工作目录 + 隔离数据目录。
+/// Selftest environment: mock provider + temporary config/work dirs + isolated data dir.
 pub(crate) struct SelftestEnv {
     pub(crate) config_path: PathBuf,
     pub(crate) cwd: PathBuf,
@@ -16,16 +16,18 @@ pub(crate) fn setup_selftest() -> SelftestEnv {
         pig_core::mock::MOCK_FILE_CONTENT,
     )
     .expect("write mock file");
-    // 数据目录必须在工作区**外面**（对齐生产 ~/.pigcode）：放在工作区内会被
-    // Grep/Glob 工具搜到——rollout/model-io 落盘里存着历轮用户消息原文，
-    // 子代理 grep 工作区会把其中的 mock 触发词（ECHO_HISTORY 等）带回请求体，
-    // 抢先命中 mock 的内容路由分支（selftest 曾因此因子代理结论被
-    // echo_history_response 截胡而挂）
+    // The data dir must live **outside** the workspace (mirroring production
+    // ~/.pigcode): inside the workspace it would be found by the Grep/Glob tools —
+    // rollout/model-io files persist verbatim user messages from past turns, and a
+    // subagent grepping the workspace would carry mock triggers (ECHO_HISTORY
+    // etc.) back into the request body, hitting the mock's content-routing branch
+    // early (the selftest once failed this way: subagent conclusions got hijacked
+    // by echo_history_response)
     let data_dir =
         std::env::temp_dir().join(format!("pig-app-selftest-data-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);
     std::fs::create_dir_all(&data_dir).expect("create data dir");
-    // agent 通过 PIG_DATA_DIR 找到隔离数据目录
+    // The agent locates the isolated data dir via PIG_DATA_DIR
     unsafe { std::env::set_var("PIG_DATA_DIR", &data_dir) };
     let config_path = dir.join("config.toml");
     std::fs::write(
@@ -72,7 +74,7 @@ reasoning_levels = ["high", "max"]
     }
 }
 
-/// PIG_SELFTEST=1：会话A完整修改链 → 会话B并行对话 → 切回A → 模拟重启 resume → @搜索。
+/// PIG_SELFTEST=1: session A full edit chain → session B parallel conversation → switch back to A → simulated restart resume → @search.
 pub(crate) async fn run_selftest(
     view: Entity<AppView>,
     window_handle: AnyWindowHandle,
@@ -92,12 +94,13 @@ pub(crate) async fn run_selftest(
 
     timer!(800).await;
 
-    // hero 态断言：无会话、hero 展示
+    // Hero state assertion: no sessions, hero shown
     let is_hero = app!(|app: &mut AppView, cx| app.debug_is_hero(cx));
-    assert!(is_hero, "启动应进入 hero 态");
-    println!("[selftest] hero 态 OK");
+    assert!(is_hero, "startup should land in the hero state");
+    println!("[selftest] hero screen OK");
 
-    // hero 态 @ 文件搜索：未建会话也要出结果（曾在 current=None 处被丢弃，弹框等不到结果）
+    // Hero-state @ file search: results must appear even with no session created
+    // yet (they were once dropped at current=None and the popup never saw results)
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
             cx.emit(crate::composer::ComposerEvent::SearchFiles(
@@ -109,7 +112,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "hero @搜索超时");
+        assert!(waited < 10_000, "hero @-search timed out");
         let found = app!(|app: &mut AppView, cx| {
             app.composer
                 .read(cx)
@@ -121,14 +124,14 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    println!("[selftest] hero @搜索 OK");
+    println!("[selftest] hero @-search OK");
 
-    // hero 发送首条消息 → 自动建会话
+    // Send the first message from hero → a session is created automatically
     app!(|app: &mut AppView, cx| {
         app.exec_mode = pig_protocol::ExecMode::ConfirmBeforeEdit;
         app.hero_send(
             format!(
-                "{} 创建并修改文件，然后跑个命令",
+                "{} create and modify files, then run a command",
                 pig_core::mock::SCENARIO_B_TRIGGER
             ),
             vec![],
@@ -144,15 +147,15 @@ pub(crate) async fn run_selftest(
             break id;
         }
     };
-    println!("[selftest] hero 发送 → 会话 A 建立: {session_a}");
+    println!("[selftest] hero send -> session A created: {session_a}");
 
-    // 会话 A：场景 B（审批×3）
+    // Session A: scenario B (3 approvals)
     let mut approvals = 0u32;
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 60_000, "会话 A 回合超时");
+        assert!(waited < 60_000, "session A turn timed out");
         let approved = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_a)?;
             let pending = views.thread.read(cx).pending_approval();
@@ -173,7 +176,7 @@ pub(crate) async fn run_selftest(
             if !streaming && waited > 1000 && tool_done {
                 assert!(
                     text.contains(pig_core::mock::SCENARIO_B_MARKER),
-                    "A 文本标记: {text}"
+                    "A text marker: {text}"
                 );
                 assert!(tool_output.contains(pig_core::mock::SCENARIO_B_BASH_MARKER));
                 return Some(());
@@ -184,25 +187,28 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    assert_eq!(approvals, 3, "场景 B 三次审批");
-    // hero → 会话态切换断言
+    assert_eq!(approvals, 3, "scenario B needs 3 approvals");
+    // Hero → session state switch assertion
     let is_hero = app!(|app: &mut AppView, cx| app.debug_is_hero(cx));
-    assert!(!is_hero, "发送后应进入会话态");
-    println!("[selftest] 会话 A 场景 B 完成（审批×3），输入框已沉底");
+    assert!(!is_hero, "should enter the session state after send");
+    println!("[selftest] session A scenario B done (3 approvals), composer settled at bottom");
 
-    // 调用轨迹面板：mock 回合的多步调用应已落 model-io 记录；面板加载、
-    // 折叠/展开两态渲染（构造元素树不 panic 即过）
+    // Trajectory panel: the mock turn's multi-step calls should already have
+    // persisted model-io records; the panel loads and renders both
+    // collapsed/expanded states (building the element tree without panicking
+    // passes)
     app!(|app: &mut AppView, cx| {
         app.open_right_tab(RightTab::Trajectory, cx);
         let records = app.trajectory.as_ref().map(|s| s.records.len());
         assert!(
             records.is_some_and(|n| n >= 2),
-            "场景 B 多步调用应落多条 model-io 记录: {records:?}"
+            "scenario B multi-step calls should persist multiple model-io records: {records:?}"
         );
         let _ = app.render_trajectory_panel(cx);
     });
     app!(|app: &mut AppView, cx| {
-        // 逐行展开：模拟点开首条调用的首行，重渲染展开态
+        // Row-by-row expansion: simulate opening the first row of the first call
+        // and re-render the expanded state
         if let Some(state) = &mut app.trajectory {
             let key = format!("{}:0", state.records[0].turn);
             state.expanded.insert(key);
@@ -210,12 +216,13 @@ pub(crate) async fn run_selftest(
         let _ = app.render_trajectory_panel(cx);
         app.close_right_tab(RightTab::Trajectory, cx);
     });
-    println!("[selftest] 调用轨迹面板加载/展开渲染 OK");
+    println!("[selftest] trajectory panel load/expand rendering OK");
 
-    // 文件查看器：模拟点击 Read 卡路径（ThreadEvent::OpenFile 与点击同链路）→
-    // 右侧「文件」tab 打开并加载完整内容（README.mock.md 是场景 B 的 Read 目标）
+    // File viewer: simulate clicking the Read card path (ThreadEvent::OpenFile
+    // shares the click path) → the right "Files" tab opens and loads the full
+    // content (README.mock.md is scenario B's Read target)
     app!(|app: &mut AppView, cx| {
-        let views = app.views.get(&session_a).expect("会话 A 视图");
+        let views = app.views.get(&session_a).expect("session A view");
         views.thread.update(cx, |_, cx| {
             cx.emit(crate::thread_view::ThreadEvent::OpenFile {
                 path: pig_core::mock::MOCK_FILE_NAME.to_string(),
@@ -223,27 +230,31 @@ pub(crate) async fn run_selftest(
             });
         });
     });
-    // 加载走后台线程（读盘 + tree-sitter 高亮），轮询等就绪
+    // Loading runs on a background thread (disk read + tree-sitter highlighting);
+    // poll until ready
     let mut file_waited = 0u64;
     loop {
         timer!(100).await;
         file_waited += 100;
-        assert!(file_waited < 10_000, "文件面板加载超时");
+        assert!(file_waited < 10_000, "file panel load timed out");
         if let Some((path, lines)) = app!(|app: &mut AppView, cx| app.debug_file_tab(cx)) {
-            assert!(lines > 0, "文件面板应有内容行: {path}");
+            assert!(lines > 0, "file panel should have content lines: {path}");
             break;
         }
     }
-    // 关掉文件 tab 还原右侧面板收起态（后续步骤断言「默认收起」）
+    // Close the file tab to restore the right panel's collapsed state (later
+    // steps assert "collapsed by default")
     app!(|app: &mut AppView, cx| {
         if let Some(RightTab::File { path }) = app.right_active.clone() {
             app.close_right_tab(RightTab::File { path }, cx);
         }
     });
-    println!("[selftest] 文件查看面板（Read 路径点击 → 右侧 tab 加载）OK");
+    println!("[selftest] file view panel (Read path click -> right tab load) OK");
 
-    // 展开 Bash 工具卡（命令卡 + 输出卡渲染路径：高亮 + 横向滚动区），
-    // 真实渲染若干帧不 panic 即过（Read 卡展开在会话 B 步骤——它有 Read 调用）
+    // Expand the Bash tool card (command card + output card render paths:
+    // highlighting + horizontal scroll regions); rendering a few real frames
+    // without panicking passes (the Read card is expanded in the session B step,
+    // which has the Read call)
     let expanded = app!(|app: &mut AppView, cx| {
         let views = app.views.get(&session_a)?;
         let mut hit = false;
@@ -252,11 +263,16 @@ pub(crate) async fn run_selftest(
         });
         Some(hit)
     });
-    assert_eq!(expanded, Some(true), "会话 A 应有 Bash 工具卡");
+    assert_eq!(
+        expanded,
+        Some(true),
+        "session A should have a Bash tool card"
+    );
     timer!(300).await;
-    println!("[selftest] Bash 代码卡展开渲染 OK");
+    println!("[selftest] Bash code card expand rendering OK");
 
-    // 工作区视图：会话 cwd 应出现在工作区列表，且按工作区分组正确
+    // Workspace view: the session cwd should appear in the workspace list and be
+    // grouped correctly
     let cwd_str = app!(|app: &mut AppView, _| app.cwd.display().to_string());
     let (has_cwd, grouped) = app!(|app: &mut AppView, cx| {
         let sidebar = app.sidebar.read(cx);
@@ -267,10 +283,10 @@ pub(crate) async fn run_selftest(
                 .contains(&session_a),
         )
     });
-    assert!(has_cwd, "工作区列表应包含会话 cwd");
-    assert!(grouped, "工作区视图应按 cwd 分组会话");
+    assert!(has_cwd, "workspace list should contain the session cwd");
+    assert!(grouped, "workspace view should group sessions by cwd");
 
-    // 添加/移除工作区
+    // Add/remove workspace
     let extra = std::env::temp_dir().join(format!("pig-app-ws-{}", std::process::id()));
     std::fs::create_dir_all(&extra).unwrap();
     let extra_str = extra.display().to_string();
@@ -279,7 +295,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "添加工作区超时");
+        assert!(waited < 10_000, "add-workspace timed out");
         let has = app!(|app: &mut AppView, cx| {
             app.sidebar.read(cx).debug_workspaces().contains(&extra_str)
         });
@@ -292,7 +308,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "移除工作区超时");
+        assert!(waited < 10_000, "remove-workspace timed out");
         let has = app!(|app: &mut AppView, cx| {
             app.sidebar.read(cx).debug_workspaces().contains(&extra_str)
         });
@@ -300,9 +316,9 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    println!("[selftest] 工作区列表 OK（会话 cwd 自动出现 + 手动增删）");
+    println!("[selftest] workspace list OK (session cwd auto-appears + manual add/remove)");
 
-    // 会话 B：新建 + 场景 A
+    // Session B: create new + scenario A
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         None,
@@ -320,17 +336,17 @@ pub(crate) async fn run_selftest(
             break id;
         }
     };
-    println!("[selftest] 会话 B 就绪: {session_b}");
+    println!("[selftest] session B ready: {session_b}");
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             session_b.clone(),
-            "读一下 README.mock.md 并总结".to_string(),
+            "read README.mock.md and summarize".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
-    timer!(300).await; // 等第一个回合开跑
+    timer!(300).await; // wait for the first turn to start
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             session_b.clone(),
@@ -345,7 +361,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 60_000, "排队流程超时");
+        assert!(waited < 60_000, "queueing flow timed out");
         let (queued_len, streaming, text) = app!(|app: &mut AppView, cx| {
             let Some(views) = app.views.get(&session_b) else {
                 return (0, false, String::new());
@@ -359,11 +375,14 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    assert!(saw_queued, "应出现排队芯片");
-    println!("[selftest] 会话 B 完成，消息排队 OK（自动接续，第二轮历史=6）");
+    assert!(saw_queued, "a queued chip should have appeared");
+    println!(
+        "[selftest] session B done, message queueing OK (auto-continuation, 6 history items on round 2)"
+    );
 
-    // 展开会话 B 的 Read 工具卡（代码卡渲染路径：行号 + 高亮 + 横向滚动区），
-    // 真实渲染若干帧不 panic 即过
+    // Expand session B's Read tool card (code card render path: line numbers +
+    // highlighting + horizontal scroll region); rendering a few real frames
+    // without panicking passes
     let expanded = app!(|app: &mut AppView, cx| {
         let views = app.views.get(&session_b)?;
         let mut hit = false;
@@ -372,15 +391,20 @@ pub(crate) async fn run_selftest(
         });
         Some(hit)
     });
-    assert_eq!(expanded, Some(true), "会话 B 应有 Read 工具卡");
+    assert_eq!(
+        expanded,
+        Some(true),
+        "session B should have a Read tool card"
+    );
     timer!(300).await;
-    println!("[selftest] Read 代码卡展开渲染 OK");
+    println!("[selftest] Read code card expand rendering OK");
 
-    // turn 导航条：会话 B 有 2 轮用户消息，面板已绘制（宽度非零）且达到断点。
-    // bounds 由 prepaint 记录：数据就绪不等于帧已绘制，等绘制循环跑完
+    // Turn nav bar: session B has 2 turns of user messages; the panel is drawn
+    // (non-zero width) and past the breakpoint. bounds are recorded in prepaint:
+    // data readiness does not mean a frame was drawn, so wait for draw loops
     let mut waited = 0u64;
     let (mut nav_turns, mut nav_pane_w) = app!(|app: &mut AppView, cx| {
-        let views = app.views.get(&session_b).expect("B 视图在内存");
+        let views = app.views.get(&session_b).expect("session B view in memory");
         views.thread.read(cx).debug_nav_state()
     });
     loop {
@@ -390,25 +414,29 @@ pub(crate) async fn run_selftest(
         timer!(200).await;
         waited += 200;
         (nav_turns, nav_pane_w) = app!(|app: &mut AppView, cx| {
-            let views = app.views.get(&session_b).expect("B 视图在内存");
+            let views = app.views.get(&session_b).expect("session B view in memory");
             views.thread.read(cx).debug_nav_state()
         });
     }
-    assert!(nav_turns >= 2, "会话 B 应有 ≥2 轮用户消息");
+    assert!(nav_turns >= 2, "session B should have >= 2 user turns");
     assert!(
         nav_pane_w >= 720.,
-        "消息面板宽 {nav_pane_w} 应 ≥720（导航条断点）"
+        "message pane width {nav_pane_w} should be >= 720 (nav bar breakpoint)"
     );
-    println!("[selftest] turn 导航条可见条件 OK（{nav_turns} 轮，面板宽 {nav_pane_w:.0}）");
+    println!(
+        "[selftest] turn nav bar visibility OK ({nav_turns} turns, pane width {nav_pane_w:.0})"
+    );
 
-    // 贴底时活动项应为最后一轮用户消息（回归：曾按「离视口顶最近」在贴底时
-    // 高亮到更早轮次——底部视口里多条用户消息同时可见，离顶最近的偏早）
+    // At bottom, the active item should be the last turn's user message
+    // (regression: it used to highlight an earlier turn while pinned to bottom by
+    // "nearest to viewport top" — several user messages are visible at once in
+    // the bottom viewport and the top-nearest skews early)
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
         let (active, offset_y, max_offset_y, view_h, user_rows) = app!(|app: &mut AppView, cx| {
-            let views = app.views.get(&session_b).expect("B 视图在内存");
+            let views = app.views.get(&session_b).expect("session B view in memory");
             views.thread.read(cx).debug_nav_active_detail()
         });
         let last_ix = user_rows.last().map(|(ix, _, _)| *ix);
@@ -417,33 +445,34 @@ pub(crate) async fn run_selftest(
         }
         assert!(
             waited < 10_000,
-            "贴底时活动项应为最后一轮: active={active:?} last={last_ix:?} \
-             offset_y={offset_y:.1} max_offset_y={max_offset_y:.1} 视口高={view_h:.1} \
-             用户行={user_rows:?}"
+            "at bottom the active item should be the last turn: active={active:?} last={last_ix:?} \
+             offset_y={offset_y:.1} max_offset_y={max_offset_y:.1} view_h={view_h:.1} \
+             user_rows={user_rows:?}"
         );
     }
-    println!("[selftest] turn 导航条活动项 OK（贴底 = 最后一轮）");
+    println!("[selftest] turn nav bar active item OK (follow bottom = last turn)");
 
-    // 切回 A：内存状态应原样保留
+    // Switch back to A: in-memory state must be preserved as-is
     app!(|app: &mut AppView, cx| app.switch_session(session_a.clone(), cx));
     let current = app!(|app: &mut AppView, _| app.current.clone());
     assert_eq!(current.as_ref(), Some(&session_a));
     let kept = app!(|app: &mut AppView, cx| {
-        let views = app.views.get(&session_a).expect("A 视图在内存");
+        let views = app.views.get(&session_a).expect("session A view in memory");
         let (_, text, _, _) = views.thread.read(cx).debug_last_assistant();
         text.contains(pig_core::mock::SCENARIO_B_MARKER)
     });
-    assert!(kept, "切回 A 后内容应保留");
-    println!("[selftest] 会话切换 OK");
+    assert!(kept, "content should be kept after switching back to A");
+    println!("[selftest] session switching OK");
 
-    // 模拟重启：drop manager 重 spawn + ListSessions/OpenSession 重放
+    // Simulated restart: drop the manager, re-spawn + ListSessions/OpenSession replay
     app!(|app: &mut AppView, cx| app.restart_agent(cx));
-    // 等自动打开最近会话（B，updated_at 最新），再显式切到 A 触发重放
+    // Wait for the most recent session to auto-open (B, latest updated_at), then
+    // explicitly switch to A to trigger replay
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "重启后自动打开会话超时");
+        assert!(waited < 10_000, "auto-open session after restart timed out");
         let ready = app!(|app: &mut AppView, _| app.current.is_some());
         if ready {
             break;
@@ -454,7 +483,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "重启后重放超时");
+        assert!(waited < 30_000, "replay after restart timed out");
         let done = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_a)?;
             let (tool_done, text, _, _) = views.thread.read(cx).debug_last_assistant();
@@ -469,9 +498,9 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    println!("[selftest] 模拟重启 resume OK（消息+工具卡+diff 全恢复）");
+    println!("[selftest] simulated-restart resume OK (messages + tool cards + diffs all restored)");
 
-    // @搜索：真实文件
+    // @search: real files
     app!(|app: &mut AppView, _| {
         app.agent
             .search_files(session_a.clone(), "hello".to_string(), None);
@@ -480,7 +509,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "@搜索超时");
+        assert!(waited < 10_000, "@-search timed out");
         let found = app!(|app: &mut AppView, cx| {
             app.composer
                 .read(cx)
@@ -492,15 +521,15 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    println!("[selftest] @搜索 OK");
+    println!("[selftest] @-search OK");
 
-    // compact（模型摘要）
+    // compact (model summary)
     app!(|app: &mut AppView, _| app.agent.compact(session_a.clone(), None));
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 15_000, "compact 超时");
+        assert!(waited < 15_000, "compact timed out");
         let compacted = app!(|app: &mut AppView, cx| {
             app.views
                 .get(&session_a)
@@ -508,24 +537,28 @@ pub(crate) async fn run_selftest(
                 .unwrap_or_default()
                 .iter()
                 .any(|note| {
-                    note.contains("模型摘要") && note.contains(pig_core::mock::SUMMARY_MARKER)
+                    note.contains("model summary") && note.contains(pig_core::mock::SUMMARY_MARKER)
                 })
         });
         if compacted {
             break;
         }
     }
-    // 压缩收尾后「正在压缩」标记必须已清除（ContextCompacted 与 CompactStarted 同会话配对）
+    // After compact settles, the "compacting" flag must already be cleared
+    // (ContextCompacted pairs with CompactStarted in the same session)
     let still_compacting = app!(|app: &mut AppView, cx| {
         app.views
             .get(&session_a)
             .map(|views| views.thread.read(cx).debug_compacting())
             .unwrap_or(false)
     });
-    assert!(!still_compacting, "compact 完成后压缩标记应已清除");
-    println!("[selftest] 模型摘要 compact OK");
+    assert!(
+        !still_compacting,
+        "compacting flag should be cleared after compact settles"
+    );
+    println!("[selftest] model summary compact OK");
 
-    // 场景 C：计划模式闭环
+    // Scenario C: plan mode loop
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         None,
@@ -544,25 +577,31 @@ pub(crate) async fn run_selftest(
         }
     };
     app!(|app: &mut AppView, cx| {
-        // 计划模式与权限档正交：档定在「变更前确认」（执行阶段 3 次审批），计划单独开
+        // Plan mode is orthogonal to the permission level: level pinned to
+        // "confirm before edit" (3 approvals during execution), plan mode toggled
+        // on separately
         app.apply_exec_mode(pig_protocol::ExecMode::ConfirmBeforeEdit, cx);
         app.apply_plan_mode(true, cx);
         app.agent.send_message(
             session_c.clone(),
-            format!("{} 给我一个改造计划", pig_core::mock::SCENARIO_C_TRIGGER),
+            format!(
+                "{} give me a refactoring plan",
+                pig_core::mock::SCENARIO_C_TRIGGER
+            ),
             vec![],
             vec![],
             pig_protocol::ExecMode::ConfirmBeforeEdit,
         );
     });
-    // kimi 文件语义闭环：mock 先 Write 计划文件（直通免审批）→ ExitPlanMode 弹
-    // 审批面板 → 批准 → 场景 B 工具链（Write/Edit/Bash 三次审批）→ 收尾
+    // kimi file-semantics loop: the mock first Writes the plan file
+    // (pass-through, no approval) → ExitPlanMode raises the approval panel →
+    // approve → scenario B tool chain (Write/Edit/Bash, 3 approvals) → wrap up
     let mut approvals = 0u32;
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 60_000, "场景 C 执行超时");
+        assert!(waited < 60_000, "scenario C execution timed out");
         let approved = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_c)?;
             views.thread.read(cx).pending_approval().map(|_| {
@@ -589,43 +628,60 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    assert_eq!(approvals, 4, "ExitPlanMode 1 次 + 场景 B 3 次审批");
+    assert_eq!(
+        approvals, 4,
+        "1 ExitPlanMode approval + 3 scenario B approvals"
+    );
     let mode = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_exec_mode());
     let plan_on = app!(|app: &mut AppView, cx| app.composer.read(cx).plan_enabled());
     assert_eq!(
         mode,
         pig_protocol::ExecMode::ConfirmBeforeEdit,
-        "批准后模式档不变（正交）"
+        "mode tier unchanged after approval (orthogonal)"
     );
-    assert!(!plan_on, "批准后计划开关应关闭");
-    // kimi 文件语义：计划文件真实落盘（mock 经 Write 直通写入）
+    assert!(!plan_on, "plan toggle should be off after approval");
+    // kimi file semantics: the plan file is really persisted (the mock writes it
+    // via pass-through Write)
     let cwd = app!(|app: &mut AppView, _| app.cwd.clone());
     let plan_file = cwd.join(".pigcode/plans/plan-mock.md");
-    let plan_text = std::fs::read_to_string(&plan_file)
-        .unwrap_or_else(|e| panic!("计划文件应已落盘 {}: {e}", plan_file.display()));
+    let plan_text = std::fs::read_to_string(&plan_file).unwrap_or_else(|e| {
+        panic!(
+            "plan file should have been persisted at {}: {e}",
+            plan_file.display()
+        )
+    });
     assert!(
         plan_text.contains(pig_core::mock::PLAN_MARKER),
-        "计划文件应含计划全文: {plan_text}"
+        "plan file should contain the full plan text: {plan_text}"
     );
-    println!("[selftest] 计划模式闭环（Write 计划文件 → 面板批准 → 开工）OK");
+    println!("[selftest] plan mode loop (Write plan file -> panel approval -> work starts) OK");
 
-    // 水位条
+    // Usage watermark bar
     let usage = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_context_usage());
-    assert_eq!(usage, Some((142, 128_000)), "水位条数据: {usage:?}");
-    println!("[selftest] 上下文水位条 OK");
+    assert_eq!(
+        usage,
+        Some((142, 128_000)),
+        "usage watermark bar data: {usage:?}"
+    );
+    println!("[selftest] context usage watermark bar OK");
 
-    // 设置页数据：ConfigSnapshot 已收到、composer 模型列表已填充
+    // Settings page data: ConfigSnapshot received and the composer model list
+    // populated
     let (provider_count, model_count) = app!(|app: &mut AppView, cx| {
         (
             app.debug_config().map(|c| c.providers.len()).unwrap_or(0),
             app.composer.read(cx).debug_model_count(),
         )
     });
-    assert_eq!(provider_count, 2, "ConfigSnapshot 应含 2 个供应商");
-    assert_eq!(model_count, 2, "composer 应列出 2 个模型");
-    println!("[selftest] ConfigSnapshot + 模型列表 OK");
+    assert_eq!(
+        provider_count, 2,
+        "ConfigSnapshot should contain 2 providers"
+    );
+    assert_eq!(model_count, 2, "composer should list 2 models");
+    println!("[selftest] ConfigSnapshot + model list OK");
 
-    // Anthropic 供应商端到端：会话 D 切到 anthropic 模型跑场景 B
+    // Anthropic provider end-to-end: session D switches to the anthropic model
+    // and runs scenario B
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         None,
@@ -654,7 +710,7 @@ pub(crate) async fn run_selftest(
         app.agent.send_message(
             session_d.clone(),
             format!(
-                "{} 创建并修改文件，然后跑个命令",
+                "{} create and modify files, then run a command",
                 pig_core::mock::SCENARIO_B_TRIGGER
             ),
             vec![],
@@ -667,7 +723,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 60_000, "Anthropic 场景 B 超时");
+        assert!(waited < 60_000, "Anthropic scenario B timed out");
         let approved = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_d)?;
             views.thread.read(cx).pending_approval().map(|_| {
@@ -695,10 +751,11 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    assert_eq!(approvals, 1, "AutoEdit 下仅 Bash 审批");
-    println!("[selftest] Anthropic 供应商端到端 OK");
+    assert_eq!(approvals, 1, "under AutoEdit only the Bash approval");
+    println!("[selftest] Anthropic provider end-to-end OK");
 
-    // AskUserQuestion：会话 E 走 SCENARIO_Q → 问题条出现 → 选选项 → 提交 → marker + 工具卡
+    // AskUserQuestion: session E runs SCENARIO_Q → question bar appears → pick
+    // option → submit → marker + tool card
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         None,
@@ -722,28 +779,37 @@ pub(crate) async fn run_selftest(
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             session_e.clone(),
-            format!("{} 帮我决定实现方案", pig_core::mock::SCENARIO_Q_TRIGGER),
+            format!(
+                "{} help me decide the implementation approach",
+                pig_core::mock::SCENARIO_Q_TRIGGER
+            ),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
         );
     });
-    // 等问题条出现（问题与审批互斥，问题优先，AutoEdit 下 AskUserQuestion 免审批）
+    // Wait for the question bar (questions and approvals are mutually exclusive,
+    // questions win; under AutoEdit AskUserQuestion needs no approval)
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "问题条出现超时");
+        assert!(waited < 30_000, "question bar appearance timed out");
         let has =
             app!(|app: &mut AppView, cx| { app.composer.read(cx).debug_question().is_some() });
         if has {
             break;
         }
     }
-    println!("[selftest] AskUserQuestion 问题条出现 OK");
-    // 向导分页：第 1 题选「方案 A」→ 下一题 → 第 2 题选「要」→ 提交
+    println!("[selftest] AskUserQuestion question bar appears OK");
+    // Wizard paging: pick "Option A" on question 1 → next → pick "Yes" on
+    // question 2 → submit
     let q1 = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_question());
-    assert_eq!(q1.as_deref(), Some("选择实现方案"), "首题题干: {q1:?}");
+    assert_eq!(
+        q1.as_deref(),
+        Some("Choose an implementation approach"),
+        "first question text: {q1:?}"
+    );
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |composer, cx| {
             composer.debug_select_question_option(0, 0, cx);
@@ -753,10 +819,10 @@ pub(crate) async fn run_selftest(
     let q2 = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_question());
     assert_eq!(
         q2.as_deref(),
-        Some("需要跑测试吗"),
-        "翻页后应显示第 2 题: {q2:?}"
+        Some("Should tests run?"),
+        "after paging, question 2 should be shown: {q2:?}"
     );
-    println!("[selftest] AskUserQuestion 翻页 OK");
+    println!("[selftest] AskUserQuestion paging OK");
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |composer, cx| {
             composer.debug_select_question_option(1, 0, cx);
@@ -767,7 +833,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "AskUserQuestion 回合超时");
+        assert!(waited < 30_000, "AskUserQuestion turn timed out");
         let done = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_e)?;
             let thread = views.thread.read(cx);
@@ -775,7 +841,7 @@ pub(crate) async fn run_selftest(
             if !thread.is_streaming() && waited > 1000 && tool_done {
                 assert!(
                     text.contains(pig_core::mock::MOCK_Q_MARKER),
-                    "E 文本标记: {text}"
+                    "E text marker: {text}"
                 );
                 return Some(tool_output);
             }
@@ -783,12 +849,12 @@ pub(crate) async fn run_selftest(
         });
         if let Some(tool_output) = done {
             assert!(
-                tool_output.contains("方案 A"),
-                "工具输出应含第 1 题答案: {tool_output}"
+                tool_output.contains("Option A"),
+                "tool output should contain the question 1 answer: {tool_output}"
             );
             assert!(
-                tool_output.contains("需要跑测试吗：要"),
-                "工具输出应含第 2 题答案: {tool_output}"
+                tool_output.contains("Should tests run?: Yes"),
+                "tool output should contain the question 2 answer: {tool_output}"
             );
             break;
         }
@@ -797,24 +863,39 @@ pub(crate) async fn run_selftest(
         let views = app.views.get(&session_e)?;
         Some(views.thread.read(cx).debug_has_tool_call("AskUserQuestion"))
     });
-    assert_eq!(has_card, Some(true), "工具卡应显示 AskUserQuestion");
-    println!("[selftest] AskUserQuestion 提问场景 OK");
+    assert_eq!(
+        has_card,
+        Some(true),
+        "tool card should show AskUserQuestion"
+    );
+    println!("[selftest] AskUserQuestion scenario OK");
 
-    // 右侧面板：默认收起 → 面板按钮直开（无 tab 时显示菜单页）→ 开改动 tab →
-    // 快捷键再触发收起（tab 保留）→ × 关尽 tab 后面板自动收起
+    // Right panel: collapsed by default → the panel button opens it directly
+    // (menu page shows when there is no tab) → open the changes tab → the
+    // shortcut toggles it back collapsed (tab kept) → after × closes the last tab
+    // the panel auto-collapses
     let right_initial = app!(|app: &mut AppView, _| app.right_open);
-    assert!(!right_initial, "右侧面板默认应收起");
+    assert!(!right_initial, "right panel should be collapsed by default");
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
     let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
-    assert!(open && active.is_none(), "面板展开且无 tab 时应显示菜单页");
+    assert!(
+        open && active.is_none(),
+        "panel open with no tab should show the menu page"
+    );
     app!(|app: &mut AppView, cx| app.open_right_tab(RightTab::Changes, cx));
     let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
-    assert!(open && active == Some(RightTab::Changes), "改动 tab 应打开");
+    assert!(
+        open && active == Some(RightTab::Changes),
+        "the changes tab should be open"
+    );
     app!(|app: &mut AppView, cx| app.toggle_right_tab(RightTab::Changes, cx));
     let (open, kept) = app!(|app: &mut AppView, _| {
         (app.right_open, app.right_active == Some(RightTab::Changes))
     });
-    assert!(!open && kept, "再次触发应收起面板并保留 tab");
+    assert!(
+        !open && kept,
+        "toggling again should collapse the panel and keep the tab"
+    );
     app!(|app: &mut AppView, cx| app.close_right_tab(RightTab::Changes, cx));
     let (open, active, tabs) = app!(|app: &mut AppView, _| {
         (
@@ -825,9 +906,9 @@ pub(crate) async fn run_selftest(
     });
     assert!(
         !open && active.is_none() && tabs == 0,
-        "面板收起状态下关 tab 不改变收起状态；tab 清空"
+        "closing a tab while collapsed keeps the collapsed state; tabs cleared"
     );
-    // 面板展开时关掉最后一个 tab：面板自动收起
+    // Close the last tab while the panel is open: the panel auto-collapses
     app!(|app: &mut AppView, cx| {
         app.open_right_tab(RightTab::Changes, cx);
         app.close_right_tab(RightTab::Changes, cx);
@@ -835,21 +916,26 @@ pub(crate) async fn run_selftest(
     let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
     assert!(
         !open && active.is_none(),
-        "关尽最后一个 tab 后面板应自动收起"
+        "panel should auto-collapse after the last tab is closed"
     );
     app!(|app: &mut AppView, cx| app.toggle_right_panel(cx));
-    println!("[selftest] 右侧面板开合 OK");
+    println!("[selftest] right panel open/close OK");
 
-    // 底部终端面板：默认收起 → 展开（真 PTY spawn + TerminalElement 渲染链路）
-    // → 再触发收起（tab/进程保留，面板仅隐藏）。开关要 &mut Window（焦点/创建视图），
-    // 经 update_window 回到窗口上下文驱动。
+    // Bottom terminal panel: collapsed by default → expand (real PTY spawn +
+    // TerminalElement render chain) → toggle back collapsed (tab/process kept,
+    // panel merely hidden). The toggle needs &mut Window (focus/view creation),
+    // so it is driven via update_window back in window context.
     let terminal_initial = app!(|app: &mut AppView, _| app.terminal_open);
-    assert!(!terminal_initial, "终端面板默认应收起");
+    assert!(
+        !terminal_initial,
+        "terminal panel should be collapsed by default"
+    );
     cx.update_window(window_handle, |_, window, cx| {
         view.update(cx, |app, cx| app.toggle_terminal_panel(window, cx));
     })
-    .expect("selftest 窗口应可用");
-    // 等 PTY spawn、zsh 提示符进 grid、若干渲染帧（prepaint/paint 全链路跑到）
+    .expect("selftest window should be available");
+    // Wait for PTY spawn, the zsh prompt to land in the grid, and a few render
+    // frames (the full prepaint/paint chain runs)
     timer!(600).await;
     let (open, tabs) = app!(|app: &mut AppView, cx| {
         (
@@ -860,11 +946,14 @@ pub(crate) async fn run_selftest(
                 .unwrap_or(0),
         )
     });
-    assert!(open && tabs >= 1, "终端面板应展开且至少一个 tab");
+    assert!(
+        open && tabs >= 1,
+        "terminal panel should be open with at least one tab"
+    );
     cx.update_window(window_handle, |_, window, cx| {
         view.update(cx, |app, cx| app.toggle_terminal_panel(window, cx));
     })
-    .expect("selftest 窗口应可用");
+    .expect("selftest window should be available");
     let (closed, kept) = app!(|app: &mut AppView, cx| {
         (
             !app.terminal_open,
@@ -875,23 +964,26 @@ pub(crate) async fn run_selftest(
                 >= 1,
         )
     });
-    assert!(closed && kept, "再触发应收起终端面板且 tab 保留");
-    println!("[selftest] 终端面板开合 OK");
+    assert!(
+        closed && kept,
+        "toggling again should collapse the terminal panel and keep the tab"
+    );
+    println!("[selftest] terminal panel open/close OK");
 
-    // 加面板菜单（标签页栏 "+"）：点开打开、再点收起
+    // Panel menu (the tab bar's "+"): click to open, click again to collapse
     app!(|app: &mut AppView, cx| {
         app.toggle_right_menu(&ClickEvent::default(), cx);
     });
     let menu_open = app!(|app: &mut AppView, _| app.right_menu_open);
-    assert!(menu_open, "菜单应打开");
+    assert!(menu_open, "menu should be open");
     app!(|app: &mut AppView, cx| {
         app.toggle_right_menu(&ClickEvent::default(), cx);
     });
     let menu_closed = app!(|app: &mut AppView, _| !app.right_menu_open);
-    assert!(menu_closed, "再点应收起菜单");
-    println!("[selftest] 右侧面板菜单 OK");
+    assert!(menu_closed, "clicking again should collapse the menu");
+    println!("[selftest] right panel menu OK");
 
-    // 改动 chip：点击改为直接打开右侧改动面板（不再弹层）
+    // Changes chip: clicking now opens the right changes panel directly (no more popup)
     app!(|app: &mut AppView, cx| {
         app.composer
             .update(cx, |_, cx| cx.emit(ComposerEvent::OpenChanges));
@@ -899,11 +991,11 @@ pub(crate) async fn run_selftest(
     let (open, active) = app!(|app: &mut AppView, _| (app.right_open, app.right_active.clone()));
     assert!(
         open && active == Some(RightTab::Changes),
-        "改动 chip 应打开右侧面板并激活改动 tab"
+        "changes chip should open the right panel and activate the changes tab"
     );
-    println!("[selftest] 改动 chip → 右侧改动面板 OK");
+    println!("[selftest] changes chip -> right review panel OK");
 
-    // 会话管理：首条消息自动命名 → 手动重命名 → 删除
+    // Session management: first message auto-titles → manual rename → delete
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         None,
@@ -925,11 +1017,12 @@ pub(crate) async fn run_selftest(
             break id;
         }
     };
-    // 首条消息（≥10 字）触发自动命名 sidecar；mock 回 {"title": MOCK_TITLE}
+    // First message (≥10 chars) triggers the auto-title sidecar; the mock
+    // returns {"title": MOCK_TITLE}
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             session_f.clone(),
-            "帮我梳理这个项目的模块结构并给出重构建议".to_string(),
+            "help me outline this project's module structure and suggest refactoring".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -939,7 +1032,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "自动命名超时");
+        assert!(waited < 30_000, "auto-titling timed out");
         let done = app!(|app: &mut AppView, cx| {
             let Some(views) = app.views.get(&session_f) else {
                 return false;
@@ -960,40 +1053,46 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    println!("[selftest] 首条消息自动命名 OK（mock 标题替换 30 字符种子）");
+    println!("[selftest] first-message auto-titling OK (mock title replaces 30-char seed)");
 
-    // 手动重命名：core 落库（title_custom）后 SessionList 全量刷新回来仍是新名，
-    // 才算真正持久化（本地补丁只管即时显示）
-    app!(|app: &mut AppView, cx| app.rename_session(&session_f, "手动改名F", cx));
+    // Manual rename: only counts as truly persisted when the full SessionList
+    // refresh after core persists it (title_custom) still shows the new name
+    // (the local patch only covers immediate display)
+    app!(|app: &mut AppView, cx| app.rename_session(&session_f, "manual rename F", cx));
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "重命名持久化超时");
+        assert!(waited < 10_000, "rename persistence timed out");
         let done = app!(|app: &mut AppView, _| {
             app.metas
                 .iter()
                 .find(|m| m.id == session_f)
                 .map(|m| m.title.as_str())
-                == Some("手动改名F")
+                == Some("manual rename F")
         });
         if done {
             break;
         }
     }
-    println!("[selftest] 会话手动重命名 OK");
+    println!("[selftest] session manual rename OK");
 
-    // 删除会话：视图/列表/rollout 文件全清理；删当前会话自动切走
+    // Delete session: view/list/rollout file all cleaned up; deleting the
+    // current session switches away automatically
     let data_dir =
-        std::path::PathBuf::from(std::env::var("PIG_DATA_DIR").expect("selftest 数据目录"));
+        std::path::PathBuf::from(std::env::var("PIG_DATA_DIR").expect("selftest data dir"));
     let jsonl = data_dir.join("sessions").join(format!("{session_f}.jsonl"));
-    assert!(jsonl.exists(), "删除前 rollout 应存在: {}", jsonl.display());
+    assert!(
+        jsonl.exists(),
+        "rollout should exist before deletion: {}",
+        jsonl.display()
+    );
     app!(|app: &mut AppView, cx| app.delete_session(&session_f, cx));
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "删除会话超时");
+        assert!(waited < 10_000, "session deletion timed out");
         let gone = app!(|app: &mut AppView, _| {
             !app.metas.iter().any(|m| m.id == session_f) && !app.views.contains_key(&session_f)
         });
@@ -1003,13 +1102,15 @@ pub(crate) async fn run_selftest(
     }
     assert!(
         app!(|app: &mut AppView, _| app.current.clone()) != Some(session_f),
-        "删除当前会话后应切走"
+        "should switch away after deleting the current session"
     );
-    println!("[selftest] 会话删除 OK（视图+列表+rollout 全清理）");
+    println!("[selftest] session deletion OK (views + list + rollout all cleaned)");
 
-    // ---- 新会话模型选择不被工作区种子冲掉（回归：曾「切模型→选工作区→发送」
-    // 被 apply_hero_defaults 用工作区旧模型覆盖）----
-    // 前置：显式用 mock 建一个会话并完成回合，成为工作区最新种子
+    // ---- New-session model selection must not be clobbered by the workspace
+    // seed (regression: "switch model → pick workspace → send" was once
+    // overridden by apply_hero_defaults with the workspace's old model) ----
+    // Setup: explicitly create a session with mock and finish a turn so it
+    // becomes the workspace's latest seed
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         Some("mock".to_string()),
@@ -1033,7 +1134,7 @@ pub(crate) async fn run_selftest(
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             seed_id.clone(),
-            "种子会话打个卡".to_string(),
+            "seed session check-in".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1043,7 +1144,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "模型种子会话超时");
+        assert!(waited < 30_000, "model seed session timed out");
         let done = app!(|app: &mut AppView, cx| {
             let Some(views) = app.views.get(&seed_id) else {
                 return false;
@@ -1055,17 +1156,19 @@ pub(crate) async fn run_selftest(
         }
     }
 
-    // 前置断言：未显式选模型时，hero 默认值来自工作区种子（此时最新 = 刚建的 mock 会话）
+    // Setup assertion: with no explicit model chosen, the hero default comes from
+    // the workspace seed (latest = the just-created mock session)
     app!(|app: &mut AppView, cx| app.enter_hero(cx));
     timer!(400).await;
     let seeded = app!(|app: &mut AppView, _| app.current_model.clone());
     assert_eq!(
         seeded,
         Some(("mock".to_string(), "mock-model".to_string())),
-        "未选模型时 hero 默认值应来自工作区种子: {seeded:?}"
+        "with no model chosen, the hero default should come from the workspace seed: {seeded:?}"
     );
 
-    // 变体 2：hero → 切 anthropic → 再选工作区（触发 apply_hero_defaults）→ 发送
+    // Variant 2: hero → switch to anthropic → pick workspace again (triggers
+    // apply_hero_defaults) → send
     app!(|app: &mut AppView, cx| app.enter_hero(cx));
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
@@ -1090,11 +1193,11 @@ pub(crate) async fn run_selftest(
             Some(("anthropic".to_string(), "mock-model".to_string())),
             true
         ),
-        "选工作区后用户已选的模型不应被种子覆盖: {picked:?}"
+        "after picking a workspace, the user-chosen model should not be overridden by the seed: {picked:?}"
     );
     app!(|app: &mut AppView, cx| {
         app.hero_send(
-            "模型选择回归 v2".to_string(),
+            "model selection regression v2".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1105,7 +1208,7 @@ pub(crate) async fn run_selftest(
     let v2_id = loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 20_000, "v2 会话建立超时");
+        assert!(waited < 20_000, "v2 session creation timed out");
         let found = app!(|app: &mut AppView, cx| {
             let Some(sid) = &app.current else { return None };
             if known.contains(sid) {
@@ -1134,11 +1237,11 @@ pub(crate) async fn run_selftest(
             Some("anthropic".to_string()),
             Some("mock-model".to_string())
         )),
-        "切模型→选工作区→发送：新会话应使用用户选择的模型: {v2:?}"
+        "switch model -> pick workspace -> send: the new session should use the user-chosen model: {v2:?}"
     );
-    println!("[selftest] hero 切模型后选工作区，模型选择保留 OK");
+    println!("[selftest] model kept after hero model switch then workspace pick OK");
 
-    // 变体 1：hero → 切 anthropic → 直接发送（无工作区选择）
+    // Variant 1: hero → switch to anthropic → send directly (no workspace selection)
     app!(|app: &mut AppView, cx| app.enter_hero(cx));
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
@@ -1151,7 +1254,7 @@ pub(crate) async fn run_selftest(
     timer!(400).await;
     app!(|app: &mut AppView, cx| {
         app.hero_send(
-            "模型选择回归 v1".to_string(),
+            "model selection regression v1".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1162,7 +1265,7 @@ pub(crate) async fn run_selftest(
     let v1_id = loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 20_000, "v1 会话建立超时");
+        assert!(waited < 20_000, "v1 session creation timed out");
         let found = app!(|app: &mut AppView, cx| {
             let Some(sid) = &app.current else { return None };
             if sid == &v2_id || known.contains(sid) {
@@ -1191,15 +1294,16 @@ pub(crate) async fn run_selftest(
             Some("anthropic".to_string()),
             Some("mock-model".to_string())
         )),
-        "hero 切模型直接发送：新会话应使用用户选择的模型: {v1:?}"
+        "hero model switch then direct send: the new session should use the user-chosen model: {v1:?}"
     );
-    println!("[selftest] 新会话模型选择（用户选择优先/种子兜底）OK");
+    println!("[selftest] new-session model pick (user choice wins / seed fallback) OK");
 
-    // 变体 3（用户实际流程）：工作区行点 +（NewTaskInWorkspace，预设 cwd 进
-    // hero）→ 切模型 → 发送。
-    // 前置：再显式建一个 mock 会话并完成回合——v1/v2 的 anthropic 会话已成为
-    // 工作区最新种子，会与用户选择同为 anthropic，断言无法区分「保留选择」
-    // 与「还原成种子」，必须把种子刷回 mock
+    // Variant 3 (the user's real flow): click + on a workspace row
+    // (NewTaskInWorkspace, cwd preloaded into hero) → switch model → send.
+    // Setup: explicitly create one more mock session and finish a turn — the
+    // v1/v2 anthropic sessions have become the workspace's latest seed and would
+    // match the user's anthropic choice, so the assertion could not tell "choice
+    // kept" from "restored to seed"; the seed must be flushed back to mock
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
         Some("mock".to_string()),
@@ -1223,7 +1327,7 @@ pub(crate) async fn run_selftest(
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             seed3_id.clone(),
-            "v3 前置种子会话".to_string(),
+            "v3 setup seed session".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1233,7 +1337,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "v3 种子会话超时");
+        assert!(waited < 30_000, "v3 seed session timed out");
         let done = app!(|app: &mut AppView, cx| {
             let Some(views) = app.views.get(&seed3_id) else {
                 return false;
@@ -1244,9 +1348,11 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    // 确认种子生效：进 hero 后默认模型应是 mock（工作区最新）
+    // Confirm the seed took effect: after entering hero the default model should
+    // be mock (workspace latest)
     app!(|app: &mut AppView, cx| {
-        // SidebarEvent::NewTaskInWorkspace 的 handler 本体（直调需要 window）
+        // The body of the SidebarEvent::NewTaskInWorkspace handler (direct call
+        // needs a window)
         app.hero_cwd = Some(app.cwd.clone());
         app.enter_hero(cx);
     });
@@ -1255,9 +1361,9 @@ pub(crate) async fn run_selftest(
     assert_eq!(
         seeded3,
         Some(("mock".to_string(), "mock-model".to_string())),
-        "v3 前置：工作区种子应为 mock: {seeded3:?}"
+        "v3 setup: the workspace seed should be mock: {seeded3:?}"
     );
-    // 切 anthropic → 发送
+    // Switch to anthropic → send
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
             cx.emit(ComposerEvent::SetModel {
@@ -1269,7 +1375,7 @@ pub(crate) async fn run_selftest(
     timer!(400).await;
     app!(|app: &mut AppView, cx| {
         app.hero_send(
-            "模型选择回归 v3".to_string(),
+            "model selection regression v3".to_string(),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1280,7 +1386,7 @@ pub(crate) async fn run_selftest(
     let v3_id = loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 20_000, "v3 会话建立超时");
+        assert!(waited < 20_000, "v3 session creation timed out");
         let found = app!(|app: &mut AppView, cx| {
             let Some(sid) = &app.current else { return None };
             if sid == &v1_id || sid == &v2_id || known.contains(sid) || sid == &seed3_id {
@@ -1309,13 +1415,16 @@ pub(crate) async fn run_selftest(
             Some("anthropic".to_string()),
             Some("mock-model".to_string())
         )),
-        "工作区点+→切模型→发送：新会话应使用用户选择的模型: {v3:?}"
+        "workspace + click -> switch model -> send: the new session should use the user-chosen model: {v3:?}"
     );
-    println!("[selftest] 工作区点+新建后切模型，模型选择保留 OK");
+    println!("[selftest] model kept after workspace click + new session then model switch OK");
 
-    // 切模型时思考等级落点（优先级）：模型默认档 > 继承（需新模型支持）
-    // > 继承档失效时启发式。selftest 配置：mock 有默认 low，anthropic 无默认
-    // 1) 默认档优先：当前 high（mock 也支持 high）→ 切 mock 仍落到默认 low
+    // Reasoning level landing spot when switching models (priority): model
+    // default > inherit (requires the new model to support it) > heuristic when
+    // the inherited level is invalid. Selftest config: mock defaults to low,
+    // anthropic has no default.
+    // 1) Default wins: currently high (mock also supports high) → switching to
+    // mock still lands on the default low
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
             cx.emit(ComposerEvent::SetReasoning(Some("high".to_string())));
@@ -1323,7 +1432,11 @@ pub(crate) async fn run_selftest(
     });
     timer!(200).await;
     let had_level = app!(|app: &mut AppView, _| app.reasoning_level.clone());
-    assert_eq!(had_level, Some("high".to_string()), "前置：等级应为 high");
+    assert_eq!(
+        had_level,
+        Some("high".to_string()),
+        "setup: the level should be high"
+    );
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
             cx.emit(ComposerEvent::SetModel {
@@ -1344,15 +1457,16 @@ pub(crate) async fn run_selftest(
     assert_eq!(
         level,
         Some("low".to_string()),
-        "模型默认档应优先于可继承的等级: level={level:?}"
+        "the model default tier should win over an inheritable level: level={level:?}"
     );
     assert_eq!(
         meta_level,
         Some("low".to_string()),
-        "落点等级应写穿 meta: meta_level={meta_level:?}"
+        "the landed level should be written through to meta: meta_level={meta_level:?}"
     );
 
-    // 2) 未配默认 → 继承：anthropic 无默认，max 在其等级表内 → 切过去保持 max
+    // 2) No default configured → inherit: anthropic has no default and max is in
+    // its level list → switching keeps max
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
             cx.emit(ComposerEvent::SetReasoning(Some("max".to_string())));
@@ -1371,12 +1485,14 @@ pub(crate) async fn run_selftest(
     assert_eq!(
         level,
         Some("max".to_string()),
-        "未配默认且等级被支持时应继承: level={level:?}"
+        "with no default configured and the level supported, it should be inherited: level={level:?}"
     );
-    println!("[selftest] 切模型思考等级落点（默认档优先/继承）OK");
+    println!("[selftest] thinking level on model switch (default tier first / inherited) OK");
 
-    // 子代理场景（A3）：前台 Agent 卡——运行中出现进度行、收尾后原摘要保留；
-    // 随后后台子代理完成 → 合成 <task-notification> 用户消息到达（通知卡渲染路径）
+    // Subagent scenario (A3): foreground Agent card — progress line appears
+    // while running, original summary kept after settling; then the background
+    // subagent finishes → a synthetic <task-notification> user message arrives
+    // (notification card render path)
     let before_current = app!(|app: &mut AppView, _| app.current.clone());
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
@@ -1396,8 +1512,9 @@ pub(crate) async fn run_selftest(
         }
     };
     app!(|app: &mut AppView, _| {
-        // 钉到 mock（OpenAI 格式）供应商：前面的切模型测试把当前选择留在了
-        // anthropic，而 mock 的子代理场景只有 OpenAI 格式分支
+        // Pin to the mock (OpenAI format) provider: the earlier model-switch
+        // tests left the current selection on anthropic, but the mock's subagent
+        // scenario only has the OpenAI-format branch
         app.agent.set_model(
             session_c.clone(),
             "mock".to_string(),
@@ -1417,7 +1534,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(100).await;
         waited += 100;
-        assert!(waited < 60_000, "前台子代理场景超时");
+        assert!(waited < 60_000, "foreground subagent scenario timed out");
         let state = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_c)?;
             let thread = views.thread.read(cx);
@@ -1436,35 +1553,48 @@ pub(crate) async fn run_selftest(
         };
         saw_progress |= !done && live_note.is_some();
         if done && !streaming {
-            assert!(saw_progress, "运行中应出现过进度行（SubagentProgress）");
             assert!(
-                summary.contains("子代理 explore"),
-                "收尾后原摘要应保留（不被进度覆盖）: {summary}"
+                saw_progress,
+                "progress line (SubagentProgress) should have appeared while running"
             );
-            assert!(live_note.is_none(), "收尾后进度行应清空: {live_note:?}");
+            assert!(
+                summary.contains("subagent explore"),
+                "after settling, the original summary should be kept (not overwritten by progress): {summary}"
+            );
+            assert!(
+                live_note.is_none(),
+                "after settling, the progress line should be cleared: {live_note:?}"
+            );
             assert!(
                 tool_output.contains(pig_core::mock::SUBAGENT_CHILD_DONE),
-                "Agent 卡输出应含子代理结论: {tool_output}"
+                "Agent card output should contain the subagent conclusion: {tool_output}"
             );
-            // A3c：SubagentCard 事件已把代理卡元信息写到卡片上（agent_id + 副标题）
+            // A3c: the SubagentCard event wrote the agent card meta onto the card (agent_id + subtitle)
             let card_meta = app!(|app: &mut AppView, cx| {
                 let views = app.views.get(&session_c)?;
                 views.thread.read(cx).debug_agent_card_meta()
             });
             let Some((card_agent_id, card_subtitle)) = card_meta else {
-                panic!("Agent 卡应有代理卡元信息（SubagentCard 事件）");
+                panic!("Agent card should carry agent card meta (SubagentCard event)");
             };
-            assert!(!card_agent_id.is_empty(), "代理卡 agent_id 应非空");
+            assert!(
+                !card_agent_id.is_empty(),
+                "agent card agent_id should be non-empty"
+            );
             assert!(
                 card_subtitle.contains("explore"),
-                "代理卡副标题应含 profile: {card_subtitle}"
+                "agent card subtitle should contain the profile: {card_subtitle}"
             );
             break;
         }
     }
-    println!("[selftest] 子代理前台卡片（进度行出现/原摘要保留/收尾清行/代理卡元信息）OK");
+    println!(
+        "[selftest] foreground subagent card (progress line appears / summary kept / cleared on finish / agent card meta) OK"
+    );
 
-    // 同会话发后台子代理：running 回执收尾 → 子代理完成后 core 注入通知并唤醒收尾
+    // Send a background subagent in the same session: the running receipt
+    // settles → after the subagent finishes, core injects the notification and
+    // wakes the wrap-up
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             session_c.clone(),
@@ -1478,7 +1608,10 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 60_000, "后台子代理通知超时");
+        assert!(
+            waited < 60_000,
+            "background subagent notification timed out"
+        );
         let (streaming, has_notification) = app!(|app: &mut AppView, cx| {
             let Some(views) = app.views.get(&session_c) else {
                 return (true, false);
@@ -1490,15 +1623,18 @@ pub(crate) async fn run_selftest(
             break;
         }
     }
-    println!("[selftest] 后台子代理完成 → task-notification 合成消息到达 OK");
+    println!(
+        "[selftest] background subagent done -> task-notification synthetic message arrives OK"
+    );
 
-    // A3b：通知开标签的结构化 meta 解析（气泡渲染数据源）
+    // A3b: structured meta parsing of the notification open tag (data source for
+    // bubble rendering)
     let (agent_id, title, duration_ms, record, result) = {
         let mut waited = 0u64;
         loop {
             timer!(200).await;
             waited += 200;
-            assert!(waited < 10_000, "通知 meta 解析超时");
+            assert!(waited < 10_000, "notification meta parsing timed out");
             let found = app!(|app: &mut AppView, cx| {
                 let views = app.views.get(&session_c)?;
                 views.thread.read(cx).debug_task_notification_meta()
@@ -1509,24 +1645,30 @@ pub(crate) async fn run_selftest(
         }
     };
     assert!(
-        title.contains("子代理自测委派"),
-        "通知标题应为 description: {title}"
+        title.contains("subagent selftest delegation"),
+        "notification title should be the description: {title}"
     );
-    // A3c/A3d：耗时、上下文记录路径与结果文件路径属性
-    assert!(duration_ms.is_some(), "通知应带 duration_ms");
-    let record = record.expect("通知应带 record 记录路径");
+    // A3c/A3d: duration, context record path and result file path attributes
+    assert!(
+        duration_ms.is_some(),
+        "notification should carry duration_ms"
+    );
+    let record = record.expect("notification should carry a record path");
     assert!(
         record.contains(".agents/") || record.contains(".agents\\"),
-        "record 应为子代理上下文 JSONL: {record}"
+        "record should be the subagent context JSONL: {record}"
     );
-    let result_path = result.expect("通知应带 result 结果路径");
+    let result_path = result.expect("notification should carry a result path");
     assert!(
         result_path.ends_with(".result.md"),
-        "result 应为结果全文文件: {result_path}"
+        "result should be the full result file: {result_path}"
     );
-    println!("[selftest] 通知气泡结构化 meta 解析 OK（{agent_id} · {title} · {duration_ms:?}ms）");
+    println!(
+        "[selftest] notification bubble structured meta parsing OK ({agent_id} · {title} · {duration_ms:?}ms)"
+    );
 
-    // 走通知卡点击的同一路径开「子代理」tab → Op::LoadSubagent → SubagentHistory
+    // Open the "Subagents" tab via the same path as clicking the notification
+    // card → Op::LoadSubagent → SubagentHistory
     app!(|app: &mut AppView, cx| {
         app.open_subagent_tab(session_c.clone(), agent_id.clone(), title.clone(), cx);
     });
@@ -1534,24 +1676,26 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 15_000, "子代理历史加载超时");
+        assert!(waited < 15_000, "subagent history load timed out");
         let state = app!(|app: &mut AppView, cx| app.debug_subagent_tab(cx));
         if let Some((tab_title, items)) = state {
             assert!(
                 items >= 3,
-                "子代理对话应有 user/tool/assistant 各至少一条: items={items}"
+                "subagent conversation should have at least one user/tool/assistant row each: items={items}"
             );
             assert!(
-                tab_title.contains("子代理自测委派"),
-                "tab 标题应为 meta.description: {tab_title}"
+                tab_title.contains("subagent selftest delegation"),
+                "tab title should be meta.description: {tab_title}"
             );
             break;
         }
     }
-    println!("[selftest] 子代理 tab（点击开面板 + 历史加载 ≥3 行）OK");
+    println!("[selftest] subagent tab (click opens panel + history loads >= 3 rows) OK");
 
-    // A3d：面板实时输出——新会话发 BG，后台子代理运行中经代理卡同路径开 tab：
-    // running 指示出现 → SubagentActivity 增量追加 → finished 后 running 消失
+    // A3d: panel live output — send BG in a new session and open the tab via the
+    // same agent-card path while the background subagent runs: running indicator
+    // appears → SubagentActivity appends incrementally → running disappears
+    // after finished
     let before_current = app!(|app: &mut AppView, _| app.current.clone());
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),
@@ -1585,13 +1729,14 @@ pub(crate) async fn run_selftest(
             pig_protocol::ExecMode::AutoEdit,
         );
     });
-    // 等 bg Agent 卡的代理卡元信息（SubagentCard 先于子代理执行到达，带 agent_id）
+    // Wait for the bg Agent card's card meta (SubagentCard arrives before
+    // subagent execution, carrying agent_id)
     let bg_agent_id = {
         let mut waited = 0u64;
         loop {
             timer!(50).await;
             waited += 50;
-            assert!(waited < 15_000, "后台代理卡元信息超时");
+            assert!(waited < 15_000, "background agent card meta timed out");
             let meta = app!(|app: &mut AppView, cx| {
                 let views = app.views.get(&session_d)?;
                 views.thread.read(cx).debug_agent_card_meta()
@@ -1601,12 +1746,13 @@ pub(crate) async fn run_selftest(
             }
         }
     };
-    // 立即开 tab（此刻子代理大概率仍在跑：mock 子侧 ≥2 次请求 × 50ms/片）
+    // Open the tab immediately (the subagent is most likely still running: the
+    // mock child side does ≥2 requests × 50ms/chunk)
     app!(|app: &mut AppView, cx| {
         app.open_subagent_tab(
             session_d.clone(),
             bg_agent_id.clone(),
-            "子代理自测委派".to_string(),
+            "subagent selftest delegation".to_string(),
             cx,
         );
     });
@@ -1619,7 +1765,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(100).await;
         waited += 100;
-        assert!(waited < 30_000, "面板实时输出超时");
+        assert!(waited < 30_000, "panel live output timed out");
         let state = app!(|app: &mut AppView, cx| {
             let live = app.debug_subagent_live(&bg_agent_id, cx);
             let scroll = app.debug_subagent_scroll(&bg_agent_id, cx);
@@ -1634,110 +1780,150 @@ pub(crate) async fn run_selftest(
             continue;
         };
         saw_running |= running;
-        // 追加活动期间跟随态不应丢（A3f）
+        // The following state must not be lost during appended activity (A3f)
         if let Some((following, _)) = scroll_state {
             saw_following |= following;
         }
-        // A3e①：工具回执早已收尾（done）但子代理仍在跑（!finished）→ 卡应转圈
+        // A3e(1): the tool receipt settled long ago (done) but the subagent is
+        // still running (!finished) → the card should spin
         if let Some((_, done, finished)) = &card_state {
             saw_card_running |= *done && !*finished;
         }
-        // A3g：BG 在跑时「后台 Agent」chip 应出现
+        // A3g: while BG is running, the "background Agent" chip should appear
         saw_agent_chip |= chips.1;
         if initial_items.is_none() && items > 0 {
             initial_items = Some(items);
         }
         if !running && items > 0 {
-            // 收尾（finished → running=false + 全量重拉收口）
-            assert!(saw_running, "运行期间应见过 running=true（运行中指示）");
-            assert!(appends >= 1, "应有 SubagentActivity 增量追加");
+            // Wrap-up (finished → running=false plus a full refetch to close out)
+            assert!(
+                saw_running,
+                "should have seen running=true while the subagent ran (running indicator)"
+            );
+            assert!(
+                appends >= 1,
+                "there should be incremental SubagentActivity appends"
+            );
             assert!(
                 Some(items) >= initial_items,
-                "收尾重拉后 items 不应变少: {items} < {initial_items:?}"
+                "after the wrap-up refetch, items should not decrease: {items} < {initial_items:?}"
             );
             break;
         }
     }
-    assert!(saw_following, "追加活动期间 following 应保持 true");
-    // 卡的终态：finished 落位（不再转圈）
+    assert!(
+        saw_following,
+        "following should stay true during appended activity"
+    );
+    // The card's terminal state: finished lands (no more spinning)
     let (_, card_done, card_finished) = app!(|app: &mut AppView, cx| {
         app.views
             .get(&session_d)
             .and_then(|views| views.thread.read(cx).debug_agent_card_state())
-            .expect("D 应有代理卡")
+            .expect("session D should have an agent card")
     });
-    assert!(card_done && card_finished, "子代理结束后卡应落终态");
+    assert!(
+        card_done && card_finished,
+        "the card should reach its terminal state after the subagent finishes"
+    );
     assert!(
         saw_card_running,
-        "应见过「工具收尾但子代理在跑」的转圈窗口（done=true 且 finished=false）"
+        "should have seen the spinning window where the tool settled but the subagent still ran (done=true && finished=false)"
     );
-    println!("[selftest] 子代理面板实时输出（running 指示/活动追加/收尾消失）OK");
-    println!("[selftest] 后台代理卡运行态机（转圈窗口→终态）OK");
+    println!(
+        "[selftest] subagent panel live output (running indicator / active append / cleared on finish) OK"
+    );
+    println!(
+        "[selftest] background agent card run-state machine (spinner window -> terminal state) OK"
+    );
 
-    // A3f：面板跟随滚动——追加活动期间 following 未丢（上面已断言），收尾后贴底
-    //（面板内容可能不足一屏：此时 max_offset=0，at_bottom 恒真，断言退化为
-    // 跟随态检查；真实溢出场景的跟随/浮钮靠人工验证）
+    // A3f: panel follow scrolling — following was not lost during appended
+    // activity (asserted above); after wrap-up it sits at bottom (panel content
+    // may be shorter than one screen: then max_offset=0, at_bottom is always
+    // true, and the assertion degrades to a following-state check; following and
+    // the floating button in real overflow scenarios rely on manual
+    // verification)
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "面板贴底超时");
+        assert!(waited < 10_000, "panel stick-to-bottom timed out");
         let scroll = app!(|app: &mut AppView, cx| app.debug_subagent_scroll(&bg_agent_id, cx));
         let Some((following, at_bottom)) = scroll else {
             continue;
         };
         if at_bottom {
-            assert!(following, "贴底时应处于跟随态");
+            assert!(
+                following,
+                "should be in the following state while at bottom"
+            );
             break;
         }
     }
-    println!("[selftest] 子代理面板跟随滚动（following 保持 + 贴底）OK");
+    println!("[selftest] subagent panel follow-scroll (following kept + stick to bottom) OK");
 
-    // A3g：chip 按类型拆分——BG 在跑时见过「后台 Agent」chip；
-    // 会话 D 无 Bash 任务，「后台 Bash」chip 不应出现
-    assert!(saw_agent_chip, "BG 在跑时应出现「后台 Agent」chip");
+    // A3g: chips split by type — the "background Agent" chip was seen while BG
+    // ran; session D has no Bash task, so the "background Bash" chip must not
+    // appear
+    assert!(
+        saw_agent_chip,
+        "the background Agent chip should appear while BG is running"
+    );
     let chips = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_task_chips());
-    assert_eq!(chips, (false, true), "会话 D 应只有 Agent chip: {chips:?}");
-    // agent 任务行数据带 agent_id（与代理卡一致）
+    assert_eq!(
+        chips,
+        (false, true),
+        "session D should have only the Agent chip: {chips:?}"
+    );
+    // Agent task rows carry agent_id (consistent with the agent cards)
     let task_agent_ids = app!(|app: &mut AppView, cx| app.composer.read(cx).debug_agent_task_ids());
     assert!(
         task_agent_ids.iter().any(|id| id == &bg_agent_id),
-        "Agent 任务行应带 agent_id: {task_agent_ids:?}"
+        "Agent task rows should carry agent_id: {task_agent_ids:?}"
     );
-    // 任务行点击的事件路径：ComposerEvent::OpenSubagent → open_subagent_tab 聚焦 tab
+    // Task row click's event path: ComposerEvent::OpenSubagent →
+    // open_subagent_tab focuses the tab
     app!(|app: &mut AppView, cx| {
         app.composer.update(cx, |_, cx| {
             cx.emit(ComposerEvent::OpenSubagent {
                 agent_id: bg_agent_id.clone(),
-                title: "子代理 explore: 子代理自测委派".to_string(),
+                title: "subagent explore: subagent selftest delegation".to_string(),
             });
         });
     });
     let tab_active = app!(|app: &mut AppView, cx| app.debug_subagent_tab(cx).is_some());
-    assert!(tab_active, "OpenSubagent 后应有激活的子代理 tab");
-    // 回归：打开「后台 Agent」弹层走真实渲染帧不炸——palette_open 漏 AgentTasks
-    // 会落进 render_popup 的 unreachable（用户实机踩到的崩溃）
+    assert!(
+        tab_active,
+        "there should be an active subagent tab after OpenSubagent"
+    );
+    // Regression: opening the "background Agent" popup must survive real render
+    // frames — a palette_open that misses AgentTasks falls into render_popup's
+    // unreachable (a crash hit on a user's machine)
     let popup_open = app!(|app: &mut AppView, cx| {
         app.composer
             .update(cx, |composer, cx| composer.debug_open_agent_tasks_popup(cx))
     });
-    assert!(popup_open, "Agent 弹层应打开");
+    assert!(popup_open, "the Agent popup should be open");
     timer!(200).await;
     app!(|app: &mut AppView, cx| {
         app.composer
             .update(cx, |composer, cx| composer.debug_close_popup(cx));
     });
-    println!("[selftest] 后台 Agent 弹层渲染（palette 路由回归）OK");
-    println!("[selftest] 后台任务 chip 拆分（Agent chip 显隐/agent_id/点行开 tab）OK");
+    println!("[selftest] background Agent popup rendering (palette routing regression) OK");
+    println!(
+        "[selftest] background task chip split (Agent chip visibility / agent_id / row click opens tab) OK"
+    );
 
-    // A3e②：模拟重启重开会话 D——代理卡元信息从 rollout 回放重建（不退化成
-    // 原始输出卡），且后台代理回放即落终态（core 补发 finished，不转圈）
+    // A3e(2): simulated restart reopens session D — the agent card meta is
+    // rebuilt from rollout replay (not degraded to a raw output card), and the
+    // background agent lands in its terminal state on replay (core re-emits
+    // finished, no spinning)
     app!(|app: &mut AppView, cx| app.restart_agent(cx));
     let mut waited = 0u64;
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 10_000, "重启后自动打开会话超时");
+        assert!(waited < 10_000, "auto-open session after restart timed out");
         let ready = app!(|app: &mut AppView, _| app.current.is_some());
         if ready {
             break;
@@ -1748,7 +1934,7 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
-        assert!(waited < 30_000, "重启后重放代理卡超时");
+        assert!(waited < 30_000, "agent card replay after restart timed out");
         let state = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_d)?;
             let thread = views.thread.read(cx);
@@ -1763,51 +1949,57 @@ pub(crate) async fn run_selftest(
         let (Some((card_agent, subtitle)), Some((_, done, finished))) = (meta, card_state) else {
             continue;
         };
-        assert_eq!(card_agent, bg_agent_id, "回放应重建同一代理卡");
+        assert_eq!(
+            card_agent, bg_agent_id,
+            "replay should rebuild the same agent card"
+        );
         assert!(
             subtitle.contains("explore"),
-            "副标题应含 profile: {subtitle}"
+            "subtitle should contain the profile: {subtitle}"
         );
         assert!(
             done && finished,
-            "回放的后台代理卡应直接落终态: done={done} finished={finished}"
+            "the replayed background agent card should land directly in its terminal state: done={done} finished={finished}"
         );
         break;
     }
-    println!("[selftest] 代理卡回放重建（meta 保留 + 落终态不转圈）OK");
+    println!(
+        "[selftest] agent card replay rebuild (meta kept + terminal state without spinner) OK"
+    );
 
-    // 三栏最小宽度钳制（纯函数）：侧栏 ≥200、右面板 ≥280、为中心区保留 ≥480
+    // Three-pane minimum width clamping (pure function): sidebar ≥200, right
+    // panel ≥280, and ≥480 reserved for the center area
     assert_eq!(
         clamp_dock_widths(1280., 220., 300., true, true),
         (220., 300.),
-        "区间内不动"
+        "no change within the allowed range"
     );
     assert_eq!(
         clamp_dock_widths(1280., 100., 50., true, true),
         (200., 280.),
-        "低于各自最小值拉回"
+        "clamped back below their respective minimums"
     );
     assert_eq!(
         clamp_dock_widths(1280., 900., 300., true, true),
         (500., 300.),
-        "左栏封顶为中心区留 480，右栏不受牵连"
+        "left pane capped to reserve 480 for the center; right pane unaffected"
     );
     assert_eq!(
         clamp_dock_widths(1280., 900., 300., true, false),
         (800., 300.),
-        "收起的栏不占预算"
+        "collapsed panes do not consume the budget"
     );
     assert_eq!(
         clamp_dock_widths(960., 400., 400., true, true),
         (200., 280.),
-        "窗口最小宽时两侧同时越界：左先让位，一遍收敛到全最小"
+        "at the minimum window width both sides overflow: left yields first, converging to all minimums in one pass"
     );
     assert_eq!(
         clamp_dock_widths(0., 220., 300., true, true),
         (220., 300.),
-        "首帧未测量不动作"
+        "no action on the unmeasured first frame"
     );
-    println!("[selftest] 三栏最小宽度钳制 OK");
+    println!("[selftest] three-pane minimum width clamping OK");
 
     println!("SELFTEST PASS");
     std::process::exit(0);

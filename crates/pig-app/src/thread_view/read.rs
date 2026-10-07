@@ -1,19 +1,24 @@
-//! Read 工具的展示：摘要行附加件（路径可点击 + 行数）与展开的代码卡
-//!（头部 = 文件名 + 自动换行/复制按钮；正文 = 行号 gutter + tree-sitter
-//! 高亮，行号取 Read 输出的真实文件行号；尾部标注行原样附在代码之后）。
+//! Presentation of the Read tool: the summary line attachment (clickable path +
+//! line count) and the expanded code card (header = file name + wrap/copy
+//! buttons; body = line-number gutter + tree-sitter highlighting, line numbers
+//! taken from the Read output's real file line numbers; trailing note lines
+//! appended after the code verbatim).
 //!
-//! 输出格式（pig-core tool/read.rs）：`{行号}\t{内容}` 逐行 + 尾部标注行
-//!（[已截断…] / [文件信息…] / [警告…]）。空文件/「文件未变化」/报错等
-//! 无行号输出 → is_read_code_output 为 false，回落通用工具卡。
+//! Output format (pig-core tool/read.rs): `{line}\t{content}` per line +
+//! trailing note lines ([truncated…] / [file info…] / [warning…]). Line-less
+//! outputs such as empty files/"file unchanged"/errors → is_read_code_output
+//! is false and the generic tool card is the fallback.
 
 use super::*;
 
-/// 卡片渲染行数上限（diff 卡同款口径；完整内容点路径在右侧文件面板看）
+/// Render row cap for the card (same measure as the diff card; click the path to
+/// see the full content in the right file panel)
 const MAX_CARD_ROWS: usize = 600;
-/// 卡片正文限高
+/// Card body height cap
 const CARD_BODY_MAX_H: f32 = 320.;
 
-/// 首行形如 `{数字}\t…` 即判定为带行号的文件内容输出（零分配，逐帧可用）
+/// A first line shaped like `{digits}\t…` counts as numbered file content output
+/// (zero allocation, usable per frame)
 pub(crate) fn is_read_code_output(output: &str) -> bool {
     output
         .lines()
@@ -22,7 +27,8 @@ pub(crate) fn is_read_code_output(output: &str) -> bool {
         .is_some_and(|(no, _)| !no.is_empty() && no.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Read 输出的首行号（点路径打开文件面板时的滚动定位）
+/// The Read output's first line number (scroll positioning when clicking the
+/// path opens the file panel)
 pub(crate) fn read_output_first_line(output: &str) -> Option<usize> {
     let (no, _) = output.lines().next()?.split_once('\t')?;
     if no.is_empty() || !no.bytes().all(|b| b.is_ascii_digit()) {
@@ -31,7 +37,8 @@ pub(crate) fn read_output_first_line(output: &str) -> Option<usize> {
     no.parse().ok()
 }
 
-/// 摘要行的「N 行」计数：带行号前缀的行数（零分配扫描；非内容输出为 0）
+/// The summary line's "N lines" count: the number of lines with a numeric
+/// prefix (zero-allocation scan; 0 for non-content output)
 pub(crate) fn read_output_line_count(output: &str) -> usize {
     output
         .lines()
@@ -42,9 +49,11 @@ pub(crate) fn read_output_line_count(output: &str) -> usize {
         .count()
 }
 
-/// 全文解析：`{行号}\t{内容}` 行入 lines，空行跳过，其余（尾部标注）入 notes。
-/// 注意内容行自身可能以「数字+tab」开头（文件内容如此），split_once 只切第一个
-/// tab 天然正确；空内容行是 `{no}\t`（body 为空串）
+/// Full-text parsing: `{line}\t{content}` lines go into lines, blank lines are
+/// skipped, and the rest (trailing notes) go into notes. Note a content line
+/// itself can start with "digits+tab" (the file content is like that);
+/// split_once splitting only at the first tab is naturally correct; an empty
+/// content line is `{no}\t` (empty body)
 pub(crate) fn parse_read_output(output: &str) -> Option<ParsedReadOutput> {
     let mut lines = Vec::new();
     let mut notes = Vec::new();
@@ -60,16 +69,17 @@ pub(crate) fn parse_read_output(output: &str) -> Option<ParsedReadOutput> {
     (!lines.is_empty()).then_some(ParsedReadOutput { lines, notes })
 }
 
-/// parse_read_output 的结果
+/// Result of parse_read_output
 pub(crate) struct ParsedReadOutput {
-    /// (文件行号, 行内容)
+    /// (file line number, line content)
     pub lines: Vec<(usize, String)>,
-    /// 尾部标注行（[已截断…]/[文件信息…]/[警告…]）
+    /// Trailing note lines ([truncated…]/[file info…]/[warning…])
     pub notes: Vec<String>,
 }
 
-/// 解析输出 + 拼接高亮文本 + tree-sitter 高亮 + 量最大行宽（结果缓存在
-/// ReadCardUi，主题切换由调用方按 Arc 判等重建）
+/// Parse output + assemble highlight text + tree-sitter highlight + measure max
+/// line width (result cached in ReadCardUi; theme changes are rebuilt by the
+/// caller via Arc equality)
 fn build_card_content(
     output: &str,
     path: &str,
@@ -95,10 +105,13 @@ fn build_card_content(
 }
 
 impl ThreadView {
-    /// Read 工具的展开代码卡（ZCode 同款）：圆角描边卡，头部 = 文件名 +
-    /// 自动换行/复制按钮；正文 = 行号 gutter（真实文件行号）+ tree-sitter
-    /// 高亮行。默认不折行（横向滚动），点换行钮切自动换行。限高内部滚动；
-    /// 超 MAX_CARD_ROWS 截断并提示。四角用卡片底色补丁收圆（diff 卡同款）。
+    /// The Read tool's expanded code card (same as ZCode): rounded bordered card;
+    /// header = file name + wrap/copy buttons; body = line-number gutter (real
+    /// file line numbers) + tree-sitter highlighted lines. No wrapping by
+    /// default (horizontal scroll); click the wrap button to toggle soft wrap.
+    /// Height-capped with internal scrolling; truncated with a note beyond
+    /// MAX_CARD_ROWS. The four corners are rounded by card-colored patches
+    /// (same as the diff card).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_read_card(
         &self,
@@ -129,14 +142,16 @@ impl ThreadView {
 
         let border = cx.theme().border;
         let card_bg = cx.theme().secondary;
-        // 卡片背后 = 页面底色（消息区自身透明，与 Root 的 tokens.background 同值）
+        // Behind the card = page background (the message area itself is
+        // transparent, same value as Root's tokens.background)
         let behind = cx.theme().background;
         let subtle = cx.theme().muted_foreground;
         let subtlest = subtle.opacity(0.6);
         let (_, name) = split_path(path);
 
-        // 头部：文件名 + 自动换行开关 + 复制（按钮悬停才显出是惯例，这里常显——
-        // ZCode 读取卡头部按钮即常显）
+        // Header: file name + wrap toggle + copy (hover-only buttons are the
+        // convention elsewhere, but here they are always visible — ZCode's read
+        // card header buttons are always visible too)
         let header = h_flex()
             .w_full()
             .pl_3()
@@ -162,7 +177,7 @@ impl ThreadView {
                     .xsmall()
                     .icon(AssetIconName::TextWrap)
                     .when(ui.wrap, |this| this.text_color(cx.theme().foreground))
-                    .tooltip("自动换行")
+                    .tooltip(rust_i18n::t!("thread.wrap"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::ToolCall {
                             read_ui: Some(ui), ..
@@ -186,7 +201,7 @@ impl ThreadView {
                         IconName::Copy
                     })
                     .when(ui.copied, |this| this.text_color(cx.theme().success))
-                    .tooltip("复制")
+                    .tooltip(rust_i18n::t!("common.copy"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::ToolCall {
                             read_ui: Some(ui), ..
@@ -210,7 +225,7 @@ impl ThreadView {
                     })),
             );
 
-        // 正文行（行号 = Read 输出里的真实文件行号）
+        // Body rows (line numbers = the real file line numbers from the Read output)
         let total = content.lines.len();
         let shown = total.min(MAX_CARD_ROWS);
         let gutter_w = gutter_width(content.lines.last().map(|(no, _)| *no).unwrap_or(1));
@@ -226,7 +241,7 @@ impl ThreadView {
                 )
             })
             .collect();
-        // 尾部标注（[已截断…]/[文件信息…]）与超上限省略提示
+        // Trailing notes ([truncated…]/[file info…]) plus the over-cap omission note
         for note in &content.notes {
             rows.push(
                 div()
@@ -245,10 +260,7 @@ impl ThreadView {
                     .py_1()
                     .text_center()
                     .text_color(subtlest)
-                    .child(format!(
-                        "… 省略 {} 行（点摘要行路径在右侧查看完整文件）…",
-                        total - shown
-                    ))
+                    .child(rust_i18n::t!("thread.read_omitted", n = total - shown).to_string())
                     .into_any_element(),
             );
         }
@@ -258,18 +270,24 @@ impl ThreadView {
             .w_full()
             .max_h(px(CARD_BODY_MAX_H))
             .overflow_y_scroll()
-            // 滚轮锁定手势轴：gpui 默认会把纵向滚轮 delta 映射到仅 x 可滚的
-            // 容器（y→x），也会把横向 delta 映射到仅 y 可滚的容器（x→y）——
-            // 不锁定时滚轮一动两个轴一起滚。锁定后：纵向滚轮只滚纵向，
-            // 横向（Shift+滚轮/触控板横滑）只滚横向
+            // Lock the wheel to the gesture axis: by default gpui maps vertical
+            // wheel delta onto x-only scrollable containers (y→x) and horizontal
+            // delta onto y-only scrollable containers (x→y) — without the lock
+            // one wheel move scrolls both axes. Locked: the vertical wheel only
+            // scrolls vertically, horizontal (Shift+wheel/trackpad swipe) only
+            // horizontally
             .restrict_scroll_to_axis()
             .track_scroll(body_scroll)
-            // 不折行：内容显式量宽 + 横向滚动（不显式给宽会被布局钳进可用空间，
-            // 横向滚动失效——见 code_view::measure_max_line_width）；折行：内容收进卡宽
+            // No wrap: content gets an explicit measured width + horizontal
+            // scrolling (without an explicit width layout clamps it into the
+            // available space and horizontal scrolling breaks — see
+            // code_view::measure_max_line_width); wrapped: content fits the card
+            // width
             .child(if ui.wrap {
                 v_flex().w_full().children(rows).into_any_element()
             } else {
-                // 行 = gutter + 代码格（pl_3 + 文本 + pr_3）；底部预留横向滚动条车道
+                // Row = gutter + code cell (pl_3 + text + pr_3); reserve a
+                // horizontal scrollbar lane at the bottom
                 let content_w = gutter_w + px(24.) + content.max_line_width;
                 div()
                     .id(("read-body-x", key))
@@ -300,16 +318,20 @@ impl ThreadView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(header)
                     .child(
-                        // 滚动条收进正文区域（不到头部）；角上由补丁收圆
+                        // Scrollbar tucked into the body area (not reaching the
+                        // header); corners rounded by patches
                         div()
                             .relative()
                             .w_full()
                             .child(body)
                             .child(Scrollbar::vertical(body_scroll))
                             .when(!ui.wrap, |this| {
-                                // 横向滚动条常显（Scrolling 模式滚动完就淡出，
-                                // 鼠标用户会失去唯一的横滚入口——滚轮纵走不映射
-                                // 横向，只能靠拖条/Shift+滚轮/触控板）
+                                // Horizontal scrollbar always visible (in
+                                // Scrolling mode it fades out after scrolling,
+                                // leaving mouse users without their only
+                                // horizontal entry — the vertical wheel never
+                                // maps to horizontal; only the bar/Shift+wheel/
+                                // trackpad work)
                                 this.child(
                                     Scrollbar::horizontal(&ui.h_scroll).mode(ScrollbarMode::Always),
                                 )
@@ -326,7 +348,7 @@ impl ThreadView {
                 .absolute()
                 .inset_0(),
             )
-            // 补丁盖住了角上的描边，重描一遍圆角边框
+            // The patches cover the corner strokes; redraw the rounded border
             .child(
                 div()
                     .absolute()

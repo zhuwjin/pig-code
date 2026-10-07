@@ -1,68 +1,46 @@
 use super::cards::{measure_ticker_width, ticker_roll_content};
-use super::{MentionSegment, split_mention_segments, strip_reference_suffix};
+use super::{MentionSegment, split_mention_segments};
 use super::{
     TickerRoll, adjacent_image_index, as_task_notification, clamp_lightbox_pan,
     collect_lightbox_positions, elide_record_path, format_file_size, format_notification_duration,
     lightbox_display_size, lightbox_fit_scale, lightbox_pan_after_zoom, message_image_number,
-    parse_image_link, split_image_links, ticker_target_line,
+    ticker_target_line,
 };
 use std::time::{Duration, Instant};
 
 #[test]
-fn strip_reference_suffix_only_removes_exact_core_suffix() {
-    let files = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-    // core 旧格式：完整命中即剥
-    assert_eq!(
-        strip_reference_suffix("看看\n\n引用文件: src/a.rs, src/b.rs", &files),
-        "看看"
-    );
-    // 新记录（无后缀）：原样
-    assert_eq!(strip_reference_suffix("看看", &files), "看看");
-    // 手写同形文本（与 files.join 不完全一致）：不动
-    assert_eq!(
-        strip_reference_suffix("看看\n\n引用文件: src/a.rs", &files),
-        "看看\n\n引用文件: src/a.rs"
-    );
-    // 无 files：不动
-    assert_eq!(
-        strip_reference_suffix("看看\n\n引用文件: src/a.rs", &[]),
-        "看看\n\n引用文件: src/a.rs"
-    );
-}
-
-#[test]
 fn split_mention_segments_matches_boundaries_and_longest_first() {
-    // 基本：命中切成 Mention，文本保留原间距
+    // Basic: matches split into Mention, text keeps original spacing
     let files = vec!["src/a.rs".to_string()];
     assert_eq!(
-        split_mention_segments("@src/a.rs 帮我看看", &files),
+        split_mention_segments("@src/a.rs take a look", &files),
         vec![
             MentionSegment::Mention("src/a.rs".into()),
-            MentionSegment::Text(" 帮我看看".into()),
+            MentionSegment::Text(" take a look".into()),
         ]
     );
-    // 边界保护：@a.rs2 不误配 @a.rs
+    // Boundary guard: @a.rs2 must not falsely match @a.rs
     let files = vec!["a.rs".to_string()];
     assert_eq!(
-        split_mention_segments("@a.rs2 与 @a.rs", &files),
+        split_mention_segments("@a.rs2 and @a.rs", &files),
         vec![
-            MentionSegment::Text("@a.rs2 与 ".into()),
+            MentionSegment::Text("@a.rs2 and ".into()),
             MentionSegment::Mention("a.rs".into()),
         ]
     );
-    // 长路径优先：src/a.rs 整颗命中，不被 a.rs 截胡
+    // Longest path first: src/a.rs matches whole, not hijacked by a.rs
     let files = vec!["a.rs".to_string(), "src/a.rs".to_string()];
     assert_eq!(
         split_mention_segments("@src/a.rs", &files),
         vec![MentionSegment::Mention("src/a.rs".into())]
     );
-    // 多处出现都切；文本中没出现的 files 不产生段（交给回落 chip 行）
+    // All occurrences split; files absent from the text produce no segment (left to the fallback chip row)
     let files = vec!["x.rs".to_string(), "y.rs".to_string()];
     assert_eq!(
-        split_mention_segments("@x.rs 和 @x.rs", &files),
+        split_mention_segments("@x.rs and @x.rs", &files),
         vec![
             MentionSegment::Mention("x.rs".into()),
-            MentionSegment::Text(" 和 ".into()),
+            MentionSegment::Text(" and ".into()),
             MentionSegment::Mention("x.rs".into()),
         ]
     );
@@ -70,35 +48,35 @@ fn split_mention_segments_matches_boundaries_and_longest_first() {
 
 #[test]
 fn task_notification_strips_outer_tags() {
-    // 无属性的最简形态（含换行；属性解析另测）：识别为通知
+    // Minimal form without attributes (with newlines; attribute parsing tested separately): recognized as a notification
     assert!(
             as_task_notification(
-                "<task-notification>\n后台子代理 a1（explore）已完成（3 步）。\n\n结果正文\n</task-notification>"
+                "<task-notification>\nBackground subagent a1 (explore) finished (3 turns).\n\nResult body\n</task-notification>"
             )
             .is_some()
         );
-    // 外围空白容错（trim 后再判定）
-    assert!(as_task_notification("  <task-notification>正文</task-notification>\n").is_some());
+    // Tolerates surrounding whitespace (trimmed before checking)
+    assert!(as_task_notification("  <task-notification>body</task-notification>\n").is_some());
 }
 
 #[test]
 fn task_notification_rejects_plain_messages() {
-    assert!(as_task_notification("普通用户消息").is_none());
-    // 只有前缀/只有后缀都不算
-    assert!(as_task_notification("<task-notification>没封口").is_none());
-    assert!(as_task_notification("没开头</task-notification>").is_none());
-    // 标签不在整段首尾（前面有正文）不算
-    assert!(as_task_notification("引用：<task-notification>x</task-notification>").is_none());
-    // 相似标签名（前缀后非 '>'/空白）不算
+    assert!(as_task_notification("plain user message").is_none());
+    // Prefix-only or suffix-only does not count
+    assert!(as_task_notification("<task-notification>unclosed").is_none());
+    assert!(as_task_notification("no open tag</task-notification>").is_none());
+    // Tags not spanning the whole text (body text in front) do not count
+    assert!(as_task_notification("quote: <task-notification>x</task-notification>").is_none());
+    // Similar tag names (non-'>'/whitespace after the prefix) do not count
     assert!(as_task_notification("<task-notification-foo>x</task-notification>").is_none());
 }
 
 #[test]
 fn task_notification_keeps_nested_tags() {
-    // 嵌套同名标签不误判：strip_suffix 只认最外层闭标签，整段仍识别为通知
+    // Nested same-name tags not misjudged: strip_suffix only honors the outermost closing tag; the whole text is still recognized as a notification
     assert!(
         as_task_notification(
-            "<task-notification>外<task-notification>内</task-notification>外</task-notification>"
+            "<task-notification>outer<task-notification>inner</task-notification>outer</task-notification>"
         )
         .is_some()
     );
@@ -106,16 +84,19 @@ fn task_notification_keeps_nested_tags() {
 
 #[test]
 fn task_notification_parses_open_tag_attributes() {
-    // core 实际产物：开标签带 agent_id/profile/status/turns/model/description/
-    // duration_ms/record/result
+    // Actual core output: the open tag carries agent_id/profile/status/turns/model/
+    // description/duration_ms/record/result
     let note = as_task_notification(
-            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"子代理自测委派\" duration_ms=\"12345\" record=\"/tmp/x/sessions/s1.agents/a1-2.jsonl\" result=\"/tmp/x/sessions/s1.agents/a1-2.result.md\">\n后台子代理 a1-2（explore）已完成（3 步）。\n\n结果\n</task-notification>",
+            "<task-notification agent_id=\"a1-2\" profile=\"explore\" status=\"completed\" turns=\"3\" model=\"Mock · mock-model\" description=\"subagent selftest delegation\" duration_ms=\"12345\" record=\"/tmp/x/sessions/s1.agents/a1-2.jsonl\" result=\"/tmp/x/sessions/s1.agents/a1-2.result.md\">\nBackground subagent a1-2 (explore) finished (3 turns).\n\nResult\n</task-notification>",
         )
-        .expect("带属性通知应解析");
+        .expect("notification with attributes should parse");
     assert_eq!(note.agent_id.as_deref(), Some("a1-2"));
     assert_eq!(note.status.as_deref(), Some("completed"));
     assert_eq!(note.turns.as_deref(), Some("3"));
-    assert_eq!(note.description.as_deref(), Some("子代理自测委派"));
+    assert_eq!(
+        note.description.as_deref(),
+        Some("subagent selftest delegation")
+    );
     assert_eq!(note.duration_ms, Some(12345));
     assert_eq!(
         note.record.as_deref(),
@@ -125,20 +106,21 @@ fn task_notification_parses_open_tag_attributes() {
         note.result.as_deref(),
         Some("/tmp/x/sessions/s1.agents/a1-2.result.md")
     );
-    // 失败版
+    // Failed variant
     let failed = as_task_notification(
-            "<task-notification agent_id=\"a1-3\" profile=\"explore\" status=\"failed\" turns=\"20\" model=\"Mock · mock-model\" description=\"x\">\n失败原因\n</task-notification>",
+            "<task-notification agent_id=\"a1-3\" profile=\"explore\" status=\"failed\" turns=\"20\" model=\"Mock · mock-model\" description=\"x\">\nFailure reason\n</task-notification>",
         )
-        .expect("失败通知应解析");
+        .expect("failed-status notification should parse");
     assert_eq!(failed.status.as_deref(), Some("failed"));
 }
 
 #[test]
 fn task_notification_tolerates_missing_attributes() {
-    // 属性逐个独立解析：全部缺失 → 全 None
-    //（解析健壮性；渲染侧按字段缺省——标题回退「后台子代理」、无 agent_id 不挂点击）
-    let note = as_task_notification("<task-notification>正文</task-notification>")
-        .expect("无属性通知应解析");
+    // Attributes parsed independently: all missing → all None
+    // (parse robustness; the render side defaults per field: title falls back to
+    // "background subagent", no click wiring without agent_id)
+    let note = as_task_notification("<task-notification>body</task-notification>")
+        .expect("notification without attributes should parse");
     assert!(note.agent_id.is_none());
     assert!(note.status.is_none());
     assert!(note.turns.is_none());
@@ -146,11 +128,11 @@ fn task_notification_tolerates_missing_attributes() {
     assert!(note.duration_ms.is_none());
     assert!(note.record.is_none());
     assert!(note.result.is_none());
-    // 部分属性缺失：逐字段 None 回落；非数字耗时 → None
+    // Partially missing attributes: per-field None fallback; non-numeric duration → None
     let partial = as_task_notification(
         "<task-notification agent_id=\"a9-1\" duration_ms=\"abc\">x</task-notification>",
     )
-    .expect("部分属性应解析");
+    .expect("notification with partial attributes should parse");
     assert_eq!(partial.agent_id.as_deref(), Some("a9-1"));
     assert!(partial.status.is_none());
     assert!(partial.duration_ms.is_none());
@@ -158,17 +140,17 @@ fn task_notification_tolerates_missing_attributes() {
 
 #[test]
 fn notification_display_formatters() {
-    // 耗时：<60s → X.X 秒；≥60s → m 分 ss 秒
+    // Duration: <60s → X.X s; ≥60s → m min ss s
     assert_eq!(format_notification_duration(2345), "2.3 秒");
     assert_eq!(format_notification_duration(60_000), "1 分 00 秒");
     assert_eq!(format_notification_duration(61_500), "1 分 01 秒");
-    // 记录路径中段省略：短路径原样，长路径留首尾
+    // Record path middle elision: short paths as-is, long paths keep head and tail
     assert_eq!(elide_record_path("/tmp/a.jsonl"), "/tmp/a.jsonl");
     let long = "/var/folders/xx/yy/data/sessions/s1-2.agents/a123-1.jsonl";
     let elided = elide_record_path(long);
     assert!(elided.starts_with("/…/"), "{elided}");
     assert!(elided.ends_with("s1-2.agents/a123-1.jsonl"), "{elided}");
-    // 文件大小
+    // File size
     assert_eq!(format_file_size(512), "512 B");
     assert_eq!(format_file_size(2048), "2.0 KB");
     assert_eq!(format_file_size(3 * 1024 * 1024), "3.0 MB");
@@ -176,12 +158,12 @@ fn notification_display_formatters() {
 
 #[test]
 fn task_notification_sanitized_description_parses() {
-    // core 消毒后的 description：无引号无换行、≤60 字符，串搜解析不受影响
+    // description sanitized by core: no quotes or newlines, ≤60 chars; string-search parsing unaffected
     let sanitized: String = "描述 with space 与 CJK".to_string();
     let text = format!(
         "<task-notification agent_id=\"a1-1\" status=\"completed\" turns=\"1\" model=\"m\" description=\"{sanitized}\">\nb\n</task-notification>"
     );
-    let note = as_task_notification(&text).expect("消毒后描述应解析");
+    let note = as_task_notification(&text).expect("sanitized description should parse");
     assert_eq!(note.description.as_deref(), Some(sanitized.as_str()));
 }
 
@@ -244,69 +226,83 @@ fn lightbox_zoom_keeps_pointer_anchor() {
     assert!((before_point.1 - after_point.1).abs() < 0.001);
 }
 
-#[test]
-fn split_image_links_extracts_trailing_attachment_links() {
-    // 正文 + 链接行
-    let (body, indices) =
-        split_image_links("看图说话\n\n[图片 1](pig-code-composer://attachments/m1)");
-    assert_eq!(body, "看图说话");
-    assert_eq!(indices, vec![1]);
-    // 多图空格分隔
-    let (body, indices) = split_image_links(
-        "多图\n\n[图片 1](pig-code-composer://attachments/m1) [图片 2](pig-code-composer://attachments/m2)",
-    );
-    assert_eq!(body, "多图");
-    assert_eq!(indices, vec![1, 2]);
-    // 纯图消息（无正文前缀，整段即链接行）
-    let (body, indices) = split_image_links("[图片 3](pig-code-composer://attachments/m3)");
-    assert_eq!(body, "");
-    assert_eq!(indices, vec![3]);
-    // 正文本身含空行：只剥最后的链接行
-    let (body, indices) =
-        split_image_links("第一段\n\n第二段\n\n[图片 2](pig-code-composer://attachments/m2)");
-    assert_eq!(body, "第一段\n\n第二段");
-    assert_eq!(indices, vec![2]);
-}
+/// User message image pipeline: each image_nums entry (media file number) occupies
+/// one thumbnail slot; the body stays clean original text (the attachment-link
+/// protocol is dead, no longer parsed from text).
+/// With no media dir bound (test entity default) each image falls back to the
+/// placeholder (the render layer shows an "unavailable" chip).
+#[gpui_kit::test]
+fn append_user_message_loads_images_by_nums(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    cx.update(gpui_kit::init);
 
-#[test]
-fn split_image_links_leaves_non_links_untouched() {
-    // 无链接 → 原样
-    let (body, indices) = split_image_links("普通消息");
-    assert_eq!(body, "普通消息");
-    assert!(indices.is_empty());
-    // 尾行混入非链接 token → 整体不拆
-    let (body, indices) =
-        split_image_links("看图\n\n[图片 1](pig-code-composer://attachments/m1) 别的");
-    assert_eq!(
-        body,
-        "看图\n\n[图片 1](pig-code-composer://attachments/m1) 别的"
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
     );
-    assert!(indices.is_empty());
-    // label 与 URL 序号不一致 → 不算附件链接
-    assert_eq!(
-        parse_image_link("[图片 1](pig-code-composer://attachments/m2)"),
-        None
-    );
-    // 其它协议/形态 → 不算
-    assert_eq!(parse_image_link("[图片 1](https://x.com/m1)"), None);
-    assert!(parse_image_link("[图片 12](pig-code-composer://attachments/m12)").is_some());
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("describe the image".to_string(), vec![], vec![3, 7], cx);
+                let message = view
+                    .messages
+                    .last()
+                    .expect("user message should be appended");
+                assert_eq!(
+                    message.text, "describe the image",
+                    "body should be the clean original text"
+                );
+                assert_eq!(message.images.len(), 2, "one slot per image_nums entry");
+                assert!(
+                    message.images.iter().all(|img| img.thumb.is_none()),
+                    "no media dir: every image falls back to the placeholder (「已失效」 chip)"
+                );
+                // Message without images: images stays empty
+                view.append_user_message("plain text".to_string(), vec![], vec![], cx);
+                assert!(
+                    view.messages
+                        .last()
+                        .expect("second message")
+                        .images
+                        .is_empty()
+                );
+            });
+        })
+        .unwrap();
 }
 
 #[test]
 fn ticker_target_line_picks_last_non_empty_line() {
     assert_eq!(ticker_target_line(""), None);
     assert_eq!(ticker_target_line("  \n\t\n"), None);
-    // 最后一个非空行，行号是原文行下标（纵滚的 key）
+    // Last non-empty line; the line number is the original text's line index (the vertical-scroll key)
     assert_eq!(
-        ticker_target_line("第一行\n\n第二行\n\n"),
-        Some((2, "第二行".to_string()))
+        ticker_target_line("line 1\n\nline 2\n\n"),
+        Some((2, "line 2".to_string()))
     );
-    // 裸 \r 与制表符压成单空格（渲染层把 \r 当换行，滚动行必须保持单行）
+    // Bare \r and tabs collapse to single spaces (the render layer treats \r as a newline; the scrolling line must stay single-line)
     assert_eq!(
-        ticker_target_line("第一行\n第 二\t行\r尾"),
-        Some((1, "第 二 行 尾".to_string()))
+        ticker_target_line("line 1\na b\tc\rd"),
+        Some((1, "a b c d".to_string()))
     );
-    // 行号稳定：同行追加不换 key
+    // Stable line number: appending to the same line keeps the key
     assert_eq!(ticker_target_line("abc"), Some((0, "abc".to_string())));
     assert_eq!(
         ticker_target_line("abc def"),
@@ -317,9 +313,9 @@ fn ticker_target_line_picks_last_non_empty_line() {
 #[test]
 fn ticker_roll_first_line_shows_without_animation() {
     let mut roll = TickerRoll::default();
-    // 首行直接显示：不触发滚动（无定时器）、无退场行、不播入场动画
-    assert!(!roll.feed((0, "第一行".to_string())));
-    assert_eq!(roll.displayed, Some((0, "第一行".to_string())));
+    // First line shows directly: no scrolling (no timer), no exiting line, no enter animation
+    assert!(!roll.feed((0, "line 1".to_string())));
+    assert_eq!(roll.displayed, Some((0, "line 1".to_string())));
     assert!(!roll.rolled_in);
     assert!(roll.exiting.is_none());
 }
@@ -327,10 +323,10 @@ fn ticker_roll_first_line_shows_without_animation() {
 #[test]
 fn ticker_roll_refreshes_same_line_in_place() {
     let mut roll = TickerRoll::default();
-    roll.feed((0, "想".to_string()));
-    // 同行号追加：原位刷新，不滚动
-    assert!(!roll.feed((0, "想更多".to_string())));
-    assert_eq!(roll.displayed, Some((0, "想更多".to_string())));
+    roll.feed((0, "think".to_string()));
+    // Append to the same line number: in-place refresh, no scroll
+    assert!(!roll.feed((0, "think more".to_string())));
+    assert_eq!(roll.displayed, Some((0, "think more".to_string())));
     assert!(roll.exiting.is_none());
     assert!(!roll.rolling);
 }
@@ -339,24 +335,24 @@ fn ticker_roll_refreshes_same_line_in_place() {
 fn ticker_roll_promotes_new_line_and_queues_during_hold() {
     let mut roll = TickerRoll::default();
     roll.feed((0, "a".to_string()));
-    // 行号变且不在停留期：立即滚动
+    // Line number changed and outside the hold period: scroll immediately
     assert!(roll.feed((1, "b".to_string())));
     assert_eq!(roll.displayed, Some((1, "b".to_string())));
     assert_eq!(roll.exiting, Some((0, "a".to_string())));
     assert!(roll.rolled_in);
     assert!(roll.rolling);
-    // 停留期内：第一条排队保位，第二条占第二格，再来的替换第二格
+    // Within the hold period: the first queued entry keeps its slot, the second takes the second slot, later ones replace the second slot
     assert!(!roll.feed((2, "c".to_string())));
     assert!(!roll.feed((3, "d".to_string())));
     assert!(!roll.feed((4, "e".to_string())));
     assert_eq!(roll.queue, vec![(2, "c".to_string()), (4, "e".to_string())]);
-    // 同 key 覆盖排队中的条目（文本原位更新，不新增条目）
+    // Same key overwrites the queued entry (text updated in place, no new entry)
     assert!(!roll.feed((4, "e+".to_string())));
     assert_eq!(
         roll.queue,
         vec![(2, "c".to_string()), (4, "e+".to_string())]
     );
-    // 滚动中的当前行同行号追加仍是原位刷新
+    // Appending to the currently scrolling line's number is still an in-place refresh
     assert!(!roll.feed((1, "b+".to_string())));
     assert_eq!(roll.displayed, Some((1, "b+".to_string())));
 }
@@ -367,13 +363,13 @@ fn ticker_roll_fire_promotes_next_and_stops_when_drained() {
     roll.feed((0, "a".to_string()));
     roll.feed((1, "b".to_string()));
     let generation = roll.generation;
-    // 代次不符的旧定时器直接作废
+    // A stale timer with mismatched generation is discarded outright
     assert!(!roll.fire(generation + 1, Instant::now()));
-    // 空队列：收尾（清退场行、退出停留期），不续期
+    // Empty queue: wrap up (clear the exiting line, leave the hold period), no re-arm
     assert!(!roll.fire(generation, Instant::now()));
     assert!(!roll.rolling);
     assert!(roll.exiting.is_none());
-    // 有新行排队时：滚入队首并续期
+    // With new lines queued: roll in the queue head and re-arm
     assert!(roll.feed((2, "c".to_string())));
     roll.feed((3, "d".to_string()));
     let generation = roll.generation;
@@ -390,11 +386,11 @@ fn ticker_roll_fire_skips_stale_queue_on_timer_drift() {
     roll.feed((1, "b".to_string()));
     roll.feed((2, "c".to_string()));
     roll.feed((3, "d".to_string()));
-    // 模拟主线程繁忙：定时器晚到 >250ms（回填上次滚动时刻）
+    // Simulate a busy main thread: the timer fires >250ms late (backfills the last scroll time)
     roll.promoted_at = Some(Instant::now() - Duration::from_secs(2));
     let generation = roll.generation;
     assert!(roll.fire(generation, Instant::now()));
-    // 跳过中间条 c，直接播最新 d
+    // Skips the middle entry c and plays the latest d directly
     assert_eq!(roll.displayed, Some((3, "d".to_string())));
     assert!(roll.queue.is_empty());
 }
@@ -406,22 +402,25 @@ fn ticker_roll_reset_invalidates_pending_timer() {
     roll.feed((1, "b".to_string()));
     roll.feed((2, "c".to_string()));
     let generation = roll.generation;
-    // 展开/收起：重置到最新行，无退场、无排队、无入场动画
+    // Expand/collapse: reset to the latest line, no exiting line, no queue, no enter animation
     roll.reset_to(ticker_target_line("a\nb\nc"));
     assert_eq!(roll.displayed, Some((2, "c".to_string())));
     assert!(roll.exiting.is_none());
     assert!(roll.queue.is_empty());
     assert!(!roll.rolled_in);
     assert!(!roll.rolling);
-    // reset 前起的定时器到点不动作（代次已作废）
+    // A timer started before reset does nothing when it fires (generation already invalidated)
     assert!(!roll.fire(generation, Instant::now()));
     assert_eq!(roll.displayed, Some((2, "c".to_string())));
 }
 
-/// 横向钉尾回归：纵滚容器的内容必须保持自然宽度溢出视口，ScrollHandle 才能感知
-/// 横向可滚（钉尾 `set_offset(-max_offset)` 依赖它）。回归史：滚动容器内的文本
-/// 宽度会被布局钳进可用空间（max_offset 恒 0 → 内容停在开头，2026-09-30 实测），
-/// 修复 = 显式量宽设给容器（measure_ticker_width，sidebar 跑马灯同款）。
+/// Horizontal pin-to-tail regression: the vertical-scroll container's content must
+/// keep its natural width overflowing the viewport so ScrollHandle can sense
+/// horizontal scrollability (pin-to-tail `set_offset(-max_offset)` depends on it).
+/// Regression history: text inside the scroll container got its width clamped by
+/// layout into the available space (max_offset always 0 → content stuck at the
+/// start, reproduced 2026-09-30); the fix is to measure the width explicitly and
+/// set it on the container (measure_ticker_width, same as the sidebar marquee).
 #[gpui_kit::test]
 fn ticker_roll_content_overflows_viewport(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::test::TestWindowExt as _;
@@ -440,8 +439,8 @@ fn ticker_roll_content_overflows_viewport(cx: &mut gpui_kit::TestAppContext) {
             window: &mut gpui_kit::Window,
             cx: &mut gpui_kit::Context<Self>,
         ) -> impl gpui_kit::IntoElement {
-            // 与 render_thinking 相同的嵌套：限宽外层 + 滚动 viewport + 纵滚容器
-            let line = "纵滚回归探针".repeat(40);
+            // Same nesting as render_thinking: width-capped outer + scroll viewport + vertical-scroll container
+            let line = "vertical-scroll regression probe".repeat(40);
             let width = measure_ticker_width(&line, window, cx);
             gpui_kit::div().size_full().child(
                 gpui_kit::div().w(gpui_kit::px(200.)).child(
@@ -476,7 +475,7 @@ fn ticker_roll_content_overflows_viewport(cx: &mut gpui_kit::TestAppContext) {
     let max = scroll.max_offset().x;
     assert!(
         max > gpui_kit::px(1.),
-        "滚动行内容应溢出视口（钉尾依赖 max_offset），实际 {max:?}"
+        "ticker line content should overflow the viewport (pin-to-tail depends on max_offset), got {max:?}"
     );
 }
 
@@ -485,46 +484,54 @@ fn read_output_parsing() {
     use super::{
         is_read_code_output, parse_read_output, read_output_first_line, read_output_line_count,
     };
-    // 标准分页输出：编号行 + 截断提示
-    let output = "215\tlet base = base.strip_suffix(\".exe\");\n216\t}\n\n[已截断: 显示 215-216 行，共 300 行；用 offset 参数继续读取]";
-    let parsed = parse_read_output(output).expect("应解析出内容");
+    // Standard paginated output: numbered lines + truncation note
+    let output = "215\tlet base = base.strip_suffix(\".exe\");\n216\t}\n\n[Truncated: showing lines 215-216 of 300; pass an offset to keep reading]";
+    let parsed = parse_read_output(output).expect("should parse content");
     assert_eq!(parsed.lines.len(), 2);
     assert_eq!(parsed.lines[0].0, 215);
     assert_eq!(parsed.lines[0].1, "let base = base.strip_suffix(\".exe\");");
     assert_eq!(parsed.lines[1].1, "}");
     assert_eq!(
         parsed.notes,
-        vec!["[已截断: 显示 215-216 行，共 300 行；用 offset 参数继续读取]"]
+        vec!["[Truncated: showing lines 215-216 of 300; pass an offset to keep reading]"]
     );
     assert_eq!(read_output_line_count(output), 2);
     assert_eq!(read_output_first_line(output), Some(215));
     assert!(is_read_code_output(output));
 
-    // 内容行自身以「数字+tab」开头：split_once 只切第一个 tab
-    let parsed = parse_read_output("7\t100\t200").expect("应解析");
+    // A content line itself starting with "digits+tab": split_once splits only at the first tab
+    let parsed = parse_read_output("7\t100\t200").expect("should parse");
     assert_eq!(parsed.lines, vec![(7, "100\t200".to_string())]);
 
-    // 空内容行（`{no}\t`）与 lossy 警告（无空行分隔）
-    let parsed = parse_read_output("1\t\n2\tx\n[警告: 解码存在替换字符]").expect("应解析");
+    // Empty content line (`{no}\t`) and a lossy warning (no blank-line separator)
+    let parsed =
+        parse_read_output("1\t\n2\tx\n[Warning: decoded output contains replacement characters]")
+            .expect("should parse");
     assert_eq!(parsed.lines.len(), 2);
     assert_eq!(parsed.lines[0].1, "");
-    assert_eq!(parsed.notes, vec!["[警告: 解码存在替换字符]"]);
-
-    // 非内容输出：空文件/未变化/报错 → None（回落通用工具卡）
-    assert!(parse_read_output("（空文件）").is_none());
-    assert!(
-        parse_read_output("（文件未变化：与上次 Read 参数相同且内容一致，无需重复读取）").is_none()
+    assert_eq!(
+        parsed.notes,
+        vec!["[Warning: decoded output contains replacement characters]"]
     );
-    assert!(parse_read_output("文件不存在: foo.rs").is_none());
-    assert!(!is_read_code_output("（空文件）"));
-    assert_eq!(read_output_line_count("（空文件）"), 0);
-    assert_eq!(read_output_first_line("（空文件）"), None);
+
+    // Non-content output: empty file/unchanged/error → None (falls back to the generic tool card)
+    assert!(parse_read_output("(empty file)").is_none());
+    assert!(
+        parse_read_output("(File unchanged: same Read parameters as last time and identical content, no need to read again)").is_none()
+    );
+    assert!(parse_read_output("File not found: foo.rs").is_none());
+    assert!(!is_read_code_output("(empty file)"));
+    assert_eq!(read_output_line_count("(empty file)"), 0);
+    assert_eq!(read_output_first_line("(empty file)"), None);
 }
 
-/// 横向滚动回归：Read 卡不折行时，内容列用 measure_max_line_width 的显式宽度
-/// （不显式给宽会被布局钳进可用空间，横向滚动失效）；这里验证「量宽 + 显式设宽
-/// → ScrollHandle 感知横向溢出」整条链路（结构与 render_read_card 正文一致：
-/// x 滚动容器 > v_flex（显式宽）> code_line_row（nowrap））。
+/// Horizontal scroll regression: when the Read card is not wrapping, the content
+/// column uses the explicit width from measure_max_line_width (without an
+/// explicit width, layout clamps it into the available space and horizontal
+/// scrolling breaks); this verifies the whole "measure width + set width
+/// explicitly → ScrollHandle senses horizontal overflow" chain (structure
+/// matches the render_read_card body: x-scroll container > v_flex (explicit
+/// width) > code_line_row (nowrap)).
 #[gpui_kit::test]
 fn read_card_nowrap_overflows_horizontally(cx: &mut gpui_kit::TestAppContext) {
     use crate::code_view::{code_line_row, highlight_code, measure_max_line_width};
@@ -545,10 +552,13 @@ fn read_card_nowrap_overflows_horizontally(cx: &mut gpui_kit::TestAppContext) {
             window: &mut gpui_kit::Window,
             cx: &mut gpui_kit::Context<Self>,
         ) -> impl gpui_kit::IntoElement {
-            let code = format!("短行\n{}", "let x = \"超长行\"; ".repeat(40));
+            let code = format!(
+                "short line\n{}",
+                "let x = \"a very long line\"; ".repeat(40)
+            );
             let theme = cx.theme().highlight_theme.clone();
             let highlighted = highlight_code(&code, "text", &theme);
-            // 与卡同结构：gutter(28) + 代码格 padding(24) + 最大行宽
+            // Same structure as the card: gutter(28) + code cell padding(24) + max line width
             let content_w = gpui_kit::px(28.)
                 + gpui_kit::px(24.)
                 + measure_max_line_width(&code, &highlighted, window, cx);
@@ -562,7 +572,7 @@ fn read_card_nowrap_overflows_horizontally(cx: &mut gpui_kit::TestAppContext) {
                         .child(v_flex().w(content_w).children(vec![
                             code_line_row(
                                 1,
-                                "短行",
+                                "short line",
                                 vec![],
                                 gpui_kit::px(28.),
                                 gpui_kit::hsla(0., 0., 0., 1.),
@@ -594,16 +604,19 @@ fn read_card_nowrap_overflows_horizontally(cx: &mut gpui_kit::TestAppContext) {
     let max = h_scroll.max_offset().x;
     assert!(
         max > gpui_kit::px(1.),
-        "显式量宽后超长行应溢出视口产生横向滚动（max_offset.x），实际 {max:?}"
+        "with explicit width measurement the long line should overflow the viewport for horizontal scrolling (max_offset.x), got {max:?}"
     );
 }
 
-/// 滚轮轴锁定回归：Read 卡（x/y 两层滚动容器）必须各自只响应自己轴的滚轮
-/// delta。gpui 默认把纵向 delta 映射到仅 x 可滚容器（y→x）、横向 delta 映射到
-/// 仅 y 可滚容器（x→y），不加 restrict_scroll_to_axis 时滚轮一动两轴同滚
-///（2026-10-05 用户实测反馈）。结构与 render_read_card 正文一致。
-/// 注：window.scroll(id) 依赖观测注册表（仅收 test_support 包裹的元素），
-/// 这里用 dispatch_event 往已知布局位置直接派发滚轮事件。
+/// Scroll wheel axis-lock regression: the Read card (x/y two-layer scroll
+/// containers) must each respond only to its own axis's wheel delta. gpui by
+/// default maps vertical delta onto x-only scrollable containers (y→x) and
+/// horizontal delta onto y-only scrollable containers (x→y); without
+/// restrict_scroll_to_axis one wheel move scrolls both axes (user-reported
+/// 2026-10-05). Structure matches the render_read_card body.
+/// Note: window.scroll(id) relies on the observation registry (only elements
+/// wrapped by test_support register), so wheel events are dispatched directly
+/// at known layout positions via dispatch_event.
 #[gpui_kit::test]
 fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
     use crate::code_view::code_line_row;
@@ -625,7 +638,7 @@ fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
             _window: &mut gpui_kit::Window,
             _cx: &mut gpui_kit::Context<Self>,
         ) -> impl gpui_kit::IntoElement {
-            let line = "let x = \"超长行\"; ".repeat(40);
+            let line = "let x = \"a very long line\"; ".repeat(40);
             gpui_kit::div().size_full().child(
                 gpui_kit::div()
                     .w(gpui_kit::px(200.))
@@ -671,7 +684,7 @@ fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
             h_scroll: h_scroll.clone(),
         }
     });
-    // 卡片固定在窗口左上角的 200x100 区域；往其中心派滚轮事件
+    // The card sits in the 200x100 area at the window's top-left; dispatch wheel events at its center
     let wheel = |dx: f32, dy: f32| {
         gpui_kit::ScrollWheelEvent {
             position: gpui_kit::point(gpui_kit::px(100.), gpui_kit::px(50.)),
@@ -682,7 +695,7 @@ fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
     };
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        // 纵向滚轮（鼠标滚轮 = Lines，非 precise）：只能滚纵向，横向纹丝不动
+        // Vertical wheel (mouse wheel = Lines, not precise): scrolls vertically only; horizontal stays put
         window.dispatch_event(wheel(0., -3.), cx);
         window.render_frame(cx);
     })
@@ -690,11 +703,14 @@ fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
     assert_eq!(
         h_scroll.offset().x,
         gpui_kit::px(0.),
-        "纵向滚轮不得带动横向滚动"
+        "vertical wheel must not drive horizontal scrolling"
     );
-    assert!(y_scroll.offset().y < gpui_kit::px(0.), "纵向滚轮应滚纵向");
-    // 横向 delta（Shift+滚轮/触控板横滑）：只能滚横向，纵向保持原位
-    //（滚动偏移与 y 轴同号约定：向右滚 = delta.x 为负、offset.x 变负）
+    assert!(
+        y_scroll.offset().y < gpui_kit::px(0.),
+        "vertical wheel should scroll vertically"
+    );
+    // Horizontal delta (Shift+wheel/trackpad swipe): scrolls horizontally only; vertical stays put
+    // (scroll offsets share the y-axis sign convention: scrolling right = delta.x negative, offset.x negative)
     let y_before = y_scroll.offset().y;
     cx.update_window(window.into(), |_, window, cx| {
         window.dispatch_event(wheel(-4., 0.), cx);
@@ -703,18 +719,26 @@ fn read_card_scroll_wheel_is_axis_locked(cx: &mut gpui_kit::TestAppContext) {
     .unwrap();
     assert!(
         h_scroll.offset().x != gpui_kit::px(0.),
-        "横向 delta 应滚横向"
+        "horizontal delta should scroll horizontally"
     );
-    assert_eq!(y_scroll.offset().y, y_before, "横向 delta 不得带动纵向滚动");
+    assert_eq!(
+        y_scroll.offset().y,
+        y_before,
+        "horizontal delta must not drive vertical scrolling"
+    );
 }
-/// 滚动链回归：Bash 卡的子卡用独立滚动句柄（不走 cards.rs 共享的
-/// consume_scroll(body_scroll) 兜底），内容可滚时必须各自吞掉滚轮——
-/// 否则穿透到外层消息列表双滚（2026-10-05 用户实测反馈）；内容不可滚
-///（短命令）时必须穿透给列表（与其他工具卡行为一致）。
+/// Scroll chaining regression: the Bash card's subcards use independent scroll
+/// handles (they do not go through the shared consume_scroll(body_scroll)
+/// fallback in cards.rs); when content is scrollable each must swallow the wheel
+/// itself, otherwise it leaks through to the outer message list and both scroll
+/// (user-reported 2026-10-05); when content is not scrollable (short command)
+/// it must chain through to the list (consistent with other tool cards).
 ///
-/// 注意点：①滚轮命中间接看 mouse_position（dispatch_event 不给滚轮更新它），
-/// 派发前先派 MouseMove；②开合动画按真实墙钟播放，期间 max_h 裁切会挡住
-/// 命中——展开后先睡过动画时长再测。
+/// Notes: (1) wheel hit-testing indirectly reads mouse_position (dispatch_event
+/// does not update it for wheels), so dispatch a MouseMove first; (2) the
+/// expand/collapse animation plays on real wall-clock time and max_h clipping
+/// during it blocks hit-testing — sleep past the animation duration after
+/// expanding before testing.
 #[gpui_kit::test]
 fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::test::TestWindowExt as _;
@@ -742,12 +766,14 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
             Probe { thread }
         },
     );
-    // 场景：Bash 卡在前（顶部，避免滚动后的几何换算）+ 30 条用户消息撑出
-    // 外层列表滚动（命令 1 行 → 命令卡不可滚；输出 40 行 → 输出卡可滚）
+    // Scenario: the Bash card first (top, avoiding post-scroll geometry math) plus
+    // 30 user messages to stretch the outer list into scrollability (the command
+    // is 1 line → command subcard not scrollable; the output is 40 lines → output
+    // subcard scrollable)
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
-                view.append_user_message("先跑个命令".to_string(), vec![], cx);
+                view.append_user_message("run a command first".to_string(), vec![], vec![], cx);
                 view.reduce_event(
                     pig_protocol::Event::ToolCallBegin {
                         session_id: "s".into(),
@@ -765,7 +791,7 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
                         seq: 1,
                         item_id: "b1".into(),
                         output: (1..=40)
-                            .map(|i| format!("输出行 {i}"))
+                            .map(|i| format!("output line {i}"))
                             .collect::<Vec<_>>()
                             .join("\n"),
                         is_error: false,
@@ -774,14 +800,18 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
                     cx,
                 );
                 for ix in 0..30 {
-                    view.append_user_message(format!("消息 {ix}"), vec![], cx);
+                    view.append_user_message(format!("message {ix}"), vec![], vec![], cx);
                 }
-                assert!(view.debug_expand_tool("Bash", cx), "应有 Bash 卡可展开");
+                assert!(
+                    view.debug_expand_tool("Bash", cx),
+                    "a Bash card should exist to expand"
+                );
             });
         })
         .unwrap();
-    // 列表回顶（卡片在顶部）：append 期间每条消息都强制跟随贴底（含 deferred
-    // 滚动标记），先渲一帧消费掉标记，再显式归零
+    // Restore the list to top (card at top): during append every message forces
+    // follow-bottom (including the deferred scroll flag), so render one frame to
+    // consume the flag, then explicitly zero the offset
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     window
@@ -793,15 +823,17 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
             });
         })
         .unwrap();
-    // 渲染一帧（bash_ui 创建 + 内容量高），再等动画播完（开合动画按真实墙钟
-    // 走；不播完 max_h 裁切会把命中区收没）
+    // Render one frame (bash_ui created + heights measured), then wait out the
+    // animation (the expand/collapse animation runs on real wall clock; if not
+    // finished, max_h clipping removes the hit area)
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
-    // 滚轮命中间接看 mouse_position：先把指针移过去（dispatch_event 只给
-    // MouseMove/Down/Up 更新 mouse_position，滚轮事件不更新）
+    // Wheel hit-testing indirectly reads mouse_position: move the pointer there
+    // first (dispatch_event updates mouse_position only for MouseMove/Down/Up,
+    // not wheel events)
     let mouse_move = |position| {
         gpui_kit::MouseMoveEvent {
             position,
@@ -809,7 +841,7 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
         }
         .to_platform_input()
     };
-    // dy: 负 = 向下滚（offset 变负），正 = 向上滚
+    // dy: negative = scroll down (offset goes negative), positive = scroll up
     let wheel = |position, dy: f32| {
         gpui_kit::ScrollWheelEvent {
             position,
@@ -839,10 +871,13 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
     let (outer_before, outer_max, out_state) = window
         .update(cx, |probe, _, cx| read_state(probe, cx))
         .unwrap();
-    let (_, cmd_center) = out_state.expect("Bash 卡 UI 态应已创建");
-    assert!(outer_max > gpui_kit::px(0.), "外层消息列表应可滚动");
+    let (_, cmd_center) = out_state.expect("Bash card UI state should be created");
+    assert!(
+        outer_max > gpui_kit::px(0.),
+        "outer message list should be scrollable"
+    );
 
-    // 输出卡中心（此刻应在视口内）：用卡 bounds 的中心
+    // Output subcard center (should be inside the viewport by now): use the center of the card bounds
     let out_center = window
         .update(cx, |probe, _, cx| {
             let view = probe.thread.read(cx);
@@ -855,7 +890,7 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
                     } => Some(ui.out_scroll.bounds().center()),
                     _ => None,
                 })
-                .expect("Bash 卡 UI 态应已创建")
+                .expect("Bash card UI state should be created")
         })
         .unwrap();
     let list_bounds = window
@@ -865,10 +900,10 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
         .unwrap();
     assert!(
         out_center.y > list_bounds.top() && out_center.y < list_bounds.bottom(),
-        "输出卡应在视口内: {out_center:?} vs {list_bounds:?}"
+        "output subcard should be inside the viewport: {out_center:?} vs {list_bounds:?}"
     );
 
-    // 滚输出卡（可滚）：卡内滚动 + 外层列表纹丝不动（不穿透）
+    // Scroll the output subcard (scrollable): scrolls inside the card; the outer list stays put (no leak-through)
     cx.update_window(window.into(), |_, window, cx| {
         window.dispatch_event(mouse_move(out_center), cx);
         window.dispatch_event(wheel(out_center, -3.), cx);
@@ -879,16 +914,19 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| read_state(probe, cx))
         .unwrap();
     let out_after = out_after.unwrap().0;
-    assert!(out_after < gpui_kit::px(0.), "输出卡应滚动: {out_after:?}");
+    assert!(
+        out_after < gpui_kit::px(0.),
+        "output subcard should have scrolled: {out_after:?}"
+    );
     assert_eq!(
         outer_after, outer_before,
-        "可滚卡片不得把滚轮穿透给外层消息列表"
+        "a scrollable card must not leak the wheel to the outer message list"
     );
 
-    // 滚命令卡（1 行不可滚）：穿透给外层列表（与其他工具卡一致）
+    // Scroll the command subcard (1 line, not scrollable): chains through to the outer list (consistent with other tool cards)
     cx.update_window(window.into(), |_, window, cx| {
         window.dispatch_event(mouse_move(cmd_center), cx);
-        // 外层列表在顶部，向下滚（dy 为负）才有位移可观
+        // The outer list is at the top; only scrolling down (negative dy) yields observable motion
         window.dispatch_event(wheel(cmd_center, -3.), cx);
         window.render_frame(cx);
     })
@@ -900,11 +938,12 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
         .unwrap();
     assert!(
         outer_chained < outer_after,
-        "不可滚的卡片应把滚轮穿透给外层列表（{outer_after:?} → 下滚 {outer_chained:?}）"
+        "a non-scrollable card should chain the wheel to the outer list ({outer_after:?} → scrolled down {outer_chained:?})"
     );
 }
 
-/// 压缩分隔条：进行中「正在压缩上下文」→ 完成「上下文已压缩」，摘要全文留 text。
+/// Compact divider: in-progress "compacting context" → done "context compacted";
+/// the full summary stays in text.
 #[gpui_kit::test]
 fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::AppContext as _;
@@ -933,11 +972,11 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
         },
     );
 
-    // 进行中：set_compacting(true) → 进行条出现且铺满内容列（分隔线 flex_grow 生效）
+    // In progress: set_compacting(true) → the progress divider appears and fills the content column (the divider's flex_grow works)
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
-                view.append_user_message("整理一下这个文件".to_string(), vec![], cx);
+                view.append_user_message("tidy up this file".to_string(), vec![], vec![], cx);
                 view.set_compacting(true, cx);
                 assert!(view.debug_compacting());
             });
@@ -947,16 +986,16 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
         .unwrap();
     cx.update_window(window.into(), |_, window, _| {
         let snap = window.find("compacting-divider");
-        assert!(snap.visible(), "进行中分隔条应可见");
+        assert!(snap.visible(), "in-progress divider should be visible");
         assert!(
             snap.bounds().size.width > gpui_kit::px(600.),
-            "分隔条应铺满内容列（分隔线 grow）: {:?}",
+            "divider should span the full content column (divider line grow): {:?}",
             snap.bounds()
         );
     })
     .unwrap();
 
-    // 完成：进行条消失，「上下文已压缩」分隔条出现；摘要全文留在消息 text 供断言
+    // Done: the progress divider disappears, the "context compacted" divider appears; the full summary stays in message text for assertions
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
@@ -971,12 +1010,12 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.try_find("compacting-divider").is_none(),
-            "完成后进行条应消失"
+            "in-progress divider should disappear once compacting is done"
         );
-        // 用户消息占 index 0，压缩条是 index 1
+        // The user message takes index 0; the compact divider is index 1
         let snap = window
             .try_find(("compact-note", 1usize))
-            .expect("「上下文已压缩」分隔条应出现");
+            .expect("the 'context compacted' ('上下文已压缩') divider should appear");
         assert!(snap.visible());
     })
     .unwrap();
@@ -988,13 +1027,13 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
                     notes
                         .iter()
                         .any(|n| n.contains("模型摘要") && n.contains("摘要正文")),
-                    "摘要全文应保留在系统条 text: {notes:?}"
+                    "full summary should stay in the system note text: {notes:?}"
                 );
             });
         })
         .unwrap();
 
-    // 中止兜底：压缩中被打断（TurnAborted）标记必须清除，不残留进行条
+    // Abort fallback: when compacting is interrupted (TurnAborted) the flag must be cleared, leaving no progress divider behind
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
@@ -1006,15 +1045,21 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
                     },
                     cx,
                 );
-                assert!(!view.debug_compacting(), "TurnAborted 应清压缩标记");
+                assert!(
+                    !view.debug_compacting(),
+                    "TurnAborted should clear the compacting flag"
+                );
             });
         })
         .unwrap();
 }
 
-/// 回合工作行（「已工作 N 秒 ›」）：TurnComplete 后工具卡/思考块收进折叠行，
-/// 点击整行展开（内容变高）再收起；中断回合落 Stopped。时长格式化毫秒→秒
-/// 向最近取整、至少 1 秒在 render_work_row，纯格式化部分直接钉 fmt_work_duration
+/// Turn work row ("worked N s ›"): after TurnComplete, tool cards and thinking
+/// blocks collapse into the row; clicking the whole row expands (content grows)
+/// then collapses again; aborted turns land on Stopped. Duration formatting
+/// (milliseconds → seconds, nearest rounding, minimum 1 s) lives in
+/// render_work_row; the pure formatting part is pinned directly on
+/// fmt_work_duration
 #[gpui_kit::test]
 fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::AppContext as _;
@@ -1047,11 +1092,11 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
         },
     );
 
-    // 完整回合：用户消息 ix 0，assistant 消息 ix 1，工具卡段 six 0
+    // Full turn: user message ix 0, assistant message ix 1, tool card segment six 0
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
-                view.append_user_message("跑个命令".to_string(), vec![], cx);
+                view.append_user_message("run a command".to_string(), vec![], vec![], cx);
                 view.reduce_event(
                     pig_protocol::Event::TurnStarted {
                         session_id: "s".into(),
@@ -1077,7 +1122,7 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
                         seq: 2,
                         item_id: "b1".into(),
                         output: (1..=40)
-                            .map(|i| format!("输出行 {i}"))
+                            .map(|i| format!("output line {i}"))
                             .collect::<Vec<_>>()
                             .join("\n"),
                         is_error: false,
@@ -1102,9 +1147,12 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
                             duration: Some(d)
                         }) if d == std::time::Duration::from_millis(10_400)
                     ),
-                    "回合完成应落定工作行（真实耗时）"
+                    "turn completion should settle the work row (real duration)"
                 );
-                assert!(!message.work_open, "工作行默认收起");
+                assert!(
+                    !message.work_open,
+                    "work row should be collapsed by default"
+                );
             });
         })
         .unwrap();
@@ -1112,15 +1160,18 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     cx.update_window(window.into(), |_, window, _| {
-        assert!(window.find(("work-row", 1usize)).visible(), "折叠行应可见");
+        assert!(
+            window.find(("work-row", 1usize)).visible(),
+            "collapsed row should be visible"
+        );
         assert!(
             window.try_find(("tool", 1024usize)).is_none(),
-            "收起时工具卡不应渲染"
+            "tool cards should not render while collapsed"
         );
     })
     .unwrap();
 
-    // 点击折叠行 → 展开：工具卡回到消息流
+    // Click the collapsed row → expand: the tool card returns to the message flow
     cx.update_window(window.into(), |_, window, cx| {
         window.click(("work-row", 1usize), cx);
     })
@@ -1130,7 +1181,7 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.try_find(("tool", 1024usize)).is_some(),
-            "展开后工具卡应回到消息流"
+            "after expanding, the tool card should return to the message flow"
         );
     })
     .unwrap();
@@ -1138,12 +1189,12 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| {
             assert!(
                 probe.thread.read(cx).messages[1].work_open,
-                "点击后工作行应展开"
+                "work row should expand after the click"
             );
         })
         .unwrap();
 
-    // 再点 → 收起，工具卡再次消失
+    // Click again → collapse; the tool card disappears again
     cx.update_window(window.into(), |_, window, cx| {
         window.click(("work-row", 1usize), cx);
     })
@@ -1153,12 +1204,12 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.try_find(("tool", 1024usize)).is_none(),
-            "再收起工具卡应消失"
+            "collapsing again should hide the tool card"
         );
     })
     .unwrap();
 
-    // 中断回合落 Stopped（「已停止」）
+    // The aborted turn lands on Stopped ("stopped")
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
@@ -1191,14 +1242,14 @@ fn work_row_collapses_on_turn_complete(cx: &mut gpui_kit::TestAppContext) {
                 let message = &view.messages[2];
                 assert!(
                     matches!(message.work_state, Some(super::WorkState::Stopped)),
-                    "中断回合应落 Stopped"
+                    "aborted turn should land on Stopped"
                 );
             });
         })
         .unwrap();
 }
 
-/// @提及内联 chip：渲染可见（图标+下划线文件名），点击发 OpenFile 打开文件
+/// @mention inline chip: renders visibly (icon + underlined file name); click emits OpenFile to open the file
 #[gpui_kit::test]
 fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::test::TestWindowExt as _;
@@ -1225,7 +1276,7 @@ fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppCo
             Probe { thread }
         },
     );
-    // 事件捕获（订阅须活到测试结束）
+    // Event capture (the subscription must live until the test ends)
     let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = captured.clone();
     let mut events_sub = None;
@@ -1241,8 +1292,9 @@ fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppCo
                     },
                 ));
                 view.append_user_message(
-                    "@src/a.rs 帮我看看这个文件".to_string(),
+                    "@src/a.rs take a look at this file".to_string(),
                     vec!["src/a.rs".to_string()],
+                    vec![],
                     cx,
                 );
             });
@@ -1252,31 +1304,37 @@ fn user_message_mention_chip_renders_and_opens_file(cx: &mut gpui_kit::TestAppCo
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
 
-    // chip 真实渲染可见（消息 ix=0，Mention 段 six=0）
+    // The chip really renders visibly (message ix=0, Mention segment six=0)
     cx.update_window(window.into(), |_, window, _| {
         let snap = window.find(("user-mention", 0usize));
-        assert!(snap.visible(), "@chip 应可见");
+        assert!(snap.visible(), "@chip should be visible");
     })
     .unwrap();
 
-    // 点击 chip → OpenFile{path, line: None}
+    // Click the chip → OpenFile{path, line: None}
     cx.update_window(window.into(), |_, window, cx| {
         window.click(("user-mention", 0usize), cx);
     })
     .unwrap();
     let events = captured.borrow();
-    assert_eq!(events.len(), 1, "应只发一次 OpenFile: {}", events.len());
+    assert_eq!(
+        events.len(),
+        1,
+        "OpenFile should be emitted exactly once: {}",
+        events.len()
+    );
     match &events[0] {
         super::ThreadEvent::OpenFile { path, line } => {
             assert_eq!(path, "src/a.rs");
             assert_eq!(*line, None);
         }
-        other => panic!("应为 OpenFile 事件: {other:?}"),
+        other => panic!("expected an OpenFile event: {other:?}"),
     }
 }
 
-/// 消息操作行（ZCode assistant 操作行同款）：回合结束后渲染（悬停浮现），
-/// 分叉事件 turns = 目标消息所在回合序；复制置 copied；进行中的回合整行不出
+/// Message actions row (same as ZCode's assistant actions row): rendered after
+/// the turn ends (appears on hover); the fork event's turns = the target
+/// message's turn ordinal; copy sets copied; a running turn renders no row at all
 #[gpui_kit::test]
 fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::AppContext as _;
@@ -1320,10 +1378,12 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
                         sink.borrow_mut().push(event.clone());
                     },
                 ));
-                // 两个完整回合：消息 [U0, A1, U2, A3]
-                for (turn, ask, answer) in [("t1", "问一", "答一"), ("t2", "问二", "答二")]
-                {
-                    view.append_user_message(ask.to_string(), vec![], cx);
+                // Two complete turns: messages [U0, A1, U2, A3]
+                for (turn, ask, answer) in [
+                    ("t1", "question one", "answer one"),
+                    ("t2", "question two", "answer two"),
+                ] {
+                    view.append_user_message(ask.to_string(), vec![], vec![], cx);
                     view.reduce_event(
                         pig_protocol::Event::TurnStarted {
                             session_id: "s".into(),
@@ -1358,24 +1418,24 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
 
-    // 两回合的操作行都在（透明但可点）
+    // Both turns' action rows exist (transparent but clickable)
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.try_find(("msg-fork", 1usize)).is_some(),
-            "第一回合应有分叉钮"
+            "the first turn should have a fork button"
         );
         assert!(
             window.try_find(("msg-copy", 1usize)).is_some(),
-            "第一回合应有复制钮"
+            "the first turn should have a copy button"
         );
         assert!(
             window.try_find(("msg-fork", 3usize)).is_some(),
-            "第二回合应有分叉钮"
+            "the second turn should have a fork button"
         );
     })
     .unwrap();
 
-    // 分叉：turns = 目标消息所在回合序
+    // Fork: turns = the target message's turn ordinal
     cx.update_window(window.into(), |_, window, cx| {
         window.click(("msg-fork", 1usize), cx);
     })
@@ -1393,10 +1453,10 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
                 _ => None,
             })
             .collect();
-        assert_eq!(forks, vec![1, 2], "分叉回合数: {forks:?}");
+        assert_eq!(forks, vec![1, 2], "forked turn ordinals: {forks:?}");
     }
 
-    // 复制：置 copied（勾号反馈），拼全部 Markdown 段
+    // Copy: sets copied (checkmark feedback) and joins all Markdown segments
     cx.update_window(window.into(), |_, window, cx| {
         window.click(("msg-copy", 1usize), cx);
     })
@@ -1405,11 +1465,11 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| {
             assert!(
                 probe.thread.read(cx).messages[1].copied,
-                "复制后应置 copied"
+                "copied should be set after copying"
             );
         })
         .unwrap();
-    // 勾号 1.2s 后回弹（回弹计时器走测试调度器假时钟，真 sleep 不推进）
+    // The checkmark bounces back after 1.2s (the rebound timer runs on the test scheduler's fake clock; real sleep does not advance it)
     cx.dispatcher
         .advance_clock(std::time::Duration::from_millis(1300));
     cx.run_until_parked();
@@ -1417,12 +1477,12 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| {
             assert!(
                 !probe.thread.read(cx).messages[1].copied,
-                "1.2s 后勾号应回弹"
+                "checkmark should bounce back after 1.2s"
             );
         })
         .unwrap();
 
-    // 进行中的回合：操作行整行不渲染
+    // Running turn: the actions row is not rendered at all
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
@@ -1442,17 +1502,18 @@ fn message_actions_copy_and_fork(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.try_find(("msg-actions", 4usize)).is_none(),
-            "进行中的回合不应渲染操作行"
+            "a running turn should not render the actions row"
         );
-        // 已结束的回合不受新回合影响
+        // Finished turns are unaffected by the new turn
         assert!(window.try_find(("msg-fork", 3usize)).is_some());
     })
     .unwrap();
 }
 
-/// ExitPlanMode 计划卡（kimi「计划 待确认/已通过」同款）：ToolCallBegin 建卡
-/// 显示「待确认」，chevron 展开看计划全文；决议 + ToolCallEnd 后落三态；
-/// 回放形态（Begin+End 连续到达）直接显示结果
+/// ExitPlanMode plan card (same as kimi's "plan pending/approved"): ToolCallBegin
+/// creates the card showing "pending"; the chevron expands to the full plan text;
+/// the decision plus ToolCallEnd settles the tri-state; the replay form
+/// (Begin+End arriving back to back) shows the result directly
 #[gpui_kit::test]
 fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::AppContext as _;
@@ -1481,11 +1542,11 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
         },
     );
 
-    // live 形态：TurnStarted → ExitPlanMode ToolCallBegin（detail=参数 JSON）→ ApprovalRequested
+    // Live form: TurnStarted → ExitPlanMode ToolCallBegin (detail = args JSON) → ApprovalRequested
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
-                view.append_user_message("出个计划".to_string(), vec![], cx);
+                view.append_user_message("make a plan".to_string(), vec![], vec![], cx);
                 view.reduce_event(
                     pig_protocol::Event::TurnStarted {
                         session_id: "s".into(),
@@ -1500,8 +1561,8 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                         seq: 1,
                         item_id: "pe1".into(),
                         tool: "ExitPlanMode".into(),
-                        input_summary: "请求退出计划模式".into(),
-                        detail: serde_json::json!({"plan": "# 实施计划\n\n1. 第一步\n2. 第二步"})
+                        input_summary: "request to exit plan mode".into(),
+                        detail: serde_json::json!({"plan": "# Implementation plan\n\n1. Step one\n2. Step two"})
                             .to_string(),
                     },
                     cx,
@@ -1512,7 +1573,8 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                         seq: 2,
                         request_id: "req-pe1".into(),
                         tool: "ExitPlanMode".into(),
-                        detail: "# 实施计划\n\n1. 第一步\n2. 第二步".into(),
+                        detail: "# Implementation plan\n\n1. Step one\n2. Step two".into(),
+                        danger_key: None,
                     },
                     cx,
                 );
@@ -1522,7 +1584,7 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                         message.segments.first(),
                         Some(super::Segment::Plan { done: false, .. })
                     ),
-                    "ExitPlanMode 应建 Plan 段而非工具卡段"
+                    "ExitPlanMode should create a Plan segment, not a tool-card segment"
                 );
             });
         })
@@ -1530,15 +1592,15 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
 
-    // 「计划 · 待确认」行可见；chevron 展开后计划全文可见
+    // The "plan · pending" row is visible; after the chevron expands, the full plan text is visible
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.find(("plan-row", 1024usize)).visible(),
-            "计划行应可见"
+            "plan row should be visible"
         );
         assert!(
             window.try_find(("plan-row-body", 1024usize)).is_none(),
-            "默认收起，无展开体"
+            "collapsed by default, no expanded body"
         );
     })
     .unwrap();
@@ -1551,12 +1613,12 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
     cx.update_window(window.into(), |_, window, _| {
         assert!(
             window.try_find(("plan-row-body", 1024usize)).is_some(),
-            "点击后应展开计划全文"
+            "clicking should expand the full plan text"
         );
     })
     .unwrap();
 
-    // 批准 + ToolCallEnd → 「已通过」
+    // Approve + ToolCallEnd → "approved"
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
@@ -1571,7 +1633,8 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                         session_id: "s".into(),
                         seq: 3,
                         item_id: "pe1".into(),
-                        output: "计划已批准，计划模式已关闭，请按计划开始执行。".into(),
+                        output: "Plan approved; plan mode is now off. Start executing the plan."
+                            .into(),
                         is_error: false,
                         edit: None,
                     },
@@ -1584,15 +1647,18 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                     ..
                 }) = view.messages[1].segments.first()
                 else {
-                    panic!("应为 Plan 段");
+                    panic!("expected a Plan segment");
                 };
-                assert!(*done && *approved, "批准后应落「已通过」");
-                assert!(*open, "展开态保留");
+                assert!(
+                    *done && *approved,
+                    "approval should settle on '已通过' (approved)"
+                );
+                assert!(*open, "expanded state should be preserved");
             });
         })
         .unwrap();
 
-    // 回放形态：Begin+End 连续到达（output 含「用户拒绝」）→ 直接「已拒绝」
+    // Replay form: Begin+End arriving back to back (output contains "user declined") → "declined" directly
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
@@ -1610,8 +1676,8 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                         seq: 5,
                         item_id: "replay-2-tool-1".into(),
                         tool: "ExitPlanMode".into(),
-                        input_summary: "请求退出计划模式".into(),
-                        detail: serde_json::json!({"plan": "# 旧计划"}).to_string(),
+                        input_summary: "request to exit plan mode".into(),
+                        detail: serde_json::json!({"plan": "# Old plan"}).to_string(),
                     },
                     cx,
                 );
@@ -1620,13 +1686,13 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                         session_id: "s".into(),
                         seq: 6,
                         item_id: "replay-2-tool-1".into(),
-                        output: "用户拒绝退出计划模式，请继续完善计划或回答疑问。".into(),
+                        output: "The user declined to exit plan mode. Continue refining the plan or answer open questions.".into(),
                         is_error: true,
                         edit: None,
                     },
                     cx,
                 );
-                let message = view.messages.last().expect("回放消息");
+                let message = view.messages.last().expect("replay message");
                 assert!(
                     matches!(
                         message.segments.first(),
@@ -1636,7 +1702,7 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
                             ..
                         })
                     ),
-                    "回放应直接落「已拒绝」"
+                    "replay should land directly on '已拒绝' (declined)"
                 );
             });
         })

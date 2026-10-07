@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppView {
-    /// hero 态：当前无会话，或当前会话没有任何消息
+    /// Hero state: no current session, or the current session has no messages
     pub(crate) fn is_hero(&self, cx: &App) -> bool {
         match &self.current {
             None => true,
@@ -22,7 +22,7 @@ impl AppView {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| cwd.display().to_string())
             })
-            .unwrap_or_else(|| "选择工作区".to_string());
+            .unwrap_or_else(|| rust_i18n::t!("hero.select_workspace").to_string());
         let mut cwds: Vec<String> = self
             .metas
             .iter()
@@ -47,9 +47,11 @@ impl AppView {
         });
     }
 
-    /// hero 默认值：把「工作区最近活跃会话」的模型/模式/思考等级铺到 composer，
-    /// 作为下次新建会话的默认值（用户可再改；hero_send 时按当前选择创建）。
-    /// 无种子（新工作区）则不动，保留 app 默认/上次选择。
+    /// Hero defaults: spread the workspace's most recently active session's
+    /// model/mode/reasoning level onto the composer as the defaults for the next
+    /// new session (the user can still change them; hero_send creates with the
+    /// current selection). With no seed (a new workspace) nothing changes,
+    /// keeping the app defaults/last selection.
     pub(crate) fn apply_hero_defaults(&mut self, cx: &mut Context<Self>) {
         let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
         let Some(seed) = self
@@ -63,21 +65,25 @@ impl AppView {
         };
         self.exec_mode = seed.exec_mode;
         self.reasoning_level = seed.reasoning_level.clone();
-        // 模型显示名：config 里按 provider_id 查供应商名，查不到退化为 model_id。
-        // hero 态用户已显式选过模型时不覆盖（模式/思考等级仍铺种子）
+        // Model display name: look up the provider name in config by
+        // provider_id, falling back to model_id when not found. Do not overwrite
+        // when the user has explicitly picked a model in hero state (mode and
+        // reasoning level still get seeded)
         let label = match (&seed.provider_id, &seed.model_id) {
             (Some(p), Some(m)) if !self.hero_model_dirty => {
                 self.current_model = Some((p.clone(), m.clone()));
-                self.model_display_label(p, m)
+                Some(self.model_display_label(p, m))
             }
-            // 种子没有模型选择：模型展示不动，只铺模式/思考等级
-            _ => String::new(),
+            // User explicitly picked a model: leave the model display alone, only seed mode/reasoning level
+            _ if self.hero_model_dirty => None,
+            // Seed has no model choice: show the "no model configured" placeholder (no leftover label from the previous session)
+            _ => Some(rust_i18n::t!("composer.no_model").to_string()),
         };
         self.composer.update(cx, |composer, cx| {
             composer.set_exec_mode(seed.exec_mode, cx);
             composer.set_reasoning_level(seed.reasoning_level.clone(), cx);
             composer.set_fs_access(seed.fs_read_outside, seed.fs_write_outside, cx);
-            if !label.is_empty() {
+            if let Some(label) = label {
                 composer.set_model_name(label, cx);
             }
         });
@@ -90,11 +96,11 @@ impl AppView {
         self.title_branches = vec![];
         self.title_branch_menu_open = false;
         self.hero_error = None;
-        // 新的 hero 周期：显式模型选择标记复位（工作区种子重新生效）
+        // A new hero cycle: reset the explicit-model-choice flag (the workspace seed takes effect again)
         self.hero_model_dirty = false;
         self.composer.update(cx, |composer, cx| {
             composer.clear_context_usage(cx);
-            // 进度/任务/改动 chip 同属上个会话的状态，一并清掉（setter 会收起对应弹层）
+            // Progress/task/change chips are also previous-session state; clear them together (the setters collapse their popovers)
             composer.set_todos(vec![], cx);
             composer.set_tasks(vec![], cx);
             composer.set_changes(0, 0, vec![], cx);
@@ -126,14 +132,15 @@ impl AppView {
     ) {
         self.pending_first_send = Some((text, files, images, mode));
         let cwd = self.hero_cwd.clone().unwrap_or_else(|| self.cwd.clone());
-        // 带上 UI 当前选择：新建会话用它们（而不是工作区种子）初始化，
-        // 避免 SessionConfigured 回来把用户刚选的模式/思考等级覆盖掉
+        // Carry the UI's current selections: the new session initializes with
+        // them (not the workspace seed), so a returning SessionConfigured cannot
+        // overwrite the mode/reasoning level the user just picked
         let (provider_id, model_id) = match self.current_model.clone() {
             Some((p, m)) => (Some(p), Some(m)),
             None => (None, None),
         };
         eprintln!(
-            "[model] hero_send 新建会话：cwd={} 模型={:?} 思考={:?}",
+            "[model] hero_send new session: cwd={} model={:?} thinking={:?}",
             cwd.display(),
             provider_id.as_deref().zip(model_id.as_deref()),
             self.reasoning_level
@@ -144,7 +151,7 @@ impl AppView {
             model_id,
             self.reasoning_level.clone(),
             Some(mode),
-            // 计划开关带上 composer 草稿态（hero 上勾了「计划」新会话即开）
+            // The plan toggle carries the composer's draft state (checking "plan" on hero starts the new session with it on)
             Some(self.plan_enabled),
         );
         self.composer.update(cx, |composer, cx| {
@@ -153,7 +160,7 @@ impl AppView {
         cx.notify();
     }
 
-    /// 关闭 Yolo 确认框并回焦输入框
+    /// Close the Yolo confirm dialog and refocus the input
     pub(crate) fn close_yolo_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.yolo_confirm_open = false;
         self.composer.update(cx, |composer, cx| {
@@ -162,14 +169,16 @@ impl AppView {
         cx.notify();
     }
 
-    /// Yolo 确认框「开启无管制模式」：应用模式并关闭
+    /// The Yolo confirm dialog's "enable unrestricted mode": apply the mode and close
     pub(crate) fn confirm_yolo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_yolo_confirm(window, cx);
         self.apply_exec_mode(ExecMode::Yolo, cx);
     }
 
-    /// 「开启无管制模式？」确认框（ModelDialog 同款覆盖层：遮罩 + 居中卡片）。
-    /// 取消/点遮罩/Esc 不生效；确认才切 Yolo。每次切换都弹，不记住选择。
+    /// The "enable unrestricted mode?" confirm dialog (a ModelDialog-style
+    /// overlay: mask plus centered card). Cancel/mask click/Esc do not apply;
+    /// only confirm switches to Yolo. It pops up on every switch and does not
+    /// remember the choice.
     pub(crate) fn render_yolo_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("yolo-confirm-overlay")
@@ -191,7 +200,7 @@ impl AppView {
                             this.close_yolo_confirm(window, cx);
                         }
                     }))
-                    .on_click(|_, _, cx| cx.stop_propagation()) // 点卡片不触发遮罩取消
+                    .on_click(|_, _, cx| cx.stop_propagation()) // clicking the card must not trigger the mask cancel
                     .w(px(420.))
                     .gap_3()
                     .p_4()
@@ -204,23 +213,23 @@ impl AppView {
                             .text_lg()
                             .font_semibold()
                             .text_color(cx.theme().danger)
-                            .child("开启无管制模式？"),
+                            .child(rust_i18n::t!("hero.yolo_title")),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("此模式下所有操作直接执行：不弹任何确认，危险命令也不再拦截。仅建议在容器、虚拟机等隔离环境中使用。")
-                            .child("注意：敏感文件（.env / 私钥 / 云凭据）仍会拦截。"),
+                            .child(rust_i18n::t!("hero.yolo_body"))
+                            .child(rust_i18n::t!("hero.yolo_note")),
                     )
                     .child(
                         h_flex()
                             .gap_2()
                             .justify_end()
                             .child(
-                                // 与问卷/审批条按钮同尺寸（Small），确认弹框按钮字号一致
+                                // Same size as the questionnaire/approval-bar buttons (Small) so confirm-dialog button sizes stay consistent
                                 Button::new("yolo-cancel")
-                                    .label("取消")
+                                    .label(rust_i18n::t!("common.cancel"))
                                     .outline()
                                     .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -229,7 +238,7 @@ impl AppView {
                             )
                             .child(
                                 Button::new("yolo-confirm")
-                                    .label("开启无管制模式")
+                                    .label(rust_i18n::t!("hero.yolo_confirm"))
                                     .danger()
                                     .small()
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -250,7 +259,7 @@ impl AppView {
         }
     }
 
-    /// 自测用。
+    /// For self-tests.
     pub fn debug_is_hero(&self, cx: &App) -> bool {
         self.is_hero(cx)
     }
@@ -266,18 +275,24 @@ impl AppView {
                 (secs / 3600 + 8) % 24
             });
         let greeting = match hour {
-            5..=11 => "上午好呀",
-            12..=17 => "下午好呀",
-            _ => "晚上好呀",
+            5..=11 => rust_i18n::t!("hero.greeting_morning"),
+            12..=17 => rust_i18n::t!("hero.greeting_afternoon"),
+            _ => rust_i18n::t!("hero.greeting_evening"),
         };
 
-        let chips: Vec<(&'static str, &'static str)> = vec![
+        let chips: Vec<(String, String)> = vec![
             (
-                "总结这个工作区",
-                "请阅读 README 并总结这个工作区的结构和主要模块。",
+                rust_i18n::t!("hero.chip_summarize").to_string(),
+                rust_i18n::t!("hero.chip_summarize_prompt").to_string(),
             ),
-            ("修复一个报错", "我遇到了一个报错："),
-            ("写单元测试", "请为主要模块写单元测试。"),
+            (
+                rust_i18n::t!("hero.chip_fix").to_string(),
+                rust_i18n::t!("hero.chip_fix_prompt").to_string(),
+            ),
+            (
+                rust_i18n::t!("hero.chip_test").to_string(),
+                rust_i18n::t!("hero.chip_test_prompt").to_string(),
+            ),
         ];
 
         v_flex()
@@ -285,12 +300,7 @@ impl AppView {
             .items_center()
             .justify_center()
             .gap_5()
-            .child(
-                div()
-                    .text_xl()
-                    .font_semibold()
-                    .child(format!("{greeting}，接下来交给我吧")),
-            )
+            .child(div().text_xl().font_semibold().child(greeting))
             .child(
                 div()
                     .w_full()
@@ -317,7 +327,7 @@ impl AppView {
                             .child(label)
                             .on_click(move |_, window, cx| {
                                 composer.update(cx, |composer, cx| {
-                                    composer.fill_text(fill, window, cx);
+                                    composer.fill_text(&fill, window, cx);
                                 });
                             })
                     })),

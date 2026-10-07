@@ -33,66 +33,76 @@ use pig_protocol::{
 
 use crate::{ComposerNavDown, ComposerNavNext, ComposerNavPrev, ComposerNavUp, ComposerPopupClose};
 
+/// Slash commands: (command name, i18n key of the description). Command names
+/// are fixed English and never localized; descriptions are fetched by t! in
+/// the current language.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/clear", "清空当前会话消息"),
-    ("/compact", "压缩上下文（模型摘要）"),
+    ("/clear", "composer.slash_clear"),
+    ("/compact", "composer.slash_compact"),
 ];
 
-pub const PLACEHOLDER_IDLE: &str = "向 pig-code 提问，使用 @ 添加上下文，使用 / 选择命令";
-pub const PLACEHOLDER_STREAMING: &str = "继续输入以排队后续修改";
-
-/// (名称, 描述, 模式)
-const EXEC_MODES: &[(&str, &str, ExecMode)] = &[
-    (
-        "变更前确认",
-        "改文件、跑命令前先问我",
-        ExecMode::ConfirmBeforeEdit,
-    ),
-    ("自动编辑", "自动编辑文件，跑命令前问我", ExecMode::AutoEdit),
-    (
-        "完全访问",
-        "全自动执行；高风险命令仍会弹窗确认",
-        ExecMode::FullAccess,
-    ),
-    (
-        "无管制模式",
-        "全自动执行，无确认无拦截；仅限容器/沙箱使用",
-        ExecMode::Yolo,
-    ),
+/// (name, description, mode) — the constant table stores only modes; names and
+/// descriptions are fetched by t! in the current language
+const EXEC_MODES: &[ExecMode] = &[
+    ExecMode::ConfirmBeforeEdit,
+    ExecMode::AutoEdit,
+    ExecMode::FullAccess,
+    ExecMode::Yolo,
 ];
+
+fn exec_mode_label(mode: ExecMode) -> std::borrow::Cow<'static, str> {
+    match mode {
+        ExecMode::ConfirmBeforeEdit => rust_i18n::t!("composer.exec_confirm"),
+        ExecMode::AutoEdit => rust_i18n::t!("composer.exec_auto_edit"),
+        ExecMode::FullAccess => rust_i18n::t!("composer.exec_full_access"),
+        ExecMode::Yolo => rust_i18n::t!("composer.exec_yolo"),
+    }
+}
+
+fn exec_mode_description(mode: ExecMode) -> std::borrow::Cow<'static, str> {
+    match mode {
+        ExecMode::ConfirmBeforeEdit => rust_i18n::t!("composer.exec_confirm_desc"),
+        ExecMode::AutoEdit => rust_i18n::t!("composer.exec_auto_edit_desc"),
+        ExecMode::FullAccess => rust_i18n::t!("composer.exec_full_access_desc"),
+        ExecMode::Yolo => rust_i18n::t!("composer.exec_yolo_desc"),
+    }
+}
 
 fn exec_mode_icon(mode: ExecMode) -> AssetIconName {
     match mode {
         ExecMode::ConfirmBeforeEdit => AssetIconName::Hand,
         ExecMode::AutoEdit => AssetIconName::ShieldCheck,
         ExecMode::FullAccess => AssetIconName::ShieldAlert,
-        // 无管制沿用警示图标（现有图标里没有更合适的）
+        // Unregulated keeps the alert icon (nothing more suitable among the
+        // existing icons)
         ExecMode::Yolo => AssetIconName::ShieldAlert,
     }
 }
 
-/// 模式色（弹层行的图标+label、输入框 chip）：按危险程度 中性 → 黄 → 橙 → 红。
-/// 描述文字保持 muted 灰不上色。
+/// Mode colors (popup row icon+label, composer chip): by risk level, neutral →
+/// yellow → orange → red. Description text stays muted gray, uncolored.
 fn exec_mode_color(mode: ExecMode, cx: &App) -> Hsla {
     let theme = cx.theme();
     match mode {
-        // 中性：默认前景，不额外着色
+        // Neutral: default foreground, no extra coloring
         ExecMode::ConfirmBeforeEdit => theme.foreground,
-        // 黄/琥珀：中间档
+        // Yellow/amber: middle tier
         ExecMode::AutoEdit => theme.warning,
-        // 橙：激进但有护栏（主题无 orange token，用 Tailwind 色板的 orange-500）
+        // Orange: aggressive but with guardrails (the theme has no orange
+        // token, use Tailwind palette orange-500)
         ExecMode::FullAccess => gpui_kit::component::theme::orange_500(),
-        // 红：无护栏
+        // Red: no guardrails
         ExecMode::Yolo => theme.danger,
     }
 }
 
-/// 模式弹层 footer 里的「区外读/写」小开关：label（text_xs muted）+ Checkbox
-///（不挂 handler，点击冒泡到外层），文字与复选框整体一个点击区。
-/// 点击切换并 emit SetFsAccess，不关弹层。
+/// The small "read/write outside" toggle in the mode popup footer: label
+/// (text_xs muted) + Checkbox (no handler attached; clicks bubble to the outer
+/// layer), with the text and checkbox forming one click area. Clicking toggles
+/// and emits SetFsAccess without closing the popup.
 fn fs_toggle(
     id: &'static str,
-    label: &'static str,
+    label: std::borrow::Cow<'static, str>,
     checked: bool,
     is_read: bool,
     composer: Entity<Composer>,
@@ -131,18 +141,20 @@ fn fs_toggle(
         .into_any_element()
 }
 
-/// 任务耗时：started→ended（或至今），"N 秒 / N 分"。
+/// Task duration: started→ended (or until now), "N seconds / N minutes".
 fn format_task_duration(started_at: u64, end: u64) -> String {
     let secs = end.saturating_sub(started_at);
     if secs < 60 {
-        format!("{secs} 秒")
+        rust_i18n::t!("composer.task_duration_seconds", n = secs).to_string()
     } else {
-        format!("{} 分", secs / 60)
+        rust_i18n::t!("composer.task_duration_minutes", n = secs / 60).to_string()
     }
 }
 
-/// Questionnaire 的 choice value 直接用选项 label（提交回 label，与协议一致）：
-/// 按 label 去重保序——服务端发出重复 label 时防 schema DuplicateChoice 错误与渲染 id 冲突。
+/// Questionnaire choice values use the option labels directly (submissions
+/// send back labels, consistent with the protocol): dedupe by label preserving
+/// order — guards against the schema DuplicateChoice error and rendering id
+/// conflicts when the server emits duplicate labels.
 fn dedup_question_options(question: &QuestionItem) -> Vec<&QuestionOption> {
     let mut seen = std::collections::HashSet::new();
     question
@@ -151,37 +163,66 @@ fn dedup_question_options(question: &QuestionItem) -> Vec<&QuestionOption> {
         .filter(|option| seen.insert(option.label.as_str()))
         .collect()
 }
-/// (供应商名, provider_id, model_id, 推理等级列表[(id, 显示名)])
+/// (provider name, provider_id, model_id, reasoning level list [(id, display
+/// name)])
 pub type ModelOption = (String, String, String, Vec<(String, String)>);
 
-/// 待审批的操作：审批期间输入框隐藏，显示审批条。
+/// Operation awaiting approval: while the approval is pending the composer is
+/// hidden and the approval bar is shown.
 #[derive(Clone)]
 pub struct PendingApproval {
-    /// 这笔审批在 core 侧的等待 id（决议定向回复用）
+    /// This approval's wait id on the core side (for directing the decision
+    /// reply)
     pub request_id: String,
-    /// 审批来源会话（ExitPlanMode 的计划文件路径拼接用）
+    /// Session the approval came from (for building the ExitPlanMode plan file
+    /// path)
     pub session_id: String,
     pub tool: String,
-    /// Bash 是命令原文；Write/Edit 是 diff 预览；ExitPlanMode 是计划全文
+    /// Bash is the raw command; Write/Edit is a diff preview; ExitPlanMode is
+    /// the full plan text
     pub detail: String,
+    /// Reason key for a high-risk command (core bash.rs DangerReason.key; the
+    /// approval card shows a localized warning line above the detail, see
+    /// danger_reason_text)
+    pub danger_key: Option<String>,
     pub cwd: String,
 }
 
 impl PendingApproval {
-    /// ExitPlanMode 的计划文件绝对路径（core 弹审批前已落盘）
+    /// Absolute path of the ExitPlanMode plan file (core persists it before
+    /// raising the approval)
     pub fn plan_path(&self) -> String {
         format!("{}/.pigcode/plans/plan-{}.md", self.cwd, self.session_id)
     }
 }
 
-/// 待回答的结构化提问：显示问题条时输入区隐藏（与审批条互斥，问题优先）。
+/// danger_key → localized risk reason text: a static match over the six known
+/// keys (no dynamic key concatenation; unknown keys — added by future core —
+/// return None and show no warning line; a guard test keeps all six keys
+/// covered).
+pub(crate) fn danger_reason_text(key: &str) -> Option<String> {
+    let text = match key {
+        "fork_bomb" => rust_i18n::t!("approval.danger.fork_bomb"),
+        "rm_rf_root" => rust_i18n::t!("approval.danger.rm_rf_root"),
+        "disk_format" => rust_i18n::t!("approval.danger.disk_format"),
+        "dd_block" => rust_i18n::t!("approval.danger.dd_block"),
+        "shutdown" => rust_i18n::t!("approval.danger.shutdown"),
+        "chmod_root" => rust_i18n::t!("approval.danger.chmod_root"),
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+/// Structured question awaiting an answer: while the question bar is shown the
+/// input area is hidden (mutually exclusive with the approval bar; the
+/// question takes priority).
 #[derive(Clone)]
 pub struct PendingQuestion {
     pub request_id: String,
     pub questions: Vec<QuestionItem>,
 }
 
-/// 任务面板过滤 tab。
+/// Task panel filter tabs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskFilter {
     Running,
@@ -190,11 +231,15 @@ enum TaskFilter {
 }
 
 impl TaskFilter {
-    const TABS: &[(TaskFilter, &str)] = &[
-        (TaskFilter::Running, "进行中"),
-        (TaskFilter::Finished, "已完成"),
-        (TaskFilter::All, "全部"),
-    ];
+    const TABS: &[TaskFilter] = &[TaskFilter::Running, TaskFilter::Finished, TaskFilter::All];
+
+    fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            TaskFilter::Running => rust_i18n::t!("composer.filter_running"),
+            TaskFilter::Finished => rust_i18n::t!("composer.filter_finished"),
+            TaskFilter::All => rust_i18n::t!("composer.filter_all"),
+        }
+    }
 
     fn matches(self, status: TaskStatus) -> bool {
         match self {
@@ -205,8 +250,9 @@ impl TaskFilter {
     }
 }
 
-/// 后台任务 chip 类别（kimi-code 同款拆分）：Bash 后台任务 / 子代理（Agent）任务，
-/// 按 TaskSummary.agent_id 分派——chip 与弹层各自独立显隐
+/// Background task chip kinds (same split as kimi-code): Bash background
+/// tasks / subagent (Agent) tasks, dispatched by TaskSummary.agent_id — chips
+/// and popups show and hide independently
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskChipKind {
     Bash,
@@ -223,11 +269,11 @@ impl TaskChipKind {
 
     fn label(self, running: usize) -> String {
         let name = match self {
-            Self::Bash => "后台 Bash",
-            Self::Agent => "后台 Agent",
+            Self::Bash => rust_i18n::t!("composer.chip_bash"),
+            Self::Agent => rust_i18n::t!("composer.chip_agent"),
         };
         if running > 0 {
-            format!("{name} {running} 运行中")
+            rust_i18n::t!("composer.chip_running", name = name.as_ref(), n = running).to_string()
         } else {
             name.to_string()
         }
@@ -239,62 +285,70 @@ pub enum ComposerEvent {
     Send {
         text: String,
         files: Vec<String>,
-        /// 剪贴板粘贴的图片附件（原始字节，core 侧压缩）
+        /// Image attachments pasted from the clipboard (raw bytes, compressed
+        /// on the core side)
         images: Vec<pig_protocol::PendingImage>,
         mode: ExecMode,
     },
     Stop,
     Clear,
     Compact {
-        /// 命令分阶时用户在 chip 后续写的重点说明（无 = 普通压缩）
+        /// Focus notes the user appended after the chip when staging the
+        /// command (absent = a plain compact)
         instruction: Option<String>,
     },
     SetModel {
         provider_id: String,
         model_id: String,
     },
-    /// 计划审批面板的路径链接：右侧「文件」tab 打开计划文件
+    /// Path link in the plan approval panel: opens the plan file in the right
+    /// "File" tab
     OpenFile {
         path: String,
     },
     SetReasoning(Option<String>),
     OpenSettings,
     SetExecMode(ExecMode),
-    /// 计划模式开关（与执行模式正交；弹层勾选 / chip 关闭）
+    /// Plan mode toggle (orthogonal to exec mode; popup checkbox / chip close)
     SetPlanMode(bool),
-    /// 选中「无管制模式」：先弹确认框（AppView 宿主），确认后才走 SetExecMode
+    /// "Unregulated mode" selected: show the confirmation dialog first (hosted
+    /// by AppView); only after confirmation proceed to SetExecMode
     RequestYoloConfirm,
-    /// 模式菜单里的「工作区外读/写」开关
+    /// "Read/write outside workspace" toggles in the mode menu
     SetFsAccess {
         read_outside: bool,
         write_outside: bool,
     },
     SearchFiles(String),
-    /// hero：打开系统目录选择器
+    /// hero: open the system directory picker
     PickDirectory,
-    /// hero：选择最近目录
+    /// hero: pick a recent directory
     SelectCwd(String),
-    /// hero：取消工作区选择（不在工作区中工作）
+    /// hero: cancel the workspace selection (work outside a workspace)
     ClearCwd,
-    /// hero：切换 git 分支
+    /// hero: switch git branch
     CheckoutBranch(String),
-    /// 审批条：批准 / 本会话内批准 / 拒绝（定向到条上挂的 request_id——
-    /// 并发审批排队时各笔请求各答各的，不能笼统答「最后一个」）
+    /// Approval bar: approve / approve for this session / reject (directed at
+    /// the request_id attached to the bar — with concurrent approvals queued,
+    /// each request is answered individually, not indiscriminately as "the
+    /// last one")
     DecideApproval {
         request_id: String,
         decision: ApprovalDecision,
-        /// 反馈意见（kimi Revise：计划「修改」提交时携带；其余审批为 None）
+        /// Feedback (kimi Revise: carried when the plan "Revise" is submitted;
+        /// None for other approvals)
         feedback: Option<String>,
     },
-    /// 问题条：提交（Some=各题选中标签）/ 跳过（None）
+    /// Question bar: submit (Some = selected labels per question) / skip (None)
     QuestionReply {
         request_id: String,
         answers: Option<Vec<Vec<String>>>,
     },
-    /// 改动 chip：直接打开右侧面板的改动 tab（不走弹层）
+    /// Changes chip: directly opens the right panel's Changes tab (no popup)
     OpenChanges,
-    /// 「后台 Agent」弹层的任务行点击：打开右侧子代理对话 tab
-    ///（title 用任务 command 原文；AppView 经 open_subagent_tab 处理）
+    /// Task row click in the "background Agent" popup: opens the right
+    /// subagent conversation tab (title uses the task's raw command; AppView
+    /// handles it via open_subagent_tab)
     OpenSubagent {
         agent_id: String,
         title: String,
@@ -313,80 +367,99 @@ pub(crate) enum Popup {
     Context,
     Todos,
     Tasks,
-    /// 「后台 Agent」chip 的弹层（与 Tasks（后台 Bash）分家，独立显隐/关闭）
+    /// Popup of the "background Agent" chip (split from Tasks (background
+    /// Bash), with independent show/hide and close)
     AgentTasks,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
 
-/// 弹层相对触发芯片的水平锚点。
+/// Horizontal anchor of a popup relative to its trigger chip.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PopupAnchor {
     Left,
     Right,
-    /// 弹层水平中线对齐芯片中线（上下文容量面板用）。
+    /// The popup's horizontal centerline aligns with the chip's centerline
+    /// (used by the context capacity panel).
     Center,
 }
 
 pub struct Composer {
     input: Entity<TextareaState>,
     exec_mode: usize,
-    /// 计划模式开关（与 exec_mode 正交；开启时 bar 上显示独立「计划」chip）
+    /// Plan mode toggle (orthogonal to exec_mode; when on, the bar shows a
+    /// separate "Plan" chip)
     plan_enabled: bool,
-    /// 会话级「工作区外读/写」开关（模式菜单里的两个勾选项）
+    /// Session-level "read/write outside workspace" toggles (the two
+    /// checkboxes in the mode menu)
     fs_read_outside: bool,
     fs_write_outside: bool,
     model: String,
     models: Vec<ModelOption>,
     reasoning_level: Option<String>,
     popup: Option<(Popup, usize)>,
-    /// 最近一次被 on_mouse_down_out 关掉的弹层及按下位置：弹层打开时点击芯片，
-    /// outside-close 先把它关掉，同一次按压的 click 紧跟着到达——按按下位置吞掉它，
-    /// 避免「收起又马上弹开」。
+    /// The most recent popup closed by on_mouse_down_out plus the press
+    /// position: clicking a chip while its popup is open triggers outside-close
+    /// first, and the click from the same press arrives right after — swallow
+    /// it by press position to avoid "collapse then instantly reopen".
     outside_closed: Option<(Popup, Point<Pixels>)>,
     streaming: bool,
-    /// 待审批：Some 时输入区隐藏，显示审批条
+    /// Pending approval: Some hides the input area and shows the approval bar
     approval: Option<PendingApproval>,
-    /// ExitPlanMode 审批的计划 markdown 视图（kimi 计划审批面板正文；
-    /// 随 set_approval/decide_approval 建立与释放）
+    /// Plan markdown view for ExitPlanMode approvals (the kimi plan approval
+    /// panel body; created and released along with set_approval/
+    /// decide_approval)
     plan_state: Option<Entity<gpui_kit::component::text::TextViewState>>,
-    /// 计划「修改」输入态（kimi Revise）：true 时面板底部显示反馈输入框，
-    /// 提交并拒绝携带反馈给模型修订
+    /// Plan "Revise" input state (kimi Revise): when true, the panel bottom
+    /// shows a feedback input; submitting rejects with the feedback carried to
+    /// the model for revision
     plan_revise: bool,
-    /// 反馈输入框（惰性创建，随面板复用）
+    /// Feedback input (lazily created, reused with the panel)
     plan_revise_input: Option<Entity<InputState>>,
-    /// 审批条的焦点（承接 ⏎ / Ctrl+⏎ / Esc 快捷键）
+    /// Approval bar focus (receives the ⏎ / Ctrl+⏎ / Esc shortcuts)
     approval_focus: FocusHandle,
-    /// 是否已为当前审批条抢过焦点（每次出现只抢一次）
+    /// Whether focus has already been claimed for the current approval bar
+    /// (claimed once per appearance)
     approval_focused: bool,
-    /// 待回答提问：Some 时输入区隐藏，显示问题条（与审批互斥，问题优先）
+    /// Question awaiting an answer: Some hides the input area and shows the
+    /// question bar (mutually exclusive with approval; the question takes
+    /// priority)
     question: Option<PendingQuestion>,
-    /// 问题条的问卷实体与事件订阅：InputState 需要 window 才能建，render 里惰性构建；
-    /// request_id 变化 / 提交 / 放弃 / 清空时释放
+    /// Questionnaire entity and event subscription for the question bar:
+    /// InputState needs a window to build, so it is built lazily in render;
+    /// released on request_id change / submit / abandon / clear
     questionnaire: Option<(Entity<QuestionnaireState>, Subscription)>,
-    /// 问卷当前页题号（0 起）：CurrentItemChanged 事件的镜像（debug_question 无 cx，读不了实体）
+    /// Current questionnaire page index (0-based): a mirror of
+    /// CurrentItemChanged events (debug_question has no cx and cannot read the
+    /// entity)
     question_current: usize,
-    /// 问题条焦点（承接 Esc 放弃）
+    /// Question bar focus (receives Esc to abandon)
     question_focus: FocusHandle,
     question_focused: bool,
     mention_results: Vec<String>,
-    /// / 和 @ 弹层的键盘选中项（Tab/↑↓ 切换；弹层开/查询变/结果刷新时归零）
+    /// Keyboard-selected item of the / and @ popups (Tab/↑↓ to move; reset
+    /// when a popup opens / the query changes / results refresh)
     popup_sel: usize,
-    /// / 和 @ 弹层列表的滚动句柄（选中项随导航滚进视野）
+    /// Scroll handle of the / and @ popup lists (the selected item scrolls
+    /// into view while navigating)
     popup_scroll: ScrollHandle,
     context_usage: Option<(u64, u64, u64, u64)>,
-    /// 输入区上方芯片：TodoList 进度 / 后台 Bash 任务快照（core 推送），点击弹出只读面板
+    /// Chips above the input area: TodoList progress / background Bash task
+    /// snapshots (core-pushed); click to open a read-only panel
     todos: Vec<TodoItem>,
     tasks: Vec<TaskSummary>,
     task_filter: TaskFilter,
-    /// 本会话改动统计与文件列表（ReviewPanel 快照推送）
+    /// This session's change stats and file list (pushed from ReviewPanel
+    /// snapshots)
     changes: (u32, u32),
     change_files: Vec<(String, u32, u32)>,
-    /// 展开输出尾部的任务行 id
+    /// Task row id whose output tail is expanded
     expanded_task: Option<String>,
-    /// 剪贴板粘贴的图片附件（chip 条展示；发送时转 PendingImage 下发，发送后清空）
+    /// Image attachments pasted from the clipboard (shown in the chip strip;
+    /// sent as PendingImage on send, cleared afterwards)
     pasted_images: Vec<PastedImage>,
-    /// 粘贴提示（如超过 8 张上限）；下一次成功粘贴清除
+    /// Paste note (e.g. over the 8-image limit); cleared on the next
+    /// successful paste
     paste_note: Option<String>,
     hero_mode: bool,
     hero_cwds: Vec<String>,
@@ -400,7 +473,7 @@ pub struct Composer {
     exec_command: Entity<CommandState>,
     model_command: Entity<CommandState>,
     reasoning_command: Entity<CommandState>,
-    placeholder_applied: &'static str,
+    placeholder_applied: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -419,7 +492,7 @@ impl Composer {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder(PLACEHOLDER_IDLE)
+                .placeholder(rust_i18n::t!("composer.placeholder_idle"))
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
         });
@@ -429,7 +502,8 @@ impl Composer {
             window,
             |this: &mut Self, input, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift, .. } if !shift => {
-                    // / 和 @ 弹层打开且有候选项：Enter 确认选中项（不发送）
+                    // A / or @ popup is open with candidates: Enter confirms
+                    // the selection (no send)
                     if this.popup_selection_active(cx) {
                         this.confirm_selection(window, cx);
                     } else {
@@ -447,7 +521,7 @@ impl Composer {
             plan_enabled: false,
             fs_read_outside: false,
             fs_write_outside: false,
-            model: "未配置模型".to_string(),
+            model: rust_i18n::t!("composer.no_model").to_string(),
             models: vec![],
             reasoning_level: None,
             popup: None,
@@ -488,7 +562,7 @@ impl Composer {
             exec_command: cx.new(|cx| CommandState::new(window, cx)),
             model_command: cx.new(|cx| CommandState::new(window, cx)),
             reasoning_command: cx.new(|cx| CommandState::new(window, cx)),
-            placeholder_applied: PLACEHOLDER_IDLE,
+            placeholder_applied: rust_i18n::t!("composer.placeholder_idle").to_string(),
             _subscriptions,
         }
     }
@@ -523,7 +597,7 @@ impl Composer {
         cx.notify();
     }
 
-    /// 建议芯片：填入引导文本（不发送）。
+    /// Suggestion chip: fill in guiding text (without sending).
     pub fn fill_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| {
             input.set_value(text, window, cx);
@@ -541,20 +615,22 @@ impl Composer {
         cx.notify();
     }
 
-    /// 自测用。
+    /// For selftest.
     pub fn debug_model_count(&self) -> usize {
         self.models.len()
     }
 
-    /// 自测用。
+    /// For selftest.
     #[allow(dead_code)]
     pub fn debug_reasoning_level(&self) -> Option<String> {
         self.reasoning_level.clone()
     }
 
-    /// 待审批操作：Some 时输入区隐藏，显示审批条；None 恢复输入。
+    /// Pending approval operation: Some hides the input area and shows the
+    /// approval bar; None restores the input.
     pub fn set_approval(&mut self, approval: Option<PendingApproval>, cx: &mut Context<Self>) {
-        // 计划面板正文（ExitPlanMode 专用）：request_id 变了才重建，重复同步不丢滚动位置
+        // Plan panel body (ExitPlanMode only): rebuild only when request_id
+        // changes; repeated syncs do not lose the scroll position
         let recreate = match (&approval, &self.approval) {
             (Some(new), Some(old)) => new.request_id != old.request_id,
             (Some(_), None) => true,
@@ -577,8 +653,10 @@ impl Composer {
         cx.notify();
     }
 
-    /// 审批条决议：清空审批态、发事件（带本条 request_id 定向）、焦点还回输入框。
-    /// feedback 仅计划「修改」提交路径非 None（kimi Revise 携带给模型修订）
+    /// Approval bar decision: clear the approval state, emit the event
+    /// (directed via this bar's request_id), and return focus to the input.
+    /// feedback is non-None only on the plan "Revise" submit path (kimi Revise
+    /// carries it to the model for revision)
     fn decide_approval(
         &mut self,
         decision: ApprovalDecision,
@@ -599,7 +677,8 @@ impl Composer {
         }
     }
 
-    /// 计划「修改」提交：拒绝并携带反馈文本（kimi Revise；空文本 = 裸拒绝）
+    /// Plan "Revise" submit: reject carrying the feedback text (kimi Revise;
+    /// empty text = a bare reject)
     fn submit_plan_revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let feedback = self
             .plan_revise_input
@@ -609,7 +688,8 @@ impl Composer {
         self.decide_approval(ApprovalDecision::Reject, feedback, window, cx);
     }
 
-    /// 计划「修改」取消：回三按钮态、清空输入、焦点还审批条
+    /// Plan "Revise" cancel: back to the three-button state, clear the input,
+    /// return focus to the approval bar
     fn cancel_plan_revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_revise = false;
         if let Some(input) = &self.plan_revise_input {
@@ -619,9 +699,11 @@ impl Composer {
         cx.notify();
     }
 
-    /// 待回答提问：Some 时显示问题条；None 清除（提交/放弃/回合结束后）。
-    /// request_id 变化（或清空）时问卷实体一并释放（render 惰性重建）；同一提问的
-    /// 重复同步保留问卷（翻页与已选状态不丢）。
+    /// Question awaiting an answer: Some shows the question bar; None clears
+    /// it (after submit/abandon/turn end). When request_id changes (or is
+    /// cleared) the questionnaire entity is released too (rebuilt lazily in
+    /// render); repeated syncs of the same question keep the questionnaire
+    /// (paging and selected state are not lost).
     pub fn set_question(&mut self, question: Option<PendingQuestion>, cx: &mut Context<Self>) {
         let changed = match (&self.question, &question) {
             (Some(old), Some(new)) => old.request_id != new.request_id,
@@ -637,7 +719,8 @@ impl Composer {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 命令分阶：命令 token 打头 → 按「命令 + 续写文本」分派，不发聊天消息
+        // Command staging: input starts with a command token → dispatch as
+        // "command + appended text", sending no chat message
         if let Some((command, args)) = self.command_mode(cx) {
             self.input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
@@ -652,12 +735,13 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).value().trim().to_string();
-        // 有图片附件时允许空文本发送
+        // Allow sending empty text when there are image attachments
         if text.is_empty() && self.pasted_images.is_empty() {
             return;
         }
-        // @提及已存为 InlineToken 原子 token：从 token 列表收集文件
-        //（不去重，与原先按空白切词的行为一致）；纯文本里的 @ 不再计入
+        // @mentions are already stored as atomic InlineTokens: collect files
+        // from the token list (no dedup, matching the old whitespace-splitting
+        // behavior); @ in plain text no longer counts
         let files: Vec<String> = self
             .input
             .read(cx)
@@ -666,7 +750,8 @@ impl Composer {
             .filter_map(|span| span.token().text().strip_prefix('@'))
             .map(str::to_string)
             .collect();
-        // 附件随消息下发并清空（chip 条消失）
+        // Attachments are sent with the message and cleared (the chip strip
+        // disappears)
         let images: Vec<pig_protocol::PendingImage> = std::mem::take(&mut self.pasted_images)
             .into_iter()
             .map(|image| pig_protocol::PendingImage {
@@ -683,12 +768,13 @@ impl Composer {
             text,
             files,
             images,
-            mode: EXEC_MODES[self.exec_mode].2,
+            mode: EXEC_MODES[self.exec_mode],
         });
         cx.notify();
     }
 
-    /// 从光标前的文本检测 @ 或 / 触发符，返回触发位置和查询串。
+    /// Detect an @ or / trigger in the text before the caret, returning the
+    /// trigger position and query string.
     fn detect_trigger(head: &str) -> Option<(Popup, usize)> {
         for (ix, ch) in head.char_indices().rev() {
             let boundary = ix == 0 || head[..ix].ends_with(char::is_whitespace);
@@ -706,9 +792,11 @@ impl Composer {
         let value = input.read(cx).value();
         let caret = input.read(cx).selected_range().start.min(value.len());
         self.popup = Self::detect_trigger(&value[..caret]);
-        // 触发位置落在某个 token 范围内 → 不是真触发符：删掉 chip/@token 尾随
-        // 空格后光标紧贴 token 尾，纯文本扫描会把 token 里的 //@ 又当触发符
-        //（命令 chip 与 @提及共有的「弹层复活」坑）
+        // Trigger position inside a token range → not a real trigger: after
+        // deleting the trailing space of a chip/@token the caret sits right at
+        // the token tail, and a plain-text scan would treat the //@ inside the
+        // token as a trigger again (the shared "popup resurrection" pitfall of
+        // command chips and @mentions)
         if let Some((_kind, start)) = self.popup {
             let inside_token = input
                 .read(cx)
@@ -719,7 +807,8 @@ impl Composer {
                 self.popup = None;
             }
         }
-        // 查询变化即回到首项（与「过滤列表变化」的直觉一致）
+        // A changed query returns to the first item (matching the "filtered
+        // list changed" intuition)
         self.popup_sel = 0;
         if let Some((Popup::Mention, start)) = self.popup {
             let query = value[start + 1..caret].to_string();
@@ -734,29 +823,34 @@ impl Composer {
         cx.notify();
     }
 
-    /// / 和 @ 弹层当前候选数（导航/确认与渲染共用同一过滤口径）
+    /// Current candidate count of the / and @ popups (navigation/confirmation
+    /// and rendering share the same filtered view)
     fn popup_nav_count(&self, cx: &App) -> usize {
         match self.popup_query(cx).map(|(kind, _, query)| (kind, query)) {
-            Some((Popup::Slash, query)) => Self::slash_filtered(&query).count(),
+            Some((Popup::Slash, query)) => Self::slash_filtered(&query).len(),
             Some((Popup::Mention, _)) => self.mention_results.len(),
             _ => 0,
         }
     }
 
-    /// 弹层打开且有候选：Enter 应确认选中项而不是发送
+    /// Popup open with candidates: Enter should confirm the selection, not
+    /// send
     fn popup_selection_active(&self, cx: &App) -> bool {
         matches!(self.popup, Some((Popup::Mention | Popup::Slash, _)))
             && self.popup_nav_count(cx) > 0
     }
 
-    fn slash_filtered(query: &str) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    fn slash_filtered(query: &str) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         SLASH_COMMANDS
             .iter()
-            .filter(move |(name, _)| name[1..].contains(query))
+            .filter(|(name, _)| name[1..].contains(query))
+            .map(|&(name, key)| (name, rust_i18n::t!(key)))
+            .collect()
     }
 
-    /// Tab/↑/↓ 导航：弹层打开且有候选时循环切换并滚进视野；
-    /// 否则 cx.propagate() 放行给输入框原生行为（光标移动/缩进）
+    /// Tab/↑/↓ navigation: when a popup is open with candidates, cycle
+    /// through them and scroll into view; otherwise cx.propagate() defers to
+    /// the input's native behavior (caret movement/indent)
     fn nav_popup(&mut self, delta: i32, cx: &mut Context<Self>) {
         let count = self.popup_nav_count(cx);
         if count == 0 {
@@ -768,8 +862,9 @@ impl Composer {
         cx.notify();
     }
 
-    /// Esc（Input context 上的应用层绑定）：/ 和 @ 弹层开着就关掉；
-    /// 其余弹层（Command 面板有自己的 Cancel 链）与无弹层时 propagate 放行
+    /// Esc (app-layer binding on the Input context): close the / and @ popups
+    /// when open; for other popups (Command panels have their own Cancel
+    /// chain) and no popup, propagate through
     fn close_popup_key(&mut self, cx: &mut Context<Self>) {
         if matches!(self.popup, Some((Popup::Mention | Popup::Slash, _))) {
             self.popup = None;
@@ -779,17 +874,18 @@ impl Composer {
         }
     }
 
-    /// Enter/点击确认当前选中项：Slash 分阶为命令 token（不执行），Mention 插文件 token
+    /// Enter/click confirms the current selection: Slash stages a command
+    /// token (not executed), Mention inserts a file token
     fn confirm_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((kind, _start, query)) = self.popup_query(cx) else {
             return;
         };
         match kind {
             Popup::Slash => {
-                let items: Vec<_> = Self::slash_filtered(&query).collect();
+                let items = Self::slash_filtered(&query);
                 let Some((name, _)) = items
                     .get(self.popup_sel.min(items.len().saturating_sub(1)))
-                    .copied()
+                    .cloned()
                 else {
                     return;
                 };
@@ -812,9 +908,11 @@ impl Composer {
         }
     }
 
-    /// 命令分阶：选中的斜杠命令替换为行首 InlineToken（chip），光标留在 token
-    /// 之后继续输入——发送时才按「命令 + 续写文本」分派，而不是选中即执行
-    ///（对齐 kimi-code 的 /compact 选中后「Compact 重点：xxxx」形态）
+    /// Command staging: the chosen slash command is replaced with a leading
+    /// InlineToken (chip) and the caret stays after the token for more input —
+    /// dispatch happens on send as "command + appended text", not on selection
+    /// (matching kimi-code's "Compact focus: xxxx" shape after selecting
+    /// /compact)
     fn stage_command(
         &mut self,
         command: &'static str,
@@ -836,7 +934,8 @@ impl Composer {
                 .replace_range_with_token(start..caret, token, window, cx)
                 .is_ok()
             {
-                // 同 @提及：token API 不自动加分隔符，补一个尾随空格
+                // Same as @mentions: the token API adds no separator, so
+                // append a trailing space
                 input.replace(" ", window, cx);
             } else {
                 input.set_selected_range(start..caret, cx);
@@ -848,7 +947,8 @@ impl Composer {
         cx.notify();
     }
 
-    /// 命令模式：输入以 /compact 或 /clear 命令 token 打头 → 返回 (命令, 续写文本)
+    /// Command mode: input starts with a /compact or /clear command token →
+    /// returns (command, appended text)
     fn command_mode(&self, cx: &App) -> Option<(String, Option<String>)> {
         let value = self.input.read(cx).value();
         for span in self.input.read(cx).tokens() {
@@ -867,7 +967,7 @@ impl Composer {
         None
     }
 
-    /// 自测用。
+    /// For selftest.
     pub fn debug_mention_results(&self) -> &[String] {
         &self.mention_results
     }
@@ -884,7 +984,8 @@ impl Composer {
         cx.notify();
     }
 
-    /// 切换会话/回 hero 时清掉上一个会话的水位（新会话的 ContextUsage 到达前不显示）
+    /// Clear the previous session's watermark on session switch / returning
+    /// to hero (nothing shows until the new session's ContextUsage arrives)
     pub fn clear_context_usage(&mut self, cx: &mut Context<Self>) {
         if self.context_usage.take().is_some() {
             cx.notify();
@@ -892,29 +993,31 @@ impl Composer {
     }
 
     pub fn set_exec_mode(&mut self, mode: ExecMode, cx: &mut Context<Self>) {
-        if let Some(ix) = EXEC_MODES.iter().position(|(_, _, m)| *m == mode) {
+        if let Some(ix) = EXEC_MODES.iter().position(|m| *m == mode) {
             self.exec_mode = ix;
         }
         cx.notify();
     }
 
-    /// 计划模式开关（SessionConfigured/PlanModeChanged 同步，或弹层勾选）
+    /// Plan mode toggle (synced by SessionConfigured/PlanModeChanged, or the
+    /// popup checkbox)
     pub fn set_plan_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.plan_enabled = enabled;
         cx.notify();
     }
 
-    /// 当前计划开关（hero 新建会话携带用）
+    /// Current plan toggle (carried when hero creates a session)
     pub fn plan_enabled(&self) -> bool {
         self.plan_enabled
     }
 
-    /// 回焦输入框（对话框/弹层关闭后由 AppView 调用）
+    /// Refocus the input (called by AppView after dialogs/popups close)
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    /// 恢复会话持久化的区外读写开关（会话切换/新建/回放时由 meta 同步）
+    /// Restore the session-persisted outside read/write toggles (synced from
+    /// meta on session switch/creation/replay)
     pub fn set_fs_access(
         &mut self,
         read_outside: bool,
@@ -926,18 +1029,20 @@ impl Composer {
         cx.notify();
     }
 
-    /// 恢复会话持久化的思考等级（会话切换时由 SessionConfigured 同步）
+    /// Restore the session-persisted reasoning level (synced by
+    /// SessionConfigured on session switch)
     pub fn set_reasoning_level(&mut self, level: Option<String>, cx: &mut Context<Self>) {
         self.reasoning_level = level;
         cx.notify();
     }
 
-    /// 自测用。
+    /// For selftest.
     pub fn debug_exec_mode(&self) -> ExecMode {
-        EXEC_MODES[self.exec_mode].2
+        EXEC_MODES[self.exec_mode]
     }
 
-    /// token 数自动单位：<1k 原样；k/M 级整除显示整数、否则一位小数
+    /// Automatic token-count units: <1k as-is; k/M levels show an integer
+    /// when evenly divisible, otherwise one decimal
     fn format_tokens_compact(n: u64) -> String {
         if n < 1_000 {
             n.to_string()
@@ -962,19 +1067,20 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let desired_placeholder = if self.streaming {
-            PLACEHOLDER_STREAMING
+            rust_i18n::t!("composer.placeholder_streaming")
         } else {
-            PLACEHOLDER_IDLE
+            rust_i18n::t!("composer.placeholder_idle")
         };
         if self.placeholder_applied != desired_placeholder {
-            self.placeholder_applied = desired_placeholder;
+            self.placeholder_applied = desired_placeholder.to_string();
             self.input.update(cx, |input, cx| {
                 input.set_placeholder(desired_placeholder, window, cx);
             });
         }
         let approval = self.approval.clone();
-        // 审批条出现/消失时做一次焦点交接：出现时抢焦点承接 ⏎/Esc 快捷键，
-        // 消失（决议或回合结束）后焦点还回输入框
+        // One-time focus handover when the approval bar appears/disappears:
+        // on appearance it claims focus to receive the ⏎/Esc shortcuts; after
+        // disappearance (decision or turn end) focus returns to the input
         match (&approval, self.approval_focused) {
             (Some(_), false) => {
                 self.approval_focused = true;
@@ -988,8 +1094,11 @@ impl Render for Composer {
         }
         let question = self.question.clone();
         self.ensure_questionnaire(window, cx);
-        // 问题条焦点交接（与审批条同模式；与审批互斥、问题优先）：出现时焦点交给问卷
-        // 当前题（承接数字键/⏎），消失后焦点还回输入框
+        // Question bar focus handover (same pattern as the approval bar;
+        // mutually exclusive with approval, the question takes priority): on
+        // appearance focus goes to the questionnaire's current item
+        // (receiving number keys/⏎); after disappearance focus returns to
+        // the input
         match (&question, self.question_focused) {
             (Some(_), false) => {
                 self.question_focused = true;
@@ -1019,7 +1128,8 @@ impl Render for Composer {
             .find(|(_, _, model_id, _)| self.model.ends_with(&format!("/{model_id}")))
             .map(|(_, _, _, levels)| levels.clone())
             .unwrap_or_default();
-        // 当前选中等级的显示名（缺省回退 id 本身）
+        // Display name of the currently selected level (falls back to the id
+        // itself by default)
         let reasoning_label = self.reasoning_level.as_ref().map(|id| {
             reasoning_levels
                 .iter()
@@ -1051,8 +1161,10 @@ impl Render for Composer {
             self.render_popup(cx)
         };
 
-        // 输入框容器表面色：暗色下提亮到 neutral-850 左右从窗口背景浮起（参考官网
-        // message-scroller 的输入框）；弹层面板用主题 popover 深色 + 边框分界。
+        // Composer container surface color: in dark mode, brightened to
+        // around neutral-850 to float above the window background
+        // (referencing the official site's message-scroller input); popup
+        // panels use the theme's dark popover plus a border boundary.
         let composer_surface = if cx.theme().is_dark() {
             hsla(0., 0., 0.11, 1.)
         } else {
@@ -1060,14 +1172,18 @@ impl Render for Composer {
         };
         let dark = cx.theme().is_dark();
 
-        // 外框与内容分层：GPUI 会把元素的边框画在所有子孙之后（style.paint 先画背景，
-        // 画完子元素才画边框），边框留在内容容器上的话，上方弹层会被容器顶边穿线；
-        // 边框/背景拆成独立的底层兄弟元素先画，弹层就能正常盖住它。
+        // Layered frame and content: GPUI paints an element's border after
+        // all descendants (style.paint draws the background first and the
+        // border only after the children); if the border stays on the content
+        // container, popups above get crossed by the container's top border
+        // line. Splitting the border/background into a separate underlying
+        // sibling painted first lets popups cover it normally.
         div()
             .w_full()
             .p_3()
-            // / 和 @ 弹层的键盘导航（动作冒泡自输入框；弹层关闭时处理器
-            // cx.propagate() 放行，回落到输入框原生行为）
+            // Keyboard navigation for the / and @ popups (actions bubble from
+            // the input; when a popup is closed the handler cx.propagate()s
+            // through, falling back to the input's native behavior)
             .on_action(cx.listener(|this, _: &ComposerNavUp, _, cx| this.nav_popup(-1, cx)))
             .on_action(cx.listener(|this, _: &ComposerNavDown, _, cx| this.nav_popup(1, cx)))
             .on_action(cx.listener(|this, _: &ComposerNavNext, _, cx| this.nav_popup(1, cx)))
@@ -1086,8 +1202,10 @@ impl Render for Composer {
                         .absolute()
                         .inset_0()
                         .rounded_2xl()
-                        // 暗色下靠表面色分界（官网样式无描边）；亮色下背景与窗口同为白色，
-                        // 仍需描边分界
+                        // In dark mode the surface color separates (official
+                        // style has no stroke); in light mode the background
+                        // is white like the window, so a stroke is still
+                        // needed for separation
                         .when(!dark, |this| {
                             this.border_1().border_color(cx.theme().border)
                         })
@@ -1213,7 +1331,10 @@ impl Render for Composer {
                                                                             "?".into()
                                                                         })
                                                                 } else {
-                                                                    "非 git 仓库".to_string()
+                                                                    rust_i18n::t!(
+                                                                        "composer.not_git_repo"
+                                                                    )
+                                                                    .to_string()
                                                                 }),
                                                         )
                                                         .when(self.hero_is_git, |this| {
@@ -1234,7 +1355,9 @@ impl Render for Composer {
                             )
                         })
                         .when(
-                            // hero（新会话页）不属于任何会话：进度/任务/改动 chip 一律不显示
+                            // hero (the new session page) belongs to no
+                            // session: progress/task/changes chips are never
+                            // shown
                             !self.hero_mode
                                 && (!self.todos.is_empty()
                                     || !self.tasks.is_empty()
@@ -1261,7 +1384,9 @@ impl Render for Composer {
                                         Textarea::new(&self.input)
                                             .appearance(false)
                                             .bordered(false)
-                                            // token 图标：命令 chip 用终端图标，@提及用文件图标
+                                            // Token icons: command chips use
+                                            // the terminal icon, @mentions the
+                                            // file icon
                                             .token(|ctx, _, _| {
                                                 if ctx.token().text().starts_with('/') {
                                                     InputToken::new(ctx).icon(IconName::SquareTerminal)
@@ -1291,10 +1416,10 @@ impl Render for Composer {
                                         .relative()
                                         .child(self.render_bar_chip(
                                             "exec-mode",
-                                            Some(exec_mode_icon(EXEC_MODES[self.exec_mode].2)),
-                                            EXEC_MODES[self.exec_mode].0.to_string(),
+                                            Some(exec_mode_icon(EXEC_MODES[self.exec_mode])),
+                                            exec_mode_label(EXEC_MODES[self.exec_mode]).to_string(),
                                             exec_open,
-                                            Some(exec_mode_color(EXEC_MODES[self.exec_mode].2, cx)),
+                                            Some(exec_mode_color(EXEC_MODES[self.exec_mode], cx)),
                                             cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                 let command = this.exec_command.clone();
                                                 this.toggle_popup(
@@ -1304,10 +1429,16 @@ impl Render for Composer {
                                                     window,
                                                     cx,
                                                 );
-                                                // 高亮只跟鼠标走：清掉默认的键盘选中块
-                                                //（否则首行常驻一个类高亮块，悬停
-                                                // 计划行时读作「两个高亮」）；键盘
-                                                // ↓ 会重新选中，行为不变
+                                                // Highlight follows the mouse
+                                                // only: clear the default
+                                                // keyboard selection block
+                                                // (otherwise the first row
+                                                // keeps a highlight-like
+                                                // block, reading as "two
+                                                // highlights" when hovering
+                                                // the plan row); keyboard ↓
+                                                // reselects, so behavior is
+                                                // unchanged
                                                 if matches!(this.popup, Some((Popup::ExecMode, _))) {
                                                     this.exec_command.update(cx, |state, cx| {
                                                         state.set_selected_index(None, window, cx);
@@ -1318,8 +1449,10 @@ impl Render for Composer {
                                         ))
                                         .when_some(exec_popup, |this, popup| this.child(popup)),
                                 )
-                                // 计划模式 chip（与权限档正交，ZCode composer 计划 chip 同款）：
-                                // 灯泡 + 「计划」+ X 关闭；仅开启时渲染
+                                // Plan mode chip (orthogonal to the permission
+                                // tier, same as ZCode composer's plan chip):
+                                // lightbulb + "Plan" + X to close; rendered
+                                // only when enabled
                                 .when(self.plan_enabled, |this| {
                                     this.child(
                                         h_flex()
@@ -1340,7 +1473,7 @@ impl Render for Composer {
                                                 div()
                                                     .text_sm()
                                                     .text_color(cx.theme().info)
-                                                    .child("计划"),
+                                                    .child(rust_i18n::t!("composer.plan")),
                                             )
                                             .child(
                                                 div()
@@ -1370,7 +1503,9 @@ impl Render for Composer {
                                 })
                                 .child(div().flex_1())
                                 .when_some(self.context_usage, |this, (used, total, _, _)| {
-                                    // 上下文水位环形指示器（ZCode 同款）：悬停展示容量面板
+                                    // Context usage ring indicator (same as
+                                    // ZCode): hover to show the capacity
+                                    // panel
                                     let ratio = (used as f32 / total as f32).clamp(0.0, 1.0);
                                     let ring_color = if ratio > 0.8 {
                                         cx.theme().warning
@@ -1449,7 +1584,12 @@ impl Render for Composer {
                                                     Some(AssetIconName::Brain),
                                                     reasoning_label
                                                         .clone()
-                                                        .unwrap_or_else(|| "关".into()),
+                                                        .unwrap_or_else(|| {
+                                                            rust_i18n::t!(
+                                                                "composer.reasoning_off_chip"
+                                                            )
+                                                            .into()
+                                                        }),
                                                     reasoning_open,
                                                     None,
                                                     cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -1477,7 +1617,7 @@ impl Render for Composer {
                                             .danger()
                                             .icon(AssetIconName::Square)
                                             .rounded(px(999.))
-                                            .tooltip("停止")
+                                            .tooltip(rust_i18n::t!("composer.stop"))
                                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                                                 cx.emit(ComposerEvent::Stop);
                                             })),
@@ -1489,7 +1629,7 @@ impl Render for Composer {
                                             .primary()
                                             .icon(AssetIconName::ArrowUp)
                                             .rounded(px(999.))
-                                            .tooltip("发送")
+                                            .tooltip(rust_i18n::t!("composer.send"))
                                             .when(!can_send, |this| this.disabled(true))
                                             .on_click(cx.listener(
                                                 |this, _: &ClickEvent, window, cx| {

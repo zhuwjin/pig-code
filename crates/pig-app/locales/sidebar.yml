@@ -1,0 +1,75 @@
+_version: 2
+
+# 侧栏（会话列表 / 工作区分组 / 右键菜单）。
+
+sidebar:
+  search_placeholder:
+    zh-CN: 搜索会话或工作区…
+    en: Search sessions or workspaces…
+  # 会话标题空串哨兵的展示占位（自动命名完成前的侧栏/标题栏/归档页显示）
+  untitled:
+    zh-CN: 新任务
+    en: New task
+  settings:
+    zh-CN: 设置
+    en: Settings
+  new_task:
+    zh-CN: 新建任务
+    en: New task
+  search:
+    zh-CN: 搜索
+    en: Search
+  sessions:
+    zh-CN: 会话
+    en: Sessions
+  collapse_all:
+    zh-CN: 折叠全部工作区
+    en: Collapse all workspaces
+  expand_all:
+    zh-CN: 展开全部工作区
+    en: Expand all workspaces
+  list_manage:
+    zh-CN: 列表管理
+    en: Manage list
+  pinned:
+    zh-CN: 置顶
+    en: Pinned
+  show_more:
+    zh-CN: 展开更多
+    en: Show more
+  collapse:
+    zh-CN: 收起
+    en: Collapse
+  view:
+    zh-CN: 视图
+    en: View
+  view_flat:
+    zh-CN: 平铺列表
+    en: Flat list
+  view_grouped:
+    zh-CN: 按工作区分组
+    en: Group by workspace
+  rename:
+    zh-CN: 重命名
+    en: Rename
+  pin:
+    zh-CN: 置顶
+    en: Pin
+  unpin:
+    zh-CN: 取消置顶
+    en: Unpin
+  archive:
+    zh-CN: 归档
+    en: Archive
+  unarchive:
+    zh-CN: 取消归档
+    en: Unarchive
+  delete_session:
+    zh-CN: 删除会话
+    en: Delete session
+  copy_path:
+    zh-CN: 复制路径
+    en: Copy path
+  remove_workspace:
+    zh-CN: 移除工作区
+    en: Remove workspace

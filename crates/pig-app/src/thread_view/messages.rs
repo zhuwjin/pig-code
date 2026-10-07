@@ -1,14 +1,14 @@
 use super::*;
 
-/// 导航条横条宽度/透明度的弹簧参数：近临界阻尼（ζ≈0.93），
-/// 平滑收拢不拖尾、无明显过冲
+/// Spring parameters for nav bar width/opacity: near-critical damping (ζ≈0.93),
+/// smooth settling with no trailing and no visible overshoot
 const NAV_BAR_SPRING: SpringConfig = SpringConfig::new(260., 30., 1.);
 
-/// 导航预览卡的进出场动画时长（悬停稳定 120ms 开卡不变，动画只管淡入淡出）
+/// Enter/exit animation duration of the nav preview card (the stable-120ms-hover opening rule is unchanged; the animation only handles fade in/out)
 const NAV_CARD_ANIM_DUR: std::time::Duration = std::time::Duration::from_millis(160);
 
-/// 压缩分隔条：分隔线 — 内容 — 分隔线（「正在压缩上下文」进行态与
-/// 「上下文已压缩」完成态共用骨架，对标 ZCode 的上下文压缩分隔行）
+/// Compact divider: line - content - line (the "Compacting context" in-progress state and the
+/// "Context compacted" done state share this skeleton, modeled on ZCode's context compaction divider row)
 pub(crate) fn render_compact_divider(content: AnyElement, cx: &App) -> AnyElement {
     let line = || div().flex_grow(1.).h(px(1.)).bg(cx.theme().border);
     h_flex()
@@ -22,22 +22,12 @@ pub(crate) fn render_compact_divider(content: AnyElement, cx: &App) -> AnyElemen
         .into_any_element()
 }
 
-/// @提及分段：文本里出现的 @path（files 命中）切成 Mention，其余为 Text。
-/// 长路径优先（防前缀互吃）；命中点后一个字符须是路径终止符（防 @a.rs2 误配 @a.rs）
+/// @-mention segmentation: every @path occurring in the text (a files hit) is cut into a Mention, the rest stays Text.
+/// Longer paths first (prevents prefixes from eating each other); the character after a hit must be a path terminator (prevents @a.rs2 from matching @a.rs)
 #[derive(Debug, PartialEq)]
 pub(crate) enum MentionSegment {
     Text(String),
     Mention(String),
-}
-
-/// 旧记录的「引用文件: a, b」后缀（core 曾拼进展示文本；新记录不再写入，
-/// chip 已内联表达）：只在 files 非空且完整命中时剥除，手写同形文本不受影响
-pub(crate) fn strip_reference_suffix(text: &str, files: &[String]) -> String {
-    if files.is_empty() {
-        return text.to_string();
-    }
-    let suffix = format!("\n\n引用文件: {}", files.join(", "));
-    text.replacen(&suffix, "", 1)
 }
 
 pub(crate) fn split_mention_segments(text: &str, files: &[String]) -> Vec<MentionSegment> {
@@ -76,7 +66,7 @@ pub(crate) fn split_mention_segments(text: &str, files: &[String]) -> Vec<Mentio
         }
         segments = next;
     }
-    // 相邻 Text 段合并（边界保护跳过失败命中时会留下相邻文本段）
+    // Merge adjacent Text segments (the boundary guard skips failed hits, leaving adjacent text segments behind)
     let mut merged: Vec<MentionSegment> = Vec::with_capacity(segments.len());
     for segment in segments {
         match (merged.last_mut(), &segment) {
@@ -88,7 +78,7 @@ pub(crate) fn split_mention_segments(text: &str, files: &[String]) -> Vec<Mentio
     merged
 }
 
-/// 导航预览卡本体（打开卡与出场快照共用）：标题 2 行 + 助手摘要 3 行
+/// Nav preview card body (shared by the open card and the exit snapshot): title 2 lines + assistant summary 3 lines
 fn nav_card_body(data: &NavCardData, cx: &App) -> Div {
     let (_, _, user_preview, assistant_preview, is_text) = data;
     v_flex()
@@ -110,8 +100,8 @@ fn nav_card_body(data: &NavCardData, cx: &App) -> Div {
         .child(
             div()
                 .text_sm()
-                // 文本回复 80% 亮度，占位文案最暗档
-                //（对齐 ZCode 的 popover-foreground/80 与 foreground-subtle 分档）
+                // Text replies at 80% brightness, placeholder labels at the darkest tier
+                // (aligned with ZCode's popover-foreground/80 and foreground-subtle tiers)
                 .text_color(if *is_text {
                     cx.theme().foreground.opacity(0.8)
                 } else {
@@ -129,15 +119,15 @@ impl ThreadView {
         message: &ChatMessage,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 后台子代理完成/失败的合成消息：渲染为通知卡而非用户气泡
-        //（剥标签只在显示层，message.text 原文不动，live 与回放共用此路径）
+        // Synthetic message of a background subagent finishing/failing: rendered as a notification card instead of a user bubble
+        // (tag stripping happens only in the display layer; message.text keeps the original, and live and replay share this path)
         if let Some(note) = as_task_notification(&message.text) {
             return self.render_task_notification(ix, &note, message, cx);
         }
-        // 展示文本与 @提及分段（剥旧记录后缀 + 内联 chip）；文本里没出现的
-        // files（程序化附件等）回落到气泡上方的传统 chip 行
-        let display_text = strip_reference_suffix(&message.text, &message.files);
-        let segments = split_mention_segments(&display_text, &message.files);
+        // Display text and @-mention segmentation (inline chips); files that never appear
+        // in the text (programmatic attachments, etc.) fall back to the traditional chip row above the bubble
+        // (pre-2026-10 records may carry a legacy "引用文件: ..." suffix in the text; shown as-is)
+        let segments = split_mention_segments(&message.text, &message.files);
         let unmatched: Vec<String> = {
             let inline: std::collections::HashSet<&str> = segments
                 .iter()
@@ -188,8 +178,8 @@ impl ThreadView {
                             .with_easing(ease_out_quint()),
                         |el, delta| el.top(px(4.0 * (1.0 - delta))).opacity(delta),
                     )
-                    // 图片附件：缩略图横排（换行），在文本上方（气泡内容第一行）；
-                    // 丢失/坏字节 → 文本 chip 降级
+                    // Image attachments: thumbnails in a wrapping row, above the text (first row of the bubble content);
+                    // missing/corrupt bytes → degrade to a text chip
                     .when(!message.images.is_empty(), |this| {
                         this.child(h_flex().gap_2().flex_wrap().children(
                             message.images.iter().enumerate().map(|(image_ix, image)| {
@@ -197,13 +187,13 @@ impl ThreadView {
                             }),
                         ))
                     })
-                    // @提及内联渲染：文本段保持窗口级选择（共享 handle + 阅读序），
-                    // chip = 文件图标 + 下划线文件名，点击在右侧面板打开文件
-                    .when(!display_text.is_empty(), |this| {
+                    // @-mention inline rendering: text segments keep window-level selection (shared handle + reading order),
+                    // chip = file icon + underlined file name; click opens the file in the right-side panel
+                    .when(!message.text.is_empty(), |this| {
                         let handle = message
                             .selection
                             .as_ref()
-                            .expect("render 时已惰性创建选择 handle")
+                            .expect("selection handle lazily created during render")
                             .0
                             .clone();
                         if segments
@@ -255,7 +245,7 @@ impl ThreadView {
                                 SelectableText::with_handle(
                                     ("user-msg-text", ix),
                                     handle,
-                                    display_text.clone(),
+                                    message.text.clone(),
                                 )
                                 .document_order(ix as u64),
                             )
@@ -265,12 +255,12 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 后台子代理的合成通知块（A3d，kimi-code 同款）：
-    /// 右对齐「✓ 由后台发送（Agent）」小标签 + 用户气泡同款底色的限宽气泡
-    ///（标题 / 已完成·耗时 / 结果文件行 / 默认折叠的原始 payload）。
-    /// 点击气泡开右侧子代理对话 tab（复制路径按钮与 payload 折叠行的命中区
-    /// stop_propagation 不冒泡；缺 agent_id 属性时不挂点击——core 产物恒有，
-    /// 缺省只出现在手工构造文本的容错场景）。
+    /// The background subagent's synthetic notification block (A3d, same as kimi-code):
+    /// a right-aligned "✓ Sent by background (Agent)" mini label + a width-capped bubble on the same background as user bubbles
+    /// (title / completed · duration / result file row / raw payload collapsed by default).
+    /// Clicking the bubble opens the right-side subagent conversation tab (the copy-path button's and the payload collapse row's hit areas
+    /// stop_propagation and do not bubble; no click handler when the agent_id attribute is missing; core output always has it,
+    /// and a missing value only occurs in the fault-tolerant path for hand-built text).
     pub(crate) fn render_task_notification(
         &self,
         message_ix: usize,
@@ -285,20 +275,31 @@ impl ThreadView {
             .description
             .clone()
             .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| "后台子代理".to_string());
-        // 状态行：已完成/失败（N 步）· 耗时 …（属性缺哪个省哪个）
-        let status_word = if failed { "失败" } else { "已完成" };
-        let steps = note.turns.as_deref().map(|t| format!("{t} 步"));
-        let cost = note
-            .duration_ms
-            .map(|ms| format!("耗时 {}", format_notification_duration(ms)));
+            .unwrap_or_else(|| rust_i18n::t!("thread.bg_subagent").to_string());
+        // Status line: completed/failed (N steps) · duration … (whichever attribute is missing is omitted)
+        let status_word = if failed {
+            rust_i18n::t!("thread.failed")
+        } else {
+            rust_i18n::t!("thread.completed")
+        };
+        let steps = note.turns.as_deref().map(|t| {
+            // turns 以字符串形态存（通知属性），"1" 时取单数键
+            if t == "1" {
+                rust_i18n::t!("thread.steps_one", n = t).to_string()
+            } else {
+                rust_i18n::t!("thread.steps", n = t).to_string()
+            }
+        });
+        let cost = note.duration_ms.map(|ms| {
+            rust_i18n::t!("thread.duration", d = format_notification_duration(ms)).to_string()
+        });
         let status_line = match (steps, cost) {
             (Some(steps), Some(cost)) => format!("{status_word} {steps} · {cost}"),
             (Some(steps), None) => format!("{status_word} {steps}"),
             (None, Some(cost)) => format!("{status_word} · {cost}"),
             (None, None) => status_word.to_string(),
         };
-        // UI 态在 render 前的预备循环里已惰性创建；防御 None（理论上不会走到）
+        // The UI state was lazily created in the prepare loop before render; guard against None (theoretically unreachable)
         let ui = message.notification_ui.as_ref();
         let payload_open = ui.is_some_and(|u| u.payload_open);
         let copied = ui.is_some_and(|u| u.copied);
@@ -312,7 +313,7 @@ impl ThreadView {
             .w_full()
             .items_end()
             .gap_1()
-            // 上方右对齐小标签：✓/✗ 由后台发送（Agent）
+            // Top right-aligned mini label: ✓/✗ Sent by background (Agent)
             .child(
                 h_flex()
                     .gap_1()
@@ -333,11 +334,11 @@ impl ThreadView {
                         div()
                             .text_xs()
                             .text_color(if failed { cx.theme().danger } else { subtle })
-                            .child("由后台发送（Agent）"),
+                            .child(rust_i18n::t!("thread.sent_by_background")),
                     ),
             )
-            // 气泡（A3d：与用户消息气泡同款底色/圆角/padding，宽随内容、上限 520px；
-            // 失败版不换底色，只有状态词与标签走 danger）
+            // Bubble (A3d: same background/radius/padding as user message bubbles, width follows content capped at 520px;
+            // the failed variant keeps the same background; only the status word and label go danger)
             .child(
                 v_flex()
                     .id(("task-notification", message_ix))
@@ -356,7 +357,7 @@ impl ThreadView {
                                 });
                             }))
                     })
-                    // 第 1 行：标题（description，缺省「后台子代理」）
+                    // Row 1: title (description; falls back to "background subagent")
                     .child(
                         div()
                             .min_w_0()
@@ -368,19 +369,19 @@ impl ThreadView {
                             .text_color(cx.theme().foreground)
                             .child(title),
                     )
-                    // 第 2 行：状态（已完成/失败 · 耗时）
+                    // Row 2: status (completed/failed · duration)
                     .child(
                         div()
                             .text_xs()
                             .text_color(if failed { cx.theme().danger } else { subtle })
                             .child(status_line),
                     )
-                    // 第 3 行：结果文件（doc 图标 + 中段省略路径 + 大小 + 复制路径按钮）；
-                    // 指向 result.md（core 产物恒带 result 属性；缺省时整行省略）
+                    // Row 3: result file (doc icon + middle-elided path + size + copy-path button);
+                    // points at result.md (core output always carries the result attribute; the whole row is omitted without it)
                     .when_some(note.result.clone(), |this, result_path| {
                         let size_text = match record_size {
                             Some(Some(bytes)) => format_file_size(bytes),
-                            Some(None) => "记录已删除".to_string(),
+                            Some(None) => rust_i18n::t!("thread.record_deleted").to_string(),
                             None => String::new(),
                         };
                         this.child(
@@ -416,9 +417,13 @@ impl ThreadView {
                                     Button::new(("task-notification-copy", message_ix))
                                         .xsmall()
                                         .outline()
-                                        .label(if copied { "已复制" } else { "复制路径" })
+                                        .label(if copied {
+                                            rust_i18n::t!("thread.copied")
+                                        } else {
+                                            rust_i18n::t!("thread.copy_path")
+                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            // 复制路径不冒泡到卡体（不开子代理 tab）
+                                            // Copy path does not bubble to the card body (does not open the subagent tab)
                                             cx.stop_propagation();
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 result_path.clone(),
@@ -435,7 +440,7 @@ impl ThreadView {
                                 ),
                         )
                     })
-                    // 第 4 行：「原始 payload」折叠行（默认收起；命中区不冒泡到卡体）
+                    // Row 4: "raw payload" collapse row (collapsed by default; its hit area does not bubble to the card body)
                     .child(
                         h_flex()
                             .id(("task-notification-payload-toggle", message_ix))
@@ -462,9 +467,14 @@ impl ThreadView {
                                 .size_3()
                                 .text_color(subtlest),
                             )
-                            .child(div().text_xs().text_color(subtle).child("原始 payload")),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(subtle)
+                                    .child(rust_i18n::t!("thread.raw_payload")),
+                            ),
                     )
-                    // 展开区：payload 原文（含标签全文），等宽 + 更深底 + 限高 240 内滚
+                    // Expanded area: raw payload text (full text with tags), monospace + darker background + 240-capped internal scroll
                     .when(payload_open, |this| {
                         let block = div()
                             .id(("task-notification-payload", message_ix))
@@ -479,7 +489,7 @@ impl ThreadView {
                             .text_color(subtle)
                             .child(message.text.clone());
                         match payload_scroll {
-                            // 滚轮落在 payload 区时不穿透到外层消息列表
+                            // A wheel over the payload area does not pass through to the outer message list
                             Some(handle) => this.child(
                                 block
                                     .track_scroll(&handle)
@@ -488,7 +498,7 @@ impl ThreadView {
                             None => this.child(block),
                         }
                     })
-                    // 与用户气泡同款的入场动画（链尾：AnimationElement 不再支持交互方法）
+                    // The same enter animation as user bubbles (at the chain tail: AnimationElement no longer supports interaction methods)
                     .with_animation(
                         "user-msg-enter",
                         Animation::new(std::time::Duration::from_millis(150))
@@ -499,8 +509,8 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 用户消息的单张图片附件：缩略图（最长边 72px，等比不放大，圆角），
-    /// 点击开灯箱看大图；文件丢失/解码失败 → 「[图片 N（已失效）]」文本 chip（不可点）
+    /// One image attachment of a user message: a thumbnail (longest edge 72px, aspect-preserving, no upscaling, rounded),
+    /// click to open the lightbox for the large image; missing file/decode failure → an "[Image N (expired)]" text chip (not clickable)
     pub(crate) fn render_user_image(
         &self,
         message_ix: usize,
@@ -546,17 +556,17 @@ impl ThreadView {
                 .bg(cx.theme().muted)
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!(
-                    "[图片 {}（已失效）]",
-                    message_image_number(image_ix)
-                ))
+                .child(
+                    rust_i18n::t!("thread.image_expired", n = message_image_number(image_ix))
+                        .to_string(),
+                )
                 .into_any_element(),
         }
     }
 
-    /// 回合工作行（对齐 ZCode AssistantHistoryStatus）：回合结束后该轮的
-    /// 思考块/工具卡折叠成这一行，点击整行展开/收起。chevron 常显（截图同款），
-    /// 不做展开高度动画——工作段与正文段在消息内交错，不是连续区块
+    /// Turn work row (aligned with ZCode AssistantHistoryStatus): after the turn ends, that turn's
+    /// thinking blocks/tool cards collapse into this row; click the whole row to expand/collapse. The chevron is always visible (as in the screenshots),
+    /// and there is no expand-height animation: work segments and body segments interleave within the message instead of forming one contiguous block
     fn render_work_row(
         &self,
         ix: usize,
@@ -565,13 +575,15 @@ impl ThreadView {
     ) -> AnyElement {
         let label = match message.work_state {
             Some(WorkState::Completed { duration: Some(d) }) => {
-                // 毫秒 → 秒向最近取整、至少 1 秒（对齐 ZCode workDuration）
+                // Milliseconds → seconds rounded to nearest, at least 1 second (aligned with ZCode workDuration)
                 let secs = (d.as_millis() as f64 / 1000.).round() as u64;
-                fmt_work_duration(secs.max(1), "已工作")
+                fmt_work_duration(secs.max(1), rust_i18n::t!("thread.worked").as_ref())
             }
-            // 回放里无 TurnStats 的历史回合：没有真实时长
-            Some(WorkState::Completed { duration: None }) => "已处理".to_string(),
-            Some(WorkState::Stopped) => "已停止".to_string(),
+            // History turns without TurnStats in replay: no real duration
+            Some(WorkState::Completed { duration: None }) => {
+                rust_i18n::t!("thread.processed").to_string()
+            }
+            Some(WorkState::Stopped) => rust_i18n::t!("thread.stopped").to_string(),
             None => return div().into_any_element(),
         };
         let open = message.work_open;
@@ -637,7 +649,7 @@ impl ThreadView {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("上下文已压缩"),
+                                    .child(rust_i18n::t!("thread.context_compacted")),
                             )
                             .into_any_element(),
                         cx,
@@ -649,18 +661,18 @@ impl ThreadView {
                     .segments
                     .iter()
                     .any(|s| matches!(s, Segment::Thinking { .. } | Segment::ToolCall { .. }));
-                // 回合已结束且未手动展开：思考块/工具卡收进工作行，只留正文
+                // Turn ended and not manually expanded: thinking blocks/tool cards fold into the work row, leaving only the body
                 let collapse_work = message.work_state.is_some() && !message.work_open;
-                // 每行带稳定键（段下标/固定名），工作行出现与折叠切换不会
-                // 让其余行的 seg-enter 动画键移位重播
+                // Each row carries a stable key (segment index/fixed name), so the work row appearing or the collapse toggling
+                // does not shift and replay the other rows' seg-enter animation keys
                 let mut segments: Vec<(String, AnyElement)> =
                     Vec::with_capacity(message.segments.len() + 2);
                 if message.work_state.is_some() && has_work {
                     segments.push(("work".to_string(), self.render_work_row(ix, message, cx)));
                 }
                 for (six, segment) in message.segments.iter().enumerate() {
-                    // 审批不占独立行：待批准状态显示在对应的工具调用行上
-                    //（ApprovalRequested 紧跟在该工具的 ToolCallBegin 之后发出）
+                    // Approvals take no separate row: the awaiting-approval state shows on the corresponding tool call row
+                    // (ApprovalRequested is emitted right after that tool's ToolCallBegin)
                     if matches!(segment, Segment::Approval { .. }) {
                         continue;
                     }
@@ -696,15 +708,15 @@ impl ThreadView {
                                 cx,
                             ),
                             Segment::Markdown { state, .. } => {
-                                // 表格对齐 ZCode（w-max min-w-full，PR #2）：列宽按实测
-                                // 内容分配、贴合内容（wrap 表格按字符数比例分列，「前四
-                                // slot」这种短文本列会被压到折行）；帧宽不足时列先收缩
-                                // 换行、到列地板后整体横向滚动（上游无滚动条，窗口极窄时
-                                // 超宽可横滚但无视觉提示）。
-                                // 不要动 table_cell 的 padding：列宽测量含 CELL_PAD_PX(16)，
-                                // 改大会让所有列的内容盒比测量窄、短列反而折行（实测）。
-                                // 行尾吞字（#3293，inline flow 全角标点量宽少算）
-                                // 已由 0.7.1 根治：按整形后绘制宽度收紧重排。
+                                // Tables align with ZCode (w-max min-w-full, PR #2): column widths are
+                                // distributed by measured content and hug it (wrap tables split columns by character-count ratio, so short-text
+                                // columns like "first four slots" get squeezed into wrapping); when the frame is too narrow, columns shrink and
+                                // wrap first, then the whole table scrolls horizontally after hitting the column floor (upstream has no scrollbar, so an extremely
+                                // narrow window can scroll horizontally with no visual cue).
+                                // Do not touch table_cell's padding: column width measurement includes CELL_PAD_PX(16);
+                                // increasing it makes every column's content box narrower than measured and short columns wrap instead (verified in practice).
+                                // End-of-line glyph swallowing (#3293, inline flow under-measuring fullwidth punctuation)
+                                // was fixed for good in 0.7.1: re-layout tightens by the shaped draw width.
                                 let mut table = StyleRefinement::default();
                                 table.overflow.x = Some(Overflow::Scroll);
                                 TextView::new(state)
@@ -712,12 +724,12 @@ impl ThreadView {
                                     .stream_fade(self.streaming)
                                     .text_sm()
                                     .style(TextViewStyle::default().table(table))
-                                    // 搜索跳转的 reveal 兜底：外层消息列表是
-                                    // v_flex().overflow_y_scroll() 的 div 滚动容器，
-                                    // 不是 gpui::list——reveal_range 不会自动滚它
-                                    //（行不可见时上游报 Hidden，见 TextView::on_reveal
-                                    // 文档）。这里按行 bounds（窗口坐标）手动把目标行
-                                    // 滚进可视区；行已可见时上游报 Shown，不会调这里
+                                    // Reveal fallback for search jumps: the outer message list is
+                                    // a v_flex().overflow_y_scroll() div scroll container,
+                                    // not a gpui::list, so reveal_range will not auto-scroll it
+                                    // (upstream reports Hidden when the row is invisible; see the TextView::on_reveal
+                                    // docs). Here the target row is manually scrolled into the
+                                    // visible area by its line bounds (window coordinates); when the row is already visible, upstream reports Shown and this is not called
                                     .on_reveal({
                                         let scroll_handle = self.scroll_handle.clone();
                                         move |line, _window, _cx| {
@@ -814,8 +826,8 @@ impl ThreadView {
                             .into_any_element(),
                     ));
                 }
-                // 操作行（ZCode ConversationAssistantTextActions 同款）：悬停浮现，
-                // 复制整轮 Markdown 原文 + 会话分叉；进行中的回合整行不出
+                // Action row (same as ZCode ConversationAssistantTextActions): appears on hover,
+                // copy the whole turn's Markdown source + fork the session; the row never appears on a turn still in flight
                 let turn_in_flight = self.streaming && ix == self.messages.len() - 1;
                 let has_markdown = message
                     .segments
@@ -829,8 +841,8 @@ impl ThreadView {
                             .id(("msg-actions", ix))
                             .test_support()
                             .gap_1()
-                            // 透明而非 invisible：命中区保留（ZCode opacity-0 同款），
-                            // 悬停消息时浮现
+                            // Transparent rather than invisible: the hit area survives (same as ZCode opacity-0),
+                            // surfacing when the message is hovered
                             .opacity(0.)
                             .group_hover(group_id, |this| this.opacity(1.))
                             .when(has_markdown, |this| {
@@ -846,7 +858,7 @@ impl ThreadView {
                                         .when(message.copied, |this| {
                                             this.text_color(cx.theme().success)
                                         })
-                                        .tooltip("复制")
+                                        .tooltip(rust_i18n::t!("common.copy"))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if let Some(message) = this.messages.get_mut(ix) {
                                                 let text = message
@@ -866,8 +878,8 @@ impl ThreadView {
                                                 message.copied = true;
                                                 message.copied_gen += 1;
                                                 let generation = message.copied_gen;
-                                                // 1.2s 后回弹勾号（ZCode 1200ms 同款）；
-                                                // 连点按代次作废旧计时器
+                                                // Revert the check after 1.2s (same as ZCode's 1200ms);
+                                                // rapid clicks invalidate the old timer by generation
                                                 cx.spawn(
                                                     async move |this: WeakEntity<ThreadView>, cx| {
                                                         cx.background_executor()
@@ -895,10 +907,10 @@ impl ThreadView {
                                     .ghost()
                                     .xsmall()
                                     .icon(AssetIconName::GitFork)
-                                    .tooltip("分叉")
+                                    .tooltip(rust_i18n::t!("thread.fork"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        // User 角色与 core 的 User 记录 1:1
-                                        //（含后台子代理 task-notification 合成消息）
+                                        // User roles map 1:1 to core's User records
+                                        // (including background subagent task-notification synthetic messages)
                                         let turns = this.messages[..=ix]
                                             .iter()
                                             .filter(|m| m.role == Role::User)
@@ -929,11 +941,11 @@ impl ThreadView {
         }
     }
 
-    /// turn 导航条（ZCode ConversationTurnNavigator 同款）：消息流左缘的竖排
-    /// 小横条，一条用户消息一根。悬停时目标与相邻横条山峰式加宽；悬停稳定
-    /// 120ms 后在横条右侧弹出该轮预览卡（用户消息前 2 行 + 助手回复前 3 行，
-    /// 离开 80ms 关闭）；点击跳转对应消息。
-    /// 无悬停时高亮视口顶部所属的 turn；流式中的最后一根保持最低亮度。
+    /// Turn nav (same as ZCode ConversationTurnNavigator): small vertical bars
+    /// on the left edge of the message stream, one per user message. On hover, the target and neighboring bars widen mountain-style; after a stable
+    /// 120ms hover, a turn preview card pops out to the bar's right (first 2 lines of the user message + first 3 lines of the assistant reply,
+    /// closing 80ms after leaving); clicking jumps to the corresponding message.
+    /// Without a hover, the turn owning the viewport top is highlighted; the last bar keeps the lowest brightness while streaming.
     pub(crate) fn render_turn_nav(
         &mut self,
         user_ixs: &[usize],
@@ -942,8 +954,8 @@ impl ThreadView {
     ) -> AnyElement {
         let foreground = cx.theme().foreground;
         let subtlest = cx.theme().muted_foreground.opacity(0.6);
-        // 只有最后一轮可能处于流式（对齐 ZCode：同一 running turn 只有最后
-        // 一条 query 呈现 running 强调）
+        // Only the last turn can be streaming (aligned with ZCode: within one running turn, only the
+        // last query shows the running emphasis)
         let running_ix = if self.streaming {
             user_ixs.last().copied()
         } else {
@@ -952,20 +964,20 @@ impl ThreadView {
         let focus_pos = self
             .nav_hover
             .and_then(|hover| user_ixs.iter().position(|&ix| ix == hover));
-        // rail 高度上限：对齐 ZCode 的 max-h calc(100% - 6rem)
+        // Rail height cap: aligned with ZCode's max-h calc(100% - 6rem)
         let rail_max_h = self.scroll_handle.bounds().size.height - px(96.);
         let rail_max_h = if rail_max_h < px(0.) {
             px(0.)
         } else {
             rail_max_h
         };
-        // 清掉已不存在消息的横条 bounds
+        // Drop the bar bounds of messages that no longer exist
         self.nav_bar_bounds
             .borrow_mut()
             .retain(|&ix, _| ix < self.messages.len());
-        // 预览卡内容只给当前打开的那根横条算（不必每帧为全部横条生成预览文本）。
-        // freshly_opened = 上一帧无卡（从关闭态新开）：只有它才播入场淡入，
-        // 横条间切换不重复播
+        // Preview card content is computed only for the currently open bar (no need to generate preview text for every bar each frame).
+        // freshly_opened = no card last frame (newly opened from closed): only then does the enter fade play;
+        // switching between bars does not replay it
         let freshly_opened = self.nav_card.is_some() && self.nav_card_last.is_none();
         let card: Option<NavCardData> = self.nav_card.and_then(|ix| {
             let bounds = self
@@ -974,9 +986,12 @@ impl ThreadView {
                 .get(&ix)
                 .map(|cell| cell.get())?;
             if bounds.size.width <= px(0.) {
-                return None; // 首帧 prepaint 前还没有 bounds
+                return None; // no bounds yet before the first prepaint
             }
-            let user_preview = nav_preview_text(&[self.messages[ix].text.as_str()], "（无文本）");
+            let user_preview = nav_preview_text(
+                &[self.messages[ix].text.as_str()],
+                rust_i18n::t!("thread.no_text").as_ref(),
+            );
             let (assistant_preview, assistant_is_text) = self.nav_assistant_preview(ix, user_ixs);
             Some((
                 ix,
@@ -1004,11 +1019,11 @@ impl ThreadView {
                     .max_h(rail_max_h)
                     .overflow_y_scroll()
                     .track_scroll(&self.nav_rail_scroll)
-                    // 滚轮落在导航条上只滚 rail，不联动消息列表
+                    // A wheel over the nav scrolls only the rail, not the message list
                     .on_scroll_wheel(consume_scroll(&self.nav_rail_scroll))
                     .children(user_ixs.iter().enumerate().map(|(pos, &ix)| {
-                        // 山峰式加宽：悬停项 2.6x，相邻 1.7x / 1.25x（对齐 ZCode 档位）；
-                        // 最大 31.2px，不超出 32px 的 rail 宽度
+                        // Mountain-style widening: hovered item 2.6x, neighbors 1.7x / 1.25x (aligned with ZCode's tiers);
+                        // at most 31.2px, never exceeding the rail's 32px width
                         let (scale, mut opacity, focus_color): (f32, f32, bool) =
                             match focus_pos.map(|focus| pos.abs_diff(focus)) {
                                 Some(0) => (2.6_f32, 1.0, true),
@@ -1016,7 +1031,7 @@ impl ThreadView {
                                 Some(2) => (1.25, 0.72, false),
                                 _ => (1.0, 0.58, false),
                             };
-                        // 无悬停时由滚动位置驱动的活动项强调
+                        // Scroll-position-driven active-item emphasis when nothing is hovered
                         let show_active = focus_pos.is_none() && active == Some(ix);
                         if show_active {
                             opacity = 0.9;
@@ -1046,8 +1061,8 @@ impl ThreadView {
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if *hovered {
                                     this.nav_hover = Some(ix);
-                                    // 悬停稳定 120ms 才开卡（对齐 ZCode openDelay），
-                                    // 快速滑过不闪卡
+                                    // The card opens only after a stable 120ms hover (aligned with ZCode openDelay);
+                                    // a quick swipe does not flash a card
                                     cx.spawn(async move |this, cx| {
                                         cx.background_executor()
                                             .timer(std::time::Duration::from_millis(120))
@@ -1062,17 +1077,17 @@ impl ThreadView {
                                     })
                                     .detach();
                                 } else {
-                                    // 只清自己这根的悬停：gpui 按绘制顺序逐元素
-                                    // 判定 hover，向上滑（bar2→bar1）时新横条的
-                                    // enter 先触发、旧横条的 leave 后到，无条件
-                                    // 清空会把刚设置的 enter 抹掉
+                                    // Clear only this bar's hover: gpui resolves hover
+                                    // element by element in paint order; swiping upward (bar2→bar1) fires the new
+                                    // bar's enter first and the old bar's leave later, and an unconditional
+                                    // clear would wipe the just-set enter
                                     if this.nav_hover == Some(ix) {
                                         this.nav_hover = None;
                                     }
-                                    // 离开 80ms 才关闭（对齐 ZCode closeDelay）；
-                                    // 关闭条件 = 打开的横条不再被悬停——离开导航条
-                                    // 与「移到别的横条」都走关闭（ZCode 每根横条
-                                    // 独立 HoverCard：移动即关闭重开，快速扫过不弹）
+                                    // Closes only 80ms after leaving (aligned with ZCode closeDelay);
+                                    // the close condition = the open bar is no longer hovered; leaving the nav
+                                    // and "moving to another bar" both close (ZCode gives each bar its
+                                    // own HoverCard: moving closes and reopens, so a fast sweep pops nothing)
                                     cx.spawn(async move |this, cx| {
                                         cx.background_executor()
                                             .timer(std::time::Duration::from_millis(80))
@@ -1092,17 +1107,17 @@ impl ThreadView {
                                 cx.notify();
                             }))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                // 跳走后暂停跟随；若目标就在底部附近，render
-                                // 里的 at_bottom 检查会恢复跟随
+                                // Pause following after jumping away; if the target is near the bottom, the
+                                // at_bottom check in render resumes following
                                 this.follow_bottom = false;
                                 this.nav_jump = true;
                                 this.scroll_handle.scroll_to_top_of_item(ix);
                                 cx.notify();
                             }))
                             .child(
-                                // 透明度弹簧（内层：活动/悬停/运行态强调）+ 宽度
-                                // 弹簧（外层：山峰加宽）。元素 id 保持弹簧状态，
-                                // 目标变化平滑接力；颜色是离散两档，仍瞬时切换
+                                // Opacity spring (inner: active/hover/running emphasis) + width
+                                // spring (outer: mountain widening). The element id keeps the spring state,
+                                // handing over smoothly when the target changes; color is two discrete tiers and still switches instantly
                                 div()
                                     .h(px(2.))
                                     .rounded_full()
@@ -1121,10 +1136,10 @@ impl ThreadView {
                             .into_any_element()
                     })),
             )
-            // 预览卡：deferred 到窗口层绘制（逃出 rail 的滚动裁剪），锚定横条右侧
-            //（ZCode 是 side=right align=start sideOffset=8 的 HoverCard；gpui-kit
-            // 的 HoverCard 只有 corner 锚定、弹不到触发器右侧，故按 Positioner 自绘）。
-            // 入场淡入仅「从关闭态新开」时播（freshly_opened），横条间切换不重播
+            // Preview card: deferred to the window layer for painting (escapes the rail's scroll clipping), anchored to the bar's right
+            // (ZCode uses a HoverCard with side=right align=start sideOffset=8; gpui-kit's
+            // HoverCard only anchors to corners and cannot pop to the trigger's right, so it is hand-drawn with a Positioner).
+            // The enter fade plays only when "newly opened from closed" (freshly_opened); switching between bars does not replay it
             .when_some(card, |this, data @ (ix, bounds, _, _, _)| {
                 let body: AnyElement = if freshly_opened {
                     nav_card_body(&data, cx)
@@ -1150,7 +1165,7 @@ impl ThreadView {
                     .with_priority(1),
                 )
             })
-            // 出场卡：关闭一刻的快照播淡出（160ms），清理计时器按代次作废
+            // Exit card: the snapshot at the moment of closing plays a 160ms fade-out; the cleanup timer is invalidated by generation
             .when_some(exit_card, |this, data @ (_, bounds, _, _, _)| {
                 let generation = self.nav_card_exit_gen;
                 this.child(
@@ -1173,8 +1188,8 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 关闭导航预览卡：渲染快照移入出场位播 160ms 淡出（代次进动画 id），
-    /// 清理计时器按代次作废。离开导航条与「移到别的横条」共用此路径
+    /// Close the nav preview card: the render snapshot moves into the exit slot to play a 160ms fade-out (the generation goes into the animation id),
+    /// and the cleanup timer is invalidated by generation. Leaving the nav and "moving to another bar" share this path
     pub(crate) fn close_nav_card(&mut self, cx: &mut Context<Self>) {
         if let Some(data) = self.nav_card_last.take() {
             self.nav_card_exit_gen += 1;
@@ -1198,9 +1213,9 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// 导航预览卡的助手摘要：该用户消息之后第一条助手消息的 Markdown 文本拼接
-    ///（对齐 ZCode：assistantTextRows 合并、最多 2 段 220 字符）。
-    /// 无文本时按流式状态给占位文案；返回的 bool 表示是否为真实回复文本。
+    /// Assistant summary of the nav preview card: the Markdown texts of the first assistant message after this user message, joined
+    /// (aligned with ZCode: assistantTextRows merged, at most 2 paragraphs of 220 characters).
+    /// With no text, a placeholder label is given based on the streaming state; the returned bool tells whether it is real reply text.
     pub(crate) fn nav_assistant_preview(&self, ix: usize, user_ixs: &[usize]) -> (String, bool) {
         let running = self.streaming && user_ixs.last() == Some(&ix);
         let texts: Vec<&str> = self.messages[ix + 1..]
@@ -1220,19 +1235,22 @@ impl ThreadView {
         if texts.is_empty() {
             return (
                 if running {
-                    "正在生成…"
+                    rust_i18n::t!("thread.generating")
                 } else {
-                    "（暂无文本回复）"
+                    rust_i18n::t!("thread.no_text_reply")
                 }
                 .to_string(),
                 false,
             );
         }
-        (nav_preview_text(&texts, "（暂无文本回复）"), true)
+        (
+            nav_preview_text(&texts, rust_i18n::t!("thread.no_text_reply").as_ref()),
+            true,
+        )
     }
 }
 
-/// 拆成 (目录部分含结尾分隔符, 文件名)；无分隔符时目录为空
+/// Splits into (directory part including the trailing separator, file name); the directory is empty when there is no separator
 pub(crate) fn split_path(path: &str) -> (String, String) {
     match path.rfind(['/', '\\']) {
         Some(ix) => (path[..=ix].to_string(), path[ix + 1..].to_string()),
@@ -1240,7 +1258,7 @@ pub(crate) fn split_path(path: &str) -> (String, String) {
     }
 }
 
-/// token 数自动单位：<1k 原样；k/M 级整除显示整数、否则一位小数
+/// Token count auto units: <1k as-is; k/M shows an integer when evenly divisible, otherwise one decimal
 pub(crate) fn fmt_tokens(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
@@ -1261,8 +1279,8 @@ pub(crate) fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// 回合脚注的 token 统计段：未缓存输入 · 缓存命中（命中率）· 输出 ·
-/// 首字时间 · 解码速度（不含首字；api_ms 为 0 的退化数据退回墙钟）
+/// Token stats section of the turn footer: uncached input · cache hits (hit rate) · output ·
+/// time to first token · decode speed (excluding TTFT; degenerate data with api_ms 0 falls back to wall clock)
 pub(crate) fn format_turn_stats(stats: &pig_protocol::TurnUsageStats) -> String {
     let total_input = stats.input + stats.cache_read;
     let hit_rate = if total_input > 0 {
@@ -1273,21 +1291,22 @@ pub(crate) fn format_turn_stats(stats: &pig_protocol::TurnUsageStats) -> String 
     } else {
         String::new()
     };
-    // 速度按纯解码时间算（API 总时长 − 首字等待，不含工具执行/审批等待）；
-    // api_ms 为 0（mock 亚毫秒回合等退化数据）时退回墙钟时间
+    // Speed is computed on pure decode time (total API time - the TTFT wait; tool execution/approval waits excluded);
+    // when api_ms is 0 (degenerate data like mock sub-millisecond turns), fall back to wall-clock time
     let api_ms = if stats.api_ms > 0 {
         stats.api_ms
     } else {
         stats.duration_ms
     };
-    // 平均首字 = 首字等待总和 ÷ 请求次数（多步回合一堆 TTFT 取平均；
-    // api_steps 为 0 时按一步算，不除零）
+    // Average TTFT = total TTFT wait / request count (a multi-step turn averages its many TTFTs;
+    // when api_steps is 0, count as one step to avoid dividing by zero)
     let steps = stats.api_steps.max(1);
     let ttft = if stats.ttft_ms > 0 {
-        format!(
-            " · 首字 {:.1}s",
-            stats.ttft_ms as f64 / steps as f64 / 1000.0
+        rust_i18n::t!(
+            "thread.ttft",
+            n = stats.ttft_ms as f64 / steps as f64 / 1000.0 : {:.1}
         )
+        .to_string()
     } else {
         String::new()
     };
@@ -1300,17 +1319,21 @@ pub(crate) fn format_turn_stats(stats: &pig_protocol::TurnUsageStats) -> String 
     } else {
         String::new()
     };
-    format!(
-        " · 输入 {}（未缓存）· 命中 {}{hit_rate} · 输出 {}{ttft}{speed}",
-        fmt_tokens(stats.input),
-        fmt_tokens(stats.cache_read),
-        fmt_tokens(stats.output),
+    rust_i18n::t!(
+        "thread.turn_stats",
+        input = fmt_tokens(stats.input),
+        hit = fmt_tokens(stats.cache_read),
+        hit_rate = hit_rate,
+        output = fmt_tokens(stats.output),
+        ttft = ttft,
+        speed = speed,
     )
+    .to_string()
 }
 
-/// 导航预览卡文本：按空行分段、段内连续空白折叠为空格，取前 2 段以换行拼接，
-/// 超 220 字符截断补「...」（对齐 ZCode conversationTurnNavigatorHelpers 的
-/// buildPreviewText：maxPreviewChars 220 / maxPreviewParagraphs 2）
+/// Nav preview card text: split on blank lines, fold runs of whitespace within a paragraph into spaces, take the first 2 paragraphs joined by newlines,
+/// truncate past 220 characters and append "..." (aligned with ZCode conversationTurnNavigatorHelpers
+/// buildPreviewText: maxPreviewChars 220 / maxPreviewParagraphs 2)
 pub(crate) fn nav_preview_text(parts: &[&str], fallback: &str) -> String {
     let joined = parts.join("\n\n");
     let mut paragraphs: Vec<String> = Vec::new();

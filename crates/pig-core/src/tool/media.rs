@@ -1,7 +1,7 @@
 use super::*;
 
-/// 图片魔数嗅探（读文件头，不信任扩展名）：命中返回 mime，否则 None。
-/// Read/ReadMediaFile 共用。
+/// Image magic-byte sniffing (reads the file header, does not trust the extension): returns the mime on a hit, None otherwise.
+/// Shared by Read/ReadMediaFile.
 pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
         Some("image/png")
@@ -16,7 +16,7 @@ pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// 手写 base64（标准 alphabet + `=` 填充；不加依赖，与快照 hex 编码同风格）
+/// Hand-written base64 (standard alphabet + `=` padding; no extra dependency, same style as the snapshot hex encoding)
 pub fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -41,48 +41,49 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// 将 TIFF 原始字节无缩放转换为 PNG，供剪贴板粘贴入口规范化格式。
-/// 先读取尺寸再解码，避免超大 TIFF 在解码阶段占用过多内存。
+/// Convert raw TIFF bytes to PNG without scaling, to normalize the format for the clipboard paste entry point.
+/// Dimensions are read before decoding so oversized TIFFs do not hog memory at the decode stage.
+/// Error messages are English constants (model channel: they enter context verbatim as tool results / paste-failure notices).
 pub fn convert_tiff_to_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     if bytes.len() as u64 > MAX_MEDIA_FILE_BYTES {
         return Err(format!(
-            "TIFF 文件超过 {}MB 上限",
+            "TIFF file exceeds the {}MB limit",
             MAX_MEDIA_FILE_BYTES / 1024 / 1024
         ));
     }
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| format!("TIFF 解析失败: {e}"))?;
+        .map_err(|e| format!("Failed to parse TIFF: {e}"))?;
     let (width, height) = reader
         .into_dimensions()
-        .map_err(|e| format!("TIFF 尺寸读取失败: {e}"))?;
+        .map_err(|e| format!("Failed to read TIFF dimensions: {e}"))?;
     if width == 0 || height == 0 {
-        return Err("TIFF 尺寸无效".to_string());
+        return Err("Invalid TIFF dimensions".to_string());
     }
     if width as u64 * height as u64 > MAX_MEDIA_PIXELS {
-        return Err(format!("TIFF 图片过大（{width}×{height}）"));
+        return Err(format!("TIFF image too large ({width}×{height})"));
     }
     let image = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| format!("TIFF 解析失败: {e}"))?
+        .map_err(|e| format!("Failed to parse TIFF: {e}"))?
         .decode()
-        .map_err(|e| format!("TIFF 解码失败: {e}"))?;
+        .map_err(|e| format!("Failed to decode TIFF: {e}"))?;
     let mut output = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut output, image::ImageFormat::Png)
-        .map_err(|e| format!("TIFF 转 PNG 编码失败: {e}"))?;
+        .map_err(|e| format!("Failed to encode TIFF as PNG: {e}"))?;
     Ok((output.into_inner(), width, height))
 }
 
-/// 媒体文件的尺寸/体积上限（ReadMediaFile 与粘贴发送共用）
+/// Media file size/pixel caps (shared by ReadMediaFile and paste sending)
 const MAX_MEDIA_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_MEDIA_PIXELS: u64 = 100_000_000;
-/// 默认缩放到最长边 2000（full_resolution=true 时不缩）
+/// Default scaling to a 2000px longest edge (no scaling when full_resolution=true)
 const MEDIA_MAX_EDGE: u32 = 2000;
-/// PNG 输出超过 4MB 且无 alpha → 转 JPEG q85 兜底
+/// PNG output over 4MB without alpha → fall back to JPEG q85
 const MAX_PNG_BYTES: usize = 4 * 1024 * 1024;
 
-/// 压缩产物（进模型预算的图片）
+/// Compression product (the image that enters the model budget)
 pub struct CompressedImage {
     pub bytes: Vec<u8>,
     pub media_type: String,
@@ -90,9 +91,9 @@ pub struct CompressedImage {
     pub height: u32,
 }
 
-/// 解码后图片的预算内编码：最长边 2000 等比缩放（小的不动），
-/// 有 alpha 或源是 PNG/GIF/WebP → PNG；否则 JPEG q85；PNG 超 4MB 无 alpha → JPEG 兜底。
-/// ReadMediaFile（region 裁剪后）与粘贴发送共用这一段。
+/// Budget-friendly encoding of a decoded image: proportional scaling to a 2000px longest edge (small ones untouched);
+/// alpha present or source is PNG/GIF/WebP → PNG; otherwise JPEG q85; PNG over 4MB without alpha → JPEG fallback.
+/// Shared by ReadMediaFile (after the region crop) and paste sending.
 pub fn encode_image_for_model(
     mut image: image::DynamicImage,
     source_mime: &str,
@@ -109,7 +110,9 @@ pub fn encode_image_for_model(
         h = nh;
     }
     if w as u64 * h as u64 > MAX_MEDIA_PIXELS {
-        return Err(format!("图片过大（{w}×{h}），请用 region 参数裁剪局部"));
+        return Err(format!(
+            "Image too large ({w}×{h}); crop a section with the region parameter"
+        ));
     }
     let has_alpha = image.color().has_alpha();
     let prefer_png = has_alpha || matches!(source_mime, "image/png" | "image/gif" | "image/webp");
@@ -122,7 +125,7 @@ pub fn encode_image_for_model(
         let mut buf = std::io::Cursor::new(Vec::new());
         image
             .write_to(&mut buf, image::ImageFormat::Png)
-            .map_err(|e| format!("图片编码失败: {e}"))?;
+            .map_err(|e| format!("Failed to encode image: {e}"))?;
         buf.into_inner()
     } else {
         encode_jpeg(&image)?
@@ -139,31 +142,32 @@ pub fn encode_image_for_model(
     })
 }
 
-/// 原始字节 → 压缩产物（粘贴发送路径）：source_mime 为空串时魔数嗅探。
-/// 尺寸预检（不解码大图）→ 解码 → encode_image_for_model。
+/// Raw bytes → compressed product (paste-send path): magic-byte sniffing when source_mime is an empty string.
+/// Dimension precheck (without decoding the full image) → decode → encode_image_for_model.
 pub fn compress_image_for_model(
     bytes: &[u8],
     source_mime: &str,
 ) -> Result<CompressedImage, String> {
     let sniffed = if source_mime.is_empty() {
-        sniff_image(bytes).ok_or("不是可识别的图片（支持 PNG/JPEG/GIF/WebP）".to_string())?
+        sniff_image(bytes)
+            .ok_or("Not a recognizable image (PNG/JPEG/GIF/WebP supported)".to_string())?
     } else {
         source_mime
     };
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| format!("图片解析失败: {e}"))?;
+        .map_err(|e| format!("Failed to parse image: {e}"))?;
     let (w, h) = reader
         .into_dimensions()
-        .map_err(|e| format!("图片解析失败: {e}"))?;
+        .map_err(|e| format!("Failed to parse image: {e}"))?;
     if w as u64 * h as u64 > MAX_MEDIA_PIXELS {
-        return Err(format!("图片过大（{w}×{h}）"));
+        return Err(format!("Image too large ({w}×{h})"));
     }
     let image = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| format!("图片解析失败: {e}"))?
+        .map_err(|e| format!("Failed to parse image: {e}"))?
         .decode()
-        .map_err(|e| format!("图片解码失败: {e}"))?;
+        .map_err(|e| format!("Failed to decode image: {e}"))?;
     encode_image_for_model(image, sniffed)
 }
 
@@ -183,14 +187,14 @@ impl Tool for ReadMediaFile {
             "type": "function",
             "function": {
                 "name": "ReadMediaFile",
-                "description": "读取图片文件进上下文（PNG/JPEG/GIF/WebP，魔数嗅探不信任扩展名）。默认等比缩放到最长边 2000 像素；region 可按原图坐标裁剪局部，full_resolution=true 不缩放。需要模型支持图片输入。",
+                "description": "Read an image file into context (PNG/JPEG/GIF/WebP; detected by magic bytes, not the extension). Images are scaled proportionally to a 2000px longest edge by default; region crops a section in original-image pixel coordinates, and full_resolution=true skips scaling. The model must support image input.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "相对工作目录的图片路径" },
+                        "path": { "type": "string", "description": "Image path relative to the working directory" },
                         "region": {
                             "type": "object",
-                            "description": "可选裁剪区域（原图像素坐标；越界自动夹紧，不相交报错）",
+                            "description": "Optional crop region (original-image pixel coordinates; clamped to the image bounds, error if disjoint)",
                             "properties": {
                                 "x": { "type": "integer" },
                                 "y": { "type": "integer" },
@@ -199,7 +203,7 @@ impl Tool for ReadMediaFile {
                             },
                             "required": ["x", "y", "width", "height"]
                         },
-                        "full_resolution": { "type": "boolean", "description": "true 时不做 2000px 缩放（默认 false）" }
+                        "full_resolution": { "type": "boolean", "description": "true skips the 2000px scaling (default false)" }
                     },
                     "required": ["path"]
                 }
@@ -213,7 +217,9 @@ impl Tool for ReadMediaFile {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let path = args["path"].as_str().ok_or("缺少参数 path")?;
+            let path = args["path"]
+                .as_str()
+                .ok_or("Missing required parameter: path")?;
             let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
@@ -221,32 +227,35 @@ impl Tool for ReadMediaFile {
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
             if bytes.len() as u64 > MAX_MEDIA_FILE_BYTES {
                 return Err(format!(
-                    "文件超过 100MB 上限（{}MB）",
+                    "File exceeds the 100MB limit ({}MB)",
                     bytes.len() / 1024 / 1024
                 ));
             }
             let Some(source_mime) = sniff_image(&bytes) else {
-                return Err("不是可识别的图片（支持 PNG/JPEG/GIF/WebP）；视频暂不支持".to_string());
+                return Err(
+                    "Not a recognizable image (PNG/JPEG/GIF/WebP supported); video is not supported yet"
+                        .to_string(),
+                );
             };
-            // 先读尺寸再解码：总像素超限直接拒（防解码大图撑爆内存）
+            // Read dimensions before decoding: reject outright when total pixels exceed the cap (prevents decoding huge images from exhausting memory)
             let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
                 .with_guessed_format()
-                .map_err(|e| format!("图片解析失败: {e}"))?;
+                .map_err(|e| format!("Failed to parse image: {e}"))?;
             let (orig_w, orig_h) = reader
                 .into_dimensions()
-                .map_err(|e| format!("图片解析失败: {e}"))?;
+                .map_err(|e| format!("Failed to parse image: {e}"))?;
             if orig_w as u64 * orig_h as u64 > MAX_MEDIA_PIXELS {
                 return Err(format!(
-                    "图片过大（{orig_w}×{orig_h}），请用 region 参数裁剪局部"
+                    "Image too large ({orig_w}×{orig_h}); crop a section with the region parameter"
                 ));
             }
             let image = image::ImageReader::new(std::io::Cursor::new(&bytes))
                 .with_guessed_format()
-                .map_err(|e| format!("图片解析失败: {e}"))?
+                .map_err(|e| format!("Failed to parse image: {e}"))?
                 .decode()
-                .map_err(|e| format!("图片解码失败: {e}"))?;
+                .map_err(|e| format!("Failed to decode image: {e}"))?;
 
-            // region 裁剪（原图坐标；夹紧到图内，完全不相交报错）
+            // region crop (original-image coordinates; clamped to the image bounds, errors when fully disjoint)
             let mut crop_note = String::new();
             let image = if let Some(region) = args.get("region") {
                 let (rx, ry, rw, rh) = (
@@ -262,17 +271,17 @@ impl Tool for ReadMediaFile {
                 );
                 if ix >= ix2 || iy >= iy2 {
                     return Err(format!(
-                        "裁剪区域（x={rx}, y={ry}, {rw}×{rh}）与图片（{orig_w}×{orig_h}）不相交"
+                        "Crop region (x={rx}, y={ry}, {rw}×{rh}) does not intersect the image ({orig_w}×{orig_h})"
                     ));
                 }
-                crop_note = format!("，裁剪 ({rx},{ry})→({ix2},{iy2})");
+                crop_note = format!(", cropped ({rx},{ry})->({ix2},{iy2})");
                 image.crop_imm(ix, iy, ix2 - ix, iy2 - iy)
             } else {
                 image
             };
 
-            // 默认等比缩到最长边 2000；full_resolution 不缩（共享编码管线恒定缩放，
-            // 故 full_resolution 走独立分支：只编码不缩放）
+            // Default proportional scaling to a 2000px longest edge; full_resolution skips scaling (the shared encoding
+            // pipeline always scales, so full_resolution takes a separate branch: encode only, no scaling)
             let full_resolution = args["full_resolution"].as_bool().unwrap_or(false);
             let compressed = if full_resolution {
                 let has_alpha = image.color().has_alpha();
@@ -289,7 +298,7 @@ impl Tool for ReadMediaFile {
                     let mut buf = std::io::Cursor::new(Vec::new());
                     image
                         .write_to(&mut buf, image::ImageFormat::Png)
-                        .map_err(|e| format!("图片编码失败: {e}"))?;
+                        .map_err(|e| format!("Failed to encode image: {e}"))?;
                     buf.into_inner()
                 } else {
                     encode_jpeg(&image)?
@@ -311,7 +320,7 @@ impl Tool for ReadMediaFile {
             let kb = compressed.bytes.len() / 1024;
             Ok(ToolEffect {
                 output: format!(
-                    "已读取图片 {path}（原始 {orig_w}×{orig_h}{crop_note} → 输出 {w}×{h}，{}，{kb}KB）",
+                    "Read image {path} (original {orig_w}×{orig_h}{crop_note} -> output {w}×{h}, {}, {kb}KB)",
                     compressed.media_type
                 ),
                 file_change: None,
@@ -327,7 +336,7 @@ impl Tool for ReadMediaFile {
     }
 }
 
-/// 只读尺寸（不解码）；非图片返回 None。粘贴 chip 展示用。
+/// Read dimensions only (no decoding); returns None for non-images. Used by the paste chip display.
 pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -336,17 +345,17 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()
 }
 
-/// 完整解码校验：成功返回尺寸。缩略图渲染前的坏字节防护（UI 降级用）
+/// Full decode check: returns dimensions on success. Bad-byte guard before thumbnail rendering (for UI fallback)
 pub fn decode_image_check(bytes: &[u8]) -> Option<(u32, u32)> {
     let image = image::load_from_memory(bytes).ok()?;
     Some((image.width(), image.height()))
 }
 
-/// JPEG q85 编码（转 RGB 丢弃 alpha）
+/// JPEG q85 encoding (converted to RGB, alpha dropped)
 fn encode_jpeg(image: &image::DynamicImage) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85)
         .encode_image(&image.to_rgb8())
-        .map_err(|e| format!("图片编码失败: {e}"))?;
+        .map_err(|e| format!("Failed to encode image: {e}"))?;
     Ok(buf.into_inner())
 }

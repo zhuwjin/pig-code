@@ -3,21 +3,22 @@ use gpui_kit::assets::IconName as AssetsIconName;
 use super::*;
 use crate::RelativeTime as _;
 
-/// 「已归档的会话」页的行数据（AppView 从 SessionMeta + 工作区别名汇总喂入）
+/// Row data of the "archived sessions" page (fed by AppView from SessionMeta plus
+/// workspace aliases)
 #[derive(Clone, PartialEq)]
 pub(crate) struct ArchivedSessionRow {
     pub id: String,
     pub title: String,
-    /// 工作区路径（cwd）
+    /// Workspace path (cwd)
     pub workspace: String,
-    /// 工作区显示名（别名优先）
+    /// Workspace display name (alias first)
     pub workspace_name: String,
     pub created_at: u64,
-    /// 归档动作会刷新 updated_at，此处即「归档时间」
+    /// Archiving refreshes updated_at, so this is effectively the "archived time"
     pub updated_at: u64,
 }
 
-/// 归档列表排序：归档时间（默认）/ 创建时间 / 按字母顺序
+/// Archived list sort: archived time (default) / created time / alphabetical
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArchivedSort {
     ArchivedTime,
@@ -25,11 +26,16 @@ pub(crate) enum ArchivedSort {
     Alphabetical,
 }
 
-/// 工作区过滤下拉的「不过滤」哨兵项
-const ALL_WORKSPACES: &str = "所有工作区";
+/// The workspace filter dropdown's "no filter" sentinel entry; its label changes
+/// with the UI language, and options/backfill/filter comparisons all take the
+/// string from this function (sync_archived_ws_options rebuilds options)
+pub(crate) fn all_workspaces_label() -> String {
+    rust_i18n::t!("settings.archived.all_workspaces").to_string()
+}
 
 impl SettingsView {
-    /// 归档列表喂入（AppView 在打开设置页 / SessionList 变化时推送）；值变才 notify
+    /// Archived list feed (pushed by AppView when the settings page opens /
+    /// SessionList changes); notify only when the value changes
     pub(crate) fn set_archived_sessions(
         &mut self,
         rows: Vec<ArchivedSessionRow>,
@@ -41,11 +47,12 @@ impl SettingsView {
         }
     }
 
-    /// 工作区过滤下拉的选项跟随 scope_workspaces（脏标记 + render 前同步，
-    /// 与 appearance_dirty 同手法——SelectState::set_items 需要 Window）；
-    /// 选中项已消失时回到「所有工作区」
+    /// The workspace filter dropdown's options follow scope_workspaces (dirty
+    /// flag plus sync before render, same approach as appearance_dirty —
+    /// SelectState::set_items needs a Window); when the selected entry
+    /// disappears, fall back to "all workspaces"
     pub(crate) fn sync_archived_ws_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut options = vec![ALL_WORKSPACES.to_string()];
+        let mut options = vec![all_workspaces_label()];
         options.extend(self.scope_workspaces.iter().map(|(_, name)| name.clone()));
         let selected = self
             .archived_workspace
@@ -53,7 +60,7 @@ impl SettingsView {
             .selected_value()
             .cloned()
             .filter(|v| options.contains(v))
-            .unwrap_or_else(|| ALL_WORKSPACES.to_string());
+            .unwrap_or_else(all_workspaces_label);
         self.archived_workspace.update(cx, |state, cx| {
             state.set_items(SearchableVec::new(options), window, cx);
             state.set_selected_value(&selected, window, cx);
@@ -67,7 +74,7 @@ impl SettingsView {
             .read(cx)
             .selected_value()
             .cloned()
-            .filter(|v| v != ALL_WORKSPACES);
+            .filter(|v| *v != all_workspaces_label());
         let mut rows: Vec<&ArchivedSessionRow> = self
             .archived_sessions
             .iter()
@@ -102,11 +109,12 @@ impl SettingsView {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .text_center()
-                            // 区分「本无归档」与「搜索/过滤无匹配」
+                            // Distinguish "nothing archived" from "search/filter
+                            // has no match"
                             .child(if self.archived_sessions.is_empty() {
-                                "还没有归档的会话"
+                                rust_i18n::t!("settings.archived.empty_none").to_string()
                             } else {
-                                "没有匹配的归档会话"
+                                rust_i18n::t!("settings.archived.empty_no_match").to_string()
                             }),
                     )
                     .into_any_element()
@@ -123,22 +131,23 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 排序切换：归档时间 / 创建时间 / 按字母顺序（分段 pill，对齐 ZCode）
+    /// Sort switch: archived time / created time / alphabetical (segmented
+    /// pills, aligned with ZCode)
     fn render_archived_sort_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let tabs = [
             (
                 ArchivedSort::ArchivedTime,
-                "归档时间",
+                rust_i18n::t!("settings.archived.sort_archived"),
                 AssetsIconName::Clock,
             ),
             (
                 ArchivedSort::CreatedTime,
-                "创建时间",
+                rust_i18n::t!("settings.archived.sort_created"),
                 AssetsIconName::CalendarClock,
             ),
             (
                 ArchivedSort::Alphabetical,
-                "按字母顺序",
+                rust_i18n::t!("settings.archived.sort_alpha"),
                 AssetsIconName::ArrowDownAZ,
             ),
         ];
@@ -175,14 +184,16 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// 归档会话行：标题 + 时间一行，所属工作区 + 恢复/删除按钮一行
+    /// Archived session row: title plus time on one line, owning workspace plus
+    /// restore/delete buttons on another
     fn render_archived_row(
         &self,
         row: &ArchivedSessionRow,
         ix: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 时间列跟随排序口径（ZCode 同款：按创建时间排序时显示创建时间）
+        // The time column follows the sort criterion (like ZCode: created time
+        // is shown when sorting by created time)
         let time = match self.archived_sort {
             ArchivedSort::CreatedTime => row.created_at,
             _ => row.updated_at,
@@ -205,7 +216,7 @@ impl SettingsView {
                             .text_sm()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(row.title.clone()),
+                            .child(crate::sidebar::display_title(&row.title)),
                     )
                     .child(
                         div()
@@ -236,7 +247,7 @@ impl SettingsView {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Undo2)
-                            .tooltip("恢复到会话列表")
+                            .tooltip(rust_i18n::t!("settings.archived.restore_tooltip"))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(SettingsEvent::RestoreSession(restore_id.clone()));
                             })),
@@ -246,7 +257,7 @@ impl SettingsView {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Delete)
-                            .tooltip("删除会话（不可恢复）")
+                            .tooltip(rust_i18n::t!("settings.archived.delete_tooltip"))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(SettingsEvent::DeleteSession(delete_id.clone()));
                             })),

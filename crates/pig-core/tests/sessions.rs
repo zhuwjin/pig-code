@@ -5,7 +5,7 @@ use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
 use std::time::Duration;
 
-/// resume：rollout 落盘 → 新 agent 进程内 OpenSession → 历史重建，模型能收到之前的历史。
+/// resume: rollout persisted → OpenSession on a new in-process agent → history rebuilt, the model receives the prior history.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_rebuilds_history() {
     let (config_path, cwd, data_dir) = setup("m4-resume");
@@ -21,7 +21,7 @@ async fn resume_rebuilds_history() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize it".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -34,7 +34,7 @@ async fn resume_rebuilds_history() {
     .await;
     agent.shutdown();
 
-    // 模拟重启：同一 data_dir 起新 manager
+    // Simulate a restart: new manager on the same data_dir
     let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
     let events2 = agent2.events.clone();
 
@@ -44,13 +44,14 @@ async fn resume_rebuilds_history() {
     })
     .await;
     let Some(Event::SessionList { sessions }) = list.last() else {
-        panic!("应有 SessionList");
+        panic!("expected SessionList");
     };
     assert!(
         sessions.iter().any(|s| s.id == session_id
-            // 首条消息种子标题，或已被自动命名 sidecar 替换（两者取一，取决于时机）
-            && (s.title.contains("读一下") || s.title == mock::MOCK_TITLE)),
-        "索引里应有会话且 title 来自首条消息或自动命名: {sessions:?}"
+            // Title seeded from the first message, or already replaced by the
+            // auto-naming sidecar (either one, depending on timing)
+            && (s.title.contains("Read the mock") || s.title == mock::MOCK_TITLE)),
+        "index should contain the session with a title from the first message or auto-naming: {sessions:?}"
     );
 
     agent2
@@ -65,30 +66,30 @@ async fn resume_rebuilds_history() {
     })
     .await;
     assert!(
-        replay
-            .iter()
-            .any(|e| matches!(e, Event::UserMessage { text, .. } if text.contains("读一下"))),
-        "重放应含用户消息"
+        replay.iter().any(
+            |e| matches!(e, Event::UserMessage { text, .. } if text.contains("Read the mock"))
+        ),
+        "replay should include the user message"
     );
     assert!(
         replay
             .iter()
             .any(|e| matches!(e, Event::ToolCallBegin { tool, .. } if tool == "Read")),
-        "重放应含工具调用"
+        "replay should include a tool call"
     );
 
-    // 回放以 duration_ms=0 的 TurnComplete 收尾；先排空回放事件，避免干扰下面的 recv_until
+    // The replay ends with a TurnComplete of duration_ms=0; drain replay events first to avoid interfering with the recv_until below
     while tokio::time::timeout(Duration::from_millis(200), events2.recv())
         .await
         .is_ok()
     {}
 
-    // 继续对话：模型应收到重建后的历史（system+user+assistant+tool_call+tool_result+新user = 6 条）
+    // Continue the conversation: the model should receive the rebuilt history (system+user+assistant+tool_call+tool_result+new user = 6 entries)
     agent2
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "ECHO_HISTORY 报一下消息数".into(),
+            content: "ECHO_HISTORY report the message count".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -105,12 +106,16 @@ async fn resume_rebuilds_history() {
             .and_then(|n| n.parse::<usize>().ok()),
         _ => None,
     });
-    assert_eq!(count, Some(6), "resume 后历史应完整重建: {events:#?}");
+    assert_eq!(
+        count,
+        Some(6),
+        "history should be fully rebuilt after resume: {events:#?}"
+    );
     agent2.shutdown();
 }
 
-/// resume 后上下文水位恢复：取 step_usage 最后一条的 used（142），
-/// 而不是 turn_stats 的回合合计（60+10 + 100+42 = 212）。
+/// Context watermark restored after resume: takes the used of the last
+/// step_usage (142), not the turn total from turn_stats (60+10 + 100+42 = 212).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_restores_context_watermark() {
     let (config_path, cwd, data_dir) = setup("m4-watermark");
@@ -126,7 +131,7 @@ async fn resume_restores_context_watermark() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize it".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -139,7 +144,7 @@ async fn resume_restores_context_watermark() {
     .await;
     agent.shutdown();
 
-    // 每个带 usage 的 step 都应落盘一条 step_usage（默认场景 2 步：70 与 142）
+    // Every step with usage should persist one step_usage record (the default scenario has 2 steps: 70 and 142)
     let rollout_path = data_dir
         .join("sessions")
         .join(format!("{session_id}.jsonl"));
@@ -147,10 +152,10 @@ async fn resume_restores_context_watermark() {
     assert_eq!(
         content.matches("\"type\":\"step_usage\"").count(),
         2,
-        "每个 step 的用量应各落一条: {content}"
+        "each step's usage should get its own record: {content}"
     );
 
-    // 模拟重启：OpenSession 回放后应补发水位，取最后一条 step_usage 的 used
+    // Simulate a restart: OpenSession replay should re-emit the watermark, taking used from the last step_usage
     let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
     let events2 = agent2.events.clone();
     agent2
@@ -168,12 +173,12 @@ async fn resume_restores_context_watermark() {
         replay
             .iter()
             .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
-        "回放后水位应为最后一步的 142，而非回合合计 212: {replay:#?}"
+        "watermark after replay should be the last step's 142, not the turn total 212: {replay:#?}"
     );
     agent2.shutdown();
 }
 
-/// sessions 表的 pin/archive。
+/// Pin/archive on the sessions table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pin_and_archive_update_index() {
     let (config_path, cwd, data_dir) = setup("m4-meta");
@@ -188,7 +193,7 @@ async fn pin_and_archive_update_index() {
             session_id: session_id.clone(),
             pinned: Some(true),
             archived: None,
-            title: Some("重要任务".into()),
+            title: Some("Important task".into()),
         })
         .await
         .unwrap();
@@ -202,7 +207,7 @@ async fn pin_and_archive_update_index() {
         panic!()
     };
     let meta = sessions.iter().find(|s| s.id == session_id).unwrap();
-    assert!(meta.pinned && !meta.archived && meta.title == "重要任务");
+    assert!(meta.pinned && !meta.archived && meta.title == "Important task");
 
     agent
         .ops
@@ -226,14 +231,14 @@ async fn pin_and_archive_update_index() {
     let meta = sessions.iter().find(|s| s.id == session_id).unwrap();
     assert!(!meta.pinned && meta.archived);
 
-    // 落盘验证：重开 store 读出归档标记
+    // Persistence check: reopen the store and read back the archived flag
     let store = pig_core::store::Store::open(&data_dir).unwrap();
     let meta = store.get_session(&session_id).unwrap();
     assert!(meta.archived && !meta.pinned, "{meta:?}");
     agent.shutdown();
 }
 
-/// 两个会话并行发消息，事件按 session_id 正确分流。
+/// Two sessions send messages in parallel; events are routed correctly by session_id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parallel_sessions() {
     let (config_path, cwd, data_dir) = setup("m4-parallel");
@@ -257,7 +262,7 @@ async fn parallel_sessions() {
         .ops
         .send(Op::SendMessage {
             session_id: session_b.clone(),
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize it".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -272,7 +277,10 @@ async fn parallel_sessions() {
     while !(complete_a && complete_b) {
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
         else {
-            assert!(std::time::Instant::now() < deadline, "并行回合超时");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parallel turns timed out"
+            );
             continue;
         };
         match &event {
@@ -282,18 +290,21 @@ async fn parallel_sessions() {
         }
         all.push(event);
     }
-    // A 的 text 事件都属于 A；B 的工具调用都属于 B
+    // A's text events all belong to A; B's tool calls all belong to B
     for event in &all {
         match event {
             Event::TextDelta {
                 session_id, delta, ..
             } if delta.contains("HISTORY_COUNT") => {
-                assert_eq!(session_id, &session_a, "A 的文本不应串到 B")
+                assert_eq!(session_id, &session_a, "A's text should not leak into B")
             }
             Event::ToolCallBegin {
                 session_id, tool, ..
             } if tool == "Read" => {
-                assert_eq!(session_id, &session_b, "B 的工具调用不应串到 A")
+                assert_eq!(
+                    session_id, &session_b,
+                    "B's tool call should not leak into A"
+                )
             }
             _ => {}
         }
@@ -301,13 +312,47 @@ async fn parallel_sessions() {
     agent.shutdown();
 }
 
-/// AGENTS.md 双层注入。
+/// AGENTS.md two-layer injection (the English system prompt exceeds the mock's
+/// 3000-char echo cap, so assert via the request-body log that both layers of
+/// rules entered the request sent to the model).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_md_injected() {
-    let (config_path, cwd, data_dir) = setup("m4-agents");
+    let (port, log) = pig_core::mock::start_mock_server_with_log();
+    let cwd = std::env::temp_dir().join(format!("pig-core-m4-agents-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(
+        cwd.join(pig_core::mock::MOCK_FILE_NAME),
+        pig_core::mock::MOCK_FILE_CONTENT,
+    )
+    .unwrap();
+    let data_dir = cwd.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    std::fs::write(data_dir.join("AGENTS.md"), "GLOBAL_RULE_X1: 全局规则").unwrap();
-    std::fs::write(cwd.join("AGENTS.md"), "WORKSPACE_RULE_Y2: 工作区规则").unwrap();
+    std::fs::write(data_dir.join("AGENTS.md"), "GLOBAL_RULE_X1: global rule").unwrap();
+    std::fs::write(cwd.join("AGENTS.md"), "WORKSPACE_RULE_Y2: workspace rule").unwrap();
+    let config_path = cwd.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"default_provider = "mock"
+default_model = "mock-model"
+
+[[providers]]
+id = "mock"
+name = "Mock provider"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key = "mock-key"
+api_format = "OpenAiChat"
+enabled = true
+
+[[providers.models]]
+id = "mock-model"
+context_window = 128000
+max_output_tokens = 8192
+"#
+        ),
+    )
+    .unwrap();
 
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let events = agent.events.clone();
@@ -317,34 +362,31 @@ async fn agents_md_injected() {
         .ops
         .send(Op::SendMessage {
             session_id,
-            content: "ECHO_SYSTEM 回显系统提示词".into(),
+            content: "Just chatting".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
         })
         .await
         .unwrap();
-    let events = recv_until(&events, Duration::from_secs(20), |e| {
+    recv_until(&events, Duration::from_secs(20), |e| {
         matches!(e, Event::TurnComplete { .. })
     })
     .await;
-    let text = events.iter().find_map(|e| match e {
-        Event::TextDone { full_text, .. } => Some(full_text.as_str()),
-        _ => None,
-    });
-    let text = text.expect("应有文本回复");
+
+    let bodies = log.lock().unwrap().join("\n");
     assert!(
-        text.contains("GLOBAL_RULE_X1"),
-        "应含全局 AGENTS.md: {text}"
+        bodies.contains("GLOBAL_RULE_X1"),
+        "should include the global AGENTS.md"
     );
     assert!(
-        text.contains("WORKSPACE_RULE_Y2"),
-        "应含工作区 AGENTS.md: {text}"
+        bodies.contains("WORKSPACE_RULE_Y2"),
+        "should include the workspace AGENTS.md"
     );
     agent.shutdown();
 }
 
-/// Compact：历史变短且带压缩标记。
+/// Compact: history gets shorter and carries the compact marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compact_shortens_history() {
     let (config_path, cwd, data_dir) = setup("m4-compact");
@@ -352,8 +394,12 @@ async fn compact_shortens_history() {
     let events = agent.events.clone();
     let session_id = new_session(&agent, cwd.clone()).await;
 
-    // 三轮对话积累历史（第一轮带工具链，后续轮为纯文本）
-    for text in ["读一下 mock 文件并总结", "再总结一下", "继续"] {
+    // Three conversation rounds to accumulate history (the first with a tool chain, later rounds plain text)
+    for text in [
+        "Read the mock file and summarize it",
+        "Summarize again",
+        "Go on",
+    ] {
         agent
             .ops
             .send(Op::SendMessage {
@@ -384,12 +430,12 @@ async fn compact_shortens_history() {
     })
     .await;
     let Some(Event::ContextCompacted { omitted, note, .. }) = compacted.last() else {
-        panic!("应有 ContextCompacted")
+        panic!("expected ContextCompacted")
     };
     assert!(*omitted > 0);
-    assert!(note.contains("前文已压缩"), "{note}");
+    assert!(note.contains("Earlier context compacted"), "{note}");
 
-    // compact 后历史变短
+    // History is shorter after compact
     agent
         .ops
         .send(Op::SendMessage {
@@ -411,12 +457,16 @@ async fn compact_shortens_history() {
             .and_then(|n| n.parse::<usize>().ok()),
         _ => None,
     });
-    // M5 起 compact 保留最近 4 条：system + 摘要 + 4 条 + 新 user = 7
-    assert_eq!(count, Some(7), "compact 后历史应变短: {collected:#?}");
+    // Since M5 compact keeps the last 4 entries: system + summary + 4 entries + new user = 7
+    assert_eq!(
+        count,
+        Some(7),
+        "history should be shorter after compact: {collected:#?}"
+    );
     agent.shutdown();
 }
 
-/// @文件搜索。
+/// @ file search.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_files_finds_real_files() {
     let (config_path, cwd, data_dir) = setup("m4-search");
@@ -441,22 +491,25 @@ async fn search_files_finds_real_files() {
     })
     .await;
     let Some(Event::FileSearchResults { results, .. }) = events.last() else {
-        panic!("应有 FileSearchResults")
+        panic!("expected FileSearchResults")
     };
     assert!(
         results.iter().any(|r| r == "src/hello.rs"),
-        "应找到真实文件: {results:?}"
+        "should find the real file: {results:?}"
     );
     assert!(
         !results.iter().any(|r| r.contains("config.toml")),
-        "cwd 外的 data 目录不应出现: {results:?}"
+        "the data directory outside cwd should not appear: {results:?}"
     );
     agent.shutdown();
 }
 
-/// 重启持久化：待办（todos 表）、文件改动（file_changes 表）、
-/// 原始快照（file_originals 表 → 跨重启 diff 基线 + revert）。
-/// 两个会话分别跑两种场景：mock 按请求体子串分发，同会话串场景会互相干扰。
+/// Restart persistence: todos (todos table), file changes (file_changes table),
+/// original snapshots (file_originals table → cross-restart diff baseline +
+/// revert).
+/// Two sessions run the two scenarios separately: the mock dispatches on
+/// request-body substrings, so chaining scenarios in one session would
+/// interfere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_restores_todos_changes_and_revert() {
     let (config_path, cwd, data_dir) = setup("m5-persist");
@@ -467,13 +520,13 @@ async fn restart_restores_todos_changes_and_revert() {
     );
     let events = agent.events.clone();
 
-    // 会话 A：文件改动（Write → Edit → Bash）
+    // Session A: file changes (Write → Edit → Bash)
     let session_a = new_session(&agent, cwd.clone()).await;
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_a.clone(),
-            content: format!("{} 改个文件", mock::SCENARIO_B_TRIGGER),
+            content: format!("{} edit a file", mock::SCENARIO_B_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::FullAccess,
@@ -485,13 +538,13 @@ async fn restart_restores_todos_changes_and_revert() {
     })
     .await;
 
-    // 会话 B：待办写入（TodoList）
+    // Session B: todo writes (TodoList)
     let session_b = new_session(&agent, cwd.clone()).await;
     agent
         .ops
         .send(Op::SendMessage {
             session_id: session_b.clone(),
-            content: format!("{} 建两条待办", mock::TODO_SCENARIO_TRIGGER),
+            content: format!("{} create two todos", mock::TODO_SCENARIO_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::FullAccess,
@@ -504,11 +557,11 @@ async fn restart_restores_todos_changes_and_revert() {
     .await;
     agent.shutdown();
 
-    // 模拟重启：同一 data_dir 起新 manager
+    // Simulate a restart: new manager on the same data_dir
     let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let events2 = agent2.events.clone();
 
-    // 重开会话 A：文件改动从 DB 恢复（按路径一条当前态）
+    // Reopen session A: file changes restored from the DB (one current-state entry per path)
     agent2
         .ops
         .send(Op::OpenSession {
@@ -517,8 +570,9 @@ async fn restart_restores_todos_changes_and_revert() {
         .await
         .unwrap();
     let replay_a = recv_until(&events2, Duration::from_secs(10), |e| {
-        // 回放收尾哨兵：stats=None 的 TurnComplete。回合内若有用量会先回放
-        // TurnStats 的 TurnComplete（stats=Some），不能在那时提前停
+        // Replay-end sentinel: the TurnComplete with stats=None. If the turn
+        // had usage, the TurnComplete carrying TurnStats (stats=Some) is
+        // replayed first — do not stop early there
         matches!(e, Event::TurnComplete { stats: None, .. })
     })
     .await;
@@ -529,10 +583,10 @@ async fn restart_restores_todos_changes_and_revert() {
     assert_eq!(
         file_changes.len(),
         1,
-        "同路径只回放一条当前态: {file_changes:?}"
+        "only one current-state entry per path in the replay: {file_changes:?}"
     );
 
-    // 跨重启 revert：原始快照已恢复 → revert 成功且新建文件被删除
+    // Cross-restart revert: original snapshots restored → revert succeeds and the created file is deleted
     while tokio::time::timeout(Duration::from_millis(200), events2.recv())
         .await
         .is_ok()
@@ -553,14 +607,14 @@ async fn restart_restores_todos_changes_and_revert() {
         ev.iter().any(
             |e| matches!(e, Event::FileReverted { path, .. } if path == mock::SCENARIO_B_FILE)
         ),
-        "跨重启 revert 应成功（基线来自 file_originals 表）: {ev:#?}"
+        "cross-restart revert should succeed (baseline from the file_originals table): {ev:#?}"
     );
     assert!(
         !cwd.join(mock::SCENARIO_B_FILE).exists(),
-        "revert 后新建文件应被删除"
+        "the created file should be deleted after revert"
     );
 
-    // 重开会话 B：待办从 DB 恢复（JSONL 无待办记录的新会话也能还原）
+    // Reopen session B: todos restored from the DB (even for a session whose JSONL has no todo records)
     while tokio::time::timeout(Duration::from_millis(200), events2.recv())
         .await
         .is_ok()
@@ -580,21 +634,23 @@ async fn restart_restores_todos_changes_and_revert() {
         Event::TodoListChanged { items, .. } if !items.is_empty() => Some(items),
         _ => None,
     });
-    let items =
-        todo_snapshot.unwrap_or_else(|| panic!("回放应含 DB 恢复的待办快照: {replay_b:#?}"));
+    let items = todo_snapshot.unwrap_or_else(|| {
+        panic!("replay should include the todo snapshot restored from the DB: {replay_b:#?}")
+    });
     assert_eq!(items.len(), 2, "{items:?}");
     assert!(
         items
             .iter()
             .any(|i| i.content.contains(mock::TODO_SCENARIO_ITEM)
                 && i.status == pig_protocol::TodoStatus::InProgress),
-        "进行中的待办应还原: {items:?}"
+        "the in-progress todo should be restored: {items:?}"
     );
     agent2.shutdown();
 }
 
-/// 会话级模型/模式/思考等级持久化：
-/// ① 新会话继承工作区最近活跃会话的值；② 重启后重开恢复。
+/// Session-level model/mode/reasoning-level persistence:
+/// (1) a new session inherits the values of the workspace's most recently
+/// active session; (2) reopening after a restart restores them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_model_mode_persist_and_inherit() {
     let (config_path, cwd, data_dir) = setup("m5-mode-persist");
@@ -606,7 +662,7 @@ async fn session_model_mode_persist_and_inherit() {
     let events = agent.events.clone();
     let session_a = new_session(&agent, cwd.clone()).await;
 
-    // 会话 A 设置模式 + 模型 + 思考等级（写穿 sessions 表）
+    // Session A sets mode + model + reasoning level (written through to the sessions table)
     agent
         .ops
         .send(Op::SetExecMode {
@@ -625,15 +681,16 @@ async fn session_model_mode_persist_and_inherit() {
         })
         .await
         .unwrap();
-    // 等写穿完成（op 按序处理，发一个 ListSessions 当栅栏）
+    // Wait for the write-through to finish (ops are processed in order; send a ListSessions as a barrier)
     agent.ops.send(Op::ListSessions).await.unwrap();
     recv_until(&events, Duration::from_secs(5), |e| {
         matches!(e, Event::SessionList { .. })
     })
     .await;
 
-    // ① 同工作区新建会话：模型/模式未指定 → 继承 A 的种子；
-    // 思考等级模拟 UI hero 种子下达后显式传入（core 按原样采用）
+    // (1) New session in the same workspace: model/mode unspecified → inherits
+    // A's seed; the reasoning level simulates the UI hero seeding it explicitly
+    // (core adopts it as-is)
     agent
         .ops
         .send(Op::NewSession {
@@ -658,7 +715,7 @@ async fn session_model_mode_persist_and_inherit() {
         ..
     }) = configured.last()
     else {
-        panic!("应有 SessionConfigured")
+        panic!("expected SessionConfigured")
     };
     assert_eq!(
         (
@@ -673,11 +730,11 @@ async fn session_model_mode_persist_and_inherit() {
             Some("high"),
             ExecMode::FullAccess
         ),
-        "新会话应继承工作区最近活跃会话的模型/模式/思考等级"
+        "new session should inherit the model/mode/reasoning level of the workspace's most recently active session"
     );
     agent.shutdown();
 
-    // ② 模拟重启后重开 A：值应从 sessions 表恢复
+    // (2) Simulate a restart and reopen A: values should be restored from the sessions table
     let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
     let events2 = agent2.events.clone();
     agent2
@@ -687,7 +744,7 @@ async fn session_model_mode_persist_and_inherit() {
         })
         .await
         .unwrap();
-    // A 没有回合记录，回放不会发 TurnComplete；以重开路径必发的 TaskListChanged 为终点
+    // A has no turn records so the replay emits no TurnComplete; use TaskListChanged (always emitted on the reopen path) as the endpoint
     let replay = recv_until(&events2, Duration::from_secs(10), |e| {
         matches!(e, Event::TaskListChanged { .. })
     })
@@ -702,7 +759,7 @@ async fn session_model_mode_persist_and_inherit() {
         .iter()
         .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
-        panic!("回放应有 SessionConfigured: {replay:#?}")
+        panic!("replay should have SessionConfigured: {replay:#?}")
     };
     assert_eq!(
         (
@@ -717,12 +774,12 @@ async fn session_model_mode_persist_and_inherit() {
             Some("high"),
             ExecMode::FullAccess
         ),
-        "重启后重开应恢复模型/模式/思考等级"
+        "reopen after restart should restore model/mode/reasoning level"
     );
     agent2.shutdown();
 }
 
-/// 改完设置不对话、在两个会话间来回切换：值必须跟随各自会话，不丢不串。
+/// Change settings without chatting, then switch back and forth between two sessions: values must follow their own session, never lost or crossed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switch_preserves_mode_without_turn() {
     let (config_path, cwd, data_dir) = setup("m5-switch");
@@ -731,7 +788,7 @@ async fn switch_preserves_mode_without_turn() {
     let session_a = new_session(&agent, cwd.clone()).await;
     let session_b = new_session(&agent, cwd.clone()).await;
 
-    // A 上改模式/模型/思考等级（不对话）
+    // Change mode/model/reasoning level on A (no chatting)
     agent
         .ops
         .send(Op::SetExecMode {
@@ -750,14 +807,14 @@ async fn switch_preserves_mode_without_turn() {
         })
         .await
         .unwrap();
-    // 栅栏：op 按序处理，等一次 ListSessions 回来即完成写穿
+    // Barrier: ops are processed in order; once a ListSessions comes back the write-through is done
     agent.ops.send(Op::ListSessions).await.unwrap();
     recv_until(&events, Duration::from_secs(5), |e| {
         matches!(e, Event::SessionList { .. })
     })
     .await;
 
-    // 切到 B：应是 B 自己的默认值，不是 A 的
+    // Switch to B: should be B's own defaults, not A's
     agent
         .ops
         .send(Op::OpenSession {
@@ -778,7 +835,7 @@ async fn switch_preserves_mode_without_turn() {
         .iter()
         .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
-        panic!("B 应有 SessionConfigured: {ev_b:#?}")
+        panic!("B should have SessionConfigured: {ev_b:#?}")
     };
     assert_eq!(
         (
@@ -787,10 +844,10 @@ async fn switch_preserves_mode_without_turn() {
             *exec_mode
         ),
         (None, None, ExecMode::ConfirmBeforeEdit),
-        "B 不应带上 A 的值"
+        "B should not carry A's values"
     );
 
-    // B 上只改思考等级、不选模型（无模型覆盖也要持久化）
+    // Change only the reasoning level on B, no model selected (persists even without a model override)
     agent
         .ops
         .send(Op::SetReasoning {
@@ -805,7 +862,7 @@ async fn switch_preserves_mode_without_turn() {
     })
     .await;
 
-    // 切回 A：应恢复刚才改的值（虽然没对话）
+    // Switch back to A: the values just changed should be restored (even though no chatting happened)
     agent
         .ops
         .send(Op::OpenSession {
@@ -827,7 +884,7 @@ async fn switch_preserves_mode_without_turn() {
         .iter()
         .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
-        panic!("A 应有 SessionConfigured: {ev_a:#?}")
+        panic!("A should have SessionConfigured: {ev_a:#?}")
     };
     assert_eq!(
         (
@@ -842,10 +899,10 @@ async fn switch_preserves_mode_without_turn() {
             Some("high"),
             ExecMode::FullAccess
         ),
-        "切回应恢复 A 改过的值"
+        "switching back should restore A's changed values"
     );
 
-    // 再切回 B：只改思考等级的值也应在
+    // Switch back to B again: the reasoning-level-only change should be there too
     agent
         .ops
         .send(Op::OpenSession {
@@ -865,18 +922,19 @@ async fn switch_preserves_mode_without_turn() {
         .iter()
         .find(|e| matches!(e, Event::SessionConfigured { .. }))
     else {
-        panic!("B 应有 SessionConfigured: {ev_b2:#?}")
+        panic!("B should have SessionConfigured: {ev_b2:#?}")
     };
     assert_eq!(
         (provider_id.as_deref(), reasoning_level.as_deref()),
         (None, Some("max")),
-        "无模型覆盖的思考等级切换后应保留"
+        "reasoning level changed without a model override should persist"
     );
     agent.shutdown();
 }
 
-/// 回归：resume 后新消息必须继续落盘。
-/// 曾 `Session::load` 置 `rollout: None`，重开会话里的新内容重启即丢。
+/// Regression: after resume, new messages must keep being persisted.
+/// `Session::load` once set `rollout: None`, so new content in a reopened
+/// session was lost on restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_keeps_appending() {
     let (config_path, cwd, data_dir) = setup("m4-resume-append");
@@ -891,7 +949,7 @@ async fn resume_keeps_appending() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "第一轮消息".into(),
+            content: "Round one message".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -904,7 +962,7 @@ async fn resume_keeps_appending() {
     .await;
     agent.shutdown();
 
-    // 模拟重启：重开旧会话，追加第二轮
+    // Simulate a restart: reopen the old session and append a second round
     let agent2 = pig_core::spawn_agent_with_data_dir(
         Some(config_path.clone()),
         cwd.clone(),
@@ -918,7 +976,7 @@ async fn resume_keeps_appending() {
         })
         .await
         .unwrap();
-    // 回放以 duration_ms=0 的 TurnComplete 收尾；排空后再发新消息
+    // The replay ends with a TurnComplete of duration_ms=0; drain, then send the new message
     recv_until(&events2, Duration::from_secs(10), |e| {
         matches!(e, Event::TurnComplete { .. })
     })
@@ -931,7 +989,7 @@ async fn resume_keeps_appending() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: "第二轮消息".into(),
+            content: "Round two message".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -944,18 +1002,21 @@ async fn resume_keeps_appending() {
     .await;
     agent2.shutdown();
 
-    // 落盘文件应同时包含两轮用户消息
+    // The persisted file should contain both rounds' user messages
     let rollout_path = data_dir
         .join("sessions")
         .join(format!("{session_id}.jsonl"));
     let content = std::fs::read_to_string(&rollout_path).unwrap();
-    assert!(content.contains("第一轮消息"), "第一轮应保留: {content}");
     assert!(
-        content.contains("第二轮消息"),
-        "resume 后的新消息应落盘: {content}"
+        content.contains("Round one message"),
+        "round one should be kept: {content}"
+    );
+    assert!(
+        content.contains("Round two message"),
+        "new messages after resume should be persisted: {content}"
     );
 
-    // 再模拟一次重启：重放应同时包含两轮消息
+    // Simulate one more restart: the replay should contain both rounds' messages
     let agent3 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
     let events3 = agent3.events.clone();
     agent3
@@ -966,23 +1027,24 @@ async fn resume_keeps_appending() {
         .await
         .unwrap();
     let replay = recv_until(&events3, Duration::from_secs(10), |e| {
-        // 同上：等回放收尾（stats=None 的 TurnComplete），TurnStats 的提前收尾不停
+        // Same as above: wait for the replay end (TurnComplete with stats=None); do not stop at the earlier TurnStats-carrying completion
         matches!(e, Event::TurnComplete { stats: None, .. })
     })
     .await;
-    for round in ["第一轮消息", "第二轮消息"] {
+    for round in ["Round one message", "Round two message"] {
         assert!(
             replay
                 .iter()
                 .any(|e| matches!(e, Event::UserMessage { text, .. } if text.contains(round))),
-            "重放应含「{round}」: {replay:#?}"
+            "replay should contain '{round}': {replay:#?}"
         );
     }
     agent3.shutdown();
 }
 
-/// 模型配置默认思考等级：新会话未指定等级时采用默认档；
-/// 显式指定不受影响；默认档不在等级表内则忽略
+/// Model-config default reasoning level: a new session with no level specified
+/// adopts the default tier; an explicit level is unaffected; a default tier
+/// not in the level list is ignored
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_reasoning_level_on_new_session() {
     let port = mock::start_mock_server();
@@ -999,7 +1061,7 @@ default_model = "mock-model"
 
 [[providers]]
 id = "mock"
-name = "Mock 供应商"
+name = "Mock provider"
 base_url = "http://127.0.0.1:{port}/v1"
 api_key = "mock-key"
 api_format = "OpenAiChat"
@@ -1035,7 +1097,7 @@ default_reasoning_level = "high"
         .await
     }
 
-    // 未指定等级 → 采用模型默认档 high
+    // No level specified → adopt the model's default tier high
     agent.ops.send(create(None)).await.unwrap();
     let evs = wait_configured(&events).await;
     let level = evs.iter().find_map(|e| match e {
@@ -1047,10 +1109,10 @@ default_reasoning_level = "high"
     assert_eq!(
         level,
         Some(Some("high".to_string())),
-        "未指定等级应采用默认档"
+        "unspecified level should adopt the default tier"
     );
 
-    // 显式指定 → 不被默认档覆盖
+    // Explicitly specified → not overridden by the default tier
     agent.ops.send(create(Some("low".into()))).await.unwrap();
     let evs = wait_configured(&events).await;
     let level = evs.iter().find_map(|e| match e {
@@ -1059,15 +1121,20 @@ default_reasoning_level = "high"
         } => Some(reasoning_level.clone()),
         _ => None,
     });
-    assert_eq!(level, Some(Some("low".to_string())), "显式等级不应被覆盖");
+    assert_eq!(
+        level,
+        Some(Some("low".to_string())),
+        "explicit level should not be overridden"
+    );
 
-    // 显式关（None 的关语义与未指定相同）：见 NewSession 的注释——
-    // 默认档语义优先，这里再验证一遍默认档无效时的行为
+    // Explicit off (None's off semantics equal unspecified): see the comments
+    // on NewSession — the default-tier semantics take priority; here we
+    // re-verify behavior when the default tier is invalid
     agent.ops.send(create(None)).await.unwrap();
     let _ = wait_configured(&events).await;
     agent.shutdown();
 
-    // 默认档不在等级表内 → 忽略，保持未指定（关）
+    // Default tier not in the level list → ignored, stays unspecified (off)
     let mut config: pig_protocol::AppConfig =
         toml::from_str(&std::fs::read_to_string(dir.join("config.toml")).unwrap()).unwrap();
     config.providers[0].models[0].default_reasoning_level = Some("ultra".into());
@@ -1083,6 +1150,6 @@ default_reasoning_level = "high"
         } => Some(reasoning_level.clone()),
         _ => None,
     });
-    assert_eq!(level, Some(None), "无效默认档应被忽略");
+    assert_eq!(level, Some(None), "invalid default tier should be ignored");
     agent2.shutdown();
 }

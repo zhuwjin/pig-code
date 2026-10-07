@@ -17,7 +17,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> bool {
 async fn git_info_and_checkout() {
     let (config_path, cwd, data_dir) = setup("m6-git");
     if !git(&cwd, &["init"]) {
-        eprintln!("git 不可用，跳过");
+        eprintln!("git unavailable, skipping");
         return;
     }
     assert!(git(
@@ -53,15 +53,18 @@ async fn git_info_and_checkout() {
         ..
     }) = collected.last()
     else {
-        panic!("应有 GitInfo")
+        panic!("expected GitInfo")
     };
-    assert!(current_branch.is_some(), "应识别当前分支");
+    assert!(
+        current_branch.is_some(),
+        "current branch should be detected"
+    );
     assert!(
         branches.contains(&"feature-x".to_string()),
-        "分支列表: {branches:?}"
+        "branch list: {branches:?}"
     );
 
-    // 切换分支
+    // Switch branch
     agent
         .ops
         .send(Op::CheckoutBranch {
@@ -78,25 +81,25 @@ async fn git_info_and_checkout() {
         collected
             .iter()
             .any(|e| matches!(e, Event::BranchChanged { branch, .. } if branch == "feature-x")),
-        "应切换成功: {collected:#?}"
+        "checkout should succeed: {collected:#?}"
     );
     let (_, head) = pig_core::git::git_info(&cwd);
     let _ = head;
     let (current, _) = pig_core::git::git_info(&cwd);
     assert_eq!(current.as_deref(), Some("feature-x"));
 
-    // 非仓库报错
+    // A non-repo reports an error
     let nonrepo = std::env::temp_dir().join(format!("pig-core-nogit-{}", std::process::id()));
     std::fs::create_dir_all(&nonrepo).unwrap();
     let (current, branches) = pig_core::git::git_info(&nonrepo);
-    assert!(current.is_none() && branches.is_empty(), "非 git 仓库");
+    assert!(current.is_none() && branches.is_empty(), "not a git repo");
     let err = pig_core::git::checkout(&nonrepo, "x");
-    assert!(err.is_err(), "非仓库 checkout 应报错");
+    assert!(err.is_err(), "checkout in a non-repo should fail");
 
     agent.shutdown();
 }
 
-/// 回合中发消息 → 排队 → 回合结束自动接续。
+/// Send a message mid-turn → queued → automatically continued after the turn ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn message_queue_fifo() {
     let (config_path, cwd, data_dir) = setup("m6-queue");
@@ -108,7 +111,7 @@ async fn message_queue_fifo() {
         .ops
         .send(Op::SendMessage {
             session_id: sid.clone(),
-            content: "读一下 mock 文件并总结".into(),
+            content: "Read the mock file and summarize".into(),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -116,7 +119,7 @@ async fn message_queue_fifo() {
         .await
         .unwrap();
 
-    // 等第一个回合开始后再发第二条
+    // Wait until the first turn starts, then send the second message
     recv_until(&events, Duration::from_secs(10), |e| {
         matches!(e, Event::TurnStarted { .. })
     })
@@ -133,7 +136,7 @@ async fn message_queue_fifo() {
         .await
         .unwrap();
 
-    // 应收到 MessageQueued，然后两个 TurnComplete
+    // Should receive MessageQueued, then two TurnCompletes
     let mut queued = false;
     let mut completes = 0;
     let mut count: Option<usize> = None;
@@ -141,7 +144,7 @@ async fn message_queue_fifo() {
     loop {
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await
         else {
-            assert!(std::time::Instant::now() < deadline, "排队流程超时");
+            assert!(std::time::Instant::now() < deadline, "queue flow timed out");
             continue;
         };
         match &event {
@@ -160,9 +163,9 @@ async fn message_queue_fifo() {
             _ => {}
         }
     }
-    assert!(queued, "应收到 MessageQueued");
-    // 第二轮历史 = system + (user+assistant+tool+assistant) + user = 6
-    assert_eq!(count, Some(6), "第二轮应携带完整历史");
+    assert!(queued, "should receive MessageQueued");
+    // Second turn history = system + (user+assistant+tool+assistant) + user = 6
+    assert_eq!(count, Some(6), "second turn should carry the full history");
 
     agent.shutdown();
 }

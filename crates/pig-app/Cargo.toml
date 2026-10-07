@@ -23,6 +23,10 @@ ropey = "=2.0.0-beta.1"
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
 unicode-segmentation = "1"
+# GUI 多语言（与 gpui-component 同款机制/版本）：注册表在 locales/，t! 取串
+rust-i18n = "4.2"
+# 「跟随系统」语言检测（macOS CFLocale / Windows API）
+sys-locale = "0.3"
 
 # unix 默认 shell 解析（getpwuid/access，与 portable-pty new_default_prog 同链）
 [target.'cfg(unix)'.dependencies]
@@ -30,3 +34,5 @@ libc = "0.2"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7", features = ["test-support"] }
+# 测试进程启动前钉 zh-CN（rust-i18n 默认 locale 是 en；ctor 仅测试用）
+ctor = "1"

@@ -1,8 +1,12 @@
-//! 右侧面板「文件」tab：只读文件查看器（Read 工具卡的路径点击打开）。
-//! 行号 gutter + tree-sitter 语法高亮（code_view 共享件）；头部为
-//! 路径 + 自动换行开关 + 复制按钮。默认不折行（uniform_list 虚拟化 + 横向
-//! 滚动，整文件可开）；换行模式行高不定，退回普通列表（超 MAX_WRAP_LINES
-//! 截断并提示）。打开时若 Read 卡带了行号，加载完成后滚到该行。
+//! "File" tab of the right panel: read-only file viewer (opened by clicking
+//! a path on a Read tool card).
+//! Line number gutter + tree-sitter syntax highlighting (shared code_view
+//! pieces); the header is path + wrap toggle + copy button. Defaults to
+//! no-wrap (uniform_list virtualization + horizontal scrolling, so any file
+//! size opens); in wrap mode the line height varies, falling back to a
+//! plain list (truncated with a hint beyond MAX_WRAP_LINES). If the Read
+//! card carried a line number, scrolls to that line after loading
+//! completes.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -21,9 +25,11 @@ use crate::code_view::{
 };
 use crate::review_panel::shorten_path;
 
-/// 文件读取上限（点击的路径可能是任意大文件；超出拒绝并提示）
+/// File read limit (a clicked path may be an arbitrarily large file; refuse
+/// and hint beyond it)
 const MAX_VIEW_BYTES: u64 = 8 * 1024 * 1024;
-/// 换行模式渲染行数上限（普通列表非虚拟化；不折行模式经 uniform_list 全量渲染）
+/// Rendered line limit in wrap mode (the plain list is not virtualized;
+/// no-wrap mode renders everything via uniform_list)
 const MAX_WRAP_LINES: usize = 2000;
 
 enum LoadState {
@@ -33,44 +39,65 @@ enum LoadState {
 }
 
 struct FileContent {
-    /// 全文（LF 归一）；行区间见 highlighted.lines
+    /// Full text (LF-normalized); see highlighted.lines for line ranges
     code: String,
-    /// 高亮结果（含行区间；主题切换后在 render 里按 Arc 判等重算）
+    /// Highlight result (with line ranges; recomputed in render on theme
+    /// switch by comparing the Arc)
     highlighted: HighlightedCode,
-    /// 语言名（高亮重算用）
+    /// Language name (for highlight recomputation)
     lang: &'static str,
-    /// 最大行宽（首帧 render 惰性量宽——text_system 只在 UI 线程可用；
-    /// 不显式给宽时横向滚动失效，见 code_view::measure_max_line_width）
+    /// Max line width (measured lazily on the first render frame:
+    /// text_system is only available on the UI thread; horizontal scrolling
+    /// breaks without an explicit width, see
+    /// code_view::measure_max_line_width)
     max_width: std::cell::Cell<Option<Pixels>>,
 }
 
 pub struct FileViewPanel {
-    /// 展示路径（Read 工具摘要原文，多为工作区相对路径；头部截断显示）
+    /// Display path (verbatim from the Read tool summary, usually a
+    /// workspace-relative path; truncated in the header)
     display: String,
-    /// 实际读取的绝对路径
+    /// Absolute path actually read
     full: PathBuf,
     state: LoadState,
-    /// 自动换行开关（默认关：横向滚动）
+    /// Wrap toggle (off by default: horizontal scrolling)
     wrap: bool,
-    /// 复制按钮反馈（换勾，应用惯例不回弹）
+    /// Copy button feedback (swaps to a checkmark; app convention is no
+    /// revert)
     copied: bool,
-    /// 不折行模式：uniform_list 虚拟滚动
+    /// No-wrap mode: uniform_list virtual scrolling
     list_scroll: UniformListScrollHandle,
-    /// 折行模式：普通纵向滚动
+    /// Wrap mode: plain vertical scrolling
     wrap_scroll: ScrollHandle,
 }
 
-/// 后台读文件 + 解码（pig-core 同款 UTF-16/GBK 转码）；返回错误文案或全文
+/// Read + decode the file in the background (same UTF-16/GBK transcoding as
+/// pig-core); returns an error message or the full text
 fn read_file(full: &Path) -> Result<String, String> {
-    let meta = std::fs::metadata(full).map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
+    let meta = std::fs::metadata(full).map_err(|e| {
+        rust_i18n::t!(
+            "file_panel.read_failed",
+            path = full.display().to_string(),
+            error = e.to_string()
+        )
+        .to_string()
+    })?;
     if meta.len() > MAX_VIEW_BYTES {
-        return Err(format!(
-            "文件过大（{} MB），仅支持查看 {} MB 以内的文件",
-            meta.len() / 1024 / 1024,
-            MAX_VIEW_BYTES / 1024 / 1024
-        ));
+        return Err(rust_i18n::t!(
+            "file_panel.too_large",
+            size = meta.len() / 1024 / 1024,
+            max = MAX_VIEW_BYTES / 1024 / 1024
+        )
+        .to_string());
     }
-    let bytes = std::fs::read(full).map_err(|e| format!("读取失败 {}: {e}", full.display()))?;
+    let bytes = std::fs::read(full).map_err(|e| {
+        rust_i18n::t!(
+            "file_panel.read_failed",
+            path = full.display().to_string(),
+            error = e.to_string()
+        )
+        .to_string()
+    })?;
     Ok(pig_core::text::decode(&bytes)?.text)
 }
 
@@ -87,8 +114,10 @@ impl FileViewPanel {
         }
     }
 
-    /// 读取并高亮（读盘与高亮都在后台线程；主题在 UI 线程取）。
-    /// initial_line：加载完成后滚到该行（Read 卡带过来的首行号）
+    /// Read and highlight (disk read and highlighting both on a background
+    /// thread; the theme is taken on the UI thread).
+    /// initial_line: scroll to this line after loading (first line number
+    /// carried over from the Read card)
     pub fn reload(&mut self, initial_line: Option<usize>, cx: &mut Context<Self>) {
         self.state = LoadState::Loading;
         self.copied = false;
@@ -106,7 +135,8 @@ impl FileViewPanel {
                 });
                 return;
             };
-            // 主题对象需在 UI 线程取（高亮颜色在解析时定死）
+            // The theme object must be taken on the UI thread (highlight
+            // colors are fixed at parse time)
             let theme = this
                 .update(cx, |_, cx| cx.theme().highlight_theme.clone())
                 .ok();
@@ -125,7 +155,8 @@ impl FileViewPanel {
                     max_width: std::cell::Cell::new(None),
                 }));
                 if let Some(line) = initial_line {
-                    // uniform_list 与折行滚动各记一份（实际生效看当前模式）
+                    // Record one for uniform_list and one for wrap scrolling
+                    // (whichever matches the current mode takes effect)
                     this.list_scroll
                         .scroll_to_item(line.saturating_sub(1).min(total), ScrollStrategy::Top);
                     this.wrap_scroll
@@ -137,7 +168,7 @@ impl FileViewPanel {
         .detach();
     }
 
-    /// 自测用：已加载的行数；未加载/失败为 None
+    /// For self-tests: loaded line count; None when not loaded or failed
     pub fn debug_state(&self) -> Option<usize> {
         match &self.state {
             LoadState::Ready(content) => Some(content.highlighted.lines.len()),
@@ -145,7 +176,8 @@ impl FileViewPanel {
         }
     }
 
-    /// 主题切换后高亮颜色过期：按 Arc 指针判等重算（render 前调用）
+    /// Highlight colors go stale after a theme switch: recompute by Arc
+    /// pointer equality (called before render)
     fn refresh_highlight_if_stale(&mut self, cx: &mut Context<Self>) {
         let LoadState::Ready(content) = &self.state else {
             return;
@@ -186,7 +218,8 @@ impl FileViewPanel {
                     .text_xs()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_color(subtle)
-                    // 头部截断保留文件名（review 面板同款）
+                    // Header truncation keeps the file name (same as the
+                    // review panel)
                     .child(shorten_path(&self.display, 48)),
             )
             .child(
@@ -195,7 +228,7 @@ impl FileViewPanel {
                     .xsmall()
                     .icon(gpui_kit::assets::IconName::TextWrap)
                     .when(wrap, |this| this.text_color(cx.theme().foreground))
-                    .tooltip("自动换行")
+                    .tooltip(rust_i18n::t!("file_panel.wrap"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.wrap = !this.wrap;
                         cx.notify();
@@ -211,7 +244,7 @@ impl FileViewPanel {
                         IconName::Copy
                     })
                     .when(copied, |this| this.text_color(cx.theme().success))
-                    .tooltip("复制文件内容")
+                    .tooltip(rust_i18n::t!("file_panel.copy_content"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let LoadState::Ready(content) = &this.state {
                             cx.write_to_clipboard(ClipboardItem::new_string(content.code.clone()));
@@ -222,9 +255,12 @@ impl FileViewPanel {
             )
     }
 
-    /// 不折行：uniform_list 虚拟化（整文件），横向不约束宽度（长行横滚）。
-    /// 行宽显式给足（行号列 + padding + 最大行宽）：不给宽时列表以首行
-    /// 量宽，超长行会无处可滚（见 code_view::measure_max_line_width）
+    /// No-wrap: uniform_list virtualization (whole file), width unconstrained
+    /// horizontally (long lines scroll sideways).
+    /// The row width is given explicitly and fully (gutter column, padding
+    /// and max line width): without an explicit width the list measures by
+    /// the first row and overlong lines have nowhere to scroll (see
+    /// code_view::measure_max_line_width)
     fn render_lines_nowrap(
         &self,
         content: &Rc<FileContent>,
@@ -257,13 +293,17 @@ impl FileViewPanel {
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
         .track_scroll(&self.list_scroll)
         .size_full()
-        // 底部预留常显横向滚动条的车道（padding 收缩内容视口，滚动条恰好落在
-        // 车道上而不盖末行；内容高度不含 padding，末行仍可完整滚入视口）
+        // Reserve a lane at the bottom for the always-visible horizontal
+        // scrollbar (padding shrinks the content viewport so the scrollbar
+        // lands exactly on the lane instead of covering the last line;
+        // content height excludes padding, so the last line can still scroll
+        // fully into view)
         .pb(px(CODE_SCROLLBAR_LANE))
         .into_any_element()
     }
 
-    /// 折行：普通列表（行高不定），超 MAX_WRAP_LINES 截断并提示
+    /// Wrap: plain list (variable line height), truncated with a hint beyond
+    /// MAX_WRAP_LINES
     fn render_lines_wrap(
         &self,
         content: &Rc<FileContent>,
@@ -289,7 +329,9 @@ impl FileViewPanel {
             .id("file-lines-wrap")
             .size_full()
             .overflow_y_scroll()
-            // 滚轮锁定手势轴（防横向 delta 被映射成纵向滚动，Read 卡同款）
+            // Lock the scroll wheel to the gesture axis (prevents horizontal
+            // delta from being mapped to vertical scrolling, same as the
+            // Read card)
             .restrict_scroll_to_axis()
             .track_scroll(&self.wrap_scroll)
             .child(v_flex().w_full().children(rows))
@@ -301,9 +343,14 @@ impl FileViewPanel {
                         .text_center()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "… 自动换行模式仅显示前 {shown} 行（共 {total} 行）；关闭换行可查看完整文件 …"
-                        )),
+                        .child(
+                            rust_i18n::t!(
+                                "file_panel.wrap_truncated",
+                                shown = shown,
+                                total = total
+                            )
+                            .to_string(),
+                        ),
                 )
             })
             .into_any_element()
@@ -321,7 +368,12 @@ impl Render for FileViewPanel {
                 .justify_center()
                 .gap_2()
                 .child(Spinner::new().small().color(subtle))
-                .child(div().text_sm().text_color(subtle).child("加载中…"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(subtle)
+                        .child(rust_i18n::t!("common.loading")),
+                )
                 .into_any_element(),
             LoadState::Err(error) => v_flex()
                 .size_full()
@@ -336,7 +388,8 @@ impl Render for FileViewPanel {
                 )
                 .into_any_element(),
             LoadState::Ready(content) => {
-                // 最大行宽惰性量宽（text_system 只在 UI 线程可用）；量一次缓存
+                // Measure the max line width lazily (text_system is only
+                // available on the UI thread); measure once and cache
                 let max_width = match content.max_width.get() {
                     Some(w) => w,
                     None => {
@@ -370,9 +423,12 @@ impl Render for FileViewPanel {
                     } else {
                         Scrollbar::vertical(&self.list_scroll)
                     })
-                    // 不折行时长行可横滚（触控板横滑 / Shift+滚轮 / 拖滚动条），
-                    // 横向滚动条常显（默认 Scrolling 模式闲时淡出，鼠标用户会
-                    // 失去唯一的横滚入口）
+                    // In no-wrap mode long lines scroll horizontally
+                    // (trackpad swipe / Shift+wheel / dragging the
+                    // scrollbar), and the horizontal scrollbar is always
+                    // visible (the default Scrolling mode fades out when
+                    // idle, leaving mouse users without their only
+                    // horizontal scroll entry)
                     .when(!self.wrap, |this| {
                         this.child(
                             Scrollbar::horizontal(&self.list_scroll).mode(ScrollbarMode::Always),

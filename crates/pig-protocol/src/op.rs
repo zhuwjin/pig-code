@@ -1,18 +1,21 @@
 use super::*;
 
-/// UI → core 命令
+/// UI → core commands
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Op {
     NewSession {
         cwd: PathBuf,
-        /// UI 当前模型选择；None → 工作区最近活跃会话 / 配置默认
+        /// Current model selection in the UI; None → the workspace's most recently
+        /// active session / config default
         provider_id: Option<String>,
         model_id: Option<String>,
-        /// UI 当前思考等级（原样采用，None = 关；种子的等级经 UI hero 默认值下达）
+        /// Current reasoning level in the UI (adopted as-is, None = off; the seeded
+        /// level arrives via the UI hero defaults)
         reasoning_level: Option<String>,
-        /// UI 当前执行模式；None → 工作区最近活跃会话 / 默认
+        /// Current exec mode in the UI; None → the workspace's most recently active
+        /// session / default
         exec_mode: Option<ExecMode>,
-        /// 计划模式开关（None/false = 关；不种子继承——计划是临时态）
+        /// Plan mode switch (None/false = off; not seeded — plan is a transient state)
         #[serde(default)]
         plan_enabled: Option<bool>,
     },
@@ -24,12 +27,12 @@ pub enum Op {
     AddWorkspace {
         path: PathBuf,
     },
-    /// 从侧栏移除工作区：置为隐藏，条目与会话数据保留；
-    /// 该工作区下新建会话时自动恢复
+    /// Remove the workspace from the sidebar: mark it hidden, keeping the entry and
+    /// session data; automatically restored when a new session is created in that workspace
     RemoveWorkspace {
         path: PathBuf,
     },
-    /// 重命名工作区显示名；alias 为 None 表示恢复默认目录名
+    /// Rename the workspace display name; alias None restores the default directory name
     RenameWorkspace {
         path: PathBuf,
         alias: Option<String>,
@@ -38,25 +41,29 @@ pub enum Op {
         session_id: String,
         pinned: Option<bool>,
         archived: Option<bool>,
-        /// 手动重命名（置 title_custom，此后自动命名不再覆盖）
+        /// Manual rename (sets title_custom; auto-naming no longer overwrites afterwards)
         title: Option<String>,
     },
-    /// 删除会话：清 sessions 及关联表 + rollout JSONL，不可恢复
+    /// Delete a session: clears sessions plus related tables + the rollout JSONL,
+    /// unrecoverable
     DeleteSession {
         session_id: String,
     },
-    /// 会话分叉：以源会话前 N 个回合的历史派生新会话（boundary 含第 N 回合
-    /// 本身），创建后按 OpenSession 冷路径打开（SessionConfigured + replay）
+    /// Fork a session: derive a new session from the first N turns of the source's
+    /// history (the boundary includes the Nth turn itself); after creation it opens
+    /// via the OpenSession cold path (SessionConfigured + replay)
     ForkSession {
         session_id: String,
-        /// 保留的回合数（≥1，0 钳为 1；超过源回合总数 = 全量复制）
+        /// Number of turns kept (≥1, 0 clamps to 1; exceeding the source's total
+        /// turns = full copy)
         turns: usize,
     },
     SendMessage {
         session_id: String,
         content: String,
         files: Vec<String>,
-        /// 粘贴/拖拽进来的图片（原始字节，core 侧压缩后进模型上下文）
+        /// Pasted/dragged-in images (raw bytes; core compresses them before they
+        /// enter the model context)
         #[serde(default)]
         images: Vec<PendingImage>,
         mode: ExecMode,
@@ -67,12 +74,14 @@ pub enum Op {
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,
-        /// 反馈意见（kimi Revise：拒绝计划时携带给模型修订；仅 ExitPlanMode 用）
+        /// Feedback (kimi Revise: carried to the model for revision when a plan is
+        /// rejected; ExitPlanMode only)
         #[serde(default)]
         feedback: Option<String>,
     },
-    /// 结构化提问的回复：None = 用户跳过；外层按题、内层为该题选中标签
-    ///（"其他"自由文本作为标签原样放入）
+    /// Reply to a structured question: None = the user skipped; the outer vector is
+    /// per question, the inner holds that question's selected labels ("Other" free
+    /// text goes in as a label verbatim)
     QuestionReply {
         request_id: String,
         answers: Option<Vec<Vec<String>>>,
@@ -81,10 +90,11 @@ pub enum Op {
         session_id: String,
         provider_id: String,
         model_id: String,
-        /// None = 不启用推理参数
+        /// None = reasoning params disabled
         reasoning_level: Option<String>,
     },
-    /// 单独设置思考等级：无模型覆盖时同样生效（作用于配置默认模型）并持久化
+    /// Set the reasoning level alone: also effective when no model override exists
+    /// (applies to the configured default model) and persisted
     SetReasoning {
         session_id: String,
         reasoning_level: Option<String>,
@@ -100,12 +110,14 @@ pub enum Op {
         session_id: String,
         mode: ExecMode,
     },
-    /// 计划模式开关（与执行模式正交；模型侧经 EnterPlanMode/ExitPlanMode 自切）
+    /// Plan mode switch (orthogonal to exec mode; the model toggles it on its side
+    /// via EnterPlanMode/ExitPlanMode)
     SetPlanMode {
         session_id: String,
         enabled: bool,
     },
-    /// 会话级「工作区外读/写」开关（默认关；tmp 目录始终放行）
+    /// Session-level "read/write outside workspace" switches (off by default; tmp
+    /// directories are always allowed)
     SetFsAccess {
         session_id: String,
         read_outside: bool,
@@ -118,11 +130,12 @@ pub enum Op {
     SearchFiles {
         session_id: String,
         query: String,
-        /// 显式搜索目录（hero 未建会话时传 hero 工作区；None = 按会话/默认目录）
+        /// Explicit search directory (the hero workspace when no session is created
+        /// yet; None = the session's/default directory)
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// 非会话态：查询目录的 git 信息（hero 分支选择器）
+    /// Sessionless: query a directory's git info (the hero branch selector)
     GitInfo {
         cwd: PathBuf,
     },
@@ -130,40 +143,45 @@ pub enum Op {
         cwd: PathBuf,
         branch: String,
     },
-    /// 非会话态：工作区 git 改动列表（未暂存 + 已暂存，含 untracked 行数统计）
+    /// Sessionless: the workspace's git change list (unstaged + staged, with
+    /// untracked line counts)
     GitStatus {
         cwd: PathBuf,
     },
-    /// 非会话态：单文件 git diff 原文（staged=false 未暂存 / true 已暂存）
+    /// Sessionless: one file's raw git diff (staged=false unstaged / true staged)
     GitDiff {
         cwd: PathBuf,
         path: String,
         staged: bool,
     },
-    /// 取消该会话队首的排队消息（FIFO）
+    /// Cancel the session's first queued message (FIFO)
     CancelQueued {
         session_id: String,
         text: String,
     },
-    /// 加载后台子代理的完整对话（右侧「子代理」tab 只读展示）；
-    /// 无需 Session 实例，直接读 {sessions_dir}/{session_id}.agents/{agent_id}.jsonl
+    /// Load a background subagent's full conversation (read-only display in the
+    /// right-side "subagent" tab); needs no Session instance, directly reads
+    /// {sessions_dir}/{session_id}.agents/{agent_id}.jsonl
     LoadSubagent {
         session_id: String,
         agent_id: String,
     },
-    /// 非会话态：按模型 ID 查 models.dev 元数据（上下文/输入输出上限/推理等级）；
-    /// 磁盘缓存命中直接回，未命中（新模型）重新拉取后再回
+    /// Sessionless: look up models.dev metadata by model ID (context/input-output
+    /// limits/reasoning levels); a disk cache hit replies directly, a miss (new
+    /// model) re-fetches before replying
     ModelLookup {
         id: String,
     },
     Compact {
         session_id: String,
-        /// 用户对本次摘要的特别要求（/compact 选中后在输入框续写的重点说明；
-        /// 对齐 ZCode 自定义指令 / kimi-code custom_instruction_block）
+        /// The user's special requirements for this summary (the focus notes appended
+        /// in the composer after selecting /compact; aligned with ZCode custom
+        /// instructions / kimi-code's custom_instruction_block)
         #[serde(default)]
         instruction: Option<String>,
     },
-    /// 查询会话的 MCP server 连接清单（设置页展示用）；回 Event::McpServerList
+    /// Query the session's MCP server connection list (for settings page display);
+    /// replies with Event::McpServerList
     ListMcpServers {
         session_id: String,
     },

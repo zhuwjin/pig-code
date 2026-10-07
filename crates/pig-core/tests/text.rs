@@ -1,5 +1,6 @@
-//! 文本管线与文件工具边界防护测试：text 模块编解码、Read/Write/Edit 的
-//! 编码/行尾保留、敏感文件与符号链接防护、ChangeTracker 字节级快照。
+//! Text pipeline and file tool boundary-guard tests: text module
+//! encode/decode, encoding/line-ending preservation in Read/Write/Edit,
+//! sensitive-file and symlink guards, byte-level ChangeTracker snapshots.
 
 use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
@@ -25,7 +26,7 @@ fn gbk_bytes(text_lf: &str) -> Vec<u8> {
     text::encode(text_lf, FileEncoding::Gbk, false, LineEnding::Lf).unwrap()
 }
 
-// ---------- text 模块 ----------
+// ---------- text module ----------
 
 #[test]
 fn decode_utf8_bom() {
@@ -44,7 +45,7 @@ fn decode_utf16le_with_bom() {
     let doc = text::decode(&bytes).unwrap();
     assert_eq!(doc.encoding, FileEncoding::Utf16Le);
     assert!(doc.bom);
-    // 2 个 CRLF、无孤立 LF → 主导 CRLF，视图归一为 LF
+    // 2 CRLFs, no lone LF → CRLF dominant; the view normalizes to LF
     assert_eq!(doc.text, "hi\nthere\n");
     assert_eq!(doc.line_ending, LineEnding::Crlf);
 }
@@ -60,7 +61,11 @@ fn decode_utf16le_without_bom_heuristic() {
     .unwrap();
     assert!(!bytes.starts_with(&[0xFF, 0xFE]));
     let doc = text::decode(&bytes).unwrap();
-    assert_eq!(doc.encoding, FileEncoding::Utf16Le, "应被启发式识别");
+    assert_eq!(
+        doc.encoding,
+        FileEncoding::Utf16Le,
+        "should be detected by the heuristic"
+    );
     assert!(!doc.bom);
     assert_eq!(doc.text, "hello world, this is plain ascii\n");
 
@@ -79,17 +84,17 @@ fn decode_utf16le_without_bom_heuristic() {
 #[test]
 fn decode_binary_nul_rejected() {
     let err = text::decode(b"ab\x00cd").unwrap_err();
-    assert!(err.contains("二进制"), "{err}");
+    assert!(err.contains("Binary file"), "{err}");
 }
 
 #[test]
 fn decode_control_chars_rejected() {
-    // 0x01-0x08 循环填满：控制字符占比 100%，且无 NUL
+    // Fill cyclically with 0x01-0x08: 100% control characters, and no NUL
     let bytes: Vec<u8> = (0..200).map(|i| 0x01 + (i % 8) as u8).collect();
     let err = text::decode(&bytes).unwrap_err();
-    assert!(err.contains("二进制"), "{err}");
+    assert!(err.contains("Binary file"), "{err}");
 
-    // 正常文本里夹少量控制字符不误判（占比远低于 30%）
+    // A few control chars mixed into normal text must not misclassify (ratio far below 30%)
     let mut text_bytes = b"normal text line\n".to_vec();
     text_bytes.push(0x01);
     let doc = text::decode(&text_bytes).unwrap();
@@ -101,24 +106,24 @@ fn decode_gbk_roundtrip_accept_and_reject() {
     let bytes = gbk_bytes("中文测试，编码识别\n");
     assert!(
         std::str::from_utf8(&bytes).is_err(),
-        "GBK 字节不是合法 UTF-8"
+        "GBK bytes are not valid UTF-8"
     );
     let doc = text::decode(&bytes).unwrap();
     assert_eq!(doc.encoding, FileEncoding::Gbk);
     assert_eq!(doc.text, "中文测试，编码识别\n");
 
-    // 非法 UTF-8 且 GBK round-trip 不复原（孤立 lead byte → 替换符）
+    // Invalid UTF-8 and no GBK round-trip restoration (lone lead byte → replacement char)
     let err = text::decode(&[0x81, 0x82, 0x83]).unwrap_err();
-    assert!(err.contains("无法识别的文本编码"), "{err}");
+    assert!(err.contains("Unrecognized text encoding"), "{err}");
 }
 
 #[test]
 fn decode_crlf_dominant_and_mixed() {
     let doc = text::decode(b"a\r\nb\r\nc\n").unwrap();
     assert_eq!(doc.line_ending, LineEnding::Crlf);
-    assert_eq!(doc.text, "a\nb\nc\n", "视图一律归一为 LF");
+    assert_eq!(doc.text, "a\nb\nc\n", "view is always normalized to LF");
 
-    // 孤立 \n 多 → 主导 LF；残留的 \r\n 也归一（孤立 \r 保留）
+    // More lone \n → LF dominant; leftover \r\n is also normalized (lone \r preserved)
     let doc = text::decode(b"a\nb\nc\r\nd\re\n").unwrap();
     assert_eq!(doc.line_ending, LineEnding::Lf);
     assert_eq!(doc.text, "a\nb\nc\nd\re\n");
@@ -130,7 +135,7 @@ fn encode_restores_crlf_and_defensive_normalize() {
         text::encode("a\nb\n", FileEncoding::Utf8, false, LineEnding::Crlf).unwrap(),
         b"a\r\nb\r\n"
     );
-    // 入参自带 \r\n 时先归一，避免 \r\r\n
+    // Input already carrying \r\n is normalized first to avoid \r\r\n
     assert_eq!(
         text::encode("a\r\nb\r\n", FileEncoding::Utf8, false, LineEnding::Crlf).unwrap(),
         b"a\r\nb\r\n"
@@ -159,21 +164,21 @@ fn encode_gbk_rejects_unencodable() {
         LineEnding::Lf,
     )
     .unwrap_err();
-    assert!(err.contains("GBK 无法编码"), "{err}");
+    assert!(err.contains("GBK cannot encode"), "{err}");
 }
 
 #[test]
 fn decode_utf16_odd_trailing_byte_is_lossy() {
     let mut bytes = text::encode("hi\n", FileEncoding::Utf16Le, true, LineEnding::Lf).unwrap();
-    bytes.push(0x61); // 奇数尾字节
+    bytes.push(0x61); // odd trailing byte
     let doc = text::decode(&bytes).unwrap();
     assert_eq!(doc.text, "hi\n");
-    assert!(doc.lossy, "奇数尾字节丢弃应置 lossy");
+    assert!(doc.lossy, "dropping the odd trailing byte should set lossy");
 }
 
 // ---------- Read ----------
 
-/// 共享 tracker/state 的执行（Read 登记的新鲜度状态要在 Read→Write/Edit 间共享）
+/// Execute with shared tracker/state (the freshness state registered by Read must be shared across Read→Write/Edit)
 async fn run_tool_in(
     dir: &std::path::Path,
     tracker: &mut ChangeTracker,
@@ -226,7 +231,7 @@ async fn read_has_line_numbers() {
     assert!(out.contains("2\tbeta"), "{out}");
     assert!(out.contains("3\tgamma"), "{out}");
 
-    // offset 起算行号
+    // Line numbers count from the offset
     let (out, is_error, _, _, _) = run_tool(
         &dir,
         "Read",
@@ -245,11 +250,11 @@ async fn read_crlf_normalized_with_file_info() {
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "win.txt"})).await;
     assert!(!is_error, "{out}");
-    assert!(!out.contains('\r'), "输出不应含 CR: {out:?}");
+    assert!(!out.contains('\r'), "output should not contain CR: {out:?}");
     assert!(out.contains("1\ta"), "{out}");
     assert!(
-        out.contains("[文件信息:") && out.contains("行尾=CRLF"),
-        "应有文件信息行: {out}"
+        out.contains("[File info:") && out.contains("line endings=CRLF"),
+        "should have a file info line: {out}"
     );
 }
 
@@ -264,13 +269,13 @@ async fn read_utf16le_and_gbk() {
         run_tool(&dir, "Read", serde_json::json!({"path": "u16.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("1\t你好"), "{out}");
-    assert!(out.contains("编码=UTF-16LE"), "{out}");
+    assert!(out.contains("encoding=UTF-16LE"), "{out}");
 
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "g.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(out.contains("中文内容"), "{out}");
-    assert!(out.contains("编码=GBK"), "{out}");
+    assert!(out.contains("encoding=GBK"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -281,7 +286,7 @@ async fn read_binary_rejected() {
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "bin.dat"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("二进制"), "{out}");
+    assert!(out.contains("Binary file"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -294,28 +299,31 @@ async fn read_long_line_truncated() {
         run_tool(&dir, "Read", serde_json::json!({"path": "long.txt"})).await;
     assert!(!is_error, "{out}");
     assert!(
-        out.contains("用 column_offset=2000 续读"),
-        "截断标记应带续读参数: {}",
+        out.contains("continue with column_offset=2000"),
+        "truncation marker should carry continuation parameters: {}",
         &out[..out.len().min(300)]
     );
-    assert!(out.contains("共 3000"), "{out}");
+    assert!(out.contains("of 3000"), "{out}");
     assert!(out.contains("2\tshort"), "{out}");
 
-    // 续读:2000 起可见 1000 字符,装得下 → 无续读标记,带区间说明
+    // Continuation: 1000 chars visible from 2000, fits the budget → no continuation marker, carries the range note
     let (out, _, _, _, _) = run_tool(
         &dir,
         "Read",
         serde_json::json!({"path": "long.txt", "column_offset": 2000}),
     )
     .await;
-    assert!(!out.contains("续读"), "末段不应再有续读标记: {out}");
-    assert!(out.contains("本行第 2001-3000 字符"), "{out}");
+    assert!(
+        !out.contains("continue with"),
+        "the last segment should not carry a continuation marker: {out}"
+    );
+    assert!(out.contains("chars 2001-3000 of 3000"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_char_budget_truncates() {
     let dir = temp_dir("read-budget");
-    // 3000 行 × 50 字符 ≈ 15 万字符，超过 10 万预算（行数上限 2000 也不会先到）
+    // 3000 lines × 50 chars ≈ 150k chars, over the 100k budget (the 2000-line cap would not hit first either)
     let content: String = (1..=3000)
         .map(|i| format!("line {i:04} {}\n", "y".repeat(40)))
         .collect();
@@ -324,9 +332,16 @@ async fn read_char_budget_truncates() {
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "big.txt"})).await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("[已截断: 显示 1-"), "应有截断提示: {out}");
-    assert!(out.contains("共 3000 行"), "{out}");
-    assert!(out.len() < 120_000, "输出应受字符预算约束: {}", out.len());
+    assert!(
+        out.contains("[Truncated: showing lines 1-"),
+        "should have a truncation notice: {out}"
+    );
+    assert!(out.contains("of 3000"), "{out}");
+    assert!(
+        out.len() < 120_000,
+        "output should respect the character budget: {}",
+        out.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -339,15 +354,15 @@ async fn read_empty_and_missing_file() {
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "empty.txt"})).await;
     assert!(!is_error, "{out}");
-    assert_eq!(out, "（空文件）");
+    assert_eq!(out, "(empty file)");
 
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "missing.rs"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("文件不存在: missing.rs"), "{out}");
+    assert!(out.contains("File not found: missing.rs"), "{out}");
     assert!(
         out.contains("a.rs") && out.contains("b.rs"),
-        "应列同目录文件: {out}"
+        "should list sibling files: {out}"
     );
 }
 
@@ -361,13 +376,13 @@ async fn read_env_rejected_but_template_allowed() {
     for path in [".env", ".env.local"] {
         let (out, is_error, _, _, _) =
             run_tool(&dir, "Read", serde_json::json!({"path": path})).await;
-        assert!(is_error, "{path} 应拒绝: {out}");
-        assert!(out.contains("敏感文件"), "{out}");
-        assert!(!out.contains("SECRET=1"), "内容不应泄露: {out}");
+        assert!(is_error, "{path} should be rejected: {out}");
+        assert!(out.contains("sensitive file"), "{out}");
+        assert!(!out.contains("SECRET=1"), "content should not leak: {out}");
     }
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": ".env.example"})).await;
-    assert!(!is_error, "模板文件应可读: {out}");
+    assert!(!is_error, "template file should be readable: {out}");
 }
 
 // ---------- Write ----------
@@ -379,7 +394,7 @@ async fn write_preserves_crlf() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    // 写前新鲜度：已存在的文件须先 Read
+    // Pre-write freshness: an existing file must be Read first
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -399,11 +414,14 @@ async fn write_preserves_crlf() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("CRLF"), "输出应说明保留了 CRLF: {out}");
+    assert!(
+        out.contains("CRLF"),
+        "output should mention the preserved CRLF: {out}"
+    );
     assert_eq!(
         std::fs::read(dir.join("win.txt")).unwrap(),
         b"x\r\ny\r\n",
-        "写回应保持 CRLF"
+        "write-back should keep CRLF"
     );
 }
 
@@ -437,10 +455,10 @@ async fn write_preserves_gbk() {
     assert_eq!(
         std::fs::read(dir.join("g.txt")).unwrap(),
         gbk_bytes("新的中文\n"),
-        "写回应是 GBK 字节"
+        "write-back should be GBK bytes"
     );
 
-    // GBK 文件写入不可编码字符 → 拒绝且文件不动
+    // Writing an unencodable character into a GBK file → rejected, file untouched
     let before = std::fs::read(dir.join("g.txt")).unwrap();
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
@@ -455,7 +473,7 @@ async fn write_preserves_gbk() {
     assert_eq!(
         std::fs::read(dir.join("g.txt")).unwrap(),
         before,
-        "拒绝写入时文件不动"
+        "file untouched when the write is rejected"
     );
 }
 
@@ -474,17 +492,17 @@ async fn write_symlink_escape_rejected() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("越出工作目录"), "{out}");
+    assert!(out.contains("Path escapes the working directory"), "{out}");
     assert_eq!(
         std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
         "top secret\n",
-        "符号链接目标不应被改写"
+        "symlink target should not be rewritten"
     );
 
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "link.txt"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("越出工作目录"), "{out}");
+    assert!(out.contains("Path escapes the working directory"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -497,8 +515,11 @@ async fn write_env_rejected() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("敏感文件"), "{out}");
-    assert!(!dir.join(".env").exists(), "拒绝后不应落盘");
+    assert!(out.contains("sensitive file"), "{out}");
+    assert!(
+        !dir.join(".env").exists(),
+        "nothing should be written after rejection"
+    );
 }
 
 // ---------- Edit ----------
@@ -510,7 +531,7 @@ async fn edit_crlf_preserved_and_diff_clean() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    // 写前新鲜度：先 Read 再 Edit
+    // Pre-write freshness: Read before Edit
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -533,22 +554,22 @@ async fn edit_crlf_preserved_and_diff_clean() {
     assert_eq!(
         std::fs::read(dir.join("win.txt")).unwrap(),
         b"a\r\nB\r\nc\r\n",
-        "编辑后磁盘仍是 CRLF"
+        "disk content stays CRLF after the edit"
     );
-    let edit = edit.expect("Edit 应带本次编辑 diff");
+    let edit = edit.expect("Edit should carry the per-edit diff");
     assert_eq!(
         (edit.additions, edit.deletions),
         (1, 1),
-        "diff 只反映本次替换"
+        "diff reflects only this replacement"
     );
     assert!(
         !edit.unified_diff.contains('\r'),
-        "diff 基于 LF 视图应干净: {}",
+        "diff should be clean on the LF view: {}",
         edit.unified_diff
     );
     assert!(edit.unified_diff.contains("-b") && edit.unified_diff.contains("+B"));
 
-    // CRLF 文件用 \r\n 的 old_string 匹配不上时，报错应引导用 LF
+    // When an old_string with \r\n fails to match in a CRLF file, the error should advise using LF
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -558,7 +579,10 @@ async fn edit_crlf_preserved_and_diff_clean() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("CRLF 行尾"), "应提示用 LF: {out}");
+    assert!(
+        out.contains("CRLF line endings"),
+        "should advise using LF: {out}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -578,7 +602,7 @@ async fn edit_replace_all_counts() {
     .await;
     assert!(!is_error);
 
-    // 不设 replace_all：多处匹配报错，保留「出现 N 次」并引导 replace_all
+    // Without replace_all: multiple matches error out, keeping "appears N times" and pointing to replace_all
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -588,7 +612,7 @@ async fn edit_replace_all_counts() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("出现 3 次"), "{out}");
+    assert!(out.contains("appears 3 times"), "{out}");
     assert!(out.contains("replace_all=true"), "{out}");
 
     let (out, is_error, _, _, _) = run_tool_in(
@@ -600,7 +624,7 @@ async fn edit_replace_all_counts() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("替换 3 处"), "{out}");
+    assert!(out.contains("replaced 3 occurrences"), "{out}");
     assert_eq!(
         std::fs::read_to_string(dir.join("f.txt")).unwrap(),
         "bar\nbar\nbar\n"
@@ -619,7 +643,7 @@ async fn edit_old_equals_new_rejected() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("相同"), "{out}");
+    assert!(out.contains("identical"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -643,7 +667,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
         assert!(!is_error);
     }
 
-    // old_string 占整行（不含 \n）→ 连行尾 \n 一起删，不留空行
+    // old_string spanning a whole line (without \n) → the trailing \n is deleted too, no empty line left
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -658,7 +682,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
         "a\nc\n"
     );
 
-    // 文件末尾无 \n 可吞时保持原样拼接
+    // When the file end has no \n to swallow, splice as-is
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -670,7 +694,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
     assert!(!is_error);
     assert_eq!(std::fs::read_to_string(dir.join("g.txt")).unwrap(), "x\n");
 
-    // replace_all 逐处同样吞换行
+    // replace_all swallows the newline at each occurrence too
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -680,7 +704,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("替换 2 处"), "{out}");
+    assert!(out.contains("replaced 2 occurrences"), "{out}");
     assert_eq!(
         std::fs::read_to_string(dir.join("h.txt")).unwrap(),
         "keep\nkeep\n"
@@ -692,7 +716,7 @@ async fn edit_empty_new_swallows_trailing_newline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revert_gbk_file_is_byte_exact() {
     let dir = temp_dir("revert-gbk");
-    // GBK 编码 + CRLF 行尾的 fixture
+    // Fixture with GBK encoding + CRLF line endings
     let original = text::encode(
         "中文标题\n正文\n",
         FileEncoding::Gbk,
@@ -705,7 +729,7 @@ async fn revert_gbk_file_is_byte_exact() {
 
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
-    // 新鲜度：先 Read 再 Edit
+    // Freshness: Read before Edit
     let (_, is_error, _, _, _) = tool::execute(
         &call("Read", serde_json::json!({"path": "g.txt"})),
         ToolContext {
@@ -729,25 +753,29 @@ async fn revert_gbk_file_is_byte_exact() {
     )
     .await;
     assert!(!is_error);
-    assert_ne!(std::fs::read(&file).unwrap(), original, "编辑应改变字节");
+    assert_ne!(
+        std::fs::read(&file).unwrap(),
+        original,
+        "the edit should change the bytes"
+    );
 
     tracker.revert(&file).unwrap();
     assert_eq!(
         std::fs::read(&file).unwrap(),
         original,
-        "GBK/CRLF 文件 revert 应字节级还原"
+        "revert of a GBK/CRLF file should be byte-exact"
     );
 }
 
 #[test]
 fn snapshot_store_codec_roundtrip() {
-    // UTF-8 直通（合法 UTF-8 原文落盘，不加 hex 前缀）
+    // UTF-8 pass-through (valid UTF-8 text persisted as-is, no hex prefix)
     let text = "abc\n中文\n";
     let stored = tool::snapshot_to_store(text.as_bytes());
     assert_eq!(stored, text);
     assert_eq!(tool::snapshot_from_store(&stored), text.as_bytes());
 
-    // 非 UTF-8 走 hex
+    // Non-UTF-8 goes through hex
     let bytes: Vec<u8> = vec![0xFF, 0xFE, 0x01, 0x00, 0xD6, 0xD0];
     let stored = tool::snapshot_to_store(&bytes);
     assert!(stored.starts_with("pigcode:hex:"), "{stored}");
@@ -763,20 +791,23 @@ fn tracker_original_restore_roundtrip_gbk() {
 
     let mut tracker = ChangeTracker::default();
     tracker.snapshot(&file).unwrap();
-    let stored = tracker.original(&file).expect("已追踪").expect("文件存在");
+    let stored = tracker
+        .original(&file)
+        .expect("tracked")
+        .expect("file exists");
     assert!(
         stored.starts_with("pigcode:hex:"),
-        "GBK 字节应 hex 化: {stored}"
+        "GBK bytes should be hex-encoded: {stored}"
     );
 
-    // 模拟重启：restore 进新 tracker，revert 应还原字节
+    // Simulate a restart: restore into a new tracker; revert should restore the bytes
     std::fs::write(&file, b"corrupted").unwrap();
     let mut revived = ChangeTracker::default();
     revived.restore(vec![(file.clone(), Some(stored))]);
     revived.revert(&file).unwrap();
     assert_eq!(std::fs::read(&file).unwrap(), bytes);
 
-    // UTF-8 文件：original() 直出文本，restore 后 revert 同样字节精确
+    // UTF-8 file: original() returns the text directly; after restore, revert is equally byte-exact
     let utf8_file = dir.join("u.txt");
     std::fs::write(&utf8_file, "plain utf8\n").unwrap();
     let mut tracker = ChangeTracker::default();
@@ -803,7 +834,10 @@ fn sensitive_file_patterns() {
         "id_ed25519-x",
         "id_rsa_old",
     ] {
-        assert!(tool::is_sensitive_file(Path::new(name)), "{name} 应判敏感");
+        assert!(
+            tool::is_sensitive_file(Path::new(name)),
+            "{name} should be flagged as sensitive"
+        );
     }
     for name in [
         ".env.example",
@@ -812,15 +846,15 @@ fn sensitive_file_patterns() {
         "id_rsa.pub",
         "id_ed25519.pub",
         "env.txt",
-        "my_id_rsa_notes.md", // 前缀不在文件名开头
+        "my_id_rsa_notes.md", // prefix not at the start of the file name
         "credentials",
     ] {
         assert!(
             !tool::is_sensitive_file(Path::new(name)),
-            "{name} 不应判敏感"
+            "{name} should not be flagged as sensitive"
         );
     }
-    // 云凭据看父目录名
+    // Cloud credentials look at the parent directory name
     assert!(tool::is_sensitive_file(Path::new(
         "/home/u/.aws/credentials"
     )));
@@ -832,15 +866,15 @@ fn sensitive_file_patterns() {
     )));
 }
 
-// ---------- 4.1 悬空符号链接封堵 ----------
+// ---------- 4.1 Dangling symlink blocking ----------
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dangling_symlink_rejected_fail_closed() {
     let dir = temp_dir("dangling-symlink");
-    // 指向不存在目标的悬空链接
+    // A dangling link pointing to a nonexistent target
     let missing = std::env::temp_dir().join(format!(
-        "pig-core-不存在的目录xxxxx-{}/evil.txt",
+        "pig-core-nonexistent-dir-xxxxx-{}/evil.txt",
         std::process::id()
     ));
     std::os::unix::fs::symlink(&missing, dir.join("link.txt")).unwrap();
@@ -852,17 +886,23 @@ async fn dangling_symlink_rejected_fail_closed() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("符号链接"), "{out}");
-    assert!(!missing.exists(), "外部文件不应被创建");
+    assert!(
+        out.contains("Symlink points to a nonexistent target"),
+        "{out}"
+    );
+    assert!(!missing.exists(), "the external file should not be created");
 
-    // 读同一路径同样 fail-closed
+    // Reading the same path is also fail-closed
     let (out, is_error, _, _, _) =
         run_tool(&dir, "Read", serde_json::json!({"path": "link.txt"})).await;
     assert!(is_error, "{out}");
-    assert!(out.contains("符号链接"), "{out}");
+    assert!(
+        out.contains("Symlink points to a nonexistent target"),
+        "{out}"
+    );
 }
 
-// ---------- 4.2 Edit 容错匹配梯队 ----------
+// ---------- 4.2 Edit tolerant match tiers ----------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edit_strips_read_line_number_prefixes() {
@@ -885,7 +925,7 @@ async fn edit_strips_read_line_number_prefixes() {
         assert!(!is_error);
     }
 
-    // 模型从 Read 输出连行号一起复制（「2\t」前缀）
+    // The model copies the line number along from the Read output (the "2\t" prefix)
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -895,13 +935,16 @@ async fn edit_strips_read_line_number_prefixes() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("容错匹配：已剥离行号前缀"), "{out}");
+    assert!(
+        out.contains("tolerant match: line-number prefixes stripped"),
+        "{out}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("f.rs")).unwrap(),
         "fn main() {\n    bar();\n}\n"
     );
 
-    // 「行号:」前缀变体（grep 风格，冒号后无空格）
+    // The "line-number:" prefix variant (grep style, no space after the colon)
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -916,7 +959,7 @@ async fn edit_strips_read_line_number_prefixes() {
         "x = 1;\ny = 3;\n"
     );
 
-    // 剥离后多处匹配 → 仍报「出现 N 次」
+    // Multiple matches after stripping → still reports "appears N times"
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -926,13 +969,13 @@ async fn edit_strips_read_line_number_prefixes() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("出现 2 次"), "{out}");
+    assert!(out.contains("appears 2 times"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edit_quote_normalization_follows_file_style() {
     let dir = temp_dir("edit-quotes");
-    // 弯引号文件
+    // A curly-quote file
     std::fs::write(dir.join("q.rs"), "let s = \u{201C}hello\u{201D};\n").unwrap();
 
     let mut tracker = ChangeTracker::default();
@@ -947,7 +990,7 @@ async fn edit_quote_normalization_follows_file_style() {
     .await;
     assert!(!is_error);
 
-    // 直引号 old_string 命中；new_string 直引号被转成弯引号
+    // A straight-quote old_string hits; straight quotes in new_string are converted to curly
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -957,11 +1000,14 @@ async fn edit_quote_normalization_follows_file_style() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("容错匹配：引号风格已跟随文件"), "{out}");
+    assert!(
+        out.contains("tolerant match: quote style adjusted to match the file"),
+        "{out}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("q.rs")).unwrap(),
         "let s = \u{201C}world\u{201D};\n",
-        "直引号应成对转为弯引号"
+        "straight quotes should be converted to curly quotes in pairs"
     );
 }
 
@@ -982,7 +1028,7 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
     .await;
     assert!(!is_error);
 
-    // replace_all + 行号前缀：不走第 2 级宽匹配，精确找不到 → 报错文案不变
+    // replace_all + line-number prefix: tier-2 tolerant matching is skipped, exact miss → the error copy stays unchanged
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -992,9 +1038,9 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("未找到"), "{out}");
+    assert!(out.contains("old_string not found"), "{out}");
 
-    // 三级都找不到时 not-found 报错文案不变
+    // When all three tiers miss, the not-found error copy stays unchanged
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1004,11 +1050,11 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("old_string 在 f.txt 中未找到"), "{out}");
-    assert!(!out.contains("容错"), "{out}");
+    assert!(out.contains("old_string not found in f.txt"), "{out}");
+    assert!(!out.contains("tolerant match"), "{out}");
 }
 
-// ---------- 5.1 read-file-state 写前新鲜度 ----------
+// ---------- 5.1 read-file-state pre-write freshness ----------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_edit_requires_prior_read() {
@@ -1017,7 +1063,7 @@ async fn write_edit_requires_prior_read() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // 未读先写：Edit / Write 都被拒
+    // Writing before reading: both Edit / Write are rejected
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1027,7 +1073,7 @@ async fn write_edit_requires_prior_read() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("尚未读过"), "{out}");
+    assert!(out.contains("has not been read"), "{out}");
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1037,9 +1083,9 @@ async fn write_edit_requires_prior_read() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("尚未读过"), "{out}");
+    assert!(out.contains("has not been read"), "{out}");
 
-    // 新文件（不存在）不需要 Read
+    // A new (nonexistent) file needs no Read
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1050,7 +1096,7 @@ async fn write_edit_requires_prior_read() {
     .await;
     assert!(!is_error, "{out}");
 
-    // Write 后紧接着 Edit 自己刚写的文件：合法（写盘已刷新状态）
+    // Editing a file right after writing it: allowed (the write refreshed the state)
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1061,7 +1107,7 @@ async fn write_edit_requires_prior_read() {
     .await;
     assert!(!is_error, "{out}");
 
-    // Read 后 Write 放行
+    // Write is allowed after Read
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1099,7 +1145,7 @@ async fn edit_blocked_after_external_modification() {
     .await;
     assert!(!is_error);
 
-    // 外部进程改了文件 → Edit 拒绝
+    // An external process modified the file → Edit rejected
     std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
@@ -1110,9 +1156,9 @@ async fn edit_blocked_after_external_modification() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("已被外部修改"), "{out}");
+    assert!(out.contains("modified externally"), "{out}");
 
-    // 重新 Read 后放行
+    // Allowed after a fresh Read
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1151,7 +1197,7 @@ async fn mtime_touch_with_same_content_allowed() {
     .await;
     assert!(!is_error);
 
-    // 改写相同内容（mtime 被碰、hash 不变）→ 放行并顺手更新状态
+    // Rewriting the same content (mtime touched, hash unchanged) → allowed and the state is refreshed in passing
     std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(dir.join("f.txt"), "same content\n").unwrap();
     let (_, is_error, _, _, _) = run_tool_in(
@@ -1162,13 +1208,13 @@ async fn mtime_touch_with_same_content_allowed() {
         serde_json::json!({"path": "f.txt", "old_string": "same", "new_string": "still same"}),
     )
     .await;
-    assert!(!is_error, "hash 相同应放行");
+    assert!(!is_error, "same hash should be allowed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partial_read_blocks_write_paged_read_clears() {
     let dir = temp_dir("fresh-partial");
-    // 超 10 万字符：不带参数 Read 必然被预算截断
+    // Over 100k chars: a Read without arguments is guaranteed to be truncated by the budget
     let content: String = (1..=4000)
         .map(|i| format!("line {i:04} {}\n", "y".repeat(30)))
         .collect();
@@ -1185,9 +1231,9 @@ async fn partial_read_blocks_write_paged_read_clears() {
     )
     .await;
     assert!(!is_error, "{out}");
-    assert!(out.contains("[已截断"), "{out}");
+    assert!(out.contains("[Truncated"), "{out}");
 
-    // 不完整视图：Edit/Write 都拒绝
+    // Incomplete view: both Edit/Write are rejected
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1197,10 +1243,12 @@ async fn partial_read_blocks_write_paged_read_clears() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("不完整视图"), "{out}");
+    assert!(out.contains("incomplete view"), "{out}");
 
-    // 显式分页读不算 partial：登记覆盖为完整口径（freshness/hash 仍以最后一次记录为准），
-    // Write 放行——ZCode 同款口径：分页参数意味着模型知道自己只看了窗口
+    // An explicitly paged Read does not count as partial: the registration
+    // overrides to the full-view rule (freshness/hash still follow the last
+    // record), and Write is allowed — same rule as ZCode: pagination
+    // parameters mean the model knows it only viewed a window
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1221,7 +1269,7 @@ async fn partial_read_blocks_write_paged_read_clears() {
     assert!(!is_error, "{out}");
 }
 
-// ---------- 审批预览走文本管线（approval_detail） ----------
+// ---------- Approval preview goes through the text pipeline (approval_detail) ----------
 
 #[test]
 fn approval_detail_edit_crlf_preview_clean() {
@@ -1234,13 +1282,15 @@ fn approval_detail_edit_crlf_preview_clean() {
             serde_json::json!({"path": "win.txt", "old_string": "b", "new_string": "B"}),
         ),
         &dir,
-        None,
     );
-    assert!(!detail.contains('\r'), "预览基于 LF 视图: {detail:?}");
+    assert!(
+        !detail.contains('\r'),
+        "preview is based on the LF view: {detail:?}"
+    );
     assert!(detail.contains("-b") && detail.contains("+B"), "{detail}");
     assert!(
         !detail.contains("-a") && !detail.contains("-c"),
-        "未改的行不应进 diff（不全文件翻转）: {detail}"
+        "unchanged lines should not enter the diff (no whole-file flip): {detail}"
     );
 }
 
@@ -1254,11 +1304,13 @@ fn approval_detail_edit_replace_all_and_fuzzy_notes() {
             serde_json::json!({"path": "all.txt", "old_string": "x", "new_string": "y", "replace_all": true}),
         ),
         &dir,
-        None,
     );
-    assert!(detail.contains("（replace_all：替换 3 处）"), "{detail}");
+    assert!(
+        detail.contains("(replace_all: replaced 3 occurrences)"),
+        "{detail}"
+    );
 
-    // 容错梯队：带 Read 行号前缀的 old_string 命中第 2 级，detail 注明
+    // Tolerant tiers: an old_string with a Read line-number prefix hits tier 2; the detail notes it
     std::fs::write(dir.join("f.rs"), "fn a() {}\nlet x = 1;\n").unwrap();
     let detail = pig_core::session::approval_detail(
         &call(
@@ -1266,15 +1318,17 @@ fn approval_detail_edit_replace_all_and_fuzzy_notes() {
             serde_json::json!({"path": "f.rs", "old_string": "1\tfn a() {}", "new_string": "fn b() {}"}),
         ),
         &dir,
-        None,
     );
-    assert!(detail.contains("（容错匹配：已剥离行号前缀）"), "{detail}");
+    assert!(
+        detail.contains("(tolerant match: line-number prefixes stripped)"),
+        "{detail}"
+    );
 }
 
 #[test]
 fn approval_detail_write_decodes_existing_file() {
     let dir = temp_dir("approval-write");
-    // CRLF：预览不应出现全文件翻转（LF 视图对比）
+    // CRLF: the preview must not flip the whole file (compared on the LF view)
     std::fs::write(dir.join("w.txt"), b"keep\r\nold\r\n").unwrap();
     let detail = pig_core::session::approval_detail(
         &call(
@@ -1282,16 +1336,18 @@ fn approval_detail_write_decodes_existing_file() {
             serde_json::json!({"path": "w.txt", "content": "keep\nnew\n"}),
         ),
         &dir,
-        None,
     );
     assert!(!detail.contains('\r'), "{detail:?}");
     assert!(
         detail.contains("-old") && detail.contains("+new"),
         "{detail}"
     );
-    assert!(!detail.contains("-keep"), "未变的行不进 diff: {detail}");
+    assert!(
+        !detail.contains("-keep"),
+        "unchanged lines stay out of the diff: {detail}"
+    );
 
-    // GBK：before 用解码后的文本视图，中文不乱码
+    // GBK: before uses the decoded text view, Chinese text is not garbled
     std::fs::write(dir.join("g.txt"), gbk_bytes("中文行\n旧行\n")).unwrap();
     let detail = pig_core::session::approval_detail(
         &call(
@@ -1299,7 +1355,6 @@ fn approval_detail_write_decodes_existing_file() {
             serde_json::json!({"path": "g.txt", "content": "中文行\n新行\n"}),
         ),
         &dir,
-        None,
     );
     assert!(
         detail.contains("-旧行") && detail.contains("+新行"),

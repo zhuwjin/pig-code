@@ -1,17 +1,17 @@
-//! MCP server 配置加载：Claude Code 兼容形态
-//! `{ "mcpServers": { "<name>": { "command", "args", "env", "timeoutMs" } } }`（stdio）
-//! 与远程形态 `{ "url", "headers", "timeoutMs" }`（streamable HTTP）。
-//! `type` 字段可省略：有 `url` 按远程、有 `command` 按 stdio 推断；
-//! 显式 `"type": "stdio" | "http"` 时按声明校验。`"type": "sse"`（2024-11-05
-//! legacy HTTP+SSE）暂不支持，记录后跳过。
-//! `"disabled": true` 停用条目：解析保留、合并（覆盖同名）后过滤，不参与连接。
-//! 用户级 `<data_dir>/mcp.json` 为底，项目级 `<workspace>/.pigcode/mcp.json` 覆盖同名。
+//! MCP server config loading: Claude Code-compatible shape
+//! `{ "mcpServers": { "<name>": { "command", "args", "env", "timeoutMs" } } }` (stdio)
+//! and the remote shape `{ "url", "headers", "timeoutMs" }` (streamable HTTP).
+//! The `type` field may be omitted: presence of `url` infers remote, presence of `command` infers stdio;
+//! an explicit `"type": "stdio" | "http"` is validated as declared. `"type": "sse"` (2024-11-05
+//! legacy HTTP+SSE) is not yet supported; it is logged and skipped.
+//! `"disabled": true` disables an entry: kept through parsing, filtered after merging (same-name override), excluded from connecting.
+//! User-level `<data_dir>/mcp.json` is the base; project-level `<workspace>/.pigcode/mcp.json` overrides same-name entries.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-/// 单次调用（initialize/tools/list/tools/call/ping）默认超时
+/// Default timeout for a single call (initialize/tools/list/tools/call/ping)
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -19,12 +19,12 @@ pub struct McpServerConfig {
     pub name: String,
     pub transport: McpTransport,
     pub timeout: Duration,
-    /// `disabled: true` 停用：解析/合并保留该条（项目级可停用用户级同名条目），
-    /// 连接阶段整体过滤
+    /// `disabled: true` disables the entry: kept through parsing/merging (project level can disable a user-level same-name entry),
+    /// filtered out wholesale at the connection stage
     pub disabled: bool,
 }
 
-/// 传输配置：stdio 子进程 / streamable HTTP 远程端点
+/// Transport config: stdio subprocess / streamable HTTP remote endpoint
 #[derive(Debug, Clone)]
 pub enum McpTransport {
     Stdio(McpStdioConfig),
@@ -41,7 +41,7 @@ pub struct McpStdioConfig {
 #[derive(Debug, Clone)]
 pub struct McpHttpConfig {
     pub url: String,
-    /// 自定义请求头（每个 POST/DELETE 都携带；鉴权 token 走这里，OAuth 后续项）
+    /// Custom request headers (carried on every POST/DELETE; auth tokens go here, OAuth is a future item)
     pub headers: HashMap<String, String>,
 }
 
@@ -63,15 +63,15 @@ struct RawServer {
     disabled: bool,
 }
 
-/// 加载并合并两个来源；文件缺失/非法不 panic，记录后跳过；
-/// `disabled` 停用在覆盖合并后生效（项目级停用用户级同名条目）
+/// Load and merge both sources; a missing/invalid file does not panic but is logged and skipped;
+/// `disabled` takes effect after the override merge (project level can disable a user-level same-name entry)
 pub fn load(workspace_root: &Path, data_dir: &Path) -> Vec<McpServerConfig> {
     let user = load_file(&data_dir.join("mcp.json"));
     let project = load_file(&workspace_root.join(".pigcode").join("mcp.json"));
     merged_enabled(user, project)
 }
 
-/// 合并同名覆盖后过滤停用条目（load 的主体，单测直击）
+/// Merge same-name overrides, then filter out disabled entries (the body of load, exercised directly by unit tests)
 fn merged_enabled(
     user: Vec<McpServerConfig>,
     project: Vec<McpServerConfig>,
@@ -82,7 +82,7 @@ fn merged_enabled(
         .collect()
 }
 
-/// 用户级为底、项目级覆盖同名；输出按名字排序（连接顺序稳定）
+/// User level as the base, project level overrides same names; output sorted by name (stable connection order)
 fn merge(user: Vec<McpServerConfig>, project: Vec<McpServerConfig>) -> Vec<McpServerConfig> {
     let mut merged: HashMap<String, McpServerConfig> = HashMap::new();
     for server in user.into_iter().chain(project) {
@@ -93,30 +93,30 @@ fn merge(user: Vec<McpServerConfig>, project: Vec<McpServerConfig>) -> Vec<McpSe
     out
 }
 
-/// 读单个文件：缺失 → 空；读失败 → 记录并跳过
+/// Read a single file: missing -> empty; read failure -> logged and skipped
 fn load_file(path: &Path) -> Vec<McpServerConfig> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
         Err(e) => {
-            eprintln!("[mcp] 读取配置失败 {}: {e}", path.display());
+            eprintln!("[mcp] failed to read config {}: {e}", path.display());
             return vec![];
         }
     };
     parse_file(&raw, path)
 }
 
-/// 解析文件文本：文件级 JSON 非法整文件跳过；单个 server 非法只跳过该条
+/// Parse file text: file-level invalid JSON skips the whole file; a single invalid server skips only that entry
 fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
     let file: serde_json::Value = match serde_json::from_str(raw) {
         Ok(file) => file,
         Err(e) => {
-            eprintln!("[mcp] 解析配置失败 {}: {e}", path.display());
+            eprintln!("[mcp] failed to parse config {}: {e}", path.display());
             return vec![];
         }
     };
     let Some(servers) = file.get("mcpServers").and_then(|v| v.as_object()) else {
-        eprintln!("[mcp] {} 缺少 mcpServers 对象，已跳过", path.display());
+        eprintln!("[mcp] {} has no mcpServers object, skipped", path.display());
         return vec![];
     };
     let mut out = Vec::new();
@@ -129,7 +129,7 @@ fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
                 disabled,
             }),
             Err(e) => eprintln!(
-                "[mcp] {} 中 server {name} 配置非法，已跳过: {e}",
+                "[mcp] server {name} in {} is invalid, skipped: {e}",
                 path.display()
             ),
         }
@@ -137,9 +137,10 @@ fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
     out
 }
 
-/// 单条 server 配置 → 传输形态 + 超时 + 停用标记：显式 type 优先，否则按 url/command 推断
+/// A single server config -> transport shape + timeout + disabled flag: explicit type wins, otherwise inferred from url/command
 fn parse_server(value: serde_json::Value) -> Result<(McpTransport, Duration, bool), String> {
-    let raw: RawServer = serde_json::from_value(value).map_err(|e| format!("配置非法: {e}"))?;
+    let raw: RawServer =
+        serde_json::from_value(value).map_err(|e| format!("invalid server config: {e}"))?;
     let disabled = raw.disabled;
     let timeout = raw
         .timeout_ms
@@ -155,10 +156,10 @@ fn parse_server(value: serde_json::Value) -> Result<(McpTransport, Duration, boo
         Some("stdio") => stdio_transport(raw),
         Some("http") | Some("streamable-http") => http_transport(raw),
         Some("sse") => Err(
-            "legacy SSE（2024-11-05 HTTP+SSE）传输暂不支持，请用 streamable HTTP 端点".to_string(),
+            "legacy SSE transport (2024-11-05 HTTP+SSE) is not supported; use a streamable HTTP endpoint".to_string(),
         ),
         Some(other) => Err(format!(
-            "未知 type \"{other}\"（支持 stdio/http，可省略按 url 推断）"
+            "unknown type \"{other}\" (stdio/http supported; omit to infer from url)"
         )),
         None => {
             if raw.url.is_some() {
@@ -174,7 +175,7 @@ fn parse_server(value: serde_json::Value) -> Result<(McpTransport, Duration, boo
 fn stdio_transport(raw: RawServer) -> Result<McpTransport, String> {
     let command = raw.command.unwrap_or_default();
     if command.trim().is_empty() {
-        return Err("缺少 command（stdio 形态）或 url（远程形态）".to_string());
+        return Err("missing command (stdio) or url (remote)".to_string());
     }
     Ok(McpTransport::Stdio(McpStdioConfig {
         command,
@@ -187,10 +188,10 @@ fn http_transport(raw: RawServer) -> Result<McpTransport, String> {
     let url = raw.url.unwrap_or_default();
     let url = url.trim();
     if url.is_empty() {
-        return Err("远程形态缺少 url".to_string());
+        return Err("remote server config is missing url".to_string());
     }
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(format!("url 须以 http:// 或 https:// 开头: {url}"));
+        return Err(format!("url must start with http:// or https://: {url}"));
     }
     Ok(McpTransport::Http(McpHttpConfig {
         url: url.to_string(),
@@ -206,7 +207,7 @@ mod tests {
         let server = servers.iter().find(|s| s.name == name).expect(name);
         match &server.transport {
             McpTransport::Stdio(stdio) => stdio,
-            other => panic!("{name} 应为 stdio: {other:?}"),
+            other => panic!("{name} should be stdio: {other:?}"),
         }
     }
 
@@ -246,7 +247,7 @@ mod tests {
         let servers = parse_file(raw, Path::new("mcp.json"));
         assert_eq!(servers.len(), 1);
         let McpTransport::Http(http) = &servers[0].transport else {
-            panic!("应按 url 推断为 http: {:?}", servers[0].transport);
+            panic!("url should infer http: {:?}", servers[0].transport);
         };
         assert_eq!(http.url, "https://mcp.example.com/mcp");
         assert_eq!(
@@ -304,7 +305,7 @@ mod tests {
         );
         let merged = merge(user, project);
         assert_eq!(merged.len(), 3);
-        // b 被项目级覆盖成 http 形态
+        // b is overridden to the http shape by the project level
         let b = merged.iter().find(|s| s.name == "b").expect("b");
         assert!(matches!(b.transport, McpTransport::Http(_)));
         assert_eq!(stdio_of(&merged, "a").command, "ua");
@@ -325,11 +326,11 @@ mod tests {
             r#"{"mcpServers": {"a": {"command": "pa", "disabled": true}}}"#,
             Path::new("proj/.pigcode/mcp.json"),
         );
-        // 解析保留停用条目（供覆盖合并）；load 语义 = merged_enabled
+        // Parsing keeps disabled entries (for the override merge); load semantics = merged_enabled
         assert_eq!(user.iter().filter(|s| s.disabled).count(), 1);
         let enabled = merged_enabled(user, project);
         let names: Vec<&str> = enabled.iter().map(|s| s.name.as_str()).collect();
-        // a 被项目级停用覆盖、b 用户级停用；d 的 disabled:false 显式启用
+        // a is disabled by the project-level override, b is disabled at user level; d's disabled:false explicitly enables it
         assert_eq!(names, vec!["d"]);
     }
 }

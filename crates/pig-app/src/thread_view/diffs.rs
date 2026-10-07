@@ -1,10 +1,14 @@
 use super::*;
 
 impl ThreadView {
-    /// 编辑工具的展开卡片（ZCode LightweightDiffPreview 同款）：圆角描边代码卡，
-    /// 无 padding；行号 gutter（新增绿/删除红/其余最暗）+ 增删行淡底色与左缘色条，
-    /// 行号是预览行连续序号（非文件行号），限高内部滚动，超 400 行截断；
-    /// 四角用卡片底色补丁收圆（gpui 内容裁剪仅矩形），滚动条内置随补丁收角。
+    /// The edit tool's expanded card (same as ZCode LightweightDiffPreview):
+    /// rounded bordered code card, no padding; line-number gutter (added green/
+    /// removed red/rest dimmest) + faint row backgrounds and a left color bar
+    /// for add/delete rows; line numbers are consecutive preview row numbers
+    /// (not file line numbers); height-capped with internal scrolling,
+    /// truncated past 400 rows; the four corners are rounded by card-colored
+    /// patches (gpui content clipping is rectangular only), scrollbars built in
+    /// and rounded with the patches.
     pub(crate) fn render_edit_diff(
         id: impl Into<ElementId>,
         edit: &EditDiff,
@@ -83,7 +87,7 @@ impl ThreadView {
                     .w_full()
                     .items_stretch()
                     .when_some(bg, |this, bg| this.bg(bg))
-                    // 左缘色条（对应 ZCode 的 inset 3px box-shadow）
+                    // Left color bar (ZCode's inset 3px box-shadow equivalent)
                     .child(div().w(px(3.)).flex_shrink_0().bg(bar))
                     .child(
                         div()
@@ -113,13 +117,14 @@ impl ThreadView {
                     .py_1()
                     .text_center()
                     .text_color(gutter_muted)
-                    .child(format!("… 省略 {omitted} 行 …"))
+                    .child(rust_i18n::t!("thread.omitted_lines", n = omitted).to_string())
                     .into_any_element(),
             );
         }
 
         let card_bg = cx.theme().secondary;
-        // 卡片背后 = 页面底色（消息区自身透明，与 Root 的 tokens.background 同值）
+        // Behind the card = page background (the message area itself is
+        // transparent, same value as Root's tokens.background)
         let behind = cx.theme().background;
         div()
             .relative()
@@ -140,7 +145,7 @@ impl ThreadView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .children(rows),
             )
-            // 滚动条收进卡片内部，角上同样被补丁收住
+            // Scrollbar tucked inside the card; corners likewise held by the patches
             .child(Scrollbar::vertical(body_scroll))
             .child(
                 canvas(
@@ -152,7 +157,7 @@ impl ThreadView {
                 .absolute()
                 .inset_0(),
             )
-            // 补丁盖住了角上的描边，重描一遍圆角边框
+            // The patches cover the corner strokes; redraw the rounded border
             .child(
                 div()
                     .absolute()
@@ -164,11 +169,14 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 每轮改动面板（ZCode 文件更改卡同款）：圆角描边卡片，头部
-    /// 「✎ N 个文件已修改」+ 右端「+A -D」与增删比例条（绿=新增占比、红=删除）；
-    /// 下方逐文件行（目录暗淡可省略 + 文件名高亮，右端等宽 +N/-N）。
-    /// 折叠态只露前 PREVIEW_ROWS 行，底部「还有 N 个文件 ▾」展开全部（再点收起）；
-    /// 文件行点击在右侧「文件」tab 打开（ThreadEvent::OpenFile）。
+    /// Per-turn changes panel (same as ZCode's file changes card): rounded
+    /// bordered card; header "✎ N files modified" + "+A -D" on the right end
+    /// with an add/delete ratio bar (green = added share, red = deleted); one
+    /// row per file below (dimmed elidable directory + highlighted file name,
+    /// monospace +N/-N on the right end). The collapsed state shows only the
+    /// first PREVIEW_ROWS rows; the bottom "N more files ▾" expands all (click
+    /// again to collapse); clicking a file row opens it in the right "Files"
+    /// tab (ThreadEvent::OpenFile).
     pub(crate) fn render_turn_changes(
         &self,
         message_ix: usize,
@@ -178,9 +186,10 @@ impl ThreadView {
         expand_anim: &ExpandAnim,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        /// 折叠态直出的文件行数，超出收进底部「还有 N 个文件」
+        /// File rows shown directly in the collapsed state; the rest folds into
+        /// the bottom "N more files"
         const PREVIEW_ROWS: usize = 3;
-        /// 头部增删比例条宽度（绿段占比 = 新增 / 总改动）
+        /// Header add/delete ratio bar width (green share = additions / total changes)
         const STAT_BAR_W: f32 = 48.;
 
         let subtle = cx.theme().muted_foreground;
@@ -193,7 +202,7 @@ impl ThreadView {
             (a + r.edit.additions, d + r.edit.deletions)
         });
 
-        // 头部增删比例条
+        // Header add/delete ratio bar
         let stat_bar = (adds + dels > 0).then(|| {
             let green_w = (STAT_BAR_W * adds as f32 / (adds + dels) as f32).round();
             h_flex()
@@ -249,7 +258,9 @@ impl ThreadView {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(subtle)
-                            .child(format!("{} 个文件已修改", rows.len())),
+                            .child(
+                                rust_i18n::t!("thread.files_modified", n = rows.len()).to_string(),
+                            ),
                     )
                     .child(div().flex_1())
                     .child(
@@ -275,7 +286,8 @@ impl ThreadView {
                     .children(preview_rows),
             )
             .when(show_extra, |this| {
-                // 开合动画包装（滑开/滑收 + 淡入淡出）
+                // Expand/collapse animation wrapper (slide open/closed + fade
+                // in/out)
                 this.child(self.expand_anim_wrap(
                     format!(
                         "turn-changes-expand-{message_ix}-{segment_ix}-{}",
@@ -316,9 +328,13 @@ impl ThreadView {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(subtle)
                                 .child(if open {
-                                    "收起".to_string()
+                                    rust_i18n::t!("thread.collapse").to_string()
                                 } else {
-                                    format!("还有 {} 个文件", rows.len() - PREVIEW_ROWS)
+                                    rust_i18n::t!(
+                                        "thread.more_files",
+                                        n = rows.len() - PREVIEW_ROWS
+                                    )
+                                    .to_string()
                                 }),
                         )
                         .child(
@@ -335,9 +351,11 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// 改动面板的单文件行：目录暗淡可省略 + 文件名高亮，右端等宽 +N/-N；
-    /// 点击在右侧「文件」tab 打开（ThreadEvent::OpenFile，按会话 cwd 解析路径），
-    /// 悬停时路径加下划线提示可点
+    /// A single file row of the changes panel: dimmed elidable directory +
+    /// highlighted file name, monospace +N/-N on the right end; clicking opens
+    /// it in the right "Files" tab (ThreadEvent::OpenFile, path resolved
+    /// against the session cwd); hovering underlines the path to hint
+    /// clickability
     fn render_turn_file_row(
         message_ix: usize,
         segment_ix: usize,
@@ -360,14 +378,16 @@ impl ThreadView {
             .px_3()
             .py(px(6.))
             .cursor_pointer()
-            .tooltip(move |window, cx| Tooltip::new("在右侧打开文件").build(window, cx))
+            .tooltip(move |window, cx| {
+                Tooltip::new(rust_i18n::t!("thread.open_file_right").to_string()).build(window, cx)
+            })
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(ThreadEvent::OpenFile {
                     path: path.clone(),
                     line: None,
                 });
             }))
-            // 路径：目录暗淡可省略，文件名高亮收尾
+            // Path: dimmed elidable directory, highlighted file name at the end
             .child(
                 h_flex()
                     .min_w_0()
