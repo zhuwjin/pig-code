@@ -903,6 +903,39 @@ mod tests {
         assert!(git_bash_candidates(Path::new("C:/shim/git.exe")).is_empty());
     }
 
+    /// Git Bash detection must never trust a bare bash.exe on the PATH:
+    /// `C:\Windows\System32\bash.exe` is the WSL launcher (seen in the wild
+    /// 2026-10-08 — every Bash command ran inside WSL, dotnet unreachable,
+    /// `-c` payload re-expanded by an outer WSL shell). The git.exe layout
+    /// inference must win instead. Cross-platform: dummy files in an isolated
+    /// temp layout, the real process env is untouched.
+    #[test]
+    fn git_bash_detection_ignores_bare_bash_exe_on_path() {
+        let tmp = std::env::temp_dir().join(format!("pig-git-bash-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // System32-style dir first on PATH with a bare bash.exe (the WSL trap)
+        let sys32 = tmp.join("Sys32");
+        // scoop-style git layout on a later PATH entry: cmd/git.exe + bin/bash.exe
+        let git_root = tmp.join("gitroot");
+        for dir in [&sys32, &git_root.join("cmd"), &git_root.join("bin")] {
+            std::fs::create_dir_all(dir).expect("create layout dir");
+        }
+        std::fs::write(sys32.join("bash.exe"), b"").expect("write fake WSL launcher");
+        std::fs::write(git_root.join("cmd").join("git.exe"), b"").expect("write fake git");
+        std::fs::write(git_root.join("bin").join("bash.exe"), b"").expect("write fake bash");
+
+        let found = git_bash_from_dirs(&[sys32.clone(), git_root.join("cmd")], &[], &|p: &Path| {
+            p.is_file()
+        });
+        assert_eq!(
+            found,
+            Some(git_root.join("bin").join("bash.exe")),
+            "a bare bash.exe ahead of a real git layout must be ignored"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// NUL redirect rewrite: only the redirect target is touched, not plain arguments.
     #[test]
     fn nul_redirect_rewrite() {

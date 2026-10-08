@@ -38,10 +38,16 @@ pub(crate) fn unix_shell() -> &'static str {
     })
 }
 
-/// Git Bash detection chain (same as kimi-code):
-/// explicit PIGCODE_SHELL_PATH → bash.exe on PATH → git.exe on PATH to infer
-/// the install root (parent for the regular cmd/bin layout; package-manager
-/// shims are seen through via `git --exec-path`) → common install locations.
+/// Git Bash detection chain (same shape as ZCode's):
+/// explicit PIGCODE_SHELL_PATH → git.exe on PATH to infer the install root
+/// (parent for the regular cmd/bin layout; package-manager shims are seen
+/// through via `git --exec-path`) → common install locations. Deliberately
+/// never scans PATH for a bare bash.exe: `C:\Windows\System32\bash.exe` sits
+/// near the front of PATH and is the WSL launcher, not Git Bash — commands
+/// would run inside a Linux VM (Windows tools like dotnet unreachable), and
+/// the launcher re-expands the `-c` payload through an outer WSL shell, so
+/// assignments/`$(...)` in one command break (seen in the wild 2026-10-08 on
+/// a scoop-git machine; kimi-code's chain has the same latent trap).
 pub(crate) fn detect_git_bash() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PIGCODE_SHELL_PATH") {
         let path = PathBuf::from(path);
@@ -51,40 +57,45 @@ pub(crate) fn detect_git_bash() -> Option<PathBuf> {
     }
     let dirs: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    for dir in &dirs {
-        let candidate = dir.join("bash.exe");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    for dir in &dirs {
+    git_bash_from_dirs(&dirs, &program_file_bases(), &|p| p.is_file())
+}
+
+/// Testable core of detect_git_bash (env access stays in the caller):
+/// git.exe on the given dir list → install-root inference → Program
+/// Files-style base dirs.
+pub(crate) fn git_bash_from_dirs(
+    dirs: &[PathBuf],
+    bases: &[PathBuf],
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    for dir in dirs {
         for git_exe in [
             dir.join("git.exe"),
             dir.join("cmd").join("git.exe"),
             dir.join("bin").join("git.exe"),
         ] {
-            if !git_exe.is_file() {
+            if !is_file(&git_exe) {
                 continue;
             }
             for candidate in git_bash_candidates(&git_exe) {
-                if candidate.is_file() {
+                if is_file(&candidate) {
                     return Some(candidate);
                 }
             }
             if let Some(root) = git_root_from_exec_path(&git_exe) {
                 for sub in ["bin", "usr\\bin"] {
                     let candidate = root.join(sub).join("bash.exe");
-                    if candidate.is_file() {
+                    if is_file(&candidate) {
                         return Some(candidate);
                     }
                 }
             }
         }
     }
-    for base in program_file_bases() {
+    for base in bases {
         for sub in ["Git\\bin", "Git\\usr\\bin"] {
             let candidate = base.join(sub).join("bash.exe");
-            if candidate.is_file() {
+            if is_file(&candidate) {
                 return Some(candidate);
             }
         }
