@@ -203,6 +203,27 @@ impl AppView {
                 });
                 cx.notify();
             }
+            Event::FsAccessChanged {
+                session_id,
+                read_outside,
+                write_outside,
+                ..
+            } => {
+                // An out-of-workspace approval's "always this session" flipped
+                // the session toggle core-side: sync the cached meta (session
+                // switches reseed from it) and check the composer menu boxes
+                if let Some(meta) = self.metas.iter_mut().find(|m| &m.id == session_id) {
+                    meta.fs_read_outside = *read_outside;
+                    meta.fs_write_outside = *write_outside;
+                }
+                if self.current.as_ref() == Some(session_id) {
+                    let (read_outside, write_outside) = (*read_outside, *write_outside);
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_fs_access(read_outside, write_outside, cx);
+                    });
+                }
+                cx.notify();
+            }
             Event::PlanModeChanged {
                 session_id,
                 enabled,
@@ -889,6 +910,7 @@ pub(crate) fn event_session_id(event: &Event) -> Option<String> {
         | Event::SubagentActivity { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
         | Event::PlanModeChanged { session_id, .. }
+        | Event::FsAccessChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),
         Event::SessionList { .. }
         | Event::SessionTitleChanged { .. }

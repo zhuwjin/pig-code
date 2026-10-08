@@ -40,6 +40,7 @@ async fn run_tool(
             cwd: dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await

@@ -673,6 +673,7 @@ async fn yolo_sensitive_file_still_blocked() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;

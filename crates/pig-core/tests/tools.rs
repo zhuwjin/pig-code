@@ -33,6 +33,7 @@ async fn edit_not_found_and_not_unique() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -47,6 +48,7 @@ async fn edit_not_found_and_not_unique() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -61,6 +63,7 @@ async fn edit_not_found_and_not_unique() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -79,6 +82,7 @@ async fn edit_not_found_and_not_unique() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -113,6 +117,7 @@ async fn path_escape_rejected() {
                 cwd: &dir,
                 tracker: &mut tracker,
                 state: &state,
+                fs_grant: None,
             },
         )
         .await;
@@ -144,6 +149,7 @@ async fn write_diff_revert_cycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -165,6 +171,7 @@ async fn write_diff_revert_cycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -200,6 +207,7 @@ async fn edit_produces_per_edit_diff() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -225,6 +233,7 @@ async fn edit_produces_per_edit_diff() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -261,6 +270,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -283,6 +293,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -301,6 +312,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -314,6 +326,7 @@ async fn turn_changes_are_per_turn_not_cumulative() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -338,6 +351,7 @@ async fn revert_modified_file_restores_content() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -352,6 +366,7 @@ async fn revert_modified_file_restores_content() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -382,6 +397,7 @@ async fn glob_and_grep() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -394,6 +410,7 @@ async fn glob_and_grep() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -412,6 +429,7 @@ async fn glob_and_grep() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -434,6 +452,7 @@ async fn todo_list_read_write_replace() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -454,6 +473,7 @@ async fn todo_list_read_write_replace() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -471,6 +491,7 @@ async fn todo_list_read_write_replace() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -487,6 +508,7 @@ async fn todo_list_read_write_replace() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -506,6 +528,7 @@ async fn todo_list_read_write_replace() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -516,6 +539,7 @@ async fn todo_list_read_write_replace() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -639,6 +663,7 @@ async fn background_bash_task_lifecycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -672,6 +697,7 @@ async fn background_bash_task_lifecycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -688,6 +714,7 @@ async fn background_bash_task_lifecycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -699,6 +726,7 @@ async fn background_bash_task_lifecycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -720,6 +748,7 @@ async fn background_bash_task_lifecycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -732,6 +761,7 @@ async fn background_bash_task_lifecycle() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -858,6 +888,7 @@ async fn read_and_edit_reject_oversized_files() {
             cwd: &dir,
             tracker: &mut ChangeTracker::default(),
             state: &SessionToolState::for_test(),
+            fs_grant: None,
         },
     )
     .await;
@@ -881,6 +912,7 @@ async fn read_and_edit_reject_oversized_files() {
             cwd: &dir,
             tracker: &mut ChangeTracker::default(),
             state: &SessionToolState::for_test(),
+            fs_grant: None,
         },
     )
     .await;
@@ -900,6 +932,7 @@ async fn read_and_edit_reject_oversized_files() {
             cwd: &dir,
             tracker: &mut ChangeTracker::default(),
             state: &SessionToolState::for_test(),
+            fs_grant: None,
         },
     )
     .await;
@@ -928,6 +961,7 @@ async fn edit_unescape_tier_matches_literal_escapes() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -938,7 +972,7 @@ async fn edit_unescape_tier_matches_literal_escapes() {
             "Edit",
             serde_json::json!({"path": "a.txt", "old_string": "alpha\\nbeta", "new_string": "X\\tY"}),
         ),
-        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state },
+        ToolContext { cwd: &dir, tracker: &mut tracker, state: &state, fs_grant: None },
     )
     .await;
     assert!(!is_error, "{out}");
@@ -966,6 +1000,7 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -980,6 +1015,7 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -997,6 +1033,7 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1009,6 +1046,7 @@ async fn edit_unescape_tier_not_applied_when_exact_or_unknown() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1030,6 +1068,7 @@ async fn read_shortcircuits_identical_view() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1043,6 +1082,7 @@ async fn read_shortcircuits_identical_view() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1056,6 +1096,7 @@ async fn read_shortcircuits_identical_view() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1072,6 +1113,7 @@ async fn read_shortcircuits_identical_view() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1110,6 +1152,7 @@ async fn fetch_url_allows_local_http_and_decodes_gbk() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1155,6 +1198,7 @@ async fn write_and_edit_leave_no_temp_files() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1168,6 +1212,7 @@ async fn write_and_edit_leave_no_temp_files() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1204,6 +1249,7 @@ async fn edit_not_unique_reports_line_numbers() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -1216,6 +1262,7 @@ async fn edit_not_unique_reports_line_numbers() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;

@@ -211,6 +211,9 @@ pub struct Session {
     /// reminds again; not persisted, self-heals on the first turn after
     /// resume)
     mode_reminded: Option<(ExecMode, bool)>,
+    /// Last out-of-workspace toggle state the model was reminded of (the
+    /// turn_reminder baseline is both-off)
+    fs_reminded: (bool, bool),
     /// Subagent profile snapshot frozen at session start (for the profile
     /// list embedded in the Agent/AgentSwarm tool descriptions — rescanning
     /// every step would let editing a profile break the tools prefix cache;
@@ -261,6 +264,15 @@ enum StepOutcome {
 /// Event emission from free paths (background subagent tasks/gated free
 /// functions): seq increments atomically, sharing the same Arc counter with
 /// Session::emit (foreground/background event seqs stay ordered).
+/// Coalesce-key value for an out-of-workspace access kind ("read"/"write"):
+/// parallel same-kind outside requests share one popup
+fn fs_kind_key(access: tool::FsAccess) -> String {
+    match access {
+        tool::FsAccess::Read => "read".to_string(),
+        tool::FsAccess::Write => "write".to_string(),
+    }
+}
+
 pub(crate) fn emit_bg(
     session_id: &str,
     seq: &std::sync::atomic::AtomicU64,
@@ -370,27 +382,50 @@ pub(crate) async fn exec_tool_gated_ctx(
     // Bash = command first word, Write/Edit = path
     let approval_key = (call.name.clone(), tool::approval_subject(call));
 
-    if danger_reason.is_some()
-        || (tool.is_some_and(|t| tool::requires_approval(t, ctx.mode))
-            && !ctx.always_allowed.contains(&approval_key)
-            && !readonly_bash
-            && !allowed_by_rules
-            // kimi writesOnlyPlanFile: in plan mode, writing the plan file
-            // passes through approval-free
-            && !(ctx.plan_enabled
-                && tool::is_plan_file_write(ctx.cwd, &call.arguments)))
-    {
+    // Out-of-workspace file access with the session toggles off: an approval
+    // request instead of a hard error — Allow runs this one call (the per-call
+    // fs_grant on ToolContext), AlwaysAllow covers the same access kind for
+    // the rest of the session (the same session memory as other tools'),
+    // Reject returns the boundary error as a tool error. Applies in every
+    // mode: leaving the workspace is a scope change worth one click even under
+    // FullAccess/Yolo. tmp and the extra read roots stay exempt; the
+    // sensitive-file filter runs after resolve regardless of the grant.
+    let fs_outside = tool::fs_outside_intent(ctx.state, ctx.cwd, &call.name, &call.arguments);
+    let needs_normal = tool.is_some_and(|t| tool::requires_approval(t, ctx.mode))
+        && !ctx.always_allowed.contains(&approval_key)
+        && !readonly_bash
+        && !allowed_by_rules
+        // kimi writesOnlyPlanFile: in plan mode, writing the plan file
+        // passes through approval-free
+        && !(ctx.plan_enabled && tool::is_plan_file_write(ctx.cwd, &call.arguments));
+
+    if danger_reason.is_some() || fs_outside.is_some() || needs_normal {
         let request_id = format!("{}-{turn_id}-approval-{item_id}", ctx.session_id);
         // Bash detail = the bare command; the danger warning goes through
-        // danger_key (the GUI localizes the title line by key)
-        let detail_text = approval_detail(call, ctx.cwd);
+        // danger_key (the GUI localizes the title line by key). An
+        // out-of-workspace request leads with its own access line instead.
+        let detail_text = match &fs_outside {
+            Some((access, path)) => format!(
+                "{} outside the workspace: {path}",
+                match access {
+                    tool::FsAccess::Read => "Read",
+                    tool::FsAccess::Write => "Write",
+                }
+            ),
+            None => approval_detail(call, ctx.cwd),
+        };
         // The coalescing key reuses perm_subject (Bash = full command,
         // Write/Edit = path, MCP = tool name); tools without a subject do not
         // coalesce (conservative), and the danger flag is part of the key —
-        // normal popups never coalesce into danger popups
-        let coalesce_key = perm_subject
-            .clone()
-            .map(|subject| (call.name.clone(), subject, danger_reason.is_some()));
+        // normal popups never coalesce into danger popups. Out-of-workspace
+        // requests coalesce by access kind (parallel same-kind outside reads
+        // share one popup)
+        let coalesce_key = match &fs_outside {
+            Some((access, _)) => Some(("fs-outside".to_string(), fs_kind_key(*access), false)),
+            None => perm_subject
+                .clone()
+                .map(|subject| (call.name.clone(), subject, danger_reason.is_some())),
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
         ctx.pending
             .lock()
@@ -403,7 +438,7 @@ pub(crate) async fn exec_tool_gated_ctx(
                 seq,
                 request_id: request_id.clone(),
                 tool: call.name.clone(),
-                detail: detail_text,
+                detail: detail_text.clone(),
                 danger_key,
             }
         });
@@ -420,17 +455,66 @@ pub(crate) async fn exec_tool_gated_ctx(
                 // Dangerous commands are not recorded in always_allowed:
                 // allowed this time only, equivalent to Allow
                 if danger_reason.is_none() {
-                    ctx.always_allowed.insert(approval_key);
+                    if let Some((access, _)) = &fs_outside {
+                        // "Always this session" = flipping the session toggle
+                        // itself — the same switch the composer mode menu
+                        // shows: persisted to meta (resumed sessions keep it),
+                        // and FsAccessChanged lets the UI check the box
+                        match access {
+                            tool::FsAccess::Read => ctx
+                                .state
+                                .fs_read_outside
+                                .store(true, std::sync::atomic::Ordering::Relaxed),
+                            tool::FsAccess::Write => ctx
+                                .state
+                                .fs_write_outside
+                                .store(true, std::sync::atomic::Ordering::Relaxed),
+                        }
+                        let read_outside = ctx
+                            .state
+                            .fs_read_outside
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let write_outside = ctx
+                            .state
+                            .fs_write_outside
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let session_id = ctx.session_id.to_string();
+                        if let Ok(store) = ctx.store.lock() {
+                            store.update_session(&session_id, |meta| {
+                                meta.fs_read_outside = read_outside;
+                                meta.fs_write_outside = write_outside;
+                                meta.updated_at = now_secs();
+                            });
+                        }
+                        emit_bg(ctx.session_id, ctx.seq, tx, |session_id, seq| {
+                            Event::FsAccessChanged {
+                                session_id,
+                                seq,
+                                read_outside,
+                                write_outside,
+                            }
+                        });
+                    }
+                    if needs_normal {
+                        ctx.always_allowed.insert(approval_key);
+                    }
                 }
             }
             ApprovalDecision::Reject => {
-                let note = match danger_reason {
-                    Some(reason) => format!(
+                let note = if let Some((access, path)) = &fs_outside {
+                    format!(
+                        "The user declined {} outside the workspace ({path}). Respect their decision; do not route around it via the shell, and continue within the workspace.",
+                        fs_kind_key(*access)
+                    )
+                } else {
+                    match danger_reason {
+                        Some(reason) => format!(
                         "The user rejected this high-risk command ({}). Respect their decision; use a different approach, or explain why it is needed before continuing.",
                         reason.en
                     ),
-                    None => "The user rejected this action. Respect their decision; use a different approach, or explain why it is needed before continuing."
-                        .to_string(),
+                        None => "The user rejected this action. Respect their decision; use a different approach, or explain why it is needed before continuing."
+                            .to_string(),
+                    }
                 };
                 return GatedToolOutcome::Rejected { note };
             }
@@ -442,6 +526,7 @@ pub(crate) async fn exec_tool_gated_ctx(
             cwd: ctx.cwd,
             tracker: ctx.tracker,
             state: ctx.state,
+            fs_grant: fs_outside.map(|(access, _)| access),
         };
         tokio::select! {
             result = tool::execute_with_extra(call, tool_ctx, ctx.extra_tools) => Some(result),
@@ -675,6 +760,7 @@ impl Session {
             date_reminded: today,
             agents_reminded: agents_prompt,
             mode_reminded: None,
+            fs_reminded: (false, false),
             profiles_snapshot,
             last_total_tokens: None,
             turn_input: 0,
@@ -769,6 +855,7 @@ impl Session {
             date_reminded: today,
             agents_reminded: agents_prompt,
             mode_reminded: None,
+            fs_reminded: (false, false),
             profiles_snapshot,
             last_total_tokens: None,
             turn_input: 0,

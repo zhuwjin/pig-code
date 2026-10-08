@@ -73,6 +73,15 @@ impl Session {
             self.plan_enabled,
             &self.id,
             &mut self.mode_reminded,
+            (
+                self.state
+                    .fs_read_outside
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.state
+                    .fs_write_outside
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            &mut self.fs_reminded,
             &self.date_frozen,
             &mut self.date_reminded,
             &self.agents_prompt,
@@ -524,6 +533,8 @@ impl Session {
             self.mode,
             config.input_image,
             &self.permissions,
+            &self.state,
+            &self.cwd,
         );
         let mut next_ix = 0usize;
         for (call_ix, call) in tool_calls.iter().enumerate() {
@@ -1293,6 +1304,9 @@ impl Session {
                         cwd: &cwd,
                         tracker: &mut tracker,
                         state: &state,
+                        // Group members are fs_outside-free by the mask; the
+                        // grant lives on the serial gate path only
+                        fs_grant: None,
                     };
                     let mut extra: Vec<Box<dyn tool::Tool>> = match &mcp {
                         Some(mcp) if call.name.starts_with("mcp__") => {
@@ -1633,8 +1647,15 @@ fn parallel_safe(
     mode: ExecMode,
     input_image: bool,
     permissions: &crate::permissions::PermissionRules,
+    state: &crate::task::SessionToolState,
+    cwd: &std::path::Path,
 ) -> bool {
     if PARALLEL_EXCLUDED.contains(&call.name.as_str()) {
+        return false;
+    }
+    // Out-of-workspace target with the toggles off needs the approval popup —
+    // only the serial gate can request one, so such calls are sync points
+    if tool::fs_outside_intent(state, cwd, &call.name, &call.arguments).is_some() {
         return false;
     }
     if call.name == "ReadMediaFile" && !input_image {
@@ -1664,10 +1685,12 @@ fn parallel_mask(
     mode: ExecMode,
     input_image: bool,
     permissions: &crate::permissions::PermissionRules,
+    state: &crate::task::SessionToolState,
+    cwd: &std::path::Path,
 ) -> Vec<bool> {
     calls
         .iter()
-        .map(|call| parallel_safe(call, tools, mode, input_image, permissions))
+        .map(|call| parallel_safe(call, tools, mode, input_image, permissions, state, cwd))
         .collect()
 }
 
@@ -1697,6 +1720,78 @@ mod tests {
         assert_eq!(seed_title(" \n\t "), "");
     }
 
+    /// Out-of-workspace read targets demote to serial sync points (only the
+    /// gate can pop the approval); inside paths, tmp, and the toggle-on state
+    /// stay parallel-eligible
+    #[test]
+    fn parallel_mask_demotes_outside_targets() {
+        let marker = format!("pig-mask-out-{}", std::process::id());
+        let ws = std::env::temp_dir().join(format!("ws-{marker}"));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let outside = std::env::temp_dir()
+            .parent()
+            .unwrap()
+            .join(format!("outside-{marker}"));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_str = outside.display().to_string().replace("\\", "/");
+        let (task_notify, _t) = tokio::sync::mpsc::unbounded_channel();
+        let (wake_notify, _w) = tokio::sync::mpsc::unbounded_channel();
+        let state = crate::task::SessionToolState::new(
+            "mask-out".to_string(),
+            task_notify,
+            wake_notify,
+            vec![],
+        );
+        let tools = tool::all();
+        let rules = crate::permissions::PermissionRules::default();
+        let call = |path: &str| ToolCall {
+            id: "c1".to_string(),
+            name: "Read".to_string(),
+            arguments: format!("{{\"path\": \"{path}\"}}"),
+        };
+        assert!(
+            !parallel_safe(
+                &call(&outside_str),
+                &tools,
+                ExecMode::AutoEdit,
+                true,
+                &rules,
+                &state,
+                &ws,
+            ),
+            "outside target must fall to the serial gate for its approval"
+        );
+        assert!(
+            parallel_safe(
+                &call("README.mock.md"),
+                &tools,
+                ExecMode::AutoEdit,
+                true,
+                &rules,
+                &state,
+                &ws,
+            ),
+            "inside path stays parallel"
+        );
+        state
+            .fs_read_outside
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            parallel_safe(
+                &call(&outside_str),
+                &tools,
+                ExecMode::AutoEdit,
+                true,
+                &rules,
+                &state,
+                &ws,
+            ),
+            "toggle on restores parallel eligibility"
+        );
+    }
+
     fn mask_of(names: &[&str], mode: ExecMode, input_image: bool) -> Vec<bool> {
         mask_with(names, &tool::all(), mode, input_image, "no-rules")
     }
@@ -1718,12 +1813,28 @@ mod tests {
                 arguments: "{}".to_string(),
             })
             .collect();
+        let (task_notify, _t_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wake_notify, _w_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = crate::task::SessionToolState::new(
+            "mask-test".to_string(),
+            task_notify,
+            wake_notify,
+            vec![],
+        );
         let permissions = if rules_toml == "no-rules" {
             crate::permissions::PermissionRules::default()
         } else {
             crate::permissions::PermissionRules::parse(rules_toml).expect("rules should parse")
         };
-        parallel_mask(&calls, tools, mode, input_image, &permissions)
+        parallel_mask(
+            &calls,
+            tools,
+            mode,
+            input_image,
+            &permissions,
+            &state,
+            std::path::Path::new("/ws"),
+        )
     }
 
     /// Build an MCP tool (for_test fake connection; only the name/read_only

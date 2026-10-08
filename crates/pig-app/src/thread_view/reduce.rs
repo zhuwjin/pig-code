@@ -448,8 +448,10 @@ impl ThreadView {
                 }
                 self.auto_scroll();
             }
-            Event::FileChanged { .. } | Event::FileReverted { .. } | Event::ContextUsage { .. } => {
-            }
+            Event::FileChanged { .. }
+            | Event::FileReverted { .. }
+            | Event::ContextUsage { .. }
+            | Event::FsAccessChanged { .. } => {}
             // Data for the right "Subagents" tab (AppView routes it straight to the panel; the message flow does not show it)
             Event::SubagentHistory { .. } => {}
             Event::UserMessage {

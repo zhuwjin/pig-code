@@ -184,6 +184,10 @@ pub struct ToolContext<'a> {
     pub cwd: &'a Path,
     pub tracker: &'a mut ChangeTracker,
     pub state: &'a crate::task::SessionToolState,
+    /// One-call out-of-workspace grant: Some(access) when the gate just got an
+    /// approval for exactly this call's outside access — resolve_with_access
+    /// lets this single call through; coalesced waiters each carry their own.
+    pub fs_grant: Option<paths::FsAccess>,
 }
 
 pub trait Tool: Send + Sync {

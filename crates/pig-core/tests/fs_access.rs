@@ -39,6 +39,7 @@ async fn run(
             cwd: dir,
             tracker,
             state,
+            fs_grant: None,
         },
     )
     .await;

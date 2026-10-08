@@ -64,6 +64,16 @@ pub const SUBJECT_FILE_B: &str = "subject_b.txt";
 
 /// Read-only command scenario (AutoEdit pass-through check): Bash ls → text. ls is inside the read-only allowlist.
 pub const SCENARIO_READONLY_TRIGGER: &str = "READONLY_SCENARIO";
+/// Out-of-workspace approval scenarios (tests/fs_outside.rs): the message
+/// carries the absolute target path as the whitespace-delimited token right
+/// after the trigger — tests use forward-slash paths, which survive the raw
+/// JSON body without escaping.
+pub const SCENARIO_OUTSIDE_READ_TRIGGER: &str = "SCENARIO_OUTSIDE_READ";
+pub const SCENARIO_OUTSIDE_WRITE_TRIGGER: &str = "SCENARIO_OUTSIDE_WRITE";
+/// Mid-turn variant: TWO outside reads in one turn (round 0 and round 1),
+/// done text from round 2 — used to prove an Op::SetFsAccess flip issued
+/// while the turn is running takes effect on the very next tool call
+pub const SCENARIO_OUTSIDE_READ2_TRIGGER: &str = "SCENARIO_READ2_OUTSIDE";
 pub const READONLY_MARKER: &str = "MOCK_READONLY_DONE";
 
 /// Slow command scenario (verifies the stop-while-tool-running path): Bash
@@ -390,6 +400,65 @@ fn echo_history_response(body: &str) -> Vec<String> {
 /// Scenario B advances by the number of tool results in history: 0→Write,
 /// 1→Edit, 2→Bash, ≥3→text. The file parameter avoids multiple self-test
 /// sessions mutating the same file and interfering with each other.
+fn outside_path_after(body: &str, trigger: &str) -> Option<String> {
+    // The trigger sits inside the JSON-escaped user message: the path token
+    // ends at the closing quote, not only at whitespace
+    body.split(trigger)
+        .nth(1)?
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .find(|tok| !tok.is_empty())
+        .map(str::to_string)
+}
+
+fn outside_text_chunks(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .chunks(9)
+        .map(|piece| {
+            sse_chunk(
+                serde_json::json!({"content": piece.iter().collect::<String>()}),
+                None,
+            )
+        })
+        .collect()
+}
+
+fn outside_read_response(path: &str, tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_outside_read",
+            "Read",
+            &serde_json::json!({"path": path}).to_string(),
+            None,
+        ),
+        _ => outside_text_chunks(&format!("OUTSIDE_READ_DONE {path}")),
+    }
+}
+
+fn outside_read2_response(path: &str, tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 | 1 => tool_call_chunks(
+            "call_outside_read2",
+            "Read",
+            &serde_json::json!({"path": path}).to_string(),
+            None,
+        ),
+        _ => outside_text_chunks(&format!("OUTSIDE_READ2_DONE {path}")),
+    }
+}
+
+fn outside_write_response(path: &str, tool_results: usize) -> Vec<String> {
+    match tool_results {
+        0 => tool_call_chunks(
+            "call_outside_write",
+            "Write",
+            &serde_json::json!({"path": path, "content": "outside write"}).to_string(),
+            None,
+        ),
+        _ => outside_text_chunks(&format!("OUTSIDE_WRITE_DONE {path}")),
+    }
+}
+
 fn scenario_b_response(tool_results: usize, file: &str) -> Vec<String> {
     match tool_results {
         0 => tool_call_chunks(
@@ -1252,6 +1321,19 @@ async fn handle_connection(
         plan_write_gate_response(tool_results)
     } else if body.contains(SCENARIO_MEDIA_TRIGGER) {
         media_scenario_response(tool_results)
+    } else if let Some(path) = outside_path_after(&body, SCENARIO_OUTSIDE_READ_TRIGGER).as_deref() {
+        // Multi-turn tests reuse the trigger: count tool results after the
+        // LAST user message, not across the whole history
+        let tail = body.rsplit("\"role\":\"user\"").next().unwrap_or("");
+        outside_read_response(path, tail.matches("\"role\":\"tool\"").count())
+    } else if let Some(path) = outside_path_after(&body, SCENARIO_OUTSIDE_READ2_TRIGGER).as_deref()
+    {
+        let tail = body.rsplit("\"role\":\"user\"").next().unwrap_or("");
+        outside_read2_response(path, tail.matches("\"role\":\"tool\"").count())
+    } else if let Some(path) = outside_path_after(&body, SCENARIO_OUTSIDE_WRITE_TRIGGER).as_deref()
+    {
+        let tail = body.rsplit("\"role\":\"user\"").next().unwrap_or("");
+        outside_write_response(path, tail.matches("\"role\":\"tool\"").count())
     } else if body.contains(SUBAGENT_TRIGGER) {
         // Parent-side requests always contain the original trigger; child-side
         // requests only have the behavior token prefix from the prompt

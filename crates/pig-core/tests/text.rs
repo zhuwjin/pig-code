@@ -198,6 +198,7 @@ async fn run_tool_in(
             cwd: dir,
             tracker,
             state,
+            fs_grant: None,
         },
     )
     .await
@@ -736,6 +737,7 @@ async fn revert_gbk_file_is_byte_exact() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
@@ -749,6 +751,7 @@ async fn revert_gbk_file_is_byte_exact() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;

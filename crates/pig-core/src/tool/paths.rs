@@ -150,15 +150,16 @@ fn is_tmp_absolute_path(raw: &str) -> bool {
 }
 
 /// Policy entry point of resolve_checked (all file tools go through here): paths inside the workspace and explicit tmp absolute paths
-/// are always allowed; other outside-workspace paths follow the session toggles; when a toggle is off, the error points to the mode menu. Dangling links are always rejected.
+/// are always allowed; other outside-workspace paths follow the session toggles; a per-call approval grant (the gate sets it after an
+/// approved out-of-workspace request) lets this single call through. Dangling links are always rejected.
 /// The sensitive-file check (is_sensitive_file) is performed unconditionally by the tool after resolve, unaffected by the toggles.
 pub fn resolve_with_access(
-    state: &SessionToolState,
-    cwd: &Path,
+    ctx: &ToolContext<'_>,
     path: &str,
     create_parents: bool,
     access: FsAccess,
 ) -> Result<PathBuf, String> {
+    let (cwd, state) = (ctx.cwd, ctx.state);
     match resolve_core(cwd, path, create_parents) {
         Ok(resolved) => Ok(resolved),
         Err(BoundFailure::Other(message)) => Err(message),
@@ -189,7 +190,7 @@ pub fn resolve_with_access(
             let allowed = match access {
                 FsAccess::Read => state.fs_read_outside.load(Ordering::Relaxed),
                 FsAccess::Write => state.fs_write_outside.load(Ordering::Relaxed),
-            };
+            } || ctx.fs_grant == Some(access);
             if allowed {
                 // Same gate: with the toggle on, symlinks pointing outside the workspace are also allowed
                 Ok(resolved)
@@ -199,11 +200,89 @@ pub fn resolve_with_access(
                     FsAccess::Write => "outside-workspace write access",
                 };
                 Err(format!(
-                    "Path escapes the working directory: {path} (the user can enable {toggle} in the input box's mode menu)"
+                    "Path escapes the working directory: {path} ({toggle} needs the user's approval — they can enable it in the input box's mode menu or approve it when asked)"
                 ))
             }
         }
     }
+}
+
+/// Which tools touch the filesystem and in which mode, for the out-of-workspace
+/// approval (Bash is deliberately absent — the shell is not path-bound and has
+/// its own dangerous-command gate).
+pub fn fs_intent_of_tool(name: &str) -> Option<FsAccess> {
+    match name {
+        "Read" | "Glob" | "Grep" | "ReadMediaFile" => Some(FsAccess::Read),
+        "Write" | "Edit" => Some(FsAccess::Write),
+        _ => None,
+    }
+}
+
+/// Gate-side out-of-workspace pre-check (no side effects: parents are never
+/// created, nothing is touched): Some((access, path)) when this call targets
+/// outside the workspace, is not exempt (tmp / extra read roots), and the
+/// session toggle is off — the gate turns that into an approval request
+/// instead of the hard error resolve_with_access used to return. Mirrors
+/// resolve_with_access's classification: resolve_core runs with
+/// create_parents=false, and its "directory does not exist" outcome falls back
+/// to a lexical check so a Write into a not-yet-existing outside directory
+/// also pops.
+pub fn fs_outside_intent(
+    state: &SessionToolState,
+    cwd: &Path,
+    tool: &str,
+    arguments: &str,
+) -> Option<(FsAccess, String)> {
+    let access = fs_intent_of_tool(tool)?;
+    let path = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()?
+        .get("path")?
+        .as_str()?
+        .to_string();
+    let toggle = match access {
+        FsAccess::Read => state.fs_read_outside.load(Ordering::Relaxed),
+        FsAccess::Write => state.fs_write_outside.load(Ordering::Relaxed),
+    };
+    if toggle {
+        return None;
+    }
+    let blocked = match resolve_core(cwd, &path, false) {
+        Ok(_) => None,
+        Err(
+            BoundFailure::ParentOutside { resolved } | BoundFailure::TargetOutside { resolved },
+        ) => Some(resolved),
+        // Always rejected regardless of toggles; no popup
+        Err(BoundFailure::DanglingSymlink) => return None,
+        Err(BoundFailure::Other(message)) => {
+            // A Write into a not-yet-existing directory: lexical fallback so
+            // new outside directories still trigger the request
+            if !message.starts_with("Directory does not exist") {
+                return None;
+            }
+            let cwd_can = cwd.canonicalize().ok()?;
+            let raw = Path::new(&path);
+            let full = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                cwd_can.join(raw)
+            };
+            let full = lexical_normalize(&full);
+            (!full.starts_with(&cwd_can)).then_some(full)
+        }
+    }?;
+    if is_tmp_absolute_path(&path) {
+        return None;
+    }
+    if access == FsAccess::Read
+        && Path::new(&path).is_absolute()
+        && state
+            .extra_read_roots
+            .iter()
+            .any(|root| blocked.starts_with(root))
+    {
+        return None;
+    }
+    Some((access, path))
 }
 
 /// Sensitive-file check (case-insensitive, file name only): .env family / SSH private keys / cloud credentials.

@@ -31,6 +31,7 @@ async fn bash(
             cwd: dir,
             tracker,
             state,
+            fs_grant: None,
         },
     )
     .await;
@@ -50,6 +51,7 @@ async fn task_ctl(
             cwd: dir,
             tracker,
             state,
+            fs_grant: None,
         },
     )
     .await;

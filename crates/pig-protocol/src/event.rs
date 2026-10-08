@@ -248,6 +248,15 @@ pub enum Event {
         seq: u64,
         mode: ExecMode,
     },
+    /// Out-of-workspace read/write toggles changed core-side (an approval's
+    /// "always allow this session" flips the session toggle and persists it);
+    /// UI-initiated toggles go through Op::SetFsAccess with no event back
+    FsAccessChanged {
+        session_id: String,
+        seq: u64,
+        read_outside: bool,
+        write_outside: bool,
+    },
     /// Plan mode switch changed (emitted when the model toggles it via
     /// EnterPlanMode/ExitPlanMode; UI-initiated toggles go through Op::SetPlanMode
     /// with no event back)

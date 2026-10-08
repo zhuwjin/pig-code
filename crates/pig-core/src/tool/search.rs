@@ -61,7 +61,7 @@ impl Tool for Glob {
                 .unwrap_or(MAX_MATCH_RESULTS as u64) as usize;
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
             let root = match args["path"].as_str() {
-                Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
+                Some(path) => resolve_with_access(&ctx, path, false, FsAccess::Read)?,
                 None => ctx.cwd.to_path_buf(),
             };
             // Filtering during traversal (Override allowlist): non-matching files never enter the result set, and the mtime stat is skipped too
@@ -220,7 +220,7 @@ impl Tool for Grep {
                 after = 0;
             }
             let root = match args["path"].as_str() {
-                Some(path) => resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?,
+                Some(path) => resolve_with_access(&ctx, path, false, FsAccess::Read)?,
                 None => ctx.cwd.to_path_buf(),
             };
 

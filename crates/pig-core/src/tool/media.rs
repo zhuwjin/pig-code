@@ -220,7 +220,7 @@ impl Tool for ReadMediaFile {
             let path = args["path"]
                 .as_str()
                 .ok_or("Missing required parameter: path")?;
-            let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Read)?;
+            let full = resolve_with_access(&ctx, path, false, FsAccess::Read)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }

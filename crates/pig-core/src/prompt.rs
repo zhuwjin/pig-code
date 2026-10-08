@@ -254,12 +254,14 @@ pub(crate) fn mode_line(mode: ExecMode) -> &'static str {
         }
         ExecMode::FullAccess => {
             "Current execution mode: full-access. All tools run without approval; commands \
-             flagged as high-risk still ask for user confirmation."
+             flagged as high-risk and out-of-workspace file access still ask for the user's \
+             confirmation."
         }
         ExecMode::Yolo => {
             "Current execution mode: unrestricted (Yolo). All tools run directly — no approvals \
-             and no dangerous-command interception; sensitive files (.env, private keys, \
-             credentials) remain unreadable and unwritable."
+             and no dangerous-command interception; out-of-workspace file access still asks \
+             unless the mode-menu toggles are enabled, and sensitive files (.env, private \
+             keys, credentials) remain unreadable and unwritable."
         }
     }
 }
@@ -298,6 +300,8 @@ pub(crate) fn turn_reminder(
     plan_enabled: bool,
     session_id: &str,
     mode_reminded: &mut Option<(ExecMode, bool)>,
+    fs_access: (bool, bool),
+    fs_reminded: &mut (bool, bool),
     date_frozen: &str,
     date_reminded: &mut String,
     agents_frozen: &str,
@@ -312,6 +316,28 @@ pub(crate) fn turn_reminder(
             lines.push(plan_line(session_id));
         }
         *mode_reminded = Some(state);
+    }
+    // Out-of-workspace toggles ride the same change-triggered reminder: the
+    // baseline is both-off (the prompt already states the default), so this
+    // fires when a resumed session starts with a persisted toggle on, and on
+    // any mid-session change (mode-menu checkbox or an approval's
+    // always-this-session flip) — telling the model it may now retry (or must
+    // again expect approval for) outside-workspace access
+    if *fs_reminded != fs_access {
+        let (read, write) = fs_access;
+        let phrase = |on: bool| {
+            if on {
+                "allowed"
+            } else {
+                "blocked (ask via the approval request)"
+            }
+        };
+        lines.push(format!(
+            "Session file-access update: reading outside the workspace is {}, writing outside the workspace is {}.",
+            phrase(read),
+            phrase(write)
+        ));
+        *fs_reminded = fs_access;
     }
     let today = today();
     if today != *date_reminded {
@@ -587,6 +613,60 @@ mod tests {
         assert!(prompt.contains("answer from the results.\n\n<env>"));
     }
 
+    /// The out-of-workspace toggle reminder is change-triggered: silent at the
+    /// both-off baseline (the prompt states the default), fires when a resumed
+    /// session starts with a persisted toggle on or a mid-session flip happens
+    /// (mode-menu checkbox / approval always-this-session), and re-fires on
+    /// revoke
+    #[test]
+    fn fs_access_reminder_is_change_triggered() {
+        fn call(
+            fs_access: (bool, bool),
+            mode_reminded: &mut Option<(pig_protocol::ExecMode, bool)>,
+            fs_reminded: &mut (bool, bool),
+        ) -> Option<String> {
+            super::turn_reminder(
+                pig_protocol::ExecMode::AutoEdit,
+                false,
+                "s-test",
+                mode_reminded,
+                fs_access,
+                fs_reminded,
+                "2026-10-08",
+                &mut super::today(),
+                "",
+                "",
+                &mut String::new(),
+            )
+        }
+        let mut mode_reminded = None;
+        let mut fs_reminded = (false, false);
+        // Baseline both-off: no file-access line (only the first-turn mode line)
+        let r = call((false, false), &mut mode_reminded, &mut fs_reminded).unwrap();
+        assert!(!r.contains("file-access update"), "baseline: {r}");
+        // Read enabled: fires with both directions stated
+        let r = call((true, false), &mut mode_reminded, &mut fs_reminded).unwrap();
+        assert!(
+            r.contains("reading outside the workspace is allowed"),
+            "{r}"
+        );
+        assert!(
+            r.contains("writing outside the workspace is blocked"),
+            "{r}"
+        );
+        // Unchanged: nothing left to remind — the whole reminder is None
+        assert!(
+            call((true, false), &mut mode_reminded, &mut fs_reminded).is_none(),
+            "unchanged state must not re-notify"
+        );
+        // Revoked: re-fires with blocked
+        let r = call((false, false), &mut mode_reminded, &mut fs_reminded).unwrap();
+        assert!(
+            r.contains("reading outside the workspace is blocked"),
+            "{r}"
+        );
+    }
+
     /// The tool listing must map one-to-one with the registry (tool::all() + the root
     /// session's Agent/AgentSwarm), preventing drift between the prompt listing and the
     /// actually available tools — a new tool whose one-liner was forgotten fails here. MCP
@@ -724,6 +804,8 @@ mod tests {
             false,
             "s1",
             &mut mode_reminded,
+            (false, false),
+            &mut (false, false),
             &today,
             &mut date_reminded,
             "",
@@ -744,6 +826,8 @@ mod tests {
                 false,
                 "s1",
                 &mut mode_reminded,
+                (false, false),
+                &mut (false, false),
                 &today,
                 &mut date_reminded,
                 "",
@@ -759,6 +843,8 @@ mod tests {
             true,
             "s1",
             &mut mode_reminded,
+            (false, false),
+            &mut (false, false),
             &today,
             &mut date_reminded,
             "",
@@ -774,6 +860,8 @@ mod tests {
             false,
             "s1",
             &mut mode_reminded,
+            (false, false),
+            &mut (false, false),
             &today,
             &mut date_reminded,
             "",
@@ -791,6 +879,8 @@ mod tests {
             false,
             "s1",
             &mut mode_reminded,
+            (false, false),
+            &mut (false, false),
             &today,
             &mut date_reminded,
             "",
@@ -810,6 +900,8 @@ mod tests {
                 false,
                 "s1",
                 &mut mode_reminded,
+                (false, false),
+                &mut (false, false),
                 &today,
                 &mut date_reminded,
                 "",
@@ -826,6 +918,8 @@ mod tests {
                 false,
                 "s1",
                 &mut mode_reminded,
+                (false, false),
+                &mut (false, false),
                 &today,
                 &mut date_reminded,
                 fresh,
@@ -842,6 +936,8 @@ mod tests {
             false,
             "s1",
             &mut mode_reminded,
+            (false, false),
+            &mut (false, false),
             "2000-01-01",
             &mut date_reminded,
             "",
@@ -860,6 +956,8 @@ mod tests {
                 false,
                 "s1",
                 &mut mode_reminded,
+                (false, false),
+                &mut (false, false),
                 "2000-01-01",
                 &mut date_reminded,
                 "",

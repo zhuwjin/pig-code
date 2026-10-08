@@ -49,7 +49,7 @@ impl Tool for EditFile {
                 );
             }
             let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-            let full = resolve_with_access(ctx.state, ctx.cwd, path, false, FsAccess::Write)?;
+            let full = resolve_with_access(&ctx, path, false, FsAccess::Write)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }

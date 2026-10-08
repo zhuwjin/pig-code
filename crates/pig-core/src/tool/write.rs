@@ -61,7 +61,7 @@ impl Tool for WriteFile {
             let content = args["content"]
                 .as_str()
                 .ok_or("Missing required parameter: content")?;
-            let full = resolve_with_access(ctx.state, ctx.cwd, path, true, FsAccess::Write)?;
+            let full = resolve_with_access(&ctx, path, true, FsAccess::Write)?;
             if is_sensitive_file(&full) {
                 return Err(sensitive_file_error(&full));
             }

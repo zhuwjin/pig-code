@@ -105,6 +105,7 @@ async fn run(
             cwd: dir,
             tracker: &mut tracker,
             state,
+            fs_grant: None,
         },
     )
     .await;
@@ -245,6 +246,7 @@ async fn read_tool_redirects_images() {
             cwd: &dir,
             tracker: &mut tracker,
             state: &state,
+            fs_grant: None,
         },
     )
     .await;
