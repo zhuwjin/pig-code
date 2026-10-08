@@ -572,6 +572,7 @@ pub(crate) async fn run_selftest(
         let current = app!(|app: &mut AppView, _| app.current.clone());
         if let Some(id) = current
             && id != session_a
+            && id != session_b
         {
             break id;
         }
@@ -696,6 +697,7 @@ pub(crate) async fn run_selftest(
         if let Some(id) = current
             && id != session_a
             && id != session_b
+            && id != session_c
         {
             break id;
         }
@@ -723,6 +725,33 @@ pub(crate) async fn run_selftest(
     loop {
         timer!(200).await;
         waited += 200;
+        if waited >= 60_000 {
+            // Flake diagnostics: dump the actual message layout at the stall
+            // (role + segment kinds + tool done flags) before failing
+            let layout = app!(|app: &mut AppView, cx| {
+                let views = app.views.get(&session_d)?;
+                let thread = views.thread.read(cx);
+                Some((
+                    thread.debug_layout(),
+                    thread.debug_last_assistant(),
+                    thread.is_streaming(),
+                ))
+            });
+            if let Some((lines, last, streaming)) = layout {
+                let ids = app!(|app: &mut AppView, _| {
+                    Some(format!(
+                        "a={} b={} c={} d={} current={:?}",
+                        session_a, session_b, session_c, session_d, app.current
+                    ))
+                });
+                println!(
+                    "[selftest] scenario B stall dump: streaming={streaming} last_assistant={last:?} ids={ids:?}"
+                );
+                for line in lines {
+                    println!("[selftest]   {line}");
+                }
+            }
+        }
         assert!(waited < 60_000, "Anthropic scenario B timed out");
         let approved = app!(|app: &mut AppView, cx| {
             let views = app.views.get(&session_d)?;

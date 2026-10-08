@@ -472,6 +472,48 @@ impl ThreadView {
         })
     }
 
+    /// For self-test stall diagnostics: a compact per-message layout summary
+    /// (role + segment kinds with ToolCall done/error flags) so a timeout
+    /// assert can print what actually landed instead of a bare "timed out".
+    pub fn debug_layout(&self) -> Vec<String> {
+        self.messages
+            .iter()
+            .map(|m| {
+                let segs: Vec<String> = m
+                    .segments
+                    .iter()
+                    .map(|s| match s {
+                        Segment::Thinking { text, .. } => {
+                            format!("Thinking({}ch)", text.chars().count())
+                        }
+                        Segment::Markdown { text, .. } => {
+                            format!("Markdown({}ch)", text.chars().count())
+                        }
+                        Segment::ToolCall {
+                            tool,
+                            done,
+                            is_error,
+                            ..
+                        } => format!("Tool({tool},done={done},err={is_error})"),
+                        Segment::Approval { .. } => "Approval".into(),
+                        Segment::Plan { .. } => "Plan".into(),
+                        Segment::TurnChanges { rows, .. } => {
+                            format!("TurnChanges({}rows)", rows.len())
+                        }
+                    })
+                    .collect();
+                let role = match m.role {
+                    Role::User => {
+                        format!("User({:?})", m.text.chars().take(50).collect::<String>())
+                    }
+                    Role::Assistant => "Assistant".to_string(),
+                    Role::System => "System".to_string(),
+                };
+                format!("{role}[{}]", segs.join(","))
+            })
+            .collect()
+    }
+
     /// For self-tests: expand the most recent tool card of the given tool (exercising the code-card render path), returning whether one was found.
     /// After expanding, scroll back to the bottom: the card's extra height pushes the viewport off the bottom, and follow_bottom semantics keep it pinned
     pub fn debug_expand_tool(&mut self, tool: &str, cx: &mut Context<Self>) -> bool {
