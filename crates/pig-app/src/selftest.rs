@@ -2001,6 +2001,106 @@ pub(crate) async fn run_selftest(
     );
     println!("[selftest] three-pane minimum width clamping OK");
 
+    // Global search popup (Ctrl+K quick switcher): rows cover workspaces +
+    // sessions, query filters, Enter on a session row switches to it, and a
+    // workspace row enters hero preset to that workspace
+    {
+        use crate::search_popup::SearchRow;
+        cx.update_window(window_handle, |_, window, cx| {
+            view.update(cx, |app, cx| app.open_search_popup(window, cx));
+        })
+        .unwrap();
+        let rows = app!(|app: &mut AppView, cx| {
+            assert!(
+                app.search_open,
+                "popup should be open after open_search_popup"
+            );
+            app.search_rows(cx)
+        });
+        let ws_rows = rows
+            .iter()
+            .filter(|r| matches!(r, SearchRow::Workspace { .. }))
+            .count();
+        let session_rows = rows
+            .iter()
+            .filter(|r| matches!(r, SearchRow::Session { .. }))
+            .count();
+        assert!(ws_rows >= 1, "workspace rows should be listed");
+        assert!(
+            session_rows >= 3,
+            "session rows should list the sessions created so far (got {session_rows})"
+        );
+        // No-match query empties the list; ↑/↓ wrapping on the empty list is a
+        // no-op (move_search_selection returns early)
+        cx.update_window(window_handle, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.search_input.update(cx, |input, cx| {
+                    input.set_value("zzz-no-such-thing", window, cx)
+                });
+            });
+        })
+        .unwrap();
+        let empty = app!(|app: &mut AppView, cx| app.search_rows(cx).len());
+        assert_eq!(empty, 0, "a no-match query should empty the result list");
+        // Session-row confirm: pick the first session row (newest session) and
+        // confirm — current switches and the popup closes with state reset
+        cx.update_window(window_handle, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.search_input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            });
+        })
+        .unwrap();
+        let (session_row_ix, session_id) = app!(|app: &mut AppView, cx| {
+            let rows = app.search_rows(cx);
+            rows.iter()
+                .position(|r| matches!(r, SearchRow::Session { .. }))
+                .zip(rows.iter().find_map(|r| match r {
+                    SearchRow::Session { id } => Some(id.clone()),
+                    _ => None,
+                }))
+                .expect("session rows should be back with an empty query")
+        });
+        cx.update_window(window_handle, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.search_selected = session_row_ix;
+                app.confirm_search(window, cx);
+            });
+        })
+        .unwrap();
+        let after_session = app!(|app: &mut AppView, _| {
+            (app.search_open, app.search_selected, app.current.clone())
+        });
+        assert_eq!(after_session, (false, 0, Some(session_id.clone())));
+        // Workspace-row confirm: the first row is a workspace (activity
+        // order); confirming enters hero preset to it
+        let ws_path = app!(|app: &mut AppView, cx| {
+            let rows = app.search_rows(cx);
+            app.search_open = true; // reopen without focusing (window-free path)
+            match rows.first() {
+                Some(SearchRow::Workspace { path }) => Some(path.clone()),
+                _ => None,
+            }
+            .expect("the first row with an empty query should be a workspace")
+        });
+        cx.update_window(window_handle, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.search_selected = 0;
+                app.confirm_search(window, cx);
+            });
+        })
+        .unwrap();
+        let after_ws = app!(|app: &mut AppView, _| {
+            (app.search_open, app.current.clone(), app.hero_cwd.clone())
+        });
+        assert_eq!(
+            after_ws,
+            (false, None, Some(std::path::PathBuf::from(ws_path.clone()))),
+            "workspace confirm should close the popup and enter hero preset to it"
+        );
+    }
+    println!("[selftest] global search popup (rows/filter/session+workspace confirm) OK");
+
     println!("SELFTEST PASS");
     std::process::exit(0);
 }

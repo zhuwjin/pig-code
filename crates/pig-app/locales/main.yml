@@ -98,3 +98,33 @@ files:
   manager_linux:
     zh-CN: 文件管理器
     en: File Manager
+
+# 全局搜索弹窗（Ctrl+K 快速切换器：会话 + 工作区）
+search:
+  placeholder:
+    zh-CN: 搜索会话或工作区…
+    en: Search sessions or workspaces…
+  workspaces_one:
+    zh-CN: 工作区 1
+    en: 1 workspace
+  workspaces:
+    zh-CN: 工作区 %{n}
+    en: "%{n} workspaces"
+  sessions_one:
+    zh-CN: 会话 1
+    en: 1 session
+  sessions:
+    zh-CN: 会话 %{n}
+    en: "%{n} sessions"
+  hint_select:
+    zh-CN: "↑↓ 选择"
+    en: "↑↓ navigate"
+  hint_open:
+    zh-CN: "Enter 打开"
+    en: "Enter open"
+  hint_close:
+    zh-CN: "Esc 关闭"
+    en: "Esc close"
+  empty:
+    zh-CN: 无匹配结果
+    en: No results

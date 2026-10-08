@@ -47,6 +47,8 @@ pub(crate) enum SidebarView {
 pub enum SidebarEvent {
     Select(String),
     NewTask,
+    /// Open the global search popup (Ctrl+K quick switcher; AppView-owned)
+    OpenSearch,
     /// Create a new task under the given workspace directory (hero preset cwd)
     NewTaskInWorkspace(String),
     SetPinned(String, bool),
@@ -99,8 +101,6 @@ pub struct Sidebar {
     renaming: Option<RenameTarget>,
     rename_input: Entity<InputState>,
     active: Option<String>,
-    search_open: bool,
-    search_input: Entity<InputState>,
     expanded: std::collections::HashSet<String>,
     /// Expand/collapse animation state of a workspace's session list
     /// (crate::anim::ExpandAnim), key = workspace path
@@ -141,30 +141,16 @@ mod views;
 
 impl Sidebar {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(rust_i18n::t!("sidebar.search_placeholder"))
-        });
         let rename_input = cx.new(|cx| InputState::new(window, cx));
-        let _subscriptions = vec![
-            cx.subscribe_in(
-                &search_input,
-                window,
-                |_this: &mut Self, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        cx.notify();
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &rename_input,
-                window,
-                |this: &mut Self, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                        this.commit_rename(cx);
-                    }
-                },
-            ),
-        ];
+        let _subscriptions = vec![cx.subscribe_in(
+            &rename_input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_rename(cx);
+                }
+            },
+        )];
         Self {
             view: SidebarView::Workspace,
             sessions: vec![],
@@ -173,8 +159,6 @@ impl Sidebar {
             renaming: None,
             rename_input,
             active: None,
-            search_open: false,
-            search_input,
             expanded: std::collections::HashSet::new(),
             expand_anims: std::collections::HashMap::new(),
             paginate_anims: std::collections::HashMap::new(),
@@ -235,22 +219,6 @@ impl Sidebar {
             self.panel_width = width;
             cx.notify();
         }
-    }
-
-    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_open = true;
-        self.search_input.update(cx, |input, cx| {
-            input.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    fn query(&self, cx: &App) -> String {
-        self.search_input.read(cx).value().to_lowercase()
-    }
-
-    fn matches(&self, query: &str, text: &str) -> bool {
-        query.is_empty() || text.to_lowercase().contains(query)
     }
 
     /// Workspace display name: prefer the user alias, else the directory name.

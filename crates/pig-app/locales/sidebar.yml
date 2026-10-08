@@ -3,9 +3,6 @@ _version: 2
 # 侧栏（会话列表 / 工作区分组 / 右键菜单）。
 
 sidebar:
-  search_placeholder:
-    zh-CN: 搜索会话或工作区…
-    en: Search sessions or workspaces…
   # 会话标题空串哨兵的展示占位（自动命名完成前的侧栏/标题栏/归档页显示）
   untitled:
     zh-CN: 新任务

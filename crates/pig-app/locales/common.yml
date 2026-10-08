@@ -39,6 +39,12 @@ time:
   days:
     zh-CN: "%{n} 天"
     en: "%{n} d"
+  weeks:
+    zh-CN: "%{n} 周"
+    en: "%{n}w"
+  months:
+    zh-CN: "%{n} 个月"
+    en: "%{n}mo"
 
 # 设置页 - 外观 - 语言
 settings:

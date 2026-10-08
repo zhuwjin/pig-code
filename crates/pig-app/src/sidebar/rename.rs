@@ -36,13 +36,13 @@ impl Sidebar {
 
     /// The inline rename input is drawn on the session row, so first ensure the row
     /// actually renders: a regular session may be hidden in the workspace view by
-    /// collapsing/pagination/name filtering, so fall back to the flat list and clear
-    /// any blocking search term; archived sessions are not rendered in the sidebar
-    /// (managed on the settings page's "archived sessions"), return false to give up
+    /// collapsing/pagination, so fall back to the flat list; archived sessions are
+    /// not rendered in the sidebar (managed on the settings page's "archived
+    /// sessions"), return false to give up
     fn ensure_session_row_visible(
         &mut self,
         id: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.session_row_visible(id, cx) {
@@ -52,46 +52,26 @@ impl Sidebar {
             return false;
         }
         self.view = SidebarView::Flat;
-        let blocked_by_query = self
-            .sessions
-            .iter()
-            .find(|s| s.id == id)
-            .is_some_and(|s| !self.matches(&self.query(cx), &s.title));
-        if blocked_by_query {
-            self.search_input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-            });
-        }
         self.session_row_visible(id, cx)
     }
 
     /// Whether a session row is visible in the current view: archived sessions are
-    /// never visible (not rendered in the sidebar);
-    /// the flat view checks title filtering; the workspace view additionally
-    /// requires the workspace to be unfiltered by search, expanded,
-    /// and within the pagination range
-    fn session_row_visible(&self, id: &str, cx: &App) -> bool {
+    /// never visible (not rendered in the sidebar); the workspace view requires
+    /// the workspace expanded and the session within the pagination range
+    fn session_row_visible(&self, id: &str, _cx: &App) -> bool {
         let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
             return false;
         };
         if session.archived {
             return false;
         }
-        let query = self.query(cx);
         match self.view {
-            SidebarView::Flat => self.matches(&query, &session.title),
+            SidebarView::Flat => true,
             SidebarView::Workspace => {
                 if session.pinned {
-                    return self.matches(&query, &session.title);
+                    return true;
                 }
                 let workspace = session.cwd.display().to_string();
-                // The workspace view filters by workspace name/path, not by session
-                // title
-                if !self.matches(&query, &self.workspace_name(&workspace))
-                    && !self.matches(&query, &workspace)
-                {
-                    return false;
-                }
                 if !self.expanded.contains(&workspace) {
                     return false;
                 }

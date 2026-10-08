@@ -14,6 +14,7 @@ mod file_panel;
 mod font;
 mod i18n;
 mod review_panel;
+mod search_popup;
 mod settings;
 mod sidebar;
 mod subagent_panel;
@@ -36,9 +37,10 @@ use std::rc::Rc;
 use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName as AssetsIconName;
 use gpui_kit::base::GlobalState;
-use gpui_kit::base::{Align, ElementExt as _, Placement, Positioner};
+use gpui_kit::base::{Align, Dialog, ElementExt as _, Placement, Positioner};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::dock::{DockPlacement, panel_handle};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
@@ -54,7 +56,8 @@ gpui_kit::actions!(
     [
         NewTask,
         FocusSearch,
-        CloseSearch,
+        SearchPrev,
+        SearchNext,
         FocusThreadSearch,
         CloseThreadSearch,
         CloseSettings,
@@ -78,8 +81,8 @@ pub struct ThemeFollowSystem(pub bool);
 
 impl Global for ThemeFollowSystem {}
 
-/// Relative time display (just now / N minutes / N hours / N days; i18n via
-/// t! interpolation)
+/// Relative time display (just now / N minutes / N hours / N days / N weeks /
+/// N months; i18n via t! interpolation)
 pub trait RelativeTime {
     fn relative(&self) -> String;
 }
@@ -95,7 +98,16 @@ impl RelativeTime for u64 {
             0..=59 => rust_i18n::t!("time.just_now").to_string(),
             60..=3599 => rust_i18n::t!("time.minutes", n = diff / 60).to_string(),
             3600..=86399 => rust_i18n::t!("time.hours", n = diff / 3600).to_string(),
-            _ => rust_i18n::t!("time.days", n = diff / 86400).to_string(),
+            _ => {
+                let days = diff / 86400;
+                if days < 7 {
+                    rust_i18n::t!("time.days", n = days).to_string()
+                } else if days < 30 {
+                    rust_i18n::t!("time.weeks", n = days / 7).to_string()
+                } else {
+                    rust_i18n::t!("time.months", n = days / 30).to_string()
+                }
+            }
         }
     }
 }
@@ -304,6 +316,13 @@ struct AppView {
     hidden_workspaces: std::collections::HashSet<String>,
     /// Workspace path → user-defined display name
     workspace_aliases: std::collections::HashMap<String, String>,
+    /// Global search popup (Ctrl+K, quick switcher over sessions and
+    /// workspaces; see search_popup.rs)
+    search_open: bool,
+    search_input: Entity<InputState>,
+    /// Selected result row (flattened: workspaces then sessions)
+    search_selected: usize,
+    search_scroll: ScrollHandle,
     settings: Entity<SettingsView>,
     settings_open: bool,
     /// "Enable unregulated mode?" confirmation dialog (pops on every switch
@@ -397,6 +416,12 @@ impl AppView {
         let sidebar = cx.new(|cx| Sidebar::new(window, cx));
         let composer = cx.new(|cx| Composer::new(window, cx));
         let settings = cx.new(|cx| SettingsView::new(window, cx));
+        // Global search popup input: Change resets the selection (rows are
+        // recomputed on every render); Enter (PressEnter) confirms the selected
+        // row. set_value on close emits no Change (upstream emit_events=false),
+        // so the selection is reset explicitly in close_search_popup
+        let search_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(rust_i18n::t!("search.placeholder")));
         let (dock, dock_skin) =
             gpui_kit::component::dock::DockSkin::dock_area("pig-dock", None, window, cx);
         // The dock toggle button in the tab bar is unneeded (title bar
@@ -443,6 +468,10 @@ impl AppView {
             workspaces: vec![],
             hidden_workspaces: std::collections::HashSet::new(),
             workspace_aliases: std::collections::HashMap::new(),
+            search_open: false,
+            search_input,
+            search_selected: 0,
+            search_scroll: ScrollHandle::new(),
             settings,
             settings_open: false,
             yolo_confirm_open: false,
@@ -483,6 +512,18 @@ impl AppView {
             }),
             cx.subscribe_in(&app.sidebar, window, |this, _, event, window, cx| {
                 this.on_sidebar_event(event, window, cx);
+            }),
+            cx.subscribe_in(&app.search_input, window, |this, _, event, window, cx| {
+                match event {
+                    InputEvent::Change => {
+                        this.search_selected = 0;
+                        cx.notify();
+                    }
+                    // Single-line input emits PressEnter for Enter/Shift+Enter
+                    // alike (consumed at the input layer, never bubbles up)
+                    InputEvent::PressEnter { .. } => this.confirm_search(window, cx),
+                    _ => {}
+                }
             }),
             cx.subscribe(
                 &app.settings,
@@ -1061,8 +1102,13 @@ impl Render for AppView {
                 this.enter_hero(cx);
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.sidebar
-                    .update(cx, |sidebar, cx| sidebar.open_search(window, cx));
+                // Ctrl+K toggles the global search popup (quick switcher over
+                // sessions and workspaces)
+                if this.search_open {
+                    this.close_search_popup(window, cx);
+                } else {
+                    this.open_search_popup(window, cx);
+                }
             }))
             // In-session search: forwarded to the current session's thread
             // view; Close is triggered by Esc in the search bar's
@@ -1133,6 +1179,9 @@ impl Render for AppView {
             .when(self.yolo_confirm_open, |this| {
                 this.child(self.render_yolo_confirm(cx))
             })
+            // Global search popup (Ctrl+K): the Dialog component gates itself
+            // on the open flag (renders an empty div when closed)
+            .child(self.render_search_dialog(cx))
     }
 }
 
@@ -1186,7 +1235,11 @@ fn main() {
                 // Bottom terminal panel (matching the ctrl-` convention of
                 // terminal apps)
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
-                KeyBinding::new("escape", CloseSearch, Some("search")),
+                // Global search popup ↑/↓ selection: bound on the popup's
+                // "search" context (the wrapper around the query input), so no
+                // other input is affected; Esc rides the Dialog's own Cancel
+                KeyBinding::new("up", SearchPrev, Some("search")),
+                KeyBinding::new("down", SearchNext, Some("search")),
                 KeyBinding::new("escape", CloseThreadSearch, Some("thread-search")),
                 KeyBinding::new("escape", CloseSettings, Some("settings")),
                 // Keyboard navigation for the composer's / and @ popups: same

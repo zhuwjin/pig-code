@@ -40,8 +40,8 @@ impl Sidebar {
                     .w_full()
                     .rounded(cx.theme().radius)
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_search(window, cx);
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::OpenSearch);
                     }))
                     .child(Icon::new(IconName::Search).size_4())
                     .child(
@@ -57,20 +57,6 @@ impl Sidebar {
                             .child("Ctrl+K"),
                     ),
             )
-            .when(self.search_open, |this| {
-                this.child(
-                    div()
-                        .key_context("search")
-                        .on_action(cx.listener(|this, _: &crate::CloseSearch, window, cx| {
-                            this.search_open = false;
-                            this.search_input.update(cx, |input, cx| {
-                                input.set_value("", window, cx);
-                            });
-                            cx.notify();
-                        }))
-                        .child(Input::new(&self.search_input).small()),
-                )
-            })
             .into_any_element()
     }
 
@@ -270,11 +256,10 @@ impl Sidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let query = self.query(cx);
         let mut pinned: Vec<usize> = vec![];
         let mut rest: Vec<usize> = vec![];
         for (ix, s) in self.sessions.iter().enumerate() {
-            if s.archived || !self.matches(&query, &s.title) {
+            if s.archived {
                 continue;
             }
             if s.pinned {
@@ -437,7 +422,6 @@ impl Sidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let query = self.query(cx);
         let mut out: Vec<AnyElement> = vec![];
 
         // Pinned section: pinned sessions across workspaces in one place (archived
@@ -446,7 +430,7 @@ impl Sidebar {
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.pinned && !s.archived && self.matches(&query, &s.title))
+            .filter(|(_, s)| s.pinned && !s.archived)
             .map(|(ix, _)| ix)
             .collect();
         pinned.sort_by_key(|ix| std::cmp::Reverse(self.sessions[*ix].updated_at));
@@ -469,9 +453,6 @@ impl Sidebar {
 
         for (p_ix, workspace) in self.workspaces.iter().enumerate() {
             let name = self.workspace_name(workspace);
-            if !self.matches(&query, &name) && !self.matches(&query, workspace) {
-                continue;
-            }
             let expanded = self.expanded.contains(workspace);
             // While the collapse animation plays the content stays mounted: expanded
             // remains true while open flips to false immediately (instant icon

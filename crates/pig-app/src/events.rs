@@ -830,7 +830,7 @@ impl AppView {
     pub(crate) fn on_sidebar_event(
         &mut self,
         event: &SidebarEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -839,6 +839,7 @@ impl AppView {
                 self.hero_cwd = None;
                 self.enter_hero(cx);
             }
+            SidebarEvent::OpenSearch => self.open_search_popup(window, cx),
             SidebarEvent::NewTaskInWorkspace(path) => {
                 self.hero_cwd = Some(PathBuf::from(path));
                 self.enter_hero(cx);
