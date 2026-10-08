@@ -65,6 +65,9 @@ pub enum ThreadEvent {
         /// Feedback (kimi Revise: carried when the plan's "Revise" is submitted; None for other approvals)
         feedback: Option<String>,
     },
+    /// Click on the compact divider's "view summary" link: opens the right-side
+    /// "compact summary" tab (the clicked compaction point's own summary text)
+    OpenCompactSummary { text: String },
     /// Session fork: derives a new session from the history ending at this message's turn (turns = the number of turns kept)
     Fork { turns: usize },
 }
@@ -402,11 +405,22 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// Compaction finished: divider style (rendered as "🗄 Context compacted"; the full summary stays in text for self-test assertions)
-    pub fn add_compact_note(&mut self, note: &str, cx: &mut Context<Self>) {
+    /// Compaction finished: divider style ("context compacted (Nk → Mk tokens) · view summary"; the full summary stays in text for self-test assertions)
+    pub fn add_compact_note(
+        &mut self,
+        note: &str,
+        used_before: Option<u64>,
+        used_after: Option<u64>,
+        summary: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.messages.push(ChatMessage::system_with_kind(
             note.to_string(),
-            SystemNoteKind::Compacted,
+            SystemNoteKind::Compacted {
+                used_before,
+                used_after,
+                summary,
+            },
         ));
         self.auto_scroll();
         cx.notify();

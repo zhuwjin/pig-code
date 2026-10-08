@@ -419,12 +419,17 @@ impl AppView {
                 session_id,
                 note,
                 omitted,
+                used_before,
+                used_after,
+                summary,
                 ..
             } => {
                 let session_id = session_id.clone();
                 self.ensure_views(&session_id, cx);
                 let note = note.clone();
                 let omitted = *omitted;
+                let (used_before, used_after, summary) =
+                    (*used_before, *used_after, summary.clone());
                 self.views[&session_id].thread.update(cx, |thread, cx| {
                     thread.set_compacting(false, cx);
                     if omitted == 0 {
@@ -432,7 +437,7 @@ impl AppView {
                         // out flat directly
                         thread.add_system_note(&note, cx);
                     } else {
-                        thread.add_compact_note(&note, cx);
+                        thread.add_compact_note(&note, used_before, used_after, summary, cx);
                     }
                 });
             }

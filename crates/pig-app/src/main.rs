@@ -45,7 +45,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
-    TitleBar, h_flex, v_flex,
+    TitleBar, h_flex, text::TextViewState, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -131,7 +131,8 @@ struct SessionViews {
 /// Right panel tabs: "Changes" and "Trajectory" are built-in pages;
 /// "Subagent" is one per agent_id (opened by clicking a notification card);
 /// "File" is one per absolute path (opened by clicking the path on a Read
-/// card).
+/// card); "CompactSummary" shows the compact divider's summary (one shared
+/// tab, its content swapped per click).
 /// Browser/terminal/side chat to come later.
 #[derive(Clone, PartialEq, Eq)]
 enum RightTab {
@@ -144,6 +145,7 @@ enum RightTab {
     File {
         path: String,
     },
+    CompactSummary,
 }
 
 impl RightTab {
@@ -154,6 +156,7 @@ impl RightTab {
             Self::Trajectory => "trajectory".to_string(),
             Self::Subagent { agent_id } => format!("subagent-{agent_id}"),
             Self::File { path } => format!("file-{path}"),
+            Self::CompactSummary => "compact-summary".to_string(),
         }
     }
 }
@@ -373,6 +376,9 @@ struct AppView {
     /// Content panels of "File" tabs (normalized absolute path → panel
     /// entity; removed when the tab closes)
     file_tabs: HashMap<String, Entity<FileViewPanel>>,
+    /// Markdown render state of the "compact summary" tab (rebuilt on each
+    /// divider-link click; cleared when the tab closes)
+    compact_summary: Option<Entity<TextViewState>>,
     /// Whether the bottom terminal panel is expanded (collapsed by default)
     terminal_open: bool,
     /// Terminal panel entity (lazily created; collapsing only hides it, tabs
@@ -496,6 +502,7 @@ impl AppView {
             right_active: None,
             subagent_tabs: HashMap::new(),
             file_tabs: HashMap::new(),
+            compact_summary: None,
             terminal_open: false,
             terminal: None,
             terminal_h: TERMINAL_PANEL_DEFAULT_H,
@@ -738,6 +745,9 @@ impl AppView {
                 }
                 ThreadEvent::OpenFile { path, line } => {
                     this.open_file_tab(&sid, path.clone(), *line, cx);
+                }
+                ThreadEvent::OpenCompactSummary { text } => {
+                    this.open_compact_summary_tab(text.clone(), cx);
                 }
                 ThreadEvent::Fork { turns } => {
                     // Fork source = this ThreadView's session; once core

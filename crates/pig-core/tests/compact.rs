@@ -85,6 +85,9 @@ async fn model_summary_compact() {
         omitted,
         note,
         automatic,
+        used_before,
+        used_after,
+        summary,
         ..
     }) = collected.last()
     else {
@@ -93,6 +96,26 @@ async fn model_summary_compact() {
     // After cutting the tail back to a user boundary, 2 entries remain (window [T,A,u,A] drops the first two)
     assert_eq!(*omitted, 4);
     assert!(!automatic, "manual compact");
+    // The divider's "before → after" data: the mock reports a usage sample every
+    // turn, and the post-compact estimate is present (their ordering is not
+    // meaningful here — the mock's 142-token samples sit below the real
+    // estimate of the compacted history; ordering is covered by the auto-compact test)
+    assert!(
+        used_before.is_some(),
+        "a real Usage sample preceded compact"
+    );
+    assert!(
+        used_after.is_some_and(|after| after > 0),
+        "post-compact estimate should be present: {used_after:?}"
+    );
+    // The bare summary rides along for the UI's "view summary" panel (the note embeds
+    // the same text wrapped in model-facing guidance)
+    let summary = summary.as_deref().expect("model summary succeeded");
+    assert!(summary.contains(mock::SUMMARY_MARKER), "{summary}");
+    assert!(
+        !summary.contains("Earlier context compacted"),
+        "the bare summary carries no note wrapper: {summary}"
+    );
     assert!(
         note.contains("model summary"),
         "should use model summary: {note}"
@@ -108,6 +131,8 @@ async fn model_summary_compact() {
     assert!(rollout.contains("\"type\":\"compact\""), "{rollout}");
     assert!(rollout.contains(mock::SUMMARY_MARKER));
     assert!(rollout.contains("\"used_after\""), "{rollout}");
+    assert!(rollout.contains("\"used_before\""), "{rollout}");
+    assert!(rollout.contains("\"summary\""), "{rollout}");
 
     // Post-compact history = system + summary + 2 entries after the user boundary + new user = 5
     send(&events, &agent, &sid, "ECHO_HISTORY");
@@ -150,6 +175,28 @@ async fn auto_compact_on_high_usage() {
     assert!(
         compact_pos < complete_pos,
         "compact must happen before TurnComplete"
+    );
+    // The divider's "before → after": before = the 120000 watermark that triggered the
+    // auto-compact, after = the estimate of the compacted history (well below)
+    let Some(Event::ContextCompacted {
+        used_before,
+        used_after,
+        summary,
+        ..
+    }) = collected.get(compact_pos.expect("checked above"))
+    else {
+        unreachable!()
+    };
+    assert_eq!(*used_before, Some(120_000));
+    assert!(
+        used_after.is_some_and(|after| after < 120_000),
+        "post-compact estimate should be well below the trigger watermark: {used_after:?}"
+    );
+    assert!(
+        summary
+            .as_deref()
+            .is_some_and(|s| s.contains(mock::SUMMARY_MARKER)),
+        "the bare summary should ride along for the summary panel: {summary:?}"
     );
     agent.shutdown();
 }

@@ -558,6 +558,38 @@ pub(crate) async fn run_selftest(
     );
     println!("[selftest] model summary compact OK");
 
+    // Compact summary panel: simulate clicking the divider's "view summary" link
+    // (ThreadEvent::OpenCompactSummary shares the click path) → the right
+    // "compact summary" tab opens with the summary markdown
+    app!(|app: &mut AppView, cx| {
+        let views = app.views.get(&session_a).expect("session A view");
+        views.thread.update(cx, |_, cx| {
+            cx.emit(crate::thread_view::ThreadEvent::OpenCompactSummary {
+                text: format!("## Summary\n\n{}", pig_core::mock::SUMMARY_MARKER),
+            });
+        });
+    });
+    let mut summary_waited = 0u64;
+    loop {
+        timer!(100).await;
+        summary_waited += 100;
+        assert!(summary_waited < 5_000, "compact summary tab open timed out");
+        let opened = app!(|app: &mut AppView, _| {
+            app.right_active == Some(RightTab::CompactSummary) && app.compact_summary.is_some()
+        });
+        if opened {
+            break;
+        }
+    }
+    app!(|app: &mut AppView, cx| {
+        app.close_right_tab(RightTab::CompactSummary, cx);
+        assert!(
+            app.compact_summary.is_none(),
+            "closing the tab should release the render state"
+        );
+    });
+    println!("[selftest] compact summary panel open/close OK");
+
     // Scenario C: plan mode loop
     app!(|app: &mut AppView, _| app.agent.new_session(
         app.cwd.clone(),

@@ -21,6 +21,9 @@ impl Session {
                     omitted: 0,
                     note: "History is short; no compaction needed.".to_string(),
                     automatic,
+                    used_before: None,
+                    used_after: None,
+                    summary: None,
                 },
                 tx,
             );
@@ -88,12 +91,17 @@ How to use this summary: it is a faithful record of the earlier conversation —
         // without the reset the watermark check would see the pre-compaction high value and immediately trigger
         // another automatic compaction at the start of the next turn, compacting the freshly generated summary again
         let used_after = estimate_history_tokens(&self.history);
+        // The divider's "before → after": the pre-compaction watermark is the last real Usage
+        // sample (None when no request has happened yet)
+        let used_before = self.last_total_tokens;
         self.last_total_tokens = Some(used_after);
         self.record(&RolloutRecord::Compact {
             note: note.clone(),
             omitted,
             automatic,
             used_after: Some(used_after),
+            used_before,
+            summary: summary.clone(),
         });
         // Refresh the capacity chip immediately (skipped when no model is configured; no window to report)
         if let Some(config) = config {
@@ -118,6 +126,9 @@ How to use this summary: it is a faithful record of the earlier conversation —
                 omitted,
                 note,
                 automatic,
+                used_before,
+                used_after: Some(used_after),
+                summary,
             },
             tx,
         );

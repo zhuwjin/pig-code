@@ -179,13 +179,22 @@ impl Session {
                     omitted,
                     automatic,
                     used_after,
+                    used_before,
+                    summary,
                 } => {
                     // Replay restores the compaction point's usage watermark (used_after is the estimate of the
                     // compacted history) and re-emits the event: the UI rebuilds the "context compacted" divider at the same spot in the message stream
                     if let Some(used) = used_after {
                         self.last_total_tokens = Some(*used);
                     }
-                    let (note, omitted, automatic) = (note.clone(), *omitted, *automatic);
+                    let (note, omitted, automatic, used_before, used_after, summary) = (
+                        note.clone(),
+                        *omitted,
+                        *automatic,
+                        *used_before,
+                        *used_after,
+                        summary.clone(),
+                    );
                     self.emit(
                         |session_id, seq| Event::ContextCompacted {
                             session_id,
@@ -193,6 +202,9 @@ impl Session {
                             omitted,
                             note,
                             automatic,
+                            used_before,
+                            used_after,
+                            summary,
                         },
                         tx,
                     );

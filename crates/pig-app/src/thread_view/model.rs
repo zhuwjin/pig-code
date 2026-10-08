@@ -429,7 +429,7 @@ pub struct ChatMessage {
     pub role: Role,
     pub text: String,
     /// System note kind (only meaningful for the System role): plain text / "Context compacted" divider
-    /// (the compact divider renders as an icon-bearing divider row; the full summary stays in text for self-assertions and debugging)
+    /// (the compact divider renders as a divider row with a "view summary" link; the full summary stays in text for self-assertions and debugging)
     pub system_kind: SystemNoteKind,
     /// Selection handle + refresh subscription of a user message (drives live highlighting during drag-selection); only the User role has it
     pub selection: Option<(TextSelectionHandle, Subscription)>,
@@ -454,8 +454,19 @@ pub struct ChatMessage {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SystemNoteKind {
     Plain,
-    /// "Context compacted" divider (divider line + Archive icon + short label; does not render the full summary)
-    Compacted,
+    /// "Context compacted" divider: label + "before → after" token counts + a blue
+    /// "view summary" link opening the right-side summary panel (the full summary
+    /// also stays in text for self-assertions and debugging)
+    Compacted {
+        /// Pre-/post-compaction context usage watermark (None = unknown, e.g. no
+        /// Usage sample yet or a pre-field rollout record): the pair drives the
+        /// "（Nk → Mk tokens）" suffix; when either side is missing only the label shows
+        used_before: Option<u64>,
+        used_after: Option<u64>,
+        /// Bare model summary for the right-side panel (None = truncation fallback;
+        /// the panel then shows the full note)
+        summary: Option<String>,
+    },
     /// Core error note: renders "⚠ {localized error}" with the text built at
     /// draw time (a language switch updates it too); `text` stays empty
     Error(pig_protocol::CoreError),

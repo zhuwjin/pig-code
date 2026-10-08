@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::component::text::TextView;
 
 /// Right panel menu item: (name, icon, shortcut action, placeholder-disabled,
 /// tab to open on click)
@@ -54,6 +55,10 @@ impl AppView {
         // The "File" tab's content panel is released when the tab closes
         if let RightTab::File { path } = &tab {
             self.file_tabs.remove(path);
+        }
+        // The "Compact summary" tab's render state is released when the tab closes
+        if tab == RightTab::CompactSummary {
+            self.compact_summary = None;
         }
         if self.right_active.as_ref() == Some(&tab) {
             self.right_active = self.right_tabs.last().cloned();
@@ -129,6 +134,22 @@ impl AppView {
             }
         }
         let tab = RightTab::File { path: key };
+        if !self.right_tabs.contains(&tab) {
+            self.right_tabs.push(tab.clone());
+        }
+        self.right_active = Some(tab);
+        self.right_open = true;
+        cx.notify();
+    }
+
+    /// Open/focus the "compact summary" tab (the compact divider's "view summary"
+    /// link): one shared tab whose content is rebuilt per click, so each compaction
+    /// point shows its own summary.
+    pub(crate) fn open_compact_summary_tab(&mut self, text: String, cx: &mut Context<Self>) {
+        let state = cx.new(|cx| TextViewState::markdown("", cx));
+        state.update(cx, |state, cx| state.set_text(&text, cx));
+        self.compact_summary = Some(state);
+        let tab = RightTab::CompactSummary;
         if !self.right_tabs.contains(&tab) {
             self.right_tabs.push(tab.clone());
         }
@@ -431,6 +452,12 @@ impl AppView {
                     truncate_tab_label(name),
                 )
             }
+            RightTab::CompactSummary => (
+                Icon::new(AssetsIconName::Archive)
+                    .size_3p5()
+                    .into_any_element(),
+                rust_i18n::t!("panel.compact_summary").to_string(),
+            ),
         };
         h_flex()
             .id(format!("right-tab-{}", tab.key()))
@@ -556,6 +583,18 @@ impl AppView {
             },
             Some(RightTab::File { path }) => match self.file_tabs.get(path) {
                 Some(panel) => panel.clone().into_any_element(),
+                None => self.render_right_menu_page(window, cx),
+            },
+            Some(RightTab::CompactSummary) => match &self.compact_summary {
+                // Read-only markdown view of the clicked compaction point's summary
+                // (the outer div scrolls, same as the trajectory panel)
+                Some(state) => div()
+                    .id("compact-summary-panel")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .child(TextView::new(state).selectable(true).text_sm())
+                    .into_any_element(),
                 None => self.render_right_menu_page(window, cx),
             },
             None => self.render_right_menu_page(window, cx),

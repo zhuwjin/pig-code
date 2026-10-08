@@ -1237,7 +1237,8 @@ fn grep_result_row_click_opens_file_at_line(cx: &mut gpui_kit::TestAppContext) {
     }
 }
 
-/// Compact divider: in-progress "compacting context" → done "context compacted";
+/// Compact divider: in-progress "compacting context" → done "context compacted (Nk → Mk tokens)"
+/// with a "view summary" link (click → OpenCompactSummary carrying the bare summary);
 /// the full summary stays in text.
 #[gpui_kit::test]
 fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
@@ -1266,17 +1267,29 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
             Probe { thread }
         },
     );
-
+    // Event capture (the subscription must live until the test ends)
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = captured.clone();
+    let mut events_sub = None;
     // In progress: set_compacting(true) → the progress divider appears and fills the content column (the divider's flex_grow works)
     window
-        .update(cx, |probe, _, cx| {
+        .update(cx, |probe, window, cx| {
             probe.thread.update(cx, |view, cx| {
+                let entity = cx.entity();
+                events_sub = Some(cx.subscribe_in(
+                    &entity,
+                    window,
+                    move |_, _, event: &super::ThreadEvent, _, _| {
+                        sink.borrow_mut().push(event.clone());
+                    },
+                ));
                 view.append_user_message("tidy up this file".to_string(), vec![], vec![], cx);
                 view.set_compacting(true, cx);
                 assert!(view.debug_compacting());
             });
         })
         .unwrap();
+    let _events_sub = events_sub;
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     cx.update_window(window.into(), |_, window, _| {
@@ -1295,7 +1308,13 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, cx| {
                 view.set_compacting(false, cx);
-                view.add_compact_note("[前文已压缩·模型摘要] 省略 9 条消息。\n\n摘要正文", cx);
+                view.add_compact_note(
+                    "[前文已压缩·模型摘要] 省略 9 条消息。\n\n摘要正文",
+                    Some(391_000),
+                    Some(41_600),
+                    Some("摘要正文".to_string()),
+                    cx,
+                );
                 assert!(!view.debug_compacting());
             });
         })
@@ -1312,8 +1331,33 @@ fn compact_divider_progress_then_done(cx: &mut gpui_kit::TestAppContext) {
             .try_find(("compact-note", 1usize))
             .expect("the 'context compacted' ('上下文已压缩') divider should appear");
         assert!(snap.visible());
+        // The "view summary" link sits inside the divider
+        let link = window
+            .try_find(("compact-summary-link", 1usize))
+            .expect("the 'view summary' link should appear inside the divider");
+        assert!(link.visible());
     })
     .unwrap();
+    // Clicking the link emits OpenCompactSummary with the bare summary (not the full note)
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("compact-summary-link", 1usize), cx);
+    })
+    .unwrap();
+    {
+        let events = captured.borrow();
+        assert_eq!(
+            events.len(),
+            1,
+            "OpenCompactSummary should be emitted exactly once: {}",
+            events.len()
+        );
+        match &events[0] {
+            super::ThreadEvent::OpenCompactSummary { text } => {
+                assert_eq!(text, "摘要正文");
+            }
+            other => panic!("expected an OpenCompactSummary event: {other:?}"),
+        }
+    }
     window
         .update(cx, |probe, _, cx| {
             probe.thread.update(cx, |view, _| {

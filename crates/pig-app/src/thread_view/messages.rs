@@ -641,29 +641,60 @@ impl ThreadView {
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("⚠ {}", crate::errors::core_error_text(error)))
                     .into_any_element(),
-                SystemNoteKind::Compacted => div()
-                    .id(("compact-note", ix))
-                    .test_support()
-                    .w_full()
-                    .child(render_compact_divider(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Icon::new(AssetIconName::Archive)
-                                    .size_3p5()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(rust_i18n::t!("thread.context_compacted")),
-                            )
-                            .into_any_element(),
-                        cx,
-                    ))
-                    .into_any_element(),
+                SystemNoteKind::Compacted {
+                    used_before,
+                    used_after,
+                    summary,
+                } => {
+                    // Label: with both watermarks known "context compacted (Nk → Mk tokens)",
+                    // otherwise the bare "context compacted" (old rollout records carry no counts)
+                    let label = match (used_before, used_after) {
+                        (Some(before), Some(after)) => rust_i18n::t!(
+                            "thread.context_compacted_full",
+                            before = fmt_tokens(*before),
+                            after = fmt_tokens(*after)
+                        )
+                        .to_string(),
+                        _ => rust_i18n::t!("thread.context_compacted").to_string(),
+                    };
+                    // The panel shows the bare summary; the truncation fallback has none
+                    // and shows the full note instead
+                    let panel_text = summary.clone().unwrap_or_else(|| message.text.clone());
+                    div()
+                        .id(("compact-note", ix))
+                        .test_support()
+                        .w_full()
+                        .child(render_compact_divider(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .id(("compact-summary-link", ix))
+                                        .test_support()
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        // Link blue (same as the search result row hover)
+                                        .text_color(gpui_kit::component::theme::blue_500())
+                                        .hover(|this| this.underline())
+                                        .child(rust_i18n::t!("thread.view_summary"))
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(ThreadEvent::OpenCompactSummary {
+                                                text: panel_text.clone(),
+                                            });
+                                        })),
+                                )
+                                .into_any_element(),
+                            cx,
+                        ))
+                        .into_any_element()
+                }
             },
             Role::Assistant => {
                 let has_work = message

@@ -74,6 +74,12 @@ thread:
   context_compacted:
     zh-CN: 上下文已压缩
     en: Context compacted
+  context_compacted_full:
+    zh-CN: 上下文已压缩（%{before} → %{after} tokens）
+    en: Context compacted (%{before} → %{after} tokens)
+  view_summary:
+    zh-CN: 查看摘要
+    en: View summary
   fork:
     zh-CN: 分叉
     en: Fork

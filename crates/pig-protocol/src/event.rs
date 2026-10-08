@@ -223,6 +223,17 @@ pub enum Event {
         note: String,
         /// true = triggered automatically pre-sampling; false = the user's manual /compact
         automatic: bool,
+        /// Pre-compaction context usage watermark (None = no Usage sample yet); shown in the
+        /// divider as "before → after tokens"
+        #[serde(default)]
+        used_before: Option<u64>,
+        /// Post-compaction estimated watermark (the same value as the refreshed ContextUsage)
+        #[serde(default)]
+        used_after: Option<u64>,
+        /// Bare model summary (None = summary generation failed, truncation fallback); the
+        /// note embeds it in model-facing guidance — the UI's "view summary" panel shows this
+        #[serde(default)]
+        summary: Option<String>,
     },
     /// core blocks waiting for Op::ApprovalReply (same request_id)
     ApprovalRequested {

@@ -19,6 +19,9 @@ panel:
   subagent:
     zh-CN: 子代理
     en: Subagent
+  compact_summary:
+    zh-CN: 压缩摘要
+    en: Compact summary
   changes_empty:
     zh-CN: 开始会话后，这里会显示工作区改动
     en: Workspace changes will show here once a session starts

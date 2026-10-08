@@ -148,6 +148,12 @@ pub enum RolloutRecord {
         /// last_total_tokens, so that after reopening, the watermark check does not
         /// immediately fire another auto-compact on the stale pre-compact high value)
         used_after: Option<u64>,
+        /// Pre-compaction context usage watermark (None on old records / when no Usage
+        /// sample existed yet); the UI divider shows it as "before → after tokens"
+        used_before: Option<u64>,
+        /// Bare model summary (None = truncation fallback / old records); the note embeds
+        /// it in model-facing guidance — the UI's summary panel shows the bare text
+        summary: Option<String>,
     },
 }
 
