@@ -1,5 +1,6 @@
-use gpui_kit::{AssetSource, Result, SharedString};
+use gpui_kit::{AssetSource, Image, ImageFormat, Result, SharedString};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 /// pig's own assets (provider icons etc.), embedded into the binary by
 /// rust-embed; debug builds read from the source directory, release builds pack
@@ -7,6 +8,18 @@ use std::borrow::Cow;
 #[derive(rust_embed::RustEmbed)]
 #[folder = "assets/"]
 struct PigAssets;
+
+/// The Win11-style colored folder icon (64px PNG; sourced from ZCode's
+/// Apache-2.0 material-icons set — the same icon its "open with" spots use).
+/// Used as the title-bar "open in file manager" icon on non-macOS and as the
+/// pre-fetch fallback on macOS (the real NSWorkspace Finder icon replaces it)
+pub(crate) fn folder_icon() -> Option<Arc<Image>> {
+    let file = PigAssets::get("icons/folder-win.png")?;
+    Some(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        file.data.to_vec(),
+    )))
+}
 
 /// Chained asset source: look up pig's own assets first, falling back to
 /// gpui-kit official component assets on a miss (Lucide icons etc.). Replaces
@@ -36,6 +49,20 @@ impl AssetSource for ChainedAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedded Win11-style folder icon must be a plausible PNG (loaded at
+    /// startup as the "open in file manager" button icon on non-macOS; sourced
+    /// from ZCode's Apache-2.0 material-icons set, rasterized to 64px)
+    #[test]
+    fn folder_icon_png_loadable() {
+        let file = PigAssets::get("icons/folder-win.png").expect("icons/folder-win.png embedded");
+        let bytes = file.data.as_ref();
+        assert!(bytes.len() > 500, "folder icon PNG suspiciously small");
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+    }
 
     /// All icon assets referenced by the preset directory must be loadable
     /// (rust-embed key = path relative to assets/); when a new preset changes a

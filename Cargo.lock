@@ -5313,6 +5313,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "windows 0.57.0",
 ]
 
 [[package]]

@@ -132,8 +132,7 @@ impl AppView {
                             // "Open in Finder/file manager" split button:
                             // the main button opens the current workspace
                             // directly, the chevron opens a menu (open in
-                            // terminal/editor etc. will later hang on the
-                            // same menu)
+                            // terminal etc. hang on the same menu)
                             .when(self.current.is_some(), |this| {
                                 let fm_label =
                                     rust_i18n::t!("title_bar.open_in", name = file_manager_name())
@@ -152,8 +151,14 @@ impl AppView {
                                         .into_any_element(),
                                 };
                                 let view = cx.entity().downgrade();
-                                let menu_icon = self.fm_icon.clone();
-                                let menu_label = fm_label.clone();
+                                let fm_menu_icon = self.fm_icon.clone();
+                                // The dropdown rows carry the bare localized
+                                // app name next to the app icon, like app
+                                // entries; the full "open in …" sentence stays
+                                // on the button tooltip
+                                let fm_menu_label = file_manager_name();
+                                let term_menu_icon = self.terminal_icon.clone();
+                                let term_menu_label = terminal_name();
                                 this.child(
                                     DropdownButton::new("fm-split")
                                         .outline()
@@ -169,32 +174,75 @@ impl AppView {
                                         )
                                         .dropdown_menu(move |menu, _, _| {
                                             let view = view.clone();
-                                            let label = menu_label.clone();
-                                            // With a real image, draw an
-                                            // "icon + text" row via the
-                                            // ElementItem variant (the icon
-                                            // slot only takes monochrome
-                                            // Icons, colorful images must go
-                                            // through img); without one
-                                            // (non-mac / not yet fetched)
-                                            // degrade to a plain text item
-                                            let item = match menu_icon.clone() {
-                                                Some(icon) => {
-                                                    PopupMenuItem::element(move |_, _| {
-                                                        h_flex()
-                                                            .gap_2()
-                                                            .items_center()
-                                                            .child(img(icon.clone()).size_4())
-                                                            .child(label.clone())
-                                                    })
+                                            // App rows: "real icon + name" via
+                                            // the ElementItem variant (the icon
+                                            // slot only takes monochrome Icons,
+                                            // colorful images must go through
+                                            // img); a Lucide glyph stands in
+                                            // until the real icon arrives (or
+                                            // where extraction is unavailable)
+                                            let app_row = |icon: &Option<
+                                                std::sync::Arc<Image>,
+                                            >,
+                                             fallback: AssetsIconName,
+                                             label: &str|
+                                             -> PopupMenuItem {
+                                                let label = label.to_string();
+                                                match icon.clone() {
+                                                    Some(icon) => {
+                                                        PopupMenuItem::element(move |_, _| {
+                                                            h_flex()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .child(
+                                                                    img(icon.clone()).size_4(),
+                                                                )
+                                                                .child(label.clone())
+                                                        })
+                                                    }
+                                                    None => PopupMenuItem::element(
+                                                        move |_, _| {
+                                                            h_flex()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .child(
+                                                                    Icon::new(fallback).size_4(),
+                                                                )
+                                                                .child(label.clone())
+                                                        },
+                                                    ),
                                                 }
-                                                None => PopupMenuItem::new(menu_label.clone()),
                                             };
-                                            menu.item(item.on_click(move |_, _, cx| {
-                                                let _ = view.update(cx, |this, _| {
-                                                    this.open_current_in_file_manager();
-                                                });
-                                            }))
+                                            menu.item(
+                                                app_row(
+                                                    &fm_menu_icon,
+                                                    AssetsIconName::FolderOpen,
+                                                    &fm_menu_label,
+                                                )
+                                                .on_click({
+                                                    let view = view.clone();
+                                                    move |_, _, cx| {
+                                                        let _ = view.update(cx, |this, _| {
+                                                            this.open_current_in_file_manager();
+                                                        });
+                                                    }
+                                                }),
+                                            )
+                                            .item(
+                                                app_row(
+                                                    &term_menu_icon,
+                                                    AssetsIconName::Terminal,
+                                                    &term_menu_label,
+                                                )
+                                                .on_click({
+                                                    let view = view.clone();
+                                                    move |_, _, cx| {
+                                                        let _ = view.update(cx, |this, _| {
+                                                            this.open_current_in_terminal();
+                                                        });
+                                                    }
+                                                }),
+                                            )
                                         }),
                                 )
                             })
@@ -482,6 +530,20 @@ impl AppView {
         }
     }
 
+    /// Title-bar menu "open in terminal": same shape as the file-manager one
+    pub(crate) fn open_current_in_terminal(&self) {
+        let Some(cwd) = self.current_cwd() else {
+            return;
+        };
+        if let Err(err) = pig_core::files::open_in_terminal(&cwd) {
+            eprintln!(
+                "[fm] failed to open via {} {}: {err}",
+                terminal_name(),
+                cwd.display()
+            );
+        }
+    }
+
     /// Title bar branch switch menu: deferred to the window layer, anchored
     /// right below the branch chip (same pattern as the tab "+" menu). The
     /// current branch is highlighted; clicking another branch checks it
@@ -582,5 +644,19 @@ pub(crate) fn file_manager_name() -> String {
         rust_i18n::t!("files.manager_windows").to_string()
     } else {
         rust_i18n::t!("files.manager_linux").to_string()
+    }
+}
+
+/// Platform name for "open in a terminal" (localized), matching the hardcoded
+/// preference list in pig_core::files::open_in_terminal: Windows Terminal on
+/// Windows (the wt.exe preference), Terminal.app on macOS, the generic
+/// "Terminal" for Linux's probe list
+pub(crate) fn terminal_name() -> String {
+    if cfg!(target_os = "macos") {
+        rust_i18n::t!("files.terminal_macos").to_string()
+    } else if cfg!(target_os = "windows") {
+        rust_i18n::t!("files.terminal_windows").to_string()
+    } else {
+        rust_i18n::t!("files.terminal_linux").to_string()
     }
 }

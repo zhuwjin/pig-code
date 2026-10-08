@@ -29,5 +29,14 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 
+# Windows 取资源管理器/Windows Terminal 真实应用图标；对齐 macOS 的 Finder 图标路径，已在依赖树内
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.57", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_SystemInformation",
+    "Win32_System_Registry",
+    "Win32_Graphics_Gdi",
+] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

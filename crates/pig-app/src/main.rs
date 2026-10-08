@@ -287,6 +287,10 @@ struct AppView {
     /// fetched in the background on macOS; None before it arrives or on other
     /// platforms → falls back to the Lucide folder icon)
     fm_icon: Option<std::sync::Arc<Image>>,
+    /// Real terminal app icon for the "open in terminal" menu row (background
+    /// extraction on Windows/macOS; None elsewhere or before it arrives →
+    /// falls back to the Lucide terminal glyph)
+    terminal_icon: Option<std::sync::Arc<Image>>,
     /// Trajectory popup (None = closed): persisted model-io records of the
     /// current session
     trajectory: Option<TrajectoryState>,
@@ -458,6 +462,7 @@ impl AppView {
             session_menu_outside_close: None,
             session_menu_btn_bounds: Rc::new(Cell::new(Bounds::default())),
             fm_icon: None,
+            terminal_icon: None,
             trajectory: None,
             hero_branch: None,
             hero_branches: vec![],
@@ -563,8 +568,14 @@ impl AppView {
         }
         app.push_hero_info(cx);
         app.refresh_git_branch(None, cx);
-        // macOS: fetch the real Finder icon in the background (NSWorkspace,
-        // thread-safe); fall back to the Lucide folder icon until it arrives
+        // Title-bar "open in …" icons: the embedded Win11-style colored folder
+        // for the file-manager button immediately, replaced by the platform's
+        // real app icons once the background fetches land (macOS: NSWorkspace
+        // Finder/Terminal icons; Windows: PrivateExtractIconsW on
+        // explorer.exe / the Windows Terminal alias)
+        app.fm_icon = crate::assets::folder_icon();
+        // The two cfg blocks below differ only in the extraction fn and the
+        // target field; spelled out for clarity over a generic helper
         #[cfg(target_os = "macos")]
         {
             let task = cx
@@ -574,6 +585,54 @@ impl AppView {
                 if let Some(png) = task.await {
                     let _ = this.update(cx, |app, cx| {
                         app.fm_icon = Some(std::sync::Arc::new(Image::from_bytes(
+                            ImageFormat::Png,
+                            png,
+                        )));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+            let task = cx
+                .background_executor()
+                .spawn(async move { pig_core::files::terminal_icon_png() });
+            cx.spawn(async move |this: WeakEntity<AppView>, cx| {
+                if let Some(png) = task.await {
+                    let _ = this.update(cx, |app, cx| {
+                        app.terminal_icon = Some(std::sync::Arc::new(Image::from_bytes(
+                            ImageFormat::Png,
+                            png,
+                        )));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let task = cx
+                .background_executor()
+                .spawn(async move { pig_core::files::file_manager_icon_png() });
+            cx.spawn(async move |this: WeakEntity<AppView>, cx| {
+                if let Some(png) = task.await {
+                    let _ = this.update(cx, |app, cx| {
+                        app.fm_icon = Some(std::sync::Arc::new(Image::from_bytes(
+                            ImageFormat::Png,
+                            png,
+                        )));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+            let task = cx
+                .background_executor()
+                .spawn(async move { pig_core::files::terminal_icon_png() });
+            cx.spawn(async move |this: WeakEntity<AppView>, cx| {
+                if let Some(png) = task.await {
+                    let _ = this.update(cx, |app, cx| {
+                        app.terminal_icon = Some(std::sync::Arc::new(Image::from_bytes(
                             ImageFormat::Png,
                             png,
                         )));

@@ -87,7 +87,7 @@ title_bar:
     zh-CN: 切换分支
     en: Switch branch
 
-# 「在系统文件管理器中打开」的平台称呼（标题栏 split 按钮的菜单标签/tooltip）
+# 「在系统文件管理器/终端中打开」的平台称呼（标题栏 split 按钮的菜单标签/tooltip）
 files:
   manager_macos:
     zh-CN: 访达
@@ -98,6 +98,16 @@ files:
   manager_linux:
     zh-CN: 文件管理器
     en: File Manager
+  # open_in_terminal 的平台终端称呼（Windows 指 wt.exe 优先项）
+  terminal_macos:
+    zh-CN: 终端
+    en: Terminal
+  terminal_windows:
+    zh-CN: Windows 终端
+    en: Windows Terminal
+  terminal_linux:
+    zh-CN: 终端
+    en: Terminal
 
 # 全局搜索弹窗（Ctrl+K 快速切换器：会话 + 工作区）
 search:
