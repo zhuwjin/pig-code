@@ -76,8 +76,9 @@ impl AppView {
             }
             // User explicitly picked a model: leave the model display alone, only seed mode/reasoning level
             _ if self.hero_model_dirty => None,
-            // Seed has no model choice: show the "no model configured" placeholder (no leftover label from the previous session)
-            _ => Some(rust_i18n::t!("composer.no_model").to_string()),
+            // Seed has no model choice: show the "no model configured" placeholder (no leftover label from the previous session;
+            // the empty sentinel localizes at the composer's draw time)
+            _ => Some(String::new()),
         };
         self.composer.update(cx, |composer, cx| {
             composer.set_exec_mode(seed.exec_mode, cx);
@@ -333,7 +334,12 @@ impl AppView {
                     })),
             )
             .when_some(self.hero_error.clone(), |this, error| {
-                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(crate::errors::core_error_text(&error)),
+                )
             })
             .into_any_element()
     }

@@ -852,11 +852,12 @@ impl ThreadView {
             !done && !card.finished && !approval_pending
         };
         // The background card's live progress lives in the card-level live_note (written by SubagentActivity keyed by agent_id);
-        // the foreground card uses the segment-level live_note (written by SubagentProgress keyed by item_id)
-        let progress_note = if card.background {
-            card.live_note.as_deref()
+        // the foreground card uses the segment-level live_note (written by SubagentProgress keyed by item_id).
+        // The card-level note is structured and localizes at draw time; the segment-level note is core-provided raw text
+        let progress_note: Option<String> = if card.background {
+            card.live_note.as_ref().map(AgentLiveNote::display)
         } else {
-            live_note
+            live_note.map(str::to_string)
         };
         let failed = done && is_error;
         let title = if card.description.is_empty() {
@@ -940,9 +941,10 @@ impl ThreadView {
                     )
                     // Live progress row while running (moved into the card: spinner plus single-line ellipsis)
                     .when(
-                        running && progress_note.is_some_and(|note| !note.is_empty()),
+                        running && progress_note.as_deref().is_some_and(|n| !n.is_empty()),
                         |this| {
                             let note = progress_note
+                                .as_deref()
                                 .unwrap_or_default()
                                 .split_whitespace()
                                 .collect::<Vec<_>>()
@@ -1208,11 +1210,12 @@ impl ThreadView {
                 let card = &cards[ix];
                 let card_done = row_done(card);
                 // Progress row while running: background cards use the card-level live_note (written by SubagentActivity),
-                // foreground cards share the segment-level live_note (written by SubagentProgress keyed by item_id)
+                // foreground cards share the segment-level live_note (written by SubagentProgress keyed by item_id);
+                // the card-level note is structured and localizes at draw time
                 let note = if card.background {
-                    card.live_note.as_deref()
+                    card.live_note.as_ref().map(AgentLiveNote::display)
                 } else {
-                    live_note
+                    live_note.map(str::to_string)
                 };
                 let base_title = if card.description.is_empty() {
                     rust_i18n::t!("thread.subagent").to_string()
@@ -1271,6 +1274,7 @@ impl ThreadView {
                             .into_any_element()
                     } else {
                         let note = note
+                            .as_deref()
                             .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
                             .filter(|n| !n.is_empty());
                         h_flex()

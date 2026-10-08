@@ -118,6 +118,7 @@ impl ThreadView {
                     output: String::new(),
                     is_error: false,
                     done: false,
+                    stopped: false,
                     // The Swarm panel's collapsed state also uses this field
                     // (agent cards have no output expansion area); expanded by default
                     expanded: tool == "AgentSwarm",
@@ -148,6 +149,7 @@ impl ThreadView {
                     output: String::new(),
                     is_error: false,
                     done: false,
+                    stopped: false,
                     expanded: false,
                     edit: None,
                     live_note: None,
@@ -175,6 +177,7 @@ impl ThreadView {
                     output: out,
                     is_error: err,
                     done,
+                    stopped,
                     expanded,
                     edit: slot,
                     live_note,
@@ -184,6 +187,9 @@ impl ThreadView {
                     *out = output;
                     *err = is_error;
                     *done = true;
+                    // A late settle after an abort-wrap: the real output replaces
+                    // the "Stopped" placeholder state
+                    *stopped = false;
                     *slot = edit;
                     // Settling clears the live progress line (the card returns to its static summary)
                     *live_note = None;
@@ -308,27 +314,42 @@ impl ThreadView {
                         card.live_note = None;
                         self.auto_scroll();
                     } else if let Some(item) = item {
-                        // Activity item → progress line text: tool → "tool name
+                        // Activity item → progress line: tool → "tool name
                         // summary"; assistant → first line of the body; user
-                        // ignored. Uniformly flattened to one line, truncated to
-                        // 60 chars
+                        // ignored. Stored raw (AgentLiveNote) with the localized
+                        // fallback word applied at render time; flattened to one
+                        // line, truncated to 60 chars
+                        let flatten = |s: &str| -> String {
+                            s.split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .chars()
+                                .take(60)
+                                .collect()
+                        };
                         let note = match item.role.as_str() {
                             "tool" => {
-                                let tool_fallback = rust_i18n::t!("thread.tool_fallback");
-                                Some(format!(
-                                    "{} {}",
-                                    item.tool.as_deref().unwrap_or(tool_fallback.as_ref()),
-                                    item.text
-                                ))
+                                let name = item
+                                    .tool
+                                    .as_deref()
+                                    .filter(|n| !n.is_empty())
+                                    .map(str::to_string);
+                                let text = flatten(&item.text);
+                                // Name and text both missing: nothing to show
+                                (name.is_some() || !text.is_empty())
+                                    .then_some(AgentLiveNote::Tool { name, text })
                             }
-                            "assistant" => item.text.lines().next().map(str::to_string),
+                            "assistant" => item
+                                .text
+                                .lines()
+                                .next()
+                                .map(flatten)
+                                .filter(|l| !l.is_empty())
+                                .map(|line| AgentLiveNote::Text { line }),
                             _ => None,
-                        }
-                        .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
-                        .filter(|n| !n.is_empty());
-                        if let Some(note) = note {
-                            let note: String = note.chars().take(60).collect();
-                            card.live_note = Some(note);
+                        };
+                        if note.is_some() {
+                            card.live_note = note;
                             self.auto_scroll();
                         }
                     }
@@ -356,18 +377,15 @@ impl ThreadView {
                     .map(|s| s.duration_ms)
                     .filter(|ms| *ms > 0)
                     .unwrap_or(duration_ms);
-                if duration_ms > 0 || stats.is_some() {
-                    let stats_part = stats.as_ref().map(format_turn_stats).unwrap_or_default();
-                    if let Some(message) = self.messages.last_mut() {
-                        message.footer = Some(
-                            rust_i18n::t!(
-                                "thread.turn_end",
-                                n = duration as f64 / 1000.0 : {:.1},
-                                stats = stats_part
-                            )
-                            .to_string(),
-                        );
-                    }
+                if (duration_ms > 0 || stats.is_some())
+                    && let Some(message) = self.messages.last_mut()
+                {
+                    // Raw data only: the footer text is localized at render
+                    // time so a language switch updates finished turns too
+                    message.footer = Some(Footer::TurnEnd {
+                        duration_ms: duration,
+                        stats,
+                    });
                 }
                 self.settle_work_rows(WorkState::Completed {
                     duration: (duration > 0).then_some(std::time::Duration::from_millis(duration)),
@@ -382,29 +400,28 @@ impl ThreadView {
                 self.compacting = false;
                 // Abort wrap-up: tool cards that never saw ToolCallEnd are stuck
                 // spinning as "running" — settle them all (clear the live
-                // progress line; with no output, set "stopped"). Only the last
-                // assistant message can have unfinished segments; iterating all
-                // messages is just out-of-order defense
+                // progress line; with no output, mark stopped so the localized
+                // placeholder renders at draw time — a partial output is kept
+                // as-is). Only the last assistant message can have unfinished
+                // segments; iterating all messages is just out-of-order defense
                 for message in &mut self.messages {
                     for segment in &mut message.segments {
                         if let Segment::ToolCall {
-                            output,
                             done,
+                            stopped,
                             live_note,
                             ..
                         } = segment
                             && !*done
                         {
                             *done = true;
+                            *stopped = true;
                             *live_note = None;
-                            if output.is_empty() {
-                                *output = rust_i18n::t!("thread.stopped").to_string();
-                            }
                         }
                     }
                 }
                 if let Some(message) = self.messages.last_mut() {
-                    message.footer = Some(rust_i18n::t!("thread.stopped").to_string());
+                    message.footer = Some(Footer::Stopped);
                 }
                 self.settle_work_rows(WorkState::Stopped);
                 self.set_streaming(false, cx);
@@ -480,11 +497,12 @@ impl ThreadView {
                 self.replay_turn = false;
                 self.settle_work_rows(WorkState::Stopped);
                 self.set_streaming(false, cx);
-                // Core structured error → localized text (detail is the English original as a note)
-                self.messages.push(ChatMessage::system(format!(
-                    "⚠ {}",
-                    crate::errors::core_error_text(&error)
-                )));
+                // Structured error note: "⚠ {localized text}" is built at draw
+                // time (a language switch updates it too)
+                self.messages.push(ChatMessage::system_with_kind(
+                    String::new(),
+                    SystemNoteKind::Error(error),
+                ));
             }
         }
         cx.notify();

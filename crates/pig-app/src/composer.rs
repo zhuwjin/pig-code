@@ -521,7 +521,7 @@ impl Composer {
             plan_enabled: false,
             fs_read_outside: false,
             fs_write_outside: false,
-            model: rust_i18n::t!("composer.no_model").to_string(),
+            model: String::new(),
             models: vec![],
             reasoning_level: None,
             popup: None,
@@ -606,8 +606,20 @@ impl Composer {
     }
 
     pub fn set_model_name(&mut self, model: String, cx: &mut Context<Self>) {
+        // Empty string = the "no model configured" sentinel (rendered as the
+        // localized placeholder at draw time, so a language switch updates it)
         self.model = model;
         cx.notify();
+    }
+
+    /// Bar-chip label for the current model: the empty sentinel maps to the
+    /// localized "no model configured" placeholder
+    fn model_display(&self) -> String {
+        if self.model.is_empty() {
+            rust_i18n::t!("composer.no_model").to_string()
+        } else {
+            self.model.clone()
+        }
     }
 
     pub fn set_models(&mut self, models: Vec<ModelOption>, cx: &mut Context<Self>) {
@@ -1557,7 +1569,7 @@ impl Render for Composer {
                                         .child(self.render_bar_chip(
                                             "model-picker",
                                             None,
-                                            self.model.clone(),
+                                            self.model_display(),
                                             model_open,
                                             None,
                                             cx.listener(move |this, event: &ClickEvent, window, cx| {

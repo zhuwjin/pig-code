@@ -140,7 +140,9 @@ pub struct SettingsView {
     /// Detail form's API format dropdown (same trigger as the input fields; the
     /// old outline button's 16px centering clashed with the form)
     format_select: Entity<TextSelectState>,
-    test_results: std::collections::HashMap<String, (bool, String)>,
+    /// Per-provider connection-test outcome, stored structured (the settings
+    /// page localizes the ok/failure text at render time)
+    test_results: std::collections::HashMap<String, pig_protocol::ConnTestResult>,
     model_dialog: Option<ModelDialog>,
     /// Open/close state of the preset picker dialog for adding a provider
     preset_picker_open: bool,
@@ -650,12 +652,10 @@ impl SettingsView {
     pub fn set_test_result(
         &mut self,
         provider_id: &str,
-        ok: bool,
-        message: String,
+        result: pig_protocol::ConnTestResult,
         cx: &mut Context<Self>,
     ) {
-        self.test_results
-            .insert(provider_id.to_string(), (ok, message));
+        self.test_results.insert(provider_id.to_string(), result);
         cx.notify();
     }
 

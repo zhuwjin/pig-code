@@ -624,13 +624,22 @@ impl ThreadView {
         let message = &self.messages[ix];
         match message.role {
             Role::User => self.render_user_message(ix, message, cx),
-            Role::System => match message.system_kind {
+            Role::System => match &message.system_kind {
                 SystemNoteKind::Plain => div()
                     .w_full()
                     .text_center()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(message.text.clone())
+                    .into_any_element(),
+                // Error note: the "⚠" prefix plus the localized error text built
+                // at draw time (a language switch updates it)
+                SystemNoteKind::Error(error) => div()
+                    .w_full()
+                    .text_center()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("⚠ {}", crate::errors::core_error_text(error)))
                     .into_any_element(),
                 SystemNoteKind::Compacted => div()
                     .id(("compact-note", ix))
@@ -753,6 +762,7 @@ impl ThreadView {
                                 output,
                                 is_error,
                                 done,
+                                stopped,
                                 expanded,
                                 edit,
                                 live_note,
@@ -766,13 +776,20 @@ impl ThreadView {
                                     message.segments.get(six + 1),
                                     Some(Segment::Approval { decision: None, .. })
                                 );
+                                // Aborted with no output: the localized "Stopped"
+                                // placeholder is built here at draw time (a language
+                                // switch updates it); a partial output is shown as-is
+                                let stopped_placeholder = (*stopped && output.is_empty())
+                                    .then(|| rust_i18n::t!("thread.stopped").to_string());
+                                let output_display =
+                                    stopped_placeholder.as_deref().unwrap_or(output.as_str());
                                 self.render_tool_card(
                                     ix,
                                     six,
                                     tool,
                                     summary,
                                     live_note.as_deref(),
-                                    output,
+                                    output_display,
                                     *is_error,
                                     *done,
                                     *expanded,
@@ -816,13 +833,27 @@ impl ThreadView {
                     ));
                 }
                 if let Some(footer) = &message.footer {
+                    // Localized at draw time so switching the language re-renders
+                    // already-finished turns
+                    let text = match footer {
+                        Footer::TurnEnd { duration_ms, stats } => rust_i18n::t!(
+                            "thread.turn_end",
+                            n = *duration_ms as f64 / 1000.0 : {:.1},
+                            stats = stats
+                                .as_ref()
+                                .map(format_turn_stats)
+                                .unwrap_or_default()
+                        )
+                        .to_string(),
+                        Footer::Stopped => rust_i18n::t!("thread.stopped").to_string(),
+                    };
                     segments.push((
                         "footer".to_string(),
                         h_flex()
                             .gap_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(footer.clone())
+                            .child(text)
                             .into_any_element(),
                     ));
                 }

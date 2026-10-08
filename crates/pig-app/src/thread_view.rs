@@ -384,6 +384,17 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// Core error note: stores the structured error and renders "⚠ {localized
+    /// text}" at draw time (a language switch updates already-shown notes too)
+    pub fn add_error_note(&mut self, error: &pig_protocol::CoreError, cx: &mut Context<Self>) {
+        self.messages.push(ChatMessage::system_with_kind(
+            String::new(),
+            SystemNoteKind::Error(error.clone()),
+        ));
+        self.auto_scroll();
+        cx.notify();
+    }
+
     /// Compaction finished: divider style (rendered as "🗄 Context compacted"; the full summary stays in text for self-test assertions)
     pub fn add_compact_note(&mut self, note: &str, cx: &mut Context<Self>) {
         self.messages.push(ChatMessage::system_with_kind(
@@ -501,7 +512,9 @@ impl ThreadView {
         found
     }
 
-    /// The first Agent/AgentSwarm tool card's (summary, live_note, done) (for self-tests).
+    /// The first Agent/AgentSwarm tool card's (summary, live_note text, done) (for
+    /// self-tests). The live_note is the segment-level one (foreground progress,
+    /// core-provided raw text); background cards' notes live on the card.
     pub fn debug_agent_card(&self) -> Option<(String, Option<String>, bool)> {
         self.messages
             .iter()

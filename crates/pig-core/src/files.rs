@@ -76,6 +76,8 @@ const FM_ICON_PX: u32 = 64;
 
 #[cfg(test)]
 mod tests {
+    // The only test below is macOS-only; the import would be unused elsewhere
+    #[cfg(target_os = "macos")]
     use super::*;
 
     #[cfg(target_os = "macos")]

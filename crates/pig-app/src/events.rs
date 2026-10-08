@@ -1,5 +1,4 @@
 use super::*;
-use pig_protocol::ConnTestResult;
 
 impl AppView {
     pub(crate) fn route_event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -41,10 +40,11 @@ impl AppView {
                 self.composer.update(cx, |composer, cx| {
                     composer.clear_context_usage(cx);
                 });
+                // Empty label = the "no model configured" sentinel (core sends
+                // an empty-string sentinel; the composer chip renders the
+                // localized placeholder at draw time)
                 let label = if model.is_empty() {
-                    // No model configured: core sends an empty-string sentinel
-                    // and the UI swaps in a localized placeholder
-                    rust_i18n::t!("composer.no_model").to_string()
+                    String::new()
                 } else if provider_name.is_empty() {
                     model.clone()
                 } else {
@@ -128,21 +128,11 @@ impl AppView {
                 provider_id,
                 result,
             } => {
-                // Structured result → (ok, localized message): failures pass the
-                // upstream English detail through verbatim
-                let (ok, message) = match result {
-                    ConnTestResult::Connected { status } => (
-                        true,
-                        rust_i18n::t!("settings.models.test_ok", status = status).to_string(),
-                    ),
-                    ConnTestResult::Timeout { .. } => (
-                        false,
-                        rust_i18n::t!("settings.models.test_timeout").to_string(),
-                    ),
-                    ConnTestResult::Failed { detail } => (false, detail.clone()),
-                };
+                // Stored structured; the settings page localizes ok/failure
+                // text at render time (failures pass the upstream English
+                // detail through verbatim)
                 self.settings.update(cx, |settings, cx| {
-                    settings.set_test_result(provider_id, ok, message, cx);
+                    settings.set_test_result(provider_id, result.clone(), cx);
                 });
             }
             Event::McpServerList {
@@ -235,15 +225,14 @@ impl AppView {
                 error,
                 ..
             } => {
-                // Core structured error → localized text (the detail is appended
-                // as the verbatim English original)
-                let message = crate::errors::core_error_text(error);
+                // Stored structured; the "⚠ {localized text}" note/hero banner
+                // is built at draw time (a language switch updates it too)
                 if self.is_hero(cx) {
-                    self.hero_error = Some(message);
+                    self.hero_error = Some(error.clone());
                 } else if let Some(sid) = self.current.clone() {
                     self.ensure_views(&sid, cx);
                     self.views[&sid].thread.update(cx, |thread, cx| {
-                        thread.add_system_note(&format!("⚠ {message}"), cx);
+                        thread.add_error_note(error, cx);
                     });
                 }
             }

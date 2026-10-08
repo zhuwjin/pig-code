@@ -529,7 +529,19 @@ impl SettingsView {
                             ),
                     ),
             )
-            .when_some(test_result, |this, (ok, message)| {
+            .when_some(test_result, |this, result| {
+                // Localized at draw time: failures pass the upstream English
+                // detail through verbatim
+                let ok = matches!(result, pig_protocol::ConnTestResult::Connected { .. });
+                let message = match result {
+                    pig_protocol::ConnTestResult::Connected { status } => {
+                        rust_i18n::t!("settings.models.test_ok", status = status).to_string()
+                    }
+                    pig_protocol::ConnTestResult::Timeout { .. } => {
+                        rust_i18n::t!("settings.models.test_timeout").to_string()
+                    }
+                    pig_protocol::ConnTestResult::Failed { detail } => detail,
+                };
                 this.child(
                     div()
                         .text_xs()

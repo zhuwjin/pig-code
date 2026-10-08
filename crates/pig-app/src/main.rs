@@ -284,7 +284,9 @@ struct AppView {
     hero_branch: Option<String>,
     hero_branches: Vec<String>,
     hero_is_git: bool,
-    hero_error: Option<String>,
+    /// Startup/core error shown on the hero page; stored structured so the
+    /// localized text is built at draw time
+    hero_error: Option<pig_protocol::CoreError>,
     pending_first_send: Option<(
         String,
         Vec<String>,

@@ -113,10 +113,13 @@ impl AppView {
                         self.current_model = Some((p.clone(), m.clone()));
                         self.model_display_label(p, m)
                     }
-                    // Session with no configured model: show the "no model configured" placeholder (no leftover label from the previous session)
+                    // Session with no configured model: the empty sentinel → the
+                    // composer chip renders the localized "no model configured"
+                    // placeholder at draw time (no leftover label from the
+                    // previous session)
                     _ => {
                         self.current_model = None;
-                        rust_i18n::t!("composer.no_model").to_string()
+                        String::new()
                     }
                 };
                 self.composer.update(cx, |composer, cx| {

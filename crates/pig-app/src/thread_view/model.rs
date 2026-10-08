@@ -33,7 +33,34 @@ pub struct AgentCardMeta {
     pub finished_seq: Option<u64>,
     /// Live progress row of the background subagent (written by SubagentActivity item, cleared on finished);
     /// the foreground card's progress goes through SubagentProgress into the segment-level live_note, not this field
-    pub live_note: Option<String>,
+    pub live_note: Option<AgentLiveNote>,
+}
+
+/// One background-subagent activity line, stored raw and localized at render
+/// time (a language switch updates running cards too); the text is already
+/// whitespace-normalized and truncated
+#[derive(Clone)]
+pub(crate) enum AgentLiveNote {
+    /// Tool activity: "{name} {text}"; a missing name falls back to the
+    /// localized "Tool" word at render time
+    Tool { name: Option<String>, text: String },
+    /// Assistant activity: the first line of the body, no prefix
+    Text { line: String },
+}
+
+impl AgentLiveNote {
+    /// Render-time display text
+    pub fn display(&self) -> String {
+        match self {
+            AgentLiveNote::Tool { name, text } => {
+                let name = name
+                    .clone()
+                    .unwrap_or_else(|| rust_i18n::t!("thread.tool_fallback").to_string());
+                format!("{name} {text}")
+            }
+            AgentLiveNote::Text { line } => line.clone(),
+        }
+    }
 }
 
 pub enum Segment {
@@ -65,6 +92,10 @@ pub enum Segment {
         output: String,
         is_error: bool,
         done: bool,
+        /// The turn was aborted while this call was still running: an empty
+        /// output renders the localized "Stopped" placeholder at draw time (a
+        /// non-empty partial output is shown as-is)
+        stopped: bool,
         expanded: bool,
         /// This run's edit diff for write/modify tools (inline diff card)
         edit: Option<EditDiff>,
@@ -373,6 +404,18 @@ pub enum WorkState {
     Stopped,
 }
 
+/// Turn-end footer line: raw data kept in the model and localized at render
+/// time, so switching the language re-renders already-finished turns too
+pub enum Footer {
+    /// "Turn ended · took Ns" + the optional usage stats section
+    TurnEnd {
+        duration_ms: u64,
+        stats: Option<pig_protocol::TurnUsageStats>,
+    },
+    /// Turn interrupted or errored ("Stopped")
+    Stopped,
+}
+
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
@@ -385,7 +428,7 @@ pub struct ChatMessage {
     /// Image attachments of a user message (loaded by image_nums; non-empty only for the User role)
     pub images: Vec<UserImage>,
     pub segments: Vec<Segment>,
-    pub footer: Option<String>,
+    pub footer: Option<Footer>,
     /// Turn work-row state (only meaningful for the Assistant role): None = the turn has not ended or has no work segments
     pub work_state: Option<WorkState>,
     /// Work-row expanded state (true = work segments visible inline; false = collapsed into one line)
@@ -399,11 +442,14 @@ pub struct ChatMessage {
 }
 
 /// System note kind
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SystemNoteKind {
     Plain,
     /// "Context compacted" divider (divider line + Archive icon + short label; does not render the full summary)
     Compacted,
+    /// Core error note: renders "⚠ {localized error}" with the text built at
+    /// draw time (a language switch updates it too); `text` stays empty
+    Error(pig_protocol::CoreError),
 }
 
 /// UI state of the background subagent notification card (stored with the message, released with it on clear())
