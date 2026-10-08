@@ -175,7 +175,6 @@ impl Session {
                 }
             }
         }
-        let image_count = image_refs.len();
         // Capability projection: model without image input → keep out of
         // ChatMsg.images and inform via a text placeholder (with the media path)
         let media_paths: Vec<std::path::PathBuf> =
@@ -203,7 +202,6 @@ impl Session {
                 seq,
                 text: rollout_text.clone(),
                 files: record_files.clone(),
-                image_count,
                 image_nums: nums,
             },
             tx,

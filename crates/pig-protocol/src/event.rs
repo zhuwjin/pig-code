@@ -114,10 +114,6 @@ pub enum Event {
         /// thumbnails via image_nums)
         text: String,
         files: Vec<String>,
-        /// Number of attached images (kept for protocol compatibility; display
-        /// uses image_nums)
-        #[serde(default)]
-        image_count: usize,
         /// Media file numbers of the attached images (the N in
         /// {sessions}/{id}.media/{N}.ext); the UI loads thumbnails from these,
         /// consistent with image order

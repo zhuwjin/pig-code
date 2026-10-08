@@ -191,20 +191,6 @@ mod reasoning_params_tests {
     use super::*;
 
     #[test]
-    fn provider_config_deserializes_legacy_json_without_key_url() {
-        // key_url is a later addition: existing config.toml/rollout files lack it
-        // (old records live in rollouts) and must still read back
-        let legacy = r#"{
-            "id": "p1", "name": "legacy provider", "base_url": "http://p1.local",
-            "api_key": "k", "api_format": "OpenAiChat", "enabled": true,
-            "models": []
-        }"#;
-        let provider: ProviderConfig =
-            serde_json::from_str(legacy).expect("legacy format must remain compatible");
-        assert_eq!(provider.key_url, None);
-    }
-
-    #[test]
     fn openai_params_pass_level_through_with_compat_fields() {
         let levels: Vec<String> = ["none", "low", "max", "enabled"]
             .iter()

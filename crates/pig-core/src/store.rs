@@ -83,17 +83,6 @@ impl Store {
             );",
         )
         .map_err(|e| format!("store.sqlite create-table failed: {e}"))?;
-        // Backfill columns on existing databases (idempotent; older databases without the plan_enabled column get it added, default 0 = off)
-        let has_plan: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'plan_enabled'")
-            .and_then(|mut stmt| stmt.exists([]))
-            .unwrap_or(false);
-        if !has_plan {
-            conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN plan_enabled INTEGER NOT NULL DEFAULT 0;",
-            )
-            .map_err(|e| format!("store.sqlite migration failed: {e}"))?;
-        }
         Ok(Self { conn })
     }
 

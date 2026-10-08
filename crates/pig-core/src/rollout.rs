@@ -107,10 +107,8 @@ pub enum RolloutRecord {
         edit: Option<pig_protocol::EditDiff>,
         /// Agent-card metadata for the Agent tool card (replay rebuilds the agent card)
         agent_card: Option<AgentCardRecord>,
-        /// Agent-card metadata for the AgentSwarm tool card (one per subagent; replay rebuilds
-        /// all); #[serde(default)] for backward compatibility: old JSONL without this field
-        /// reads as an empty list
-        #[serde(default)]
+        /// Agent-card metadata for the AgentSwarm tool card (one per subagent; replay
+        /// rebuilds all)
         agent_cards: Vec<AgentCardRecord>,
     },
     /// A turn's file changes (replay restores the per-turn changes panel in the message stream)
@@ -145,12 +143,10 @@ pub enum RolloutRecord {
         note: String,
         omitted: usize,
         /// true = auto-triggered at the pre-sampling watermark; false = user-initiated /compact (replay display only)
-        #[serde(default)]
         automatic: bool,
         /// Estimated token usage watermark of the post-compact history (replay restores
         /// last_total_tokens, so that after reopening, the watermark check does not
         /// immediately fire another auto-compact on the stale pre-compact high value)
-        #[serde(default)]
         used_after: Option<u64>,
     },
 }
@@ -353,26 +349,6 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A legacy ToolCall line (no agent_cards field) parses, with agent_cards reading as an empty list
-    #[test]
-    fn tool_call_without_agent_cards_reads_as_empty() {
-        let line = r#"{"type":"tool_call","tool":"AgentSwarm","summary":"subagent batch (2 items)","arguments":"{}","output":"subagent batch finished","is_error":false,"edit":null,"agent_card":null}"#;
-        let record: RolloutRecord =
-            serde_json::from_str(line).expect("legacy JSONL line should parse");
-        let RolloutRecord::ToolCall {
-            tool,
-            agent_card,
-            agent_cards,
-            ..
-        } = record
-        else {
-            panic!("should be a ToolCall record");
-        };
-        assert_eq!(tool, "AgentSwarm");
-        assert!(agent_card.is_none(), "single-card slot stays None");
-        assert!(agent_cards.is_empty(), "missing field reads as empty list");
-    }
 
     /// Batch cards serialize/read back with the record (the data source for swarm replay rebuild)
     #[test]

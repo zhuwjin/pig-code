@@ -662,19 +662,16 @@ async fn paste_flow_persists_media_and_ships_image_payload() {
     let session_id = common::new_session(&agent, dir.clone()).await;
     let events = send_paste_and_wait(&agent, &session_id, png_bytes(64, 48, false)).await;
 
-    // The user bubble event carries the image count + attachment number (clean body without an inlined link; m1 matches the media file-name index)
+    // The user bubble event carries the attachment numbers (clean body without an inlined link; m1 matches the media file-name index)
     let (user_text, nums) = events
         .iter()
         .find_map(|e| match e {
             Event::UserMessage {
-                text,
-                image_count,
-                image_nums,
-                ..
-            } if *image_count == 1 => Some((text.clone(), image_nums.clone())),
+                text, image_nums, ..
+            } if image_nums.len() == 1 => Some((text.clone(), image_nums.clone())),
             _ => None,
         })
-        .expect("UserMessage.image_count=1");
+        .expect("UserMessage with one attachment number");
     assert_eq!(
         user_text, "What is this image",
         "event text is the clean body (attachment link no longer inlined): {user_text}"
@@ -868,13 +865,9 @@ async fn paste_resume(name: &str, delete_media: bool) {
     assert!(
         replay.iter().any(|e| matches!(
             e,
-            Event::UserMessage {
-                image_count,
-                image_nums,
-                ..
-            } if *image_count == 1 && image_nums == &[1]
+            Event::UserMessage { image_nums, .. } if image_nums == &[1]
         )),
-        "replayed bubble carries image count + attachment number (same shape as live)"
+        "replayed bubble carries the attachment number (same shape as live)"
     );
     // Drain leftover replay events to avoid interfering with later recv_until calls
     while tokio::time::timeout(std::time::Duration::from_millis(200), agent2.events.recv())

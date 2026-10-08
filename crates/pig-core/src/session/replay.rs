@@ -16,7 +16,6 @@ impl Session {
                     images,
                 } => {
                     in_assistant = false;
-                    let image_count = images.len();
                     // Clean body text + attachment numbers (same shape as live); the rollout's original text is the body
                     let nums = crate::rollout::image_nums(images);
                     let files = files.clone();
@@ -26,7 +25,6 @@ impl Session {
                             seq,
                             text: text.clone(),
                             files,
-                            image_count,
                             image_nums: nums,
                         },
                         tx,
