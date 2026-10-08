@@ -182,20 +182,35 @@ pub struct ReadCardContent {
     pub max_line_width: Pixels,
 }
 
+/// UI state of one code subcard (the Bash card's command/output cards, see bash.rs)
+pub struct SubCardUi {
+    /// Word wrap (off by default: horizontal scrolling)
+    pub wrap: bool,
+    /// Copy button feedback (swaps to a check; app convention is not to revert)
+    pub copied: bool,
+    /// Vertical scroll handle
+    pub v_scroll: ScrollHandle,
+    /// Horizontal scroll handle for no-wrap mode
+    pub h_scroll: ScrollHandle,
+}
+
+impl SubCardUi {
+    pub fn new() -> Self {
+        Self {
+            wrap: false,
+            copied: false,
+            v_scroll: ScrollHandle::new(),
+            h_scroll: ScrollHandle::new(),
+        }
+    }
+}
+
 /// UI state of the Bash tool code card (lazily created before render; kept for the segment's lifetime)
 pub struct BashCardUi {
-    /// Word-wrap toggles of the command card/output card (off by default: horizontal scrolling)
-    pub cmd_wrap: bool,
-    pub out_wrap: bool,
-    /// Copy button feedback (swaps to a check; app convention is not to revert)
-    pub cmd_copied: bool,
-    pub out_copied: bool,
-    /// Vertical scroll handles of the command card/output card
-    pub cmd_scroll: ScrollHandle,
-    pub out_scroll: ScrollHandle,
-    /// Their horizontal scroll handles (no-wrap mode)
-    pub cmd_h_scroll: ScrollHandle,
-    pub out_h_scroll: ScrollHandle,
+    /// Command card state
+    pub cmd: SubCardUi,
+    /// Output card state
+    pub out: SubCardUi,
     /// Content cache of the command (bash highlight) and output (plain text) (RefCell: render borrows read-only;
     /// theme switches recompute via Arc pointer equality on PreparedCode.highlighted.theme)
     pub cache: std::cell::RefCell<Option<std::rc::Rc<BashCardContent>>>,
@@ -204,14 +219,8 @@ pub struct BashCardUi {
 impl BashCardUi {
     pub fn new() -> Self {
         Self {
-            cmd_wrap: false,
-            out_wrap: false,
-            cmd_copied: false,
-            out_copied: false,
-            cmd_scroll: ScrollHandle::new(),
-            out_scroll: ScrollHandle::new(),
-            cmd_h_scroll: ScrollHandle::new(),
-            out_h_scroll: ScrollHandle::new(),
+            cmd: SubCardUi::new(),
+            out: SubCardUi::new(),
             cache: std::cell::RefCell::new(None),
         }
     }

@@ -859,7 +859,10 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
             .find_map(|s| match s {
                 super::Segment::ToolCall {
                     bash_ui: Some(ui), ..
-                } => Some((ui.out_scroll.offset().y, ui.cmd_scroll.bounds().center())),
+                } => Some((
+                    ui.out.v_scroll.offset().y,
+                    ui.cmd.v_scroll.bounds().center(),
+                )),
                 _ => None,
             });
         (
@@ -887,7 +890,7 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
                 .find_map(|s| match s {
                     super::Segment::ToolCall {
                         bash_ui: Some(ui), ..
-                    } => Some(ui.out_scroll.bounds().center()),
+                    } => Some(ui.out.v_scroll.bounds().center()),
                     _ => None,
                 })
                 .expect("Bash card UI state should be created")
@@ -940,6 +943,298 @@ fn bash_card_scroll_traps_and_chains(cx: &mut gpui_kit::TestAppContext) {
         outer_chained < outer_after,
         "a non-scrollable card should chain the wheel to the outer list ({outer_after:?} → scrolled down {outer_chained:?})"
     );
+}
+
+/// Generic tool box: a tool without a dedicated card (TodoList) expands into a
+/// plain rounded box (no header/buttons) showing the output — monospace,
+/// height-capped at GENERIC_BOX_MAX_H and internally scrollable via the
+/// segment's shared body_scroll
+#[gpui_kit::test]
+fn generic_box_renders_and_scrolls(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("update the todos".to_string(), vec![], vec![], cx);
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 0,
+                        item_id: "g1".into(),
+                        tool: "TodoList".into(),
+                        input_summary: String::new(),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallEnd {
+                        session_id: "s".into(),
+                        seq: 1,
+                        item_id: "g1".into(),
+                        output: (1..=40)
+                            .map(|i| format!("{i}. task item"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        is_error: false,
+                        edit: None,
+                    },
+                    cx,
+                );
+                assert!(
+                    view.debug_expand_tool("TodoList", cx),
+                    "a TodoList card should exist to expand"
+                );
+            });
+        })
+        .unwrap();
+    // Render one frame, then wait out the expand animation and render again
+    // (same timing concern as the Bash card test: the animation runs on wall
+    // clock and max_h clipping mid-animation shrinks the viewport)
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let (painted, max_offset) = window
+        .update(cx, |probe, _, cx| {
+            let view = probe.thread.read(cx);
+            view.messages
+                .iter()
+                .flat_map(|m| &m.segments)
+                .find_map(|s| match s {
+                    super::Segment::ToolCall {
+                        tool, body_scroll, ..
+                    } if tool == "TodoList" => Some((
+                        body_scroll.bounds().size.width > gpui_kit::px(0.),
+                        body_scroll.max_offset().y,
+                    )),
+                    _ => None,
+                })
+                .expect("a TodoList tool call segment should exist")
+        })
+        .unwrap();
+    assert!(painted, "the generic box body should have painted");
+    assert!(
+        max_offset > gpui_kit::px(0.),
+        "the 40-line output should overflow the box cap and scroll internally"
+    );
+}
+
+/// The full input is repeated inside the generic box only when the collapsed
+/// summary row cannot show it: multi-line inputs (the row collapses them to
+/// one line) or long ones (estimated width past the row; CJK counts double)
+#[test]
+fn full_input_repeated_only_when_row_cannot_show_it() {
+    use super::cards::show_full_input;
+    assert!(!show_full_input(""));
+    assert!(!show_full_input("*/package.json"));
+    assert!(!show_full_input("查找文件|终端"));
+    // Multi-line input
+    assert!(show_full_input("first line\nsecond line"));
+    // Long single-line input (81 ASCII chars > 80 columns)
+    assert!(show_full_input(&"a".repeat(81)));
+    assert!(!show_full_input(&"a".repeat(80)));
+    // CJK counts double: 41 CJK chars = 82 columns
+    assert!(show_full_input(&"文".repeat(41)));
+    assert!(!show_full_input(&"文".repeat(40)));
+}
+
+/// Glob output parsing (search_card.rs): path rows from the first
+/// blank-line section, bracketed/parenthesized footers as notes; no result
+/// row → None (the generic box takes over)
+#[test]
+fn glob_output_parses_rows_and_notes() {
+    use super::search_card::parse_glob_output;
+    let parsed =
+        parse_glob_output("crates/a.rs\ncrates/b.rs\n\n[Showing 1-2; continue with offset=2]")
+            .expect("two path rows");
+    assert_eq!(parsed.rows.len(), 2);
+    assert_eq!(parsed.rows[0].path, "crates/a.rs");
+    assert_eq!(parsed.rows[0].line, None);
+    assert_eq!(parsed.rows[0].content, None);
+    assert_eq!(parsed.notes, vec!["[Showing 1-2; continue with offset=2]"]);
+    assert!(parse_glob_output("(no matching files)").is_none());
+}
+
+/// Grep output parsing (search_card.rs): content rows split at the first
+/// colon followed by digits + ": " (drive letters and colons inside the path
+/// stay intact), `--` separators dropped, footers as notes; files_with_matches
+/// bare paths and count rows become path-only rows
+#[test]
+fn grep_output_parses_rows_and_notes() {
+    use super::search_card::parse_grep_output;
+    let parsed = parse_grep_output(
+        "src/a.rs:10: use super::*;\nsrc/a.rs:11: use std::io;\n--\nsrc/b.rs:3: let x: u32 = 1;\n[Skipped: binary/undecodable 1]",
+    )
+    .expect("three content rows");
+    assert_eq!(parsed.rows.len(), 3);
+    assert_eq!(parsed.rows[0].path, "src/a.rs");
+    assert_eq!(parsed.rows[0].line, Some(10));
+    assert_eq!(parsed.rows[0].content.as_deref(), Some("use super::*;"));
+    // Content containing ": " with digits stays intact (first-match split)
+    assert_eq!(parsed.rows[2].path, "src/b.rs");
+    assert_eq!(parsed.rows[2].line, Some(3));
+    assert_eq!(parsed.rows[2].content.as_deref(), Some("let x: u32 = 1;"));
+    assert_eq!(parsed.notes, vec!["[Skipped: binary/undecodable 1]"]);
+    // Windows absolute path: the drive-letter colon does not split
+    let parsed = parse_grep_output("C:/work/a.rs:7: fn main() {}").expect("one row");
+    assert_eq!(parsed.rows[0].path, "C:/work/a.rs");
+    assert_eq!(parsed.rows[0].line, Some(7));
+    // files_with_matches: bare paths
+    let parsed = parse_grep_output("src/a.rs\nsrc/b.rs").expect("two path rows");
+    assert_eq!(parsed.rows[1].path, "src/b.rs");
+    assert_eq!(parsed.rows[1].line, None);
+    // Count mode: `{path}:{count}` opens the file and shows the count
+    let parsed = parse_grep_output("src/a.rs:3").expect("count row");
+    assert_eq!(parsed.rows[0].path, "src/a.rs");
+    assert_eq!(parsed.rows[0].content.as_deref(), Some("3"));
+    assert!(parse_grep_output("(no matches)").is_none());
+}
+
+/// Grep result list: rows render and clicking one emits OpenFile with the
+/// row's path and line number (the right-side file panel scrolls to and
+/// highlights that line)
+#[gpui_kit::test]
+fn grep_result_row_click_opens_file_at_line(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, IntoElement as _};
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    // Event capture (the subscription must live until the test ends)
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = captured.clone();
+    let mut events_sub = None;
+    window
+        .update(cx, |probe, window, cx| {
+            probe.thread.update(cx, |view, cx| {
+                let entity = cx.entity();
+                events_sub = Some(cx.subscribe_in(
+                    &entity,
+                    window,
+                    move |_, _, event: &super::ThreadEvent, _, _| {
+                        sink.borrow_mut().push(event.clone());
+                    },
+                ));
+                view.append_user_message("find the callers".to_string(), vec![], vec![], cx);
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallBegin {
+                        session_id: "s".into(),
+                        seq: 0,
+                        item_id: "g1".into(),
+                        tool: "Grep".into(),
+                        input_summary: "render_title_scroll".into(),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                view.reduce_event(
+                    pig_protocol::Event::ToolCallEnd {
+                        session_id: "s".into(),
+                        seq: 1,
+                        item_id: "g1".into(),
+                        output: "src/sidebar.rs:88: fn render_title_scroll(\nsrc/main.rs:166: render_title_scroll(x)".to_string(),
+                        is_error: false,
+                        edit: None,
+                    },
+                    cx,
+                );
+                assert!(view.debug_expand_tool("Grep", cx));
+            });
+        })
+        .unwrap();
+    let _events_sub = events_sub;
+    // Wait out the expand animation (hit-testing while max_h animates is
+    // unreliable, same as the Bash card test)
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    // Row 1 (second result): the segment sits at message 1 / segment 0, so the
+    // row id is ("search-row", (1024 + 0) * 512 + 1)
+    let row_id = ("search-row", 1024usize * 512 + 1);
+    cx.update_window(window.into(), |_, window, _| {
+        let snap = window.find(row_id);
+        assert!(snap.visible(), "the second result row should be visible");
+    })
+    .unwrap();
+    // Hover drives the blue text color via the search_row_hover state
+    cx.update_window(window.into(), |_, window, cx| {
+        window.hover(row_id, cx);
+    })
+    .unwrap();
+    let hover_state = window
+        .update(cx, |probe, _, cx| probe.thread.read(cx).search_row_hover)
+        .unwrap();
+    assert_eq!(
+        hover_state,
+        Some((1, 0, 1)),
+        "hovering the row should record it in search_row_hover"
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(row_id, cx);
+    })
+    .unwrap();
+    let events = captured.borrow();
+    assert_eq!(
+        events.len(),
+        1,
+        "OpenFile should be emitted exactly once: {}",
+        events.len()
+    );
+    match &events[0] {
+        super::ThreadEvent::OpenFile { path, line } => {
+            assert_eq!(path, "src/main.rs");
+            assert_eq!(*line, Some(166));
+        }
+        other => panic!("expected an OpenFile event: {other:?}"),
+    }
 }
 
 /// Compact divider: in-progress "compacting context" → done "context compacted";

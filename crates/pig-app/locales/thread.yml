@@ -170,7 +170,7 @@ thread:
   running:
     zh-CN: 运行中
     en: Running
-  bash_output:
+  output:
     zh-CN: 输出
     en: Output
   wrap:

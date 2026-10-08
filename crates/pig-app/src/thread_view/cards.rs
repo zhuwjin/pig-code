@@ -1,5 +1,27 @@
 use super::*;
 
+/// Generic tool box body height cap (the plain expanded area of tools without
+/// a dedicated card; also the search result list's cap)
+pub(crate) const GENERIC_BOX_MAX_H: f32 = 240.;
+
+/// Whether the generic tool box repeats the full input above the output: the
+/// collapsed summary row already shows one-line inputs (truncating past the
+/// available width), so the input is worth repeating inside the box only when
+/// the row cannot show it — multi-line inputs (the row collapses them to one
+/// line) or long ones (estimated width > 80 columns; CJK counts double, the
+/// same weight heuristic as code_view's line measuring)
+pub(crate) fn show_full_input(summary: &str) -> bool {
+    if summary.contains('\n') {
+        return true;
+    }
+    let collapsed = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .chars()
+        .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+        .sum::<usize>()
+        > 80
+}
+
 impl ThreadView {
     /// Thinking collapsed block (same as ZCode reasoning.tsx): a borderless one-line header (brain icon + label);
     /// in progress the label is a shimmering "Thinking", followed by `·` plus a rolling output line (provided by the vertical-roll state machine: on line change the old
@@ -213,6 +235,9 @@ impl ThreadView {
                                     .text_color(subtlest)
                                     .child(text.to_string()),
                             )
+                            // Vertical scrollbar at the body's right edge (same
+                            // shared-handle pattern as the generic tool box)
+                            .child(Scrollbar::vertical(body_scroll))
                             .into_any_element(),
                     ),
                 )
@@ -332,9 +357,13 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// Tool call (same as ZCode): a borderless summary row (icon + localized tool name + one-line summary + status word),
-    /// the arrow shows only on hover/expand; expanded it becomes a rounded outlined card: full input (terminal tools get a `$` prefix) plus
-    /// monospace output, with the output height-capped and internally scrollable. No spinner while running; the tool name shimmers instead (ZCode's tradeoff:
+    /// Tool call: a borderless summary row (icon + localized tool name + one-line summary + status word),
+    /// the arrow shows only on hover/expand. Expanded, tools with a dedicated card get it (Edit → inline diff,
+    /// Read → code card, Bash → command+output code cards, Glob/Grep → clickable result list, see search_card.rs);
+    /// all other tools get the plain box (no header/buttons, see the generic branch below): the output in monospace,
+    /// height-capped and internally scrollable, plus the
+    /// full input repeated inside only when the summary row cannot show it (multi-line or long).
+    /// No spinner while running; the tool name shimmers instead (ZCode's tradeoff:
     /// many tools run during streaming, and a persistent animation would burn rendering resources).
     /// `approval_pending`: this tool is awaiting approval (a yellow "Waiting for approval" at the end of the row).
     /// `agent_cards`: agent card list written by SubagentCard (one for Agent, several for AgentSwarm).
@@ -698,15 +727,29 @@ impl ThreadView {
             )
             .when(expanded || expand_anim.collapsing, |this| {
                 // Read finished with line-numbered file content → code card (read.rs);
-                // running/error/non-content output (empty file, unchanged) falls back to the generic card.
+                // running/error/non-content output (empty file, unchanged) falls back to the generic box.
                 // Bash finished (failure included) → command card plus output card (bash.rs);
-                // running or awaiting approval uses the generic card (live output)
+                // everything else → the generic box (no header/buttons: monospace output,
+                // height-capped and internally scrollable; the full input is repeated inside
+                // only when the summary row cannot show it)
                 let read_card = tool == "Read"
                     && done
                     && !is_error
                     && read_ui.is_some()
                     && is_read_code_output(output);
                 let bash_card = tool == "Bash" && done && bash_ui.is_some();
+                // Glob/Grep finished successfully with parsable results → clickable
+                // result list (search_card.rs); running/error/no matches fall back
+                // to the generic box
+                let search_results = if done && !is_error {
+                    match tool {
+                        "Glob" => parse_glob_output(output),
+                        "Grep" => parse_grep_output(output),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 // The expanded body uniformly goes into a viewport with a scrollbar (track_scroll keeps the scroll position plus a visible scrollbar);
                 // the content as a whole is wrapped in the expand/collapse animation (slide open/shut plus fade in/out)
                 this.child(
@@ -722,7 +765,7 @@ impl ThreadView {
                                 .w_full()
                                 // Scroll chain: when the body can scroll it swallows the wheel, so the outer message list does not chain along
                                 .on_scroll_wheel(consume_scroll(body_scroll))
-                                // Edit tools expand into an inline diff code card; other tools get the generic input+output card
+                                // Edit tools expand into an inline diff code card; Read/Bash get their code cards; other tools get the plain box
                                 .child(if let Some(edit) = edit {
                                     Self::render_edit_diff(
                                         ("tool-body", message_ix * 1024 + segment_ix),
@@ -752,63 +795,87 @@ impl ThreadView {
                                         ),
                                         None => div().into_any_element(),
                                     }
+                                } else if let Some(results) = search_results {
+                                    // Glob/Grep: clickable result list
+                                    self.render_search_card(
+                                        message_ix,
+                                        segment_ix,
+                                        &results,
+                                        body_scroll,
+                                        cx,
+                                    )
                                 } else {
+                                    // The generic box: same rounded-bordered
+                                    // secondary fill as the code cards, but no
+                                    // header/buttons (nothing worth copying)
                                     v_flex()
                                         .w_full()
-                                        .gap_3()
                                         .rounded_xl()
                                         .border_1()
                                         .border_color(cx.theme().border)
-                                        .bg(cx.theme().group_box)
-                                        .px_4()
-                                        .py_3()
-                                        // Full input: terminal tools get the `$` prefix; other tools show the full text (the part truncated in the collapsed row)
-                                        .when(!summary.is_empty(), |this| {
-                                            this.child(
-                                                h_flex()
-                                                    .w_full()
-                                                    .gap_2()
-                                                    .items_start()
-                                                    .when(tool == "Bash", |this| {
-                                                        this.child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(subtle)
-                                                                .child("$"),
-                                                        )
-                                                    })
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .text_sm()
-                                                            .text_color(cx.theme().foreground)
-                                                            .child(summary.to_string()),
-                                                    ),
-                                            )
-                                        })
+                                        .bg(cx.theme().secondary)
+                                        .px_3()
+                                        .py_2()
+                                        .text_xs()
+                                        .line_height(px(CODE_LINE_H))
+                                        .font_family(cx.theme().mono_font_family.clone())
                                         .child(
                                             div()
                                                 .id(("tool-body", message_ix * 1024 + segment_ix))
-                                                .max_h(px(120.))
+                                                .w_full()
+                                                .max_h(px(GENERIC_BOX_MAX_H))
                                                 .overflow_y_scroll()
+                                                // Vertical-only container: without the axis lock a
+                                                // horizontal wheel gesture would scroll vertically
+                                                .restrict_scroll_to_axis()
                                                 .track_scroll(body_scroll)
-                                                .text_sm()
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .text_color(if is_error {
-                                                    cx.theme().danger
-                                                } else {
-                                                    subtle
-                                                })
-                                                .child(if output.is_empty() && done {
-                                                    rust_i18n::t!("thread.no_output").to_string()
-                                                } else {
-                                                    output.to_string()
-                                                }),
+                                                .child(
+                                                    v_flex()
+                                                        .w_full()
+                                                        .gap_2()
+                                                        // The full input, repeated only when the summary row cannot show it
+                                                        .when(show_full_input(summary), |this| {
+                                                            this.child(
+                                                                div()
+                                                                    .w_full()
+                                                                    .text_color(
+                                                                        cx.theme().foreground,
+                                                                    )
+                                                                    .child(summary.to_string()),
+                                                            )
+                                                        })
+                                                        // The "No output" placeholder stays dim
+                                                        // (same as the Bash card's)
+                                                        .child(if output.is_empty() && done {
+                                                            div()
+                                                                .w_full()
+                                                                .text_color(subtlest)
+                                                                .child(
+                                                                    rust_i18n::t!(
+                                                                        "thread.no_output"
+                                                                    )
+                                                                    .to_string(),
+                                                                )
+                                                                .into_any_element()
+                                                        } else {
+                                                            // Output in the same bright
+                                                            // foreground as the code-card
+                                                            // bodies (danger on error)
+                                                            div()
+                                                                .w_full()
+                                                                .text_color(if is_error {
+                                                                    cx.theme().danger
+                                                                } else {
+                                                                    cx.theme().foreground
+                                                                })
+                                                                .child(output.to_string())
+                                                                .into_any_element()
+                                                        }),
+                                                ),
                                         )
                                         .into_any_element()
                                 })
-                                // The diff card and Read/Bash code cards have built-in scrollbars (corners trimmed by the rounded-corner patches); the generic card gets its scrollbar here
+                                // The diff card and the Read/Bash code cards have built-in scrollbars; the generic box gets its scrollbar here
                                 .when(edit.is_none() && !read_card && !bash_card, |this| {
                                     this.child(Scrollbar::vertical(body_scroll))
                                 })

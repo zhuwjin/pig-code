@@ -4,7 +4,7 @@
 //! buttons; the output is plain text without highlighting, red on failure).
 //! No wrapping by default (horizontal scrolling + always-visible horizontal
 //! scrollbar); the two cards' toggles are independent. While running or
-//! awaiting approval the generic tool card is used (live output); the code
+//! awaiting approval the generic tool box is used (live output); the code
 //! cards take over once done (including failure).
 
 use super::*;
@@ -21,6 +21,16 @@ const MAX_CARD_ROWS: usize = 600;
 enum SubCard {
     Cmd,
     Out,
+}
+
+impl SubCard {
+    /// The subcard's UI state within a Bash card
+    fn ui(self, ui: &mut BashCardUi) -> &mut SubCardUi {
+        match self {
+            SubCard::Cmd => &mut ui.cmd,
+            SubCard::Out => &mut ui.out,
+        }
+    }
 }
 
 impl ThreadView {
@@ -63,10 +73,7 @@ impl ThreadView {
                 &content.cmd,
                 false,
                 CMD_MAX_H,
-                ui.cmd_wrap,
-                ui.cmd_copied,
-                &ui.cmd_scroll,
-                &ui.cmd_h_scroll,
+                &ui.cmd,
                 SubCard::Cmd,
                 message_ix,
                 segment_ix,
@@ -74,14 +81,11 @@ impl ThreadView {
             ))
             .child(self.render_bash_subcard(
                 ("bash-out", message_ix * 1024 + segment_ix),
-                rust_i18n::t!("thread.bash_output").as_ref(),
+                rust_i18n::t!("thread.output").as_ref(),
                 &content.out,
                 is_error,
                 OUT_MAX_H,
-                ui.out_wrap,
-                ui.out_copied,
-                &ui.out_scroll,
-                &ui.out_h_scroll,
+                &ui.out,
                 SubCard::Out,
                 message_ix,
                 segment_ix,
@@ -93,7 +97,8 @@ impl ThreadView {
     /// One subcard: header (title + wrap/copy) + body (monospace rows, no
     /// line-number gutter; without wrapping it gets an explicit measured width
     /// plus horizontal scrolling, scrollbars built in and rounded with the
-    /// corner patches)
+    /// corner patches); an empty body renders the localized "No output"
+    /// placeholder (the card only renders once done)
     #[allow(clippy::too_many_arguments)]
     fn render_bash_subcard(
         &self,
@@ -102,10 +107,7 @@ impl ThreadView {
         content: &PreparedCode,
         is_error: bool,
         max_h: f32,
-        wrap: bool,
-        copied: bool,
-        v_scroll: &ScrollHandle,
-        h_scroll: &ScrollHandle,
+        ui: &SubCardUi,
         which: SubCard,
         message_ix: usize,
         segment_ix: usize,
@@ -131,6 +133,9 @@ impl ThreadView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     // Title uses the UI font (the body is the monospace one)
                     .font_family(cx.theme().font_family.clone())
                     .text_sm()
@@ -142,7 +147,7 @@ impl ThreadView {
                     .ghost()
                     .xsmall()
                     .icon(AssetIconName::TextWrap)
-                    .when(wrap, |this| this.text_color(cx.theme().foreground))
+                    .when(ui.wrap, |this| this.text_color(cx.theme().foreground))
                     .tooltip(rust_i18n::t!("thread.wrap"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::ToolCall {
@@ -152,10 +157,8 @@ impl ThreadView {
                             .get_mut(message_ix)
                             .and_then(|m| m.segments.get_mut(segment_ix))
                         {
-                            match which {
-                                SubCard::Cmd => ui.cmd_wrap = !ui.cmd_wrap,
-                                SubCard::Out => ui.out_wrap = !ui.out_wrap,
-                            }
+                            let wrap = &mut which.ui(ui).wrap;
+                            *wrap = !*wrap;
                         }
                         cx.notify();
                     })),
@@ -164,36 +167,34 @@ impl ThreadView {
                 Button::new(format!("{}-copy-{}", key.0, key.1))
                     .ghost()
                     .xsmall()
-                    .icon(if copied {
+                    .icon(if ui.copied {
                         IconName::CircleCheck
                     } else {
                         IconName::Copy
                     })
-                    .when(copied, |this| this.text_color(cx.theme().success))
+                    .when(ui.copied, |this| this.text_color(cx.theme().success))
                     .tooltip(rust_i18n::t!("common.copy"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Segment::ToolCall {
-                            bash_ui: Some(ui), ..
+                            summary,
+                            output,
+                            bash_ui: Some(ui),
+                            ..
                         }) = this
                             .messages
                             .get_mut(message_ix)
                             .and_then(|m| m.segments.get_mut(segment_ix))
                         {
-                            let text = ui
-                                .cache
-                                .borrow()
-                                .as_ref()
-                                .map(|c| match which {
-                                    SubCard::Cmd => c.cmd.code.clone(),
-                                    SubCard::Out => c.out.code.clone(),
-                                })
-                                .unwrap_or_default();
+                            // Copy the segment's raw fields (not the draw-time
+                            // "Stopped"/"No output" placeholders); the command
+                            // card copies the input, the output card the output
+                            let text = match which {
+                                SubCard::Cmd => summary.clone(),
+                                SubCard::Out => output.clone(),
+                            };
                             if !text.is_empty() {
                                 cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                match which {
-                                    SubCard::Cmd => ui.cmd_copied = true,
-                                    SubCard::Out => ui.out_copied = true,
-                                }
+                                which.ui(ui).copied = true;
                             }
                         }
                         cx.notify();
@@ -209,7 +210,7 @@ impl ThreadView {
             cx.theme().foreground
         };
         let mut rows: Vec<AnyElement> = (0..shown)
-            .map(|ix| code_line(content.line_text(ix), content.line_styles(ix), wrap))
+            .map(|ix| code_line(content.line_text(ix), content.line_styles(ix), ui.wrap))
             .collect();
         if total == 0 || (total == 1 && content.line_text(0).is_empty()) {
             rows = vec![
@@ -242,9 +243,9 @@ impl ThreadView {
             // Lock the wheel to the gesture axis (same as the Read card): the
             // vertical wheel only scrolls vertically, horizontal only horizontally
             .restrict_scroll_to_axis()
-            .track_scroll(v_scroll)
+            .track_scroll(&ui.v_scroll)
             .text_color(text_color)
-            .child(if wrap {
+            .child(if ui.wrap {
                 v_flex().w_full().children(rows).into_any_element()
             } else {
                 // No gutter: content width = code cell padding (24) + max line
@@ -254,7 +255,7 @@ impl ThreadView {
                     .id(format!("{}-body-x-{}", key.0, key.1))
                     .overflow_x_scroll()
                     .restrict_scroll_to_axis()
-                    .track_scroll(h_scroll)
+                    .track_scroll(&ui.h_scroll)
                     .child(
                         v_flex()
                             .w(content_w)
@@ -268,11 +269,9 @@ impl ThreadView {
             .relative()
             .w_full()
             // Scroll chaining: swallow the wheel when this card's content can
-            // scroll (the Bash card does not use the shared body_scroll
-            // fallback in cards.rs — subcard handles are independent); chain
-            // through to the outer message list when it cannot, consistent with
-            // other tool cards
-            .on_scroll_wheel(consume_scroll(v_scroll))
+            // scroll; chain through to the outer message list when it cannot,
+            // consistent with other tool cards
+            .on_scroll_wheel(consume_scroll(&ui.v_scroll))
             .child(
                 v_flex()
                     .w_full()
@@ -291,12 +290,12 @@ impl ThreadView {
                             .relative()
                             .w_full()
                             .child(body)
-                            .child(Scrollbar::vertical(v_scroll))
-                            .when(!wrap, |this| {
+                            .child(Scrollbar::vertical(&ui.v_scroll))
+                            .when(!ui.wrap, |this| {
                                 // Always visible: idle fade-out would leave
                                 // mouse users without their only horizontal entry
                                 this.child(
-                                    Scrollbar::horizontal(h_scroll).mode(ScrollbarMode::Always),
+                                    Scrollbar::horizontal(&ui.h_scroll).mode(ScrollbarMode::Always),
                                 )
                             }),
                     ),

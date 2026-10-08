@@ -37,12 +37,14 @@ mod model;
 mod read;
 mod reduce;
 mod search;
+mod search_card;
 
 use lightbox::*;
 use messages::*;
 use model::Role;
 use model::*;
 use read::*;
+use search_card::*;
 
 #[derive(Clone, Debug)]
 pub enum ThreadEvent {
@@ -162,6 +164,10 @@ pub struct ThreadView {
     /// an unchanged revision = unchanged content, so re-running the same query (streaming TextDone, repeated
     /// Ctrl+F) reuses the match ranges directly and only re-searches segments whose content changed
     search_cache: HashMap<EntityId, SearchSegmentCache>,
+    /// Hovered Glob/Grep result row (message_ix, segment_ix, row_ix): drives the
+    /// row's blue text highlight (written by the row's on_hover listener;
+    /// group_hover proved unreliable on these deeply nested rows)
+    search_row_hover: Option<(usize, usize, usize)>,
     _ticker: Task<()>,
 }
 
@@ -223,6 +229,7 @@ impl ThreadView {
             search_matches: Vec::new(),
             active_match: 0,
             search_cache: HashMap::new(),
+            search_row_hover: None,
             _ticker: ticker,
         }
     }

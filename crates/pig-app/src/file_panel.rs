@@ -1,12 +1,12 @@
 //! "File" tab of the right panel: read-only file viewer (opened by clicking
-//! a path on a Read tool card).
+//! a path on a Read tool card or a row of the Glob/Grep result list).
 //! Line number gutter + tree-sitter syntax highlighting (shared code_view
 //! pieces); the header is path + wrap toggle + copy button. Defaults to
 //! no-wrap (uniform_list virtualization + horizontal scrolling, so any file
 //! size opens); in wrap mode the line height varies, falling back to a
-//! plain list (truncated with a hint beyond MAX_WRAP_LINES). If the Read
-//! card carried a line number, scrolls to that line after loading
-//! completes.
+//! plain list (truncated with a hint beyond MAX_WRAP_LINES). If the opener
+//! carried a line number, scrolls to that line after loading completes and
+//! paints a highlight background on it.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -69,6 +69,9 @@ pub struct FileViewPanel {
     list_scroll: UniformListScrollHandle,
     /// Wrap mode: plain vertical scrolling
     wrap_scroll: ScrollHandle,
+    /// The opener's target line (1-based): scrolled to after loading, and
+    /// painted with a highlight background
+    highlight_line: Option<usize>,
 }
 
 /// Read + decode the file in the background (same UTF-16/GBK transcoding as
@@ -111,16 +114,18 @@ impl FileViewPanel {
             copied: false,
             list_scroll: UniformListScrollHandle::new(),
             wrap_scroll: ScrollHandle::new(),
+            highlight_line: None,
         }
     }
 
     /// Read and highlight (disk read and highlighting both on a background
     /// thread; the theme is taken on the UI thread).
-    /// initial_line: scroll to this line after loading (first line number
-    /// carried over from the Read card)
+    /// initial_line: scroll to this line after loading and paint the target
+    /// line highlight (the Read card's first line / the search result's line)
     pub fn reload(&mut self, initial_line: Option<usize>, cx: &mut Context<Self>) {
         self.state = LoadState::Loading;
         self.copied = false;
+        self.highlight_line = initial_line;
         let full = self.full.clone();
         let lang = crate::code_view::lang_name_for_path(&self.display);
         cx.spawn(async move |this, cx| {
@@ -267,16 +272,20 @@ impl FileViewPanel {
         gutter_w: Pixels,
         gutter_color: Hsla,
         row_w: Pixels,
+        highlight: Option<Hsla>,
     ) -> AnyElement {
         let content = content.clone();
+        let highlight_line = self.highlight_line;
         uniform_list(
             "file-lines",
             content.highlighted.lines.len(),
             move |range, _, _| {
                 range
                     .map(|ix| {
+                        let hl = highlight.filter(|_| highlight_line == Some(ix + 1));
                         div()
                             .w(row_w)
+                            .when_some(hl, |this, color| this.bg(color))
                             .child(code_line_row(
                                 ix + 1,
                                 content.highlighted.line_text(&content.code, ix),
@@ -309,20 +318,26 @@ impl FileViewPanel {
         content: &Rc<FileContent>,
         gutter_w: Pixels,
         gutter_color: Hsla,
+        highlight: Option<Hsla>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let total = content.highlighted.lines.len();
         let shown = total.min(MAX_WRAP_LINES);
         let rows = (0..shown)
             .map(|ix| {
-                code_line_row(
-                    ix + 1,
-                    content.highlighted.line_text(&content.code, ix),
-                    content.highlighted.line_styles(ix),
-                    gutter_w,
-                    gutter_color,
-                    true,
-                )
+                let hl = highlight.filter(|_| self.highlight_line == Some(ix + 1));
+                div()
+                    .w_full()
+                    .when_some(hl, |this, color| this.bg(color))
+                    .child(code_line_row(
+                        ix + 1,
+                        content.highlighted.line_text(&content.code, ix),
+                        content.highlighted.line_styles(ix),
+                        gutter_w,
+                        gutter_color,
+                        true,
+                    ))
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
         v_flex()
@@ -401,14 +416,18 @@ impl Render for FileViewPanel {
                 };
                 let gutter_w = gutter_width(content.highlighted.lines.len());
                 let gutter_color = subtle.opacity(0.6);
+                // The opener's target line gets a background highlight (the
+                // search-hit convention: accent at 0.25)
+                let highlight = self.highlight_line.map(|_| cx.theme().accent.opacity(0.25));
                 let lines = if self.wrap {
-                    self.render_lines_wrap(content, gutter_w, gutter_color, cx)
+                    self.render_lines_wrap(content, gutter_w, gutter_color, highlight, cx)
                 } else {
                     self.render_lines_nowrap(
                         content,
                         gutter_w,
                         gutter_color,
                         gutter_w + px(24.) + max_width,
+                        highlight,
                     )
                 };
                 div()
