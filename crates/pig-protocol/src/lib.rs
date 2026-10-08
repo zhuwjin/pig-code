@@ -1,4 +1,4 @@
-//! Contract types between pig-code's UI and core (see docs/PLAN.md §2.2).
+//! Contract types between Pig Code's UI and core (see docs/PLAN.md §2.2).
 //! Pure serde types, no business logic; both UI and core depend on this crate.
 //!
 //! Principle: delta events (streaming fragments, live-only) are separated from done

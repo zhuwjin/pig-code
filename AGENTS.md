@@ -1,4 +1,4 @@
-# pig-code Workspace Guide
+# Pig Code Workspace Guide
 
 A graphical AI code-agent desktop app: Rust + gpui-kit (crates.io release), single process with two execution domains, UI benchmarked against ZCode. **Read `docs/PLAN.md` before touching anything** — it is the single source of design decisions and implementation records (including past "polish" notes and upstream bug tracking). Sensitive areas (dock layout, MCP, Windows subprocesses, streaming rendering) require reading the relevant sections first.
 

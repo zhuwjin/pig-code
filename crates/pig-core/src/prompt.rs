@@ -115,7 +115,7 @@ pub fn system_prompt(
     skills_section: &str,
 ) -> String {
     let mut prompt = String::from(
-        "You are pig-code, an AI coding assistant running in the user's workspace.\n\n\
+        "You are Pig Code, an AI coding assistant running in the user's workspace.\n\n\
          IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, \
          and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass \
          targeting, supply chain compromise, or detection evasion for malicious purposes. \

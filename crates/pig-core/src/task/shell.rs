@@ -1,7 +1,7 @@
 use super::*;
 
 /// Windows shell detection result: prefer Git Bash (Unix syntax + UTF-8
-/// output); fall back to cmd when not found (existing pig-code behavior, zero
+/// output); fall back to cmd when not found (existing Pig Code behavior, zero
 /// new failure modes).
 #[derive(Clone, Debug)]
 pub enum WindowsShell {

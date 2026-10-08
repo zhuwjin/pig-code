@@ -8,18 +8,18 @@ impl AppView {
             .as_ref()
             .and_then(|id| self.metas.iter().find(|m| &m.id == id))
             .map(|m| crate::sidebar::display_title(&m.title))
-            .unwrap_or_else(|| "pig-code".to_string());
+            .unwrap_or_else(|| "Pig Code".to_string());
         // Debug builds carry the version in the title bar, making it easy
         // to tell daily debugging/self-tests from release distribution
         let label = if cfg!(debug_assertions) {
             let version = env!("CARGO_PKG_VERSION");
             if self.current.is_some() {
-                format!("pig-code v{version} · {title}")
+                format!("Pig Code v{version} · {title}")
             } else {
-                format!("pig-code v{version}")
+                format!("Pig Code v{version}")
             }
         } else {
-            format!("pig-code · {title}")
+            format!("Pig Code · {title}")
         };
 
         // On Windows the title bar hits HTCAPTION: a left press still

@@ -262,7 +262,7 @@ impl HttpTransport {
             let reply = json!({
                 "jsonrpc": "2.0",
                 "id": message["id"],
-                "error": {"code": -32601, "message": "pig-code does not support server-initiated requests"},
+                "error": {"code": -32601, "message": "Pig Code does not support server-initiated requests"},
             });
             let client = self.client.clone();
             let url = self.url.clone();

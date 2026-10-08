@@ -14,7 +14,7 @@ use pig_core::spawn_agent_with_data_dir;
 use pig_protocol::{Event, Op};
 use std::time::Duration;
 
-/// Main-loop request = messages[0] is the pig-code system prompt and carries a
+/// Main-loop request = messages[0] is the Pig Code system prompt and carries a
 /// tools array (bypass requests such as title generation are also logged and
 /// must be filtered out)
 fn main_loop_requests(log: &[String]) -> Vec<serde_json::Value> {
@@ -26,7 +26,7 @@ fn main_loop_requests(log: &[String]) -> Vec<serde_json::Value> {
                 && req["messages"][0]["role"] == "system"
                 && req["messages"][0]["content"]
                     .as_str()
-                    .is_some_and(|c| c.contains("pig-code"))
+                    .is_some_and(|c| c.contains("Pig Code"))
         })
         .collect()
 }

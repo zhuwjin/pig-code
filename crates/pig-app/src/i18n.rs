@@ -121,7 +121,7 @@ mod tests {
     /// tests).
     #[test]
     fn locale_switch_changes_lookup() {
-        for (locale, needle) in [("zh-CN", "向 pig-code 提问"), ("en", "Ask pig-code")] {
+        for (locale, needle) in [("zh-CN", "向 Pig Code 提问"), ("en", "Ask Pig Code")] {
             rust_i18n::set_locale(locale);
             assert!(
                 rust_i18n::t!("composer.placeholder_idle").contains(needle),

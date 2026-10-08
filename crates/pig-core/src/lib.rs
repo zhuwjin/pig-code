@@ -1,4 +1,4 @@
-//! pig-code's agent engine: Session / turn loop / OpenAI-compatible provider / tool execution.
+//! Pig Code's agent engine: Session / turn loop / OpenAI-compatible provider / tool execution.
 //! Runs on a dedicated tokio runtime thread via `spawn_agent`, exchanging Op/Event with the
 //! UI over channels.
 //!

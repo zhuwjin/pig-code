@@ -5,8 +5,8 @@ _version: 2
 
 composer:
   placeholder_idle:
-    zh-CN: 向 pig-code 提问，使用 @ 添加上下文，使用 / 选择命令
-    en: Ask pig-code anything — @ to add context, / for commands
+    zh-CN: 向 Pig Code 提问，使用 @ 添加上下文，使用 / 选择命令
+    en: Ask Pig Code anything — @ to add context, / for commands
   placeholder_streaming:
     zh-CN: 继续输入以排队后续修改
     en: Keep typing to queue further changes

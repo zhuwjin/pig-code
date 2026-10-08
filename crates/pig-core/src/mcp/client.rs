@@ -554,7 +554,7 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
             let reply = json!({
                 "jsonrpc": "2.0",
                 "id": message["id"],
-                "error": {"code": -32601, "message": format!("pig-code does not support {method}")},
+                "error": {"code": -32601, "message": format!("Pig Code does not support {method}")},
             });
             let _ = writer.write_message(&reply).await;
         }

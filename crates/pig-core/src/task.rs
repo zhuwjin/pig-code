@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(unix_shell(), expected);
     }
 
-    /// When git is installed (a hard pig-code dependency), detection must find
+    /// When git is installed (a hard Pig Code dependency), detection must find
     /// Git Bash. Windows-only: the detection chain looks for .exe/ProgramFiles
     /// layouts, while on Unix spawn goes straight to sh without this chain
     /// (running it here would necessarily fail, which is not a regression
@@ -941,7 +941,7 @@ mod tests {
             .output()
             .is_ok_and(|out| out.status.success());
         if !git_on_path {
-            return; // Skip on machines without git (theoretically nonexistent: pig-code hard-depends on git)
+            return; // Skip on machines without git (theoretically nonexistent: Pig Code hard-depends on git)
         }
         assert!(
             matches!(windows_shell(), WindowsShell::GitBash(_)),
