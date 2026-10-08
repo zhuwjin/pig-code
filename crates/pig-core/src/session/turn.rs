@@ -1,5 +1,22 @@
 use super::*;
 
+/// Title seed from the first message: the first non-empty line, trimmed,
+/// capped at 30 chars. Multi-line/tabbed content must not leak `\n`/`\t` into
+/// the stored title — the sidebar measures titles with gpui's `shape_line`,
+/// which debug_assert-panics on embedded newlines (2026-10-08 crash:
+/// expanding a workspace whose session title carried the first message's raw
+/// newlines killed the app).
+fn seed_title(content: &str) -> String {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(30)
+        .collect()
+}
+
 impl Session {
     pub async fn run_turn(
         &mut self,
@@ -74,7 +91,7 @@ impl Session {
             // First message: seed the title (first 30 chars as fallback) and
             // generate a model title async; if manually renamed (title_custom),
             // neither overwrites
-            let title: String = content.chars().take(30).collect();
+            let title = seed_title(&content);
             let id = self.id.clone();
             self.store
                 .lock()
@@ -1657,6 +1674,28 @@ fn parallel_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Title seed: the first non-empty line, trimmed, capped at 30 chars. Raw
+    /// `\n`/`\t` must never reach the stored title — the sidebar measures
+    /// titles with gpui's `shape_line`, which debug_assert-panics on embedded
+    /// newlines (2026-10-08 crash: expanding a workspace whose session title
+    /// carried the multi-line message's raw newlines killed the app).
+    #[test]
+    fn seed_title_takes_first_line_without_control_chars() {
+        // The real crash message's head: multi-line, tab-separated fields
+        assert_eq!(
+            seed_title("产成品入库接口\n基本信息\n项目\t内容\n接口名称\t产成品入库生单接口"),
+            "产成品入库接口"
+        );
+        // Leading blank lines are skipped
+        assert_eq!(seed_title("\n\n  \nsecond line\n"), "second line");
+        // Single-line messages keep the old behavior (first 30 chars)
+        let long = "字".repeat(45);
+        assert_eq!(seed_title(&long), "字".repeat(30));
+        assert_eq!(seed_title("你好"), "你好");
+        // Whitespace-only content seeds empty (placeholder renders)
+        assert_eq!(seed_title(" \n\t "), "");
+    }
 
     fn mask_of(names: &[&str], mode: ExecMode, input_image: bool) -> Vec<bool> {
         mask_with(names, &tool::all(), mode, input_image, "no-rules")

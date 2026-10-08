@@ -184,6 +184,12 @@ impl Sidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        // Flatten control characters: `measure_title_width` shapes the title
+        // with gpui's `shape_line`, which debug_assert-panics on embedded
+        // newlines. Pre-fix title seeds (and any legacy store rows) can carry
+        // raw `\n`/`\t` from multi-line first messages — the 2026-10-08 crash
+        // was exactly this firing when a workspace block expanded.
+        let title = title.replace(['\n', '\r', '\t'], " ");
         let title_handle = self
             .title_scrolls
             .borrow_mut()
@@ -193,7 +199,7 @@ impl Sidebar {
         let hover_key = key.to_string();
         // Explicit true width (+2px slack against font width rounding), pushing the
         // overflow to the ScrollHandle
-        let title_width = Self::measure_title_width(title, window, cx) + px(2.);
+        let title_width = Self::measure_title_width(&title, window, cx) + px(2.);
         // Fade visibility follows scroll position (same as thread_view's scrolling
         // thinking rows): the right end fades while unexposed text remains; after
         // the marquee scrolls past the start, the left end fades too
@@ -224,7 +230,7 @@ impl Sidebar {
                             this.end_title_marquee(&hover_key, cx);
                         }
                     }))
-                    .child(div().w(title_width).child(title.to_string())),
+                    .child(div().w(title_width).child(title)),
             )
             .when(hides_leading, |this| {
                 this.child(Self::title_fade(true, fade_base, fade_tint))

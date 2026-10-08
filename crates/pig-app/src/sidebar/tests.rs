@@ -67,6 +67,59 @@ fn click(
 /// Pagination "show more/collapse": the container height should animate, not jump
 /// (user-reported regression: after collapsing the content is already reduced, and
 /// the max_h cap cannot hold the container down)
+/// Crash regression (2026-10-08): a session title seeded from a long
+/// multi-line first message carried raw `\n`/`\t` (the real store row read
+/// "产成品入库接口\n基本信息\n项目\t内容\n…"); expanding the workspace renders
+/// the row and measures the title via gpui's `shape_line`, whose
+/// `debug_assert!(!text.contains('\n'))` killed the app (0xc0000409 x3 in the
+/// event log). The marquee path must flatten such titles; passing this test
+/// means both the workspace-expansion render and the width measurement
+/// survived.
+#[test]
+fn dirty_multiline_title_survives_workspace_expand() {
+    let cx = &mut gpui_kit::TestAppContext::single();
+    cx.update(gpui_kit::init);
+    let window = cx.open_window(gpui_kit::size(gpui_kit::px(500.), gpui_kit::px(900.)), {
+        |window, cx| {
+            let sidebar = cx.new(|cx| Sidebar::new(window, cx));
+            SidebarProbe { sidebar }
+        }
+    });
+    let mut sessions = make_sessions("/tmp/ws", 2);
+    sessions[0].title = "产成品入库接口\n基本信息\n项目\t内容\n接口名称\t产成品入库生".to_string();
+    window
+        .update(cx, |probe, _, cx| {
+            probe.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_state(
+                    sessions,
+                    vec!["/tmp/ws".to_string()],
+                    HashMap::new(),
+                    None,
+                    cx,
+                );
+            });
+        })
+        .expect("window alive");
+    render(cx, &window);
+    // Expand the workspace (same path as clicking the folder row) — the row
+    // with the dirty title renders for the first time here
+    window
+        .update(cx, |probe, _, cx| {
+            probe.sidebar.update(cx, |sidebar, _cx| {
+                sidebar.expanded.insert("/tmp/ws".to_string());
+                let anim = sidebar
+                    .expand_anims
+                    .entry("/tmp/ws".to_string())
+                    .or_default();
+                anim.generation += 1;
+            });
+        })
+        .expect("window alive");
+    render(cx, &window);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    render(cx, &window);
+}
+
 #[test]
 fn workspace_pagination_resize_animates() {
     let cx = &mut gpui_kit::TestAppContext::single();
