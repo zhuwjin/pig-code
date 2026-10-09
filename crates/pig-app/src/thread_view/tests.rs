@@ -2047,3 +2047,152 @@ fn plan_row_states_and_expand(cx: &mut gpui_kit::TestAppContext) {
         })
         .unwrap();
 }
+
+/// Long-bubble collapse estimate: each hard line wraps at 80 display columns
+/// (CJK counts double, the same weight heuristic as show_full_input); the
+/// collapse threshold is 7 estimated lines (ZCode's 120px cap ≈ 5.3 lines + 1
+/// line of estimate slack).
+#[test]
+fn user_msg_collapse_estimate() {
+    // Empty and short texts stay open
+    assert!(!super::user_msg_is_long(""));
+    assert!(!super::user_msg_is_long("short message"));
+    // Wrap estimate: 80 columns exactly = one line, 81 = two (both still open)
+    assert!(!super::user_msg_is_long(&"a".repeat(80)));
+    assert!(!super::user_msg_is_long(&"a".repeat(81)));
+    // CJK counts double: 40 CJK chars = 80 columns = one line
+    assert!(!super::user_msg_is_long(&"密".repeat(40)));
+    // 6 hard lines = below the threshold → open
+    assert!(!super::user_msg_is_long("hi\n".repeat(6).trim_end()));
+    // 7 hard lines → reaches the threshold → collapsed
+    assert!(super::user_msg_is_long(&"hi\n".repeat(7)));
+    // One long wrapping CJK paragraph ≈ 11 lines → collapsed
+    assert!(super::user_msg_is_long(&"密".repeat(401)));
+}
+
+/// Long user bubbles collapse by default (ZCode ConversationUserInputBody): the
+/// text clips to the 5-line cap (whole lines, no partial-glyph sliver) with a
+/// floating icon pill over a bottom fade; clicking tweens the clip open (300ms), clicking
+/// again tweens it shut. Short messages carry no toggle at all.
+/// Reduce-motion snaps gpui animations to their final state, which makes the
+/// tween's settled heights assertable without real-time waits (animations run
+/// on the wall clock, not the test clock).
+#[gpui_kit::test]
+fn user_message_long_collapses_with_toggle(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+    cx.update(|cx| cx.set_reduce_motion(true));
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(900.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+
+    window
+        .update(cx, |probe, _window, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("short message".to_string(), vec![], vec![], cx);
+                let long_text = (0..12)
+                    .map(|i| format!("line {i:02} of the long spec"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                view.append_user_message(long_text, vec![], vec![], cx);
+            });
+        })
+        .unwrap();
+    // Defaults: short stays open, long collapses by construction
+    window
+        .update(cx, |probe, _window, cx| {
+            probe.thread.update(cx, |view, _| {
+                assert!(view.messages[0].user_open, "short message stays open");
+                assert!(
+                    !view.messages[1].user_open,
+                    "long message collapses by default"
+                );
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    cx.update_window(window.into(), |_, window, _| {
+        assert!(
+            window.try_find(("user-msg-toggle", 0usize)).is_none(),
+            "short message must not carry a toggle"
+        );
+        assert!(
+            window.find(("user-msg-toggle", 1usize)).visible(),
+            "long message's floating toggle should be visible"
+        );
+        let collapsed_h = window.find(("user-msg-clip", 1usize)).bounds().size.height;
+        assert!(
+            collapsed_h <= gpui_kit::px(130.),
+            "collapsed clip stays under the ≈5-line cap (115px), got {collapsed_h:?}"
+        );
+    })
+    .unwrap();
+
+    // 展开: reduce motion lands the 300ms tween at its settled open state
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("user-msg-toggle", 1usize), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    window
+        .update(cx, |probe, _window, cx| {
+            probe.thread.update(cx, |view, _| {
+                assert!(view.messages[1].user_open, "toggle click expands");
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        let expanded_h = window.find(("user-msg-clip", 1usize)).bounds().size.height;
+        assert!(
+            expanded_h > gpui_kit::px(130.),
+            "expanded text (12 lines ≈ 276px) must exceed the cap, got {expanded_h:?}"
+        );
+    })
+    .unwrap();
+
+    // 收起: the reverse tween settles back under the cap
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("user-msg-toggle", 1usize), cx);
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    window
+        .update(cx, |probe, _window, cx| {
+            probe.thread.update(cx, |view, _| {
+                assert!(!view.messages[1].user_open, "second click collapses again");
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, _| {
+        let h = window.find(("user-msg-clip", 1usize)).bounds().size.height;
+        assert!(
+            h > gpui_kit::px(0.) && h <= gpui_kit::px(130.),
+            "re-collapsed clip settles under the cap, got {h:?}"
+        );
+    })
+    .unwrap();
+}

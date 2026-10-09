@@ -433,6 +433,13 @@ pub struct ChatMessage {
     pub system_kind: SystemNoteKind,
     /// Selection handle + refresh subscription of a user message (drives live highlighting during drag-selection); only the User role has it
     pub selection: Option<(TextSelectionHandle, Subscription)>,
+    /// Long user-bubble expanded state: false = clipped to the collapsed cap with an
+    /// expand toggle below the bubble. Initialized at construction from the line
+    /// estimate (`user_msg_is_long`), so the same estimate at render never disagrees;
+    /// only meaningful for the User role
+    pub user_open: bool,
+    /// Height-tween state for the long-bubble expand/collapse (see UserMsgAnim)
+    pub user_anim: UserMsgAnim,
     pub files: Vec<String>,
     /// Image attachments of a user message (loaded by image_nums; non-empty only for the User role)
     pub images: Vec<UserImage>,
@@ -489,6 +496,8 @@ impl ChatMessage {
     pub(crate) fn user(text: String, files: Vec<String>) -> Self {
         Self {
             role: Role::User,
+            user_open: !user_msg_is_long(&text),
+            user_anim: UserMsgAnim::default(),
             text,
             system_kind: SystemNoteKind::Plain,
             selection: None,
@@ -511,6 +520,8 @@ impl ChatMessage {
     pub(crate) fn system_with_kind(text: String, kind: SystemNoteKind) -> Self {
         Self {
             role: Role::System,
+            user_open: true,
+            user_anim: UserMsgAnim::default(),
             text,
             system_kind: kind,
             selection: None,
@@ -529,6 +540,8 @@ impl ChatMessage {
     pub(crate) fn assistant() -> Self {
         Self {
             role: Role::Assistant,
+            user_open: true,
+            user_anim: UserMsgAnim::default(),
             text: String::new(),
             system_kind: SystemNoteKind::Plain,
             selection: None,
@@ -541,6 +554,69 @@ impl ChatMessage {
             copied: false,
             copied_gen: 0,
             notification_ui: None,
+        }
+    }
+}
+
+/// Long user-bubble collapse constants (ZCode's ConversationUserInputBody):
+/// tall bubbles collapse by default; the clip tweens between the cap and the
+/// natural height and a floating icon pill toggles it.
+/// Collapsed cap: whole rendered lines. ZCode pins a raw 120px, which at our
+/// metrics (0.875rem font × phi line height ≈ 22.65px) lands 6px into line 6,
+/// leaving a partial-glyph sliver at the tail — so the cap snaps to this many
+/// full lines instead.
+pub(crate) const USER_MSG_COLLAPSED_LINES: usize = 5;
+/// text_sm font size in rems (mirrors the bubble's .text_sm()).
+const USER_MSG_TEXT_FONT_REMS: f32 = 0.875;
+/// Collapsed cap in px: N lines × the per-line rounded height (font × phi,
+/// rounded like TextStyle::line_height_in_pixels), so the clip never cuts a
+/// line in half regardless of the rem scale.
+pub(crate) fn user_msg_collapsed_cap_px(rem_px: f32) -> f32 {
+    let line_px = (USER_MSG_TEXT_FONT_REMS * rem_px * 1.618_034).round();
+    USER_MSG_COLLAPSED_LINES as f32 * line_px
+}
+/// Wrap estimate: display columns per bubble line (the bubble spans ≈80% of the
+/// message area at typical widths; CJK counts double, the same weight heuristic
+/// as `show_full_input`). A misestimate only shifts collapse onset slightly.
+const USER_MSG_WRAP_COLS: usize = 80;
+/// Collapse when the estimate reaches this many lines (ZCode measures the real
+/// scrollHeight > 121px ≈ 6 lines; +1 line of slack because our line count is
+/// an estimate, keeping borderline-fitting messages toggle-free).
+const USER_MSG_COLLAPSE_THRESHOLD: usize = 7;
+
+/// Whether a user bubble's text is estimated tall enough to collapse by default.
+/// Pure function of the text so the constructor default and the render-time
+/// toggle agree; live and replay share it (replayed history also starts collapsed).
+pub(crate) fn user_msg_is_long(text: &str) -> bool {
+    user_msg_estimated_lines(text) >= USER_MSG_COLLAPSE_THRESHOLD
+}
+
+fn user_msg_estimated_lines(text: &str) -> usize {
+    text.lines()
+        .map(|line| {
+            let cols: usize = line
+                .chars()
+                .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+                .sum();
+            cols.div_ceil(USER_MSG_WRAP_COLS).max(1)
+        })
+        .sum()
+}
+
+/// Height-tween state of a long user bubble's expand/collapse (ZCode animates
+/// `max-height` for 300ms ease-out both ways): `generation` bumps on each toggle
+/// (part of the animation element id, replaying it), `measured_h` continuously
+/// tracks the text's natural height via the inner element's prepaint bounds.
+pub struct UserMsgAnim {
+    pub generation: u64,
+    pub measured_h: std::rc::Rc<std::cell::Cell<f32>>,
+}
+
+impl Default for UserMsgAnim {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            measured_h: std::rc::Rc::new(std::cell::Cell::new(0.)),
         }
     }
 }

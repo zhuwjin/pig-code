@@ -194,6 +194,9 @@ thread:
   collapse:
     zh-CN: 收起
     en: Collapse
+  expand:
+    zh-CN: 展开
+    en: Expand
   more_files:
     zh-CN: "还有 %{n} 个文件"
     en: "%{n} more files"

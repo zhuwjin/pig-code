@@ -113,10 +113,12 @@ fn nav_card_body(data: &NavCardData, cx: &App) -> Div {
 }
 
 impl ThreadView {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_user_message(
         &self,
         ix: usize,
         message: &ChatMessage,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Synthetic message of a background subagent finishing/failing: rendered as a notification card instead of a user bubble
@@ -143,6 +145,7 @@ impl ThreadView {
                 .cloned()
                 .collect()
         };
+        let long = user_msg_is_long(&message.text);
         v_flex()
             .w_full()
             .items_end()
@@ -172,6 +175,8 @@ impl ThreadView {
                     .rounded_2xl()
                     .bg(cx.theme().accent)
                     .text_sm()
+                    // Anchor for the collapsed state's floating expand link
+                    .relative()
                     .with_animation(
                         "user-msg-enter",
                         Animation::new(std::time::Duration::from_millis(150))
@@ -196,20 +201,28 @@ impl ThreadView {
                             .expect("selection handle lazily created during render")
                             .0
                             .clone();
-                        if segments
+                        let text_el = if segments
                             .iter()
                             .any(|s| matches!(s, MentionSegment::Mention(_)))
                         {
-                            this.child(h_flex().flex_wrap().items_center().children(
-                                segments.iter().enumerate().map(|(six, segment)| {
+                            h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .children(segments.iter().enumerate().map(|(six, segment)| {
                                     match segment {
-                                        MentionSegment::Text(text) => SelectableText::with_handle(
-                                            ("user-msg-text", ix * 1024 + six),
-                                            handle.clone(),
-                                            text.clone(),
-                                        )
-                                        .document_order(six as u64)
-                                        .into_any_element(),
+                                        // Wrapper div only carries the hover cursor: SelectableText never
+                                        // registers one itself (upstream gap vs TextView's selectable mode)
+                                        MentionSegment::Text(text) => div()
+                                            .cursor_text()
+                                            .child(
+                                                SelectableText::with_handle(
+                                                    ("user-msg-text", ix * 1024 + six),
+                                                    handle.clone(),
+                                                    text.clone(),
+                                                )
+                                                .document_order(six as u64),
+                                            )
+                                            .into_any_element(),
                                         MentionSegment::Mention(path) => {
                                             let file_name =
                                                 path.rsplit('/').next().unwrap_or(path).to_string();
@@ -238,16 +251,147 @@ impl ThreadView {
                                                 .into_any_element()
                                         }
                                     }
-                                }),
-                            ))
+                                }))
+                                .into_any_element()
                         } else {
-                            this.child(
-                                SelectableText::with_handle(
-                                    ("user-msg-text", ix),
-                                    handle,
-                                    message.text.clone(),
+                            // Same wrapper as the mention branch above: I-beam hover cursor
+                            div()
+                                .cursor_text()
+                                .child(
+                                    SelectableText::with_handle(
+                                        ("user-msg-text", ix),
+                                        handle,
+                                        message.text.clone(),
+                                    )
+                                    .document_order(ix as u64),
                                 )
-                                .document_order(ix as u64),
+                                .into_any_element()
+                        };
+                        // Long bubbles clip to the collapsed cap; each toggle tweens the clip
+                        // between the cap and the natural height (ZCode: 300ms ease-out
+                        // max-height transition). The cap snaps to whole rendered lines (see
+                        // user_msg_collapsed_cap_px) so the tail never shows a partial-glyph
+                        // sliver; the inner element keeps measuring the natural height (the cap
+                        // lives on the outer layer only).
+                        let cap_px = user_msg_collapsed_cap_px(f32::from(window.rem_size()));
+                        let measured = message.user_anim.measured_h.clone();
+                        let measured_inner = message.user_anim.measured_h.clone();
+                        let open = message.user_open;
+                        let toggle_gen = message.user_anim.generation;
+                        let clip_body = div()
+                            .on_prepaint(move |bounds, _, _| {
+                                measured_inner.set(f32::from(bounds.size.height))
+                            })
+                            .child(text_el);
+                        let clip = if toggle_gen > 0 {
+                            // Past the first toggle every state goes through the tween so both
+                            // directions animate; the fully-open final frame drops the cap
+                            // entirely (a leftover max_h would clamp tall content)
+                            div()
+                                .id(("user-msg-clip", ix))
+                                .test_support()
+                                .overflow_hidden()
+                                .with_animation(
+                                    ("user-msg-expand", ix * 1024 + toggle_gen as usize),
+                                    Animation::new(std::time::Duration::from_millis(300)),
+                                    move |el, delta| {
+                                        // ease-out cubic both ways (CSS transition ease-out)
+                                        let d = 1.0 - (1.0 - delta).powi(3);
+                                        let span = (measured.get() - cap_px).max(0.);
+                                        if open && delta >= 1.0 {
+                                            el
+                                        } else if open {
+                                            el.max_h(px(cap_px + span * d))
+                                        } else {
+                                            el.max_h(px(cap_px + span * (1.0 - d)))
+                                        }
+                                    },
+                                )
+                                .child(clip_body)
+                                .into_any_element()
+                        } else {
+                            // Initial render (live default or replay): static clip, no tween
+                            div()
+                                .id(("user-msg-clip", ix))
+                                .test_support()
+                                .when(long && !open, |this| {
+                                    this.max_h(px(cap_px)).overflow_hidden()
+                                })
+                                .child(clip_body)
+                                .into_any_element()
+                        };
+                        this.child(clip)
+                    })
+                    // Toggle pill (ZCode: rounded-full bg-background shadow-sm, chevron icon
+                    // only): collapsed it floats centered over the mask fade pinned to the
+                    // bubble bottom; expanded it becomes an in-flow centered row under the text
+                    .when(long, |this| {
+                        let open = message.user_open;
+                        let pill = div()
+                            .id(("user-msg-toggle", ix))
+                            .test_support()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size_7()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().background)
+                            .shadow_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(cx.theme().secondary))
+                            .tooltip({
+                                let label = if open {
+                                    rust_i18n::t!("thread.collapse")
+                                } else {
+                                    rust_i18n::t!("thread.expand")
+                                };
+                                move |window, cx| Tooltip::new(label.to_string()).build(window, cx)
+                            })
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size_4()
+                                .text_color(cx.theme().muted_foreground),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(message) = this.messages.get_mut(ix) {
+                                    message.user_open = !message.user_open;
+                                    message.user_anim.generation += 1;
+                                    cx.notify();
+                                }
+                            }));
+                        if open {
+                            this.child(div().w_full().pt_2().flex().justify_center().child(pill))
+                        } else {
+                            // ZCode masks the bottom 30% of the clipped box to transparent;
+                            // on a flat accent fill a transparent→accent gradient overlay is
+                            // pixel-identical. The pill rides centered inside the fade band.
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .bottom_0()
+                                    .left_0()
+                                    .w_full()
+                                    // ZCode masks the bottom 30% of the clipped box; at the
+                                    // 5-line cap (≈115px) that is ≈36px
+                                    .h(px(36.))
+                                    // Match the bubble's bottom corners: a square overlay would
+                                    // paint accent over the rounded corners below its curve
+                                    .rounded_b_2xl()
+                                    .flex()
+                                    .items_end()
+                                    .justify_center()
+                                    .bg(linear_gradient(
+                                        180.,
+                                        linear_color_stop(cx.theme().accent.opacity(0.), 0.),
+                                        linear_color_stop(cx.theme().accent, 1.),
+                                    ))
+                                    .child(div().pb_1().child(pill)),
                             )
                         }
                     }),
@@ -623,7 +767,7 @@ impl ThreadView {
     ) -> AnyElement {
         let message = &self.messages[ix];
         match message.role {
-            Role::User => self.render_user_message(ix, message, cx),
+            Role::User => self.render_user_message(ix, message, window, cx),
             Role::System => match &message.system_kind {
                 SystemNoteKind::Plain => div()
                     .w_full()
