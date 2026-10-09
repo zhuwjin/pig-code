@@ -142,7 +142,7 @@ fn fs_toggle(
 }
 
 /// Task duration: started→ended (or until now), "N seconds / N minutes".
-fn format_task_duration(started_at: u64, end: u64) -> String {
+pub(crate) fn format_task_duration(started_at: u64, end: u64) -> String {
     let secs = end.saturating_sub(started_at);
     if secs < 60 {
         rust_i18n::t!("composer.task_duration_seconds", n = secs).to_string()
@@ -353,6 +353,11 @@ pub enum ComposerEvent {
         agent_id: String,
         title: String,
     },
+    /// Bash row click in the "background Bash" popup: opens the right task-output
+    /// tab reading the spill file (AppView handles it via open_task_tab)
+    OpenTaskOutput {
+        task_id: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -454,7 +459,6 @@ pub struct Composer {
     changes: (u32, u32),
     change_files: Vec<(String, u32, u32)>,
     /// Task row id whose output tail is expanded
-    expanded_task: Option<String>,
     /// Image attachments pasted from the clipboard (shown in the chip strip;
     /// sent as PendingImage on send, cleared afterwards)
     pasted_images: Vec<PastedImage>,
@@ -547,7 +551,6 @@ impl Composer {
             task_filter: TaskFilter::Running,
             changes: (0, 0),
             change_files: Vec::new(),
-            expanded_task: None,
             pasted_images: Vec::new(),
             paste_note: None,
             hero_mode: false,

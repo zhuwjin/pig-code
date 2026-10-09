@@ -190,10 +190,10 @@ impl Composer {
     }
 
     /// Background task popup (split by kind into two independent panels: "background
-    /// Bash / background Agent"): clicking a Bash row expands the output tail (as
-    /// today); clicking an Agent row opens the subagent conversation tab on the
-    /// right (collapse the popup plus ComposerEvent::OpenSubagent bubbles up to
-    /// AppView)
+    /// Bash / background Agent"): clicking any row opens that task on the right —
+    /// a Bash row opens the task-output tab (full spill log), an Agent row opens
+    /// the subagent conversation tab (the popup collapses and the matching
+    /// ComposerEvent bubbles up to AppView)
     pub(crate) fn render_tasks_panel(
         &self,
         kind: TaskChipKind,
@@ -281,15 +281,17 @@ impl Composer {
                     .into_any_element(),
             };
             let duration = format_task_duration(task.started_at, task.ended_at.unwrap_or(now));
-            let expanded = self.expanded_task.as_deref() == Some(task.id.as_str());
             let task_id = task.id.clone();
             let agent_open = task
                 .agent_id
                 .clone()
                 .map(|agent_id| (agent_id, task.command.clone()));
-            let mut row = v_flex().w_full().child(
+            let row = v_flex().w_full().child(
                 h_flex()
                     .id(("aux-task-row", ix))
+                    // test_support: headless tests find/click rows through the
+                    // observation tree, which registers only marked elements
+                    .test_support()
                     .w_full()
                     .gap_2()
                     .px_1()
@@ -297,22 +299,18 @@ impl Composer {
                     .cursor_pointer()
                     .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        // Agent row: clicking opens the subagent conversation tab on
-                        // the right (collapse the popup plus bubble the event);
-                        // Bash row: expand/collapse the output tail
+                        // Both kinds open their task on the right; the popup
+                        // collapses and the event bubbles up to AppView
+                        this.popup = None;
                         if let Some((agent_id, title)) = &agent_open {
-                            this.popup = None;
                             cx.emit(ComposerEvent::OpenSubagent {
                                 agent_id: agent_id.clone(),
                                 title: title.clone(),
                             });
                         } else {
-                            this.expanded_task =
-                                if this.expanded_task.as_deref() == Some(task_id.as_str()) {
-                                    None
-                                } else {
-                                    Some(task_id.clone())
-                                };
+                            cx.emit(ComposerEvent::OpenTaskOutput {
+                                task_id: task_id.clone(),
+                            });
                         }
                         cx.notify();
                     }))
@@ -340,29 +338,6 @@ impl Composer {
                             .text_color(cx.theme().muted_foreground),
                     ),
             );
-            // Output tail expansion is for Bash rows only (an Agent's full
-            // conversation lives in the right tab)
-            if kind == TaskChipKind::Bash && expanded {
-                row = row.child(
-                    div()
-                        .id(("aux-task-output", ix))
-                        .w_full()
-                        .mt_1()
-                        .p_2()
-                        .rounded_md()
-                        .bg(cx.theme().accent.opacity(0.3))
-                        .max_h(px(240.))
-                        .overflow_y_scroll()
-                        .text_xs()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if task.output_tail.is_empty() {
-                            rust_i18n::t!("composer.no_output_yet").to_string()
-                        } else {
-                            task.output_tail.clone()
-                        }),
-                );
-            }
             list = list.child(row);
         }
 

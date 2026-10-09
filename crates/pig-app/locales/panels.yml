@@ -19,6 +19,18 @@ panel:
   subagent:
     zh-CN: 子代理
     en: Subagent
+  task_output:
+    zh-CN: 任务输出
+    en: Task output
+  task_output_loading:
+    zh-CN: 读取输出中…
+    en: Loading output…
+  task_output_omitted:
+    zh-CN: "… 前面省略 %{n} 行 …"
+    en: "… %{n} earlier lines omitted …"
+  task_output_omitted_one:
+    zh-CN: "… 前面省略 %{n} 行 …"
+    en: "… 1 earlier line omitted …"
   compact_summary:
     zh-CN: 压缩摘要
     en: Compact summary

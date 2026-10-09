@@ -18,6 +18,7 @@ mod search_popup;
 mod settings;
 mod sidebar;
 mod subagent_panel;
+mod task_output_panel;
 mod terminal;
 mod thread_view;
 
@@ -119,6 +120,7 @@ use crate::review_panel::{ReviewEvent, ReviewPanel};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::sidebar::{Sidebar, SidebarEvent, SidebarSession};
 use crate::subagent_panel::SubagentPanel;
+use crate::task_output_panel::TaskOutputPanel;
 use crate::terminal::{TerminalPanel, TerminalPanelEvent};
 use crate::thread_view::{ThreadEvent, ThreadView};
 use crate::trajectory::TrajectoryState;
@@ -145,6 +147,10 @@ enum RightTab {
     File {
         path: String,
     },
+    /// Background Bash task output; id = the task id (the key in task_tabs)
+    TaskOutput {
+        id: String,
+    },
     CompactSummary,
 }
 
@@ -156,6 +162,7 @@ impl RightTab {
             Self::Trajectory => "trajectory".to_string(),
             Self::Subagent { agent_id } => format!("subagent-{agent_id}"),
             Self::File { path } => format!("file-{path}"),
+            Self::TaskOutput { id } => format!("task-{id}"),
             Self::CompactSummary => "compact-summary".to_string(),
         }
     }
@@ -376,6 +383,9 @@ struct AppView {
     /// Content panels of "File" tabs (normalized absolute path → panel
     /// entity; removed when the tab closes)
     file_tabs: HashMap<String, Entity<FileViewPanel>>,
+    /// Content panels of "Task output" tabs (task id → panel entity; removed
+    /// when the tab closes)
+    task_tabs: HashMap<String, Entity<TaskOutputPanel>>,
     /// Markdown render state of the "compact summary" tab (rebuilt on each
     /// divider-link click; cleared when the tab closes)
     compact_summary: Option<Entity<TextViewState>>,
@@ -502,6 +512,7 @@ impl AppView {
             right_active: None,
             subagent_tabs: HashMap::new(),
             file_tabs: HashMap::new(),
+            task_tabs: HashMap::new(),
             compact_summary: None,
             terminal_open: false,
             terminal: None,

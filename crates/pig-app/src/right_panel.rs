@@ -56,6 +56,10 @@ impl AppView {
         if let RightTab::File { path } = &tab {
             self.file_tabs.remove(path);
         }
+        // The "Task output" tab's content panel is released when the tab closes
+        if let RightTab::TaskOutput { id } = &tab {
+            self.task_tabs.remove(id);
+        }
         // The "Compact summary" tab's render state is released when the tab closes
         if tab == RightTab::CompactSummary {
             self.compact_summary = None;
@@ -134,6 +138,59 @@ impl AppView {
             }
         }
         let tab = RightTab::File { path: key };
+        if !self.right_tabs.contains(&tab) {
+            self.right_tabs.push(tab.clone());
+        }
+        self.right_active = Some(tab);
+        self.right_open = true;
+        cx.notify();
+    }
+
+    /// Open/focus the "Task output" tab (background Bash task row click): the
+    /// panel reads the task's full output from core's spill file
+    /// `{cwd}/.pigcode/tool-results/{id}.log` (session.jsonl only carries the
+    /// backgrounding receipt and the registry is not persisted, so the spill is
+    /// the only complete source). Same id focuses and refreshes; the status
+    /// keeps following TaskListChanged afterwards.
+    pub(crate) fn open_task_tab(
+        &mut self,
+        session_id: String,
+        task_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = self
+            .tasks_by_session
+            .get(&session_id)
+            .and_then(|tasks| tasks.iter().find(|t| t.id == task_id))
+            .cloned()
+        else {
+            return;
+        };
+        let cwd = self
+            .metas
+            .iter()
+            .find(|m| m.id == session_id)
+            .map(|m| m.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
+        let spill = cwd
+            .join(".pigcode")
+            .join("tool-results")
+            .join(format!("{task_id}.log"));
+        match self.task_tabs.get(&task_id) {
+            Some(panel) => panel.update(cx, |panel, cx| {
+                panel.update_meta(&task, cx);
+                panel.reload(cx);
+            }),
+            None => {
+                // new_armed also arms the 2s poll: a tab opened while the task
+                // is Running gets no TaskListChanged until the task exits, and
+                // without the poll the output card would never refresh
+                let panel = cx.new(|cx| TaskOutputPanel::new_armed(session_id, &task, spill, cx));
+                panel.update(cx, |panel, cx| panel.reload(cx));
+                self.task_tabs.insert(task_id.clone(), panel);
+            }
+        }
+        let tab = RightTab::TaskOutput { id: task_id };
         if !self.right_tabs.contains(&tab) {
             self.right_tabs.push(tab.clone());
         }
@@ -452,6 +509,19 @@ impl AppView {
                     truncate_tab_label(name),
                 )
             }
+            RightTab::TaskOutput { id } => {
+                let title = self
+                    .task_tabs
+                    .get(id)
+                    .map(|panel| panel.read(cx).title().to_string())
+                    .unwrap_or_else(|| rust_i18n::t!("panel.task_output").to_string());
+                (
+                    Icon::new(AssetsIconName::Terminal)
+                        .size_3p5()
+                        .into_any_element(),
+                    truncate_tab_label(&title),
+                )
+            }
             RightTab::CompactSummary => (
                 Icon::new(AssetsIconName::Archive)
                     .size_3p5()
@@ -582,6 +652,10 @@ impl AppView {
                 None => self.render_right_menu_page(window, cx),
             },
             Some(RightTab::File { path }) => match self.file_tabs.get(path) {
+                Some(panel) => panel.clone().into_any_element(),
+                None => self.render_right_menu_page(window, cx),
+            },
+            Some(RightTab::TaskOutput { id }) => match self.task_tabs.get(id) {
                 Some(panel) => panel.clone().into_any_element(),
                 None => self.render_right_menu_page(window, cx),
             },

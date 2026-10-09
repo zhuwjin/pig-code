@@ -37,8 +37,17 @@ impl gpui_kit::Render for Probe {
         _window: &mut gpui_kit::Window,
         _cx: &mut gpui_kit::Context<Self>,
     ) -> impl gpui_kit::IntoElement {
-        use gpui_kit::IntoElement as _;
-        self.composer.clone().into_any_element()
+        // Bottom-anchored like the real dock layout, so the composer's
+        // upward-opening popups stay inside the window (clickable in headless
+        // tests); the card itself hugs the bottom edge exactly as in the app
+        use gpui_kit::{IntoElement as _, ParentElement as _, Styled as _};
+        gpui_kit::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(self.composer.clone())
+            .into_any_element()
     }
 }
 
@@ -703,4 +712,64 @@ fn danger_reason_text_covers_all_known_keys() {
     // The title key exists in both locales (used as the warning line prefix)
     assert!(!rust_i18n::t!("approval.danger.high_risk").is_empty());
     assert!(!rust_i18n::t!("approval.danger.high_risk", locale = "en").is_empty());
+}
+
+/// Background Bash task popup: clicking a row emits OpenTaskOutput (AppView
+/// opens the right task-output tab reading the spill log) and collapses the
+/// popup; no inline expansion anymore.
+#[gpui_kit::test]
+fn bash_task_row_click_opens_task_output(cx: &mut gpui_kit::TestAppContext) {
+    use pig_protocol::{TaskStatus, TaskSummary};
+    cx.update(gpui_kit::init);
+    // Taller than open_composer's default so the upward-opening popup and its
+    // rows stay inside the window bounds (required for headless clicking)
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)),
+        |window, cx| {
+            let composer = cx.new(|cx| Composer::new(window, cx));
+            Probe { composer }
+        },
+    );
+    let (events, _events_sub) = capture_events(&window, cx);
+
+    // Inject one running Bash task, then open the popup (default filter = running)
+    window
+        .update(cx, |probe, _window, cx| {
+            probe.composer.update(cx, |this, cx| {
+                this.set_tasks(
+                    vec![TaskSummary {
+                        id: "b1".to_string(),
+                        command: "npm run build".to_string(),
+                        status: TaskStatus::Running,
+                        started_at: 100,
+                        ended_at: None,
+                        output_tail: "building...".to_string(),
+                        agent_id: None,
+                    }],
+                    cx,
+                );
+                this.popup = Some((Popup::Tasks, 0));
+                cx.notify();
+            });
+        })
+        .unwrap();
+    // Let the popup's 150ms wall-clock enter animation settle (at t≈0 the
+    // opacity/top offsets are at their extremes)
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click(("aux-task-row", 0usize), cx);
+    })
+    .unwrap();
+
+    let (popup, ..) = read(cx, &window);
+    assert!(popup.is_none(), "the popup should collapse on row click");
+    let captured = events.borrow();
+    assert_eq!(captured.len(), 1, "should emit exactly one event");
+    match &captured[0] {
+        ComposerEvent::OpenTaskOutput { task_id } => assert_eq!(task_id, "b1"),
+        _ => panic!("expected an OpenTaskOutput event"),
+    }
 }

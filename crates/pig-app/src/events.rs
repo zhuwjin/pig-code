@@ -390,6 +390,20 @@ impl AppView {
                     self.composer
                         .update(cx, |composer, cx| composer.set_tasks(tasks, cx));
                 }
+                // Open task-output tabs follow their task's status (the panel
+                // re-reads the spill on transitions and re-arms its poll).
+                // Session-scoped: task ids are per-session sequences ("b1"…)
+                // and collide across sessions; tasks whose registry entry
+                // disappeared keep their last output
+                for panel in self.task_tabs.values() {
+                    if panel.read(cx).session_id() != session_id.as_str() {
+                        continue;
+                    }
+                    if let Some(task) = tasks.iter().find(|t| t.id == panel.read(cx).task_id()) {
+                        let task = task.clone();
+                        panel.update(cx, |panel, cx| panel.update_meta(&task, cx));
+                    }
+                }
             }
             Event::TurnComplete {
                 session_id,
@@ -848,6 +862,14 @@ impl AppView {
                 // composer side; same agent_id focuses without reloading)
                 if let Some(sid) = self.current.clone() {
                     self.open_subagent_tab(sid, agent_id.clone(), title.clone(), cx);
+                }
+            }
+            ComposerEvent::OpenTaskOutput { task_id } => {
+                // Bash row click in the "background Bash" popup: open the right
+                // task-output tab (spill log view; the popup already collapsed
+                // on the composer side)
+                if let Some(sid) = self.current.clone() {
+                    self.open_task_tab(sid, task_id.clone(), cx);
                 }
             }
         }
