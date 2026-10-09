@@ -40,6 +40,10 @@ pub struct ModelIoUsage {
     pub used: u64,
     #[serde(default)]
     pub total: u64,
+    /// Reasoning/thinking slice of output (informational split; 0 on old
+    /// records / providers that don't report it)
+    #[serde(default)]
+    pub reasoning_output: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -111,7 +115,7 @@ pub fn append(sessions_dir: &Path, session_id: &str, record: &ModelIoRecord) -> 
 /// Read all call records (missing file = empty list), expanding delta inputs in order into full
 /// sequences (record N's full input = the first input_offset entries of record N-1's full input + this record's delta).
 /// If the expansion chain breaks (offset exceeds the previous record's length, which should not happen), fall
-/// back to treating it as full. Bad lines are skipped with the line number eprintln'd — the trace is diagnostic
+/// back to treating it as full. Bad lines are skipped with the line number logged at warn level — the trace is diagnostic
 /// data, and one bad line must not make the whole page unopenable.
 pub fn read_all(path: &Path) -> Vec<ModelIoRecord> {
     let Ok(raw) = std::fs::read_to_string(path) else {
@@ -125,7 +129,7 @@ pub fn read_all(path: &Path) -> Vec<ModelIoRecord> {
         let mut record: ModelIoRecord = match serde_json::from_str(line) {
             Ok(record) => record,
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "failed to parse model io trace line {}, skipped: {e}",
                     ix + 1
                 );
@@ -218,6 +222,7 @@ mod tests {
                 output: 7,
                 used: 22,
                 total: 1000,
+                reasoning_output: 0,
             },
             finish: "tool_calls".into(),
             error: None,

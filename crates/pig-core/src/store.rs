@@ -59,7 +59,8 @@ impl Store {
                 model TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL
+                output_tokens INTEGER NOT NULL,
+                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_turn_usage_ts ON turn_usage(ts);
             CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
@@ -154,9 +155,9 @@ impl Store {
                 meta.fs_write_outside,
             ],
         );
-        // Write failures must not be silent (a missing column once dropped whole batches of new sessions): at least log to the console
+        // Write failures must not be silent (a missing column once dropped whole batches of new sessions): at least log at error level
         if let Err(error) = result {
-            eprintln!("[store] upsert_session failed for {}: {error}", meta.id);
+            tracing::error!("upsert_session failed for {}: {error}", meta.id);
         }
     }
 
@@ -354,6 +355,9 @@ impl Store {
 
     /// One row per finished turn; statistics aggregation (by day/model/workspace) all query this table.
     /// input_tokens is input that missed the cache; cache_read_tokens is input served from the cache.
+    /// reasoning_output_tokens is the reasoning/thinking slice of output_tokens (informational split).
+    /// Schema changes land by deleting the db (no migrations — the user rebuilds).
+    #[allow(clippy::too_many_arguments)]
     pub fn record_usage(
         &self,
         session_id: &str,
@@ -362,10 +366,11 @@ impl Store {
         input_tokens: u64,
         cache_read_tokens: u64,
         output_tokens: u64,
+        reasoning_output_tokens: u64,
     ) {
         let _ = self.conn.execute(
-            "INSERT INTO turn_usage (session_id, ts, provider, model, input_tokens, cache_read_tokens, output_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO turn_usage (session_id, ts, provider, model, input_tokens, cache_read_tokens, output_tokens, reasoning_output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session_id,
                 now_secs(),
@@ -373,7 +378,8 @@ impl Store {
                 model,
                 input_tokens,
                 cache_read_tokens,
-                output_tokens
+                output_tokens,
+                reasoning_output_tokens
             ],
         );
     }
@@ -515,7 +521,7 @@ mod tests {
             fs_write_outside: false,
         };
         store.upsert_session(&meta);
-        store.record_usage("s1", "p", "m", 1, 2, 3);
+        store.record_usage("s1", "p", "m", 1, 2, 3, 4);
         store.set_todos("s1", "[]");
         store.upsert_file_change("s1", "a.rs", "d", 1, 1);
         store.upsert_file_original("s1", "a.rs", Some("old"));

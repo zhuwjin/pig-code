@@ -184,7 +184,7 @@ pub(crate) async fn stream_anthropic(
     tools: Vec<serde_json::Value>,
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(), CoreError> {
+) -> Result<(), CallError> {
     let (system, messages) = to_anthropic_messages(&messages);
     let anthropic_tools = anthropic_request_tools(config, &tools);
     let mut body = serde_json::json!({
@@ -201,11 +201,17 @@ pub(crate) async fn stream_anthropic(
     }
     merge_reasoning_params(&mut body, config);
 
+    let url = anthropic_url(&config.base_url);
+    // API wire log (PIG_LOG_API): no-op accumulator when disabled
+    let mut api =
+        crate::api_log::ApiCall::new("anthropic.messages", &config.provider_name, &config.model);
+    api.request(&url, &body);
+
     let client = http_client();
     let response = match send_with_retry(
         || {
             client
-                .post(anthropic_url(&config.base_url))
+                .post(&url)
                 .header("x-api-key", &config.api_key)
                 .header("anthropic-version", "2023-06-01")
                 .json(&body)
@@ -215,61 +221,69 @@ pub(crate) async fn stream_anthropic(
     .await?
     {
         SendOutcome::Response(response) => response,
-        SendOutcome::Cancelled => return Ok(()),
+        SendOutcome::Cancelled => {
+            api.finish("cancelled", &[]);
+            return Ok(());
+        }
     };
 
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
         let detail: String = detail.chars().take(500).collect();
+        api.fail(&format!("HTTP {status}: {detail}"));
         return Err(CoreError::Internal {
             detail: format!("HTTP {status}: {detail}"),
-        });
+        }
+        .into());
     }
 
     let mut byte_stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut event_type = String::new();
+    // Spec-level SSE decoding (three line terminators, deferred trailing CR,
+    // multi-line data, comments, incremental UTF-8) — same semantics as the
+    // eventsource-parser package under the Vercel AI SDK
+    let mut sse = crate::sse::SseDecoder::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut total_input = 0u64;
     // Anthropic: input_tokens excludes the cached portion; cache_creation is newly written this time (a cache miss)
     let mut total_cache_read = 0u64;
-    #[allow(unused_assignments)]
     let mut total_output = 0u64;
 
     loop {
         let chunk = tokio::select! {
             chunk = byte_stream.next() => chunk,
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => {
+                api.finish("cancelled", &tool_calls);
+                return Ok(());
+            }
         };
         let Some(chunk) = chunk else { break };
-        let bytes = chunk.map_err(|e| CoreError::StreamRead {
-            detail: e.to_string(),
+        let bytes = chunk.map_err(|e| {
+            CallError::from(CoreError::StreamRead {
+                detail: e.to_string(),
+            })
         })?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim_end_matches('\r').trim().to_string();
-            buffer.drain(..=pos);
-            if line.is_empty() || line.starts_with(':') {
-                continue;
+        for event in sse.push(&bytes) {
+            // Raw wire log: the payload verbatim, plus the event: line when
+            // present (dispatch below keys off the payload's own type, same
+            // as the SDK — the event: field is redundant in Anthropic frames)
+            if event.event.is_empty() {
+                api.raw_line(&event.data);
+            } else {
+                api.raw_line(&format!("event: {}\ndata: {}", event.event, event.data));
             }
-            if let Some(event) = line.strip_prefix("event:") {
-                event_type = event.trim().to_string();
-                continue;
-            }
-            let Some(data) = line.strip_prefix("data:") else {
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(event.data.trim()) else {
                 continue;
             };
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
-                continue;
-            };
-            match event_type.as_str() {
+            match json["type"].as_str().unwrap_or("") {
                 "message_start" => {
-                    let usage = &json["message"]["usage"];
-                    total_input = usage["input_tokens"].as_u64().unwrap_or(0)
-                        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-                    total_cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    merge_usage(
+                        &mut total_input,
+                        &mut total_cache_read,
+                        &mut total_output,
+                        &json["message"]["usage"],
+                    );
                 }
                 "content_block_start" => {
                     let index = json["index"].as_u64().unwrap_or(0) as usize;
@@ -290,6 +304,7 @@ pub(crate) async fn stream_anthropic(
                             if let Some(text) = delta["text"].as_str()
                                 && !text.is_empty()
                             {
+                                api.text(text);
                                 let _ = tx.send(ProviderEvent::Text(text.to_string()));
                             }
                         }
@@ -297,6 +312,7 @@ pub(crate) async fn stream_anthropic(
                             if let Some(thinking) = delta["thinking"].as_str()
                                 && !thinking.is_empty()
                             {
+                                api.reasoning(thinking);
                                 let _ = tx.send(ProviderEvent::Reasoning(thinking.to_string()));
                             }
                         }
@@ -313,36 +329,158 @@ pub(crate) async fn stream_anthropic(
                     }
                 }
                 "message_delta" => {
-                    total_output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                    merge_usage(
+                        &mut total_input,
+                        &mut total_cache_read,
+                        &mut total_output,
+                        &json["usage"],
+                    );
                     if json["delta"]["stop_reason"].is_string() {
                         if total_input + total_cache_read + total_output > 0 {
+                            // Thinking slice of the output total (informational
+                            // split, like the SDK's outputTokens.reasoning)
+                            let thinking =
+                                json["usage"]["output_tokens_details"]["thinking_tokens"]
+                                    .as_u64()
+                                    .unwrap_or(0);
+                            api.usage(
+                                total_input,
+                                total_cache_read,
+                                total_output,
+                                total_input + total_cache_read + total_output,
+                                config.context_window,
+                                thinking,
+                            );
                             let _ = tx.send(ProviderEvent::Usage {
                                 input: total_input,
                                 cache_read: total_cache_read,
                                 output: total_output,
                                 used: total_input + total_cache_read + total_output,
                                 total: config.context_window,
+                                reasoning_output: thinking,
                             });
                         }
+                        let outcome = if tool_calls.is_empty() {
+                            "stop"
+                        } else {
+                            "tool_calls"
+                        };
+                        api.finish(outcome, &tool_calls);
                         finish(tx, &mut tool_calls);
                         return Ok(());
                     }
                 }
                 "error" => {
-                    // The upstream error body text goes into detail verbatim; without a message field, fall back semantically to Unknown
-                    return Err(match json["error"]["message"].as_str() {
-                        Some(message) => CoreError::Internal {
-                            detail: format!("Anthropic error: {message}"),
+                    // In-band 200 error. The upstream error body text goes
+                    // into detail verbatim (without a message field, fall back
+                    // semantically to Unknown). Retryability follows the SDK's
+                    // getAnthropicStreamErrorMetadata mapping (overloaded→529,
+                    // rate_limit→429, api_error→500, all retryable); the silent
+                    // retry itself is gated on "no content forwarded yet" in
+                    // stream_chat
+                    let error_type = json["error"]["type"].as_str().unwrap_or("");
+                    let retryable = matches!(
+                        error_type,
+                        "overloaded_error" | "rate_limit_error" | "api_error"
+                    );
+                    let message = json["error"]["message"].as_str().map(str::to_string);
+                    api.fail(
+                        message
+                            .as_deref()
+                            .map(|m| format!("Anthropic error: {m}"))
+                            .as_deref()
+                            .unwrap_or("Anthropic error: unknown"),
+                    );
+                    return Err(CallError {
+                        error: match message {
+                            Some(message) => CoreError::Internal {
+                                detail: format!("Anthropic error: {message}"),
+                            },
+                            None => CoreError::Unknown,
                         },
-                        None => CoreError::Unknown,
+                        retryable,
                     });
                 }
                 _ => {}
             }
         }
     }
+    let outcome = if tool_calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    api.finish(outcome, &tool_calls);
     finish(tx, &mut tool_calls);
     Ok(())
+}
+
+/// Merge one usage frame into the running totals (frame input = input_tokens
+/// plus cache_creation_input_tokens). Per the Anthropic spec, input/cache
+/// arrive in message_start and output in message_delta; compatible providers
+/// (GLM's Anthropic endpoint, observed 2026-10-09) instead send zeros in
+/// message_start and the real input numbers in message_delta. Every field
+/// merges with max — token counts never shrink within one message — so
+/// whichever frame carries the real numbers wins.
+fn merge_usage(
+    total_input: &mut u64,
+    total_cache_read: &mut u64,
+    total_output: &mut u64,
+    usage: &serde_json::Value,
+) {
+    let frame_input = usage["input_tokens"].as_u64().unwrap_or(0)
+        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    *total_input = (*total_input).max(frame_input);
+    *total_cache_read =
+        (*total_cache_read).max(usage["cache_read_input_tokens"].as_u64().unwrap_or(0));
+    *total_output = (*total_output).max(usage["output_tokens"].as_u64().unwrap_or(0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_usage;
+
+    /// Spec-compliant Anthropic: input/cache in message_start, output in
+    /// message_delta (which carries no input fields)
+    #[test]
+    fn usage_start_then_delta() {
+        let (mut input, mut cache_read, mut output) = (0, 0, 0);
+        merge_usage(
+            &mut input,
+            &mut cache_read,
+            &mut output,
+            &serde_json::json!({"input_tokens": 100, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30, "output_tokens": 1}),
+        );
+        assert_eq!((input, cache_read, output), (120, 30, 1));
+        merge_usage(
+            &mut input,
+            &mut cache_read,
+            &mut output,
+            &serde_json::json!({"output_tokens": 55}),
+        );
+        assert_eq!((input, cache_read, output), (120, 30, 55));
+    }
+
+    /// GLM's Anthropic endpoint (observed 2026-10-09): message_start carries
+    /// zeros, the real input/cache numbers arrive in message_delta
+    #[test]
+    fn usage_glm_real_numbers_in_delta() {
+        let (mut input, mut cache_read, mut output) = (0, 0, 0);
+        merge_usage(
+            &mut input,
+            &mut cache_read,
+            &mut output,
+            &serde_json::json!({"input_tokens": 0, "output_tokens": 0}),
+        );
+        assert_eq!((input, cache_read, output), (0, 0, 0));
+        merge_usage(
+            &mut input,
+            &mut cache_read,
+            &mut output,
+            &serde_json::json!({"input_tokens": 9697, "output_tokens": 112, "cache_read_input_tokens": 0}),
+        );
+        assert_eq!((input, cache_read, output), (9697, 0, 112));
+    }
 }
 
 // ---------------- One-shot requests (compact summary / connectivity test) ----------------

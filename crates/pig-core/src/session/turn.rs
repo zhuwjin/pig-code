@@ -224,6 +224,7 @@ impl Session {
                             self.turn_input,
                             self.turn_cache_read,
                             self.turn_output,
+                            self.turn_reasoning_output,
                         );
                         // Persist turn stats: replay restores the footer and
                         // session totals (the usage watermark is restored by
@@ -373,10 +374,12 @@ impl Session {
                     output,
                     used,
                     total,
+                    reasoning_output,
                 }) => {
                     self.turn_input += input;
                     self.turn_cache_read += cache_read;
                     self.turn_output += output;
+                    self.turn_reasoning_output += reasoning_output;
                     self.input_total += input;
                     self.cache_read_total += cache_read;
                     self.last_total_tokens = Some(used);
@@ -386,6 +389,7 @@ impl Session {
                         output,
                         used,
                         total,
+                        reasoning_output,
                     };
                     // Per-request usage is persisted immediately (durable before
                     // events); replay restores the watermark from the last
@@ -443,7 +447,7 @@ impl Session {
 
         // Persist the model-io trace (failures/cancellations recorded too): the
         // UI's "view model io" reads this file directly; write failures are
-        // non-fatal (same policy as rollout.append, eprintln per core
+        // non-fatal (same policy as rollout.append, warn-level log per core
         // convention)
         let io_finish = if provider_failed {
             "error"
@@ -474,7 +478,7 @@ impl Session {
         if let Err(e) =
             crate::model_io::append(&self.data_dir.join("sessions"), &self.id, &io_record)
         {
-            eprintln!("Failed to write model io trace (ignored): {e}");
+            tracing::warn!("Failed to write model io trace (ignored): {e}");
         }
         // This entry's full projection becomes the delta baseline for the next
         // one
@@ -1563,7 +1567,7 @@ fn write_plan_file(cwd: &Path, session_id: &str, plan: &str) {
         .and_then(|()| std::fs::write(&tmp, plan))
         .and_then(|()| std::fs::rename(&tmp, &path));
     if let Err(error) = result {
-        eprintln!("[plan] failed to persist plan {}: {error}", path.display());
+        tracing::warn!("failed to persist plan {}: {error}", path.display());
     }
 }
 

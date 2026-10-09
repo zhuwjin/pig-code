@@ -41,27 +41,44 @@ pub async fn complete_text(
                 "stream": false,
                 "max_tokens": config.max_output_tokens,
             });
+            let url = format!("{}/chat/completions", config.base_url);
+            let mut api =
+                crate::api_log::ApiCall::new("openai.chat", &config.provider_name, &config.model);
+            api.request(&url, &body);
             let response = tokio::select! {
                 result = client
-                    .post(format!("{}/chat/completions", config.base_url))
+                    .post(&url)
                     .bearer_auth(&config.api_key)
                     .json(&body)
-                    .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+                    .send() => result.map_err(net_err),
+                _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    api.fail(&core_error_en(&error));
+                    return Err(error);
+                }
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
+                api.fail(&format!("HTTP {status}: {detail}"));
                 return Err(CoreError::Internal {
                     detail: format!("HTTP {status}: {detail}"),
                 });
             }
-            let parsed: CompleteResponse =
-                response.json().await.map_err(|e| CoreError::Internal {
-                    detail: format!("Failed to parse response: {e}"),
+            let parsed: CompleteResponse = {
+                let raw = response.text().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to read response: {e}"),
                 })?;
-            parsed
+                api.raw_line(&raw);
+                serde_json::from_str(&raw).map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?
+            };
+            let result = parsed
                 .choices
                 .and_then(|mut c| c.pop())
                 .and_then(|c| c.message)
@@ -69,7 +86,16 @@ pub async fn complete_text(
                 .filter(|content| !content.is_empty())
                 .ok_or_else(|| CoreError::Internal {
                     detail: "Response has no content".to_string(),
-                })
+                });
+            match &result {
+                Ok(text) => {
+                    let mut api = api;
+                    api.text(text);
+                    api.finish("stop", &[]);
+                }
+                Err(error) => api.fail(&core_error_en(error)),
+            }
+            result
         }
         ApiFormat::AnthropicMessages => {
             let body = serde_json::json!({
@@ -78,34 +104,63 @@ pub async fn complete_text(
                 "stream": false,
                 "messages": [{"role": "user", "content": user_content}],
             });
+            let url = anthropic_url(&config.base_url);
+            let mut api = crate::api_log::ApiCall::new(
+                "anthropic.messages",
+                &config.provider_name,
+                &config.model,
+            );
+            api.request(&url, &body);
             let response = tokio::select! {
                 result = client
-                    .post(anthropic_url(&config.base_url))
+                    .post(&url)
                     .header("x-api-key", &config.api_key)
                     .header("anthropic-version", "2023-06-01")
                     .json(&body)
-                    .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+                    .send() => result.map_err(net_err),
+                _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    api.fail(&core_error_en(&error));
+                    return Err(error);
+                }
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
+                api.fail(&format!("HTTP {status}: {detail}"));
                 return Err(CoreError::Internal {
                     detail: format!("HTTP {status}: {detail}"),
                 });
             }
-            let parsed: CompleteResponse =
-                response.json().await.map_err(|e| CoreError::Internal {
-                    detail: format!("Failed to parse response: {e}"),
+            let parsed: CompleteResponse = {
+                let raw = response.text().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to read response: {e}"),
                 })?;
-            parsed
+                api.raw_line(&raw);
+                serde_json::from_str(&raw).map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?
+            };
+            let result = parsed
                 .content
                 .and_then(|blocks| blocks.into_iter().find_map(|b| b.text))
                 .filter(|text| !text.is_empty())
                 .ok_or_else(|| CoreError::Internal {
                     detail: "Response has no content".to_string(),
-                })
+                });
+            match &result {
+                Ok(text) => {
+                    let mut api = api;
+                    api.text(text);
+                    api.finish("stop", &[]);
+                }
+                Err(error) => api.fail(&core_error_en(error)),
+            }
+            result
         }
     }
 }
@@ -134,44 +189,72 @@ pub async fn complete_messages(
             if !tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(tools);
             }
+            let url = format!("{}/chat/completions", config.base_url);
+            let mut api =
+                crate::api_log::ApiCall::new("openai.chat", &config.provider_name, &config.model);
+            api.request(&url, &body);
             let response = tokio::select! {
                 result = client
-                    .post(format!("{}/chat/completions", config.base_url))
+                    .post(&url)
                     .bearer_auth(&config.api_key)
                     .json(&body)
-                    .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+                    .send() => result.map_err(net_err),
+                _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    api.fail(&core_error_en(&error));
+                    return Err(error);
+                }
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
+                api.fail(&format!("HTTP {status}: {detail}"));
                 return Err(CoreError::Internal {
                     detail: format!("HTTP {status}: {detail}"),
                 });
             }
-            let parsed: CompleteResponse =
-                response.json().await.map_err(|e| CoreError::Internal {
+            let parsed: CompleteResponse = {
+                let raw = response.text().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to read response: {e}"),
+                })?;
+                api.raw_line(&raw);
+                serde_json::from_str(&raw).map_err(|e| CoreError::Internal {
                     detail: format!("Failed to parse response: {e}"),
-                })?;
-            let message = parsed
-                .choices
-                .and_then(|mut c| c.pop())
-                .and_then(|c| c.message)
-                .ok_or_else(|| CoreError::Internal {
-                    detail: "Response has no message".to_string(),
-                })?;
-            if message.tool_calls.is_some() {
-                return Err(CoreError::Internal {
-                    detail: "Summary response contains tool calls".to_string(),
-                });
+                })?
+            };
+            let result = (|| {
+                let message = parsed
+                    .choices
+                    .and_then(|mut c| c.pop())
+                    .and_then(|c| c.message)
+                    .ok_or_else(|| CoreError::Internal {
+                        detail: "Response has no message".to_string(),
+                    })?;
+                if message.tool_calls.is_some() {
+                    return Err(CoreError::Internal {
+                        detail: "Summary response contains tool calls".to_string(),
+                    });
+                }
+                message
+                    .content
+                    .filter(|content| !content.is_empty())
+                    .ok_or_else(|| CoreError::Internal {
+                        detail: "Response has no content".to_string(),
+                    })
+            })();
+            match &result {
+                Ok(text) => {
+                    let mut api = api;
+                    api.text(text);
+                    api.finish("stop", &[]);
+                }
+                Err(error) => api.fail(&core_error_en(error)),
             }
-            message
-                .content
-                .filter(|content| !content.is_empty())
-                .ok_or_else(|| CoreError::Internal {
-                    detail: "Response has no content".to_string(),
-                })
+            result
         }
         ApiFormat::AnthropicMessages => {
             let (system, msgs) = to_anthropic_messages(messages);
@@ -191,42 +274,73 @@ pub async fn complete_messages(
             if !anthropic_tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(anthropic_tools);
             }
+            let url = anthropic_url(&config.base_url);
+            let mut api = crate::api_log::ApiCall::new(
+                "anthropic.messages",
+                &config.provider_name,
+                &config.model,
+            );
+            api.request(&url, &body);
             let response = tokio::select! {
                 result = client
-                    .post(anthropic_url(&config.base_url))
+                    .post(&url)
                     .header("x-api-key", &config.api_key)
                     .header("anthropic-version", "2023-06-01")
                     .json(&body)
-                    .send() => result.map_err(net_err)?,
-                _ = cancel.cancelled() => return Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+                    .send() => result.map_err(net_err),
+                _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    api.fail(&core_error_en(&error));
+                    return Err(error);
+                }
             };
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 let detail: String = detail.chars().take(300).collect();
+                api.fail(&format!("HTTP {status}: {detail}"));
                 return Err(CoreError::Internal {
                     detail: format!("HTTP {status}: {detail}"),
                 });
             }
-            let parsed: CompleteResponse =
-                response.json().await.map_err(|e| CoreError::Internal {
-                    detail: format!("Failed to parse response: {e}"),
+            let parsed: CompleteResponse = {
+                let raw = response.text().await.map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to read response: {e}"),
                 })?;
-            let blocks = parsed.content.ok_or_else(|| CoreError::Internal {
-                detail: "Response has no content".to_string(),
-            })?;
-            if blocks.iter().any(|b| b.kind.as_deref() == Some("tool_use")) {
-                return Err(CoreError::Internal {
-                    detail: "Summary response contains tool calls".to_string(),
-                });
-            }
-            blocks
-                .into_iter()
-                .find_map(|b| b.text)
-                .filter(|text| !text.is_empty())
-                .ok_or_else(|| CoreError::Internal {
+                api.raw_line(&raw);
+                serde_json::from_str(&raw).map_err(|e| CoreError::Internal {
+                    detail: format!("Failed to parse response: {e}"),
+                })?
+            };
+            let result = (|| {
+                let blocks = parsed.content.ok_or_else(|| CoreError::Internal {
                     detail: "Response has no content".to_string(),
-                })
+                })?;
+                if blocks.iter().any(|b| b.kind.as_deref() == Some("tool_use")) {
+                    return Err(CoreError::Internal {
+                        detail: "Summary response contains tool calls".to_string(),
+                    });
+                }
+                blocks
+                    .into_iter()
+                    .find_map(|b| b.text)
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| CoreError::Internal {
+                        detail: "Response has no content".to_string(),
+                    })
+            })();
+            match &result {
+                Ok(text) => {
+                    let mut api = api;
+                    api.text(text);
+                    api.finish("stop", &[]);
+                }
+                Err(error) => api.fail(&core_error_en(error)),
+            }
+            result
         }
     }
 }
@@ -239,35 +353,39 @@ pub async fn test_provider(
     model: &str,
 ) -> ConnTestResult {
     let client = http_client();
+    let api = crate::api_log::ApiCall::new("conn.test", "", model);
     let send = async {
         match format {
             ApiFormat::OpenAiChat => {
+                let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+                let body = serde_json::json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                    "stream": false,
+                });
+                api.request(&url, &body);
                 client
-                    .post(format!(
-                        "{}/chat/completions",
-                        base_url.trim_end_matches('/')
-                    ))
+                    .post(&url)
                     .bearer_auth(api_key)
-                    .json(&serde_json::json!({
-                        "model": model,
-                        "messages": [{"role": "user", "content": "ping"}],
-                        "max_tokens": 1,
-                        "stream": false,
-                    }))
+                    .json(&body)
                     .send()
                     .await
             }
             ApiFormat::AnthropicMessages => {
+                let url = anthropic_url(base_url.trim_end_matches('/'));
+                let body = serde_json::json!({
+                    "model": model,
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": false,
+                });
+                api.request(&url, &body);
                 client
-                    .post(anthropic_url(base_url.trim_end_matches('/')))
+                    .post(&url)
                     .header("x-api-key", api_key)
                     .header("anthropic-version", "2023-06-01")
-                    .json(&serde_json::json!({
-                        "model": model,
-                        "max_tokens": 1,
-                        "messages": [{"role": "user", "content": "ping"}],
-                        "stream": false,
-                    }))
+                    .json(&body)
                     .send()
                     .await
             }
@@ -282,20 +400,24 @@ pub async fn test_provider(
                 let CoreError::Network { detail } = net_err(e) else {
                     unreachable!("net_err is always Network")
                 };
+                api.fail(&format!("network: {detail}"));
                 return ConnTestResult::Failed { detail };
             }
             Err(_) => {
+                api.fail(&format!("timeout after {TIMEOUT_SECS}s"));
                 return ConnTestResult::Timeout { secs: TIMEOUT_SECS };
             }
         };
     let status = response.status();
     if status.is_success() {
+        api.finish(&format!("http {status}"), &[]);
         ConnTestResult::Connected {
             status: status.as_u16(),
         }
     } else {
         let detail = response.text().await.unwrap_or_default();
         let detail: String = detail.chars().take(200).collect();
+        api.fail(&format!("HTTP {status}: {detail}"));
         ConnTestResult::Failed {
             detail: format!("HTTP {status}: {detail}"),
         }

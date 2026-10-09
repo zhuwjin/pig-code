@@ -253,17 +253,39 @@ pub enum ProviderEvent {
     ToolCalls(Vec<ToolCall>),
     /// Token usage for a single request: input = uncached input (cache_read is the other
     /// portion of it served from cache; the two sum to total input), output is for accounting aggregation,
-    /// used is the model-reported total consumption of this request (for the usage watermark check), total is the model context window
+    /// used is the model-reported total consumption of this request (for the usage watermark check), total is the model context window,
+    /// reasoning_output is the reasoning/thinking slice of output (informational; already counted in output)
     Usage {
         input: u64,
         cache_read: u64,
         output: u64,
         used: u64,
         total: u64,
+        reasoning_output: u64,
     },
     Finished,
     /// Request/streaming failure: the structured error goes straight to the UI (passed through as Event::Error)
     Failed(CoreError),
+}
+
+/// Internal stream-call error: the CoreError to surface plus whether a silent
+/// retry is allowed. Retryable = in-band 200 errors whose type maps to a
+/// retryable status (Anthropic overloaded_error/rate_limit_error/api_error);
+/// the retry is additionally gated on "no content forwarded yet" in
+/// stream_chat (the same boundary as the empty-completion retry). Errors after
+/// send_with_retry's pre-response budget are never retryable here.
+pub(crate) struct CallError {
+    pub error: CoreError,
+    pub retryable: bool,
+}
+
+impl From<CoreError> for CallError {
+    fn from(error: CoreError) -> Self {
+        Self {
+            error,
+            retryable: false,
+        }
+    }
 }
 
 pub async fn stream_chat(
@@ -273,14 +295,87 @@ pub async fn stream_chat(
     tx: tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    let result = match config.api_format {
-        ApiFormat::OpenAiChat => stream_openai(&config, messages, tools, &tx, &cancel).await,
-        ApiFormat::AnthropicMessages => {
-            stream_anthropic(&config, messages, tools, &tx, &cancel).await
+    // Empty-completion guard (same anomaly class as ZCode's
+    // empty-completion-retry): a 200 stream that ends with no text, no
+    // reasoning and no tool calls gets ONE silent retry. Events stream through
+    // live EXCEPT Finished, which the forwarder holds back until the outcome
+    // is known — the session treats Finished as step end, so an empty attempt
+    // must never emit Finished followed by the retry's content.
+    let mut retried = false;
+    let mut tx = tx;
+    loop {
+        let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel::<ProviderEvent>();
+        let saw_content = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = saw_content.clone();
+        let forward = tokio::spawn(async move {
+            let mut held_finish = false;
+            while let Some(event) = irx.recv().await {
+                if matches!(event, ProviderEvent::Finished) {
+                    held_finish = true;
+                    continue;
+                }
+                if matches!(
+                    event,
+                    ProviderEvent::Text(_)
+                        | ProviderEvent::Reasoning(_)
+                        | ProviderEvent::ToolCalls(_)
+                ) {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+            (tx, held_finish)
+        });
+        let result = match config.api_format {
+            ApiFormat::OpenAiChat => {
+                stream_openai(&config, messages.clone(), tools.clone(), &itx, &cancel).await
+            }
+            ApiFormat::AnthropicMessages => {
+                stream_anthropic(&config, messages.clone(), tools.clone(), &itx, &cancel).await
+            }
+        };
+        drop(itx);
+        let Ok((back, held_finish)) = forward.await else {
+            return;
+        };
+        tx = back;
+        match result {
+            Err(call_error) => {
+                // Retryable in-band error (Anthropic overload/rate-limit
+                // arriving as a 200 SSE error event): one silent retry, only
+                // while nothing visible was forwarded yet
+                if call_error.retryable
+                    && !saw_content.load(std::sync::atomic::Ordering::Relaxed)
+                    && !retried
+                    && !cancel.is_cancelled()
+                {
+                    retried = true;
+                    tracing::warn!(
+                        "provider reported a retryable in-band error, retrying once: {}",
+                        core_error_en(&call_error.error)
+                    );
+                    continue;
+                }
+                let _ = tx.send(ProviderEvent::Failed(call_error.error));
+                return;
+            }
+            Ok(()) => {
+                let empty = !saw_content.load(std::sync::atomic::Ordering::Relaxed);
+                if empty && !retried && !cancel.is_cancelled() {
+                    retried = true;
+                    tracing::warn!(
+                        "provider stream completed empty (no text/reasoning/tool calls), retrying once"
+                    );
+                    continue;
+                }
+                if held_finish {
+                    let _ = tx.send(ProviderEvent::Finished);
+                }
+                return;
+            }
         }
-    };
-    if let Err(error) = result {
-        let _ = tx.send(ProviderEvent::Failed(error));
     }
 }
 

@@ -226,6 +226,10 @@ pub struct Session {
     turn_input: u64,
     turn_cache_read: u64,
     turn_output: u64,
+    /// Reasoning/thinking slice of turn_output (ProviderEvent::Usage's
+    /// reasoning_output accumulated; subagent usage tuples don't carry the
+    /// split, so child runs contribute 0)
+    turn_reasoning_output: u64,
     /// Pure API time accumulated in the current turn (provider requests only,
     /// excluding tool execution/approval waits; token speed is computed from
     /// it, so a long-running command does not drag the speed down)
@@ -766,6 +770,7 @@ impl Session {
             turn_input: 0,
             turn_cache_read: 0,
             turn_output: 0,
+            turn_reasoning_output: 0,
             turn_api_ms: 0,
             turn_ttft_ms: 0,
             turn_api_steps: 0,
@@ -861,6 +866,7 @@ impl Session {
             turn_input: 0,
             turn_cache_read: 0,
             turn_output: 0,
+            turn_reasoning_output: 0,
             turn_api_ms: 0,
             turn_ttft_ms: 0,
             turn_api_steps: 0,
@@ -1065,21 +1071,21 @@ pub(crate) use title::spawn_title_generation;
 pub(crate) use turn::pointer_file_references;
 
 /// Load project-level permission rules: a missing file = empty rules; parse
-/// failures are non-fatal with a stderr hint (the session creation/replay
+/// failures are non-fatal with a warn-level log (the session creation/replay
 /// paths have no suitable event channel, so none is forced)
 fn load_permissions(cwd: &std::path::Path) -> crate::permissions::PermissionRules {
     match crate::permissions::PermissionRules::load(cwd) {
         Ok(rules) => {
             if rules.skipped > 0 {
-                eprintln!(
-                    "[permissions] skipped {} rules with syntax errors (.pigcode/permissions.toml)",
+                tracing::warn!(
+                    "skipped {} rules with syntax errors (.pigcode/permissions.toml)",
                     rules.skipped
                 );
             }
             rules
         }
         Err(error) => {
-            eprintln!("[permissions] failed to load (continuing with no rules): {error:?}");
+            tracing::warn!("failed to load (continuing with no rules): {error:?}");
             crate::permissions::PermissionRules::default()
         }
     }

@@ -105,6 +105,19 @@ pub const PLAN_FILE_EXEC_FILE: &str = "plan_file_exec.txt";
 /// Plan write gating scenario: Write to the plans directory (pass-through) → Write a normal file (should be hard-rejected) → text.
 pub const SCENARIO_PLAN_WRITE_GATE_TRIGGER: &str = "PLAN_WRITE_GATE_SCENARIO";
 
+/// Business-error-in-200 scenario (OpenAI path): the SSE stream carries an
+/// {"error": ...} data frame instead of failing the HTTP status — the
+/// OpenAI-compatible gateway behavior the provider layer must surface as a
+/// structured error
+pub const BUSINESS_ERROR_TRIGGER: &str = "BUSINESS_ERROR_200";
+pub const BUSINESS_ERROR_MARKER: &str = "insufficient balance (mock business error)";
+
+/// Empty-completion scenario (OpenAI path): the FIRST streaming request with
+/// this marker gets a 200 stream with no content at all (a bare stop chunk);
+/// the silent retry gets a normal text reply with the marker
+pub const EMPTY_ONCE_TRIGGER: &str = "EMPTY_ONCE";
+pub const EMPTY_ONCE_MARKER: &str = "MOCK_EMPTY_RETRY_OK";
+
 /// Plan file semantics scenario: bare ExitPlanMode ({} without a plan argument); after approval, a Write follows.
 fn plan_file_scenario_response(body: &str, tool_results: usize) -> Vec<String> {
     match tool_results {
@@ -1248,6 +1261,9 @@ async fn handle_connection(
 
     // Retry test: the first request containing FAIL_ONCE_500 returns 500 (normal once the count is exhausted)
     static FAIL_ONCE_500: AtomicUsize = AtomicUsize::new(1);
+    // Empty-completion test: the first STREAMING request containing
+    // EMPTY_ONCE gets a content-less stream (normal once exhausted)
+    static EMPTY_ONCE: AtomicUsize = AtomicUsize::new(1);
     if body.contains("FAIL_ONCE_500")
         && FAIL_ONCE_500
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
@@ -1293,6 +1309,24 @@ async fn handle_connection(
     }
     let chunks = if anthropic {
         anthropic_chunks(&body, tool_results)
+    } else if body.contains(BUSINESS_ERROR_TRIGGER) {
+        // Business error inside the 200 stream (OpenAI-compatible gateways)
+        vec![format!(
+            "data: {}\n\n",
+            serde_json::json!({"error": {"message": BUSINESS_ERROR_MARKER, "code": "1005"}})
+        )]
+    } else if body.contains(EMPTY_ONCE_TRIGGER)
+        && EMPTY_ONCE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+    {
+        // Empty completion: a 200 stream whose only chunk is a bare stop
+        vec![sse_chunk(serde_json::json!({}), Some("stop"))]
+    } else if body.contains(EMPTY_ONCE_TRIGGER) {
+        vec![
+            sse_chunk(serde_json::json!({"content": EMPTY_ONCE_MARKER}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ]
     } else if body.contains("ECHO_USAGE") {
         echo_usage_response(&body)
     } else if body.contains("ECHO_HISTORY") {
