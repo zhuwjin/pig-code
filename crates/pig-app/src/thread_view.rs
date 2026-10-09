@@ -253,9 +253,18 @@ impl ThreadView {
         self.turn_started = streaming.then(std::time::Instant::now);
     }
 
+    /// The current scroll offset clamped into the valid range [-max.y, 0]: gpui's wheel handler adds
+    /// the delta to the offset immediately and only the next prepaint clamps it, so a raw read can sit
+    /// outside the range for one frame (overscroll flick, or wheeling on a list that cannot scroll at
+    /// all — which would otherwise read as a phantom upward move and pop the "Latest messages" button)
+    fn clamped_offset_y(&self) -> Pixels {
+        let max_y = self.scroll_handle.max_offset().y;
+        self.scroll_handle.offset().y.clamp(-max_y, px(0.))
+    }
+
     /// Whether currently at the bottom (offset.y ∈ [-max.y, 0], distance to bottom = offset.y + max.y)
     fn at_bottom(&self) -> bool {
-        self.scroll_handle.offset().y + self.scroll_handle.max_offset().y <= px(2.)
+        self.clamped_offset_y() + self.scroll_handle.max_offset().y <= px(2.)
     }
 
     /// Auto-scroll during output: stick to the bottom only in follow mode; do not disturb after the user scrolls up
@@ -883,8 +892,10 @@ impl Render for ThreadView {
         }
         // Dragging the scrollbar thumb, a track click, or keyboard scrolling move the offset directly
         // without a wheel event: pause following on any upward move between frames so auto_scroll stops
-        // fighting the user mid-stream. The 1px threshold rides out float jitter
-        let offset_y = self.scroll_handle.offset().y;
+        // fighting the user mid-stream. The 1px threshold rides out float jitter. The read goes through
+        // clamped_offset_y: a wheel delta lands on the offset before the next prepaint clamps it, and
+        // the transient out-of-range value must not read as an upward move
+        let offset_y = self.clamped_offset_y();
         if self.follow_bottom && offset_y > self.last_scroll_y + px(1.) && !self.at_bottom() {
             self.follow_bottom = false;
         }

@@ -2335,3 +2335,82 @@ fn upward_offset_move_pauses_follow_and_bottom_resumes(cx: &mut gpui_kit::TestAp
         "follow mode must keep the list pinned to the bottom, distance {tail:?}"
     );
 }
+
+/// gpui's wheel handler adds the delta to the scroll offset immediately and only the next
+/// prepaint clamps it into [-max, 0]: an upward flick on a list too short to scroll reads as a
+/// phantom upward offset move for one frame, which must not pause follow mode (otherwise the
+/// "Latest messages" button pops up on an unscrollable list and, with nothing scheduling another
+/// render, stays there)
+#[gpui_kit::test]
+fn wheel_overscroll_on_unscrollable_list_keeps_follow(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    // Two short messages: the content fits the viewport, max_offset stays 0
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.append_user_message("hi".to_string(), vec![], vec![], cx);
+                view.add_system_note("short reply", cx);
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let max = window
+        .update(cx, |probe, _, cx| {
+            probe
+                .thread
+                .update(cx, |view, _| view.scroll_handle.max_offset().y)
+        })
+        .unwrap();
+    assert!(
+        max <= gpui_kit::px(0.),
+        "the short list must not be scrollable, max_offset {max:?}"
+    );
+
+    // The wheel handler's raw write: an upward delta on an unscrollable list leaves a positive
+    // offset until the next prepaint clamps it back
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                view.scroll_handle
+                    .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(30.)));
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                assert!(
+                    view.follow_bottom,
+                    "a wheel flick on an unscrollable list must not pause follow mode"
+                );
+            });
+        })
+        .unwrap();
+}
