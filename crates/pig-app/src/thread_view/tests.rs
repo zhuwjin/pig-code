@@ -2196,3 +2196,142 @@ fn user_message_long_collapses_with_toggle(cx: &mut gpui_kit::TestAppContext) {
     })
     .unwrap();
 }
+
+/// The message-list scrollbar is a drag affordance that moves the offset without a
+/// wheel event: an upward move between frames must pause follow mode (otherwise
+/// auto_scroll yanks the viewport back to the bottom on the next streaming event,
+/// fighting the drag), and reaching the bottom again must resume it.
+#[gpui_kit::test]
+fn upward_offset_move_pauses_follow_and_bottom_resumes(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::test::TestWindowExt as _;
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    // 30 messages stretch the list past the viewport; appends force follow-bottom
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                for ix in 0..30 {
+                    view.append_user_message(format!("message {ix}"), vec![], vec![], cx);
+                }
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let max = window
+        .update(cx, |probe, _, cx| {
+            probe
+                .thread
+                .update(cx, |view, _| view.scroll_handle.max_offset().y)
+        })
+        .unwrap();
+    assert!(
+        max > gpui_kit::px(100.),
+        "the message list should be well past scrollable, max_offset {max:?}"
+    );
+
+    // Thumb drag upward = the offset moves up without any wheel event
+    let dragged = max * 0.5;
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                view.scroll_handle
+                    .set_offset(gpui_kit::point(gpui_kit::px(0.), -dragged));
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                assert!(
+                    !view.follow_bottom,
+                    "an upward offset move must pause follow mode"
+                );
+            });
+        })
+        .unwrap();
+
+    // While paused, a streaming append must not yank the viewport back down
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                view.add_system_note("streaming more output", cx);
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let after = window
+        .update(cx, |probe, _, cx| {
+            probe.thread.read(cx).scroll_handle.offset().y
+        })
+        .unwrap();
+    let expected = -dragged;
+    assert!(
+        (after + dragged).abs() < gpui_kit::px(1.),
+        "auto_scroll must hold the dragged position while paused, offset {after:?} vs {expected:?}"
+    );
+
+    // Dragging back to the bottom resumes following (the pre-existing resume rule).
+    // The thumb drag sets the offset directly (scroll_to_bottom is a flag deferred to
+    // the next layout, which render() — running before layout — would not see yet)
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, _| {
+                let bottom = -view.scroll_handle.max_offset().y;
+                view.scroll_handle
+                    .set_offset(gpui_kit::point(gpui_kit::px(0.), bottom));
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                assert!(
+                    view.follow_bottom,
+                    "reaching the bottom must resume follow mode"
+                );
+                // And a later append sticks to the bottom again
+                view.add_system_note("tail follows again", cx);
+            });
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    let tail = window
+        .update(cx, |probe, _, cx| {
+            let view = probe.thread.read(cx);
+            view.scroll_handle.offset().y + view.scroll_handle.max_offset().y
+        })
+        .unwrap();
+    assert!(
+        tail.abs() < gpui_kit::px(1.),
+        "follow mode must keep the list pinned to the bottom, distance {tail:?}"
+    );
+}

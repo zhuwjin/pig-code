@@ -110,6 +110,11 @@ pub struct ThreadView {
     /// Follow mode: automatically sticks to the bottom during output. The user scrolling up pauses following (a "Latest messages" button pops up),
     /// and reaching the bottom (by any means) or clicking the floating button resumes it
     follow_bottom: bool,
+    /// The list offset seen by the previous render: an upward move between frames pauses following
+    /// (covers wheel-up, dragging the scrollbar thumb, a track click, keyboard — any means).
+    /// Content growth only ever pushes the offset down and a shrink clamps to the still-bottom
+    /// position, so an upward delta reliably means user intent
+    last_scroll_y: Pixels,
     streaming: bool,
     /// Context compaction in progress (between CompactStarted → ContextCompacted/TurnAborted):
     /// renders a "Compacting context" divider at the end of the list
@@ -208,6 +213,7 @@ impl ThreadView {
             item_index: HashMap::new(),
             scroll_handle: ScrollHandle::new(),
             follow_bottom: true,
+            last_scroll_y: px(0.),
             streaming: false,
             compacting: false,
             turn_started: None,
@@ -875,6 +881,14 @@ impl Render for ThreadView {
                 self.follow_bottom = true;
             }
         }
+        // Dragging the scrollbar thumb, a track click, or keyboard scrolling move the offset directly
+        // without a wheel event: pause following on any upward move between frames so auto_scroll stops
+        // fighting the user mid-stream. The 1px threshold rides out float jitter
+        let offset_y = self.scroll_handle.offset().y;
+        if self.follow_bottom && offset_y > self.last_scroll_y + px(1.) && !self.at_bottom() {
+            self.follow_bottom = false;
+        }
+        self.last_scroll_y = offset_y;
 
         // Turn nav: one user message = one turn entry. Every message in the message list is
         // a direct child of the scroll container (see below); scroll_to_top_of_item / bounds_for_item
@@ -1082,6 +1096,14 @@ impl Render for ThreadView {
                                 )
                             }),
                     )
+                    // Overlay scrollbar for the message list: reads the tracked scroll handle's
+                    // bounds/offset/content size. Default Scrolling mode (appears while scrolling,
+                    // fades when idle) — the same overlay style as the other panels. Hidden while
+                    // the lightbox covers the area: its mask on_click does not stop mousedown, so
+                    // the thumb would stay draggable through the overlay
+                    .when(self.lightbox.is_none(), |this| {
+                        this.child(Scrollbar::vertical(&self.scroll_handle))
+                    })
                     // Turn nav: small vertical bars on the left edge, see render_turn_nav
                     .when(show_nav, |this| {
                         this.child(self.render_turn_nav(&user_ixs, nav_active, cx))
