@@ -477,7 +477,7 @@ fn assemble_prep(
 /// Append one line to the subagent context JSONL (failure is non-fatal: log and continue, same policy as rollout.append)
 fn persist_line(jsonl: &Path, line: &serde_json::Value) {
     if let Err(error) = append_agent_record(jsonl, line) {
-        eprintln!("[agent] failed to persist subagent context: {error}");
+        tracing::error!("failed to persist subagent context: {error}");
     }
 }
 

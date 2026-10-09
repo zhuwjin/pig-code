@@ -625,7 +625,7 @@ impl Session {
         for item in joined {
             match item {
                 Ok((ix, child)) => slots[ix] = Some(child),
-                Err(error) => eprintln!("[agent] swarm subagent task aborted: {error}"),
+                Err(error) => tracing::error!("swarm subagent task aborted: {error}"),
             }
         }
         let children: Vec<crate::agent::SwarmChildResult> = slots.into_iter().flatten().collect();
@@ -1124,7 +1124,7 @@ fn report_progress(
 /// and continue, same policy as rollout.append)
 fn persist_agent_line(jsonl: &Path, line: &serde_json::Value) {
     if let Err(error) = crate::agent::append_agent_record(jsonl, line) {
-        eprintln!("[agent] failed to persist subagent context: {error}");
+        tracing::error!("failed to persist subagent context: {error}");
     }
 }
 /// Persist a subagent message: base64 is not persisted (same policy as the

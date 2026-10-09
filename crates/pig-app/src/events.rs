@@ -25,8 +25,8 @@ impl AppView {
                 fs_write_outside,
             } => {
                 let session_id = session_id.clone();
-                eprintln!(
-                    "[model] SessionConfigured {session_id} -> provider={provider_id:?} model={model_id:?} thinking={reasoning_level:?}"
+                tracing::info!(
+                    "SessionConfigured {session_id} -> provider={provider_id:?} model={model_id:?} thinking={reasoning_level:?}"
                 );
                 self.ensure_views(&session_id, cx);
                 self.current = Some(session_id.clone());
@@ -701,8 +701,8 @@ impl AppView {
                 provider_id,
                 model_id,
             } => {
-                eprintln!(
-                    "[model] switch received -> {provider_id}/{model_id} (hero={}, previous thinking={:?})",
+                tracing::info!(
+                    "switch received -> {provider_id}/{model_id} (hero={}, previous thinking={:?})",
                     self.current.is_none(),
                     self.reasoning_level
                 );
@@ -734,9 +734,10 @@ impl AppView {
                             .flatten()
                     });
                 if self.reasoning_level != target {
-                    eprintln!(
-                        "[model] switching {model_id}: thinking level {:?} -> {:?}",
-                        self.reasoning_level, target
+                    tracing::debug!(
+                        "switching {model_id}: thinking level {:?} -> {:?}",
+                        self.reasoning_level,
+                        target
                     );
                     self.reasoning_level = target;
                     let level = self.reasoning_level.clone();

@@ -8,6 +8,7 @@
 //! English constants (see the root AGENTS.md convention).
 
 pub mod agent;
+pub mod api_log;
 pub mod config;
 pub mod files;
 pub mod git;
@@ -22,6 +23,7 @@ pub mod provider;
 pub mod rollout;
 pub mod session;
 pub mod skills;
+pub mod sse;
 pub mod store;
 pub mod task;
 pub mod text;

@@ -29,8 +29,8 @@ pub enum PasteArb {
 /// 3. an Image entry becomes an attachment in the formats the pipeline supports
 ///    (png/jpeg/webp/gif/tiff); other formats are dropped.
 pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
-    eprintln!(
-        "[clipboard] received {} clipboard entr{}",
+    tracing::debug!(
+        "received {} clipboard entr{}",
         item.entries.len(),
         if item.entries.len() == 1 { "y" } else { "ies" }
     );
@@ -40,23 +40,20 @@ pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
     for (index, entry) in item.entries.iter().enumerate() {
         match entry {
             ClipboardEntry::ExternalPaths(external) => {
-                eprintln!(
-                    "[clipboard] entry[{index}] = ExternalPaths(count={})",
-                    external.0.len()
-                );
+                tracing::debug!("entry[{index}] = ExternalPaths(count={})", external.0.len());
                 paths = Some(external.0.clone());
             }
             ClipboardEntry::String(s) => {
-                eprintln!(
-                    "[clipboard] entry[{index}] = String(chars={}, non_whitespace={})",
+                tracing::debug!(
+                    "entry[{index}] = String(chars={}, non_whitespace={})",
                     s.text.chars().count(),
                     s.text.chars().any(|c| !c.is_whitespace())
                 );
                 string_text = Some(s.text.clone());
             }
             ClipboardEntry::Image(img) => {
-                eprintln!(
-                    "[clipboard] entry[{index}] = Image(format={}, mime={}, bytes={})",
+                tracing::debug!(
+                    "entry[{index}] = Image(format={}, mime={}, bytes={})",
                     image_format_name(img.format),
                     image_format_mime(img.format).unwrap_or("unsupported"),
                     img.bytes.len()
@@ -68,16 +65,13 @@ pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
     if let Some(paths) = paths
         && let Some(first) = paths.first()
     {
-        eprintln!(
-            "[clipboard] arbitration = FilePath ({} path(s))",
-            paths.len()
-        );
+        tracing::debug!("arbitration = FilePath ({} path(s))", paths.len());
         return PasteArb::FilePath(first.clone());
     }
     if let Some(text) = &string_text
         && text.chars().any(|c| !c.is_whitespace())
     {
-        eprintln!("[clipboard] arbitration = Text");
+        tracing::debug!("arbitration = Text");
         return PasteArb::Text;
     }
     if let Some(img) = image {
@@ -89,15 +83,15 @@ pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
             ImageFormat::Tiff => "image/tiff",
             // Svg/Bmp/Ico/Pnm are not in the paste-compression pipeline: dropped (the engine inserts empty text; no behavior change)
             _ => {
-                eprintln!(
-                    "[clipboard] arbitration = Nothing (unsupported image format={})",
+                tracing::debug!(
+                    "arbitration = Nothing (unsupported image format={})",
                     image_format_name(img.format)
                 );
                 return PasteArb::Nothing;
             }
         };
-        eprintln!(
-            "[clipboard] arbitration = ImageBytes(mime={}, bytes={})",
+        tracing::debug!(
+            "arbitration = ImageBytes(mime={}, bytes={})",
             mime,
             img.bytes.len()
         );
@@ -106,7 +100,7 @@ pub fn arbitrate_clipboard(item: &ClipboardItem) -> PasteArb {
             mime,
         };
     }
-    eprintln!("[clipboard] arbitration = Nothing");
+    tracing::debug!("arbitration = Nothing");
     PasteArb::Nothing
 }
 

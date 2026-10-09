@@ -51,8 +51,8 @@ impl Session {
                         return false;
                     }
                     Err(error) => {
-                        eprintln!(
-                            "[pig-core] summary request failed, falling back to truncation: {error:?}"
+                        tracing::warn!(
+                            "summary request failed, falling back to truncation: {error:?}"
                         );
                         None
                     }

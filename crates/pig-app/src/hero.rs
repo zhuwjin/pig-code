@@ -140,8 +140,8 @@ impl AppView {
             Some((p, m)) => (Some(p), Some(m)),
             None => (None, None),
         };
-        eprintln!(
-            "[model] hero_send new session: cwd={} model={:?} thinking={:?}",
+        tracing::info!(
+            "hero_send new session: cwd={} model={:?} thinking={:?}",
             cwd.display(),
             provider_id.as_deref().zip(model_id.as_deref()),
             self.reasoning_level

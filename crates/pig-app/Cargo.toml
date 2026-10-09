@@ -27,6 +27,10 @@ unicode-segmentation = "1"
 rust-i18n = "4.2"
 # 「跟随系统」语言检测（macOS CFLocale / Windows API）
 sys-locale = "0.3"
+# 日志：tracing 门面 + subscriber 初始化（logging.rs）+ 按天滚动文件
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # unix 默认 shell 解析（getpwuid/access，与 portable-pty new_default_prog 同链）
 [target.'cfg(unix)'.dependencies]

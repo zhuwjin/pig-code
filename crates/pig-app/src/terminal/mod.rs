@@ -88,10 +88,7 @@ impl TerminalPanel {
         let terminal = match Terminal::spawn(&self.cwd, self.shell.as_deref()) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!(
-                    "[terminal] failed to start shell ({}): {e}",
-                    self.cwd.display()
-                );
+                tracing::debug!("failed to start shell ({}): {e}", self.cwd.display());
                 return;
             }
         };

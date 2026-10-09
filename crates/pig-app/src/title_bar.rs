@@ -522,8 +522,8 @@ impl AppView {
             return;
         };
         if let Err(err) = pig_core::files::open_in_file_manager(&cwd) {
-            eprintln!(
-                "[fm] failed to open via {} {}: {err}",
+            tracing::debug!(
+                "failed to open via {} {}: {err}",
                 file_manager_name(),
                 cwd.display()
             );
@@ -536,8 +536,8 @@ impl AppView {
             return;
         };
         if let Err(err) = pig_core::files::open_in_terminal(&cwd) {
-            eprintln!(
-                "[fm] failed to open via {} {}: {err}",
+            tracing::debug!(
+                "failed to open via {} {}: {err}",
                 terminal_name(),
                 cwd.display()
             );

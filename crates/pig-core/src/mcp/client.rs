@@ -162,8 +162,8 @@ impl McpClient {
             .map_err(|e| CoreError::McpInitialize { detail: e })?;
         let server_version = init["protocolVersion"].as_str().unwrap_or(announced);
         if server_version != announced {
-            eprintln!(
-                "[mcp] {} protocol version {server_version} (client {announced}), continuing with server version",
+            tracing::warn!(
+                "{} protocol version {server_version} (client {announced}), continuing with server version",
                 client.name
             );
         }
@@ -229,10 +229,7 @@ impl McpClient {
             for entry in result["tools"].as_array().cloned().unwrap_or_default() {
                 match parse_tool_spec(&entry) {
                     Some(spec) => tools.push(spec),
-                    None => eprintln!(
-                        "[mcp] {} skipping unparsable tool entry: {entry}",
-                        self.name
-                    ),
+                    None => tracing::warn!("{} skipping unparsable tool entry: {entry}", self.name),
                 }
             }
             let Some(next) = result["nextCursor"].as_str() else {
@@ -240,8 +237,8 @@ impl McpClient {
             };
             pages += 1;
             if pages >= MAX_LIST_PAGES {
-                eprintln!(
-                    "[mcp] {} tools/list paging exceeded {MAX_LIST_PAGES} pages, truncating",
+                tracing::warn!(
+                    "{} tools/list paging exceeded {MAX_LIST_PAGES} pages, truncating",
                     self.name
                 );
                 break;
@@ -511,7 +508,7 @@ async fn read_loop(
             Ok(Some(line)) => handle_line(&name, &line, &pending, &writer).await,
             Ok(None) => break,
             Err(e) => {
-                eprintln!("[mcp] {name} failed to read stdout: {e}");
+                tracing::warn!("{name} failed to read stdout: {e}");
                 break;
             }
         }
@@ -529,7 +526,7 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
         Ok(message) => message,
         Err(_) => {
             let preview: String = line.chars().take(120).collect();
-            eprintln!("[mcp] {name} ignoring non-JSON line: {preview}");
+            tracing::warn!("{name} ignoring non-JSON line: {preview}");
             return;
         }
     };
@@ -562,14 +559,14 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
     // The rest (notifications/*) are ignored
 }
 
-/// stderr reader: forward each line to eprintln + keep a tail snapshot
+/// stderr reader: forward each line to the debug log + keep a tail snapshot
 async fn stderr_loop(name: String, stderr: ChildStderr, tail: Arc<Mutex<String>>) {
     let mut lines = LineReader::new(stderr, MAX_STDERR_LINE_BYTES, &name);
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        eprintln!("[mcp:{name}] {line}");
+        tracing::debug!("[mcp:{name}] {line}");
         let mut tail = tail.lock().expect("stderr tail lock");
         tail.push_str(&line);
         tail.push('\n');
@@ -632,8 +629,8 @@ impl<R: tokio::io::AsyncRead + Unpin> LineReader<R> {
             }
             self.buf.extend_from_slice(&chunk[..n]);
             if self.buf.len() > self.max_line {
-                eprintln!(
-                    "[mcp] {} line exceeds {} KB, discarding the line",
+                tracing::warn!(
+                    "{} line exceeds {} KB, discarding the line",
                     self.label,
                     self.max_line / 1024
                 );

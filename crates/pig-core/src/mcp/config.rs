@@ -99,7 +99,7 @@ fn load_file(path: &Path) -> Vec<McpServerConfig> {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
         Err(e) => {
-            eprintln!("[mcp] failed to read config {}: {e}", path.display());
+            tracing::warn!("failed to read config {}: {e}", path.display());
             return vec![];
         }
     };
@@ -111,12 +111,12 @@ fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
     let file: serde_json::Value = match serde_json::from_str(raw) {
         Ok(file) => file,
         Err(e) => {
-            eprintln!("[mcp] failed to parse config {}: {e}", path.display());
+            tracing::warn!("failed to parse config {}: {e}", path.display());
             return vec![];
         }
     };
     let Some(servers) = file.get("mcpServers").and_then(|v| v.as_object()) else {
-        eprintln!("[mcp] {} has no mcpServers object, skipped", path.display());
+        tracing::warn!("{} has no mcpServers object, skipped", path.display());
         return vec![];
     };
     let mut out = Vec::new();
@@ -128,8 +128,8 @@ fn parse_file(raw: &str, path: &Path) -> Vec<McpServerConfig> {
                 timeout,
                 disabled,
             }),
-            Err(e) => eprintln!(
-                "[mcp] server {name} in {} is invalid, skipped: {e}",
+            Err(e) => tracing::warn!(
+                "server {name} in {} is invalid, skipped: {e}",
                 path.display()
             ),
         }

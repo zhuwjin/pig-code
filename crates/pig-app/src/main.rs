@@ -1,6 +1,7 @@
 // Hide the console window in release builds (kept in debug for reading logs).
 // With no console under the GUI subsystem, stdout/stderr writes are silently
-// ignored by std (verified not to panic), so pig-core's eprintln is safe
+// ignored by std (verified not to panic); the real log goes to
+// {data_dir}/logs (logging.rs, tracing)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_client;
@@ -13,6 +14,7 @@ mod errors;
 mod file_panel;
 mod font;
 mod i18n;
+mod logging;
 mod review_panel;
 mod search_popup;
 mod settings;
@@ -1266,6 +1268,12 @@ impl Render for AppView {
 }
 
 fn main() {
+    let selftest = std::env::var_os("PIG_SELFTEST").is_some();
+    let setup = selftest.then(setup_selftest);
+    // After the selftest's data-dir isolation so logs land in the temp dir;
+    // before everything else so early diagnostics are captured
+    logging::init();
+
     // PIG_NET_TEST=1: skip opening a window and test each provider's
     // connectivity with the real config (for network troubleshooting)
     // PIG_NET_TEST=full: additionally run the full message-sending flow
@@ -1279,8 +1287,6 @@ fn main() {
         return;
     }
 
-    let selftest = std::env::var_os("PIG_SELFTEST").is_some();
-    let setup = selftest.then(setup_selftest);
     let cwd = setup
         .as_ref()
         .map(|s| s.cwd.clone())

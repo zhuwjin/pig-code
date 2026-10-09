@@ -96,8 +96,8 @@ pub fn load_profiles(cwd: &Path, data_dir: &Path) -> Vec<AgentProfile> {
                     by_name.insert(profile.name.clone(), profile);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[agent] skipping unparsable subagent profile {}: {e}",
+                    tracing::warn!(
+                        "skipping unparsable subagent profile {}: {e}",
                         path.display()
                     );
                 }

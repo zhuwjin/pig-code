@@ -18,26 +18,23 @@ impl Composer {
                 // Over 20MB falls back to text paste (pasting the path as text);
                 // unreadable/non-image files likewise fall back to text
                 let Ok(meta) = std::fs::metadata(&path) else {
-                    eprintln!("[clipboard] paste FilePath failed: metadata unavailable");
+                    tracing::warn!("paste FilePath failed: metadata unavailable");
                     return false;
                 };
                 if meta.len() > 20 * 1024 * 1024 {
-                    eprintln!(
-                        "[clipboard] paste FilePath skipped: size={} exceeds 20MB",
-                        meta.len()
-                    );
+                    tracing::debug!("paste FilePath skipped: size={} exceeds 20MB", meta.len());
                     return false;
                 }
                 let Ok(bytes) = std::fs::read(&path) else {
-                    eprintln!("[clipboard] paste FilePath failed: read error");
+                    tracing::warn!("paste FilePath failed: read error");
                     return false;
                 };
                 let Some(mime) = pig_core::tool::sniff_image(&bytes) else {
-                    eprintln!("[clipboard] paste FilePath skipped: unsupported file bytes");
+                    tracing::debug!("paste FilePath skipped: unsupported file bytes");
                     return false;
                 };
-                eprintln!(
-                    "[clipboard] paste FilePath accepted: mime={}, bytes={}, entries={}",
+                tracing::debug!(
+                    "paste FilePath accepted: mime={}, bytes={}, entries={}",
                     mime,
                     bytes.len(),
                     entry_count
@@ -46,8 +43,8 @@ impl Composer {
                 true
             }
             PasteArb::ImageBytes { bytes, mime } => {
-                eprintln!(
-                    "[clipboard] paste ImageBytes accepted: mime={}, bytes={}, entries={}",
+                tracing::debug!(
+                    "paste ImageBytes accepted: mime={}, bytes={}, entries={}",
                     mime,
                     bytes.len(),
                     entry_count
@@ -56,11 +53,11 @@ impl Composer {
                 true
             }
             PasteArb::Text => {
-                eprintln!("[clipboard] paste Text: fallback to input text");
+                tracing::debug!("paste Text: fallback to input text");
                 false
             }
             PasteArb::Nothing => {
-                eprintln!("[clipboard] paste Nothing: fallback to default paste");
+                tracing::debug!("paste Nothing: fallback to default paste");
                 false
             }
         }
@@ -75,8 +72,8 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         if self.pasted_images.len() >= MAX_PASTED_IMAGES {
-            eprintln!(
-                "[clipboard] attach_image skipped: already at max={} images",
+            tracing::warn!(
+                "attach_image skipped: already at max={} images",
                 MAX_PASTED_IMAGES
             );
             self.paste_note =
@@ -88,8 +85,8 @@ impl Composer {
             let source_bytes = bytes.len();
             match pig_core::tool::convert_tiff_to_png(&bytes) {
                 Ok((png, width, height)) => {
-                    eprintln!(
-                        "[clipboard] TIFF converted to PNG: {}x{}, bytes={} -> {}",
+                    tracing::debug!(
+                        "TIFF converted to PNG: {}x{}, bytes={} -> {}",
                         width,
                         height,
                         source_bytes,
@@ -99,7 +96,7 @@ impl Composer {
                     mime = "image/png";
                 }
                 Err(error) => {
-                    eprintln!("[clipboard] TIFF conversion failed: {error}");
+                    tracing::warn!("TIFF conversion failed: {error}");
                     self.paste_note =
                         Some(rust_i18n::t!("composer.tiff_failed", error = error).to_string());
                     cx.notify();
@@ -116,8 +113,8 @@ impl Composer {
             width,
             height,
         });
-        eprintln!(
-            "[clipboard] attach_image stored: mime={}, bytes={}, dimensions={}x{}, count={}",
+        tracing::debug!(
+            "attach_image stored: mime={}, bytes={}, dimensions={}x{}, count={}",
             mime,
             byte_len,
             width,

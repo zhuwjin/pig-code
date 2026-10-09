@@ -394,14 +394,15 @@ impl Composer {
             .on_confirm(move |ix, window, cx| {
                 on_confirm_composer.update(cx, |this, cx| {
                     if ix.section == 0 {
-                        eprintln!("[model-popup] clicked \"Manage models\" (section=0)");
+                        tracing::debug!("clicked \"Manage models\" (section=0)");
                         cx.emit(ComposerEvent::OpenSettings);
                     } else if let Some((_, items)) = groups.get(ix.section - 1)
                         && let Some((provider_name, provider_id, model_id, _)) = items.get(ix.row)
                     {
-                        eprintln!(
-                            "[model-popup] selected section={} row={} -> {provider_id}/{model_id}",
-                            ix.section, ix.row
+                        tracing::debug!(
+                            "selected section={} row={} -> {provider_id}/{model_id}",
+                            ix.section,
+                            ix.row
                         );
                         this.model = format!("{provider_name}/{model_id}");
                         cx.emit(ComposerEvent::SetModel {
@@ -409,9 +410,10 @@ impl Composer {
                             model_id: model_id.clone(),
                         });
                     } else {
-                        eprintln!(
-                            "[model-popup] click did not resolve to a model: section={} row={}",
-                            ix.section, ix.row
+                        tracing::debug!(
+                            "click did not resolve to a model: section={} row={}",
+                            ix.section,
+                            ix.row
                         );
                     }
                     this.close_command_popup(window, cx);

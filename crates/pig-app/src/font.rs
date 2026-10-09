@@ -80,7 +80,7 @@ fn resolve_font(
             SharedString::from(name.to_string())
         }
         Some(name) => {
-            eprintln!("[font] font {name:?} not installed, keeping the default");
+            tracing::warn!("font {name:?} not installed, keeping the default");
             default.clone()
         }
     }

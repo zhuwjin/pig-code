@@ -13,9 +13,10 @@ fn warn_duplicate_provider_ids(config: &AppConfig) {
     let mut seen = std::collections::HashSet::new();
     for provider in &config.providers {
         if !seen.insert(&provider.id) {
-            eprintln!(
-                "[config] warning: duplicate provider id \"{}\" ({} shares it with another provider; delete and recreate the affected providers in settings)",
-                provider.id, provider.name
+            tracing::warn!(
+                "warning: duplicate provider id \"{}\" ({} shares it with another provider; delete and recreate the affected providers in settings)",
+                provider.id,
+                provider.name
             );
         }
     }

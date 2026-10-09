@@ -51,7 +51,7 @@ impl McpManager {
                         Ok(McpServer { client, tools })
                     }
                     Err(e) => {
-                        eprintln!("[mcp] failed to connect {}, skipped: {e:?}", config.name);
+                        tracing::warn!("failed to connect {}, skipped: {e:?}", config.name);
                         Err(pig_protocol::McpServerStatus {
                             name: config.name,
                             connected: false,
