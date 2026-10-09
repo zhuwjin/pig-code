@@ -202,6 +202,11 @@ pub(crate) async fn stream_anthropic(
     merge_reasoning_params(&mut body, config);
 
     let url = anthropic_url(&config.base_url);
+    // The interleaved-thinking beta header rides along when reasoning params enabled
+    // thinking for this request (same condition the SDK's client would send it under;
+    // an explicit thinking.type=disabled must not trigger it)
+    let thinking =
+        body.get("thinking").and_then(|t| t.get("type")) == Some(&serde_json::json!("enabled"));
     // API wire log (PIG_LOG_API): no-op accumulator when disabled
     let mut api =
         crate::api_log::ApiCall::new("anthropic.messages", &config.provider_name, &config.model);
@@ -209,12 +214,17 @@ pub(crate) async fn stream_anthropic(
 
     let client = http_client();
     let response = match send_with_retry(
-        || {
-            client
-                .post(&url)
-                .header("x-api-key", &config.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
+        |retry| {
+            apply_sdk_headers(
+                client
+                    .post(&url)
+                    .header("x-api-key", &config.api_key)
+                    .header("anthropic-version", "2023-06-01"),
+                true,
+                thinking,
+                retry,
+            )
+            .json(&body)
         },
         cancel,
     )

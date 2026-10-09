@@ -46,11 +46,14 @@ pub async fn complete_text(
                 crate::api_log::ApiCall::new("openai.chat", &config.provider_name, &config.model);
             api.request(&url, &body);
             let response = tokio::select! {
-                result = client
-                    .post(&url)
-                    .bearer_auth(&config.api_key)
-                    .json(&body)
-                    .send() => result.map_err(net_err),
+                result = apply_sdk_headers(
+                    client.post(&url).bearer_auth(&config.api_key),
+                    false,
+                    false,
+                    0,
+                )
+                .json(&body)
+                .send() => result.map_err(net_err),
                 _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let response = match response {
@@ -112,12 +115,17 @@ pub async fn complete_text(
             );
             api.request(&url, &body);
             let response = tokio::select! {
-                result = client
-                    .post(&url)
-                    .header("x-api-key", &config.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send() => result.map_err(net_err),
+                result = apply_sdk_headers(
+                    client
+                        .post(&url)
+                        .header("x-api-key", &config.api_key)
+                        .header("anthropic-version", "2023-06-01"),
+                    true,
+                    false,
+                    0,
+                )
+                .json(&body)
+                .send() => result.map_err(net_err),
                 _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let response = match response {
@@ -194,11 +202,14 @@ pub async fn complete_messages(
                 crate::api_log::ApiCall::new("openai.chat", &config.provider_name, &config.model);
             api.request(&url, &body);
             let response = tokio::select! {
-                result = client
-                    .post(&url)
-                    .bearer_auth(&config.api_key)
-                    .json(&body)
-                    .send() => result.map_err(net_err),
+                result = apply_sdk_headers(
+                    client.post(&url).bearer_auth(&config.api_key),
+                    false,
+                    false,
+                    0,
+                )
+                .json(&body)
+                .send() => result.map_err(net_err),
                 _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let response = match response {
@@ -282,12 +293,17 @@ pub async fn complete_messages(
             );
             api.request(&url, &body);
             let response = tokio::select! {
-                result = client
-                    .post(&url)
-                    .header("x-api-key", &config.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send() => result.map_err(net_err),
+                result = apply_sdk_headers(
+                    client
+                        .post(&url)
+                        .header("x-api-key", &config.api_key)
+                        .header("anthropic-version", "2023-06-01"),
+                    true,
+                    false,
+                    0,
+                )
+                .json(&body)
+                .send() => result.map_err(net_err),
                 _ = cancel.cancelled() => Err(CoreError::Internal { detail: "Cancelled".to_string() }),
             };
             let response = match response {
@@ -365,9 +381,7 @@ pub async fn test_provider(
                     "stream": false,
                 });
                 api.request(&url, &body);
-                client
-                    .post(&url)
-                    .bearer_auth(api_key)
+                apply_sdk_headers(client.post(&url).bearer_auth(api_key), false, false, 0)
                     .json(&body)
                     .send()
                     .await
@@ -381,13 +395,18 @@ pub async fn test_provider(
                     "stream": false,
                 });
                 api.request(&url, &body);
-                client
-                    .post(&url)
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send()
-                    .await
+                apply_sdk_headers(
+                    client
+                        .post(&url)
+                        .header("x-api-key", api_key)
+                        .header("anthropic-version", "2023-06-01"),
+                    true,
+                    false,
+                    0,
+                )
+                .json(&body)
+                .send()
+                .await
             }
         }
     };

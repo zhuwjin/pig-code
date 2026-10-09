@@ -105,7 +105,15 @@ pub(crate) async fn stream_openai(
     api.request(&url, &body);
 
     let response = match send_with_retry(
-        || client.post(&url).bearer_auth(&config.api_key).json(&body),
+        |retry| {
+            apply_sdk_headers(
+                client.post(&url).bearer_auth(&config.api_key),
+                false,
+                false,
+                retry,
+            )
+            .json(&body)
+        },
         cancel,
     )
     .await?

@@ -30,6 +30,10 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 
+# unix 取内核版本（uname，用户代理里的 os.release()）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows 取资源管理器/Windows Terminal 真实应用图标；对齐 macOS 的 Finder 图标路径，已在依赖树内
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = [
