@@ -1011,11 +1011,16 @@ impl Render for SettingsView {
                 cx.emit(SettingsEvent::Close);
             }))
             .child(settings)
+            // The modal overlays below occlude: without it the dimmed mask is
+            // paint-only — hover cursor styles and clicks pass through to the
+            // settings page behind (the search popup's backdrop fix; the mask
+            // itself lives inside each render_* root)
             .when(self.preset_picker_open, |this| {
                 this.child(
                     div()
                         .absolute()
                         .inset_0()
+                        .occlude()
                         .child(self.render_preset_picker(cx)),
                 )
             })
@@ -1024,17 +1029,25 @@ impl Render for SettingsView {
                     div()
                         .absolute()
                         .inset_0()
+                        .occlude()
                         .child(self.render_model_dialog(cx)),
                 )
             })
             .when(self.mcp_dialog.is_some(), |this| {
-                this.child(div().absolute().inset_0().child(self.render_mcp_dialog(cx)))
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .child(self.render_mcp_dialog(cx)),
+                )
             })
             .when(self.mcp_help_open, |this| {
                 this.child(
                     div()
                         .absolute()
                         .inset_0()
+                        .occlude()
                         .child(self.render_mcp_help_dialog(cx)),
                 )
             })
@@ -1043,6 +1056,7 @@ impl Render for SettingsView {
                     div()
                         .absolute()
                         .inset_0()
+                        .occlude()
                         .child(self.render_skills_dialog(cx)),
                 )
             })
@@ -1051,6 +1065,7 @@ impl Render for SettingsView {
                     div()
                         .absolute()
                         .inset_0()
+                        .occlude()
                         .child(self.render_skills_help_dialog(cx)),
                 )
             })

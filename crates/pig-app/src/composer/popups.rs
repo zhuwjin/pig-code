@@ -318,6 +318,12 @@ impl Composer {
             .absolute()
             .bottom_full()
             .mb_2()
+            // Occlude: a plain hitbox does not block the layers below, so hover
+            // cursor styles and clicks would bleed through the panel to the
+            // message stream behind it (the same fix as the search popup's
+            // backdrop; on_mouse_down_out is a window-level listener and keeps
+            // working — see the title-bar popups for the same combination)
+            .occlude()
             .map(|this| match anchor {
                 PopupAnchor::Left => this.left_0(),
                 PopupAnchor::Right => this.right_0(),
