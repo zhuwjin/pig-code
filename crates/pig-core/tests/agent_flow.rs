@@ -150,6 +150,78 @@ async fn interrupt_during_stream() {
     agent.shutdown();
 }
 
+/// Interrupt mid-turn after a completed step (its usage already arrived): the
+/// cancel wrap-up must still persist the turn's accumulated usage as a
+/// turn_stats record (interrupted turns count toward the statistics).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_after_tool_call_persists_turn_stats() {
+    let (config_path, cwd, data_dir) = setup("m2-interrupt-stats");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd).await;
+
+    // Default flow: step 1 is a Read tool call whose final chunk carries
+    // usage; step 2 streams the summary text
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "read the mock file and summarize".into(),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(10), |e| {
+        matches!(e, Event::ToolCallEnd { .. })
+    })
+    .await;
+    // Land the interrupt mid-step-2 (after its first delta, before the final
+    // usage chunk): the turn aborts with step 1's usage already accumulated
+    recv_until(&events, Duration::from_secs(10), |e| {
+        matches!(e, Event::ReasoningDelta { .. } | Event::TextDelta { .. })
+    })
+    .await;
+    agent
+        .ops
+        .send(Op::Interrupt {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(10), |e| {
+        matches!(e, Event::TurnAborted { .. })
+    })
+    .await;
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::TurnAborted { .. })),
+        "should receive TurnAborted: {collected:#?}"
+    );
+
+    // TurnAborted is emitted before the wrap-up writes; sync with a GetConfig
+    // round-trip so the turn has fully returned, then check the rollout
+    agent.ops.send(Op::GetConfig).await.unwrap();
+    recv_until(&events, Duration::from_secs(5), |e| {
+        matches!(e, Event::ConfigSnapshot { .. })
+    })
+    .await;
+    let rollout = std::fs::read_to_string(
+        data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .expect("rollout exists");
+    assert!(
+        rollout.contains("\"type\":\"turn_stats\""),
+        "interrupted turn persists its accumulated usage stats: {rollout}"
+    );
+    agent.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_config_is_empty_not_error() {
     let dir = std::env::temp_dir().join(format!("pig-core-m2-nocfg-{}", std::process::id()));

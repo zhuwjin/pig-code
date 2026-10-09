@@ -216,42 +216,10 @@ impl Session {
             {
                 StepOutcome::TextOnly => {
                     let duration_ms = started.elapsed().as_millis() as u64;
-                    if self.turn_input + self.turn_cache_read + self.turn_output > 0 {
-                        self.store.lock().expect("store lock").record_usage(
-                            &self.id,
-                            &config.provider_name,
-                            &config.model,
-                            self.turn_input,
-                            self.turn_cache_read,
-                            self.turn_output,
-                            self.turn_reasoning_output,
-                        );
-                        // Persist turn stats: replay restores the footer and
-                        // session totals (the usage watermark is restored by
-                        // StepUsage)
-                        self.record(&RolloutRecord::TurnStats {
-                            input: self.turn_input,
-                            cache_read: self.turn_cache_read,
-                            output: self.turn_output,
-                            duration_ms,
-                            api_ms: self.turn_api_ms,
-                            ttft_ms: self.turn_ttft_ms,
-                            api_steps: self.turn_api_steps,
-                        });
-                    }
+                    let stats = self.flush_turn_stats(config, duration_ms);
                     // The turn's changes panel is emitted before the turn-end
                     // event (durable data before boundary events)
                     self.flush_turn_changes(tx);
-                    let stats = (self.turn_input + self.turn_cache_read + self.turn_output > 0)
-                        .then_some(pig_protocol::TurnUsageStats {
-                            input: self.turn_input,
-                            cache_read: self.turn_cache_read,
-                            output: self.turn_output,
-                            duration_ms,
-                            api_ms: self.turn_api_ms,
-                            ttft_ms: self.turn_ttft_ms,
-                            api_steps: self.turn_api_steps,
-                        });
                     self.emit(
                         |session_id, seq| Event::TurnComplete {
                             session_id,
@@ -266,8 +234,14 @@ impl Session {
                 }
                 StepOutcome::ToolsExecuted => continue,
                 StepOutcome::Ended => {
-                    // Interrupt/failure wrap-up: changes already made this turn
-                    // still produce a panel
+                    // Interrupt/failure wrap-up: the completed steps' usage
+                    // still counts toward the statistics (the rollout
+                    // TurnStats doubles as the crash-recovery marker). The UI
+                    // keeps its interrupted state (TurnAborted was already
+                    // emitted), so the returned footer stats are dropped here
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    let _ = self.flush_turn_stats(config, duration_ms);
+                    // Changes already made this turn still produce a panel
                     self.flush_turn_changes(tx);
                     return;
                 }

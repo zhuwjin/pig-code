@@ -798,21 +798,22 @@ impl Session {
         wake_notify: tokio::sync::mpsc::UnboundedSender<(String, String)>,
         app_config: Option<&AppConfig>,
     ) -> Result<(Self, Vec<RolloutRecord>), CoreError> {
-        let records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
+        let mut records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
         let Some(RolloutRecord::Meta { cwd, .. }) = records.first() else {
             return Err(CoreError::RolloutNoMeta { id: id.to_string() });
         };
+        let cwd = cwd.clone();
         // A resumed session re-freezes the skill listing/AGENTS.md/date/
         // subagent profiles (per the directory's state at resume time)
-        let skills_prompt = crate::skills::skills_section(cwd, &data_dir);
-        let agents_prompt = prompt::agents_md(&data_dir, cwd);
-        let profiles_snapshot = crate::agent::load_profiles(cwd, &data_dir);
+        let skills_prompt = crate::skills::skills_section(&cwd, &data_dir);
+        let agents_prompt = prompt::agents_md(&data_dir, &cwd);
+        let profiles_snapshot = crate::agent::load_profiles(&cwd, &data_dir);
         let today = prompt::today();
         let history = rebuild_history(
             &records,
             // Placeholder system prompt: the first run_turn overwrites it
             // wholly with the frozen snapshot
-            prompt::system_prompt(cwd, true, None, &today, &agents_prompt, &skills_prompt),
+            prompt::system_prompt(&cwd, true, None, &today, &agents_prompt, &skills_prompt),
         );
         let originals = store
             .lock()
@@ -826,7 +827,65 @@ impl Session {
         // After resume, take over the same JSONL and keep appending; failure
         // must be loud (setting None would silently drop all subsequent
         // records)
-        let rollout = Rollout::open_append(sessions_dir, id)?;
+        let mut rollout = Rollout::open_append(sessions_dir, id)?;
+        // Crash recovery: a hard kill runs no wrap-up, so the tail turn's
+        // usage never reached turn_usage/TurnStats (the live interrupt path
+        // writes it at cancel time, so this only fires for uncounted tails).
+        // Per-request StepUsage records are durable — sum the tail turn's
+        // steps, count them, and append a synthesized TurnStats as the
+        // "counted" marker (reopening sees it and skips; replay restores the
+        // footer/session totals through the normal path). Timing fields are
+        // unknowable after a crash (zeros) and the reasoning split is not in
+        // StepUsage (0); the in-flight request's usage is lost either way.
+        if let Some((input, cache_read, output)) = uncounted_tail_usage(&records) {
+            let recovered = RolloutRecord::TurnStats {
+                input,
+                cache_read,
+                output,
+                duration_ms: 0,
+                api_ms: 0,
+                ttft_ms: 0,
+                api_steps: 0,
+            };
+            rollout.append(&recovered);
+            // Attribute to the session's last used model (meta is
+            // write-through on SetModel); the rollout file's mtime
+            // approximates the turn's time (the recovery moment would skew
+            // by-day statistics)
+            let meta = store.lock().expect("store lock").get_session(id);
+            let resolved = app_config.and_then(|config| {
+                resolve_model(
+                    config,
+                    meta.as_ref().and_then(meta_to_selection).as_ref(),
+                    None,
+                )
+            });
+            let (provider, model) = match resolved {
+                Some(resolved) => (resolved.provider_name, resolved.model),
+                None => {
+                    let unknown = || "unknown".to_string();
+                    meta.as_ref()
+                        .map(|m| {
+                            (
+                                m.provider_id.clone().unwrap_or_else(unknown),
+                                m.model_id.clone().unwrap_or_else(unknown),
+                            )
+                        })
+                        .unwrap_or_else(|| (unknown(), unknown()))
+                }
+            };
+            let ts = std::fs::metadata(sessions_dir.join(format!("{id}.jsonl")))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or_else(now_secs);
+            store
+                .lock()
+                .expect("store lock")
+                .record_usage_at(ts, id, &provider, &model, input, cache_read, output, 0);
+            records.push(recovered);
+        }
         let session = Self {
             id: id.to_string(),
             cwd: cwd.clone(),
@@ -844,7 +903,7 @@ impl Session {
                 vec![data_dir.join("sessions")],
             ),
             always_allowed: HashSet::new(),
-            permissions: load_permissions(cwd),
+            permissions: load_permissions(&cwd),
             plan_enabled: false,
             pending,
             pending_questions,
@@ -853,7 +912,7 @@ impl Session {
             rollout: Some(rollout),
             store,
             data_dir,
-            git_snapshot: prompt::git_snapshot(cwd),
+            git_snapshot: prompt::git_snapshot(&cwd),
             agents_prompt: agents_prompt.clone(),
             skills_prompt,
             date_frozen: today.clone(),
@@ -978,6 +1037,53 @@ impl Session {
         );
     }
 
+    /// Persist the turn's accumulated usage (SQLite turn_usage row for
+    /// statistics aggregation + rollout TurnStats record for replay) and build
+    /// the UI footer stats. Called on both the normal turn end and the
+    /// interrupt/failure wrap-up so interrupted turns still count; the rollout
+    /// record doubles as the "counted" marker for the crash-recovery scan in
+    /// Session::load. The in-flight request's usage is unrecoverable either
+    /// way (usage arrives at the stream's end). Returns None when no request
+    /// of the turn reported usage.
+    fn flush_turn_stats(
+        &mut self,
+        config: &ResolvedModel,
+        duration_ms: u64,
+    ) -> Option<pig_protocol::TurnUsageStats> {
+        if self.turn_input + self.turn_cache_read + self.turn_output == 0 {
+            return None;
+        }
+        self.store.lock().expect("store lock").record_usage(
+            &self.id,
+            &config.provider_name,
+            &config.model,
+            self.turn_input,
+            self.turn_cache_read,
+            self.turn_output,
+            self.turn_reasoning_output,
+        );
+        // Persist turn stats: replay restores the footer and session totals
+        // (the usage watermark is restored by StepUsage)
+        self.record(&RolloutRecord::TurnStats {
+            input: self.turn_input,
+            cache_read: self.turn_cache_read,
+            output: self.turn_output,
+            duration_ms,
+            api_ms: self.turn_api_ms,
+            ttft_ms: self.turn_ttft_ms,
+            api_steps: self.turn_api_steps,
+        });
+        Some(pig_protocol::TurnUsageStats {
+            input: self.turn_input,
+            cache_read: self.turn_cache_read,
+            output: self.turn_output,
+            duration_ms,
+            api_ms: self.turn_api_ms,
+            ttft_ms: self.turn_ttft_ms,
+            api_steps: self.turn_api_steps,
+        })
+    }
+
     fn touch_index(&mut self) {
         let id = self.id.clone();
         self.store
@@ -1070,6 +1176,36 @@ pub use title::TITLE_PROMPT_MARKER;
 pub(crate) use title::spawn_title_generation;
 pub(crate) use turn::pointer_file_references;
 
+/// Sum the tail turn's per-request usage when it was never counted: records
+/// after the last User record hold StepUsage but no TurnStats (a turn that
+/// ends normally — or is interrupted, which writes TurnStats at cancel time —
+/// always closes with TurnStats). Returns (input, cache_read, output); None
+/// when the tail turn was counted or consumed nothing.
+fn uncounted_tail_usage(records: &[RolloutRecord]) -> Option<(u64, u64, u64)> {
+    let tail = records
+        .iter()
+        .rev()
+        .take_while(|r| !matches!(r, RolloutRecord::User { .. }));
+    let (mut input, mut cache_read, mut output, mut counted) = (0u64, 0u64, 0u64, false);
+    for record in tail {
+        match record {
+            RolloutRecord::StepUsage {
+                input: i,
+                cache_read: c,
+                output: o,
+                ..
+            } => {
+                input += i;
+                cache_read += c;
+                output += o;
+            }
+            RolloutRecord::TurnStats { .. } => counted = true,
+            _ => {}
+        }
+    }
+    (!counted && input + cache_read + output > 0).then_some((input, cache_read, output))
+}
+
 /// Load project-level permission rules: a missing file = empty rules; parse
 /// failures are non-fatal with a warn-level log (the session creation/replay
 /// paths have no suitable event channel, so none is forced)
@@ -1088,5 +1224,67 @@ fn load_permissions(cwd: &std::path::Path) -> crate::permissions::PermissionRule
             tracing::warn!("failed to load (continuing with no rules): {error:?}");
             crate::permissions::PermissionRules::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user() -> RolloutRecord {
+        RolloutRecord::User {
+            text: "hi".to_string(),
+            files: vec![],
+            images: vec![],
+        }
+    }
+
+    fn step(input: u64, cache_read: u64, output: u64) -> RolloutRecord {
+        RolloutRecord::StepUsage {
+            input,
+            cache_read,
+            output,
+            used: 0,
+        }
+    }
+
+    fn stats() -> RolloutRecord {
+        RolloutRecord::TurnStats {
+            input: 1,
+            cache_read: 1,
+            output: 1,
+            duration_ms: 0,
+            api_ms: 0,
+            ttft_ms: 0,
+            api_steps: 1,
+        }
+    }
+
+    #[test]
+    fn crashed_tail_turn_sums_step_usage() {
+        // Completed turn (counted) + crashed tail turn → only the tail sums
+        let records = vec![
+            user(),
+            step(5, 5, 5),
+            stats(),
+            user(),
+            step(1, 2, 3),
+            step(4, 5, 6),
+        ];
+        assert_eq!(uncounted_tail_usage(&records), Some((5, 7, 9)));
+    }
+
+    #[test]
+    fn counted_tail_turn_is_skipped() {
+        // Normal end and live interrupt both close with TurnStats
+        let records = vec![user(), step(1, 2, 3), stats()];
+        assert_eq!(uncounted_tail_usage(&records), None);
+    }
+
+    #[test]
+    fn usage_free_tail_is_skipped() {
+        // Interrupted before any usage arrived; empty (never messaged) session
+        assert_eq!(uncounted_tail_usage(&[user()]), None);
+        assert_eq!(uncounted_tail_usage(&[]), None);
     }
 }

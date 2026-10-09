@@ -1153,3 +1153,110 @@ default_reasoning_level = "high"
     assert_eq!(level, Some(None), "invalid default tier should be ignored");
     agent2.shutdown();
 }
+
+/// Crash recovery: a turn whose process died before the wrap-up has durable
+/// per-request StepUsage records but no TurnStats. Reopening the session sums
+/// the tail turn's steps into the statistics, appends a synthesized TurnStats
+/// as the "counted" marker (replay restores the footer through the normal
+/// path), and a second reopen sees the marker and does not count again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crash_interrupted_turn_usage_recovered_on_reopen() {
+    let (config_path, cwd, data_dir) = setup("m4-crash-recovery");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "Read the mock file and summarize it".into(),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    agent.shutdown();
+
+    // Simulate a hard kill before the turn wrap-up: the turn_stats record
+    // never landed, but the per-request step_usage records did
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let original = std::fs::read_to_string(&rollout_path).expect("rollout exists");
+    assert!(
+        original.contains("\"type\":\"turn_stats\""),
+        "a completed turn persists its stats: {original}"
+    );
+    let stripped: String = original
+        .lines()
+        .filter(|line| !line.contains("\"type\":\"turn_stats\""))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&rollout_path, stripped).unwrap();
+
+    // Reopen: recovery re-appends the marker and replay restores the footer
+    let agent2 = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let events2 = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    // Replay is followed by a ContextUsage re-emit (the model is configured)
+    let replayed = recv_until(&events2, Duration::from_secs(10), |e| {
+        matches!(e, Event::ContextUsage { .. })
+    })
+    .await;
+    assert!(
+        replayed.iter().any(|e| matches!(
+            e,
+            Event::TurnComplete {
+                stats: Some(stats),
+                ..
+            } if stats.input > 0
+        )),
+        "replay should restore the recovered turn's footer stats: {replayed:#?}"
+    );
+    let recovered = std::fs::read_to_string(&rollout_path).unwrap();
+    assert_eq!(
+        recovered.matches("\"type\":\"turn_stats\"").count(),
+        1,
+        "recovery appends exactly one synthesized marker: {recovered}"
+    );
+    agent2.shutdown();
+
+    // Idempotent: a second reopen sees the marker and does not count again
+    let agent3 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    let events3 = agent3.events.clone();
+    agent3
+        .ops
+        .send(Op::OpenSession { session_id })
+        .await
+        .unwrap();
+    recv_until(&events3, Duration::from_secs(10), |e| {
+        matches!(e, Event::ContextUsage { .. })
+    })
+    .await;
+    let again = std::fs::read_to_string(&rollout_path).unwrap();
+    assert_eq!(
+        again.matches("\"type\":\"turn_stats\"").count(),
+        1,
+        "the marker prevents double counting: {again}"
+    );
+    agent3.shutdown();
+}

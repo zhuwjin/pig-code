@@ -368,12 +368,39 @@ impl Store {
         output_tokens: u64,
         reasoning_output_tokens: u64,
     ) {
+        self.record_usage_at(
+            now_secs(),
+            session_id,
+            provider,
+            model,
+            input_tokens,
+            cache_read_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+        );
+    }
+
+    /// record_usage with an explicit timestamp: crash recovery attributes the
+    /// interrupted turn to the rollout file's mtime (the recovery moment would
+    /// skew by-day statistics)
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_usage_at(
+        &self,
+        ts: u64,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        cache_read_tokens: u64,
+        output_tokens: u64,
+        reasoning_output_tokens: u64,
+    ) {
         let _ = self.conn.execute(
             "INSERT INTO turn_usage (session_id, ts, provider, model, input_tokens, cache_read_tokens, output_tokens, reasoning_output_tokens)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session_id,
-                now_secs(),
+                ts,
                 provider,
                 model,
                 input_tokens,
