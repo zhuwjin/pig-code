@@ -443,7 +443,11 @@ fn assemble_prep(
     description: String,
     ctx: &SwarmPrepCtx<'_>,
 ) -> SwarmChildPrep {
-    let all_tools = crate::tool::all();
+    let web_search = crate::tool::web_search_enabled(child_config.cap_web_search);
+    let all_tools: Vec<Box<dyn crate::tool::Tool>> = crate::tool::all()
+        .into_iter()
+        .filter(|t| web_search || t.name() != "WebSearch")
+        .collect();
     let all_names: Vec<String> = all_tools.iter().map(|t| t.name().to_string()).collect();
     let keep = child_tool_set(&profile, &all_names, child_config.input_image);
     let mut tools: Vec<Box<dyn crate::tool::Tool>> = all_tools
@@ -526,6 +530,7 @@ mod tests {
             max_output_tokens: 1,
             api_format: ApiFormat::OpenAiChat,
             reasoning_params: None,
+            cap_structured: false,
             cap_web_search: false,
             web_search_tool: None,
             input_image: true,

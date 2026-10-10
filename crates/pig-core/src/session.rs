@@ -169,6 +169,7 @@ pub fn resolve_model(
         max_output_tokens: model.max_output_tokens,
         api_format: provider.api_format,
         reasoning_params,
+        cap_structured: model.cap_structured,
         cap_web_search: model.cap_web_search,
         web_search_tool: model.web_search_tool.clone(),
         input_image: model.input_image,
@@ -838,7 +839,17 @@ impl Session {
             &records,
             // Placeholder system prompt: the first run_turn overwrites it
             // wholly with the frozen snapshot
-            prompt::system_prompt(&cwd, true, None, &today, &agents_prompt, &skills_prompt),
+            // Placeholder (overwritten by the first run_turn): the env-key
+            // leg only, the per-model cap lands with the turn's own prompt
+            prompt::system_prompt(
+                &cwd,
+                true,
+                None,
+                &today,
+                &agents_prompt,
+                &skills_prompt,
+                crate::tool::web_search_enabled(false),
+            ),
         );
         let originals = store
             .lock()
@@ -969,17 +980,26 @@ impl Session {
     /// session's frozen snapshot and the MCP listing from the lazy-connection
     /// snapshot — tools sit at the very front of the cache prefix, so bytes
     /// stay stable within the session
-    pub(crate) fn root_tools(&self) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = tool::all_root(&self.cwd, &self.data_dir, &self.profiles_snapshot);
+    pub(crate) fn root_tools(&self, web_search: bool) -> Vec<Box<dyn tool::Tool>> {
+        let mut tools = tool::all_root(
+            &self.cwd,
+            &self.data_dir,
+            &self.profiles_snapshot,
+            web_search,
+        );
         if let Some(mcp) = &self.mcp {
             tools.extend(mcp.tools());
         }
         tools
     }
 
-    /// Root session tool schema set (for run_step sampling)
-    pub(crate) fn root_schemas(&self) -> Vec<serde_json::Value> {
-        self.root_tools().iter().map(|tool| tool.schema()).collect()
+    /// Root session tool schema set (for run_step sampling); `web_search`
+    /// gates the local WebSearch tool for the current model
+    pub(crate) fn root_schemas(&self, web_search: bool) -> Vec<serde_json::Value> {
+        self.root_tools(web_search)
+            .iter()
+            .map(|tool| tool.schema())
+            .collect()
     }
 
     fn emit(

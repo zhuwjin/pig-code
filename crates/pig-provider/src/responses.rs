@@ -130,9 +130,24 @@ pub(crate) fn to_responses_input(messages: &[ChatMsg]) -> (String, Vec<serde_jso
     (instructions, input)
 }
 
+/// Responses endpoints: the official built-in web_search when the capability
+/// is on (the bare `{"type":"web_search"}` is the documented form both OpenAI
+/// and Kimi accept); a configured web_search_tool replaces it wholesale.
+pub fn responses_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Value> {
+    if !config.cap_web_search {
+        return None;
+    }
+    Some(
+        config
+            .web_search_tool
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"type": "web_search"})),
+    )
+}
+
 /// OpenAI wire tool shape -> the flat Responses shape (name/description/
 /// parameters directly on the item, `strict: false` — codex-rs sends the same
-/// flat form), plus the server-side search tool when explicitly configured.
+/// flat form), plus the server-side search tool per the capability.
 pub(crate) fn responses_request_tools(
     config: &ResolvedModel,
     tools: &[serde_json::Value],
@@ -150,7 +165,7 @@ pub(crate) fn responses_request_tools(
             })
         })
         .collect();
-    if let Some(tool) = crate::openai::openai_web_search_tool(config) {
+    if let Some(tool) = responses_web_search_tool(config) {
         out.push(tool);
     }
     out
@@ -450,6 +465,38 @@ mod tests {
         assert_eq!(input[4]["type"], "function_call_output");
         assert_eq!(input[4]["call_id"], "c1");
         assert_eq!(input[4]["output"], "ok");
+    }
+
+    #[test]
+    fn responses_web_search_default_injection() {
+        use pig_protocol::ApiFormat;
+        let model = |cap: bool, tool: Option<serde_json::Value>| super::ResolvedModel {
+            base_url: "http://localhost".into(),
+            api_key: String::new(),
+            model: "m".into(),
+            context_window: 0,
+            max_output_tokens: 0,
+            api_format: ApiFormat::OpenAiResponses,
+            reasoning_params: None,
+            cap_structured: false,
+            cap_web_search: cap,
+            web_search_tool: tool,
+            input_image: false,
+            provider_name: "p".into(),
+        };
+        // cap off -> no injection
+        assert!(super::responses_web_search_tool(&model(false, None)).is_none());
+        // cap on, no customization -> the official bare web_search tool
+        assert_eq!(
+            super::responses_web_search_tool(&model(true, None)).unwrap(),
+            serde_json::json!({"type": "web_search"})
+        );
+        // cap on with customization -> the custom JSON verbatim
+        let custom = serde_json::json!({"type": "web_search", "search_context_size": "low"});
+        assert_eq!(
+            super::responses_web_search_tool(&model(true, Some(custom.clone()))).unwrap(),
+            custom
+        );
     }
 
     #[test]

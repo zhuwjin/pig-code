@@ -17,6 +17,7 @@ fn mock_model(port: u16) -> ResolvedModel {
         max_output_tokens: 8_192,
         api_format: ApiFormat::OpenAiChat,
         reasoning_params: None,
+        cap_structured: false,
         cap_web_search: false,
         web_search_tool: None,
         input_image: false,

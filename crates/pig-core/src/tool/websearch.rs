@@ -49,6 +49,16 @@ struct SearchHit {
     snippet: String,
 }
 
+/// Whether a search backend key is present. The registration gate: without
+/// a key the tool could only ever return the configuration error, so it stays
+/// out of the model's toolset entirely (the detect() error receipt path
+/// remains for races with environment changes after registration).
+pub(crate) fn backend_configured() -> bool {
+    ["TAVILY_API_KEY", "BRAVE_API_KEY"]
+        .iter()
+        .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()))
+}
+
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))

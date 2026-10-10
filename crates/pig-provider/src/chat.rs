@@ -15,6 +15,9 @@ pub struct ResolvedModel {
     pub api_format: ApiFormat,
     pub reasoning_params: Option<serde_json::Value>,
     pub cap_web_search: bool,
+    /// Model supports native structured output (gates sidecar schema forcing;
+    /// see sidecar::apply_structured)
+    pub cap_structured: bool,
     pub web_search_tool: Option<serde_json::Value>,
     /// Model supports image input (gate for ReadMediaFile)
     pub input_image: bool,
@@ -374,6 +377,7 @@ mod tests {
             max_output_tokens: 0,
             api_format: ApiFormat::AnthropicMessages,
             reasoning_params: None,
+            cap_structured: false,
             cap_web_search: cap,
             web_search_tool: tool,
             input_image: false,

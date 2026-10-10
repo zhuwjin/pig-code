@@ -25,6 +25,9 @@ pub struct ModelDialog {
     pub(crate) new_label: Entity<InputState>,
     pub(crate) params_json: Entity<TextareaState>,
     pub(crate) params_error: Option<String>,
+    /// web_search_tool as raw JSON (empty = not set); validated on save
+    pub(crate) web_search_json: Entity<TextareaState>,
+    pub(crate) web_search_error: Option<String>,
     pub(crate) snapshot: Option<ModelConfig>,
     /// Model ID already looked up on models.dev (the same ID is not re-queried;
     /// only a changed ID triggers a new query)

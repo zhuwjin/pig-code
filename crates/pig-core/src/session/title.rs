@@ -143,10 +143,24 @@ pub(crate) fn spawn_title_generation(
     let tx = tx.clone();
     tokio::spawn(async move {
         let prompt = title_prompt(&normalized);
+        // Models declaring native structured-output support get the title
+        // schema as a hard request constraint; the lenient parsing ladder in
+        // clean_generated_title stays as the fallback and parses both paths
+        let structured = config
+            .cap_structured
+            .then(|| pig_provider::StructuredOutput {
+                name: "session_title",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                    "additionalProperties": false,
+                }),
+            });
         let cancel = CancellationToken::new();
         let raw = match tokio::time::timeout(
             TITLE_TIMEOUT,
-            pig_provider::complete_text(&config, prompt, &cancel),
+            pig_provider::complete_text(&config, prompt, structured, &cancel),
         )
         .await
         {

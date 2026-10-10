@@ -35,21 +35,77 @@ pub(crate) struct CompleteBlock {
     kind: Option<String>,
 }
 
+/// One structured-output request: the schema's name and its JSON Schema.
+/// Applied as a native per-format constraint (see [`apply_structured`]); the
+/// caller decides when to send one (pig-core gates on `cap_structured`).
+#[derive(Clone, Debug)]
+pub struct StructuredOutput<'a> {
+    pub name: &'a str,
+    pub schema: serde_json::Value,
+}
+
+/// Apply the structured-output constraint to a request body via the format's
+/// native parameter — shapes verified against kimi-code's requester shims,
+/// ZCode's forced `structuredOutputMode: "outputFormat"`, and codex-rs's
+/// TextControls: Chat `response_format.json_schema` (strict), Responses
+/// `text.format` json_schema, Anthropic `output_config.format` (nested
+/// assignment so a reasoning `output_config.effort` survives). Anthropic has
+/// no json_object form (kimi rejects it server-side), so only the schema
+/// shape exists.
+pub(crate) fn apply_structured(
+    body: &mut serde_json::Value,
+    format: ApiFormat,
+    output: &StructuredOutput<'_>,
+) {
+    match format {
+        ApiFormat::OpenAiChat => {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": output.name,
+                    "strict": true,
+                    "schema": output.schema,
+                }
+            });
+        }
+        ApiFormat::OpenAiResponses => {
+            body["text"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "strict": true,
+                    "name": output.name,
+                    "schema": output.schema,
+                }
+            });
+        }
+        ApiFormat::AnthropicMessages => {
+            body["output_config"]["format"] = serde_json::json!({
+                "type": "json_schema",
+                "schema": output.schema,
+            });
+        }
+    }
+}
+
 /// Non-streaming one-shot request (compaction summary).
 pub async fn complete_text(
     config: &ResolvedModel,
     user_content: String,
+    structured: Option<StructuredOutput<'_>>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<String, CoreError> {
     let client = http_client();
     match config.api_format {
         ApiFormat::OpenAiChat => {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "model": config.model,
                 "messages": [{"role": "user", "content": user_content}],
                 "stream": false,
                 "max_tokens": config.max_output_tokens,
             });
+            if let Some(output) = &structured {
+                apply_structured(&mut body, config.api_format, output);
+            }
             let url = format!("{}/chat/completions", config.base_url);
             let mut api =
                 crate::api_log::ApiCall::new("openai.chat", &config.provider_name, &config.model);
@@ -110,12 +166,15 @@ pub async fn complete_text(
             result
         }
         ApiFormat::AnthropicMessages => {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "model": config.model,
                 "max_tokens": config.max_output_tokens,
                 "stream": false,
                 "messages": [{"role": "user", "content": user_content}],
             });
+            if let Some(output) = &structured {
+                apply_structured(&mut body, config.api_format, output);
+            }
             let url = anthropic_url(&config.base_url);
             let mut api = crate::api_log::ApiCall::new(
                 "anthropic.messages",
@@ -180,7 +239,7 @@ pub async fn complete_text(
             result
         }
         ApiFormat::OpenAiResponses => {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "model": config.model,
                 "input": [{"type": "message", "role": "user", "content": [
                     {"type": "input_text", "text": user_content}
@@ -189,6 +248,9 @@ pub async fn complete_text(
                 "stream": false,
                 "max_output_tokens": config.max_output_tokens,
             });
+            if let Some(output) = &structured {
+                apply_structured(&mut body, config.api_format, output);
+            }
             let url = responses_url(&config.base_url);
             let mut api = crate::api_log::ApiCall::new(
                 "openai.responses",
@@ -641,4 +703,63 @@ fn responses_output_text(raw: &str) -> Result<String, CoreError> {
         });
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StructuredOutput, apply_structured};
+    use pig_protocol::ApiFormat;
+
+    fn output() -> StructuredOutput<'static> {
+        StructuredOutput {
+            name: "session_title",
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    /// The three native shapes: chat response_format (strict), responses
+    /// text.format, anthropic output_config.format
+    #[test]
+    fn structured_shapes_per_format() {
+        let out = output();
+        let mut chat = serde_json::json!({"model": "m"});
+        apply_structured(&mut chat, ApiFormat::OpenAiChat, &out);
+        assert_eq!(chat["response_format"]["type"], "json_schema");
+        assert_eq!(
+            chat["response_format"]["json_schema"]["name"],
+            "session_title"
+        );
+        assert_eq!(chat["response_format"]["json_schema"]["strict"], true);
+
+        let mut responses = serde_json::json!({"model": "m"});
+        apply_structured(&mut responses, ApiFormat::OpenAiResponses, &out);
+        assert_eq!(responses["text"]["format"]["type"], "json_schema");
+        assert_eq!(responses["text"]["format"]["strict"], true);
+        assert!(responses.get("response_format").is_none());
+
+        let mut anthropic = serde_json::json!({"model": "m"});
+        apply_structured(&mut anthropic, ApiFormat::AnthropicMessages, &out);
+        assert_eq!(anthropic["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            anthropic["output_config"]["format"]["schema"]["required"][0],
+            "title"
+        );
+        assert!(anthropic.get("response_format").is_none());
+    }
+
+    /// The anthropic shim assigns nested: a reasoning output_config.effort
+    /// merged earlier survives
+    #[test]
+    fn anthropic_structured_preserves_output_config() {
+        let out = output();
+        let mut body = serde_json::json!({"output_config": {"effort": "high"}});
+        apply_structured(&mut body, ApiFormat::AnthropicMessages, &out);
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
 }

@@ -29,7 +29,8 @@ pub use anthropic::anthropic_web_search_tool;
 pub use chat::{ChatImage, ChatMsg, FunctionWire, ResolvedModel, ToolCall, ToolCallWire};
 pub use events::{CallControl, ProviderEvent, RetryNotice, RetryReason};
 pub use openai::openai_web_search_tool;
-pub use sidecar::{complete_messages, complete_text, test_provider};
+pub use responses::responses_web_search_tool;
+pub use sidecar::{StructuredOutput, complete_messages, complete_text, test_provider};
 pub use stream::stream_chat;
 
 /// CoreError -> single-line English text (for the model channel: subagent

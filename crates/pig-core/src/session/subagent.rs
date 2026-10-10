@@ -169,8 +169,13 @@ impl Session {
         };
 
         // ---- tool narrowing: the subagent loop uses all() (naturally without
-        // Agent, preventing nesting) + MCP inheritance ----
-        let all_tools = tool::all();
+        // Agent, preventing nesting) + MCP inheritance; the local WebSearch
+        // follows the same registration gate as the root session ----
+        let web_search = tool::web_search_enabled(child_config.cap_web_search);
+        let all_tools: Vec<Box<dyn tool::Tool>> = tool::all()
+            .into_iter()
+            .filter(|t| web_search || t.name() != "WebSearch")
+            .collect();
         let all_names: Vec<String> = all_tools.iter().map(|t| t.name().to_string()).collect();
         let keep = crate::agent::child_tool_set(&profile, &all_names, child_config.input_image);
         let mut child_tools: Vec<Box<dyn tool::Tool>> = all_tools

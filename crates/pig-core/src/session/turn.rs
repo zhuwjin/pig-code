@@ -55,6 +55,7 @@ impl Session {
             &self.date_frozen,
             &self.agents_prompt,
             &self.skills_prompt,
+            tool::web_search_enabled(config.cap_web_search),
         ));
         if self.history.is_empty() {
             self.history.push(system);
@@ -294,7 +295,7 @@ impl Session {
             self.history.clone(),
             // Root session tool set = built-in + Agent/AgentSwarm + MCP (rebuilt
             // every step: profiles and MCP tools may change)
-            self.root_schemas(),
+            self.root_schemas(tool::web_search_enabled(config.cap_web_search)),
             event_tx,
             control.clone(),
         ));
@@ -511,7 +512,7 @@ impl Session {
             return StepOutcome::TextOnly;
         }
 
-        let tools = self.root_tools();
+        let tools = self.root_tools(tool::web_search_enabled(config.cap_web_search));
         // P0 grouped concurrency: consecutive "safe to run concurrently"
         // read-only calls form a parallel group (JoinSet, cap 8); non-
         // concurrentable calls are sync points — after the preceding group

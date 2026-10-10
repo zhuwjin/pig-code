@@ -236,6 +236,7 @@ pub fn resolve_subagent_model(
         max_output_tokens: model.max_output_tokens,
         api_format: provider.api_format,
         reasoning_params,
+        cap_structured: false,
         cap_web_search: model.cap_web_search,
         web_search_tool: model.web_search_tool.clone(),
         input_image: model.input_image,
@@ -665,6 +666,7 @@ You are a code reviewer; output only the issue list.
             max_output_tokens: 1,
             api_format: ApiFormat::OpenAiChat,
             reasoning_params: Some(serde_json::json!({"effort": "max"})),
+            cap_structured: false,
             cap_web_search: false,
             web_search_tool: None,
             input_image: false,
@@ -1068,7 +1070,7 @@ You are a code reviewer; output only the issue list.
             "project-level profile should be in the snapshot"
         );
         let schemas = |profiles: &[AgentProfile]| {
-            serde_json::to_string(&crate::tool::schemas_root(&ws, &tmp.0, profiles)).unwrap()
+            serde_json::to_string(&crate::tool::schemas_root(&ws, &tmp.0, profiles, true)).unwrap()
         };
         let frozen = schemas(&snapshot);
         // after freezing, add/remove profiles on disk: schema bytes from the same snapshot stay unchanged

@@ -183,6 +183,13 @@ settings:
     cap_web_search:
       zh-CN: 原生联网搜索
       en: Native web search
+    web_search_tool:
+      zh-CN: 服务端搜索工具 JSON（勾选"原生联网搜索"后注入请求的 tools；灰字为该格式的默认值，OpenAI 兼容格式留空则不注入）
+      en: 'Server-side search tool JSON (injected into request tools when "Native web search" is checked; the gray placeholder is this format''s default — chat-completions injects nothing when left empty)'
+    err_web_search_json:
+      zh-CN: '服务端搜索工具不是合法 JSON: %{error}'
+      en: 'web_search_tool is not valid JSON: %{error}'
+
     cap_system_msg:
       zh-CN: 对话中系统消息
       en: System messages in conversation

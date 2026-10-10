@@ -485,3 +485,83 @@ async fn responses_continuation_replays_items() {
     );
     agent.shutdown();
 }
+
+/// Title generation on a cap_structured model: the sidecar request carries
+/// the native json_schema constraint and the title still lands
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structured_title_carries_native_schema() {
+    let (port, log) = mock::start_mock_server_with_log();
+    let dir = std::env::temp_dir().join(format!("pig-core-struct-title-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"default_provider = "mock"
+default_model = "mock-model"
+
+[[providers]]
+id = "mock"
+name = "Mock"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key = "mock-key"
+api_format = "OpenAiChat"
+enabled = true
+
+[[providers.models]]
+id = "mock-model"
+context_window = 128000
+max_output_tokens = 8192
+cap_structured = true
+"#
+        ),
+    )
+    .unwrap();
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
+    let events = agent.events.clone();
+    let sid = new_session(&agent, dir).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid,
+            content: "Read the mock file and summarize".into(),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::SessionTitleChanged { .. })
+    })
+    .await;
+    assert!(
+        collected.iter().any(|e| matches!(
+            e,
+            Event::SessionTitleChanged { title, .. } if title == mock::MOCK_TITLE
+        )),
+        "the auto title should still land: {collected:#?}"
+    );
+    let bodies = log.lock().expect("log");
+    let title_request = bodies
+        .iter()
+        .find(|body| body.contains(pig_protocol::TITLE_PROMPT_MARKER))
+        .expect("title sidecar request in the log");
+    assert!(
+        title_request.contains("\"response_format\""),
+        "cap_structured rides the native constraint: {title_request}"
+    );
+    assert!(
+        title_request.contains("\"json_schema\"") && title_request.contains("\"session_title\""),
+        "the title schema is named: {title_request}"
+    );
+    assert!(
+        title_request.contains("\"strict\":true"),
+        "strict mode: {title_request}"
+    );
+    agent.shutdown();
+}

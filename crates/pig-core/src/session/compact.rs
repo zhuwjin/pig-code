@@ -43,7 +43,8 @@ impl Session {
         let summary = match config {
             Some(config) => {
                 let messages = build_summary_messages(&self.history, config, instruction);
-                let tools = self.root_schemas();
+                let tools =
+                    self.root_schemas(crate::tool::web_search_enabled(config.cap_web_search));
                 match pig_provider::complete_messages(config, &messages, &tools, cancel).await {
                     Ok(summary) => Some(summary),
                     Err(_) if cancel.is_cancelled() => {
@@ -352,6 +353,7 @@ mod tests {
             max_output_tokens: 1000,
             api_format: pig_protocol::ApiFormat::OpenAiChat,
             reasoning_params: None,
+            cap_structured: false,
             cap_web_search: false,
             web_search_tool: None,
             input_image: false,

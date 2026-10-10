@@ -49,6 +49,7 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
                 max_output_tokens: model.max_output_tokens,
                 api_format: provider.api_format,
                 reasoning_params: None,
+                cap_structured: model.cap_structured,
                 cap_web_search: model.cap_web_search,
                 web_search_tool: model.web_search_tool.clone(),
                 input_image: model.input_image,

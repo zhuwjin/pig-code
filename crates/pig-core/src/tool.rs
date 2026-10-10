@@ -207,6 +207,26 @@ pub trait Tool: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>>;
 }
 
+/// The registration gate is pure logic over (cap, backend-key-present):
+/// server-side search or a missing key keeps the local tool out.
+#[test]
+fn web_search_registration_gate() {
+    let gate = |cap: bool, backend: bool| web_search_enabled_with(cap, backend);
+    assert!(
+        gate(false, true),
+        "local tool with a key and no server-side search"
+    );
+    assert!(
+        !gate(true, true),
+        "server-side search takes over even with a key"
+    );
+    assert!(
+        !gate(false, false),
+        "no backend key: the call could only error"
+    );
+    assert!(!gate(true, false));
+}
+
 pub fn all() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(ReadFile),
@@ -239,12 +259,28 @@ pub fn schemas() -> Vec<serde_json::Value> {
 /// (tools sit at the very front of the cache prefix; any change invalidates everything from byte 0; the same
 /// trade-off as kimi frozenCatalogProfiles / ZCode startup assembly). At spawn time execution re-reads
 /// via load_profiles, so a stale list self-heals through the "profile does not exist" error
+/// The local WebSearch tool registers only when the model is NOT using the
+/// provider's server-side native search (cap_web_search — one search entrance
+/// for the model, server side preferred) and a search backend key exists.
+pub fn web_search_enabled(cap_web_search: bool) -> bool {
+    web_search_enabled_with(cap_web_search, websearch::backend_configured())
+}
+
+/// Pure core of [`web_search_enabled`] (testable without process-env races).
+fn web_search_enabled_with(cap_web_search: bool, backend_configured: bool) -> bool {
+    !cap_web_search && backend_configured
+}
+
 pub fn all_root(
     cwd: &Path,
     data_dir: &Path,
     profiles: &[crate::agent::AgentProfile],
+    web_search: bool,
 ) -> Vec<Box<dyn Tool>> {
-    let mut tools = all();
+    let mut tools: Vec<Box<dyn Tool>> = all()
+        .into_iter()
+        .filter(|tool| web_search || tool.name() != "WebSearch")
+        .collect();
     tools.push(Box::new(AgentTool::new(profiles)));
     tools.push(Box::new(AgentSwarmTool::new(profiles)));
     tools.push(Box::new(SkillTool::new(cwd, data_dir)));
@@ -256,8 +292,9 @@ pub fn schemas_root(
     cwd: &Path,
     data_dir: &Path,
     profiles: &[crate::agent::AgentProfile],
+    web_search: bool,
 ) -> Vec<serde_json::Value> {
-    all_root(cwd, data_dir, profiles)
+    all_root(cwd, data_dir, profiles, web_search)
         .iter()
         .map(|tool| tool.schema())
         .collect()

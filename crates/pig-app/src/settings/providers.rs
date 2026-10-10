@@ -15,6 +15,22 @@ impl SettingsView {
         let snapshot = model.clone();
         let model =
             model.unwrap_or_else(|| ModelConfig::new("", NEW_MODEL_CONTEXT, NEW_MODEL_MAX_OUTPUT));
+        // Gray placeholder = the JSON actually injected by default for this
+        // provider's format (chat-completions has no default: the Zhipu-style
+        // example stands in, empty there means no injection)
+        let web_search_placeholder = match self
+            .selected_provider()
+            .map(|p| p.api_format)
+            .unwrap_or(pig_protocol::ApiFormat::OpenAiChat)
+        {
+            pig_protocol::ApiFormat::AnthropicMessages => {
+                r#"{"type": "web_search_20250305", "name": "web_search"}"#.to_string()
+            }
+            pig_protocol::ApiFormat::OpenAiResponses => r#"{"type": "web_search"}"#.to_string(),
+            pig_protocol::ApiFormat::OpenAiChat => {
+                r#"{"type": "web_search", "web_search": {"enable": true}}"#.to_string()
+            }
+        };
         let dialog = ModelDialog {
             editing,
             id: cx.new(|cx| InputState::new(window, cx).default_value(model.id.clone())),
@@ -57,6 +73,15 @@ impl SettingsView {
                     })
             }),
             params_error: None,
+            web_search_json: cx.new(|cx| {
+                let state = TextareaState::new(window, cx).auto_grow(2, 6);
+                if let Some(tool) = &model.web_search_tool {
+                    state.default_value(serde_json::to_string_pretty(tool).unwrap_or_default())
+                } else {
+                    state.placeholder(web_search_placeholder)
+                }
+            }),
+            web_search_error: None,
             snapshot,
             looked_up_id: None,
             lookup_state: LookupState::Idle,
@@ -112,6 +137,13 @@ impl SettingsView {
         let context_window = dialog.context_window.read(cx).value().trim().parse::<u64>();
         let max_tokens = dialog.max_tokens.read(cx).value().trim().parse::<u64>();
         let params_raw = dialog.params_json.read(cx).value().to_string();
+        let web_search_raw = dialog.web_search_json.read(cx).value().trim().to_string();
+        let web_search_tool: Result<Option<serde_json::Value>, serde_json::Error> =
+            if web_search_raw.is_empty() {
+                Ok(None)
+            } else {
+                serde_json::from_str(&web_search_raw).map(Some)
+            };
         let params: Result<
             std::collections::HashMap<String, serde_json::Value>,
             serde_json::Error,
@@ -125,12 +157,16 @@ impl SettingsView {
             Some(rust_i18n::t!("settings.models.err_max_tokens").to_string())
         } else if let Err(e) = &params {
             Some(rust_i18n::t!("settings.models.err_params_json", error = e).to_string())
+        } else if let Err(e) = &web_search_tool {
+            Some(rust_i18n::t!("settings.models.err_web_search_json", error = e).to_string())
         } else {
             None
         };
         if let Some(error) = error {
+            let params_failed = params.is_err();
             let mut dialog = dialog;
-            dialog.params_error = Some(error);
+            dialog.params_error = params_failed.then_some(error.clone());
+            dialog.web_search_error = (!params_failed && web_search_tool.is_err()).then_some(error);
             self.model_dialog = Some(dialog);
             cx.notify();
             return;
@@ -146,12 +182,7 @@ impl SettingsView {
             input_pdf: dialog.input_pdf,
             cap_structured: dialog.cap_structured,
             cap_web_search: dialog.cap_web_search,
-            // No settings UI: keep the hand-configured value when editing,
-            // None when creating
-            web_search_tool: dialog
-                .snapshot
-                .as_ref()
-                .and_then(|m| m.web_search_tool.clone()),
+            web_search_tool: web_search_tool.unwrap_or(None),
             cap_system_msg: dialog.cap_system_msg,
             reasoning_levels: dialog.reasoning_levels.clone(),
             // The default level must still be in the level list
@@ -824,6 +855,20 @@ impl SettingsView {
                                                 .child(Checkbox::new("cap-struct").label(rust_i18n::t!("settings.models.cap_structured").as_ref()).checked(dialog.cap_structured).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_structured = *v; } cx.notify(); })))
                                                 .child(Checkbox::new("cap-web").label(rust_i18n::t!("settings.models.cap_web_search").as_ref()).checked(dialog.cap_web_search).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_web_search = *v; } cx.notify(); })))
                                                 .child(Checkbox::new("cap-sys").label(rust_i18n::t!("settings.models.cap_system_msg").as_ref()).checked(dialog.cap_system_msg).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_system_msg = *v; } cx.notify(); }))),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.web_search_tool").to_string()))
+                                                .child(Textarea::new(&dialog.web_search_json))
+                                                .when_some(dialog.web_search_error.clone(), |this, error| {
+                                                    this.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().danger)
+                                                            .child(error),
+                                                    )
+                                                }),
                                         )
                                         .child(
                                             v_flex()

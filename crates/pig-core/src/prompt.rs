@@ -155,6 +155,7 @@ pub fn system_prompt(
     date_frozen: &str,
     agents_section: &str,
     skills_section: &str,
+    web_search: bool,
 ) -> String {
     let mut prompt = String::from(
         "You are Pig Code, an AI coding assistant running in the user's workspace.\n\n\
@@ -215,6 +216,12 @@ pub fn system_prompt(
     if has_tools {
         prompt.push_str("\nAvailable tools:\n");
         for (name, desc) in tool_summaries() {
+            // The local WebSearch registers conditionally (server-side search
+            // takes over / no backend key): an unregistered tool must not stay
+            // listed, or the model would call into a schema it was not given
+            if !web_search && *name == "WebSearch" {
+                continue;
+            }
             prompt.push_str(&format!("- {name}: {desc}\n"));
         }
         prompt.push_str(
@@ -586,7 +593,8 @@ mod tests {
     /// system-reminder declaration are the load-bearing needles.
     #[test]
     fn communication_and_context_sections_present() {
-        let prompt = super::system_prompt(Path::new("/tmp"), true, None, "2026-10-08", "", "");
+        let prompt =
+            super::system_prompt(Path::new("/tmp"), true, None, "2026-10-08", "", "", true);
         let communicating = prompt
             .find("# Communicating with the user")
             .expect("communicating section");
@@ -748,6 +756,7 @@ mod tests {
             "2026-09-30",
             "## AGENTS.md instructions\nfrozen section",
             "## Available skills\n- demo: sample",
+            true,
         );
         assert!(
             !prompt.contains("model-driven"),
@@ -981,7 +990,7 @@ mod tests {
         let ws = tmp.0.join("ws");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&ws).unwrap();
-        let empty = super::system_prompt(&ws, true, None, "2026-09-30", "", "");
+        let empty = super::system_prompt(&ws, true, None, "2026-09-30", "", "", true);
         assert!(
             !empty.contains("Available skills"),
             "an empty frozen section emits no skills section"
@@ -1002,7 +1011,7 @@ body",
         let frozen = skills_section(&ws, &data);
         // Delete the skill directory after freezing: the prompt still uses the frozen snapshot (no rescan)
         std::fs::remove_dir_all(user_root(&data)).unwrap();
-        let prompt = super::system_prompt(&ws, true, None, "2026-09-30", "", &frozen);
+        let prompt = super::system_prompt(&ws, true, None, "2026-09-30", "", &frozen, true);
         assert!(
             prompt.contains("## Available skills"),
             "the system prompt should contain the frozen listing"
