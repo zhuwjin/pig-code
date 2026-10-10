@@ -26,7 +26,7 @@ impl TrajectoryState {
     /// Load this session's model io trace from the current data directory
     /// (missing file = empty list, not an error)
     pub(crate) fn load(session_id: &str) -> Self {
-        let sessions_dir = pig_core::data_dir().join("sessions");
+        let sessions_dir = pig_utils::data_dir().join("sessions");
         let path = pig_core::model_io::model_io_path(&sessions_dir, session_id);
         if !path.exists() {
             return Self {

@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolEffect};
-use crate::skills;
+use pig_utils::skills;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;

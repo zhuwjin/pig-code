@@ -10,7 +10,6 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::config;
-use crate::paths::normalize_workspace_path;
 use crate::rollout::{Rollout, RolloutRecord, now_secs, rebuild_history};
 use crate::store::Store;
 use crate::tool::{ChangeTracker, ToolContext};
@@ -18,6 +17,7 @@ use crate::{prompt, tool};
 use pig_protocol::AppConfig;
 use pig_provider::ResolvedModel;
 use pig_provider::{ChatMsg, ProviderEvent, ToolCall};
+use pig_utils::paths::normalize_workspace_path;
 
 /// Pending approvals: request_id → reply channel. Shared between the manager
 /// and every session; request_ids carry a session_id prefix and are globally
@@ -752,7 +752,7 @@ impl Session {
         let rollout = Rollout::create(sessions_dir, &meta)?;
         // data_dir is moved into the literal, so compute the frozen snapshots
         // as locals first (the directory's state at creation time)
-        let skills_prompt = crate::skills::skills_section(&meta.cwd, &data_dir);
+        let skills_prompt = pig_utils::skills::skills_section(&meta.cwd, &data_dir);
         let agents_prompt = prompt::agents_md(&data_dir, &meta.cwd);
         let profiles_snapshot = crate::agent::load_profiles(&meta.cwd, &data_dir);
         let today = prompt::today();
@@ -830,7 +830,7 @@ impl Session {
         let cwd = cwd.clone();
         // A resumed session re-freezes the skill listing/AGENTS.md/date/
         // subagent profiles (per the directory's state at resume time)
-        let skills_prompt = crate::skills::skills_section(&cwd, &data_dir);
+        let skills_prompt = pig_utils::skills::skills_section(&cwd, &data_dir);
         let agents_prompt = prompt::agents_md(&data_dir, &cwd);
         let profiles_snapshot = crate::agent::load_profiles(&cwd, &data_dir);
         let today = prompt::today();

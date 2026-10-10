@@ -1,5 +1,5 @@
 use super::*;
-use pig_core::skills as skill_core;
+use pig_utils::skills as skill_core;
 use std::path::Path;
 
 /// Display projection of one skill (core skills::Skill plus enable state plus
@@ -40,7 +40,7 @@ pub(crate) struct SkillsSnapshot {
 /// `<workspace>/.pigcode/skills/` and merge (project-level same-name overrides);
 /// the enable state comes from `<data_dir>/skills-state.json`
 pub(crate) fn load_skills_snapshot(workspace: Option<&Path>) -> SkillsSnapshot {
-    load_skills_from(&pig_core::data_dir(), workspace)
+    load_skills_from(&pig_utils::data_dir(), workspace)
 }
 
 /// Load with an explicit data_dir (for tests; same criteria as
@@ -215,7 +215,7 @@ impl SettingsView {
     /// Enable/disable toggle: write skills-state.json (global state, consistent
     /// across scopes), then refresh the whole page
     fn toggle_skill(&mut self, skill_path: &Path, enabled: bool, cx: &mut Context<Self>) {
-        match skill_core::set_skill_enabled(&pig_core::data_dir(), skill_path, enabled) {
+        match skill_core::set_skill_enabled(&pig_utils::data_dir(), skill_path, enabled) {
             Ok(()) => {
                 self.skills_write_error = None;
                 self.refresh_skills(cx);

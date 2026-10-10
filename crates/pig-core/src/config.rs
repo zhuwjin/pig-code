@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use pig_protocol::{AppConfig, CoreError};
 
 pub fn default_path() -> PathBuf {
-    crate::data_dir().join("config.toml")
+    pig_utils::data_dir().join("config.toml")
 }
 
 /// Duplicate provider ids make every id-based lookup hit the first one: model resolution lands on

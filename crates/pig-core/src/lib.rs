@@ -16,15 +16,12 @@ pub mod mcp;
 pub mod model_io;
 pub mod models_registry;
 pub mod net_test;
-pub mod paths;
 pub mod permissions;
 mod prompt;
 pub mod rollout;
 pub mod session;
-pub mod skills;
 pub mod store;
 pub mod task;
-pub mod text;
 pub mod tool;
 
 use std::path::PathBuf;
@@ -32,19 +29,6 @@ use std::path::PathBuf;
 use pig_protocol::{Event, Op};
 
 pub use pig_protocol::AppConfig;
-
-/// Data directory: the PIG_DATA_DIR environment variable first (self-test isolation); default ~/.pigcode.
-pub fn data_dir() -> PathBuf {
-    std::env::var_os("PIG_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .or_else(|| std::env::var_os("HOME"))
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".pigcode")
-        })
-}
 
 /// Windows release is a GUI subsystem (no console): every console child process
 /// (git/cmd/bash/npx.cmd...) pops its own console window on spawn — with git's high call
@@ -107,7 +91,7 @@ impl Drop for AgentHandle {
 
 /// Start the agent thread. `config_path` None reads the default ~/.pigcode/config.toml.
 pub fn spawn_agent(config_path: Option<PathBuf>, cwd: PathBuf) -> AgentHandle {
-    spawn_agent_with_data_dir(config_path, cwd, data_dir())
+    spawn_agent_with_data_dir(config_path, cwd, pig_utils::data_dir())
 }
 
 /// Full-chain network probe (triggered by PIG_NET_TEST=full in pig-app):

@@ -968,4 +968,47 @@ mod tests {
             "same date should not re-remind"
         );
     }
+
+    /// Wiring check: the system prompt uses the frozen listing section passed
+    /// in by the caller (a snapshot taken at session start) — changes to the
+    /// skill directories after the snapshot do not affect the frozen prompt
+    /// (stable cache); an empty section emits no skills section
+    #[test]
+    fn system_prompt_wires_frozen_skills_section() {
+        use pig_utils::skills::{skills_section, user_root};
+        let tmp = TempDir::new("wire");
+        let data = tmp.0.join("data");
+        let ws = tmp.0.join("ws");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let empty = super::system_prompt(&ws, true, None, "2026-09-30", "", "");
+        assert!(
+            !empty.contains("Available skills"),
+            "an empty frozen section emits no skills section"
+        );
+        let root = user_root(&data);
+        let dir = root.join("pdf");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---
+name: pdf
+description: PDF toolkit
+---
+body",
+        )
+        .unwrap();
+        // Freeze a copy at session creation
+        let frozen = skills_section(&ws, &data);
+        // Delete the skill directory after freezing: the prompt still uses the frozen snapshot (no rescan)
+        std::fs::remove_dir_all(user_root(&data)).unwrap();
+        let prompt = super::system_prompt(&ws, true, None, "2026-09-30", "", &frozen);
+        assert!(
+            prompt.contains("## Available skills"),
+            "the system prompt should contain the frozen listing"
+        );
+        assert!(prompt.contains("- pdf: PDF toolkit"));
+        // A rescan now finds no skills: verifies the frozen section is truly decoupled from a fresh scan
+        assert!(skills_section(&ws, &data).is_empty());
+    }
 }

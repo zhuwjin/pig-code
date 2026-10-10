@@ -269,7 +269,7 @@ impl Tool for Grep {
                 // binary/unknown-encoding files are counted as skipped (no longer silently vanishing)
                 let doc = match std::fs::read(&file)
                     .ok()
-                    .and_then(|b| crate::text::decode(&b).ok())
+                    .and_then(|b| pig_utils::text::decode(&b).ok())
                 {
                     Some(doc) => doc,
                     None => {

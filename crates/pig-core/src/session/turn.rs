@@ -128,7 +128,7 @@ impl Session {
         let mut image_refs: Vec<crate::rollout::ImageRef> = Vec::new();
         let mut chat_images: Vec<pig_provider::ChatImage> = Vec::new();
         if !images.is_empty() {
-            let media_dir = crate::rollout::media_dir(&self.data_dir.join("sessions"), &self.id);
+            let media_dir = pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.id);
             let mut next = crate::rollout::next_media_index(&media_dir);
             for (ix, pending) in images.iter().enumerate() {
                 match crate::tool::compress_image_for_model(&pending.bytes, &pending.mime) {

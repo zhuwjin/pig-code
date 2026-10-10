@@ -52,7 +52,7 @@ impl Tool for ReadFile {
                 return Err(err);
             }
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
-            let doc = match crate::text::decode(&bytes) {
+            let doc = match pig_utils::text::decode(&bytes) {
                 Ok(doc) => doc,
                 Err(error) => {
                     // Give explicit guidance for images (magic-byte sniffing, does not trust the extension)

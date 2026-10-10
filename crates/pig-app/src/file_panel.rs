@@ -101,7 +101,7 @@ fn read_file(full: &Path) -> Result<String, String> {
         )
         .to_string()
     })?;
-    Ok(pig_core::text::decode(&bytes)?.text)
+    Ok(pig_utils::text::decode(&bytes)?.text)
 }
 
 impl FileViewPanel {

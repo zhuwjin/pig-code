@@ -29,7 +29,7 @@ impl Composer {
                     tracing::warn!("paste FilePath failed: read error");
                     return false;
                 };
-                let Some(mime) = pig_core::tool::sniff_image(&bytes) else {
+                let Some(mime) = pig_utils::image::sniff_image(&bytes) else {
                     tracing::debug!("paste FilePath skipped: unsupported file bytes");
                     return false;
                 };
@@ -83,7 +83,7 @@ impl Composer {
         }
         if mime == "image/tiff" {
             let source_bytes = bytes.len();
-            match pig_core::tool::convert_tiff_to_png(&bytes) {
+            match pig_utils::image::convert_tiff_to_png(&bytes) {
                 Ok((png, width, height)) => {
                     tracing::debug!(
                         "TIFF converted to PNG: {}x{}, bytes={} -> {}",
@@ -106,7 +106,7 @@ impl Composer {
         }
         self.paste_note = None;
         let byte_len = bytes.len();
-        let (width, height) = pig_core::tool::image_dimensions(&bytes).unwrap_or((0, 0));
+        let (width, height) = pig_utils::image::image_dimensions(&bytes).unwrap_or((0, 0));
         self.pasted_images.push(PastedImage {
             bytes: std::sync::Arc::new(bytes),
             mime: mime.to_string(),

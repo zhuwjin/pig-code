@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use pig_protocol::{CoreError, SessionMeta};
 
-use crate::rollout::{Rollout, RolloutRecord, media_dir, now_secs};
+use crate::rollout::{Rollout, RolloutRecord, now_secs};
 use crate::store::Store;
+use pig_utils::media_dir;
 
 /// Derive a new session and persist it, returning the new session id (the caller opens it via the OpenSession cold path).
 /// `turns` = number of turns to keep: truncation happens before the (N+1)-th User record (TurnStats/

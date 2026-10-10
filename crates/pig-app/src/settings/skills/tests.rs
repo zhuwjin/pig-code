@@ -5,7 +5,7 @@ use super::{
     SkillInfo, SkillsSnapshot, create_skill_dir, delete_skill_dir, load_skills_from,
     sanitize_dir_name, write_skill_md,
 };
-use pig_core::skills as skill_core;
+use pig_utils::skills as skill_core;
 use std::path::{Path, PathBuf};
 
 /// Minimal temp directory helper (same approach as mcp/tests.rs, no tempfile

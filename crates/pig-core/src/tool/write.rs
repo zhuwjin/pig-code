@@ -79,7 +79,7 @@ impl Tool for WriteFile {
             let existing = std::fs::read(&full).ok();
             check_fresh(ctx.state, &full, existing.is_some(), "writing")?;
             let (encoding, bom, line_ending, note) = match &existing {
-                Some(bytes) => match crate::text::decode(bytes) {
+                Some(bytes) => match pig_utils::text::decode(bytes) {
                     Ok(doc) => {
                         let note = match (
                             doc.encoding != FileEncoding::Utf8,
@@ -112,7 +112,7 @@ impl Tool for WriteFile {
             let before = existing.as_deref().map(decoded_view).unwrap_or_default();
             let after = content.replace("\r\n", "\n");
             ctx.tracker.snapshot(&full)?;
-            let bytes = crate::text::encode(content, encoding, bom, line_ending)?;
+            let bytes = pig_utils::text::encode(content, encoding, bom, line_ending)?;
             atomic_write(&full, &bytes)?;
             // Refresh freshness after the write: immediately editing the file just written must be legal
             record_read_state(ctx.state, &full, &bytes, false, None);

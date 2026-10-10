@@ -1,0 +1,11 @@
+[package]
+name = "pig-utils"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pig-protocol = { path = "../pig-protocol" }
+encoding_rs = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -5297,6 +5297,7 @@ dependencies = [
  "pig-core",
  "pig-protocol",
  "pig-provider",
+ "pig-utils",
  "portable-pty",
  "ropey",
  "rust-embed",
@@ -5326,6 +5327,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pig-protocol",
  "pig-provider",
+ "pig-utils",
  "regex",
  "reqwest",
  "rusqlite",
@@ -5364,6 +5366,17 @@ dependencies = [
  "tokio-util",
  "tracing",
  "windows 0.57.0",
+]
+
+[[package]]
+name = "pig-utils"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "image",
+ "pig-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

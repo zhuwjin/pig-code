@@ -142,7 +142,7 @@ pub(crate) struct McpConfigSnapshot {
 /// Read the user-level `<data_dir>/mcp.json` plus the project-level
 /// `<workspace>/.pigcode/mcp.json` and merge
 pub(crate) fn load_mcp_snapshot(workspace: Option<&Path>) -> McpConfigSnapshot {
-    let user_path = pig_core::data_dir().join("mcp.json");
+    let user_path = pig_utils::data_dir().join("mcp.json");
     let project_path = workspace.map(|root| root.join(".pigcode").join("mcp.json"));
     let user = read_servers(&user_path, McpSource::User);
     let project = project_path

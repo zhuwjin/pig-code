@@ -21,11 +21,6 @@ pub struct ImageRef {
     pub height: u32,
 }
 
-/// Media directory: `{sessions}/{session_id}.media/` (adjacent to the jsonl)
-pub fn media_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
-    sessions_dir.join(format!("{session_id}.media"))
-}
-
 /// Media file naming: continuing sequence numbers inside the directory (1.png, 2.png...;
 /// `N.orig.ext` originals follow the main number). They must not be named by the in-message
 /// index — later turns in the same session renumber from 1 and would overwrite the files old

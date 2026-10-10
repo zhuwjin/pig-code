@@ -20,9 +20,9 @@ fn read_original_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// Bytes → LF model view: text::decode first, falling back to lossy UTF-8 on failure (diff fallback)
+/// Bytes → LF model view: pig_utils text::decode first, falling back to lossy UTF-8 on failure (diff fallback)
 pub(crate) fn decoded_view(bytes: &[u8]) -> String {
-    match crate::text::decode(bytes) {
+    match pig_utils::text::decode(bytes) {
         Ok(doc) => doc.text,
         Err(_) => String::from_utf8_lossy(bytes).into_owned(),
     }

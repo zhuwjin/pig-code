@@ -65,7 +65,7 @@ impl Tool for EditFile {
             }
             check_fresh(ctx.state, &full, full.exists(), "editing")?;
             let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
-            let doc = crate::text::decode(&bytes)?;
+            let doc = pig_utils::text::decode(&bytes)?;
             let content = doc.text;
             // The match + replacement computation lives in compute_edit (shared with the approval preview; what the preview shows is what gets applied)
             let outcome = match compute_edit(&content, old, new, replace_all) {
@@ -104,7 +104,7 @@ impl Tool for EditFile {
             ctx.tracker.snapshot(&full)?;
             // Matching and replacement both happen on the LF view (already normalized by decoding); the original encoding/line ending is restored on write-back
             let after = outcome.after;
-            let encoded = crate::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
+            let encoded = pig_utils::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
             atomic_write(&full, &encoded)?;
             // Refresh freshness after the write: immediately editing the file just written must be legal
             record_read_state(ctx.state, &full, &encoded, false, None);

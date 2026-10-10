@@ -3,8 +3,29 @@
 //! folding and no symlink resolution — consistent with kimi-code/ZCode: grouping relies on the
 //! entry point producing identical strings; alias fields err on the strict side and never
 //! accidentally merge on case-sensitive volumes.
+//!
+//! Also the shared data-directory and session-media layout conventions (written
+//! by pig-core's rollout, read by pig-app's attachment rendering).
 
 use std::path::{Component, Path, PathBuf};
+
+/// Data directory: the PIG_DATA_DIR environment variable first (self-test isolation); default ~/.pigcode.
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("PIG_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".pigcode")
+        })
+}
+
+/// Session attachment media layout: `{sessions_dir}/{session_id}.media/` (the
+/// rollout writes pasted/attached images there; the UI reads them back for
+/// rendering)
+pub fn media_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir.join(format!("{session_id}.media"))
+}
 
 /// Normalize a workspace path. Different spellings of the same directory (trailing slash, relative path, `~`) map to the same key;
 /// case variants and symlink aliases remain distinct paths.

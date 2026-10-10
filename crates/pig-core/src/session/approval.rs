@@ -39,7 +39,7 @@ impl Session {
 /// Bash detail = the bare command; the dangerous-command warning is carried by
 /// ApprovalRequested.danger_key (the GUI localizes the title line by key), no longer embedded in detail.
 /// Write/Edit go through the text pipeline: resolve_checked resolves the path (falls back to join on
-/// failure), bytes -> text::decode -> LF view for the diff (preview matches the real write-back); Edit
+/// failure), bytes -> pig_utils text::decode -> LF view for the diff (preview matches the real write-back); Edit
 /// goes through compute_edit (replace_all-aware; a tolerant-tier hit is noted). Decoding failure falls
 /// back to the old direct-read + replacen logic.
 pub fn approval_detail(call: &ToolCall, cwd: &std::path::Path) -> String {
@@ -54,7 +54,7 @@ pub fn approval_detail(call: &ToolCall, cwd: &std::path::Path) -> String {
             // "before" uses the LF view (GBK/UTF-16/CRLF same policy as the real write-back); unreadable counts as empty (new file)
             let old = std::fs::read(&full)
                 .ok()
-                .and_then(|bytes| crate::text::decode(&bytes).ok())
+                .and_then(|bytes| pig_utils::text::decode(&bytes).ok())
                 .map(|doc| doc.text)
                 .unwrap_or_else(|| std::fs::read_to_string(&full).unwrap_or_default());
             // "after" is defensively normalized to LF (same diff policy as Write's execution)
@@ -70,7 +70,7 @@ pub fn approval_detail(call: &ToolCall, cwd: &std::path::Path) -> String {
                 crate::tool::resolve_checked(cwd, path, false).unwrap_or_else(|_| cwd.join(path));
             let decoded = std::fs::read(&full)
                 .ok()
-                .and_then(|bytes| crate::text::decode(&bytes).ok());
+                .and_then(|bytes| pig_utils::text::decode(&bytes).ok());
             match decoded {
                 Some(doc) => {
                     match tool::compute_edit(&doc.text, old_string, new_string, replace_all) {

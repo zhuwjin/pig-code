@@ -421,7 +421,7 @@ async fn read_into<R: tokio::io::AsyncRead + Unpin>(
     sink: Option<Arc<Mutex<String>>>,
     meter: Arc<OutputMeter>,
 ) {
-    let mut decoder = crate::text::StreamDecoder::new();
+    let mut decoder = pig_utils::text::StreamDecoder::new();
     let mut buf = [0u8; 4096];
     loop {
         match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {

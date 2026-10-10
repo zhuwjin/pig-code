@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use pig_protocol::{CoreError, ExecMode};
 
 use crate::task::SessionToolState;
-use crate::text::{FileEncoding, LineEnding};
 use pig_provider::ToolCall;
+use pig_utils::text::{FileEncoding, LineEnding};
 
 const MAX_READ_LINES: usize = 2000;
 const MAX_READ_CHARS: usize = 100_000;
@@ -165,12 +165,12 @@ pub use bash::is_dangerous_command;
 pub use bash_policy::is_readonly_command;
 pub use edit::{EditMatchError, EditOutcome, compute_edit};
 pub use fetch::{check_fetch_url, extract_text, is_private_host, is_private_ip};
-pub use media::{
-    base64_encode, compress_image_for_model, convert_tiff_to_png, decode_image_check,
-    encode_image_for_model, image_dimensions, sniff_image,
-};
 pub use misc::{AgentSwarmTool, AgentTool, parse_questions, parse_swarm_args};
 pub use paths::{is_sensitive_file, resolve_checked, resolve_with_access};
+pub use pig_utils::image::{
+    CompressedImage, base64_encode, compress_image_for_model, convert_tiff_to_png,
+    decode_image_check, encode_image_for_model, image_dimensions, sniff_image,
+};
 pub use search::search_files;
 pub(crate) use skill::SkillTool;
 pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};

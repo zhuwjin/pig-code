@@ -98,7 +98,7 @@ pub(crate) struct SkillDialog {
     /// Target directory of the edit (saving rewrites in place; None when creating)
     pub(crate) target_dir: Option<PathBuf>,
     /// Target level to write to when creating
-    pub(crate) scope: pig_core::skills::SkillSource,
+    pub(crate) scope: pig_utils::skills::SkillSource,
     /// Whether project level is selectable (the project path is unknown without
     /// a selected workspace, so unavailable)
     pub(crate) project_available: bool,

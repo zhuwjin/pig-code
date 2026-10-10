@@ -715,8 +715,8 @@ impl AppView {
         // Thumbnail source for user message image attachments:
         // {data}/sessions/{id}.media (resolved the same way as in core)
         thread.update(cx, |thread, _| {
-            thread.set_media_dir(pig_core::rollout::media_dir(
-                &pig_core::data_dir().join("sessions"),
+            thread.set_media_dir(pig_utils::media_dir(
+                &pig_utils::data_dir().join("sessions"),
                 session_id,
             ));
         });

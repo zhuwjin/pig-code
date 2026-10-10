@@ -367,10 +367,10 @@ impl ThreadView {
         let Ok(bytes) = std::fs::read(&file) else {
             return missing();
         };
-        let Some(dims) = pig_core::tool::decode_image_check(&bytes) else {
+        let Some(dims) = pig_utils::image::decode_image_check(&bytes) else {
             return missing();
         };
-        let format = match pig_core::tool::sniff_image(&bytes) {
+        let format = match pig_utils::image::sniff_image(&bytes) {
             Some("image/jpeg") => ImageFormat::Jpeg,
             _ => ImageFormat::Png,
         };

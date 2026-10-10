@@ -715,39 +715,4 @@ mod tests {
             "the error should list available skills: {err}"
         );
     }
-
-    /// Wiring check: the system prompt uses the frozen listing section passed
-    /// in by the caller (a snapshot taken at session start) — changes to the
-    /// skill directories after the snapshot do not affect the frozen prompt
-    /// (stable cache); an empty section emits no skills section
-    #[test]
-    fn system_prompt_wires_frozen_skills_section() {
-        let tmp = TempDir::new("wire");
-        let data = tmp.0.join("data");
-        let ws = tmp.0.join("ws");
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::create_dir_all(&ws).unwrap();
-        let empty = crate::prompt::system_prompt(&ws, true, None, "2026-09-30", "", "");
-        assert!(
-            !empty.contains("Available skills"),
-            "an empty frozen section emits no skills section"
-        );
-        write_skill(
-            &user_root(&data),
-            "pdf",
-            "---\nname: pdf\ndescription: PDF toolkit\n---\nbody",
-        );
-        // Freeze a copy at session creation
-        let frozen = skills_section(&ws, &data);
-        // Delete the skill directory after freezing: the prompt still uses the frozen snapshot (no rescan)
-        std::fs::remove_dir_all(user_root(&data)).unwrap();
-        let prompt = crate::prompt::system_prompt(&ws, true, None, "2026-09-30", "", &frozen);
-        assert!(
-            prompt.contains("## Available skills"),
-            "the system prompt should contain the frozen listing"
-        );
-        assert!(prompt.contains("- pdf: PDF toolkit"));
-        // A rescan now finds no skills: verifies the frozen section is truly decoupled from a fresh scan
-        assert!(skills_section(&ws, &data).is_empty());
-    }
 }

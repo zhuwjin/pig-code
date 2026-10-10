@@ -23,7 +23,7 @@ static GUARDS: OnceLock<Vec<tracing_appender::non_blocking::WorkerGuard>> = Once
 /// Initialize the global subscriber. Call once at process start, after the
 /// selftest data-dir isolation (PIG_DATA_DIR) is in place.
 pub fn init() {
-    let log_dir = pig_core::data_dir().join("logs");
+    let log_dir = pig_utils::data_dir().join("logs");
     // The main log never carries API wire dumps: `pig_api=off` is appended to
     // the default, and also to a user-supplied PIG_LOG (the API log has its
     // own file; PIG_LOG_API is the single switch)

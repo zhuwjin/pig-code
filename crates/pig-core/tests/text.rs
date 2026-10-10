@@ -3,9 +3,9 @@
 //! sensitive-file and symlink guards, byte-level ChangeTracker snapshots.
 
 use pig_core::task::SessionToolState;
-use pig_core::text::{self, FileEncoding, LineEnding};
 use pig_core::tool::{self, ChangeTracker, ToolContext};
 use pig_provider::ToolCall;
+use pig_utils::text::{self, FileEncoding, LineEnding};
 
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
