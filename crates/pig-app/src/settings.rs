@@ -793,12 +793,21 @@ impl SettingsView {
             return;
         }
         self.config.terminal_shell = resolved;
-        self.schedule_shell_save(cx);
+        self.schedule_config_save(cx);
     }
 
-    /// Auto-save shell changes after a 500ms debounce (a debounce generation
-    /// separate from the provider form)
-    fn schedule_shell_save(&mut self, cx: &mut Context<Self>) {
+    fn set_model_io_full_retention(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.config.model_io_full_retention == value {
+            return;
+        }
+        self.config.model_io_full_retention = value;
+        self.schedule_config_save(cx);
+    }
+
+    /// Auto-save config changes after a 500ms debounce (a debounce generation
+    /// separate from the provider form; shared by the terminal/diagnostics
+    /// scalar fields)
+    fn schedule_config_save(&mut self, cx: &mut Context<Self>) {
         self.shell_save_generation += 1;
         let generation = self.shell_save_generation;
         cx.spawn(async move |this: WeakEntity<SettingsView>, cx| {
@@ -858,6 +867,51 @@ impl SettingsView {
                         rust_i18n::t!("settings.terminal.description").as_ref(),
                     ]),
                 ),
+            )
+    }
+
+    /// Diagnostics page: model-io trace retention. The trace file is bounded
+    /// by default (tool-result cap + per-session file size cap with reset);
+    /// full retention skips both for whole-request diagnostics
+    fn diagnostics_page(weak: &WeakEntity<Self>) -> SettingPage {
+        let get = {
+            let weak = weak.clone();
+            move |cx: &App| {
+                weak.upgrade()
+                    .map(|this| this.read(cx).config.model_io_full_retention)
+                    .unwrap_or(false)
+            }
+        };
+        let set = {
+            let weak = weak.clone();
+            move |value: bool, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| this.set_model_io_full_retention(value, cx));
+            }
+        };
+        SettingPage::new(rust_i18n::t!("settings.diagnostics.title"))
+            .icon(IconName::FileText)
+            .description(rust_i18n::t!("settings.diagnostics.description"))
+            .group(
+                SettingGroup::new()
+                    .title(rust_i18n::t!("settings.diagnostics.group_trace"))
+                    .item(
+                        SettingItem::new(
+                            rust_i18n::t!("settings.diagnostics.full_retention"),
+                            SettingField::switch(get, set),
+                        )
+                        .description(
+                            rust_i18n::t!("settings.diagnostics.full_retention_description")
+                                .as_ref(),
+                        )
+                        .keywords([
+                            "model",
+                            "io",
+                            "trace",
+                            "trajectory",
+                            rust_i18n::t!("settings.diagnostics.title").as_ref(),
+                            rust_i18n::t!("settings.diagnostics.description").as_ref(),
+                        ]),
+                    ),
             )
     }
 
@@ -984,6 +1038,7 @@ impl Render for SettingsView {
                     Self::render_models_page,
                 ),
                 Self::terminal_page(&weak),
+                Self::diagnostics_page(&weak),
                 Self::content_page(
                     rust_i18n::t!("settings.mcp.title").as_ref(),
                     IconName::Network,

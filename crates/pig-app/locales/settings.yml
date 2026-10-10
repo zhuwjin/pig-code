@@ -101,6 +101,23 @@ settings:
       zh-CN: 启动终端使用的 shell（如 /bin/zsh、/opt/homebrew/bin/fish）；留空 = 系统默认 shell。对之后新建的终端标签生效。
       en: The shell used to start terminals (e.g. /bin/zsh, /opt/homebrew/bin/fish); empty = system default shell. Applies to terminal tabs created afterwards.
 
+  diagnostics:
+    title:
+      zh-CN: 诊断
+      en: Diagnostics
+    description:
+      zh-CN: 模型调用轨迹（诊断记录）的行为。
+      en: Behavior of the model-call trace (diagnostic records).
+    group_trace:
+      zh-CN: 调用轨迹
+      en: Call trace
+    full_retention:
+      zh-CN: 全量保留调用轨迹
+      en: Full trace retention
+    full_retention_description:
+      zh-CN: 记录每次模型请求的完整输入（不做工具结果限长，也不受单会话轨迹文件大小上限约束，超限不再重置）；长会话的轨迹文件可能非常大。关闭时仅截断工具结果内容，并在文件超过 64MB 时重置。
+      en: Record every model request's full input (no tool-result length cap and no per-session trace file size cap/reset); trace files of long sessions can grow very large. When off, only tool-result content is capped and the file resets past 64MB.
+
   models:
     title:
       zh-CN: 模型设置

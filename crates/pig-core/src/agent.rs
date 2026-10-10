@@ -655,6 +655,7 @@ You are a code reviewer; output only the issue list.
             mono_font: None,
             terminal_shell: None,
             language: None,
+            model_io_full_retention: false,
         }
     }
 

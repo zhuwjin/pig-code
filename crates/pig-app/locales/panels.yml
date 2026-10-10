@@ -78,9 +78,15 @@ trajectory:
   source_compact:
     zh-CN: 上下文压缩
     en: Context compaction
-  truncated:
-    zh-CN: "%{head}…（已截断）"
-    en: "%{head}… (truncated)"
+  expand_full:
+    zh-CN: 展开全部
+    en: Expand full text
+  collapse_full:
+    zh-CN: 收起
+    en: Collapse
+  file_reset:
+    zh-CN: 轨迹文件超过大小上限，已在此处重置，之前的记录不再保留。
+    en: The trace file exceeded its size cap and was reset here; earlier records are gone.
   empty:
     zh-CN: 开始会话后，这里会显示模型调用记录
     en: Model calls will show here once a session starts

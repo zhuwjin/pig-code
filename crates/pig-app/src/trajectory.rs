@@ -20,7 +20,14 @@ pub(crate) struct TrajectoryState {
     /// Keys of expanded message rows ("{turn}:{row_ix}"; turn uniquely
     /// identifies a call, so expanded state survives refreshes)
     pub(crate) expanded: HashSet<String>,
+    /// Keys of rows whose LONG content was expanded past the collapse
+    /// threshold ("{turn}:{row_ix}:full"); long bodies render collapsed by
+    /// default with an expand affordance (no "truncated" marker, ZCode-style)
+    pub(crate) expanded_full: HashSet<String>,
 }
+
+/// Char count past which an expanded row's body starts collapsed
+const FULL_COLLAPSE_CHARS: usize = 2000;
 
 impl TrajectoryState {
     /// Load this session's model io trace from the current data directory
@@ -33,12 +40,14 @@ impl TrajectoryState {
                 records: vec![],
                 error: None,
                 expanded: HashSet::new(),
+                expanded_full: HashSet::new(),
             };
         }
         Self {
             records: pig_core::model_io::read_all(&path),
             error: None,
             expanded: HashSet::new(),
+            expanded_full: HashSet::new(),
         }
     }
 }
@@ -213,17 +222,6 @@ fn fmt_datetime(ts_ms: u64) -> String {
 /// one space (same as ZCode messagePreview)
 fn preview(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Text truncation for display (at char boundaries; a single entry in the
-/// trace is already cut at 4000, display tightens to 2000)
-fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        let head: String = text.chars().take(max).collect();
-        rust_i18n::t!("trajectory.truncated", head = head).to_string()
-    }
 }
 
 /// Message row render parameters (rec_ix + row_ix form the element id; key
@@ -541,9 +539,22 @@ impl AppView {
                 ))
             })
             .when_some(record.error.clone(), |this, error| {
-                this.child(div().text_xs().text_color(danger).child(
-                    rust_i18n::t!("trajectory.error", error = clip(&error, 2000)).to_string(),
-                ))
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(danger)
+                        .child(rust_i18n::t!("trajectory.error", error = error).to_string()),
+                )
+            })
+            // Size-cap reset marker: this record restarted the trace file; the
+            // session's earlier records are gone by design
+            .when(record.file_reset, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(rust_i18n::t!("trajectory.file_reset").to_string()),
+                )
             })
             .into_any_element()
     }
@@ -615,6 +626,27 @@ impl AppView {
                     cx.stop_propagation();
                 }))
                 .child(Icon::new(IconName::Copy).size_3().text_color(muted));
+            // Long bodies render collapsed with an expand affordance (no
+            // "truncated" marker — the full text is one click away)
+            let is_long = spec.full.chars().count() > FULL_COLLAPSE_CHARS;
+            let full_key = format!("{}:full", spec.key);
+            let full_open = self
+                .trajectory
+                .as_ref()
+                .is_some_and(|s| s.expanded_full.contains(&full_key));
+            let body_text = if !is_long || full_open {
+                spec.full.clone()
+            } else {
+                spec.full
+                    .chars()
+                    .take(FULL_COLLAPSE_CHARS)
+                    .collect::<String>()
+            };
+            let full_label = if full_open {
+                rust_i18n::t!("trajectory.collapse_full").to_string()
+            } else {
+                rust_i18n::t!("trajectory.expand_full").to_string()
+            };
             v_flex()
                 .w_full()
                 .when(zebra, |d| d.bg(zebra_bg))
@@ -642,8 +674,33 @@ impl AppView {
                         .pb_2()
                         .text_xs()
                         .text_color(cx.theme().foreground)
-                        .child(clip(&spec.full, 2000)),
+                        .child(body_text),
                 )
+                .when(is_long, |this| {
+                    this.child(
+                        div()
+                            .id(("traj-full", row_id))
+                            .w_full()
+                            .px_3()
+                            .pb_2()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(state) = &mut this.trajectory
+                                    && !state.expanded_full.remove(&full_key)
+                                {
+                                    state.expanded_full.insert(full_key.clone());
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("{full_label} ▾")),
+                            ),
+                    )
+                })
                 .into_any_element()
         } else {
             header

@@ -83,6 +83,12 @@ pub struct ModelIoRecord {
     #[serde(default)]
     pub input_offset: usize,
     pub input: Vec<ModelIoMessage>,
+    /// Set on the record that RESET the trace file after the per-session size
+    /// cap was exceeded: it carries the FULL input (offset 0) instead of the
+    /// delta, and every earlier record of the session is gone from the file
+    /// (ZCode's modelIOReset semantics; the UI shows a hint on such records)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub file_reset: bool,
 }
 
 /// Trace file path (the caller holds sessions_dir; same directory as the session rollout)
@@ -90,9 +96,27 @@ pub fn model_io_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(format!("{session_id}.model-io.jsonl"))
 }
 
+/// Per-session trace file size cap. When exceeded (and full retention is off)
+/// the file is RESET to the current record, keeping diagnostics from ever
+/// threatening the disk (ZCode's rollout cap is 64MB)
+pub const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Append one call record. Creates the directory if missing; failure returns Err (the caller
 /// treats it as non-fatal, same policy as rollout.append).
-pub fn append(sessions_dir: &Path, session_id: &str, record: &ModelIoRecord) -> Result<(), String> {
+///
+/// `full_input` is this record's FULL input projection (the delta in
+/// `record.input` is the tail past `input_offset`); it is only cloned into the
+/// record when the size cap resets the file (a reset record must be
+/// self-contained — the previous record it would reference is deleted).
+/// `full_retention` skips the size cap entirely (diagnostic mode).
+pub fn append(
+    sessions_dir: &Path,
+    session_id: &str,
+    record: &mut ModelIoRecord,
+    full_input: &[ModelIoMessage],
+    max_session_bytes: u64,
+    full_retention: bool,
+) -> Result<(), String> {
     use std::io::Write as _;
     std::fs::create_dir_all(sessions_dir).map_err(|e| {
         format!(
@@ -101,11 +125,22 @@ pub fn append(sessions_dir: &Path, session_id: &str, record: &ModelIoRecord) -> 
         )
     })?;
     let path = model_io_path(sessions_dir, session_id);
-    let mut line = serde_json::to_string(record).map_err(|e| e.to_string())?;
-    line.push('\n');
+    let existing_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let reset = !full_retention && existing_bytes >= max_session_bytes;
+    let line = if reset {
+        record.input = full_input.to_vec();
+        record.input_offset = 0;
+        record.file_reset = true;
+        serde_json::to_string(record).map_err(|e| e.to_string())?
+    } else {
+        serde_json::to_string(record).map_err(|e| e.to_string())?
+    };
+    let line = format!("{line}\n");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(reset)
+        .append(!reset)
         .open(&path)
         .map_err(|e| format!("Failed to open model io trace {}: {e}", path.display()))?;
     file.write_all(line.as_bytes())
@@ -162,16 +197,30 @@ pub fn common_prefix_len(a: &[ModelIoMessage], b: &[ModelIoMessage]) -> usize {
         .count()
 }
 
-/// Pre-request input history -> trace projection (deep content truncated to keep one record from bloating the file: first 4000 chars at a char boundary)
-pub fn project_input(messages: &[ChatMsg]) -> Vec<ModelIoMessage> {
+/// Character cap for tool RESULT message content in the trace (tool outputs
+/// are the unbounded blob — a single Read of a big file; the system/user/
+/// assistant text and tool-call arguments stay whole, ZCode-style: volume is
+/// bounded by the per-session file cap, not by cutting text)
+pub const TOOL_RESULT_MAX_CHARS: usize = 4000;
+
+/// Pre-request input history -> trace projection. Only `role:"tool"` message
+/// content is capped (`tool_result_cap`, None under full retention); every
+/// other field is recorded whole.
+pub fn project_input(messages: &[ChatMsg], tool_result_cap: Option<usize>) -> Vec<ModelIoMessage> {
     messages
         .iter()
         .map(|msg| ModelIoMessage {
             role: msg.role.clone(),
-            content: msg
-                .content
-                .as_ref()
-                .map(|c| c.chars().take(4000).collect::<String>()),
+            content: msg.content.as_ref().map(|c| {
+                if msg.role == "tool" {
+                    match tool_result_cap {
+                        Some(cap) => c.chars().take(cap).collect::<String>(),
+                        None => c.clone(),
+                    }
+                } else {
+                    c.clone()
+                }
+            }),
             tool_calls: msg
                 .tool_calls
                 .as_ref()
@@ -183,14 +232,16 @@ pub fn project_input(messages: &[ChatMsg]) -> Vec<ModelIoMessage> {
         .collect()
 }
 
-/// Response-accumulated tool calls -> trace projection (argument JSON can be long; truncated likewise)
+/// Response-accumulated tool calls -> trace projection (arguments recorded
+/// whole — a Write call's arguments are the file content, exactly what the
+/// trace exists to show)
 pub fn project_tool_calls(calls: &[ToolCall]) -> Vec<ModelIoToolCall> {
     calls
         .iter()
         .map(|call| ModelIoToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
-            arguments: call.arguments.chars().take(4000).collect(),
+            arguments: call.arguments.clone(),
         })
         .collect()
 }
@@ -239,6 +290,7 @@ mod tests {
                 content: Some("hi".into()),
                 ..Default::default()
             }],
+            file_reset: false,
         }
     }
 
@@ -247,8 +299,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pig-model-io-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let record = sample();
-        append(&dir, "s1", &record).unwrap();
-        append(&dir, "s1", &record).unwrap();
+        append(
+            &dir,
+            "s1",
+            &mut record.clone(),
+            &record.input,
+            MAX_SESSION_BYTES,
+            false,
+        )
+        .unwrap();
+        append(
+            &dir,
+            "s1",
+            &mut record.clone(),
+            &record.input,
+            MAX_SESSION_BYTES,
+            false,
+        )
+        .unwrap();
         let path = model_io_path(&dir, "s1");
         let all = read_all(&path);
         assert_eq!(all.len(), 2);
@@ -293,8 +361,27 @@ mod tests {
                 ..Default::default()
             },
         ];
-        append(&dir, "s1", &first).unwrap();
-        append(&dir, "s1", &second).unwrap();
+        let first_full = first.input.clone();
+        append(
+            &dir,
+            "s1",
+            &mut first,
+            &first_full,
+            MAX_SESSION_BYTES,
+            false,
+        )
+        .unwrap();
+        // The delta record's full projection = prefix 2 + its 2 new entries
+        let second_full = [first.input.as_slice(), second.input.as_slice()].concat();
+        append(
+            &dir,
+            "s1",
+            &mut second,
+            &second_full,
+            MAX_SESSION_BYTES,
+            false,
+        )
+        .unwrap();
         let all = read_all(&model_io_path(&dir, "s1"));
         assert_eq!(all.len(), 2);
         // First record is full
@@ -321,6 +408,113 @@ mod tests {
         let all = read_all(&model_io_path(&dir, "s1"));
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].finish, "stop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn chat(role: &str, content: &str) -> ChatMsg {
+        ChatMsg {
+            role: role.into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            images: vec![],
+            reasoning: None,
+        }
+    }
+
+    /// Only tool RESULT content is capped; system/user/assistant text and
+    /// tool-call arguments are recorded whole (a long system prompt stays
+    /// readable in the trace); full retention lifts the tool cap too
+    #[test]
+    fn project_input_caps_only_tool_results() {
+        let long: String = "字".repeat(10_000);
+        let messages = vec![
+            chat("system", &long),
+            chat("user", &long),
+            chat("assistant", &long),
+            chat("tool", &long),
+        ];
+        let count = |m: &ModelIoMessage| m.content.as_deref().map(|c| c.chars().count());
+        let projected = project_input(&messages, Some(TOOL_RESULT_MAX_CHARS));
+        assert_eq!(count(&projected[0]), Some(10_000), "system stays whole");
+        assert_eq!(count(&projected[1]), Some(10_000), "user stays whole");
+        assert_eq!(count(&projected[2]), Some(10_000), "assistant stays whole");
+        assert_eq!(
+            count(&projected[3]),
+            Some(TOOL_RESULT_MAX_CHARS),
+            "tool result capped"
+        );
+        let retained = project_input(&messages, None);
+        assert_eq!(
+            count(&retained[3]),
+            Some(10_000),
+            "full retention keeps tool results whole"
+        );
+
+        let big_args = "x".repeat(10_000);
+        let calls = project_tool_calls(&[ToolCall {
+            id: "c".into(),
+            name: "Write".into(),
+            arguments: big_args.clone(),
+        }]);
+        assert_eq!(calls[0].arguments, big_args, "tool-call arguments whole");
+    }
+
+    /// Size-cap reset: once the session file reaches the cap, the next append
+    /// rewrites the file with just that record — which must carry the FULL
+    /// input (offset 0, file_reset marker); full retention never resets
+    #[test]
+    fn append_resets_when_session_cap_exceeded() {
+        let dir = std::env::temp_dir().join(format!("pig-model-io-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut first = sample();
+        first.input = vec![
+            ModelIoMessage {
+                role: "system".into(),
+                content: Some("sys".into()),
+                ..Default::default()
+            },
+            ModelIoMessage {
+                role: "user".into(),
+                content: Some("q1".into()),
+                ..Default::default()
+            },
+        ];
+        // First record: huge cap, plain append (the delta baseline)
+        let first_full = first.input.clone();
+        append(&dir, "s1", &mut first, &first_full, u64::MAX, false).unwrap();
+
+        // Second record stores a delta (offset 2) but lands on a file already
+        // past the tiny cap → reset: rewritten file, FULL input, marked
+        let mut second = sample();
+        second.turn = "t1-s1".into();
+        second.input = vec![ModelIoMessage {
+            role: "user".into(),
+            content: Some("q2".into()),
+            ..Default::default()
+        }];
+        second.input_offset = 2;
+        let full = [first.input.as_slice(), second.input.as_slice()].concat();
+        append(&dir, "s1", &mut second, &full, 1, false).unwrap();
+        let all = read_all(&model_io_path(&dir, "s1"));
+        assert_eq!(all.len(), 1, "the file was reset to the current record");
+        assert!(all[0].file_reset, "the reset record is marked");
+        assert_eq!(all[0].turn, "t1-s1");
+        assert_eq!(all[0].input_offset, 0);
+        assert_eq!(
+            all[0].input.len(),
+            3,
+            "the reset record carries the FULL input, not the delta"
+        );
+
+        // Full retention with the same tiny cap appends instead of resetting
+        let mut third = sample();
+        third.turn = "t1-s2".into();
+        let third_full = third.input.clone();
+        append(&dir, "s1", &mut third, &third_full, 1, true).unwrap();
+        let all = read_all(&model_io_path(&dir, "s1"));
+        assert_eq!(all.len(), 2, "full retention skips the size cap");
+        assert!(!all[1].file_reset);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -285,4 +285,10 @@ pub struct AppConfig {
     /// everything else → en)
     #[serde(default)]
     pub language: Option<String>,
+    /// Model-io trace full retention (diagnostic mode): skip the tool-result
+    /// length cap and the per-session trace file size cap — every request's
+    /// input is recorded whole, so long sessions can produce very large
+    /// `{session}.model-io.jsonl` files
+    #[serde(default)]
+    pub model_io_full_retention: bool,
 }

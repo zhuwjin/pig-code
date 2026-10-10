@@ -283,11 +283,20 @@ impl Session {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let api_started = Instant::now();
         // Model-io trace input projection: snapshot before the request (images
-        // recorded as counts, long content truncated). Persisting stores only
-        // the delta: take the common prefix against the previous full
-        // projection, offset + delta (aligned with ZCode model-io, avoiding
-        // re-recording the growing full context per entry in the same session)
-        let io_input_full = crate::model_io::project_input(&self.history);
+        // recorded as counts; only tool-result content is capped unless full
+        // retention is on). Persisting stores only the delta: take the common
+        // prefix against the previous full projection, offset + delta (aligned
+        // with ZCode model-io, avoiding re-recording the growing full context
+        // per entry in the same session); volume is bounded by the per-session
+        // file cap in model_io::append
+        let io_full_retention = self
+            .app_config
+            .as_ref()
+            .is_some_and(|c| c.model_io_full_retention);
+        let io_input_full = crate::model_io::project_input(
+            &self.history,
+            (!io_full_retention).then_some(crate::model_io::TOOL_RESULT_MAX_CHARS),
+        );
         let io_offset = crate::model_io::common_prefix_len(&io_input_full, &self.io_last_input);
         let io_input: Vec<_> = io_input_full[io_offset..].to_vec();
         let provider_task = tokio::spawn(pig_provider::stream_chat(
@@ -447,7 +456,7 @@ impl Session {
         } else {
             "stop"
         };
-        let io_record = crate::model_io::ModelIoRecord {
+        let mut io_record = crate::model_io::ModelIoRecord {
             ts_ms: crate::model_io::now_ms(),
             turn: format!("{turn_id}-s{step}"),
             source: "main".into(),
@@ -463,10 +472,16 @@ impl Session {
             tool_calls: crate::model_io::project_tool_calls(&tool_calls),
             input_offset: io_offset,
             input: io_input,
+            file_reset: false,
         };
-        if let Err(e) =
-            crate::model_io::append(&self.data_dir.join("sessions"), &self.id, &io_record)
-        {
+        if let Err(e) = crate::model_io::append(
+            &self.data_dir.join("sessions"),
+            &self.id,
+            &mut io_record,
+            &io_input_full,
+            crate::model_io::MAX_SESSION_BYTES,
+            io_full_retention,
+        ) {
             tracing::warn!("Failed to write model io trace (ignored): {e}");
         }
         // This entry's full projection becomes the delta baseline for the next
