@@ -308,6 +308,7 @@ impl SettingsView {
             extra_frontmatter: extra,
             delete_armed: false,
             error: None,
+            body_scroll: ScrollHandle::new(),
         };
         self.skills_dialog = Some(dialog);
         cx.notify();
@@ -779,78 +780,121 @@ impl SettingsView {
                     .id("skills-help-dialog")
                     .w(px(560.))
                     .max_h(px(640.))
-                    .overflow_y_scroll()
-                    .gap_3()
-                    .p_4()
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
+                    // Fixed header: title left, close button top-right (replaces
+                    // the footer's lone close button)
                     .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(rust_i18n::t!("settings.skills.help_title").to_string()),
-                    )
-                    .when_some(self.skills_snapshot.as_ref(), |this, snapshot| {
-                        this.child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div().text_sm().font_semibold().child(
-                                        rust_i18n::t!("settings.skills.skill_dirs").to_string(),
-                                    ),
-                                )
-                                .child(self.render_skill_sources(snapshot, cx)),
-                        )
-                    })
-                    .child(
-                        v_flex()
-                            .gap_1()
+                        h_flex()
+                            .p_4()
+                            .pb_2()
+                            .justify_between()
                             .child(
-                                div().text_sm().font_semibold().child(
-                                    rust_i18n::t!("settings.skills.manual_edit").to_string(),
-                                ),
+                                div()
+                                    .text_lg()
+                                    .font_semibold()
+                                    .child(rust_i18n::t!("settings.skills.help_title").to_string()),
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .id("skills-help-close")
+                                    .test_support()
+                                    .p_1()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                                     .child(
-                                        rust_i18n::t!("settings.skills.manual_edit_hint")
-                                            .to_string(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(rust_i18n::t!("settings.skills.example").to_string()),
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skills_help_open = false;
+                                        cx.notify();
+                                    })),
                             ),
                     )
+                    // Scrollable body: the cap sits on the scroll element itself
+                    // and the right 16px lane keeps the overlay scrollbar off the
+                    // text (same layout as the edit dialogs)
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(rust_i18n::t!("settings.skills.effective_hint").to_string()),
-                    )
-                    .child(
-                        h_flex().gap_2().child(div().flex_1()).child(
-                            Button::new("close-skills-help")
-                                .primary()
-                                .small()
-                                .label(rust_i18n::t!("settings.common.close"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.skills_help_open = false;
-                                    cx.notify();
-                                })),
-                        ),
+                            .relative()
+                            .child(
+                                v_flex()
+                                    .id("skills-help-body")
+                                    .gap_3()
+                                    .max_h(px(580.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.skills_help_scroll)
+                                    .pl_4()
+                                    .pr(px(crate::code_view::CODE_SCROLLBAR_LANE))
+                                    .when_some(self.skills_snapshot.as_ref(), |this, snapshot| {
+                                        this.child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div().text_sm().font_semibold().child(
+                                                        rust_i18n::t!("settings.skills.skill_dirs")
+                                                            .to_string(),
+                                                    ),
+                                                )
+                                                .child(self.render_skill_sources(snapshot, cx)),
+                                        )
+                                    })
+                                    .child(
+                                        v_flex()
+                                            .gap_1()
+                                            .child(
+                                                div().text_sm().font_semibold().child(
+                                                    rust_i18n::t!("settings.skills.manual_edit")
+                                                        .to_string(),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        rust_i18n::t!(
+                                                            "settings.skills.manual_edit_hint"
+                                                        )
+                                                        .to_string(),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .rounded_lg()
+                                                    .border_1()
+                                                    .border_color(cx.theme().border)
+                                                    .px_3()
+                                                    .py_2()
+                                                    .text_xs()
+                                                    .font_family(
+                                                        cx.theme().mono_font_family.clone(),
+                                                    )
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        rust_i18n::t!("settings.skills.example")
+                                                            .to_string(),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                rust_i18n::t!("settings.skills.effective_hint")
+                                                    .to_string(),
+                                            ),
+                                    ),
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(
+                                &self.skills_help_scroll,
+                            )),
                     ),
             )
             .into_any_element()
@@ -1207,30 +1251,76 @@ impl SettingsView {
                     .id("skills-dialog")
                     .w(px(640.))
                     .max_h(px(680.))
-                    .overflow_y_scroll()
-                    .gap_3()
-                    .p_4()
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_lg().font_semibold().child(if editing {
-                        rust_i18n::t!(
-                            "settings.skills.edit_title",
-                            name = dialog.editing.clone().expect("editing")
-                        )
-                        .to_string()
-                    } else {
-                        rust_i18n::t!("settings.skills.new_skill").to_string()
-                    }))
-                    .child(form)
-                    .when_some(dialog.error.clone(), |this, error| {
-                        this.child(div().text_xs().text_color(cx.theme().danger).child(error))
-                    })
+                    // Fixed header: title left, close button top-right
                     .child(
                         h_flex()
+                            .p_4()
+                            .pb_2()
+                            .justify_between()
+                            .child(div().text_lg().font_semibold().child(if editing {
+                                rust_i18n::t!(
+                                    "settings.skills.edit_title",
+                                    name = dialog.editing.clone().expect("editing")
+                                )
+                                .to_string()
+                            } else {
+                                rust_i18n::t!("settings.skills.new_skill").to_string()
+                            }))
+                            .child(
+                                div()
+                                    .id("skills-dialog-close")
+                                    .test_support()
+                                    .p_1()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skills_dialog = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    // Scrollable form body: the cap sits on the scroll element
+                    // itself and the right 16px lane keeps the overlay scrollbar
+                    // off the fields (same layout as the model dialog)
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                v_flex()
+                                    .id("skills-dialog-body")
+                                    .gap_3()
+                                    .max_h(px(568.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&dialog.body_scroll)
+                                    .pl_4()
+                                    .pr(px(crate::code_view::CODE_SCROLLBAR_LANE))
+                                    .child(form)
+                                    .when_some(dialog.error.clone(), |this, error| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().danger)
+                                                .child(error),
+                                        )
+                                    }),
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(&dialog.body_scroll)),
+                    )
+                    .child(
+                        h_flex()
+                            .p_4()
+                            .pt_3()
                             .gap_2()
-                            .mt_1()
                             .when(editing, |this| {
                                 this.child(
                                     Button::new("skills-dialog-delete")

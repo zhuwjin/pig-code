@@ -671,34 +671,78 @@ impl SettingsView {
                     .id("preset-picker")
                     .w(px(560.))
                     .max_h(px(640.))
-                    .overflow_y_scroll()
-                    .gap_4()
-                    .p_4()
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(rust_i18n::t!("settings.models.add_provider").to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(rust_i18n::t!("settings.models.picker_description").to_string()),
-                    )
+                    // Fixed header: title left, close button top-right
                     .child(
                         h_flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(custom_card)
-                            .children(cards),
+                            .p_4()
+                            .pb_2()
+                            .justify_between()
+                            .child(
+                                div().text_lg().font_semibold().child(
+                                    rust_i18n::t!("settings.models.add_provider").to_string(),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .id("preset-picker-close")
+                                    .test_support()
+                                    .p_1()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.preset_picker_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    // Scrollable body: the cap sits on the scroll element itself
+                    // and the right 16px lane keeps the overlay scrollbar off the
+                    // cards (same layout as the edit dialogs)
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                v_flex()
+                                    .id("preset-picker-body")
+                                    .gap_4()
+                                    .max_h(px(528.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.preset_picker_scroll)
+                                    .pl_4()
+                                    .pr(px(crate::code_view::CODE_SCROLLBAR_LANE))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                rust_i18n::t!("settings.models.picker_description")
+                                                    .to_string(),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(custom_card)
+                                            .children(cards),
+                                    ),
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(
+                                &self.preset_picker_scroll,
+                            )),
                     )
                     .child(
-                        h_flex().justify_end().child(
+                        h_flex().p_4().pt_3().justify_end().child(
                             Button::new("cancel-preset-picker")
                                 .outline()
                                 .small()

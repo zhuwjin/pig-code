@@ -40,6 +40,9 @@ pub struct ModelDialog {
     /// use gentle filling (overwrite only what the data source has, keep the
     /// hand-tuned params JSON)
     pub(crate) lookup_overwrite: bool,
+    /// Scroll offset of the form body (shared by the scrollable div and its
+    /// overlay scrollbar; header/footer stay fixed)
+    pub(crate) body_scroll: ScrollHandle,
 }
 
 /// models.dev lookup progress: three states of the hint row beside the input
@@ -92,6 +95,9 @@ pub(crate) struct McpDialog {
     /// Validation error (filled on save/mode-switch failure, shown above the
     /// footer)
     pub(crate) error: Option<String>,
+    /// Scroll offset of the form body (shared by the scrollable div and its
+    /// overlay scrollbar; header/footer stay fixed)
+    pub(crate) body_scroll: ScrollHandle,
 }
 
 /// Skill create/edit dialog (the form edits SKILL.md's frontmatter plus body)
@@ -122,4 +128,7 @@ pub(crate) struct SkillDialog {
     pub(crate) delete_armed: bool,
     /// Validation error (filled on save failure, shown above the footer)
     pub(crate) error: Option<String>,
+    /// Scroll offset of the form body (shared by the scrollable div and its
+    /// overlay scrollbar; header/footer stay fixed)
+    pub(crate) body_scroll: ScrollHandle,
 }

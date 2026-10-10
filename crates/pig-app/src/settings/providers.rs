@@ -87,6 +87,7 @@ impl SettingsView {
             looked_up_id: None,
             lookup_state: LookupState::Idle,
             lookup_overwrite: false,
+            body_scroll: ScrollHandle::new(),
         };
         // Model ID input confirmed (Enter/blur) → query models.dev for
         // auto-fill. Each dialog reopen creates a fresh input; stale
@@ -736,24 +737,69 @@ impl SettingsView {
                     .id("model-dialog")
                     .w(px(560.))
                     .max_h(px(640.))
-                    .overflow_y_scroll()
-                    .gap_3()
-                    .p_4()
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
+                    // Fixed header: title left, close button top-right
+                    .child(
+                        h_flex()
+                            .p_4()
+                            .pb_2()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_semibold()
+                                    .child(if snapshot_exists {
+                                        rust_i18n::t!("settings.models.edit_title").to_string()
+                                    } else {
+                                        rust_i18n::t!("settings.models.add_model").to_string()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("model-dialog-close")
+                                    .test_support()
+                                    .p_1()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.model_dialog = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    // Form body scrolls under the fixed header and footer. The
+                    // cap must sit on the scroll element itself (same
+                    // max_h + overflow pattern as the MCP/skill dialogs) —
+                    // the shell only has a max-height, so a flex_1 child
+                    // never gets a definite height to overflow against
                     .child(
                         div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(if snapshot_exists {
-                                rust_i18n::t!("settings.models.edit_title").to_string()
-                            } else {
-                                rust_i18n::t!("settings.models.add_model").to_string()
-                            }),
-                    )
-                    .child(
+                            .relative()
+                            .child(
+                                v_flex()
+                                    .id("model-dialog-body")
+                                    .gap_3()
+                                    .max_h(px(528.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&dialog.body_scroll)
+                                    .pl_4()
+                                    // Reserve the scrollbar's own 16px lane on
+                                    // the right: the overlay Scrollbar lays out
+                                    // absolute against this wrapper's content
+                                    // box, so without the right padding it sits
+                                    // on top of the form fields (same lane
+                                    // reservation as the code-view cards)
+                                    .pr(px(crate::code_view::CODE_SCROLLBAR_LANE))
+                                    .child(
                         v_flex()
                             .gap_1()
                             .child(
@@ -1094,9 +1140,14 @@ impl SettingsView {
                                         ),
                                 )
                             }),
+                            )
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(&dialog.body_scroll)),
                     )
                     .child(
                         h_flex()
+                            .p_4()
+                            .pt_3()
                             .gap_2()
                             .child(
                                 Button::new("reset-dialog")

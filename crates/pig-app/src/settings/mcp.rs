@@ -1051,6 +1051,7 @@ impl SettingsView {
             delete_armed: false,
             base,
             error: None,
+            body_scroll: ScrollHandle::new(),
         };
         // Environment variable/header drafts follow the textarea's content
         // (swapped for display when switching transport kind)
@@ -1409,78 +1410,116 @@ impl SettingsView {
                     .id("mcp-help-dialog")
                     .w(px(560.))
                     .max_h(px(640.))
-                    .overflow_y_scroll()
-                    .gap_3()
-                    .p_4()
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
+                    // Fixed header: title left, close button top-right (replaces
+                    // the footer's lone close button)
                     .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child(rust_i18n::t!("settings.mcp.help_title").to_string()),
-                    )
-                    .when_some(self.mcp_snapshot.as_ref(), |this, snapshot| {
-                        this.child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div().text_sm().font_semibold().child(
-                                        rust_i18n::t!("settings.mcp.config_files").to_string(),
-                                    ),
-                                )
-                                .child(self.render_mcp_sources(snapshot, cx)),
-                        )
-                    })
-                    .child(
-                        v_flex()
-                            .gap_1()
+                        h_flex()
+                            .p_4()
+                            .pb_2()
+                            .justify_between()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_lg()
                                     .font_semibold()
-                                    .child(rust_i18n::t!("settings.mcp.manual_edit").to_string()),
+                                    .child(rust_i18n::t!("settings.mcp.help_title").to_string()),
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .id("mcp-help-close")
+                                    .test_support()
+                                    .p_1()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
                                     .child(
-                                        rust_i18n::t!("settings.mcp.manual_edit_hint").to_string(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(MCP_EXAMPLE),
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.mcp_help_open = false;
+                                        cx.notify();
+                                    })),
                             ),
                     )
+                    // Scrollable body: the cap sits on the scroll element itself
+                    // and the right 16px lane keeps the overlay scrollbar off the
+                    // text (same layout as the edit dialogs)
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(rust_i18n::t!("settings.mcp.effective_hint").to_string()),
-                    )
-                    .child(
-                        h_flex().gap_2().child(div().flex_1()).child(
-                            Button::new("close-mcp-help")
-                                .primary()
-                                .small()
-                                .label(rust_i18n::t!("settings.common.close"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.mcp_help_open = false;
-                                    cx.notify();
-                                })),
-                        ),
+                            .relative()
+                            .child(
+                                v_flex()
+                                    .id("mcp-help-body")
+                                    .gap_3()
+                                    .max_h(px(580.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.mcp_help_scroll)
+                                    .pl_4()
+                                    .pr(px(crate::code_view::CODE_SCROLLBAR_LANE))
+                                    .when_some(self.mcp_snapshot.as_ref(), |this, snapshot| {
+                                        this.child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div().text_sm().font_semibold().child(
+                                                        rust_i18n::t!("settings.mcp.config_files")
+                                                            .to_string(),
+                                                    ),
+                                                )
+                                                .child(self.render_mcp_sources(snapshot, cx)),
+                                        )
+                                    })
+                                    .child(
+                                        v_flex()
+                                            .gap_1()
+                                            .child(
+                                                div().text_sm().font_semibold().child(
+                                                    rust_i18n::t!("settings.mcp.manual_edit")
+                                                        .to_string(),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        rust_i18n::t!(
+                                                            "settings.mcp.manual_edit_hint"
+                                                        )
+                                                        .to_string(),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .rounded_lg()
+                                                    .border_1()
+                                                    .border_color(cx.theme().border)
+                                                    .px_3()
+                                                    .py_2()
+                                                    .text_xs()
+                                                    .font_family(
+                                                        cx.theme().mono_font_family.clone(),
+                                                    )
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(MCP_EXAMPLE),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                rust_i18n::t!("settings.mcp.effective_hint")
+                                                    .to_string(),
+                                            ),
+                                    ),
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(&self.mcp_help_scroll)),
                     ),
             )
             .into_any_element()
@@ -2125,54 +2164,108 @@ impl SettingsView {
                     .id("mcp-dialog")
                     .w(px(560.))
                     .max_h(px(640.))
-                    .overflow_y_scroll()
-                    .gap_3()
-                    .p_4()
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_lg().font_semibold().child(if editing {
-                        rust_i18n::t!(
-                            "settings.mcp.edit_title",
-                            name = dialog.editing.clone().expect("editing")
-                        )
-                        .to_string()
-                    } else {
-                        rust_i18n::t!("settings.mcp.new_mcp_server").to_string()
-                    }))
+                    // Fixed header: title left, close button top-right
                     .child(
                         h_flex()
-                            .gap_1()
+                            .p_4()
+                            .pb_2()
+                            .justify_between()
+                            .child(div().text_lg().font_semibold().child(if editing {
+                                rust_i18n::t!(
+                                    "settings.mcp.edit_title",
+                                    name = dialog.editing.clone().expect("editing")
+                                )
+                                .to_string()
+                            } else {
+                                rust_i18n::t!("settings.mcp.new_mcp_server").to_string()
+                            }))
                             .child(
-                                Button::new("mcp-mode-form")
-                                    .small()
-                                    .when(!dialog.json_mode, |this| this.primary())
-                                    .when(dialog.json_mode, |this| this.outline())
-                                    .label(rust_i18n::t!("settings.mcp.form_mode"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_mcp_json_mode(false, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("mcp-mode-json")
-                                    .small()
-                                    .when(dialog.json_mode, |this| this.primary())
-                                    .when(!dialog.json_mode, |this| this.outline())
-                                    .label("JSON")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_mcp_json_mode(true, window, cx);
+                                div()
+                                    .id("mcp-dialog-close")
+                                    .test_support()
+                                    .p_1()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.mcp_dialog = None;
+                                        cx.notify();
                                     })),
                             ),
                     )
-                    .child(if dialog.json_mode { json_view } else { form })
-                    .when_some(dialog.error.clone(), |this, error| {
-                        this.child(div().text_xs().text_color(cx.theme().danger).child(error))
-                    })
+                    // Scrollable form body: the cap sits on the scroll element
+                    // itself and the right 16px lane keeps the overlay scrollbar
+                    // off the fields (same layout as the model dialog)
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                v_flex()
+                                    .id("mcp-dialog-body")
+                                    .gap_3()
+                                    .max_h(px(528.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&dialog.body_scroll)
+                                    .pl_4()
+                                    .pr(px(crate::code_view::CODE_SCROLLBAR_LANE))
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .child(
+                                                Button::new("mcp-mode-form")
+                                                    .small()
+                                                    .when(!dialog.json_mode, |this| this.primary())
+                                                    .when(dialog.json_mode, |this| this.outline())
+                                                    .label(rust_i18n::t!("settings.mcp.form_mode"))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.set_mcp_json_mode(
+                                                                false, window, cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("mcp-mode-json")
+                                                    .small()
+                                                    .when(dialog.json_mode, |this| this.primary())
+                                                    .when(!dialog.json_mode, |this| this.outline())
+                                                    .label("JSON")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.set_mcp_json_mode(
+                                                                true, window, cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                    .child(if dialog.json_mode { json_view } else { form })
+                                    .when_some(dialog.error.clone(), |this, error| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().danger)
+                                                .child(error),
+                                        )
+                                    }),
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(&dialog.body_scroll)),
+                    )
                     .child(
                         h_flex()
+                            .p_4()
+                            .pt_3()
                             .gap_2()
-                            .mt_1()
                             .when(editing, |this| {
                                 this.child(
                                     Button::new("mcp-dialog-delete")

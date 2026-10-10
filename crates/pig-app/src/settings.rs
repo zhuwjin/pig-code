@@ -121,6 +121,8 @@ mod mcp;
 mod presets;
 mod providers;
 mod skills;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use archived::{ArchivedSessionRow, ArchivedSort};
 pub(crate) use dialog::*;
@@ -147,6 +149,11 @@ pub struct SettingsView {
     model_dialog: Option<ModelDialog>,
     /// Open/close state of the preset picker dialog for adding a provider
     preset_picker_open: bool,
+    /// Scroll offsets of the struct-less overlay dialogs (fixed header/footer
+    /// + scrollable body, same layout as the edit dialogs)
+    preset_picker_scroll: ScrollHandle,
+    mcp_help_scroll: ScrollHandle,
+    skills_help_scroll: ScrollHandle,
     /// MCP page config snapshot (fed by AppView via the RefreshMcp event;
     /// None = not loaded yet)
     mcp_snapshot: Option<McpConfigSnapshot>,
@@ -412,6 +419,9 @@ impl SettingsView {
             test_results: Default::default(),
             model_dialog: None,
             preset_picker_open: false,
+            preset_picker_scroll: ScrollHandle::new(),
+            mcp_help_scroll: ScrollHandle::new(),
+            skills_help_scroll: ScrollHandle::new(),
             mcp_snapshot: None,
             mcp_session: None,
             mcp_connection: None,
