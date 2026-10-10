@@ -1107,9 +1107,20 @@ pub const MOCK_TITLE: &str = "auto-title selftest";
 
 /// Non-streaming auto-naming response: {"title": MOCK_TITLE} (same content for
 /// both API formats). Request recognition is in session::TITLE_PROMPT_MARKER
-async fn write_title_response(stream: &mut tokio::net::TcpStream, anthropic: bool) -> bool {
+async fn write_title_response(
+    stream: &mut tokio::net::TcpStream,
+    anthropic: bool,
+    responses: bool,
+) -> bool {
     let content = format!("{{\"title\":\"{MOCK_TITLE}\"}}");
-    let json = if anthropic {
+    let json = if responses {
+        serde_json::json!({
+            "id": "resp-mock",
+            "output": [{"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": content}]}],
+            "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60},
+        })
+    } else if anthropic {
         serde_json::json!({
             "id": "msg-mock",
             "type": "message",
@@ -1276,14 +1287,18 @@ async fn handle_connection(
     }
 
     let anthropic = path.ends_with("/messages");
+    let responses = path.ends_with("/responses");
     let tool_results = body.matches("\"role\":\"tool\"").count()
         + body.matches("\"role\": \"tool\"").count()
-        + body.matches("tool_result").count();
+        + body.matches("tool_result").count()
+        + body.matches("function_call_output").count();
 
     // Non-streaming = auto naming / compact summary / connectivity test (must branch before the SSE response head)
     if body.contains("\"stream\":false") {
         let ok = if body.contains(pig_protocol::TITLE_PROMPT_MARKER) {
-            write_title_response(&mut stream, anthropic).await
+            write_title_response(&mut stream, anthropic, responses).await
+        } else if responses {
+            write_json_response_responses(&mut stream, &body).await
         } else if anthropic {
             write_json_response_anthropic(&mut stream, &body).await
         } else {
@@ -1307,7 +1322,9 @@ async fn handle_connection(
         write_ticker_scenario(&mut stream).await;
         return;
     }
-    let chunks = if anthropic {
+    let chunks = if responses {
+        responses_chunks(&body, tool_results)
+    } else if anthropic {
         anthropic_chunks(&body, tool_results)
     } else if body.contains(BUSINESS_ERROR_TRIGGER) {
         // Business error inside the 200 stream (OpenAI-compatible gateways)
@@ -1423,6 +1440,159 @@ fn anthropic_tool_call(out: &mut Vec<String>, index: usize, id: &str, name: &str
     ));
 }
 
+// ---------------- OpenAI Responses format (/responses) ----------------
+
+/// One SSE frame carrying a Responses event (no `event:` line — the payload's
+/// own `type` is the dispatch key, same as the parser)
+fn r_ev(event: serde_json::Value) -> String {
+    format!(
+        "data: {event}
+
+"
+    )
+}
+
+fn responses_created() -> serde_json::Value {
+    serde_json::json!({"type": "response.created", "response": {"id": "resp-mock"}})
+}
+
+fn responses_completed(input: u64, output: u64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "response.completed",
+        "response": {"id": "resp-mock", "usage": {
+            "input_tokens": input, "output_tokens": output,
+            "total_tokens": input + output,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        }},
+    })
+}
+
+/// Reasoning summary deltas (chunks of 8 chars, same rhythm as the Anthropic mock)
+fn responses_reasoning(out: &mut Vec<String>) {
+    for piece in MOCK_REASONING.chars().collect::<Vec<_>>().chunks(8) {
+        let delta: String = piece.iter().collect();
+        out.push(r_ev(serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_mock", "summary_index": 0, "delta": delta,
+        })));
+    }
+}
+
+/// A complete function_call item (arguments arrive whole in the done event —
+/// the parser ignores argument deltas, same as codex-rs)
+fn responses_tool_call(out: &mut Vec<String>, call_id: &str, name: &str, arguments: &str) {
+    out.push(r_ev(serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {"type": "function_call", "call_id": call_id, "name": name, "arguments": arguments},
+    })));
+}
+
+fn responses_text(out: &mut Vec<String>, text: &str) {
+    for piece in text.chars().collect::<Vec<_>>().chunks(9) {
+        let delta: String = piece.iter().collect();
+        out.push(r_ev(serde_json::json!({
+            "type": "response.output_text.delta", "delta": delta,
+        })));
+    }
+}
+
+fn responses_chunks(body: &str, tool_results: usize) -> Vec<String> {
+    let mut out = vec![r_ev(responses_created())];
+    if body.contains(SCENARIO_B_TRIGGER) {
+        let script: &[(&str, &str, &str)] = &[
+            (
+                "call_b_write",
+                "Write",
+                &serde_json::json!({"path": SCENARIO_B_FILE, "content": SCENARIO_B_CONTENT})
+                    .to_string(),
+            ),
+            (
+                "call_b_edit",
+                "Edit",
+                &serde_json::json!({"path": SCENARIO_B_FILE, "old": "line2", "new": "line two"})
+                    .to_string(),
+            ),
+            (
+                "call_b_bash",
+                "Bash",
+                &serde_json::json!({"command": format!("cat {}", SCENARIO_B_FILE)}).to_string(),
+            ),
+        ];
+        if tool_results < script.len() {
+            responses_reasoning(&mut out);
+            let (_, name, args) = &script[tool_results];
+            responses_tool_call(
+                &mut out,
+                &format!("call_b_{}", name.to_lowercase()),
+                name,
+                args,
+            );
+            out.push(r_ev(responses_completed(80, 15)));
+            return out;
+        }
+        responses_text(
+            &mut out,
+            &format!("Scenario B finished: {SCENARIO_B_MARKER}"),
+        );
+        out.push(r_ev(responses_completed(100, 42)));
+        return out;
+    }
+    responses_reasoning(&mut out);
+    if tool_results == 0 {
+        let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
+        responses_tool_call(&mut out, "call_mock_1", "Read", &arguments);
+        out.push(r_ev(responses_completed(100, 20)));
+    } else {
+        let markdown = format!(
+            "## File summary
+
+Contents of `{MOCK_FILE_NAME}`:
+
+```text
+A known file used by the pig-core mock provider for self-testing.
+```
+
+**Conclusion**: {MOCK_REPLY_MARKER}
+"
+        );
+        responses_text(&mut out, &markdown);
+        out.push(r_ev(responses_completed(100, 42)));
+    }
+    out
+}
+
+/// Non-streaming Responses reply (compact summary): one message item
+async fn write_json_response_responses(stream: &mut tokio::net::TcpStream, body: &str) -> bool {
+    if body.contains("FAIL_COMPACT") {
+        let resp = "HTTP/1.1 500 Internal Server Error
+content-length: 2
+
+{}";
+        return stream.write_all(resp.as_bytes()).await.is_ok();
+    }
+    let content =
+        format!("{SUMMARY_MARKER}: goal=mock selftest; done=read/write files; todo=none.");
+    let json = serde_json::json!({
+        "id": "resp-mock",
+        "output": [{"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": content}]}],
+        "usage": {"input_tokens": 500, "output_tokens": 30, "total_tokens": 530},
+    });
+    let payload = json.to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK
+content-type: application/json
+content-length: {}
+
+{}",
+        payload.len(),
+        payload
+    );
+    stream.write_all(resp.as_bytes()).await.is_ok()
+}
+
+/// text reply. With SCENARIO_B_TRIGGER it runs the Write→Edit→Bash chain.
 /// Anthropic scenario dispatch: no tool_result → Read tool call; otherwise a
 /// text reply. With SCENARIO_B_TRIGGER it runs the Write→Edit→Bash chain.
 fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {

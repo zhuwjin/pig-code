@@ -122,7 +122,7 @@ impl ApiCall {
     /// Log the completed call: outcome ("stop" / "tool_calls" / "cancelled" /
     /// "http 429: ..." / ...) plus the accumulated response. `tool_calls` is
     /// the streamed tool-call accumulation (&[] on one-shot calls).
-    pub fn finish(self, outcome: &str, tool_calls: &[ToolCall]) {
+    pub fn finish(&mut self, outcome: &str, tool_calls: &[ToolCall]) {
         if !self.enabled {
             return;
         }
@@ -153,7 +153,7 @@ impl ApiCall {
 
     /// Log a failed call (network error / non-2xx / parse failure) before any
     /// response accumulated.
-    pub fn fail(self, detail: &str) {
+    pub fn fail(&mut self, detail: &str) {
         self.finish(&format!("error: {detail}"), &[]);
     }
 }

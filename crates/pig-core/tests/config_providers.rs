@@ -9,6 +9,7 @@ fn v2_config(port: u16, format: ApiFormat) -> String {
     let format_str = match format {
         ApiFormat::OpenAiChat => "OpenAiChat",
         ApiFormat::AnthropicMessages => "AnthropicMessages",
+        ApiFormat::OpenAiResponses => "OpenAiResponses",
     };
     format!(
         r#"default_provider = "mock"
@@ -362,6 +363,125 @@ async fn anthropic_thinking_echoed() {
     assert!(
         thinking_pos < tool_use_pos,
         "thinking must come before tool_use: {continuation}"
+    );
+    agent.shutdown();
+}
+
+/// A full turn in Responses format: reasoning summary → Read function_call →
+/// function_call_output replay → text (via /responses + Responses SSE events)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_full_turn() {
+    let port = mock::start_mock_server();
+    let dir = std::env::temp_dir().join(format!("pig-core-resp-turn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, v2_config(port, ApiFormat::OpenAiResponses)).unwrap();
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
+    let events = agent.events.clone();
+    let sid = new_session(&agent, dir).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid,
+            content: "Read the mock file and summarize".into(),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    let collected = recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::ReasoningDelta { .. })),
+        "reasoning_summary_text.delta → reasoning"
+    );
+    assert!(
+        collected.iter().any(|e| matches!(
+            e,
+            Event::ToolCallEnd { output, is_error: false, .. } if output.contains("known file")
+        )),
+        "function_call tool chain: {collected:#?}"
+    );
+    assert!(
+        collected.iter().any(|e| matches!(
+            e,
+            Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER)
+        )),
+        "output_text.delta text"
+    );
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, Event::ContextUsage { used: 142, .. })),
+        "usage aggregated 100+42"
+    );
+    agent.shutdown();
+}
+
+/// Responses continuation requests must replay the turn as input items: the
+/// system prompt lands in top-level `instructions`, the tool result becomes a
+/// `function_call_output` item, and reasoning is echoed as a plaintext summary
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_continuation_replays_items() {
+    let (port, log) = mock::start_mock_server_with_log();
+    let dir = std::env::temp_dir().join(format!("pig-core-resp-replay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, v2_config(port, ApiFormat::OpenAiResponses)).unwrap();
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
+    let events = agent.events.clone();
+    let sid = new_session(&agent, dir).await;
+
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid,
+            content: "Read the mock file and summarize".into(),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+
+    let bodies = log.lock().expect("log");
+    let continuation = bodies
+        .iter()
+        .find(|body| body.contains("function_call_output"))
+        .unwrap_or_else(|| {
+            panic!("expected a continuation request with function_call_output: {bodies:?}")
+        });
+    assert!(
+        continuation.contains("\"instructions\":"),
+        "system prompt hoisted into instructions: {continuation}"
+    );
+    assert!(
+        continuation.contains("\"store\":false"),
+        "stateless replay (store:false): {continuation}"
+    );
+    assert!(
+        continuation.contains("\"type\":\"function_call\""),
+        "the assistant tool call replays as a function_call item: {continuation}"
+    );
+    assert!(
+        continuation.contains("\"type\":\"reasoning\""),
+        "reasoning echoes as a plaintext summary item: {continuation}"
     );
     agent.shutdown();
 }

@@ -67,6 +67,7 @@ enum FontSlot {
 /// Labels of the two API format dropdown options (shared by backfill and option construction)
 pub(crate) const FORMAT_OPENAI_LABEL: &str = "OpenAI Chat Completions (/v1/chat/completions)";
 pub(crate) const FORMAT_ANTHROPIC_LABEL: &str = "Anthropic Messages (/v1/messages)";
+pub(crate) const FORMAT_RESPONSES_LABEL: &str = "OpenAI Responses (/v1/responses)";
 
 /// Select-style setting field (official SettingFieldElement): the same trigger
 /// style as the input fields (text_sm, left-aligned, avoiding Button's 16px
@@ -383,6 +384,7 @@ impl SettingsView {
                 SearchableVec::new(vec![
                     FORMAT_OPENAI_LABEL.to_string(),
                     FORMAT_ANTHROPIC_LABEL.to_string(),
+                    FORMAT_RESPONSES_LABEL.to_string(),
                 ]),
                 None,
                 window,
@@ -598,6 +600,8 @@ impl SettingsView {
         let Some(ix) = self.selected else { return };
         let format = if label == FORMAT_ANTHROPIC_LABEL {
             ApiFormat::AnthropicMessages
+        } else if label == FORMAT_RESPONSES_LABEL {
+            ApiFormat::OpenAiResponses
         } else {
             ApiFormat::OpenAiChat
         };
@@ -708,6 +712,8 @@ impl SettingsView {
         let api_key = provider.api_key.clone();
         let format_label = if provider.api_format == ApiFormat::AnthropicMessages {
             FORMAT_ANTHROPIC_LABEL
+        } else if provider.api_format == ApiFormat::OpenAiResponses {
+            FORMAT_RESPONSES_LABEL
         } else {
             FORMAT_OPENAI_LABEL
         }

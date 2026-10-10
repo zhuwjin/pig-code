@@ -6,7 +6,7 @@ use pig_protocol::ApiFormat;
 
 use crate::chat::{ChatMsg, ResolvedModel};
 use crate::events::{CallControl, ProviderEvent, RetryNotice, RetryReason};
-use crate::{anthropic, core_error_en, openai};
+use crate::{anthropic, core_error_en, openai, responses};
 
 pub async fn stream_chat(
     config: ResolvedModel,
@@ -55,6 +55,16 @@ pub async fn stream_chat(
             }
             ApiFormat::AnthropicMessages => {
                 anthropic::stream_anthropic(
+                    &config,
+                    messages.clone(),
+                    tools.clone(),
+                    &itx,
+                    &control,
+                )
+                .await
+            }
+            ApiFormat::OpenAiResponses => {
+                responses::stream_responses(
                     &config,
                     messages.clone(),
                     tools.clone(),

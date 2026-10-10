@@ -69,6 +69,7 @@ pub enum ApprovalDecision {
 pub enum ApiFormat {
     OpenAiChat,
     AnthropicMessages,
+    OpenAiResponses,
 }
 
 /// Marker sentence opening the session-title sidecar prompt. Shared

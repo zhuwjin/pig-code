@@ -432,7 +432,7 @@ pub fn openai_web_search_tool(config: &ResolvedModel) -> Option<serde_json::Valu
 /// "message"/"msg": ...}` (Zhipu-style business envelope). A legit chat chunk
 /// never carries a top-level `error`/`success`, so these checks cannot
 /// misfire. Returns the detail to surface.
-fn business_error_detail(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn business_error_detail(value: &serde_json::Value) -> Option<String> {
     if let Some(error) = value.get("error") {
         return Some(match error {
             serde_json::Value::String(message) => message.clone(),

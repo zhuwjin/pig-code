@@ -19,6 +19,7 @@ mod chat;
 mod events;
 mod identity;
 mod openai;
+mod responses;
 mod retry;
 mod sidecar;
 mod sse;

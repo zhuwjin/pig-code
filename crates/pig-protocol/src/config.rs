@@ -180,6 +180,23 @@ pub fn default_reasoning_params(
                     })
                 }
             }
+            // Responses takes a single nested reasoning object (codex sends the
+            // same shape); "auto" summaries are what streams reasoning deltas.
+            // Off = no reasoning field at all (the API has no effort "none").
+            ApiFormat::OpenAiResponses => {
+                if off {
+                    serde_json::json!({})
+                } else {
+                    let effort = if level == "enabled" {
+                        "high"
+                    } else {
+                        level.as_str()
+                    };
+                    serde_json::json!({
+                        "reasoning": { "effort": effort, "summary": "auto" },
+                    })
+                }
+            }
         };
         map.insert(level.clone(), params);
     }
