@@ -1,8 +1,8 @@
 mod common;
 
 use common::{new_session, recv_until, setup};
-use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
+use pig_provider::mock;
 use std::time::Duration;
 
 /// resume: rollout persisted → OpenSession on a new in-process agent → history rebuilt, the model receives the prior history.
@@ -317,13 +317,13 @@ async fn parallel_sessions() {
 /// rules entered the request sent to the model).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_md_injected() {
-    let (port, log) = pig_core::mock::start_mock_server_with_log();
+    let (port, log) = pig_provider::mock::start_mock_server_with_log();
     let cwd = std::env::temp_dir().join(format!("pig-core-m4-agents-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(
-        cwd.join(pig_core::mock::MOCK_FILE_NAME),
-        pig_core::mock::MOCK_FILE_CONTENT,
+        cwd.join(pig_provider::mock::MOCK_FILE_NAME),
+        pig_provider::mock::MOCK_FILE_CONTENT,
     )
     .unwrap();
     let data_dir = cwd.join("data");

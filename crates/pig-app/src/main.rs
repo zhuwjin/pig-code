@@ -759,6 +759,9 @@ impl AppView {
                 ThreadEvent::OpenFile { path, line } => {
                     this.open_file_tab(&sid, path.clone(), *line, cx);
                 }
+                ThreadEvent::RetryNow => {
+                    this.agent.retry_now(sid.clone());
+                }
                 ThreadEvent::OpenCompactSummary { text } => {
                     this.open_compact_summary_tab(text.clone(), cx);
                 }
@@ -1282,7 +1285,7 @@ fn main() {
         if mode == "full" {
             pig_core::net_test_full_turn(None);
         } else {
-            pig_core::provider::net_test_blocking(&pig_core::config::default_path());
+            pig_core::net_test::net_test_blocking(&pig_core::config::default_path());
         }
         return;
     }

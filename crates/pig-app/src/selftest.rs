@@ -7,13 +7,13 @@ pub(crate) struct SelftestEnv {
 }
 
 pub(crate) fn setup_selftest() -> SelftestEnv {
-    let port = pig_core::mock::start_mock_server();
+    let port = pig_provider::mock::start_mock_server();
     let dir = std::env::temp_dir().join(format!("pig-app-selftest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create selftest dir");
     std::fs::write(
-        dir.join(pig_core::mock::MOCK_FILE_NAME),
-        pig_core::mock::MOCK_FILE_CONTENT,
+        dir.join(pig_provider::mock::MOCK_FILE_NAME),
+        pig_provider::mock::MOCK_FILE_CONTENT,
     )
     .expect("write mock file");
     // The data dir must live **outside** the workspace (mirroring production
@@ -118,7 +118,7 @@ pub(crate) async fn run_selftest(
                 .read(cx)
                 .debug_mention_results()
                 .iter()
-                .any(|r| r.contains(pig_core::mock::MOCK_FILE_NAME))
+                .any(|r| r.contains(pig_provider::mock::MOCK_FILE_NAME))
         });
         if found {
             break;
@@ -132,7 +132,7 @@ pub(crate) async fn run_selftest(
         app.hero_send(
             format!(
                 "{} create and modify files, then run a command",
-                pig_core::mock::SCENARIO_B_TRIGGER
+                pig_provider::mock::SCENARIO_B_TRIGGER
             ),
             vec![],
             vec![],
@@ -175,10 +175,10 @@ pub(crate) async fn run_selftest(
             let (tool_done, text, _, tool_output) = views.thread.read(cx).debug_last_assistant();
             if !streaming && waited > 1000 && tool_done {
                 assert!(
-                    text.contains(pig_core::mock::SCENARIO_B_MARKER),
+                    text.contains(pig_provider::mock::SCENARIO_B_MARKER),
                     "A text marker: {text}"
                 );
-                assert!(tool_output.contains(pig_core::mock::SCENARIO_B_BASH_MARKER));
+                assert!(tool_output.contains(pig_provider::mock::SCENARIO_B_BASH_MARKER));
                 return Some(());
             }
             None
@@ -225,7 +225,7 @@ pub(crate) async fn run_selftest(
         let views = app.views.get(&session_a).expect("session A view");
         views.thread.update(cx, |_, cx| {
             cx.emit(crate::thread_view::ThreadEvent::OpenFile {
-                path: pig_core::mock::MOCK_FILE_NAME.to_string(),
+                path: pig_provider::mock::MOCK_FILE_NAME.to_string(),
                 line: Some(1),
             });
         });
@@ -459,7 +459,7 @@ pub(crate) async fn run_selftest(
     let kept = app!(|app: &mut AppView, cx| {
         let views = app.views.get(&session_a).expect("session A view in memory");
         let (_, text, _, _) = views.thread.read(cx).debug_last_assistant();
-        text.contains(pig_core::mock::SCENARIO_B_MARKER)
+        text.contains(pig_provider::mock::SCENARIO_B_MARKER)
     });
     assert!(kept, "content should be kept after switching back to A");
     println!("[selftest] session switching OK");
@@ -489,7 +489,7 @@ pub(crate) async fn run_selftest(
             let (tool_done, text, _, _) = views.thread.read(cx).debug_last_assistant();
             let review_state = views.review.read(cx).debug_state();
             (tool_done
-                && text.contains(pig_core::mock::SCENARIO_B_MARKER)
+                && text.contains(pig_provider::mock::SCENARIO_B_MARKER)
                 && review_state.0 == 1
                 && review_state.1 == 3)
                 .then_some(())
@@ -537,7 +537,8 @@ pub(crate) async fn run_selftest(
                 .unwrap_or_default()
                 .iter()
                 .any(|note| {
-                    note.contains("model summary") && note.contains(pig_core::mock::SUMMARY_MARKER)
+                    note.contains("model summary")
+                        && note.contains(pig_provider::mock::SUMMARY_MARKER)
                 })
         });
         if compacted {
@@ -565,7 +566,7 @@ pub(crate) async fn run_selftest(
         let views = app.views.get(&session_a).expect("session A view");
         views.thread.update(cx, |_, cx| {
             cx.emit(crate::thread_view::ThreadEvent::OpenCompactSummary {
-                text: format!("## Summary\n\n{}", pig_core::mock::SUMMARY_MARKER),
+                text: format!("## Summary\n\n{}", pig_provider::mock::SUMMARY_MARKER),
             });
         });
     });
@@ -619,7 +620,7 @@ pub(crate) async fn run_selftest(
             session_c.clone(),
             format!(
                 "{} give me a refactoring plan",
-                pig_core::mock::SCENARIO_C_TRIGGER
+                pig_provider::mock::SCENARIO_C_TRIGGER
             ),
             vec![],
             vec![],
@@ -654,7 +655,7 @@ pub(crate) async fn run_selftest(
             (!thread.is_streaming()
                 && waited > 1000
                 && tool_done
-                && text.contains(pig_core::mock::SCENARIO_B_MARKER))
+                && text.contains(pig_provider::mock::SCENARIO_B_MARKER))
             .then_some(())
         });
         if done == Some(()) {
@@ -684,7 +685,7 @@ pub(crate) async fn run_selftest(
         )
     });
     assert!(
-        plan_text.contains(pig_core::mock::PLAN_MARKER),
+        plan_text.contains(pig_provider::mock::PLAN_MARKER),
         "plan file should contain the full plan text: {plan_text}"
     );
     println!("[selftest] plan mode loop (Write plan file -> panel approval -> work starts) OK");
@@ -745,7 +746,7 @@ pub(crate) async fn run_selftest(
             session_d.clone(),
             format!(
                 "{} create and modify files, then run a command",
-                pig_core::mock::SCENARIO_B_TRIGGER
+                pig_provider::mock::SCENARIO_B_TRIGGER
             ),
             vec![],
             vec![],
@@ -805,7 +806,7 @@ pub(crate) async fn run_selftest(
             (!thread.is_streaming()
                 && waited > 1000
                 && tool_done
-                && text.contains(pig_core::mock::SCENARIO_B_MARKER))
+                && text.contains(pig_provider::mock::SCENARIO_B_MARKER))
             .then_some(())
         });
         if done == Some(()) {
@@ -842,7 +843,7 @@ pub(crate) async fn run_selftest(
             session_e.clone(),
             format!(
                 "{} help me decide the implementation approach",
-                pig_core::mock::SCENARIO_Q_TRIGGER
+                pig_provider::mock::SCENARIO_Q_TRIGGER
             ),
             vec![],
             vec![],
@@ -901,7 +902,7 @@ pub(crate) async fn run_selftest(
             let (tool_done, text, _, tool_output) = thread.debug_last_assistant();
             if !thread.is_streaming() && waited > 1000 && tool_done {
                 assert!(
-                    text.contains(pig_core::mock::MOCK_Q_MARKER),
+                    text.contains(pig_provider::mock::MOCK_Q_MARKER),
                     "E text marker: {text}"
                 );
                 return Some(tool_output);
@@ -1108,7 +1109,7 @@ pub(crate) async fn run_selftest(
             !thread.is_streaming()
                 && waited > 1000
                 && !text.is_empty()
-                && title.as_deref() == Some(pig_core::mock::MOCK_TITLE)
+                && title.as_deref() == Some(pig_provider::mock::MOCK_TITLE)
         });
         if done {
             break;
@@ -1584,7 +1585,7 @@ pub(crate) async fn run_selftest(
         );
         app.agent.send_message(
             session_c.clone(),
-            format!("{} GREP", pig_core::mock::SUBAGENT_TRIGGER),
+            format!("{} GREP", pig_provider::mock::SUBAGENT_TRIGGER),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1627,7 +1628,7 @@ pub(crate) async fn run_selftest(
                 "after settling, the progress line should be cleared: {live_note:?}"
             );
             assert!(
-                tool_output.contains(pig_core::mock::SUBAGENT_CHILD_DONE),
+                tool_output.contains(pig_provider::mock::SUBAGENT_CHILD_DONE),
                 "Agent card output should contain the subagent conclusion: {tool_output}"
             );
             // A3c: the SubagentCard event wrote the agent card meta onto the card (agent_id + subtitle)
@@ -1659,7 +1660,7 @@ pub(crate) async fn run_selftest(
     app!(|app: &mut AppView, _| {
         app.agent.send_message(
             session_c.clone(),
-            format!("{} BG", pig_core::mock::SUBAGENT_TRIGGER),
+            format!("{} BG", pig_provider::mock::SUBAGENT_TRIGGER),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,
@@ -1784,7 +1785,7 @@ pub(crate) async fn run_selftest(
         );
         app.agent.send_message(
             session_d.clone(),
-            format!("{} BG", pig_core::mock::SUBAGENT_TRIGGER),
+            format!("{} BG", pig_provider::mock::SUBAGENT_TRIGGER),
             vec![],
             vec![],
             pig_protocol::ExecMode::AutoEdit,

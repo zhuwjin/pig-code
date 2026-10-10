@@ -1,8 +1,8 @@
 mod common;
 
 use common::{new_session, setup};
-use pig_core::mock;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, Op};
+use pig_provider::mock;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -662,7 +662,7 @@ async fn yolo_sensitive_file_still_blocked() {
 
     let mut tracker = pig_core::tool::ChangeTracker::default();
     let state = pig_core::task::SessionToolState::for_test();
-    let call = pig_core::provider::ToolCall {
+    let call = pig_provider::ToolCall {
         id: "t1".into(),
         name: "Read".into(),
         arguments: serde_json::json!({"path": ".env"}).to_string(),
@@ -844,7 +844,7 @@ async fn auto_edit_readonly_bash_passthrough() {
 
 #[test]
 fn approval_subject_extracts() {
-    let call = |name: &str, args: serde_json::Value| pig_core::provider::ToolCall {
+    let call = |name: &str, args: serde_json::Value| pig_provider::ToolCall {
         id: "t1".into(),
         name: name.into(),
         arguments: args.to_string(),

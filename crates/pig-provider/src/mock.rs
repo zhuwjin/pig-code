@@ -1282,7 +1282,7 @@ async fn handle_connection(
 
     // Non-streaming = auto naming / compact summary / connectivity test (must branch before the SSE response head)
     if body.contains("\"stream\":false") {
-        let ok = if body.contains(crate::session::TITLE_PROMPT_MARKER) {
+        let ok = if body.contains(pig_protocol::TITLE_PROMPT_MARKER) {
             write_title_response(&mut stream, anthropic).await
         } else if anthropic {
             write_json_response_anthropic(&mut stream, &body).await

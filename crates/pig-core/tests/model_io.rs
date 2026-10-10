@@ -1,8 +1,8 @@
 mod common;
 
 use common::{new_session, recv_until, setup};
-use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
+use pig_provider::mock;
 use std::time::Duration;
 
 /// The main session persists one call-trace record per provider step

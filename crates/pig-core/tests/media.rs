@@ -4,10 +4,10 @@
 
 use std::path::PathBuf;
 
-use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
 use pig_core::tool::{self, ChangeTracker, ToolContext};
 use pig_protocol::{Event, ExecMode, Op};
+use pig_provider::ToolCall;
 
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
@@ -320,7 +320,7 @@ mod common;
 /// (default false = the field is not declared; only an explicit true in
 /// [[providers.models]] enables it)
 fn setup_media(name: &str, input_image: bool) -> (PathBuf, PathBuf, PathBuf) {
-    let port = pig_core::mock::start_mock_server();
+    let port = pig_provider::mock::start_mock_server();
     let dir = std::env::temp_dir().join(format!("pig-core-media-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -366,7 +366,10 @@ async fn run_media_scenario(
         .ops
         .send(Op::SendMessage {
             session_id,
-            content: format!("{} read the image", pig_core::mock::SCENARIO_MEDIA_TRIGGER),
+            content: format!(
+                "{} read the image",
+                pig_provider::mock::SCENARIO_MEDIA_TRIGGER
+            ),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -546,7 +549,7 @@ fn rebuild_history_rehydrates_images_and_degrades_missing() {
 
 #[test]
 fn project_images_capability_projection() {
-    use pig_core::provider::ChatImage;
+    use pig_provider::ChatImage;
     let img = || ChatImage {
         media_type: "image/png".into(),
         data_base64: "QUJD".into(),
@@ -591,13 +594,13 @@ fn setup_paste(
     PathBuf,
     pig_core::AgentHandle,
 ) {
-    let (port, log) = pig_core::mock::start_mock_server_with_log();
+    let (port, log) = pig_provider::mock::start_mock_server_with_log();
     let dir = std::env::temp_dir().join(format!("pig-core-paste-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join(pig_core::mock::MOCK_FILE_NAME),
-        pig_core::mock::MOCK_FILE_CONTENT,
+        dir.join(pig_provider::mock::MOCK_FILE_NAME),
+        pig_provider::mock::MOCK_FILE_CONTENT,
     )
     .unwrap();
     let config_path = dir.join("config.toml");

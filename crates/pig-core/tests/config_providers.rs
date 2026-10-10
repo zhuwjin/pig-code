@@ -1,8 +1,8 @@
 mod common;
 
 use common::{new_session, recv_until};
-use pig_core::mock;
 use pig_protocol::{ApiFormat, Event, ExecMode, ModelConfig, Op, ProviderConfig};
+use pig_provider::mock;
 use std::time::Duration;
 
 fn v2_config(port: u16, format: ApiFormat) -> String {
@@ -238,7 +238,7 @@ high = {{ reasoning_effort = "high" }}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_provider_ok_and_fail() {
     let port = mock::start_mock_server();
-    let ok = pig_core::provider::test_provider(
+    let ok = pig_provider::test_provider(
         &format!("http://127.0.0.1:{port}/v1"),
         "mock-key",
         ApiFormat::OpenAiChat,
@@ -250,7 +250,7 @@ async fn test_provider_ok_and_fail() {
         "{ok:?}"
     );
 
-    let ok = pig_core::provider::test_provider(
+    let ok = pig_provider::test_provider(
         &format!("http://127.0.0.1:{port}/v1"),
         "mock-key",
         ApiFormat::AnthropicMessages,
@@ -263,8 +263,7 @@ async fn test_provider_ok_and_fail() {
     );
 
     let fail =
-        pig_core::provider::test_provider("http://127.0.0.1:1", "x", ApiFormat::OpenAiChat, "x")
-            .await;
+        pig_provider::test_provider("http://127.0.0.1:1", "x", ApiFormat::OpenAiChat, "x").await;
     assert!(matches!(fail, pig_protocol::ConnTestResult::Failed { .. }));
 }
 

@@ -68,6 +68,9 @@ pub enum ThreadEvent {
     /// Click on the compact divider's "view summary" link: opens the right-side
     /// "compact summary" tab (the clicked compaction point's own summary text)
     OpenCompactSummary { text: String },
+    /// Click on the retry-wait row's "Retry now" pill: skips the session's
+    /// remaining retry wait
+    RetryNow,
     /// Session fork: derives a new session from the history ending at this message's turn (turns = the number of turns kept)
     Fork { turns: usize },
 }
@@ -119,6 +122,9 @@ pub struct ThreadView {
     /// Context compaction in progress (between CompactStarted → ContextCompacted/TurnAborted):
     /// renders a "Compacting context" divider at the end of the list
     compacting: bool,
+    /// Live retry-wait state (Event::RetryStatus, superseded by any next event):
+    /// transient render-only data, never persisted
+    retrying: Option<pig_protocol::RetryStatus>,
     turn_started: Option<std::time::Instant>,
     /// The current turn was rebuilt by replay (turn_id starts with replay-): thinking segments get no real duration
     replay_turn: bool,
@@ -181,6 +187,34 @@ pub struct ThreadView {
 
 impl EventEmitter<ThreadEvent> for ThreadView {}
 
+/// Retry-wait row label, built at draw time from the structured status (a
+/// language switch re-renders correctly): "Retrying (2/10), in 5s · rate
+/// limited". Reason details (network root cause, in-band text) stay in the
+/// eventual Error note; the row carries the kind only.
+fn retry_wait_label(status: &pig_protocol::RetryStatus) -> String {
+    use pig_protocol::RetryReason;
+    let mut label = rust_i18n::t!(
+        "thread.retrying",
+        attempt = status.attempt,
+        max = status.max_attempts
+    )
+    .to_string();
+    let secs = status.delay_ms / 1000;
+    if secs > 0 {
+        label.push_str(rust_i18n::t!("thread.retry_after", seconds = secs).as_ref());
+    }
+    let reason = match &status.reason {
+        RetryReason::RateLimit { .. } => rust_i18n::t!("thread.retry_reason.rate_limit"),
+        RetryReason::Server(code) => rust_i18n::t!("thread.retry_reason.server", status = code),
+        RetryReason::Network { .. } => rust_i18n::t!("thread.retry_reason.network"),
+        RetryReason::EmptyCompletion => rust_i18n::t!("thread.retry_reason.empty"),
+        RetryReason::InBand { .. } => rust_i18n::t!("thread.retry_reason.inband"),
+    };
+    label.push_str(" · ");
+    label.push_str(reason.as_ref());
+    label
+}
+
 /// For self-tests: nav active-item diagnostics data (nav_last_active, offset_y, max_offset_y,
 /// container height, each user message row's [top, bottom) content coordinates)
 type NavActiveDetail = (Option<usize>, f32, f32, f32, Vec<(usize, f32, f32)>);
@@ -216,6 +250,7 @@ impl ThreadView {
             last_scroll_y: px(0.),
             streaming: false,
             compacting: false,
+            retrying: None,
             turn_started: None,
             replay_turn: false,
             queued: Vec::new(),
@@ -386,6 +421,7 @@ impl ThreadView {
         self.item_index.clear();
         self.follow_bottom = true;
         self.compacting = false;
+        self.retrying = None;
         self.nav_hover = None;
         self.nav_card = None;
         self.nav_card_last = None;
@@ -1084,6 +1120,78 @@ impl Render for ThreadView {
                                                 ))
                                                 .id("compacting-divider")
                                                 .test_support(),
+                                        ),
+                                )
+                            })
+                            // Retry-wait row: transient live state (superseded by any
+                            // next event); the pill skips the remaining wait
+                            .when_some(self.retrying.as_ref(), |this, retry| {
+                                this.child(
+                                    div()
+                                        .w_full()
+                                        .when(nav_eligible, |this| this.px_12())
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .max_w(content_max_w)
+                                                .mx_auto()
+                                                .px_4()
+                                                .child(
+                                                    h_flex()
+                                                        .id("retry-wait-row")
+                                                        .test_support()
+                                                        .gap_2()
+                                                        .child(
+                                                            Spinner::new()
+                                                                .icon(AssetIconName::LoaderCircle)
+                                                                .color(cx.theme().muted_foreground),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(
+                                                                    cx.theme().muted_foreground,
+                                                                )
+                                                                .child(retry_wait_label(retry)),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("retry-now-button")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_0p5()
+                                                                .rounded_full()
+                                                                .border_1()
+                                                                .border_color(cx.theme().border)
+                                                                .hover(|this| {
+                                                                    this.bg(cx
+                                                                        .theme()
+                                                                        .accent
+                                                                        .opacity(0.5))
+                                                                })
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            cx.theme().foreground,
+                                                                        )
+                                                                        .child(
+                                                                            rust_i18n::t!(
+                                                                                "thread.retry_now"
+                                                                            )
+                                                                            .to_string(),
+                                                                        ),
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    |_, _, _, cx| {
+                                                                        cx.emit(
+                                                                            ThreadEvent::RetryNow,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                        ),
+                                                ),
                                         ),
                                 )
                             })

@@ -42,7 +42,7 @@ pub(crate) fn compression_note(
 /// projection): the placeholder carries the paths, so the model knows images exist and where to read them.
 pub fn project_images(
     text: &mut String,
-    chat_images: &mut Vec<crate::provider::ChatImage>,
+    chat_images: &mut Vec<pig_provider::ChatImage>,
     media_paths: &[std::path::PathBuf],
     input_image: bool,
 ) {

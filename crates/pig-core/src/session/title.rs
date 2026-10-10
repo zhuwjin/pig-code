@@ -1,7 +1,7 @@
 use super::*;
 
-/// Stable marker in the prompt's first sentence: the mock server uses it to recognize title-generation requests
-pub const TITLE_PROMPT_MARKER: &str = "Generate a title for this coding session";
+// Stable marker in the prompt's first sentence: shared with the mock provider via pig-protocol
+pub use pig_protocol::TITLE_PROMPT_MARKER;
 /// Truncation length for the user message fed into the title prompt
 const TITLE_INPUT_MAX_CHARS: usize = 1_200;
 /// Maximum length of a generated title (overlong titles are truncated with an ellipsis)
@@ -146,7 +146,7 @@ pub(crate) fn spawn_title_generation(
         let cancel = CancellationToken::new();
         let raw = match tokio::time::timeout(
             TITLE_TIMEOUT,
-            provider::complete_text(&config, prompt, &cancel),
+            pig_provider::complete_text(&config, prompt, &cancel),
         )
         .await
         {

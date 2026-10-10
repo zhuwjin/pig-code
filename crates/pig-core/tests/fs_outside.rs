@@ -107,7 +107,10 @@ async fn outside_read_allow_is_per_call() {
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
     let session_id = new_session(&agent, dir.clone()).await;
 
-    let msg = format!("{} {{path}}", pig_core::mock::SCENARIO_OUTSIDE_READ_TRIGGER);
+    let msg = format!(
+        "{} {{path}}",
+        pig_provider::mock::SCENARIO_OUTSIDE_READ_TRIGGER
+    );
     // Replace {path} with the real outside file (created relative to a fresh ws)
     let (ws, outside) = outside_target("allow");
     let _ = ws;
@@ -170,7 +173,7 @@ async fn outside_read_always_allow_covers_session() {
     let _ = ws;
     let msg = format!(
         "{} {outside}",
-        pig_core::mock::SCENARIO_OUTSIDE_READ_TRIGGER
+        pig_provider::mock::SCENARIO_OUTSIDE_READ_TRIGGER
     );
 
     let first = run_turn(
@@ -226,7 +229,7 @@ async fn outside_read_reject_notes_boundary() {
     let _ = ws;
     let msg = format!(
         "{} {outside}",
-        pig_core::mock::SCENARIO_OUTSIDE_READ_TRIGGER
+        pig_provider::mock::SCENARIO_OUTSIDE_READ_TRIGGER
     );
 
     let run = run_turn(
@@ -262,7 +265,7 @@ async fn midturn_toggle_flip_takes_effect_immediately() {
     let _ = ws;
     let msg = format!(
         "{} {outside}",
-        pig_core::mock::SCENARIO_OUTSIDE_READ2_TRIGGER
+        pig_provider::mock::SCENARIO_OUTSIDE_READ2_TRIGGER
     );
 
     agent
@@ -353,7 +356,10 @@ async fn outside_write_pops_under_full_access() {
     let _ = ws;
     let outside_dir = outside_file.rsplit_once('/').unwrap().0.to_string();
     let file = format!("{outside_dir}/written.txt");
-    let msg = format!("{} {file}", pig_core::mock::SCENARIO_OUTSIDE_WRITE_TRIGGER);
+    let msg = format!(
+        "{} {file}",
+        pig_provider::mock::SCENARIO_OUTSIDE_WRITE_TRIGGER
+    );
 
     let run = run_turn(
         &agent,
@@ -389,7 +395,7 @@ async fn outside_read_pops_under_yolo() {
     let _ = ws;
     let msg = format!(
         "{} {outside}",
-        pig_core::mock::SCENARIO_OUTSIDE_READ_TRIGGER
+        pig_provider::mock::SCENARIO_OUTSIDE_READ_TRIGGER
     );
 
     let run = run_turn(

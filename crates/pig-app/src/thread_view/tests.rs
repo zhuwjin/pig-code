@@ -2414,3 +2414,67 @@ fn wheel_overscroll_on_unscrollable_list_keeps_follow(cx: &mut gpui_kit::TestApp
         })
         .unwrap();
 }
+
+/// RetryStatus sets the live retry state; any other event (a delta) clears it
+#[gpui_kit::test]
+fn retry_status_set_and_cleared_by_next_event(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::AppContext as _;
+    use pig_protocol::{Event, RetryReason, RetryStatus};
+    cx.update(gpui_kit::init);
+
+    struct Probe {
+        thread: gpui_kit::Entity<super::ThreadView>,
+    }
+    impl gpui_kit::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            _cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::IntoElement as _;
+            self.thread.clone().into_any_element()
+        }
+    }
+
+    let window = cx.open_window(
+        gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(400.)),
+        |_, cx| {
+            let thread = cx.new(super::ThreadView::new);
+            Probe { thread }
+        },
+    );
+    window
+        .update(cx, |probe, _, cx| {
+            probe.thread.update(cx, |view, cx| {
+                let status = RetryStatus {
+                    attempt: 2,
+                    max_attempts: 10,
+                    delay_ms: 4000,
+                    reason: RetryReason::RateLimit {
+                        retry_after_secs: Some(4),
+                    },
+                };
+                view.reduce_event(
+                    Event::RetryStatus {
+                        session_id: "s".into(),
+                        seq: 0,
+                        status: status.clone(),
+                    },
+                    cx,
+                );
+                assert_eq!(view.retrying.as_ref(), Some(&status));
+                // The retried attempt producing text supersedes the wait
+                view.reduce_event(
+                    Event::TextDelta {
+                        session_id: "s".into(),
+                        seq: 1,
+                        item_id: "i1".into(),
+                        delta: "hello".into(),
+                    },
+                    cx,
+                );
+                assert!(view.retrying.is_none(), "a delta clears the retry state");
+            });
+        })
+        .unwrap();
+}

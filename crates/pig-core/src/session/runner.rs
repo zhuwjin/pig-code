@@ -6,6 +6,9 @@ struct SessionEntry {
     /// snapshots while the session is inside the turn future (session=None)
     state: crate::task::SessionToolState,
     cancel: Option<CancellationToken>,
+    /// The active turn's retry control (Op::RetryNow reaches the in-flight
+    /// retry wait through it); same lifetime as `cancel`
+    retry: Option<pig_provider::CallControl>,
     model_override: Option<ModelSelection>,
     /// Session-level reasoning level: exists independently of the model override (applies to the configured default model when there is no override)
     reasoning_level: Option<String>,
@@ -44,12 +47,14 @@ fn start_turn(
         session.set_model(selection.clone());
     }
     let cancel = CancellationToken::new();
-    entry.cancel = Some(cancel.clone());
+    let control = pig_provider::CallControl::new(cancel.clone());
+    entry.cancel = Some(cancel);
+    entry.retry = Some(control.clone());
     let tx = event_tx.clone();
     let config = config.clone();
     turns.push(Box::pin(async move {
         session
-            .run_turn(content, files, images, &config, &tx, cancel)
+            .run_turn(content, files, images, &config, &tx, control)
             .await;
         (session_id, session)
     }));
@@ -211,7 +216,7 @@ pub async fn agent_loop(
                                 session.set_fs_access(meta.fs_read_outside, meta.fs_write_outside);
                                 let selection = meta_to_selection(&meta);
                                 let state = session.state.clone();
-                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, model_override: selection.clone(), reasoning_level: meta.reasoning_level.clone(), last_mode: meta.exec_mode, queue: Default::default(), mcp_status: None });
+                                sessions.insert(id.clone(), SessionEntry { session: Some(session), state, cancel: None, retry: None, model_override: selection.clone(), reasoning_level: meta.reasoning_level.clone(), last_mode: meta.exec_mode, queue: Default::default(), mcp_status: None });
                                 store.lock().expect("store lock").upsert_session(&meta);
                                 let (model, provider_name) = model_label!(selection.as_ref());
                                 emit_global!(Event::SessionConfigured {
@@ -309,6 +314,7 @@ pub async fn agent_loop(
                                     session: Some(session),
                                     state,
                                     cancel: None,
+                                    retry: None,
                                     model_override: selection.clone(),
                                     reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
                                     last_mode: meta.as_ref().map(|m| m.exec_mode).unwrap_or_default(),
@@ -621,6 +627,13 @@ pub async fn agent_loop(
                             cancel.cancel();
                         }
                     }
+                    Op::RetryNow { session_id } => {
+                        if let Some(entry) = sessions.get(&session_id)
+                            && let Some(control) = &entry.retry
+                        {
+                            control.retry_now();
+                        }
+                    }
                     Op::ApprovalReply { request_id, decision, feedback } => {
                         // The decision also wakes concurrent waiters under the same merge key (see resolve_approval)
                         super::resolve_approval(&pending, &request_id, decision, feedback);
@@ -849,7 +862,7 @@ pub async fn agent_loop(
                                 .first()
                                 .map(|m| m.id.clone())
                                 .unwrap_or_else(|| "ping".to_string());
-                            let result = provider::test_provider(
+                            let result = pig_provider::test_provider(
                                 &provider.base_url,
                                 &config::expand_env(&provider.api_key),
                                 provider.api_format,
@@ -923,6 +936,7 @@ pub async fn agent_loop(
                         .map(|mcp| mcp.statuses());
                     entry.session = Some(session);
                     entry.cancel = None;
+                    entry.retry = None;
                     // After the turn ends (including abort/error), automatically pop the queue head and continue
                     if let Some((content, files, images, mode)) = entry.queue.pop_front()
                         && let Some(resolved) = resolve!(entry.model_override.as_ref(), entry.reasoning_level.as_deref()) {

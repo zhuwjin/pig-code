@@ -1261,12 +1261,12 @@ async fn drive_subagent_loop(
         steps_run = step;
         report_progress(ctx, progress, tx, format!("Step {step} · thinking…"));
         let (child_tx, mut child_rx) = tokio::sync::mpsc::unbounded_channel();
-        let provider_task = tokio::spawn(provider::stream_chat(
+        let provider_task = tokio::spawn(pig_provider::stream_chat(
             run.child_config.clone(),
             run.history.clone(),
             run.schemas.clone(),
             child_tx,
-            cancel.clone(),
+            pig_provider::CallControl::new(cancel.clone()),
         ));
         let mut text = String::new();
         let mut reasoning = String::new();
@@ -1284,6 +1284,9 @@ async fn drive_subagent_loop(
                 Some(ProviderEvent::Reasoning(delta)) => reasoning.push_str(&delta),
                 Some(ProviderEvent::Text(delta)) => text.push_str(&delta),
                 Some(ProviderEvent::ToolCalls(calls)) => tool_calls = calls,
+                // Subagent retries stay out of the parent timeline (progress
+                // lines carry state); transient event, nothing to bookkeep
+                Some(ProviderEvent::Retrying(_)) => {}
                 Some(ProviderEvent::Usage {
                     input,
                     cache_read,
@@ -1301,7 +1304,7 @@ async fn drive_subagent_loop(
                 }
                 Some(ProviderEvent::Finished) | None => break,
                 Some(ProviderEvent::Failed(error)) => {
-                    failed = Some(crate::provider::core_error_en(&error));
+                    failed = Some(pig_provider::core_error_en(&error));
                     break;
                 }
             }

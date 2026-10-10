@@ -5,7 +5,7 @@
 //! the session layer (drive_subagent, private); the global concurrency slots live in task.rs.
 
 use super::*;
-use crate::provider::ChatMsg;
+use pig_provider::ChatMsg;
 
 /// Total budget for the aggregated result (same as the 32K budget for a single subagent's result injected into the parent session)
 pub const SWARM_RESULT_BUDGET: usize = 32_000;

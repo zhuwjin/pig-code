@@ -5,8 +5,8 @@
 mod common;
 
 use common::{new_session, recv_until, setup};
-use pig_core::mock;
 use pig_protocol::{CoreError, Event, ExecMode, Op};
+use pig_provider::mock;
 use std::time::Duration;
 
 /// An OpenAI-compatible gateway reporting a business error as a 200 SSE data

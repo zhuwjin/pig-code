@@ -11,14 +11,15 @@ cargo test -p pig-core               # Engine integration tests (tests/ dir; all
 cargo test -p pig-core --test <name> # A single test file, e.g. --test bash, --test mcp (by file name)
 cargo fmt && cargo clippy            # No custom rustfmt/clippy config; use the defaults
 PIG_SELFTEST=1 cargo run -p pig-app  # GUI end-to-end selftest (built-in mock provider + isolated temp data dir)
-cargo run -p pig-core --example mock_provider  # Standalone mock server for manual testing; point ~/.pigcode/config.toml at the printed base_url
+cargo run -p pig-provider --example mock_provider  # Standalone mock server for manual testing; point ~/.pigcode/config.toml at the printed base_url
 ```
 
 ## Architecture & Layering (Hard Rules)
 
-Three crates with one-way dependencies: `pig-app → pig-core → pig-protocol`.
+Four crates with one-way dependencies: `pig-app → pig-core → pig-provider → pig-protocol`.
 
 - **pig-protocol**: pure serde types (`Op` UI→core commands, `Event` core→UI events, config models), zero business logic, zero heavy deps. Keep protocol changes backward compatible (rollouts store old records; evolve gradually with `#[serde(default)]`).
+- **pig-provider**: the model-API wire crate (extracted 2026-10-10; was pig-core's `provider` module). Two formats (OpenAI Chat Completions / Anthropic Messages; a third, openai-responses, is planned), spec-level SSE decoding, Stainless-style SDK identity headers, transport retry with visibility (`ProviderEvent::Retrying` + `CallControl::retry_now`), one-shot sidecars (`complete_text`/`complete_messages`/`test_provider`), PIG_LOG_API wire logging, and the mock provider (used by pig-core tests and the GUI selftest). Same English-only / no-gpui rules as pig-core. Do NOT hand `pig-core::provider` paths back — call `pig_provider::` directly.
 - **pig-core**: the agent engine, running on a dedicated tokio-runtime thread (entry point `spawn_agent`), exchanging Op/Event with the UI over `async-channel`. **core must never import any gpui type**. Core design: delta events (TextDelta etc.) are for live rendering only and are never persisted; Done events carrying full values are the durable boundary; approval = core sends `ApprovalRequested` (with request_id) then blocks waiting for the UI's `ApprovalReply`; sessions persist as JSONL rollouts (first line meta + one item per line).
 - **pig-app**: the gpui-kit GUI, smol executor; `cx.spawn` loops read the Event channel and reduce into per-Entity view state.
 

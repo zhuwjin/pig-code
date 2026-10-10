@@ -11,13 +11,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config;
 use crate::paths::normalize_workspace_path;
-use crate::provider::ResolvedModel;
-use crate::provider::{ChatMsg, ProviderEvent, ToolCall};
 use crate::rollout::{Rollout, RolloutRecord, now_secs, rebuild_history};
 use crate::store::Store;
 use crate::tool::{ChangeTracker, ToolContext};
-use crate::{prompt, provider, tool};
+use crate::{prompt, tool};
 use pig_protocol::AppConfig;
+use pig_provider::ResolvedModel;
+use pig_provider::{ChatMsg, ProviderEvent, ToolCall};
 
 /// Pending approvals: request_id → reply channel. Shared between the manager
 /// and every session; request_ids carry a session_id prefix and are globally
@@ -100,6 +100,31 @@ fn meta_to_selection(meta: &SessionMeta) -> Option<ModelSelection> {
             reasoning_level: meta.reasoning_level.clone(),
         }),
         _ => None,
+    }
+}
+
+/// pig-provider's retry notice -> the protocol mirror the UI renders (plain
+/// integer fields; Duration does not serde)
+fn retry_status(notice: &pig_provider::RetryNotice) -> pig_protocol::RetryStatus {
+    use pig_protocol::{RetryReason, RetryStatus};
+    let reason = match &notice.reason {
+        pig_provider::RetryReason::RateLimit { retry_after } => RetryReason::RateLimit {
+            retry_after_secs: retry_after.map(|d| d.as_secs()),
+        },
+        pig_provider::RetryReason::Server(code) => RetryReason::Server(*code),
+        pig_provider::RetryReason::Network(detail) => RetryReason::Network {
+            detail: detail.clone(),
+        },
+        pig_provider::RetryReason::EmptyCompletion => RetryReason::EmptyCompletion,
+        pig_provider::RetryReason::InBand(detail) => RetryReason::InBand {
+            detail: detail.clone(),
+        },
+    };
+    RetryStatus {
+        attempt: notice.attempt,
+        max_attempts: notice.max_attempts,
+        delay_ms: notice.delay.as_millis() as u64,
+        reason,
     }
 }
 
@@ -634,13 +659,13 @@ pub(crate) async fn exec_tool_gated_ctx(
 fn tool_images_to_chat(
     arguments: &str,
     images: Vec<tool::ToolImage>,
-) -> Vec<crate::provider::ChatImage> {
+) -> Vec<pig_provider::ChatImage> {
     let label = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
         .and_then(|v| v["path"].as_str().map(str::to_string));
     images
         .into_iter()
-        .map(|img| crate::provider::ChatImage {
+        .map(|img| pig_provider::ChatImage {
             media_type: img.media_type,
             data_base64: img.data_base64,
             label: label.clone(),
@@ -658,7 +683,7 @@ pub(crate) enum GatedToolOutcome {
         /// Diff of this edit (for inline rendering in the parent session's
         /// tool card; ignored on the subagent path)
         edit: Option<pig_protocol::EditDiff>,
-        images: Vec<crate::provider::ChatImage>,
+        images: Vec<pig_provider::ChatImage>,
     },
     /// Rejected by approval/rules (note is the message for the model); the
     /// caller owns history/rollout/ToolCallEnd
@@ -696,13 +721,13 @@ pub(crate) enum SubagentOutcome {
 /// Argument bundle for settle_cancelled_tool: the currently cancelled call +
 /// the remaining unexecuted calls of the same response.
 struct CancelledTool<'a> {
-    call: &'a crate::provider::ToolCall,
+    call: &'a pig_provider::ToolCall,
     /// Tool card summary (persisted with the rollout record)
     summary: String,
     item_id: &'a str,
     /// Calls after the current one in the same response (will not execute;
     /// empty receipts are backfilled to keep tool_use pairing)
-    rest: &'a [crate::provider::ToolCall],
+    rest: &'a [pig_provider::ToolCall],
     /// Agent card metadata (the Agent tool's cancellation path; None for
     /// other tools)
     card: Option<crate::rollout::AgentCardRecord>,

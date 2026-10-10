@@ -2,6 +2,11 @@ use super::*;
 
 impl ThreadView {
     pub fn reduce_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        // Any non-RetryStatus event supersedes the retry wait: a delta means
+        // the retried attempt is producing, a turn end means it is over
+        if !matches!(event, Event::RetryStatus { .. }) {
+            self.retrying = None;
+        }
         match event {
             Event::SessionConfigured { .. } => {}
             // Mode chip and plan chip live in the composer (handled in main.rs/events.rs); the message flow need not respond
@@ -494,6 +499,9 @@ impl ThreadView {
             | Event::McpServerList { .. }
             | Event::ModelInfo { .. }
             | Event::WorkspaceList { .. } => {}
+            Event::RetryStatus { status, .. } => {
+                self.retrying = Some(status);
+            }
             Event::Error { error, .. } => {
                 self.finish_thinking();
                 self.replay_turn = false;

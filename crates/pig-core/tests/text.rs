@@ -2,10 +2,10 @@
 //! encode/decode, encoding/line-ending preservation in Read/Write/Edit,
 //! sensitive-file and symlink guards, byte-level ChangeTracker snapshots.
 
-use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
 use pig_core::text::{self, FileEncoding, LineEnding};
 use pig_core::tool::{self, ChangeTracker, ToolContext};
+use pig_provider::ToolCall;
 
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {

@@ -5,8 +5,8 @@
 mod common;
 
 use common::{new_session, recv_until, setup};
-use pig_core::mock;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, Op};
+use pig_provider::mock;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

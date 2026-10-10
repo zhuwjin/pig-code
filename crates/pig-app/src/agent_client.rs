@@ -109,6 +109,11 @@ impl AgentClient {
         self.send(Op::Interrupt { session_id });
     }
 
+    /// Skip the session's active model-call retry wait (no-op when none is in flight)
+    pub fn retry_now(&self, session_id: String) {
+        self.send(Op::RetryNow { session_id });
+    }
+
     /// Load a background subagent's full conversation (read-only display in the
     /// right "Subagent" tab)
     pub fn load_subagent(&self, session_id: String, agent_id: String) {

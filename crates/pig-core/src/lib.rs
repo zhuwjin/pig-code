@@ -1,6 +1,7 @@
-//! Pig Code's agent engine: Session / turn loop / OpenAI-compatible provider / tool execution.
-//! Runs on a dedicated tokio runtime thread via `spawn_agent`, exchanging Op/Event with the
-//! UI over channels.
+//! Pig Code's agent engine: Session / turn loop / tool execution, calling the
+//! wire-protocol crate pig-provider for every model request. Runs on a
+//! dedicated tokio runtime thread via `spawn_agent`, exchanging Op/Event with
+//! the UI over channels.
 //!
 //! Language-agnostic (Clean/Hexagonal): core holds no i18n registry — errors are carried by
 //! pig-protocol's CoreError enum + English detail, with localization deferred to pig-app
@@ -8,22 +9,19 @@
 //! English constants (see the root AGENTS.md convention).
 
 pub mod agent;
-pub mod api_log;
 pub mod config;
 pub mod files;
 pub mod git;
 pub mod mcp;
-pub mod mock;
 pub mod model_io;
 pub mod models_registry;
+pub mod net_test;
 pub mod paths;
 pub mod permissions;
 mod prompt;
-pub mod provider;
 pub mod rollout;
 pub mod session;
 pub mod skills;
-pub mod sse;
 pub mod store;
 pub mod task;
 pub mod text;

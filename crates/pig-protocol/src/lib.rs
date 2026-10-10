@@ -71,6 +71,11 @@ pub enum ApiFormat {
     AnthropicMessages,
 }
 
+/// Marker sentence opening the session-title sidecar prompt. Shared
+/// vocabulary: pig-core builds the prompt around it, the mock provider (and
+/// any test double) recognizes title requests by it.
+pub const TITLE_PROMPT_MARKER: &str = "Generate a title for this coding session";
+
 /// Workspace entry (persisted in the store.sqlite workspaces table)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceMeta {

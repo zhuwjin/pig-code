@@ -20,6 +20,31 @@ thread:
   compacting:
     zh-CN: 正在压缩上下文
     en: Compacting context
+  retrying:
+    zh-CN: 正在重试（%{attempt}/%{max}）
+    en: Retrying (%{attempt}/%{max})
+  retry_after:
+    zh-CN: ，%{seconds} 秒后
+    en: " in %{seconds}s"
+  retry_now:
+    zh-CN: 立即重试
+    en: Retry now
+  retry_reason:
+    rate_limit:
+      zh-CN: 限流
+      en: rate limited
+    server:
+      zh-CN: 服务端错误 %{status}
+      en: server error %{status}
+    network:
+      zh-CN: 网络错误
+      en: network error
+    empty:
+      zh-CN: 空回复
+      en: empty completion
+    inband:
+      zh-CN: 上游错误
+      en: provider error
   empty_hint:
     zh-CN: 空会话。输入消息开始对话，/ 查看命令，@ 引用文件。
     en: Empty session. Type a message to start — / for commands, @ to reference files.

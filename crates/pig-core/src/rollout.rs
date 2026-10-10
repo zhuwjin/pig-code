@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use pig_protocol::{CoreError, SessionMeta};
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{ChatImage, ChatMsg, ToolCall};
+use pig_provider::{ChatImage, ChatMsg, ToolCall};
 
 /// Persisted reference to an image attached to a user message (a file in the media directory; base64 is not stored)
 #[derive(Clone, Debug, Serialize, Deserialize)]

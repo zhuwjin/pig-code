@@ -5,9 +5,9 @@ use std::sync::atomic::Ordering;
 
 use pig_protocol::{CoreError, ExecMode};
 
-use crate::provider::ToolCall;
 use crate::task::SessionToolState;
 use crate::text::{FileEncoding, LineEnding};
+use pig_provider::ToolCall;
 
 const MAX_READ_LINES: usize = 2000;
 const MAX_READ_CHARS: usize = 100_000;

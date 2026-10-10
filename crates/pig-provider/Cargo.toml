@@ -1,0 +1,27 @@
+[package]
+name = "pig-provider"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pig-protocol = { path = "../pig-protocol" }
+encoding_rs = "0.8"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+tokio-util = "0.7"
+tracing = "0.1"
+
+# unix 取内核版本（uname，SDK 用户代理里的 os.release()）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows 取系统版本（RtlGetVersion，SDK 用户代理里的 os.release()）；
+# windows-rs 0.57 把 RtlGetVersion 放在 Wdk 命名空间，OSVERSIONINFOW 在 Win32
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.57", features = ["Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

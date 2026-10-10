@@ -44,7 +44,7 @@ impl Session {
             Some(config) => {
                 let messages = build_summary_messages(&self.history, config, instruction);
                 let tools = self.root_schemas();
-                match provider::complete_messages(config, &messages, &tools, cancel).await {
+                match pig_provider::complete_messages(config, &messages, &tools, cancel).await {
                     Ok(summary) => Some(summary),
                     Err(_) if cancel.is_cancelled() => {
                         self.emit(|session_id, seq| Event::TurnAborted { session_id, seq }, tx);
@@ -246,7 +246,7 @@ mod tests {
     fn assistant_call(id: &str) -> ChatMsg {
         ChatMsg::assistant(
             String::new(),
-            vec![crate::provider::ToolCall {
+            vec![pig_provider::ToolCall {
                 id: id.into(),
                 name: "Read".into(),
                 arguments: "{}".into(),
@@ -343,8 +343,8 @@ mod tests {
         assert_eq!(with_call, 9);
     }
 
-    fn test_model(context_window: u64) -> crate::provider::ResolvedModel {
-        crate::provider::ResolvedModel {
+    fn test_model(context_window: u64) -> pig_provider::ResolvedModel {
+        pig_provider::ResolvedModel {
             base_url: "http://x".into(),
             api_key: "k".into(),
             model: "m".into(),

@@ -1,8 +1,8 @@
 mod common;
 
 use common::{new_session, recv_until, setup};
-use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
+use pig_provider::mock;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

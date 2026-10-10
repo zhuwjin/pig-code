@@ -1,8 +1,8 @@
 //! Tool-layer unit tests: Edit failure branches, path escape, write/diff/revert.
 
-use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
 use pig_core::tool::{self, ChangeTracker, ToolContext};
+use pig_provider::ToolCall;
 
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {

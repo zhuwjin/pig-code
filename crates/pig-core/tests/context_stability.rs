@@ -9,9 +9,9 @@
 
 mod common;
 
-use pig_core::mock;
 use pig_core::spawn_agent_with_data_dir;
 use pig_protocol::{Event, Op};
+use pig_provider::mock;
 use std::time::Duration;
 
 /// Main-loop request = messages[0] is the Pig Code system prompt and carries a

@@ -11,7 +11,7 @@
 
 use std::sync::OnceLock;
 
-use crate::provider::ToolCall;
+use crate::chat::ToolCall;
 
 /// Whether the API wire log is on (PIG_LOG_API; checked once).
 pub fn enabled() -> bool {

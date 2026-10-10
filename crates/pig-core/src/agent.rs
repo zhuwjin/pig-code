@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use pig_protocol::{AppConfig, ProviderConfig};
 use serde::{Deserialize, Serialize};
 
-use crate::provider::ResolvedModel;
+use pig_provider::ResolvedModel;
 
 /// Default max turns for a subagent (when max_turns is not configured)
 pub const DEFAULT_MAX_TURNS: usize = 20;

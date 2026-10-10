@@ -1,4 +1,29 @@
-use super::*;
+use futures_util::StreamExt as _;
+use serde::{Deserialize, Serialize};
+
+use pig_protocol::CoreError;
+
+use crate::chat::{ChatMsg, ResolvedModel, ToolCall, finish, merge_reasoning_params};
+use crate::events::{CallControl, CallError, ProviderEvent};
+use crate::identity::apply_sdk_headers;
+use crate::retry::{SendOutcome, http_client, send_with_retry};
+
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    /// Custom-built (see to_openai_messages): an image-carrying tool result splits into a tool text message + a user image message
+    messages: &'a [serde_json::Value],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [serde_json::Value]>,
+    stream: bool,
+    stream_options: StreamOptions,
+    max_tokens: u64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct StreamOptions {
+    include_usage: bool,
+}
 
 /// Internal ChatMsg list -> OpenAI messages array.
 /// The only difference from direct serde serialization: OpenAI tool-role messages cannot carry images -- an image-carrying tool result
@@ -56,11 +81,6 @@ pub(crate) fn to_openai_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value>
     out
 }
 
-#[derive(Serialize)]
-pub(crate) struct StreamOptions {
-    include_usage: bool,
-}
-
 /// Request-level tool list assembly (shared by streaming/non-streaming, to prevent drift between the two):
 /// OpenAI wire shape verbatim + the server-side search tool when explicitly configured.
 pub(crate) fn openai_request_tools(
@@ -79,7 +99,7 @@ pub(crate) async fn stream_openai(
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
-    cancel: &tokio_util::sync::CancellationToken,
+    control: &CallControl,
 ) -> Result<(), CallError> {
     let client = http_client();
     let tools = openai_request_tools(config, &tools);
@@ -114,7 +134,8 @@ pub(crate) async fn stream_openai(
             )
             .json(&body)
         },
-        cancel,
+        control,
+        tx,
     )
     .await?
     {
@@ -146,7 +167,7 @@ pub(crate) async fn stream_openai(
     loop {
         let chunk = tokio::select! {
             chunk = byte_stream.next() => chunk,
-            _ = cancel.cancelled() => {
+            _ = control.cancelled() => {
                 api.finish("cancelled", &tool_calls);
                 return Ok(());
             }

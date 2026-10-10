@@ -1,8 +1,8 @@
 mod common;
 
 use common::{new_session, recv_until, setup};
-use pig_core::mock;
 use pig_protocol::{Event, ExecMode, Op};
+use pig_provider::mock;
 use std::time::Duration;
 
 /// Session fork: a two-turn session forked with turns=1 opens the new session

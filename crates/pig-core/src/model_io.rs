@@ -2,7 +2,7 @@
 //! provider call (aligned with ZCode's model-io: the UI's "view call trace" reads this file
 //! directly by session id to restore requests/responses/tool calls, without relying on rollout snapshots).
 
-use crate::provider::{ChatMsg, ToolCall};
+use pig_provider::{ChatMsg, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

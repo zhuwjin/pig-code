@@ -937,6 +937,7 @@ pub(crate) fn event_session_id(event: &Event) -> Option<String> {
         | Event::SubagentHistory { session_id, .. }
         | Event::SubagentActivity { session_id, .. }
         | Event::ExecModeChanged { session_id, .. }
+        | Event::RetryStatus { session_id, .. }
         | Event::PlanModeChanged { session_id, .. }
         | Event::FsAccessChanged { session_id, .. }
         | Event::FileSearchResults { session_id, .. } => Some(session_id.clone()),

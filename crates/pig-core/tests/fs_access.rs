@@ -6,10 +6,10 @@ mod common;
 
 use std::sync::atomic::Ordering;
 
-use pig_core::provider::ToolCall;
 use pig_core::task::SessionToolState;
 use pig_core::tool::{self, ChangeTracker, ToolContext};
 use pig_protocol::{Event, ExecMode, Op};
+use pig_provider::ToolCall;
 
 fn call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
@@ -276,7 +276,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         .ops
         .send(Op::SendMessage {
             session_id: session_id.clone(),
-            content: format!("{} edit a file", pig_core::mock::SCENARIO_B_TRIGGER),
+            content: format!("{} edit a file", pig_provider::mock::SCENARIO_B_TRIGGER),
             files: vec![],
             images: vec![],
             mode: ExecMode::AutoEdit,
@@ -310,7 +310,7 @@ async fn plan_mode_blocks_write_even_with_switch_on() {
         "all hard-denied by Plan mode: {ends:?}"
     );
     assert!(
-        !cwd.join(pig_core::mock::SCENARIO_B_FILE).exists(),
+        !cwd.join(pig_provider::mock::SCENARIO_B_FILE).exists(),
         "no file should be created in Plan mode"
     );
     agent.shutdown();

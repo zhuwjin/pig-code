@@ -39,7 +39,7 @@ pub struct AgentMeta {
 /// Read a subagent context: first-line meta + the remaining msg lines rebuild the history
 /// (for resume). Bad lines error with the line number; serde ignores the meta line's "type"
 /// field by default.
-pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<crate::provider::ChatMsg>), String> {
+pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>), String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read subagent context {}: {e}", path.display()))?;
     let mut lines = raw.lines().enumerate();
@@ -66,7 +66,7 @@ pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<crate::provider::ChatMs
                 "Subagent context line {line_no} is not a msg record"
             ));
         }
-        let msg: crate::provider::ChatMsg = serde_json::from_value(value["msg"].clone())
+        let msg: pig_provider::ChatMsg = serde_json::from_value(value["msg"].clone())
             .map_err(|e| format!("Failed to parse subagent context line {line_no} message: {e}"))?;
         history.push(msg);
     }
@@ -81,7 +81,7 @@ pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<crate::provider::ChatMs
 /// ChatMsg has no tool-error marker, so is_error is always false.
 pub fn display_items(
     meta: &AgentMeta,
-    msgs: &[crate::provider::ChatMsg],
+    msgs: &[pig_provider::ChatMsg],
 ) -> (String, String, Vec<pig_protocol::SubagentItem>) {
     let title = meta.description.clone();
     let subtitle = format!("{} · {}", meta.provider, meta.model);
@@ -93,7 +93,7 @@ pub fn display_items(
 /// tool_call_id **within this batch** — in the incremental case a batch = one step's
 /// assistant (with tool_calls) + the tool results that immediately follow, so matching
 /// naturally lands inside the batch.
-pub fn project_display_items(msgs: &[crate::provider::ChatMsg]) -> Vec<pig_protocol::SubagentItem> {
+pub fn project_display_items(msgs: &[pig_provider::ChatMsg]) -> Vec<pig_protocol::SubagentItem> {
     let mut items: Vec<pig_protocol::SubagentItem> = Vec::new();
     // Tool-row indexes indexed by call id: for backfilling output from tool result messages
     let mut tool_row_by_call: HashMap<String, usize> = HashMap::new();
@@ -117,7 +117,7 @@ pub fn project_display_items(msgs: &[crate::provider::ChatMsg]) -> Vec<pig_proto
                     });
                 }
                 for wire in msg.tool_calls.iter().flatten() {
-                    let call = crate::provider::ToolCall {
+                    let call = pig_provider::ToolCall {
                         id: wire.id.clone(),
                         name: wire.function.name.clone(),
                         arguments: wire.function.arguments.clone(),

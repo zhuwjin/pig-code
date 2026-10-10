@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pig-protocol = { path = "../pig-protocol" }
+pig-provider = { path = "../pig-provider" }
 async-channel = "2"
 encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "system-proxy"] }

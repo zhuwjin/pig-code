@@ -25,7 +25,7 @@ impl Session {
         images: Vec<pig_protocol::PendingImage>,
         config: &ResolvedModel,
         tx: &async_channel::Sender<Event>,
-        cancel: CancellationToken,
+        control: pig_provider::CallControl,
     ) {
         self.turn_counter += 1;
         self.turn_input = 0;
@@ -126,7 +126,7 @@ impl Session {
         // (next_media_index): naming by per-message index would be overwritten
         // by later turns
         let mut image_refs: Vec<crate::rollout::ImageRef> = Vec::new();
-        let mut chat_images: Vec<crate::provider::ChatImage> = Vec::new();
+        let mut chat_images: Vec<pig_provider::ChatImage> = Vec::new();
         if !images.is_empty() {
             let media_dir = crate::rollout::media_dir(&self.data_dir.join("sessions"), &self.id);
             let mut next = crate::rollout::next_media_index(&media_dir);
@@ -162,7 +162,7 @@ impl Session {
                             width: comp.width,
                             height: comp.height,
                         });
-                        chat_images.push(crate::provider::ChatImage {
+                        chat_images.push(pig_provider::ChatImage {
                             media_type: comp.media_type,
                             data_base64: crate::tool::base64_encode(&comp.bytes),
                             label: Some(format!("Image {}", ix + 1)),
@@ -211,7 +211,7 @@ impl Session {
         loop {
             step += 1;
             match self
-                .run_step(turn_id.clone(), step, config, tx, &cancel)
+                .run_step(turn_id.clone(), step, config, tx, &control)
                 .await
             {
                 StepOutcome::TextOnly => {
@@ -255,8 +255,9 @@ impl Session {
         step: usize,
         config: &ResolvedModel,
         tx: &async_channel::Sender<Event>,
-        cancel: &CancellationToken,
+        control: &pig_provider::CallControl,
     ) -> StepOutcome {
+        let cancel = control.cancel_token();
         // Lazy MCP connection (once per session): reads .pigcode/mcp.json +
         // data_dir/mcp.json; with no config we get an empty manager at
         // negligible cost; a single server failure does not affect the others
@@ -288,14 +289,14 @@ impl Session {
         let io_input_full = crate::model_io::project_input(&self.history);
         let io_offset = crate::model_io::common_prefix_len(&io_input_full, &self.io_last_input);
         let io_input: Vec<_> = io_input_full[io_offset..].to_vec();
-        let provider_task = tokio::spawn(provider::stream_chat(
+        let provider_task = tokio::spawn(pig_provider::stream_chat(
             config.clone(),
             self.history.clone(),
             // Root session tool set = built-in + Agent/AgentSwarm + MCP (rebuilt
             // every step: profiles and MCP tools may change)
             self.root_schemas(),
             event_tx,
-            cancel.clone(),
+            control.clone(),
         ));
 
         let mut text = String::new();
@@ -342,6 +343,19 @@ impl Session {
                     );
                 }
                 Some(ProviderEvent::ToolCalls(calls)) => tool_calls = calls,
+                // Transient retry state is live-render-only (no usage/tool
+                // bookkeeping) but forwarded so the UI can show the wait
+                Some(ProviderEvent::Retrying(notice)) => {
+                    let status = retry_status(&notice);
+                    self.emit(
+                        |session_id, seq| Event::RetryStatus {
+                            session_id,
+                            seq,
+                            status,
+                        },
+                        tx,
+                    );
+                }
                 Some(ProviderEvent::Usage {
                     input,
                     cache_read,
@@ -392,7 +406,7 @@ impl Session {
                     // Structured error goes straight to the UI (forwarded via
                     // Event::Error); the trace persists a one-line English
                     // version
-                    step_error = Some(crate::provider::core_error_en(&error));
+                    step_error = Some(pig_provider::core_error_en(&error));
                     self.emit(
                         |session_id, seq| Event::Error {
                             session_id: Some(session_id),
@@ -1581,7 +1595,7 @@ struct ParallelOutput {
     output: String,
     is_error: bool,
     edit: Option<pig_protocol::EditDiff>,
-    images: Vec<crate::provider::ChatImage>,
+    images: Vec<pig_provider::ChatImage>,
     file_change: Option<tool::FileChange>,
 }
 

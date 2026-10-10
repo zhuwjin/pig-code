@@ -118,7 +118,7 @@ impl Session {
                     let (tool, output) = (tool.clone(), output.clone());
                     let is_error = *is_error;
                     // Replay always recomputes the summary from the full arguments, so replays stay consistent as summary logic evolves
-                    let summary = tool::summarize(&crate::provider::ToolCall {
+                    let summary = tool::summarize(&pig_provider::ToolCall {
                         id: String::new(),
                         name: tool.clone(),
                         arguments: arguments.clone(),

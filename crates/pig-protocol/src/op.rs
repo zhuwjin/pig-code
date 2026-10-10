@@ -71,6 +71,11 @@ pub enum Op {
     Interrupt {
         session_id: String,
     },
+    /// Skip the session's active model-call retry wait (the next attempt starts
+    /// immediately); no-op when no wait is in flight
+    RetryNow {
+        session_id: String,
+    },
     ApprovalReply {
         request_id: String,
         decision: ApprovalDecision,

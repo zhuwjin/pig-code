@@ -54,7 +54,7 @@ pub fn init() {
     });
 
     // Model API wire log: own daily file, only when PIG_LOG_API is on
-    let api_layer = pig_core::api_log::enabled().then(|| {
+    let api_layer = pig_provider::api_log::enabled().then(|| {
         let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
             &log_dir,
             "pig-api.log",

@@ -351,6 +351,13 @@ pub enum Event {
         item: Option<SubagentItem>,
         finished: bool,
     },
+    /// Live-only: the session's model call entered a retry wait (transient,
+    /// never persisted; superseded by the next delta or the turn's end)
+    RetryStatus {
+        session_id: String,
+        seq: u64,
+        status: RetryStatus,
+    },
     Error {
         session_id: Option<String>,
         seq: u64,
@@ -358,4 +365,33 @@ pub enum Event {
         /// detail is the English original)
         error: CoreError,
     },
+}
+
+/// Why a model call is retrying (mirror of pig-provider's RetryReason; the UI
+/// localizes at render time, the string fields stay English detail)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetryReason {
+    /// HTTP 429; retry_after is the honored Retry-After when present (seconds)
+    RateLimit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u64>,
+    },
+    /// HTTP 5xx
+    Server(u16),
+    /// Send-phase network failure (DNS/TLS/connect/...); detail is the folded root cause
+    Network { detail: String },
+    /// A 200 stream ended with no text/reasoning/tool calls (one silent retry)
+    EmptyCompletion,
+    /// Retryable in-band 200 error; detail is the surfaced text
+    InBand { detail: String },
+}
+
+/// One retry's visible state (mirror of pig-provider's RetryNotice): which
+/// retry of how many, how long the wait is (milliseconds), and why
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryStatus {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub delay_ms: u64,
+    pub reason: RetryReason,
 }

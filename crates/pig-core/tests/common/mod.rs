@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use pig_core::mock;
 use pig_protocol::{Event, Op};
+use pig_provider::mock;
 
 #[allow(dead_code)]
 pub fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {

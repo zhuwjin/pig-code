@@ -1,4 +1,11 @@
-use super::*;
+use futures_util::StreamExt as _;
+
+use pig_protocol::CoreError;
+
+use crate::chat::{ChatMsg, ResolvedModel, ToolCall, finish, merge_reasoning_params};
+use crate::events::{CallControl, CallError, ProviderEvent};
+use crate::identity::apply_sdk_headers;
+use crate::retry::{SendOutcome, http_client, send_with_retry};
 
 pub(crate) fn anthropic_url(base: &str) -> String {
     if base.ends_with("/v1") {
@@ -183,7 +190,7 @@ pub(crate) async fn stream_anthropic(
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
-    cancel: &tokio_util::sync::CancellationToken,
+    control: &CallControl,
 ) -> Result<(), CallError> {
     let (system, messages) = to_anthropic_messages(&messages);
     let anthropic_tools = anthropic_request_tools(config, &tools);
@@ -226,7 +233,8 @@ pub(crate) async fn stream_anthropic(
             )
             .json(&body)
         },
-        cancel,
+        control,
+        tx,
     )
     .await?
     {
@@ -262,7 +270,7 @@ pub(crate) async fn stream_anthropic(
     loop {
         let chunk = tokio::select! {
             chunk = byte_stream.next() => chunk,
-            _ = cancel.cancelled() => {
+            _ = control.cancelled() => {
                 api.finish("cancelled", &tool_calls);
                 return Ok(());
             }
