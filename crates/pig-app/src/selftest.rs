@@ -196,26 +196,36 @@ pub(crate) async fn run_selftest(
     // Trajectory panel: the mock turn's multi-step calls should already have
     // persisted model-io records; the panel loads and renders both
     // collapsed/expanded states (building the element tree without panicking
-    // passes)
-    app!(|app: &mut AppView, cx| {
-        app.open_right_tab(RightTab::Trajectory, cx);
-        let records = app.trajectory.as_ref().map(|s| s.records.len());
-        assert!(
-            records.is_some_and(|n| n >= 2),
-            "scenario B multi-step calls should persist multiple model-io records: {records:?}"
-        );
-        let _ = app.render_trajectory_panel(cx);
-    });
-    app!(|app: &mut AppView, cx| {
-        // Row-by-row expansion: simulate opening the first row of the first call
-        // and re-render the expanded state
-        if let Some(state) = &mut app.trajectory {
-            let key = format!("{}:0", state.records[0].turn);
-            state.expanded.insert(key);
-        }
-        let _ = app.render_trajectory_panel(cx);
-        app.close_right_tab(RightTab::Trajectory, cx);
-    });
+    // passes). render_trajectory_panel needs the window (the rem size feeds
+    // the whole-line clip cap), so it is driven via update_window
+    cx.update_window(window_handle, |_, window, cx| {
+        view.update(cx, |app: &mut AppView, cx| {
+            app.open_right_tab(RightTab::Trajectory, cx);
+            let records = app.trajectory.as_ref().map(|s| s.records.len());
+            assert!(
+                records.is_some_and(|n| n >= 2),
+                "scenario B multi-step calls should persist multiple model-io records: {records:?}"
+            );
+            let _ = app.render_trajectory_panel(window, cx);
+            // Row-by-row expansion: simulate opening the first row of the
+            // first call and re-render the expanded state (row 0 is the
+            // system prompt, past the long-body clip — render both the
+            // floating expand pill and the full body's in-flow collapse pill)
+            if let Some(state) = &mut app.trajectory {
+                let key = format!("{}:0", state.records[0].turn);
+                state.expanded.insert(key.clone());
+                state.expanded_full.insert(format!("{key}:full"));
+            }
+            let _ = app.render_trajectory_panel(window, cx);
+            if let Some(state) = &mut app.trajectory {
+                let key = format!("{}:0", state.records[0].turn);
+                state.expanded_full.remove(&format!("{key}:full"));
+            }
+            let _ = app.render_trajectory_panel(window, cx);
+            app.close_right_tab(RightTab::Trajectory, cx);
+        });
+    })
+    .expect("selftest window should be available");
     println!("[selftest] trajectory panel load/expand rendering OK");
 
     // File viewer: simulate clicking the Read card path (ThreadEvent::OpenFile

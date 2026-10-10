@@ -1,13 +1,18 @@
 use super::*;
 
 impl Sidebar {
-    pub(crate) fn render_action_rows(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Action rows ("new task" / "search"): the trailing shortcut keycaps
+    /// (same bordered style as the right panel home page) appear only while
+    /// the row is hovered — stateless via group/group_hover; hidden chips
+    /// keep their layout space (opacity 0) so the row never reflows
+    pub(crate) fn render_action_rows(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .p_2()
             .gap_1()
             .child(
                 h_flex()
                     .id("new-task")
+                    .group("action-row")
                     .gap_2()
                     .px_2()
                     .py_1()
@@ -24,16 +29,25 @@ impl Sidebar {
                             .flex_1()
                             .child(rust_i18n::t!("sidebar.new_task")),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Ctrl+N"),
+                    .when_some(
+                        crate::AppView::render_shortcut_chips(&crate::NewTask, true, window, cx),
+                        |this, chips| {
+                            this.child(
+                                div()
+                                    .opacity(0.)
+                                    .group_hover("action-row", |mut style| {
+                                        style.opacity = Some(1.);
+                                        style
+                                    })
+                                    .child(chips),
+                            )
+                        },
                     ),
             )
             .child(
                 h_flex()
                     .id("open-search")
+                    .group("action-row")
                     .gap_2()
                     .px_2()
                     .py_1()
@@ -50,11 +64,24 @@ impl Sidebar {
                             .flex_1()
                             .child(rust_i18n::t!("sidebar.search")),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Ctrl+K"),
+                    .when_some(
+                        crate::AppView::render_shortcut_chips(
+                            &crate::FocusSearch,
+                            true,
+                            window,
+                            cx,
+                        ),
+                        |this, chips| {
+                            this.child(
+                                div()
+                                    .opacity(0.)
+                                    .group_hover("action-row", |mut style| {
+                                        style.opacity = Some(1.);
+                                        style
+                                    })
+                                    .child(chips),
+                            )
+                        },
                     ),
             )
             .into_any_element()
@@ -125,6 +152,11 @@ impl Sidebar {
         .into_any_element()
     }
 
+    /// Workspace-nested single-line session row: the 32px left padding
+    /// indents the content so the title aligns with the workspace name (row
+    /// mx 8 + px 8 + icon 16 + gap 8 = 40 from the sidebar edge), while the
+    /// row's own highlight box keeps the workspace row's mx_2 span — the two
+    /// highlight rectangles stay left-aligned
     pub(crate) fn render_session_row(
         &self,
         window: &Window,
@@ -155,7 +187,8 @@ impl Sidebar {
         let mut row = h_flex()
             .id(("session", ix))
             .mx_2()
-            .px_2()
+            .pl_8()
+            .pr_2()
             .py_1()
             .gap_2()
             .rounded(cx.theme().radius)
@@ -650,13 +683,7 @@ impl Sidebar {
                     .is_some_and(|a| a.collapsing);
                 let mut block = v_flex().gap_1();
                 for ix in sessions.iter().take(shown.min(WORKSPACE_PAGE_SIZE)) {
-                    block = block.child(
-                        div()
-                            // Indent 24px: session text aligns with the workspace
-                            // name (row mx+px 16 + icon 16 + gap 8 = 40)
-                            .pl_6()
-                            .child(self.render_session_row(window, *ix, cx)),
-                    );
+                    block = block.child(self.render_session_row(window, *ix, cx));
                 }
                 if shown > WORKSPACE_PAGE_SIZE || paginate_collapsing {
                     let mut extra = v_flex().gap_1();
@@ -665,8 +692,7 @@ impl Sidebar {
                         .skip(WORKSPACE_PAGE_SIZE)
                         .take(shown.saturating_sub(WORKSPACE_PAGE_SIZE))
                     {
-                        extra = extra
-                            .child(div().pl_6().child(self.render_session_row(window, *ix, cx)));
+                        extra = extra.child(self.render_session_row(window, *ix, cx));
                     }
                     match self.paginate_anims.get(workspace) {
                         Some(anim) => {

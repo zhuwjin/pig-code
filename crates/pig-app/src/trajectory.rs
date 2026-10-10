@@ -20,14 +20,48 @@ pub(crate) struct TrajectoryState {
     /// Keys of expanded message rows ("{turn}:{row_ix}"; turn uniquely
     /// identifies a call, so expanded state survives refreshes)
     pub(crate) expanded: HashSet<String>,
-    /// Keys of rows whose LONG content was expanded past the collapse
-    /// threshold ("{turn}:{row_ix}:full"); long bodies render collapsed by
-    /// default with an expand affordance (no "truncated" marker, ZCode-style)
+    /// Keys of rows whose LONG body was expanded past the collapsed clip
+    /// ("{turn}:{row_ix}:full"); long bodies clip to a whole-line pixel cap
+    /// by default with an expand pill floating over a bottom fade band
+    /// (no "truncated" marker, ZCode-style)
     pub(crate) expanded_full: HashSet<String>,
 }
 
-/// Char count past which an expanded row's body starts collapsed
-const FULL_COLLAPSE_CHARS: usize = 2000;
+/// Collapse gate for an expanded row's body: estimated visual lines past
+/// which the body clips (the text itself is never cut — the clip is a
+/// whole-line pixel cap)
+const TRAJ_COLLAPSED_LINES: usize = 12;
+/// Wrap estimate for the gate: display columns per body row at the right
+/// panel's default 300px width (text_xs mono ≈ 7.2px per ASCII cell; CJK
+/// counts double — the same weight heuristic as the user-message estimate).
+/// A misestimate only shifts the collapse onset slightly
+const TRAJ_WRAP_COLS: usize = 34;
+/// text_xs font size in rems (mirrors the body rows' .text_xs())
+const TRAJ_TEXT_FONT_REMS: f32 = 0.75;
+
+/// Collapsed cap in px: N lines × the per-line rounded height (font × phi,
+/// rounded like TextStyle::line_height_in_pixels), so the clip never cuts a
+/// line in half (same trick as the user-message bubble cap)
+fn traj_collapsed_cap_px(rem_px: f32) -> f32 {
+    let line_px = (TRAJ_TEXT_FONT_REMS * rem_px * 1.618_034).round();
+    TRAJ_COLLAPSED_LINES as f32 * line_px
+}
+
+/// Whether an expanded row's body is estimated tall enough to clip: each
+/// hard line contributes its wrap-aware visual rows (pure function of the
+/// text, so refreshes/replays agree)
+fn traj_body_is_long(text: &str) -> bool {
+    text.lines()
+        .map(|line| {
+            let cols: usize = line
+                .chars()
+                .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+                .sum();
+            cols.div_ceil(TRAJ_WRAP_COLS).max(1)
+        })
+        .sum::<usize>()
+        > TRAJ_COLLAPSED_LINES
+}
 
 impl TrajectoryState {
     /// Load this session's model io trace from the current data directory
@@ -256,7 +290,11 @@ impl AppView {
 
     /// Right panel "trajectory" tab content: summary subtitle + a list of
     /// call cards in chronological order
-    pub(crate) fn render_trajectory_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_trajectory_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(state) = &self.trajectory else {
             // Opening the tab rereads; this is the fallback for the
             // no-open-session case
@@ -297,6 +335,10 @@ impl AppView {
             )
             .to_string()
         };
+
+        // Whole-line clip cap for long row bodies (rem-aware: UI scaling
+        // keeps the cut on a line boundary)
+        let cap_px = traj_collapsed_cap_px(f32::from(window.rem_size()));
 
         v_flex()
             .id("trajectory-panel")
@@ -362,7 +404,7 @@ impl AppView {
                             .collect()
                     };
                     prev_len = full.len();
-                    cards.push(self.render_call_card(rec_ix, record, &display, cx));
+                    cards.push(self.render_call_card(rec_ix, record, &display, cap_px, cx));
                 }
                 v_flex().w_full().gap_4().children(cards).into_any_element()
             })
@@ -371,12 +413,14 @@ impl AppView {
 
     /// Single call card: group header (index/source/finish reason/
     /// IN·OUT·duration·clock time) + "Input" and "Output" section cards +
-    /// error block; display_input is the display-layer delta input
+    /// error block; display_input is the display-layer delta input; cap_px
+    /// is the long-body whole-line clip cap
     fn render_call_card(
         &self,
         rec_ix: usize,
         record: &pig_core::model_io::ModelIoRecord,
         display_input: &[pig_core::model_io::ModelIoMessage],
+        cap_px: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Materialize theme values into locals first (Hsla is Copy / fonts
@@ -432,6 +476,7 @@ impl AppView {
                     duration_ms: record.duration_ms,
                     ts_ms: record.ts_ms,
                 },
+                cap_px,
                 cx,
             ));
             row_ix += 1;
@@ -452,6 +497,7 @@ impl AppView {
                     duration_ms: record.duration_ms,
                     ts_ms: record.ts_ms,
                 },
+                cap_px,
                 cx,
             ));
             row_ix += 1;
@@ -561,8 +607,9 @@ impl AppView {
 
     /// Single message row (shared by the input/output cards): collapsed =
     /// colored role label + single-line preview + chevron; expanded = label +
-    /// duration·timestamp + copy button + full content
-    fn render_msg_row(&self, spec: RowSpec, cx: &mut Context<Self>) -> AnyElement {
+    /// duration·timestamp + copy button + full content; cap_px is the
+    /// long-body whole-line clip cap
+    fn render_msg_row(&self, spec: RowSpec, cap_px: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let mono = theme.mono_font_family.clone();
@@ -626,27 +673,29 @@ impl AppView {
                     cx.stop_propagation();
                 }))
                 .child(Icon::new(IconName::Copy).size_3().text_color(muted));
-            // Long bodies render collapsed with an expand affordance (no
-            // "truncated" marker — the full text is one click away)
-            let is_long = spec.full.chars().count() > FULL_COLLAPSE_CHARS;
+            // Long bodies clip to a whole-line pixel cap with an expand
+            // affordance (no "truncated" marker — the full text is one click
+            // away): collapsed = max_h clip + bottom fade band + a floating
+            // centered pill (the user-message bubble's toggle pattern, with a
+            // text label); expanded = the same pill as an in-flow centered
+            // row under the full text. The clip is by height — the text
+            // itself is never cut
+            let is_long = traj_body_is_long(&spec.full);
             let full_key = format!("{}:full", spec.key);
             let full_open = self
                 .trajectory
                 .as_ref()
                 .is_some_and(|s| s.expanded_full.contains(&full_key));
-            let body_text = if !is_long || full_open {
-                spec.full.clone()
-            } else {
-                spec.full
-                    .chars()
-                    .take(FULL_COLLAPSE_CHARS)
-                    .collect::<String>()
-            };
-            let full_label = if full_open {
-                rust_i18n::t!("trajectory.collapse_full").to_string()
-            } else {
-                rust_i18n::t!("trajectory.expand_full").to_string()
-            };
+            let body = div()
+                .w_full()
+                .px_3()
+                .pb_2()
+                .text_xs()
+                // Same mono face as the collapsed preview — expanding a row
+                // must not flip the font under the eyes
+                .font_family(mono.clone())
+                .text_color(cx.theme().foreground)
+                .child(spec.full.clone());
             v_flex()
                 .w_full()
                 .when(zebra, |d| d.bg(zebra_bg))
@@ -667,38 +716,57 @@ impl AppView {
                         .child(copy_btn)
                         .child(chevron),
                 )
-                .child(
+                .child(if is_long && !full_open {
+                    // Bottom fade over the clipped tail: a transparent→solid
+                    // gradient in the row's base color (the panel sits on the
+                    // root background; the zebra tint composites on top for odd
+                    // rows — the same two-layer trick as the sidebar title fade)
+                    let base = cx.theme().background;
                     div()
-                        .w_full()
-                        .px_3()
-                        .pb_2()
-                        .text_xs()
-                        .text_color(cx.theme().foreground)
-                        .child(body_text),
-                )
-                .when(is_long, |this| {
+                        .relative()
+                        .child(div().max_h(px(cap_px)).overflow_hidden().child(body))
+                        .child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(48.))
+                                .flex()
+                                .items_end()
+                                .justify_center()
+                                .bg(linear_gradient(
+                                    180.,
+                                    linear_color_stop(base.opacity(0.), 0.),
+                                    linear_color_stop(base, 1.),
+                                ))
+                                .when(zebra, |this| {
+                                    this.child(div().absolute().inset_0().bg(linear_gradient(
+                                        180.,
+                                        linear_color_stop(zebra_bg.opacity(0.), 0.),
+                                        linear_color_stop(zebra_bg, 1.),
+                                    )))
+                                })
+                                .child(
+                                    div()
+                                        .pb_1p5()
+                                        .child(full_toggle_pill(row_id, false, &full_key, cx)),
+                                ),
+                        )
+                        .into_any_element()
+                } else {
+                    body.into_any_element()
+                })
+                // Expanded: the pill moves in-flow as a centered row under the
+                // full text (the user-message bubble's placement rule)
+                .when(is_long && full_open, |this| {
                     this.child(
                         div()
-                            .id(("traj-full", row_id))
                             .w_full()
-                            .px_3()
                             .pb_2()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if let Some(state) = &mut this.trajectory
-                                    && !state.expanded_full.remove(&full_key)
-                                {
-                                    state.expanded_full.insert(full_key.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(format!("{full_label} ▾")),
-                            ),
+                            .flex()
+                            .justify_center()
+                            .child(full_toggle_pill(row_id, true, &full_key, cx)),
                     )
                 })
                 .into_any_element()
@@ -719,6 +787,64 @@ impl AppView {
                 .into_any_element()
         }
     }
+}
+
+/// Long-body toggle pill (shared by both states): a rounded-full bordered
+/// chip with a shadow, carrying a chevron + the 展开/收起 label (the
+/// user-message bubble's toggle shape, with a text label). The click toggles
+/// `expanded_full` with stop_propagation so the row's own collapse isn't
+/// triggered
+fn full_toggle_pill(
+    row_id: usize,
+    full_open: bool,
+    full_key: &str,
+    cx: &mut Context<AppView>,
+) -> Stateful<Div> {
+    let muted = cx.theme().muted_foreground;
+    let label = if full_open {
+        rust_i18n::t!("trajectory.collapse_full")
+    } else {
+        rust_i18n::t!("trajectory.expand_full")
+    };
+    let full_key = full_key.to_string();
+    div()
+        .id(("traj-full", row_id))
+        .flex()
+        .items_center()
+        .gap_1()
+        .h_7()
+        .px_3()
+        .rounded_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
+        .shadow_sm()
+        .cursor_pointer()
+        .hover(|this| this.bg(cx.theme().secondary))
+        .child(
+            Icon::new(if full_open {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronDown
+            })
+            .size_3p5()
+            .text_color(muted),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .child(label.to_string()),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            if let Some(state) = &mut this.trajectory
+                && !state.expanded_full.remove(&full_key)
+            {
+                state.expanded_full.insert(full_key.clone());
+            }
+            cx.notify();
+        }))
 }
 
 /// "Input"/"Output" section card: title bar + message row list with thin

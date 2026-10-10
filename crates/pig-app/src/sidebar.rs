@@ -275,7 +275,7 @@ impl Render for Sidebar {
                         // handle's hit area (gpui-base's Side::Left handle hit area
                         // stops on the left side of the boundary line), making the
                         // line undraggable
-                        .child(self.render_action_rows(cx))
+                        .child(self.render_action_rows(window, cx))
                         .child(self.render_list_header(cx))
                         .child(
                             div()

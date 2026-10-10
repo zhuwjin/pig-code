@@ -275,16 +275,16 @@ impl AppView {
     }
 
     /// Shortcut chip set (ZCode style: one small chip per key; hidden when no
-    /// key is bound).
+    /// key is bound). Associated fn (no self) so the sidebar's action rows
+    /// reuse it too.
     /// page = panel home page: large bordered keycaps, macOS modifier symbols
     /// split per key; otherwise (dropdown menu): small chips on a muted
     /// background, the macOS symbol string as a single chip.
     pub(crate) fn render_shortcut_chips(
-        &self,
         action: &dyn Action,
         page: bool,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> Option<AnyElement> {
         let binding = window
             .highest_precedence_binding_for_action_in_context(action, KeyContext::default())?;
@@ -362,7 +362,7 @@ impl AppView {
     ) -> AnyElement {
         let (label, icon, shortcut, disabled, tab) = Self::right_menu_items()[ix].clone();
         let chips =
-            shortcut.and_then(|action| self.render_shortcut_chips(action, page, window, cx));
+            shortcut.and_then(|action| Self::render_shortcut_chips(action, page, window, cx));
         h_flex()
             .id(("right-menu-item", ix))
             .w_full()
@@ -534,7 +534,7 @@ impl AppView {
             .gap_2()
             .pl_3()
             .pr_1()
-            .py_1()
+            .py_0p5()
             .rounded(cx.theme().radius)
             .cursor_pointer()
             .when(active, |this| this.bg(cx.theme().accent))
@@ -646,7 +646,7 @@ impl AppView {
                     )
                     .into_any_element(),
             },
-            Some(RightTab::Trajectory) => self.render_trajectory_panel(cx),
+            Some(RightTab::Trajectory) => self.render_trajectory_panel(window, cx),
             Some(RightTab::Subagent { agent_id }) => match self.subagent_tabs.get(agent_id) {
                 Some(panel) => panel.clone().into_any_element(),
                 None => self.render_right_menu_page(window, cx),

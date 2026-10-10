@@ -79,8 +79,8 @@ trajectory:
     zh-CN: 上下文压缩
     en: Context compaction
   expand_full:
-    zh-CN: 展开全部
-    en: Expand full text
+    zh-CN: 展开
+    en: Expand
   collapse_full:
     zh-CN: 收起
     en: Collapse
