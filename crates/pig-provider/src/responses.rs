@@ -12,6 +12,14 @@
 //! NO `encrypted_content` (only OpenAI's own endpoint can decrypt it; pig's
 //! sessions stay on one provider so requesting it is a follow-up gated on a
 //! persistence story — plaintext reasoning is session-memory-only today).
+//! Caveat recorded from the Vercel AI SDK source: official OpenAI drops
+//! reasoning items without encrypted_content under store:false, so the
+//! plaintext replay targets the compat endpoints (Kimi-class) that accept it.
+//!
+//! Tool results carrying images (ReadMediaFile) send `output` as an array of
+//! INPUT-style items — [{input_text}, {input_image}] — the shape all three
+//! audited implementations agree on (kimi-code's default lowering, the Vercel
+//! AI SDK's convertFunctionToolResultOutput, codex-rs's content-items form).
 
 use futures_util::StreamExt as _;
 
@@ -88,15 +96,33 @@ pub(crate) fn to_responses_input(messages: &[ChatMsg]) -> (String, Vec<serde_jso
                     }
                 }
             }
-            // Tool output is a plain string (v1: images from ReadMediaFile are
-            // not carried into responses-format tool results — a documented
-            // follow-up alongside the encrypted-reasoning one)
+            // Tool output is a plain string, or — when the result carries
+            // images — an array of input-style items (see the module docs)
             "tool" => {
-                input.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": msg.tool_call_id.clone().unwrap_or_default(),
-                    "output": msg.content.clone().unwrap_or_default(),
-                }));
+                let call_id = msg.tool_call_id.clone().unwrap_or_default();
+                if msg.images.is_empty() {
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": msg.content.clone().unwrap_or_default(),
+                    }));
+                } else {
+                    let mut items = vec![serde_json::json!({
+                        "type": "input_text",
+                        "text": msg.content.clone().unwrap_or_default(),
+                    })];
+                    for img in &msg.images {
+                        items.push(serde_json::json!({
+                            "type": "input_image",
+                            "image_url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+                        }));
+                    }
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": items,
+                    }));
+                }
             }
             _ => {}
         }
@@ -424,6 +450,33 @@ mod tests {
         assert_eq!(input[4]["type"], "function_call_output");
         assert_eq!(input[4]["call_id"], "c1");
         assert_eq!(input[4]["output"], "ok");
+    }
+
+    #[test]
+    fn tool_result_images_ride_the_output_array() {
+        let messages = vec![ChatMsg::tool_result_with_images(
+            "c1",
+            "Read image x.png".into(),
+            vec![ChatImage {
+                media_type: "image/png".into(),
+                data_base64: "QUJD".into(),
+                label: Some("x.png".into()),
+            }],
+        )];
+        let (_instructions, input) = to_responses_input(&messages);
+        assert_eq!(input.len(), 1);
+        let output = &input[0]["output"];
+        assert!(
+            output.is_array(),
+            "an image-carrying result sends the array form: {output}"
+        );
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[0]["text"], "Read image x.png");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,QUJD");
+        // The imageless path stays a plain string (regression-safe)
+        let (_i, input) = to_responses_input(&[ChatMsg::tool_result("c2", "ok".into())]);
+        assert!(input[0]["output"].is_string());
     }
 
     #[test]
