@@ -45,6 +45,7 @@ impl SettingsView {
             input_video: model.input_video,
             input_pdf: model.input_pdf,
             cap_structured: model.cap_structured,
+            cap_strict_tools: model.cap_strict_tools,
             cap_web_search: model.cap_web_search,
             cap_system_msg: model.cap_system_msg,
             enabled: model.enabled,
@@ -181,6 +182,7 @@ impl SettingsView {
             input_video: dialog.input_video,
             input_pdf: dialog.input_pdf,
             cap_structured: dialog.cap_structured,
+            cap_strict_tools: dialog.cap_strict_tools,
             cap_web_search: dialog.cap_web_search,
             web_search_tool: web_search_tool.unwrap_or(None),
             cap_system_msg: dialog.cap_system_msg,
@@ -384,6 +386,12 @@ impl SettingsView {
         }
         if overwrite || info.structured_output.is_some() {
             dialog.cap_structured = info.structured_output.unwrap_or(false);
+        }
+        // Provider-identity rule (pi's capability table): only lit for
+        // OpenAI/DeepSeek/Z.ai picks; everything else leaves the checkbox
+        // alone so manual overrides survive
+        if overwrite || info.strict_tools.is_some() {
+            dialog.cap_strict_tools = info.strict_tools.unwrap_or(false);
         }
         cx.notify();
     }
@@ -853,13 +861,63 @@ impl SettingsView {
                                             h_flex()
                                                 .gap_3()
                                                 .child(Checkbox::new("cap-struct").label(rust_i18n::t!("settings.models.cap_structured").as_ref()).checked(dialog.cap_structured).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_structured = *v; } cx.notify(); })))
+                                                .child(Checkbox::new("cap-strict").label(rust_i18n::t!("settings.models.cap_strict_tools").as_ref()).checked(dialog.cap_strict_tools).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_strict_tools = *v; } cx.notify(); })))
+                                                .child(
+                                                    div()
+                                                        .id("cap-strict-hint")
+                                                        .flex_shrink_0()
+                                                        .tooltip(move |window, cx| {
+                                                            gpui_kit::component::tooltip::Tooltip::element(
+                                                                move |_window, _cx| {
+                                                                    div()
+                                                                        .max_w(gpui_kit::px(320.))
+                                                                        .child(rust_i18n::t!("settings.models.cap_strict_tools_hint").to_string())
+                                                                },
+                                                            )
+                                                            .build(window, cx)
+                                                        })
+                                                        .child(
+                                                            Icon::new(IconName::Info)
+                                                                .size_3p5()
+                                                                .text_color(cx.theme().muted_foreground),
+                                                        ),
+                                                )
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .gap_3()
                                                 .child(Checkbox::new("cap-web").label(rust_i18n::t!("settings.models.cap_web_search").as_ref()).checked(dialog.cap_web_search).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_web_search = *v; } cx.notify(); })))
                                                 .child(Checkbox::new("cap-sys").label(rust_i18n::t!("settings.models.cap_system_msg").as_ref()).checked(dialog.cap_system_msg).on_click(cx.listener(|this, v: &bool, _, cx| { if let Some(d) = &mut this.model_dialog { d.cap_system_msg = *v; } cx.notify(); }))),
                                         )
                                         .child(
                                             v_flex()
                                                 .gap_1()
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.web_search_tool").to_string()))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(rust_i18n::t!("settings.models.web_search_tool").to_string()))
+                                                        .child(
+                                                            div()
+                                                                .id("web-search-tool-hint")
+                                                                .flex_shrink_0()
+                                                                .tooltip(move |window, cx| {
+                                                                    gpui_kit::component::tooltip::Tooltip::element(
+                                                                        move |_window, _cx| {
+                                                                            div()
+                                                                                .max_w(gpui_kit::px(320.))
+                                                                                .child(rust_i18n::t!("settings.models.web_search_tool_hint").to_string())
+                                                                        },
+                                                                    )
+                                                                    .build(window, cx)
+                                                                })
+                                                                .child(
+                                                                    Icon::new(IconName::Info)
+                                                                        .size_3p5()
+                                                                        .text_color(cx.theme().muted_foreground),
+                                                                ),
+                                                        ),
+                                                )
                                                 .child(Textarea::new(&dialog.web_search_json))
                                                 .when_some(dialog.web_search_error.clone(), |this, error| {
                                                     this.child(

@@ -109,6 +109,10 @@ fn parse_entry(pid: &str, mid: &str, model: &serde_json::Value) -> ModelRegistry
         reasoning_levels,
         input_modalities,
         structured_output,
+        // pi's capability table: these chat endpoints honor strict; everyone
+        // else (incl. Moonshot, denylisted by pi) stays None so a manual
+        // override survives registry picks
+        strict_tools: matches!(pid, "openai" | "deepseek" | "zai").then_some(true),
     }
 }
 
@@ -283,6 +287,7 @@ mod tests {
                 reasoning_levels: vec!["low".into(), "high".into()],
                 input_modalities: vec!["text".into(), "image".into()],
                 structured_output: Some(true),
+                strict_tools: None,
             },
         );
         save_cache(&path, 42, &index);

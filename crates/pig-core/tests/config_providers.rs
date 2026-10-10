@@ -565,3 +565,71 @@ cap_structured = true
     );
     agent.shutdown();
 }
+
+/// cap_strict_tools on a chat-format model: the streaming request's function
+/// tools carry strict + the strictified schema shape
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_tools_ride_the_request() {
+    let (port, log) = mock::start_mock_server_with_log();
+    let dir = std::env::temp_dir().join(format!("pig-core-strict-tools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"default_provider = "mock"
+default_model = "mock-model"
+
+[[providers]]
+id = "mock"
+name = "Mock"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key = "mock-key"
+api_format = "OpenAiChat"
+enabled = true
+
+[[providers.models]]
+id = "mock-model"
+context_window = 128000
+max_output_tokens = 8192
+cap_strict_tools = true
+"#
+        ),
+    )
+    .unwrap();
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), dir.join("data"));
+    let events = agent.events.clone();
+    let sid = new_session(&agent, dir).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: sid,
+            content: "Read the mock file and summarize".into(),
+            files: vec![],
+            images: vec![],
+            mode: ExecMode::AutoEdit,
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |e| {
+        matches!(e, Event::TurnComplete { .. })
+    })
+    .await;
+    let bodies = log.lock().expect("log");
+    let streaming = bodies
+        .iter()
+        .find(|body| body.contains("\"stream\":true"))
+        .expect("a streaming request in the log");
+    assert!(
+        streaming.contains("\"strict\":true"),
+        "function tools carry strict: {streaming}"
+    );
+    assert!(
+        streaming.contains("\"additionalProperties\":false"),
+        "the strictified schema shape rides along: {streaming}"
+    );
+    agent.shutdown();
+}

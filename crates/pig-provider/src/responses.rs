@@ -156,12 +156,20 @@ pub(crate) fn responses_request_tools(
         .iter()
         .map(|tool| {
             let function = &tool["function"];
+            // Strict only when the schema strictified (per-tool degradation
+            // for inexpressible MCP shapes)
+            let strict_params = config
+                .cap_strict_tools
+                .then(|| crate::strict_tools::strictify_tool_schema(&function["parameters"]))
+                .flatten();
             serde_json::json!({
                 "type": "function",
                 "name": function["name"],
                 "description": function["description"],
-                "parameters": function["parameters"],
-                "strict": false,
+                "parameters": strict_params
+                    .clone()
+                    .unwrap_or_else(|| function["parameters"].clone()),
+                "strict": strict_params.is_some(),
             })
         })
         .collect();
@@ -468,6 +476,39 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_tools_strict_flag() {
+        let mut model = super::ResolvedModel {
+            base_url: "http://localhost".into(),
+            api_key: String::new(),
+            model: "m".into(),
+            context_window: 0,
+            max_output_tokens: 0,
+            api_format: pig_protocol::ApiFormat::OpenAiResponses,
+            reasoning_params: None,
+            cap_structured: false,
+            cap_strict_tools: false,
+            cap_web_search: false,
+            web_search_tool: None,
+            input_image: false,
+            provider_name: "p".into(),
+        };
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "Read", "description": "d", "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }}
+        })];
+        let off = super::responses_request_tools(&model, &tools);
+        assert_eq!(off[0]["strict"], false, "off: strict stays false");
+        model.cap_strict_tools = true;
+        let on = super::responses_request_tools(&model, &tools);
+        assert_eq!(on[0]["strict"], true);
+        assert_eq!(on[0]["parameters"]["additionalProperties"], false);
+    }
+
+    #[test]
     fn responses_web_search_default_injection() {
         use pig_protocol::ApiFormat;
         let model = |cap: bool, tool: Option<serde_json::Value>| super::ResolvedModel {
@@ -479,6 +520,7 @@ mod tests {
             api_format: ApiFormat::OpenAiResponses,
             reasoning_params: None,
             cap_structured: false,
+            cap_strict_tools: false,
             cap_web_search: cap,
             web_search_tool: tool,
             input_image: false,

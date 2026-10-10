@@ -354,6 +354,7 @@ mod tests {
             api_format: pig_protocol::ApiFormat::OpenAiChat,
             reasoning_params: None,
             cap_structured: false,
+            cap_strict_tools: false,
             cap_web_search: false,
             web_search_tool: None,
             input_image: false,

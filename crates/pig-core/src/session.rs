@@ -170,6 +170,7 @@ pub fn resolve_model(
         api_format: provider.api_format,
         reasoning_params,
         cap_structured: model.cap_structured,
+        cap_strict_tools: model.cap_strict_tools,
         cap_web_search: model.cap_web_search,
         web_search_tool: model.web_search_tool.clone(),
         input_image: model.input_image,

@@ -17,6 +17,12 @@ pub struct ModelConfig {
     // Capability flags (stored primarily, not all consumed yet)
     #[serde(default)]
     pub cap_structured: bool,
+    /// Endpoint honors OpenAI strict function-calling semantics (or Anthropic
+    /// strict tool_use): tool schemas are strictified and sent with strict on,
+    /// the endpoint then guarantees well-formed tool arguments by constrained
+    /// decoding (OpenAI/DeepSeek/GLM chat endpoints support it; Kimi does not)
+    #[serde(default)]
+    pub cap_strict_tools: bool,
     #[serde(default)]
     pub cap_web_search: bool,
     /// Native web search tool definition: Anthropic defaults to web_search_20250305;
@@ -58,6 +64,7 @@ impl ModelConfig {
             input_video: false,
             input_pdf: false,
             cap_structured: false,
+            cap_strict_tools: false,
             cap_web_search: false,
             web_search_tool: None,
             cap_system_msg: false,
@@ -130,6 +137,11 @@ pub struct ModelRegistryInfo {
     /// checkboxes untouched
     #[serde(default)]
     pub structured_output: Option<bool>,
+    /// Strict tool schemas: derived from the provider identity (pi's
+    /// capability table — OpenAI/DeepSeek/Z.ai chat endpoints honor strict,
+    /// the rest stays untouched); None = leave the checkbox alone
+    #[serde(default)]
+    pub strict_tools: Option<bool>,
 }
 
 /// models.dev only provides level names; the parameter shape is generated per the

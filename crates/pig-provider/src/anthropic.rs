@@ -167,6 +167,25 @@ pub(crate) fn anthropic_request_tools(
     tools: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
     let mut out = to_anthropic_tools(tools);
+    // Anthropic strict tool_use: only first-party models (bare claude- prefix;
+    // gateway route IDs like anthropic/claude-… do not count — ZCode's rule,
+    // compat gateways may reject unknown tool fields); applied before the
+    // server-side search tool is appended (it takes no strict)
+    if config.cap_strict_tools && config.model.starts_with("claude-") {
+        for tool in &mut out {
+            if let Some(strict_schema) =
+                crate::strict_tools::strictify_tool_schema(&tool["input_schema"])
+            {
+                tool["input_schema"] = strict_schema;
+                tool["strict"] = serde_json::Value::Bool(true);
+            } else {
+                tracing::warn!(
+                    tool = tool["name"].as_str().unwrap_or_default(),
+                    "schema not expressible in the strict subset; sending without strict"
+                );
+            }
+        }
+    }
     if let Some(tool) = anthropic_web_search_tool(config) {
         out.push(tool);
     }

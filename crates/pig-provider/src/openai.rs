@@ -87,9 +87,34 @@ pub(crate) fn openai_request_tools(
     config: &ResolvedModel,
     tools: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
-    let mut out = tools.to_vec();
+    // Strict mode rewrites every function tool; per-tool degradation keeps
+    // inexpressible schemas (MCP passthrough) verbatim and un-strict
+    let mut out: Vec<serde_json::Value> = if config.cap_strict_tools {
+        tools.iter().map(apply_strict_function_tool).collect()
+    } else {
+        tools.to_vec()
+    };
     if let Some(tool) = openai_web_search_tool(config) {
         out.push(tool);
+    }
+    out
+}
+
+/// One OpenAI wire-shape tool under strict mode: strict-subset parameters +
+/// `strict: true` on the function object. Returns the tool unchanged when the
+/// schema cannot be expressed in the subset.
+fn apply_strict_function_tool(tool: &serde_json::Value) -> serde_json::Value {
+    let mut out = tool.clone();
+    let name = tool["function"]["name"].as_str().unwrap_or_default();
+    match crate::strict_tools::strictify_tool_schema(&tool["function"]["parameters"]) {
+        Some(strict_params) => {
+            out["function"]["parameters"] = strict_params;
+            out["function"]["strict"] = serde_json::Value::Bool(true);
+        }
+        None => tracing::warn!(
+            tool = name,
+            "schema not expressible in the strict subset; sending without strict"
+        ),
     }
     out
 }

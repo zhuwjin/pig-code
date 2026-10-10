@@ -180,12 +180,22 @@ settings:
     cap_structured:
       zh-CN: 结构化输出
       en: Structured output
+    cap_strict_tools:
+      zh-CN: 严格工具参数
+      en: Strict tool arguments
+    cap_strict_tools_hint:
+      zh-CN: 端点需支持 OpenAI strict 语义才生效：工具参数由服务端约束解码保证合法（OpenAI/DeepSeek/GLM 支持，Kimi 不支持）；注册表选模型时按提供商自动点亮，可手动覆盖
+      en: 'Only effective when the endpoint honors OpenAI strict semantics: tool arguments become guaranteed well-formed via constrained decoding (OpenAI/DeepSeek/GLM support it, Kimi does not). Auto-filled from the provider when picking a registry model; manually overridable.'
+
     cap_web_search:
       zh-CN: 原生联网搜索
       en: Native web search
     web_search_tool:
-      zh-CN: 服务端搜索工具 JSON（勾选"原生联网搜索"后注入请求的 tools；灰字为该格式的默认值，OpenAI 兼容格式留空则不注入）
-      en: 'Server-side search tool JSON (injected into request tools when "Native web search" is checked; the gray placeholder is this format''s default — chat-completions injects nothing when left empty)'
+      zh-CN: 服务端搜索工具 JSON
+      en: Server-side search tool JSON
+    web_search_tool_hint:
+      zh-CN: 勾选"原生联网搜索"后注入请求的 tools；灰字占位为该格式的默认值（Anthropic/Responses 有默认，OpenAI 兼容格式留空则不注入）
+      en: 'Injected into request tools when "Native web search" is checked; the gray placeholder is this format default (Anthropic/Responses have one; chat-completions injects nothing when left empty)'
     err_web_search_json:
       zh-CN: '服务端搜索工具不是合法 JSON: %{error}'
       en: 'web_search_tool is not valid JSON: %{error}'

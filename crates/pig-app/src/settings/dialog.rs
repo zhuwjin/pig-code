@@ -11,6 +11,7 @@ pub struct ModelDialog {
     pub(crate) input_video: bool,
     pub(crate) input_pdf: bool,
     pub(crate) cap_structured: bool,
+    pub(crate) cap_strict_tools: bool,
     pub(crate) cap_web_search: bool,
     pub(crate) cap_system_msg: bool,
     pub(crate) enabled: bool,

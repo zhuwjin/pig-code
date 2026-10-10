@@ -24,6 +24,7 @@ mod retry;
 mod sidecar;
 mod sse;
 mod stream;
+mod strict_tools;
 
 pub use anthropic::anthropic_web_search_tool;
 pub use chat::{ChatImage, ChatMsg, FunctionWire, ResolvedModel, ToolCall, ToolCallWire};

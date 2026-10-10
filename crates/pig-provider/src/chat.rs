@@ -18,6 +18,8 @@ pub struct ResolvedModel {
     /// Model supports native structured output (gates sidecar schema forcing;
     /// see sidecar::apply_structured)
     pub cap_structured: bool,
+    /// Endpoint honors strict function-calling semantics (see strict_tools)
+    pub cap_strict_tools: bool,
     pub web_search_tool: Option<serde_json::Value>,
     /// Model supports image input (gate for ReadMediaFile)
     pub input_image: bool,
@@ -378,6 +380,7 @@ mod tests {
             api_format: ApiFormat::AnthropicMessages,
             reasoning_params: None,
             cap_structured: false,
+            cap_strict_tools: false,
             cap_web_search: cap,
             web_search_tool: tool,
             input_image: false,
@@ -422,6 +425,70 @@ mod tests {
             openai_web_search_tool(&search_model(true, Some(custom.clone()))).unwrap(),
             custom
         );
+    }
+
+    /// Strict tool mode on: function tools gain strictified parameters and
+    /// strict; off = verbatim passthrough (byte-identical, cache-safe)
+    #[test]
+    fn openai_request_tools_strict_on_and_off() {
+        let mut model = search_model(false, None);
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "Read", "description": "d", "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}},
+                "required": ["path"]
+            }}
+        })];
+        assert_eq!(
+            crate::openai::openai_request_tools(&model, &tools),
+            tools,
+            "off: verbatim"
+        );
+        model.cap_strict_tools = true;
+        let out = crate::openai::openai_request_tools(&model, &tools);
+        assert_eq!(out[0]["function"]["strict"], true);
+        let params = &out[0]["function"]["parameters"];
+        let required = params["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|v| v == "offset"),
+            "every field becomes required: {params}"
+        );
+        assert_eq!(params["additionalProperties"], false);
+        assert!(
+            params["properties"]["offset"]["anyOf"][1]["type"] == "null",
+            "the optional field becomes a nullable union: {params}"
+        );
+    }
+
+    /// Anthropic strict tool_use: only first-party claude- model ids (bare
+    /// prefix — gateway route IDs do not count), tool-level strict +
+    /// strictified input_schema
+    #[test]
+    fn anthropic_request_tools_strict_first_party_only() {
+        let mut model = search_model(false, None);
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "Read", "description": "d", "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }}
+        })];
+        model.cap_strict_tools = true;
+        model.model = "claude-sonnet-4".into();
+        let out = crate::anthropic::anthropic_request_tools(&model, &tools);
+        assert_eq!(out[0]["strict"], true);
+        assert_eq!(out[0]["input_schema"]["additionalProperties"], false);
+        // Gateway-style id: no strict
+        model.model = "anthropic/claude-sonnet-4".into();
+        let out = crate::anthropic::anthropic_request_tools(&model, &tools);
+        assert!(out[0].get("strict").is_none());
+        // Switch off: never
+        model.model = "claude-sonnet-4".into();
+        model.cap_strict_tools = false;
+        let out = crate::anthropic::anthropic_request_tools(&model, &tools);
+        assert!(out[0].get("strict").is_none());
     }
 
     /// Request-level tool assembly (shared by streaming/non-streaming): the Anthropic shape must be
