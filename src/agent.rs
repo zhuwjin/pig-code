@@ -1,0 +1,215 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use nsh_core::prelude::*;
+use pig_protocol::{ApprovalDecision, Event, ExecMode, MessageDelivery, Op};
+
+static SELFTEST_ID: AtomicU64 = AtomicU64::new(0);
+
+struct SelftestDir(PathBuf);
+
+impl Drop for SelftestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The native connection to the Pig agent core.
+#[class]
+pub struct Agent {
+    handle: pig_core::AgentHandle,
+    cwd: PathBuf,
+    _selftest_dir: Option<SelftestDir>,
+}
+
+#[class]
+impl Agent {
+    /// Starts the agent in `cwd`, optionally using an isolated mock environment.
+    pub fn new(cwd: Option<String>, selftest: Option<bool>) -> Self {
+        let mut cwd = cwd
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let (handle, selftest_dir) = if selftest == Some(true) {
+            let id = SELFTEST_ID.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("pig-code-ts-selftest-{}-{id}", std::process::id()));
+            let workspace = root.join("workspace");
+            let data_dir = root.join("data");
+            std::fs::create_dir_all(&workspace).expect("create selftest workspace");
+            std::fs::create_dir_all(&data_dir).expect("create selftest data dir");
+            std::fs::write(
+                workspace.join(pig_provider::mock::MOCK_FILE_NAME),
+                pig_provider::mock::MOCK_FILE_CONTENT,
+            )
+            .expect("write selftest fixture");
+            let port = pig_provider::mock::start_mock_server();
+            let config_path = root.join("config.toml");
+            std::fs::write(
+                &config_path,
+                format!(
+                    r#"default_provider = "mock"
+default_model = "mock-model"
+
+[[providers]]
+id = "mock"
+name = "Mock"
+base_url = "http://127.0.0.1:{port}/v1"
+api_key = "mock-key"
+api_format = "OpenAiChat"
+enabled = true
+
+[[providers.models]]
+id = "mock-model"
+context_window = 128000
+max_output_tokens = 8192
+reasoning_levels = ["low", "high"]
+default_reasoning_level = "low"
+"#
+                ),
+            )
+            .expect("write selftest config");
+            cwd = workspace.clone();
+            (
+                pig_core::spawn_agent_with_data_dir(Some(config_path), workspace, data_dir),
+                Some(SelftestDir(root)),
+            )
+        } else {
+            (pig_core::spawn_agent(None, cwd.clone()), None)
+        };
+        for op in [Op::ListSessions, Op::ListWorkspaces, Op::GetConfig] {
+            let _ = handle.ops.try_send(op);
+        }
+        Self {
+            handle,
+            cwd,
+            _selftest_dir: selftest_dir,
+        }
+    }
+
+    /// The workspace used for new sessions.
+    #[getter]
+    pub fn cwd(&self) -> String {
+        self.cwd.display().to_string()
+    }
+
+    /// Sends any JSON-encoded `Op` from `pig-protocol`.
+    pub fn send(&self, op: String) -> Result<(), String> {
+        let op = serde_json::from_str(&op).map_err(|error| error.to_string())?;
+        self.send_op(op)
+    }
+
+    /// Creates a session in `cwd` using the configured model.
+    pub fn new_session(&self, cwd: String) -> Result<(), String> {
+        self.send_op(Op::NewSession {
+            cwd: PathBuf::from(cwd),
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: Some(ExecMode::Auto.permissions()),
+            plan_enabled: Some(false),
+        })
+    }
+
+    /// Opens and replays an existing session.
+    pub fn open_session(&self, session_id: String) -> Result<(), String> {
+        self.send_op(Op::OpenSession { session_id })
+    }
+
+    /// Sends text to an existing session.
+    pub fn send_message(&self, session_id: String, text: String) -> Result<(), String> {
+        self.send_op(Op::SendMessage {
+            session_id,
+            content: text,
+            files: Vec::new(),
+            images: Vec::new(),
+            permissions: ExecMode::Auto.permissions(),
+            delivery: MessageDelivery::Queue,
+        })
+    }
+
+    /// Interrupts the current turn.
+    pub fn interrupt(&self, session_id: String) -> Result<(), String> {
+        self.send_op(Op::Interrupt { session_id })
+    }
+
+    /// Allows or rejects one pending approval by request id.
+    pub fn answer_approval(&self, request_id: String, allow: bool) -> Result<(), String> {
+        self.send_op(Op::ApprovalReply {
+            request_id,
+            decision: if allow {
+                ApprovalDecision::Allow
+            } else {
+                ApprovalDecision::Reject
+            },
+            feedback: None,
+        })
+    }
+
+    /// Streams ordered JSON arrays of core events until the agent stops.
+    pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
+        let events = this.with(|agent| agent.handle.events.clone());
+        while let Ok(first) = events.recv().await {
+            let mut batch = vec![first];
+            while batch.len() < 128 {
+                match events.try_recv() {
+                    Ok(event) => batch.push(event),
+                    Err(_) => break,
+                }
+            }
+            listener.post(encode_batch(&batch));
+        }
+    }
+}
+
+impl Agent {
+    fn send_op(&self, op: Op) -> Result<(), String> {
+        self.handle
+            .ops
+            .try_send(op)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn encode_batch(batch: &[Event]) -> String {
+    serde_json::to_string(batch).unwrap_or_else(|error| {
+        serde_json::json!([{ "BridgeError": { "detail": error.to_string() } }]).to_string()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_batches_keep_the_protocol_order() {
+        let batch = [
+            Event::TurnStarted {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+            },
+            Event::TextDelta {
+                session_id: "s1".into(),
+                item_id: "i1".into(),
+                delta: "hello".into(),
+            },
+        ];
+        let encoded = encode_batch(&batch);
+        let decoded: Vec<Event> = serde_json::from_str(&encoded).expect("decode event batch");
+        assert_eq!(decoded.len(), 2);
+        assert!(matches!(
+            &decoded[0],
+            Event::TurnStarted { turn_id, .. } if turn_id == "t1"
+        ));
+        assert!(matches!(
+            &decoded[1],
+            Event::TextDelta { delta, .. } if delta == "hello"
+        ));
+    }
+
+    #[test]
+    fn generic_commands_use_the_existing_serde_contract() {
+        let op: Op = serde_json::from_str(r#""ListSessions""#).expect("unit op");
+        assert!(matches!(op, Op::ListSessions));
+    }
+}

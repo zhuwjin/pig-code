@@ -1,0 +1,9 @@
+{
+  "name": "pig-code-ts",
+  "id": "com.example.pigcodets",
+  "version": "1.0.0",
+  "build": 1,
+  "rust": ".",
+  "theme": "theme.json",
+  "appearance": "dark"
+}

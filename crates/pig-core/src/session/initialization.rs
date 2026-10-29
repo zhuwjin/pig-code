@@ -1,0 +1,559 @@
+use super::*;
+
+/// Session inputs frozen once at the start boundary (fresh or resumed):
+/// workspace trust, the rendered prompt sections and memory state. Captured in
+/// one place so create/load cannot drift apart field by field.
+struct SessionFrozen {
+    trust: crate::config::WorkspaceTrust,
+    plugin_tools: crate::plugins::PluginToolset,
+    skills_prompt: String,
+    agents_prompt: String,
+    memory_enabled: bool,
+    memory_rw_roots: Vec<PathBuf>,
+    memory_prompt: String,
+    profiles_summary: String,
+    today: String,
+}
+
+impl SessionFrozen {
+    fn capture(
+        session_id: &str,
+        cwd: &Path,
+        data_dir: &Path,
+        runtime: Option<&crate::config::RuntimeConfig>,
+    ) -> Self {
+        let app_config = runtime.map(|runtime| runtime.config());
+        let trust = runtime
+            .map(|runtime| runtime.trust().clone())
+            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(cwd));
+        let skills_prompt =
+            crate::plugins::skills_section_with_trust(cwd, data_dir, trust.admits(cwd));
+        let agents_prompt = prompt::agents_md(data_dir, cwd);
+        let memory_enabled = app_config.is_some_and(|config| config.memory.enabled);
+        if memory_enabled {
+            // The directory must genuinely exist before the prompt says
+            // "this directory already exists" (also makes the RW root
+            // canonicalizable for the path gates)
+            crate::memory::ensure_initialized(data_dir, cwd);
+        }
+        let memory_rw_roots = if memory_enabled {
+            vec![crate::memory::workspace_memory_dir(data_dir, cwd)]
+        } else {
+            vec![]
+        };
+        let memory_prompt = if memory_enabled {
+            crate::memory::memory_section(
+                app_config.unwrap_or(&AppConfig::default()),
+                data_dir,
+                cwd,
+            )
+        } else {
+            String::new()
+        };
+        let profiles_summary = crate::agent::agent_description_list(
+            &crate::agent::load_profiles_with_trust(cwd, data_dir, &trust),
+        );
+        let plugin_tools =
+            crate::plugins::PluginToolset::new(data_dir, &trust, app_config.cloned(), session_id);
+        Self {
+            trust,
+            plugin_tools,
+            skills_prompt,
+            agents_prompt,
+            memory_enabled,
+            memory_rw_roots,
+            memory_prompt,
+            profiles_summary,
+            today: prompt::today(),
+        }
+    }
+}
+
+/// Everything that differs between a fresh session and a resumed one. The
+/// shared assembler owns every field that is not part of this variation, so a
+/// new field is initialized once instead of in two near-identical literals.
+struct SessionParts {
+    id: String,
+    cwd: PathBuf,
+    history: Vec<ChatMsg>,
+    user_ixs: Vec<Option<usize>>,
+    tracker: ChangeTracker,
+    rollout: Rollout,
+    rollout_failure: Option<CoreError>,
+    pending: PendingApprovals,
+    pending_questions: PendingQuestions,
+    store: Arc<Mutex<Store>>,
+    data_dir: PathBuf,
+    task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+    runtime: Option<Arc<crate::config::RuntimeConfig>>,
+    session_start_source: &'static str,
+}
+
+fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
+    let app_config = parts.runtime.as_ref().map(|runtime| runtime.config());
+    let SessionFrozen {
+        trust,
+        plugin_tools,
+        skills_prompt,
+        agents_prompt,
+        memory_enabled,
+        memory_rw_roots,
+        memory_prompt,
+        profiles_summary,
+        today,
+    } = frozen;
+    let state = crate::task::SessionToolState::new(
+        parts.id.clone(),
+        parts.task_notify,
+        vec![parts.data_dir.join("sessions")],
+        memory_rw_roots,
+    )
+    .with_notification_store(parts.store.clone(), HashMap::new())
+    .with_data_dir(parts.data_dir.clone());
+    let session = Session {
+        delivery_receipts: state.delivery_receipts.clone(),
+        state,
+        permission_rules: load_permissions(&parts.cwd, &parts.data_dir, &trust),
+        git_snapshot: prompt::git_snapshot(&parts.cwd),
+        hooks: crate::hooks::HookSet::load(&parts.cwd, app_config),
+        id: parts.id,
+        cwd: parts.cwd,
+        history: parts.history,
+        user_ixs: parts.user_ixs,
+        io_last_input: Vec::new(),
+        turn_counter: 0,
+        tracker: parts.tracker,
+        always_allowed: HashSet::new(),
+        plan_enabled: false,
+        pending: parts.pending,
+        pending_questions: parts.pending_questions,
+        permissions: PermissionSettings::default(),
+        model_override: None,
+        rollout: Some(parts.rollout),
+        rollout_failure: parts.rollout_failure,
+        rollout_failure_reported: false,
+        notification_delivery_failure: None,
+        notification_reconcile_required: false,
+        store: parts.store,
+        data_dir: parts.data_dir,
+        agents_prompt: agents_prompt.clone(),
+        skills_prompt,
+        memory_prompt,
+        memory_enabled,
+        date_frozen: today.clone(),
+        date_reminded: today,
+        agents_reminded: agents_prompt,
+        memory_reminded: String::new(),
+        permissions_reminded: None,
+        profiles_summary,
+        prompt_text: None,
+        prompt_memory_enabled: None,
+        prompt_skills_state: None,
+        projected_input_image: None,
+        projected_input_pdf: None,
+        recorded_prompt: None,
+        last_total_tokens: None,
+        usage_turn_id: None,
+        usage_anchor: None,
+        overflow_recovered: false,
+        turn_input: 0,
+        turn_cache_read: 0,
+        turn_output: 0,
+        turn_reasoning_output: 0,
+        turn_api_ms: 0,
+        turn_ttft_ms: 0,
+        turn_ttft_steps: 0,
+        turn_api_steps: 0,
+        turn_tool_ms: 0,
+        input_total: 0,
+        cache_read_total: 0,
+        agent_seq: 0,
+        tool_item_seq: 0,
+        runtime: parts.runtime,
+        trust,
+        plugin_tools,
+        plugin_tool_filter: Default::default(),
+        mcp: None,
+        hook_context_stash: Vec::new(),
+        session_start_hook_ran: false,
+        session_start_source: parts.session_start_source,
+    };
+    session.refresh_project_sandbox();
+    session
+}
+
+impl Session {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create(
+        meta: SessionMeta,
+        pending: PendingApprovals,
+        pending_questions: PendingQuestions,
+        store: Arc<Mutex<Store>>,
+        sessions_dir: &Path,
+        data_dir: PathBuf,
+        task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+        runtime: Option<Arc<crate::config::RuntimeConfig>>,
+    ) -> Result<Self, CoreError> {
+        let rollout = Rollout::create(sessions_dir, &meta)?;
+        let frozen = SessionFrozen::capture(&meta.id, &meta.cwd, &data_dir, runtime.as_deref());
+        Ok(assemble_session(
+            SessionParts {
+                id: meta.id,
+                cwd: meta.cwd,
+                history: Vec::new(),
+                user_ixs: Vec::new(),
+                tracker: ChangeTracker::default(),
+                rollout,
+                rollout_failure: None,
+                pending,
+                pending_questions,
+                store,
+                data_dir,
+                task_notify,
+                runtime,
+                session_start_source: "startup",
+            },
+            frozen,
+        ))
+    }
+
+    /// Rebuild from rollout. Diff baselines are restored from the
+    /// file_originals table into ChangeTracker: after resume, changes are
+    /// still computed as "session's first snapshot → current", so revert
+    /// works across restarts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load(
+        id: &str,
+        sessions_dir: &Path,
+        pending: PendingApprovals,
+        pending_questions: PendingQuestions,
+        store: Arc<Mutex<Store>>,
+        data_dir: PathBuf,
+        task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+        runtime: Option<Arc<crate::config::RuntimeConfig>>,
+    ) -> Result<(Self, Vec<RolloutRecord>), CoreError> {
+        let mut records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
+        let Some(RolloutRecord::Meta { cwd, .. }) = records.first() else {
+            return Err(CoreError::RolloutNoMeta { id: id.to_string() });
+        };
+        let cwd = cwd.clone();
+        // Freeze the same inputs as create; the canonical PromptSnapshot below
+        // replaces the last-sent values (older sessions fall back to these).
+        let frozen = SessionFrozen::capture(id, &cwd, &data_dir, runtime.as_deref());
+        let session_meta = store.lock().expect("store lock").get_session(id);
+        let selection = session_meta.as_ref().and_then(|meta| {
+            Some(ModelSelection {
+                provider_id: meta.provider_id.clone()?,
+                model_id: meta.model_id.clone()?,
+                reasoning_level: meta.reasoning_level.clone(),
+            })
+        });
+        let default_level = session_meta
+            .as_ref()
+            .and_then(|meta| meta.reasoning_level.clone());
+        let resolved = resolve_runtime_model(
+            runtime.as_deref(),
+            selection.as_ref(),
+            default_level.as_deref(),
+        )
+        .ok();
+        let media = resolved
+            .as_ref()
+            .map(|model| tool::MediaCapabilities::new(model.input_image, model.input_pdf));
+        let media_dir = pig_utils::paths::media_dir(sessions_dir, id);
+        let (history, user_ixs) = crate::rollout::rebuild_history_with_media_root(
+            &records,
+            // Placeholder system prompt: the first run_turn overwrites it
+            // wholly with the frozen snapshot
+            // Placeholder (overwritten by the first run_turn): the env-key
+            // leg only, the per-model cap lands with the turn's own prompt
+            prompt::system_prompt(
+                &cwd,
+                true,
+                None,
+                &frozen.today,
+                &frozen.agents_prompt,
+                &frozen.memory_prompt,
+                &frozen.skills_prompt,
+            ),
+            media,
+            &media_dir,
+            resolved.as_ref().map(|model| model.context_window),
+        );
+        let originals = store
+            .lock()
+            .expect("store lock")
+            .file_originals(id)
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content))
+            .collect();
+        let mut tracker = ChangeTracker::default();
+        tracker.restore(originals);
+        // After resume, take over the same JSONL and keep appending; failure
+        // must be loud (setting None would silently drop all subsequent
+        // records)
+        let mut rollout = Rollout::open_append(sessions_dir, id)?;
+        // Crash recovery: a hard kill runs no wrap-up, so the tail turn's
+        // usage never reached turn_usage/TurnStats (the live interrupt path
+        // writes it at cancel time, so this only fires for uncounted tails).
+        // Per-request StepUsage records are durable — sum the tail turn's
+        // steps, count them, and append a synthesized TurnStats as the
+        // "counted" marker (reopening sees it and skips; replay restores the
+        // footer/session totals through the normal path). Timing fields are
+        // unknowable after a crash (zeros) and the reasoning split is not in
+        // StepUsage (0); the in-flight request's usage is lost either way.
+        let mut recovery_append_error: Option<CoreError> = None;
+        if let Some((input, cache_read, output, turn_id)) = uncounted_tail_usage(&records) {
+            // The rollout file's mtime approximates when the interrupted turn
+            // ended (the recovery moment would skew by-day statistics); the
+            // record and the SQLite row share it, like the live path's stamp
+            let ended_at_ms = std::fs::metadata(sessions_dir.join(format!("{id}.jsonl")))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_else(crate::model_io::now_ms);
+            let recovered = RolloutRecord::TurnStats {
+                input,
+                cache_read,
+                output,
+                duration_ms: 0,
+                ended_at_ms,
+                api_ms: 0,
+                ttft_ms: 0,
+                ttft_steps: 0,
+                api_steps: 0,
+                tool_ms: 0,
+                has_usage: true,
+                finish_reason: None,
+                turn_id: turn_id.clone(),
+            };
+            // Append as the "counted" marker before the SQLite row; both sides
+            // are idempotent on `turn_id`, so an earlier failure in either
+            // order cannot double count on the next open.
+            if let Err(error) = rollout.append(&recovered) {
+                tracing::warn!(
+                    error = %error,
+                    "failed to append the crash-recovery TurnStats marker; usage will be re-recovered on the next open"
+                );
+                recovery_append_error = Some(error.into_core(rollout.path()));
+            }
+            // Attribute to the session's last used model (meta is
+            // write-through on SetModel)
+            let meta = store.lock().expect("store lock").get_session(id);
+            let selection = meta.as_ref().and_then(meta_to_selection);
+            let resolved = resolve_runtime_model(runtime.as_deref(), selection.as_ref(), None).ok();
+            let (provider, model) = match resolved {
+                Some(resolved) => (resolved.provider_name, resolved.model),
+                None => {
+                    let unknown = || "unknown".to_string();
+                    meta.as_ref()
+                        .map(|m| {
+                            (
+                                m.provider_id.clone().unwrap_or_else(unknown),
+                                m.model_id.clone().unwrap_or_else(unknown),
+                            )
+                        })
+                        .unwrap_or_else(|| (unknown(), unknown()))
+                }
+            };
+            store.lock().expect("store lock").record_usage_at(
+                ended_at_ms,
+                id,
+                &provider,
+                &model,
+                input,
+                cache_read,
+                output,
+                0,
+                turn_id.as_deref(),
+            );
+            records.push(recovered);
+        }
+        // A recalled turn's PromptSnapshot still sits in the file but its User
+        // record was removed by the Recall tombstone: restore the latest
+        // snapshot whose turn survived so reminder state stays consistent.
+        let prompt_snapshot = surviving_prompt_snapshot(&records);
+        let delivery_receipts = crate::rollout::notification_delivery_receipts(&records);
+        let receipt_list = delivery_receipts
+            .iter()
+            .map(|(id, channel)| (id.clone(), *channel))
+            .collect::<Vec<_>>();
+        let tasks = {
+            let mut store = store.lock().expect("store lock");
+            store.reconcile_with_history(id, &receipt_list)?;
+            store.recover_interrupted_tasks(id)?;
+            store.recover_terminal_notifications(id)?;
+            store.reconcile_delivered(&receipt_list)?;
+            store.background_tasks(id)?
+        };
+        let mut session = assemble_session(
+            SessionParts {
+                id: id.to_string(),
+                cwd,
+                history,
+                user_ixs,
+                tracker,
+                rollout,
+                // A failed recovery-marker append must stop later appends: the
+                // file may hold a torn line, and the next open re-runs the
+                // (idempotent) recovery. The error is surfaced at the first
+                // durable boundary.
+                rollout_failure: recovery_append_error,
+                pending,
+                pending_questions,
+                store,
+                data_dir,
+                task_notify,
+                runtime,
+                session_start_source: "resume",
+            },
+            frozen,
+        );
+        session.restore_delivery_receipts(delivery_receipts);
+        session.state.restore_tasks(tasks);
+        if let Some(snapshot) = prompt_snapshot {
+            let trusted = session.trust.admits(&session.cwd);
+            let same_trust = snapshot_trusted(&snapshot.skills_state) == Some(trusted);
+            session.git_snapshot = snapshot.git_snapshot.clone();
+            session.agents_prompt = snapshot.agents_prompt.clone();
+            if same_trust {
+                // The snapshot is bound to its trust decision: a project skill
+                // listing, profile listing and system prompt created while the
+                // workspace was trusted must not resurface after a revoke (or
+                // vice versa). The fresh capture above is the truth then; only
+                // its reminder state is still safe to carry over.
+                if snapshot.skills_state == skills_state_with_trust(&session.data_dir, trusted) {
+                    session.skills_prompt = snapshot.skills_prompt.clone();
+                }
+                session.profiles_summary = snapshot.profiles_summary.clone();
+                session.prompt_text = Some(snapshot.text.clone());
+                session.prompt_memory_enabled = Some(snapshot.memory_enabled);
+                session.prompt_skills_state = Some(snapshot.skills_state.clone());
+                session.recorded_prompt = Some(snapshot.clone());
+            } else {
+                tracing::debug!(
+                    "the prompt snapshot was created under a different workspace trust decision; \
+                     rebuilding the prompt from the current project surfaces"
+                );
+            }
+            if snapshot.memory_enabled == session.memory_enabled {
+                session.memory_prompt = snapshot.memory_prompt.clone();
+                session.memory_reminded = snapshot.reminders.memory.clone();
+            } else {
+                session.memory_reminded = String::new();
+            }
+            session.date_frozen = snapshot.date_frozen.clone();
+            session.date_reminded = snapshot.reminders.date.clone();
+            session.agents_reminded = snapshot.reminders.agents.clone();
+            // The concrete access boundary is re-injected on the first turn
+            // after every cold open; older messages remain byte-stable.
+            session.permissions_reminded = None;
+        }
+        session.projected_input_image = media.map(|caps| caps.input_image);
+        session.projected_input_pdf = media.map(|caps| caps.input_pdf);
+        Ok((session, records))
+    }
+}
+
+/// Latest PromptSnapshot whose turn was not recalled. The snapshot record
+/// follows its User record, so a trailing Recall removes that User from the
+/// rebuilt context while its snapshot would otherwise keep the reminder state
+/// of a turn that no longer exists.
+pub(super) fn surviving_prompt_snapshot(
+    records: &[RolloutRecord],
+) -> Option<crate::rollout::PromptSnapshot> {
+    let mut user_stack: Vec<usize> = Vec::new();
+    let mut recalled: HashSet<usize> = HashSet::new();
+    let mut candidates: Vec<(usize, crate::rollout::PromptSnapshot)> = Vec::new();
+    for (ix, record) in records.iter().enumerate() {
+        match record {
+            RolloutRecord::User { .. } => user_stack.push(ix),
+            RolloutRecord::Recall => {
+                if let Some(recalled_user) = user_stack.pop() {
+                    recalled.insert(recalled_user);
+                }
+            }
+            RolloutRecord::PromptSnapshot { snapshot } => {
+                if let Some(&user) = user_stack.last() {
+                    candidates.push((user, snapshot.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    candidates
+        .into_iter()
+        .rev()
+        .find(|(user, _)| !recalled.contains(user))
+        .map(|(_, snapshot)| snapshot)
+}
+
+/// Sum the tail turn's per-request usage when it was never counted: records
+/// after the last User record hold StepUsage but no TurnStats (a turn that
+/// ends normally — or is interrupted, which writes TurnStats at cancel time —
+/// always closes with TurnStats). Returns (input, cache_read, output,
+/// turn_id); None when the tail turn was counted or consumed nothing.
+///
+/// The identity makes the SQLite recovery insert idempotent even for legacy
+/// StepUsage records that predate `turn_id`: it falls back to the earliest
+/// tail StepUsage's record index, which is stable as long as no marker was
+/// written (the only state in which recovery runs twice).
+pub(super) fn uncounted_tail_usage(
+    records: &[RolloutRecord],
+) -> Option<(u64, u64, u64, Option<String>)> {
+    let (mut input, mut cache_read, mut output, mut counted) = (0u64, 0u64, 0u64, false);
+    let mut turn_id = None;
+    let mut first_step_ix = None;
+    for (ix, record) in records.iter().enumerate().rev() {
+        if matches!(record, RolloutRecord::User { .. }) {
+            break;
+        }
+        match record {
+            RolloutRecord::StepUsage {
+                input: i,
+                cache_read: c,
+                output: o,
+                turn_id: step_turn,
+                ..
+            } => {
+                input += i;
+                cache_read += c;
+                output += o;
+                if turn_id.is_none() {
+                    turn_id = step_turn.clone();
+                }
+                first_step_ix = Some(ix);
+            }
+            RolloutRecord::TurnStats { .. } => counted = true,
+            _ => {}
+        }
+    }
+    let turn_id = turn_id.or_else(|| first_step_ix.map(|ix| format!("recovered-{ix}")));
+    (!counted && input + cache_read + output > 0).then_some((input, cache_read, output, turn_id))
+}
+
+/// Load permission rules for a workspace under one trust decision: the user
+/// level (`{data_dir}/permissions.toml`) unioned with the project level
+/// (`.pigcode/permissions.toml`). A trusted workspace also honors project
+/// `allow` rules; an untrusted one loads only its denials (no approval
+/// bypass). Missing files are empty; parse failures are non-fatal with a
+/// warn-level log — a broken level is skipped while the other stays in effect.
+pub(super) fn load_permissions(
+    cwd: &std::path::Path,
+    data_dir: &std::path::Path,
+    trust: &crate::config::WorkspaceTrust,
+) -> crate::permissions::PermissionRules {
+    let (rules, errors) =
+        crate::permissions::PermissionRules::load_layered_with_trust(cwd, data_dir, trust);
+    for error in errors {
+        tracing::warn!("permission rules level skipped ({error:?})");
+    }
+    if rules.skipped > 0 {
+        tracing::warn!(
+            "skipped {} rules with syntax errors (permissions.toml)",
+            rules.skipped
+        );
+    }
+    rules
+}

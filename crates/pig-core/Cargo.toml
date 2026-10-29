@@ -1,0 +1,126 @@
+[package]
+name = "pig-core"
+version = "0.1.0"
+edition = "2024"
+autotests = false
+
+[dependencies]
+pig-protocol = { path = "../pig-protocol" }
+pig-provider = { path = "../pig-provider" }
+pig-utils = { path = "../pig-utils" }
+async-channel = "2"
+encoding_rs = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "time"] }
+tokio-util = "0.7"
+time = { version = "0.3", features = ["local-offset"] }
+toml = "0.8"
+futures-util = "0.3"
+similar = "2"
+regex = "1"
+glob = "0.3"
+ignore = "0.4"
+globset = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }
+scraper = "0.23"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+tracing = "0.1"
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
+
+# macOS 取访达真实图标（NSWorkspace）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+
+# unix 取内核版本（uname，用户代理里的 os.release()）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows 取资源管理器/Windows Terminal 真实应用图标；对齐 macOS 的 Finder 图标路径
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.57", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_SystemInformation",
+    "Win32_System_Registry",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+    # Drive-type classification for volume enumeration (DRIVE_REMOTE etc.).
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+] }
+
+# Windows model-bash sandbox: Microsoft MXC through its published SDK crate.
+# MXC is MIT-licensed and an early preview; its native PSEC contract is only
+# enabled on some Windows builds, so the backend probes at runtime and refuses
+# the command when the host cannot honor the policy (see
+# task/sandbox/windows/). Every crate below is target-gated: nothing compiles
+# on macOS.
+#
+# `mxc-sdk` is the whole SDK: the low-level pieces this backend uses
+# (`mxc_common` models, the `process_container_common` runner and the generated
+# PSEC specification) live behind `#[doc(hidden)]` re-exports there, which is
+# what upstream's own Codex sandbox consumes as well.
+mxc-sdk = "1.0"
+# Builds the minimal PSEC specification the availability probe creates.
+flatbuffers = "25"
+# MXC's ETW dependency: 1.2.4 imports OneCore_apiset, which the GNU Windows
+# toolchain does not ship (same pin as Codex).
+tracelogging = "=1.2.3"
+# Strips the \\?\ verbatim prefix std::fs::canonicalize returns on Windows.
+dunce = "1"
+
+[[bin]]
+name = "pig-windows-sandbox"
+path = "src/bin/pig-windows-sandbox.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+dunce = "1"
+
+[[test]]
+name = "access"
+path = "tests/access.rs"
+
+[[test]]
+name = "agent"
+path = "tests/agent.rs"
+
+[[test]]
+name = "approval_modes"
+path = "tests/approval_modes.rs"
+
+[[test]]
+name = "bash"
+path = "tests/bash.rs"
+
+[[test]]
+name = "config"
+path = "tests/config.rs"
+
+[[test]]
+name = "context_overflow"
+path = "tests/context_overflow/main.rs"
+
+[[test]]
+name = "fs_access"
+path = "tests/fs_access.rs"
+
+[[test]]
+name = "prefix_cache"
+path = "tests/prefix_cache/main.rs"
+
+[[test]]
+name = "provider"
+path = "tests/provider.rs"
+
+[[test]]
+name = "session"
+path = "tests/session.rs"
+
+[[test]]
+name = "tooling"
+path = "tests/tooling.rs"

@@ -1,0 +1,17 @@
+[package]
+name = "nsh-app-pig-code-ts"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[dependencies]
+nsh-core = "0.3.0"
+nsh-base = "0.3.0"
+pig-core = { path = "crates/pig-core" }
+pig-protocol = { path = "crates/pig-protocol" }
+pig-provider = { path = "crates/pig-provider" }
+serde_json = "1"
