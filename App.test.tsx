@@ -114,9 +114,9 @@ test("answers dangerous command approvals", async () => {
   await app.type("id:composer-input", "DANGER_SCENARIO");
   await app.press("id:send-button");
   await app.waitFor("需要批准：ExecCommand", { timeout: 20000 });
-  await app.press("允许");
+  await app.keyboard.press("enter");
   await app.waitFor("需要批准：ExecCommand", { timeout: 20000 });
-  await app.press("允许");
+  await app.press("id:approval-allow");
   await app.waitFor("MOCK_DANGER_DONE", { timeout: 20000 });
   expect(app.texts()).toContain("MOCK_DANGER_DONE");
 });
@@ -135,7 +135,7 @@ test("switches appearance and folds the sidebar", async () => {
 
 test("applies named themes and appearance modes to native styles", async () => {
   const app = await openApp();
-  await app.press("id:theme-settings");
+  await app.press("id:title-theme-settings");
   expect(app.count("id:theme-picker")).toBe(1);
   await app.press("id:theme-mode-dark");
   await app.press("id:theme-option-ocean");
@@ -152,7 +152,7 @@ test("applies named themes and appearance modes to native styles", async () => {
 
 test("loads, applies, disables and restores plugin themes", async () => {
   const app = await openApp();
-  await app.press("id:theme-settings");
+  await app.press("id:title-theme-settings");
   await app.waitFor("id:theme-option-acme.midnight");
   await app.press("id:theme-mode-dark");
   await app.press("id:theme-option-acme.midnight");

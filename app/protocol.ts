@@ -53,17 +53,102 @@ export interface NoteItem {
 
 export type ChatItem = UserItem | MarkdownItem | ToolItem | NoteItem;
 
+export type ApprovalDecision = "Allow" | "ApprovedForSession" | "approved_for_project" | "Reject";
+
 export interface PendingApproval {
   requestId: string;
   tool: string;
   detail: string;
+  dangerKey?: string | null;
+  requestedWriteRoots: string[];
+  availableDecisions: ApprovalDecision[];
+}
+
+export interface QuestionOption {
+  label: string;
+  description?: string | null;
+}
+
+export interface QuestionItem {
+  question: string;
+  header?: string | null;
+  multi_select: boolean;
+  options: QuestionOption[];
+}
+
+export interface PendingQuestion {
+  requestId: string;
+  questions: QuestionItem[];
+}
+
+export interface QueueItem {
+  id: string;
+  text: string;
+  images?: unknown[];
+}
+
+export type QueuePauseReason = "stopped" | "error" | "restarted";
+export type HeldDisposition = "clear_queue_and_send" | "keep_queue_and_send" | "cancel";
+
+export interface QueueState {
+  pending: QueueItem[];
+  steer: QueueItem[];
+  paused: QueuePauseReason | null;
+  held: string | null;
+}
+
+export type SandboxMode = "read_only" | "workspace_write" | "danger_full_access";
+export type ApprovalPolicy = "on_request" | "never";
+export type ExecMode = "read-only" | "auto" | "full";
+export type MessageDelivery = "queue" | "steer";
+
+export interface PermissionSettings {
+  sandbox: { mode: SandboxMode };
+  approval: ApprovalPolicy;
+  reviewer: "user";
+}
+
+export interface SessionConfiguration {
+  providerId: string | null;
+  modelId: string | null;
+  reasoningLevel: string | null;
+  permissions: PermissionSettings;
+  planEnabled: boolean;
+}
+
+export type ApiFormat = "OpenAiChat" | "AnthropicMessages" | "OpenAiResponses";
+export type ProviderCredentialStatus = "not_required" | "configured" | "missing" | "unavailable";
+export type ConnectionTestResult =
+  | { result: "connected"; status: number }
+  | { result: "timeout"; secs: number }
+  | { result: "failed"; detail: string };
+
+export interface ModelConfig {
+  id: string;
+  name?: string | null;
+  icon?: string | null;
+  enabled: boolean;
+  context_window: number;
+  max_output_tokens: number;
+  input_image?: boolean;
+  input_pdf?: boolean;
+  reasoning_levels?: string[];
+  default_reasoning_level?: string | null;
+  reasoning_labels?: Record<string, string>;
+  [key: string]: unknown;
 }
 
 export interface ProviderConfig {
   id: string;
   name: string;
+  base_url: string;
+  requires_api_key?: boolean;
+  api_format: ApiFormat;
   enabled: boolean;
-  models: { id: string; name?: string | null; enabled: boolean }[];
+  models: ModelConfig[];
+  icon?: string | null;
+  key_url?: string | null;
+  [key: string]: unknown;
 }
 
 export interface PluginPackageInfo {
@@ -82,6 +167,7 @@ export interface PluginPackageInfo {
 export interface AppConfig {
   default_provider?: string | null;
   default_model?: string | null;
+  default_delivery?: MessageDelivery;
   providers: ProviderConfig[];
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;

@@ -10,7 +10,7 @@ const workspaceExpanded = signal(true);
 
 export function Sidebar(props: UiContext & {
   onToggle: () => void;
-  onOpenThemes: () => void;
+  onOpenSettings: () => void;
 }) {
   const { store, themeStore } = props;
   const sessions = () => store.sessions().filter((session) => session.cwd === store.cwd());
@@ -121,10 +121,10 @@ export function Sidebar(props: UiContext & {
       <If when={!workspaceExpanded()}><View class="flex-1" /></If>
       <View class="border-t border-sidebar-border p-2">
         <Button
-          testID="theme-settings"
-          accessibilityLabel="外观与主题设置"
+          testID="settings-open"
+          accessibilityLabel="模型与应用设置"
           class="rounded-(--radius) px-2 py-1.5 hover:bg-sidebar-accent active:bg-accent"
-          onPress={props.onOpenThemes}
+          onPress={props.onOpenSettings}
         >
           <View class="flex-row items-center gap-2">
             <Icon name="settings" />

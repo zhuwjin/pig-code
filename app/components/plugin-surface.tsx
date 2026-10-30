@@ -43,8 +43,10 @@ export function ExecutablePlugin(props: UiContext & { slot: string; class?: stri
       onPluginAction={(event) => {
         switch (event.name) {
           case "composer.submit":
-          case "composer.interrupt":
             store.send();
+            break;
+          case "composer.interrupt":
+            store.submitOrStop();
             break;
           case "composer.setDraft":
             store.draft.set(typeof event.data.text === "string" ? event.data.text : "");

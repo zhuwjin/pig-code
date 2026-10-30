@@ -7,6 +7,7 @@ import type { UiContext } from "./ui-context";
 import { Sidebar } from "./components/sidebar";
 import { TitleBar } from "./components/title-bar";
 import { Workspace } from "./components/workspace";
+import { SettingsPage } from "./components/settings/settings-page";
 
 Window.setTitle("Pig Code");
 Window.setTitleBar("hidden", 45);
@@ -41,6 +42,7 @@ function ThemeBackground(props: UiContext) {
 function App(props: UiContext) {
   const { store, themeStore } = props;
   const sidebarVisible = signal(true);
+  const settingsVisible = signal(false);
   const themePickerVisible = signal(false);
   const saveTheme = () => store.saveThemePreference(themeStore.activeId(), themeStore.mode());
   effect(() => {
@@ -63,11 +65,11 @@ function App(props: UiContext) {
       )}
     >
       <ThemeBackground {...props} />
-      <If when={sidebarVisible()}>
+      <If when={sidebarVisible() && !settingsVisible()}>
         <Sidebar
           {...props}
           onToggle={() => sidebarVisible.set(false)}
-          onOpenThemes={() => themePickerVisible.set(true)}
+          onOpenSettings={() => settingsVisible.set(true)}
         />
       </If>
       <View class={themeStore.classes("app.content", "min-w-0 flex-1")}>
@@ -78,7 +80,14 @@ function App(props: UiContext) {
           onOpenThemes={() => themePickerVisible.set(true)}
           onSaveTheme={saveTheme}
         />
-        <Workspace {...props} />
+        <If when={!settingsVisible()}><Workspace {...props} /></If>
+        <If when={settingsVisible()}>
+          <SettingsPage
+            {...props}
+            onBack={() => settingsVisible.set(false)}
+            onOpenThemes={() => themePickerVisible.set(true)}
+          />
+        </If>
       </View>
       <If when={themePickerVisible()}>
         <ThemePicker
