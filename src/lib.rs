@@ -1,4 +1,4 @@
-pub mod agent;
+mod agent;
 pub mod plugin_runtime;
 pub mod plugin_surface;
 mod theme;

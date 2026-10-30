@@ -3,8 +3,6 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
-mod resize_guard;
-#[cfg(windows)]
 mod windows;
 
 #[cfg(target_os = "linux")]
@@ -32,7 +30,6 @@ pub fn asset_base() -> std::path::PathBuf {
 pub fn params() -> serde_json::Map<String, nsh_engine::JsonValue> {
     serde_json::Map::from_iter([
         ("executablePlugins".into(), true.into()),
-        ("windowGuard".into(), cfg!(windows).into()),
         (
             "pluginPackage".into(),
             ".nsh/out/com.pigcodets.plugins.petal-1.nshpkg".into(),

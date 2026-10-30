@@ -26,11 +26,6 @@ not need plugin-signature verification. External `.nshpkg` packages only replace
 `nsh run` host does not register executable plugin surfaces and keeps the default composer. The custom host verifies the signed
 `.nshpkg`, runs it in an isolated `AppView`, and forwards composer actions and metrics through `HostChannel`.
 
-On Windows, `pig/window-guard` holds a resize repaint until the root `onLayout` confirms the latest size, with a
-50ms fallback that prevents a stuck window. It uses NSH 0.3.0's `WM_DPICHANGED` viewport path rather than changing
-any dependency; review `src/host/resize_guard.rs` when upgrading NSH. `PIG_RESIZE_TRACE=1 cargo run` logs the
-resize/layout/paint sequence.
-
 ```sh
 nsh build App.tsx -o .nsh/out/default
 cargo run

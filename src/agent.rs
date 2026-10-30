@@ -5,12 +5,6 @@ use nsh_core::prelude::*;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, MessageDelivery, Op};
 
 static SELFTEST_ID: AtomicU64 = AtomicU64::new(0);
-static LAYOUT_CALLBACK: std::sync::OnceLock<fn(f32, f32)> = std::sync::OnceLock::new();
-
-/// Sets the host notified after the root layout commits.
-pub fn set_layout_callback(callback: fn(f32, f32)) {
-    let _ = LAYOUT_CALLBACK.set(callback);
-}
 
 struct SelftestDir(PathBuf);
 
@@ -113,13 +107,6 @@ default_reasoning_level = "low"
     #[getter]
     pub fn cwd(&self) -> String {
         self.cwd.display().to_string()
-    }
-
-    /// Reports the latest committed root layout to the native window host.
-    pub fn report_layout(&self, width: f32, height: f32) {
-        if let Some(callback) = LAYOUT_CALLBACK.get() {
-            callback(width, height);
-        }
     }
 
     /// Sends any JSON-encoded `Op` from `pig-protocol`.

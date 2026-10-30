@@ -118,14 +118,6 @@ export class AgentStore {
     }
   }
 
-  reportLayout(width: number, height: number): void {
-    try {
-      this.agent.reportLayout(width, height);
-    } catch (error) {
-      this.globalError.set(errorMessage(error));
-    }
-  }
-
   saveThemePreference(theme: string, mode: "system" | "light" | "dark"): void {
     const config = this.config();
     if (!config) return;

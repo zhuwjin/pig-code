@@ -4,7 +4,6 @@ use nsh_platform_windows::{
 
 pub fn run() {
     let components = Components::default();
-    super::resize_guard::register(&components);
     nsh_app_pig_code_ts::plugin_surface::windows::register(&components);
     let host = nsh_engine::HostChannel::new();
     host.set_params(super::params());

@@ -7,7 +7,6 @@ import type { UiContext } from "./ui-context";
 import { Sidebar } from "./components/sidebar";
 import { TitleBar } from "./components/title-bar";
 import { Workspace } from "./components/workspace";
-import { WindowGuard } from "./components/window-guard";
 
 Window.setTitle("Pig Code");
 Window.setTitleBar("hidden", 45);
@@ -62,9 +61,7 @@ function App(props: UiContext) {
         "app.root",
         "relative flex-1 flex-row bg-background text-foreground selection:bg-selection pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]",
       )}
-      onLayout={(bounds) => store.reportLayout(bounds.size.width, bounds.size.height)}
     >
-      <WindowGuard />
       <ThemeBackground {...props} />
       <If when={sidebarVisible()}>
         <Sidebar

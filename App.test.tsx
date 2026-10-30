@@ -38,11 +38,6 @@ test("draws original SVG geometry at the requested size and tint", () => {
   expect(strokes).toBe(ICON_ELEMENTS.sun.length);
 });
 
-test("does not mount the Windows-only guard on stock hosts", async () => {
-  const app = await openApp();
-  expect(app.count("id:window-guard")).toBe(0);
-});
-
 test("places the original brand and interactive wordmark in their own regions", async () => {
   const app = await openApp();
   expect(app.count("id:sidebar-brand")).toBe(1);
