@@ -66,10 +66,26 @@ export interface ProviderConfig {
   models: { id: string; name?: string | null; enabled: boolean }[];
 }
 
+export interface PluginPackageInfo {
+  id: string;
+  name: string;
+  version: string;
+  digest: string;
+  root: string;
+  enabled: boolean;
+  contributions: {
+    themes?: { id: string; entry: string }[];
+    [key: string]: unknown;
+  };
+}
+
 export interface AppConfig {
   default_provider?: string | null;
   default_model?: string | null;
   providers: ProviderConfig[];
+  theme?: string | null;
+  theme_mode?: "system" | "light" | "dark" | null;
+  [key: string]: unknown;
 }
 
 export function eventKind(event: Payload): string {

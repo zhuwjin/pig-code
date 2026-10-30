@@ -24,6 +24,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub pages: Vec<PluginPage>,
     #[serde(default)]
+    pub themes: Vec<PluginThemeContribution>,
+    #[serde(default)]
     pub skills: Vec<PluginSkill>,
     #[serde(default)]
     pub mcp: Vec<PluginMcpServer>,
@@ -45,6 +47,7 @@ impl Default for PluginContributions {
             api_version: PLUGIN_API_VERSION,
             description: BTreeMap::new(),
             pages: Vec::new(),
+            themes: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
             tools: Vec::new(),
@@ -101,6 +104,93 @@ pub enum PluginPageKind {
     RightPanel,
     MainPanel,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginThemeContribution {
+    pub id: String,
+    pub entry: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginThemeKind {
+    #[default]
+    Theme,
+    Style,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginThemeCssVars {
+    #[serde(default)]
+    pub theme: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub light: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub dark: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginThemePart {
+    #[serde(default)]
+    pub class: Option<String>,
+    #[serde(default)]
+    pub style: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginThemeBackground {
+    pub asset: String,
+    #[serde(default)]
+    pub opacity: Option<f32>,
+    #[serde(default)]
+    pub blur: Option<f32>,
+    #[serde(default)]
+    pub overlay: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginThemeDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub kind: PluginThemeKind,
+    #[serde(default, rename = "targetThemes")]
+    pub target_themes: Vec<String>,
+    #[serde(default, rename = "cssVars")]
+    pub css_vars: PluginThemeCssVars,
+    #[serde(default)]
+    pub parts: BTreeMap<String, PluginThemePart>,
+    #[serde(default)]
+    pub background: Option<PluginThemeBackground>,
+}
+
+pub const PLUGIN_THEME_SLOTS: &[&str] = &[
+    "app.root",
+    "app.background",
+    "app.content",
+    "title-bar.root",
+    "sidebar.root",
+    "sidebar.session",
+    "composer.root",
+    "composer.input",
+    "chat.user",
+    "chat.markdown",
+    "markdown.code-block",
+    "markdown.inline-code",
+    "diff.root",
+    "diff.gutter",
+    "diff.line-added",
+    "diff.line-deleted",
+    "diff.word-added",
+    "diff.word-deleted",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,6 +367,7 @@ pub enum PluginCapability {
     ManageMcp,
     ProvideMcp,
     ProvideTools,
+    ProvideThemes,
     Http,
     ManageOwnSecrets,
     ReadConfig,

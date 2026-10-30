@@ -6,11 +6,13 @@ import {
   MarkdownItem,
   NoteItem,
   PendingApproval,
+  PluginPackageInfo,
   SessionMeta,
   ToolItem,
   errorMessage,
   eventKind,
 } from "./protocol";
+import { PluginThemeDefinition } from "./themes";
 
 let generatedId = 0;
 
@@ -27,10 +29,18 @@ export class AgentStore {
   readonly approvals = signal<Record<string, PendingApproval[]>>({});
   readonly errors = signal<Record<string, string>>({});
   readonly contextUsage = signal<Record<string, string>>({});
+  readonly outputRate = signal<Record<string, number>>({});
   readonly config = signal<AppConfig | null>(null);
   readonly globalError = signal("");
+  readonly pluginPackages = signal<PluginPackageInfo[]>([]);
+  readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
+  readonly themeError = signal("");
   private autoOpen = true;
   private pendingText: string | null = null;
+  private themeLoadId = 0;
+  private rateSession: string | null = null;
+  private rateStartedAt = 0;
+  private rateCharacters = 0;
 
   constructor(selftest = false) {
     this.agent = new Agent(null, selftest);
@@ -108,6 +118,60 @@ export class AgentStore {
     }
   }
 
+  reportLayout(width: number, height: number): void {
+    try {
+      this.agent.reportLayout(width, height);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  saveThemePreference(theme: string, mode: "system" | "light" | "dark"): void {
+    const config = this.config();
+    if (!config) return;
+    try {
+      this.agent.send(
+        JSON.stringify({
+          SaveConfig: { config: { ...config, theme, theme_mode: mode } },
+        }),
+      );
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  syncPlugins(): void {
+    try {
+      this.agent.syncPlugins();
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  setPluginEnabled(plugin: PluginPackageInfo, enabled: boolean): void {
+    try {
+      this.agent.setPluginEnabled(plugin.id, plugin.digest, enabled);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  private async loadPluginThemes(packages: PluginPackageInfo[]): Promise<void> {
+    const loadId = ++this.themeLoadId;
+    try {
+      const raw = await this.agent.loadThemes(JSON.stringify(packages));
+      const result = JSON.parse(raw) as {
+        themes: PluginThemeDefinition[];
+        errors: string[];
+      };
+      if (loadId !== this.themeLoadId) return;
+      this.pluginThemes.set(result.themes);
+      this.themeError.set(result.errors.join("\n"));
+    } catch (error) {
+      if (loadId === this.themeLoadId) this.themeError.set(errorMessage(error));
+    }
+  }
+
   private reduce(event: Record<string, any>): void {
     const kind = eventKind(event);
     const data = event[kind] ?? {};
@@ -143,6 +207,12 @@ export class AgentStore {
         );
         if (this.current() === sessionId) this.currentTitle.set(data.title);
         break;
+      case "PluginSnapshot": {
+        const packages = data.snapshot.packages as PluginPackageInfo[];
+        this.pluginPackages.set(packages);
+        void this.loadPluginThemes(packages);
+        break;
+      }
       case "ConfigSnapshot":
         this.config.set(data.config as AppConfig);
         break;
@@ -153,9 +223,11 @@ export class AgentStore {
         ]);
         break;
       case "ReasoningDelta":
+        this.recordRateDelta(sessionId!, String(data.delta ?? ""));
         this.upsertMarkdown(sessionId!, data.item_id, "reasoning", data.delta, true, true);
         break;
       case "TextDelta":
+        this.recordRateDelta(sessionId!, String(data.delta ?? ""));
         this.upsertMarkdown(sessionId!, data.item_id, "markdown", data.delta, true, true);
         break;
       case "TextDone":
@@ -215,6 +287,7 @@ export class AgentStore {
         });
         break;
       case "TurnStarted":
+        this.startRate(sessionId!);
         this.setRunning(sessionId!, true);
         break;
       case "TurnComplete":
@@ -302,6 +375,21 @@ export class AgentStore {
       };
       return next;
     });
+  }
+
+  private startRate(sessionId: string): void {
+    this.rateSession = sessionId;
+    this.rateStartedAt = Date.now();
+    this.rateCharacters = 0;
+    this.outputRate.update((all) => ({ ...all, [sessionId]: 0 }));
+  }
+
+  private recordRateDelta(sessionId: string, delta: string): void {
+    if (this.rateSession !== sessionId) this.startRate(sessionId);
+    this.rateCharacters += delta.length;
+    const elapsed = Math.max((Date.now() - this.rateStartedAt) / 1000, 0.05);
+    const tokensPerSecond = Math.max(0, Math.round(this.rateCharacters / 4 / elapsed));
+    this.outputRate.update((all) => ({ ...all, [sessionId]: tokensPerSecond }));
   }
 
   private addNote(sessionId: string, text: string, error: boolean): void {

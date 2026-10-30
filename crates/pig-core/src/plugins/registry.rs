@@ -506,6 +506,22 @@ fn validate_contributions(
             return Err(manifest(format!("duplicate page id `{}`", page.id)));
         }
     }
+    if !contributions.themes.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideThemes)
+    {
+        return Err(permission(
+            "theme contributions require the provide_themes capability",
+        ));
+    }
+    let mut theme_ids = BTreeSet::new();
+    for theme in &contributions.themes {
+        if !theme_ids.insert(theme.id.clone()) {
+            return Err(manifest(format!("duplicate theme id `{}`", theme.id)));
+        }
+        super::themes::validate_theme(root, theme)?;
+    }
     if !contributions.mcp.is_empty()
         && !contributions
             .actions
@@ -750,7 +766,7 @@ fn safe_relative(path: &str) -> Result<PathBuf, CoreError> {
     Ok(path)
 }
 
-fn canonical(path: &Path) -> Result<PathBuf, CoreError> {
+pub(crate) fn canonical(path: &Path) -> Result<PathBuf, CoreError> {
     let path = path
         .canonicalize()
         .map_err(|error| manifest(format!("{}: {error}", path.display())))?;

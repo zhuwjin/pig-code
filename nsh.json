@@ -5,5 +5,5 @@
   "build": 1,
   "rust": ".",
   "theme": "theme.json",
-  "appearance": "dark"
+  "appearance": "system"
 }

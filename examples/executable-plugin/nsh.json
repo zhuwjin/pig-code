@@ -1,0 +1,10 @@
+{
+  "name": "Petal Visuals",
+  "id": "com.pigcodets.plugins.petal",
+  "version": "1.0.0",
+  "build": 1,
+  "appearance": "system",
+  "capabilities": {
+    "host": ["composer.*"]
+  }
+}

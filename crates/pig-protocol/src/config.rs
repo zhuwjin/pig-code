@@ -434,12 +434,13 @@ pub struct AppConfig {
     /// everything else → en)
     #[serde(default)]
     pub language: Option<String>,
-    /// Saved color theme name (a named theme registered from the gpui-kit
-    /// theme sets, e.g. "Catppuccin Mocha"); None = the default light/dark
-    /// pair following the system appearance. A name unknown at startup falls
-    /// back to the defaults with a warning
+    /// Saved color theme id registered by the UI; None = the default Pig
+    /// light/dark pair. An unknown id falls back to the default theme.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Appearance override: "light", "dark", or "system"; None = system.
+    #[serde(default)]
+    pub theme_mode: Option<String>,
     /// Model-io trace full retention (diagnostic mode): skip the tool-result
     /// length cap and the per-session trace file size cap — every request's
     /// input is recorded whole, so long sessions can produce very large
@@ -767,14 +768,14 @@ impl HookShell {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookSource {
-    /// ~/.pigcode/config.toml
+    /// ~/.pigcodets/config.toml
     User,
     /// .pigcode/hooks.toml (gated by the workspace trust dialog)
     Project,
 }
 
 /// Lifecycle hooks configuration (Claude Code-compatible stdin/exit-code
-/// contract). User level lives under `[hooks]` in ~/.pigcode/config.toml; the
+/// contract). User level lives under `[hooks]` in ~/.pigcodets/config.toml; the
 /// project file `.pigcode/hooks.toml` uses the same `[hooks]` root shape and
 /// is merged per event (user entries first, project entries after). Global
 /// knobs (enabled/timeout_ms/max_output_bytes) come from the user level only.

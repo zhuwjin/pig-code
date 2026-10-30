@@ -5,6 +5,12 @@ use nsh_core::prelude::*;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, MessageDelivery, Op};
 
 static SELFTEST_ID: AtomicU64 = AtomicU64::new(0);
+static LAYOUT_CALLBACK: std::sync::OnceLock<fn(f32, f32)> = std::sync::OnceLock::new();
+
+/// Sets the host notified after the root layout commits.
+pub fn set_layout_callback(callback: fn(f32, f32)) {
+    let _ = LAYOUT_CALLBACK.set(callback);
+}
 
 struct SelftestDir(PathBuf);
 
@@ -19,6 +25,7 @@ impl Drop for SelftestDir {
 pub struct Agent {
     handle: pig_core::AgentHandle,
     cwd: PathBuf,
+    data_dir: PathBuf,
     _selftest_dir: Option<SelftestDir>,
 }
 
@@ -30,7 +37,7 @@ impl Agent {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let (handle, selftest_dir) = if selftest == Some(true) {
+        let (handle, selftest_dir, data_dir) = if selftest == Some(true) {
             let id = SELFTEST_ID.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir()
                 .join(format!("pig-code-ts-selftest-{}-{id}", std::process::id()));
@@ -71,18 +78,33 @@ default_reasoning_level = "low"
             .expect("write selftest config");
             cwd = workspace.clone();
             (
-                pig_core::spawn_agent_with_data_dir(Some(config_path), workspace, data_dir),
+                pig_core::spawn_agent_with_data_dir(Some(config_path), workspace, data_dir.clone()),
                 Some(SelftestDir(root)),
+                data_dir,
             )
         } else {
-            (pig_core::spawn_agent(None, cwd.clone()), None)
+            let data_dir = pig_utils::data_dir();
+            (pig_core::spawn_agent(None, cwd.clone()), None, data_dir)
         };
+        let selftest_theme =
+            (selftest == Some(true)).then(|| crate::theme::install_selftest_theme(&data_dir));
         for op in [Op::ListSessions, Op::ListWorkspaces, Op::GetConfig] {
             let _ = handle.ops.try_send(op);
+        }
+        let _ = handle.ops.try_send(Op::SyncPlugins {
+            packages: crate::theme::package_sources(&data_dir),
+        });
+        if let Some(digest) = selftest_theme {
+            let _ = handle.ops.try_send(Op::SetPluginEnabled {
+                package: "acme.visual".into(),
+                digest,
+                enabled: true,
+            });
         }
         Self {
             handle,
             cwd,
+            data_dir,
             _selftest_dir: selftest_dir,
         }
     }
@@ -93,10 +115,43 @@ default_reasoning_level = "low"
         self.cwd.display().to_string()
     }
 
+    /// Reports the latest committed root layout to the native window host.
+    pub fn report_layout(&self, width: f32, height: f32) {
+        if let Some(callback) = LAYOUT_CALLBACK.get() {
+            callback(width, height);
+        }
+    }
+
     /// Sends any JSON-encoded `Op` from `pig-protocol`.
     pub fn send(&self, op: String) -> Result<(), String> {
         let op = serde_json::from_str(&op).map_err(|error| error.to_string())?;
         self.send_op(op)
+    }
+
+    /// Rediscovers user plugin packages in the app's data directory.
+    pub fn sync_plugins(&self) -> Result<(), String> {
+        self.send_op(Op::SyncPlugins {
+            packages: crate::theme::package_sources(&self.data_dir),
+        })
+    }
+
+    /// Enables or disables one exact plugin package snapshot.
+    pub fn set_plugin_enabled(
+        &self,
+        package: String,
+        digest: String,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.send_op(Op::SetPluginEnabled {
+            package,
+            digest,
+            enabled,
+        })
+    }
+
+    /// Loads validated theme definitions from an enabled-plugin snapshot.
+    pub fn load_themes(&self, packages: String) -> Result<String, String> {
+        crate::theme::load_themes(&packages)
     }
 
     /// Creates a session in `cwd` using the configured model.
@@ -211,5 +266,24 @@ mod tests {
     fn generic_commands_use_the_existing_serde_contract() {
         let op: Op = serde_json::from_str(r#""ListSessions""#).expect("unit op");
         assert!(matches!(op, Op::ListSessions));
+    }
+
+    #[test]
+    fn theme_preferences_round_trip_through_save_config() {
+        let op = Op::SaveConfig {
+            config: pig_protocol::AppConfig {
+                theme: Some("ocean".into()),
+                theme_mode: Some("dark".into()),
+                ..Default::default()
+            },
+        };
+        let encoded = serde_json::to_string(&op).expect("encode config");
+        let decoded: Op = serde_json::from_str(&encoded).expect("decode config");
+        assert!(matches!(
+            decoded,
+            Op::SaveConfig { config }
+                if config.theme.as_deref() == Some("ocean")
+                    && config.theme_mode.as_deref() == Some("dark")
+        ));
     }
 }

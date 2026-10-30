@@ -29,10 +29,18 @@
       "sidebar-accent": "#e5e5e5",
       "sidebar-accent-foreground": "#262626",
       "sidebar-border": "#e5e5e5",
+      "sidebar-ring": "#a3a3a3",
       "title-bar": "#f0f0f0",
       "composer": "#ffffff",
       "tool-surface": "#f5f5f5",
-      "warning": "#ca8a04"
+      "selection": "#bfdbfe",
+      "success": "#16a34a",
+      "info": "#2563eb",
+      "warning": "#ca8a04",
+      "diff-added": "#dcfce7",
+      "diff-added-word": "#bbf7d0",
+      "diff-deleted": "#fee2e2",
+      "diff-deleted-word": "#fecaca"
     },
     "dark": {
       "background": "#0a0a0a",
@@ -60,10 +68,18 @@
       "sidebar-accent": "#262626",
       "sidebar-accent-foreground": "#f5f5f5",
       "sidebar-border": "#262626",
+      "sidebar-ring": "#737373",
       "title-bar": "#171717",
       "composer": "#1b1b1b",
       "tool-surface": "#171717",
-      "warning": "#facc15"
+      "selection": "#1d4ed8",
+      "success": "#4ade80",
+      "info": "#60a5fa",
+      "warning": "#facc15",
+      "diff-added": "#052e16",
+      "diff-added-word": "#14532d",
+      "diff-deleted": "#450a0a",
+      "diff-deleted-word": "#7f1d1d"
     }
   }
 }

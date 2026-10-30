@@ -1,0 +1,8 @@
+{
+  "api_version": 1,
+  "actions": ["provide_themes"],
+  "themes": [
+    { "id": "acme.midnight", "entry": "midnight.json" },
+    { "id": "acme.glass", "entry": "glass.json" }
+  ]
+}

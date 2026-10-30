@@ -4,10 +4,12 @@ mod http;
 mod marketplace;
 mod registry;
 mod services;
+mod themes;
 mod tools;
 
 pub use http::request_http;
 pub use marketplace::{DEFAULT_MARKETPLACE_INDEX_URL, fetch_catalog, install_package};
+pub use themes::load_theme;
 pub use tools::{PluginToolDispatcher, PluginToolFilter, PluginToolset};
 
 pub use contributions::{
