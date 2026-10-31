@@ -1,6 +1,7 @@
 mod agent;
 pub mod plugin_runtime;
 pub mod plugin_surface;
+mod terminal;
 mod theme;
 
 use nsh_core::prelude::*;
@@ -9,4 +10,5 @@ use nsh_core::prelude::*;
 #[native_module("pig-code-ts/native")]
 fn native(registry: &mut Registry) {
     registry.class::<agent::Agent>();
+    registry.class::<terminal::Terminal>();
 }

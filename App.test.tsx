@@ -38,10 +38,10 @@ test("draws original SVG geometry at the requested size and tint", () => {
   expect(strokes).toBe(ICON_ELEMENTS.sun.length);
 });
 
-test("places the original brand and interactive wordmark in their own regions", async () => {
+test("keeps the macOS traffic-light zone clear and places the interactive wordmark", async () => {
   const app = await openApp();
-  expect(app.count("id:sidebar-brand")).toBe(1);
-  expect(app.count("id:brand-mark")).toBe(1);
+  expect(app.count("id:sidebar-brand")).toBe(0);
+  expect(app.count("id:brand-mark")).toBe(0);
   expect(app.count("id:hero-pig-code-wordmark")).toBe(1);
   expect(app.count("id:sidebar-toggle")).toBe(1);
   await app.hover("id:hero-pig-code-wordmark");
@@ -51,7 +51,7 @@ test("places the original brand and interactive wordmark in their own regions", 
 
 test("samples the original glyph and returns scattered particles home", () => {
   const particles = createParticles();
-  expect(particles.length).toBeGreaterThan(500);
+  expect(particles.length).toBeGreaterThan(713);
   expect(particles.length <= 1800).toBe(true);
   expect(particles.every((particle) =>
     particle.home.x >= 0 && particle.home.x <= 420 &&
@@ -92,6 +92,7 @@ test("creates, streams and replays a session", async () => {
   expect(app.value("id:composer-input")).toBe("");
 
   await app.press("id:new-task");
+  await app.waitFor("auto-title selftest", { timeout: 10000 });
   await app.press("auto-title selftest");
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
   expect(app.count("Conclusion: MOCK_REPLY_OK")).toBe(1);
@@ -99,14 +100,61 @@ test("creates, streams and replays a session", async () => {
 
 test("restores the hero layout and fills a suggestion", async () => {
   const app = await openApp();
-  expect(app.count("id:brand-mark")).toBeGreaterThan(0);
+  expect(app.count("id:brand-mark")).toBe(0);
   expect(app.texts()).toContain("Pig Code v0.1.0");
   expect(app.texts()).toContain("总结这个工作区");
+  expect(app.texts()).toContain("选择工作区");
+  expect(app.count("text:按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息")).toBe(1);
+  expect(app.texts()).not.toContain("暂无历史会话");
   expect(app.count("id:hero-cwd")).toBe(1);
   expect(app.texts()).not.toContain("Rust agent");
 
+  await app.press("id:hero-cwd");
+  await app.press("id:hero-cwd-option-0");
+  expect(app.texts()).not.toContain("选择工作区");
+  await app.press("id:hero-cwd");
+  await app.press("id:hero-cwd-clear");
+  expect(app.texts()).toContain("选择工作区");
+
   await app.press("id:empty-suggestion-1");
-  expect(app.value("id:composer-input")).toBe("修复一个报错");
+  expect(app.value("id:composer-input")).toBe("我遇到了一个报错： ");
+});
+
+test("searches workspaces and toggles search with the keyboard", async () => {
+  const app = await openApp();
+  await app.press("id:open-search");
+  await app.type("id:global-search-input", "workspace");
+  await app.press("id:search-workspace-0");
+  expect(app.count("id:global-search-input")).toBe(0);
+  expect(app.texts()).not.toContain("选择工作区");
+
+  await app.keyboard.press("mod+k");
+  expect(app.count("id:global-search-input")).toBe(1);
+  await app.keyboard.press("escape");
+  expect(app.count("id:global-search-input")).toBe(0);
+});
+
+test("opens and refreshes the git changes panel", async () => {
+  const app = await openApp();
+  await app.press("id:right-panel-toggle");
+  await app.waitFor("id:right-panel");
+  await app.waitFor("当前目录不是 Git 仓库", { timeout: 10000 });
+  await app.press("id:right-refresh");
+  await app.press("id:right-panel-close");
+  await app.wait(300);
+  await app.press("id:right-panel-toggle");
+  await app.waitFor("当前目录不是 Git 仓库", { timeout: 10000 });
+});
+
+test("runs a real shell in the terminal panel", async () => {
+  const app = await openApp();
+  await app.press("id:terminal-toggle");
+  await app.waitFor("id:terminal-input", { timeout: 10000 });
+  await app.type("id:terminal-input", "printf PIG_TERMINAL_OK");
+  await app.keyboard.press("enter");
+  await app.waitFor("text:/PIG_TERMINAL_OK/", { timeout: 10000 });
+  await app.press("id:terminal-close");
+  expect(app.count("id:terminal-panel")).toBe(0);
 });
 
 test("answers dangerous command approvals", async () => {
@@ -121,16 +169,31 @@ test("answers dangerous command approvals", async () => {
   expect(app.texts()).toContain("MOCK_DANGER_DONE");
 });
 
-test("switches appearance and folds the sidebar", async () => {
+test("switches appearance, list view and folds the sidebar", async () => {
   const app = await openApp();
+  await app.drag("label:Resize the sidebar", { x: 60, y: 0 });
+  await app.press("id:workspace-row");
+  expect(app.count("展开当前工作区")).toBe(1);
+  await app.press("id:workspace-row");
+  expect(app.count("折叠当前工作区")).toBe(1);
+
+  await app.press("id:list-manage");
+  await app.press("id:list-view-flat");
+  expect(app.count("id:workspace-row")).toBe(0);
+  await app.press("id:list-manage");
+  await app.press("id:list-view-workspace");
+  expect(app.count("id:workspace-row")).toBe(1);
+
   const initial = app.count("id:appearance-dark") === 1 ? "dark" : "light";
   await app.press(`id:appearance-${initial}`);
   const next = initial === "dark" ? "light" : "dark";
   expect(app.count(`id:appearance-${next}`)).toBe(1);
   await app.press("id:sidebar-toggle");
-  expect(app.count("id:new-task")).toBe(0);
-  await app.press("id:sidebar-toggle");
+  await app.wait(300);
+  await app.press("id:sidebar-toggle >> nth=0");
+  await app.wait(300);
   expect(app.count("id:new-task")).toBe(1);
+  expect(app.count("role:adjustable")).toBe(1);
 });
 
 test("applies named themes and appearance modes to native styles", async () => {
@@ -139,13 +202,13 @@ test("applies named themes and appearance modes to native styles", async () => {
   expect(app.count("id:theme-picker")).toBe(1);
   await app.press("id:theme-mode-dark");
   await app.press("id:theme-option-ocean");
-  expect(app.spanStyle("id:sidebar-brand >> text:Pig Code").color).toBe("#cbd5e1ff");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#cbd5e1ff");
   expect(app.spanStyle("✓").color).toBe("#3b82f6ff");
 
   await app.press("id:theme-option-pig");
-  expect(app.spanStyle("id:sidebar-brand >> text:Pig Code").color).toBe("#d4d4d4ff");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
   await app.press("id:theme-mode-light");
-  expect(app.spanStyle("id:sidebar-brand >> text:Pig Code").color).toBe("#262626ff");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#262626ff");
   await app.press("id:theme-picker-close");
   expect(app.count("id:theme-picker")).toBe(0);
 });
@@ -156,16 +219,26 @@ test("loads, applies, disables and restores plugin themes", async () => {
   await app.waitFor("id:theme-option-acme.midnight");
   await app.press("id:theme-mode-dark");
   await app.press("id:theme-option-acme.midnight");
-  expect(app.spanStyle("id:sidebar-brand >> text:Pig Code").color).toBe("#e2e8f0ff");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#e2e8f0ff");
   expect(app.spanStyle("✓").color).toBe("#22d3eeff");
   expect(app.texts()).toContain("Glass Wallpaper");
 
   await app.press("id:theme-package-acme.visual");
   await app.waitFor("id:theme-option-acme.midnight", { state: "gone" });
-  expect(app.spanStyle("id:sidebar-brand >> text:Pig Code").color).toBe("#d4d4d4ff");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
   await app.press("id:theme-package-acme.visual");
   await app.waitFor("id:theme-option-acme.midnight");
-  expect(app.spanStyle("id:sidebar-brand >> text:Pig Code").color).toBe("#e2e8f0ff");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#e2e8f0ff");
+});
+
+test("applies configured interface and monospace fonts through theme tokens", () => {
+  const store = new ThemeStore();
+  store.hydrateFonts("Menlo", "JetBrains Mono");
+  expect(store.serialized()).toContain('"font-sans":"Menlo"');
+  expect(store.serialized()).toContain('"font-mono":"JetBrains Mono"');
+  store.hydrateFonts(null, null);
+  expect(store.serialized()).not.toContain('"font-sans"');
+  expect(store.serialized()).not.toContain('"font-mono"');
 });
 
 test("registers partial plugin themes without losing fallback tokens", () => {

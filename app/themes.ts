@@ -249,12 +249,16 @@ export function resolvedCssVars(definition: ThemeDefinition): ThemeCssVars {
 export function serializedTheme(
   definition: ThemeDefinition,
   stylePacks: readonly ThemeDefinition[] = [],
+  fonts: { ui?: string | null; mono?: string | null } = {},
 ): string {
   const cssVars = stylePacks.reduce(
     (vars, pack) => mergeCssVars(vars, pack.cssVars),
     resolvedCssVars(definition),
   );
-  return JSON.stringify({ cssVars });
+  const theme = { ...cssVars.theme };
+  if (fonts.ui?.trim()) theme["font-sans"] = fonts.ui.trim();
+  if (fonts.mono?.trim()) theme["font-mono"] = fonts.mono.trim();
+  return JSON.stringify({ cssVars: { ...cssVars, theme } });
 }
 
 export function themePreviewColor(

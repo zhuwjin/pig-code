@@ -41,9 +41,9 @@ export function PermissionPicker(props: UiContext) {
         align="start"
         popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
         trigger={
-          <View role="button" testID="exec-mode" class="flex-row items-center gap-1.5 rounded-full px-2 py-1 hover:bg-accent">
-            <Icon name="shield-check" size={14} color={token(mode() === "full" ? "destructive" : mode() === "auto" ? "warning" : "muted-foreground")} />
-            <Text class={mode() === "full" ? "text-xs text-destructive" : mode() === "auto" ? "text-xs text-warning" : "text-xs text-muted-foreground"}>{label()}</Text>
+          <View role="button" testID="exec-mode" class="flex-row items-center gap-1 rounded-full px-3 py-1 hover:bg-accent">
+            <Icon name="shield-check" size={16} color={token(mode() === "full" ? "destructive" : mode() === "auto" ? "warning" : "muted-foreground")} />
+            <Text class={mode() === "full" ? "text-sm text-destructive" : mode() === "auto" ? "text-sm text-warning" : "text-sm text-muted-foreground"}>{label()}</Text>
             <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
           </View>
         }
@@ -107,6 +107,7 @@ export function ModelPicker(props: UiContext) {
   };
   const selected = () => props.store.selectedModel();
   const reasoning = () => props.store.configuration().reasoningLevel;
+  const reasoningLabel = () => props.store.reasoningOptions().find((option) => option.id === reasoning())?.label;
   return (
     <Popover
       open={open()}
@@ -118,10 +119,13 @@ export function ModelPicker(props: UiContext) {
       align="end"
       popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
       trigger={
-        <View role="button" testID="model-picker" class="max-w-56 flex-row items-center gap-1 rounded-full px-2 py-1 hover:bg-accent">
-          <Text numberOfLines={1} class="text-xs text-muted-foreground">
-            {props.store.currentModel() || "默认模型"}
+        <View role="button" testID="model-picker" class="max-w-56 flex-row items-center gap-1 rounded-full px-3 py-1 hover:bg-accent">
+          <Text numberOfLines={1} class="text-sm text-foreground">
+            {props.store.currentModel() || "选择模型"}
           </Text>
+          <If when={props.store.currentModel() && reasoningLabel()}>
+            <Text numberOfLines={1} class="text-sm text-muted-foreground">{reasoningLabel()}</Text>
+          </If>
           <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
         </View>
       }

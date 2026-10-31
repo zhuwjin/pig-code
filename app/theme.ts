@@ -14,6 +14,7 @@ export class ThemeStore {
   readonly catalog = signal<ThemeDefinition[]>([...BUILTIN_THEMES]);
   readonly activeId = signal(DEFAULT_THEME_ID);
   readonly mode = signal<ThemeMode>("system");
+  readonly fonts = signal<{ ui?: string | null; mono?: string | null }>({});
   private hydrated = false;
   private userModified = false;
 
@@ -39,7 +40,7 @@ export class ThemeStore {
   }
 
   serialized(): string {
-    return serializedTheme(this.active(), this.activeStylePacks());
+    return serializedTheme(this.active(), this.activeStylePacks(), this.fonts());
   }
 
   classes(slot: string, base = ""): string {
@@ -76,6 +77,12 @@ export class ThemeStore {
     this.hydrated = true;
     if (themeId) this.activeId.set(themeId);
     this.setMode(mode === "light" || mode === "dark" ? mode : "system");
+  }
+
+  hydrateFonts(ui: string | null | undefined, mono: string | null | undefined): void {
+    const fonts = { ui: ui?.trim() || null, mono: mono?.trim() || null };
+    const current = this.fonts();
+    if (current.ui !== fonts.ui || current.mono !== fonts.mono) this.fonts.set(fonts);
   }
 
   select(themeId: string): void {

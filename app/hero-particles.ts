@@ -1,4 +1,4 @@
-import { WORDMARK_POINTS } from "./wordmark-points";
+import { WORDMARK_POINTS, type WordmarkPoint } from "./wordmark-points";
 
 export interface Vec2 {
   x: number;
@@ -14,7 +14,22 @@ export interface Particle {
 }
 
 export function createParticles(): Particle[] {
-  return WORDMARK_POINTS.map(([x, y, radius, tone]) => ({
+  const points: WordmarkPoint[] = [];
+  for (let index = 0; index < WORDMARK_POINTS.length; index += 1) {
+    const point = WORDMARK_POINTS[index];
+    points.push(point);
+    const next = WORDMARK_POINTS[index + 1];
+    const gap = next && next[1] === point[1] ? next[0] - point[0] : 0;
+    if (next && gap > 3 && gap < 6) {
+      points.push([
+        point[0] + gap / 2,
+        point[1],
+        (point[2] + next[2]) / 2,
+        point[3],
+      ]);
+    }
+  }
+  return points.map(([x, y, radius, tone]) => ({
     home: { x, y },
     position: { x, y },
     velocity: { x: 0, y: 0 },

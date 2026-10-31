@@ -6,6 +6,8 @@ import {
   ChatItem,
   ConnectionTestResult,
   HeldDisposition,
+  GitDiffSnapshot,
+  GitStatusSnapshot,
   MarkdownItem,
   MessageDelivery,
   NoteItem,
@@ -34,6 +36,7 @@ const EMPTY_QUEUE: QueueState = { pending: [], steer: [], paused: null, held: nu
 export class AgentStore {
   readonly agent: Agent;
   readonly cwd;
+  readonly heroCwd = signal<string | null>(null);
   readonly draft = signal("");
   readonly sessions = signal<SessionMeta[]>([]);
   readonly current = signal<string | null>(null);
@@ -56,6 +59,8 @@ export class AgentStore {
   readonly contextUsage = signal<Record<string, string>>({});
   readonly outputRate = signal<Record<string, number>>({});
   readonly config = signal<AppConfig | null>(null);
+  readonly gitStatus = signal<GitStatusSnapshot | null>(null);
+  readonly gitDiff = signal<GitDiffSnapshot | null>(null);
   readonly providerCredentials = signal<Record<string, ProviderCredentialStatus>>({});
   readonly testResults = signal<Record<string, ConnectionTestResult>>({});
   readonly testingProviders = signal<Record<string, boolean>>({});
@@ -64,6 +69,7 @@ export class AgentStore {
   readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
   readonly themeError = signal("");
   private autoOpen = true;
+  private heroModelDirty = false;
   private pendingText: string | null = null;
   private pendingDelivery: MessageDelivery = "queue";
   private themeLoadId = 0;
@@ -91,10 +97,51 @@ export class AgentStore {
     this.autoOpen = false;
     this.pendingText = null;
     this.current.set(null);
+    this.heroCwd.set(null);
+    this.heroModelDirty = false;
     this.currentTitle.set("新任务");
     this.currentModel.set("");
-    this.syncCurrentModelName();
+    this.applyHeroDefaults();
     this.globalError.set("");
+  }
+
+  selectHeroWorkspace(cwd: string | null): void {
+    this.autoOpen = false;
+    this.heroCwd.set(cwd);
+    this.applyHeroDefaults();
+  }
+
+  refreshGitStatus(): boolean {
+    const diff = this.gitDiff();
+    if (diff) this.openGitDiff(diff.path, diff.staged);
+    return this.command({ GitStatus: { cwd: this.cwd() } });
+  }
+
+  openGitDiff(path: string, staged: boolean): boolean {
+    return this.command({ GitDiff: { cwd: this.cwd(), path, staged } });
+  }
+
+  closeGitDiff(): void {
+    this.gitDiff.set(null);
+  }
+
+  private applyHeroDefaults(): void {
+    const cwd = this.heroCwd() ?? this.cwd();
+    const seed = this.sessions()
+      .filter((session) => !session.archived && session.cwd === cwd)
+      .sort((a, b) => b.updated_at - a.updated_at)[0];
+    if (seed) {
+      this.heroConfiguration.update((configuration) => ({
+        ...configuration,
+        permissions: seed.permissions ?? configuration.permissions,
+        reasoningLevel: seed.reasoning_level ?? null,
+        ...(this.heroModelDirty ? {} : {
+          providerId: seed.provider_id ?? null,
+          modelId: seed.model_id ?? null,
+        }),
+      }));
+    }
+    this.syncCurrentModelName();
   }
 
   openSession(sessionId: string): void {
@@ -155,9 +202,10 @@ export class AgentStore {
         : previous
           ? (levels.find((level) => !["none", "off", "disabled"].includes(level)) ?? null)
           : null);
+    const sessionId = this.current();
+    if (!sessionId) this.heroModelDirty = true;
     this.updateConfiguration({ providerId, modelId, reasoningLevel });
     this.syncCurrentModelName();
-    const sessionId = this.current();
     if (sessionId) {
       this.command({ SetModel: { session_id: sessionId, provider_id: providerId, model_id: modelId, reasoning_level: reasoningLevel } });
     }
@@ -241,7 +289,7 @@ export class AgentStore {
     }
     if (this.command({
       NewSession: {
-        cwd: this.cwd(),
+        cwd: this.heroCwd() ?? this.cwd(),
         provider_id: configuration.providerId,
         model_id: configuration.modelId,
         reasoning_level: configuration.reasoningLevel,
@@ -562,6 +610,12 @@ export class AgentStore {
           ),
         );
         if (this.current() === sessionId) this.currentTitle.set(data.title);
+        break;
+      case "GitStatus":
+        this.gitStatus.set(data as GitStatusSnapshot);
+        break;
+      case "GitDiff":
+        this.gitDiff.set(data as GitDiffSnapshot);
         break;
       case "PluginSnapshot": {
         const packages = data.snapshot.packages as PluginPackageInfo[];

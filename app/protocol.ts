@@ -11,6 +11,7 @@ export interface SessionMeta {
   provider_id?: string | null;
   model_id?: string | null;
   reasoning_level?: string | null;
+  permissions?: PermissionSettings;
 }
 
 export interface EditDiff {
@@ -18,6 +19,28 @@ export interface EditDiff {
   unified_diff: string;
   additions: number;
   deletions: number;
+}
+
+export interface GitFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+  status: string;
+}
+
+export interface GitStatusSnapshot {
+  cwd: string;
+  is_git: boolean;
+  unstaged: GitFileChange[];
+  staged: GitFileChange[];
+}
+
+export interface GitDiffSnapshot {
+  cwd: string;
+  path: string;
+  staged: boolean;
+  diff: string;
+  note?: "Truncated" | "TooLarge" | "Binary" | null;
 }
 
 export interface UserItem {
@@ -169,6 +192,8 @@ export interface AppConfig {
   default_model?: string | null;
   default_delivery?: MessageDelivery;
   providers: ProviderConfig[];
+  ui_font?: string | null;
+  mono_font?: string | null;
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;
   [key: string]: unknown;
