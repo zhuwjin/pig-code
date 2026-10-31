@@ -1,5 +1,5 @@
 import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, reduceMotion, signal, untracked } from "nsh";
-import type { JSX } from "nsh";
+import type { JSX, Signal } from "nsh";
 import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { Window } from "nsh/desktop";
 import { AgentStore } from "./store";
@@ -49,13 +49,13 @@ function AnimatedResizablePanel(props: {
   open: boolean;
   width: number;
   minSize: number;
+  animating: Signal<boolean>;
   onResize: (width: number) => void;
   children: JSX.Element;
 }) {
   const direction = props.side === "left" ? -1 : 1;
   const presented = signal(props.open);
-  const expanded = signal(props.open);
-  const animating = signal(false);
+  const animating = props.animating;
   const slide = createAnimatedValue(props.open ? 0 : direction * props.width);
   let shown = props.open;
   let generation = 0;
@@ -69,7 +69,6 @@ function AnimatedResizablePanel(props: {
     if (reduceMotion()) {
       slide.set(open ? 0 : direction * width);
       presented.set(open);
-      expanded.set(open);
       animating.set(false);
       return;
     }
@@ -79,41 +78,26 @@ function AnimatedResizablePanel(props: {
       presented.set(open);
     };
     animating.set(true);
-    if (open) {
-      presented.set(true);
-      requestAnimationFrame(() => {
-        if (generation !== current) return;
-        LayoutAnimation.configureNext({ duration: 220, update: { type: "easeOut" } });
-        Animated.timing(slide, {
-          toValue: 0,
-          duration: 220,
-          easing: Easing.bezier(0, 0, 0.58, 1),
-        }).start();
-        expanded.set(true);
-        setTimeout(finish, 220);
-      });
-      return;
-    }
     LayoutAnimation.configureNext({ duration: 220, update: { type: "easeOut" } });
     Animated.timing(slide, {
-      toValue: direction * width,
+      toValue: open ? 0 : direction * width,
       duration: 220,
       easing: Easing.bezier(0, 0, 0.58, 1),
     }).start();
-    expanded.set(false);
+    if (open) presented.set(true);
     setTimeout(finish, 220);
   });
   return (
     <ResizablePanel
-      size={expanded() ? props.width : 1}
-      minSize={expanded() ? props.minSize : 0}
+      size={props.open ? props.width : 0}
+      minSize={props.open ? props.minSize : 0}
       fixed
       visible={presented()}
       onResize={props.onResize}
     >
       <View
         class="relative h-full w-full overflow-hidden"
-        importantForAccessibility={expanded() ? "yes" : "no-hide-descendants"}
+        importantForAccessibility={props.open ? "yes" : "no-hide-descendants"}
       >
         <View
           class="absolute bottom-0 top-0"
@@ -129,17 +113,21 @@ function AnimatedResizablePanel(props: {
 }
 
 const HANDLE_THUMB = "h-11 w-[3px] rounded-full bg-muted-foreground opacity-0 scale-y-0 transition duration-150 ease-out group-hover:opacity-40 group-hover:scale-y-[0.45] group-active:opacity-90 group-active:scale-y-100";
+const HANDLE_THUMB_HIDDEN = "h-11 w-[3px] rounded-full bg-muted-foreground opacity-0 scale-y-0";
 
 function App(props: UiContext) {
   const { store, themeStore } = props;
   const sidebarVisible = signal(true);
   const sidebarWidth = signal(220);
+  const sidebarAnimating = signal(false);
   const rightVisible = signal(false);
   const rightWidth = signal(300);
+  const rightAnimating = signal(false);
   const terminalVisible = signal(false);
   const settingsVisible = signal(false);
   const themePickerVisible = signal(false);
   const searchVisible = signal(false);
+  const panelsAnimating = () => sidebarAnimating() || rightAnimating();
   const saveTheme = () => store.saveThemePreference(themeStore.activeId(), themeStore.mode());
   const toggleSidebar = (visible: boolean) => {
     sidebarVisible.set(visible);
@@ -185,8 +173,9 @@ function App(props: UiContext) {
       <View class="relative flex-1">
         <ResizablePanelGroup
           class="flex-1"
-          handleClass="w-px bg-border"
-          handleThumbClass={HANDLE_THUMB}
+          disabled={panelsAnimating()}
+          handleClass={panelsAnimating() ? "w-px bg-transparent" : "w-px bg-border"}
+          handleThumbClass={panelsAnimating() ? HANDLE_THUMB_HIDDEN : HANDLE_THUMB}
           handleAccessibilityLabel="Resize the sidebar"
         >
           <AnimatedResizablePanel
@@ -194,6 +183,7 @@ function App(props: UiContext) {
             open={sidebarVisible() && !settingsVisible()}
             width={sidebarWidth()}
             minSize={200}
+            animating={sidebarAnimating}
             onResize={(width) => sidebarWidth.set(width)}
           >
             <Sidebar
@@ -234,6 +224,7 @@ function App(props: UiContext) {
             open={rightVisible() && !settingsVisible()}
             width={rightWidth()}
             minSize={280}
+            animating={rightAnimating}
             onResize={(width) => rightWidth.set(width)}
           >
             <RightPanel {...props} onClose={toggleRight} />
