@@ -98,11 +98,13 @@ mod tests {
             id: "acme.visual".into(),
             name: "Acme Visual Themes".into(),
             version: "1.0.0".into(),
-            digest,
+            digest: digest.clone(),
+            content_digest: digest,
             root: package_root,
             source: PluginSource::User,
             enabled: true,
             contributions,
+            capabilities: Vec::new(),
         };
         let encoded =
             load_themes(&serde_json::to_string(&vec![package.clone()]).expect("encode package"))

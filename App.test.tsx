@@ -189,6 +189,33 @@ test("runs a real shell in the terminal panel", async () => {
   await app.waitFor("id:terminal-panel", { state: "gone" });
 });
 
+test("installs a signed UI plugin and restores the host on disable", async () => {
+  const app = await openApp();
+  await app.press("id:title-theme-settings");
+  await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
+  await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
+  await app.press("id:plugin-install");
+  await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
+  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.press("id:theme-picker-close");
+  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
+  await app.waitFor("id:plugin-send-icon");
+  await app.waitFor("text:Moon engine is running", { timeout: 10000 });
+  await app.type("id:composer-input", "MOON_BUTTON_SUBMIT");
+  await app.press("id:send-button");
+  await app.waitFor("text:/MOON_BUTTON_SUBMIT/", { timeout: 10000 });
+  await app.press("id:moon-submit");
+  await app.type("id:composer-input", "MOON_REMOTE_SUBMIT");
+  await app.press("id:moon-submit");
+  await app.waitFor("text:/MOON_REMOTE_SUBMIT/", { timeout: 10000 });
+  await app.press("id:title-theme-settings");
+  expect(app.count("id:theme-option-moon")).toBe(1);
+  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.press("id:theme-picker-close");
+  await app.waitFor("id:plugin-send-icon", { state: "gone" });
+  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { state: "gone" });
+});
+
 test("answers dangerous command approvals", async () => {
   const app = await openApp();
   await app.type("id:composer-input", "DANGER_SCENARIO");

@@ -3,7 +3,7 @@ import type { UiContext } from "../ui-context";
 import { Composer } from "./composer";
 import { EmptyWorkspace } from "./hero";
 import { MessageList } from "./messages";
-import { ExecutablePlugin, executablePlugins } from "./plugin-surface";
+import { PluginPages } from "../plugins/remote-renderer";
 import { StatusBar } from "./status-bar";
 
 export function Workspace(props: UiContext) {
@@ -30,11 +30,15 @@ export function Workspace(props: UiContext) {
         <StatusBar {...props} />
       </If>
       <If when={hero()}><EmptyWorkspace {...props} /></If>
-      <If when={executablePlugins}>
-        <View class="absolute right-6 top-6 z-40 h-20 w-20 pointer-events-none">
-          <ExecutablePlugin {...props} slot="pet" class="h-20 w-20" />
-        </View>
-      </If>
+      <View class="absolute bottom-24 right-4 z-30 w-80 gap-2">
+        <PluginPages
+          target="main"
+          packages={store.pluginPackages()}
+          documents={store.pluginDocuments()}
+          runtime={store.pluginRuntime()}
+          onEvent={(instance, node, kind, text) => store.dispatchPluginEvent(instance, node, kind, text)}
+        />
+      </View>
     </View>
   );
 }

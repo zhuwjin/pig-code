@@ -1,6 +1,5 @@
 mod agent;
-pub mod plugin_runtime;
-pub mod plugin_surface;
+mod plugin_system;
 mod terminal;
 mod theme;
 

@@ -6,8 +6,9 @@ import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { ApprovalCard } from "./approval-card";
 import { ModelPicker, PermissionPicker, SlashCandidates } from "./composer-popups";
-import { Icon } from "./icon";
-import { ExecutablePlugin, executablePlugins } from "./plugin-surface";
+import { Icon, type IconName } from "./icon";
+import { RemoteContribution } from "../plugins/remote-renderer";
+import { pluginInstance, uiContribution } from "../plugins/ui-coordinator";
 import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
@@ -136,6 +137,24 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const showQueue = () => !props.hero && !approval() && !question() && (
     queue().pending.length > 0 || queue().steer.length > 0 || queue().paused || queue().held
   );
+  const sendContent = () => {
+    const patch = uiContribution(store.pluginPackages(), "composer.sendButton", store.pluginRuntime());
+    if (!patch) {
+      return <Icon name={running() ? "square" : "arrow-up"} size={running() ? 10 : 14} color={token("primary-foreground")} />;
+    }
+    if (patch.contribution.icon) {
+      return <Icon testID="plugin-send-icon" name={patch.contribution.icon as IconName} size={14} color={token("primary-foreground")} />;
+    }
+    const instance = pluginInstance(patch.pkg);
+    return (
+      <RemoteContribution
+        instance={instance}
+        document={store.pluginDocuments()[instance] ?? null}
+        exportName={patch.contribution.export}
+        onEvent={(target, node, kind, text) => store.dispatchPluginEvent(target, node, kind, text)}
+      />
+    );
+  };
   return (
     <View class={props.hero ? "p-3 pb-1" : "px-4 pb-4 pt-2"}>
       <View class="mx-auto w-full max-w-[860px]">
@@ -158,32 +177,27 @@ export function Composer(props: UiContext & { hero?: boolean }) {
               <If when={slashCommands().length > 0}>
                 <SlashCandidates query={slashQuery() ?? ""} selected={slashIndex()} onSelect={chooseSlash} />
               </If>
-              <If when={executablePlugins}>
-                <ExecutablePlugin {...props} slot="composer" class="h-44" />
-              </If>
-              <If when={!executablePlugins}>
-                <Input
-                  testID="composer-input"
-                  value={store.draft()}
-                  onChange={(text) => store.draft.set(text)}
-                  onSubmit={() => submit()}
-                  onFocus={() => inputFocused.set(true)}
-                  onBlur={() => inputFocused.set(false)}
-                  multiline
-                  submitBehavior="submit"
-                  placeholder={running()
-                    ? store.config()?.default_delivery === "steer"
-                      ? "继续输入以引导后续修改"
-                      : "继续输入以排队后续修改"
-                    : store.config()?.default_delivery === "steer"
-                      ? "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列"
-                      : "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息"}
-                  class={themeStore.classes(
-                    "composer.input",
-                    "max-h-40 min-h-16 px-1 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground",
-                  )}
-                />
-              </If>
+              <Input
+                testID="composer-input"
+                value={store.draft()}
+                onChange={(text) => store.draft.set(text)}
+                onSubmit={() => submit()}
+                onFocus={() => inputFocused.set(true)}
+                onBlur={() => inputFocused.set(false)}
+                multiline
+                submitBehavior="submit"
+                placeholder={running()
+                  ? store.config()?.default_delivery === "steer"
+                    ? "继续输入以引导后续修改"
+                    : "继续输入以排队后续修改"
+                  : store.config()?.default_delivery === "steer"
+                    ? "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列"
+                    : "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息"}
+                class={themeStore.classes(
+                  "composer.input",
+                  "max-h-40 min-h-16 px-1 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground",
+                )}
+              />
             </View>
             <View class="flex-row items-center gap-2">
               <PermissionPicker {...props} />
@@ -196,18 +210,8 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                 class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
                 onPress={() => store.submitOrStop()}
               >
-                <Icon
-                  name={running() ? "square" : "arrow-up"}
-                  size={running() ? 10 : 14}
-                  color={token("primary-foreground")}
-                />
+                {sendContent()}
               </Button>
-            </View>
-          </If>
-          <If when={executablePlugins && !question() && !approval()}>
-            <View class="flex-row items-center px-2 pt-1">
-              <View class="flex-1" />
-              <ExecutablePlugin {...props} slot="rate" class="h-6 w-24" />
             </View>
           </If>
         </View>

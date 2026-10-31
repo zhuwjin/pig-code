@@ -24,6 +24,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub pages: Vec<PluginPage>,
     #[serde(default)]
+    pub ui: Vec<PluginUiContribution>,
+    #[serde(default)]
     pub themes: Vec<PluginThemeContribution>,
     #[serde(default)]
     pub skills: Vec<PluginSkill>,
@@ -47,6 +49,7 @@ impl Default for PluginContributions {
             api_version: PLUGIN_API_VERSION,
             description: BTreeMap::new(),
             pages: Vec::new(),
+            ui: Vec::new(),
             themes: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -380,12 +383,101 @@ pub struct PluginPackageInfo {
     pub name: String,
     pub version: String,
     pub digest: String,
+    #[serde(default)]
+    pub content_digest: String,
     pub root: PathBuf,
     pub source: PluginSource,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
     pub contributions: PluginContributions,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapabilityRequest>,
+}
+
+pub const PLUGIN_MANIFEST_FILE: &str = "pig-plugin.json";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginManifest {
+    pub api_version: u32,
+    pub id: String,
+    pub name: PluginLocalizedText,
+    pub version: String,
+    pub build: u64,
+    pub entry: String,
+    pub min_host_version: String,
+    pub protocols: PluginProtocolVersions,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapabilityRequest>,
+    #[serde(default)]
+    pub contributions: PluginContributions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PluginLocalizedText {
+    Text(String),
+    Localized(BTreeMap<String, String>),
+}
+
+impl PluginLocalizedText {
+    pub fn fallback(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Localized(values) => values
+                .get("zh-CN")
+                .or_else(|| values.get("en"))
+                .or_else(|| values.values().next())
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginProtocolVersions {
+    pub ui: u32,
+    pub services: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCapabilityRequest {
+    pub name: String,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginUiContribution {
+    pub id: String,
+    pub kind: PluginUiContributionKind,
+    pub target: String,
+    #[serde(default)]
+    pub export: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub preserve: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginUiContributionKind {
+    ReplaceChildren,
+    InsertAfter,
+    Wrap,
+    Page,
+    Panel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledPluginMetadata {
+    pub digest: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

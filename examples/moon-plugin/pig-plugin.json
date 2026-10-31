@@ -1,0 +1,97 @@
+{
+  "apiVersion": 1,
+  "id": "com.pigcodets.plugins.moon",
+  "name": {
+    "zh-CN": "月亮界面",
+    "en": "Moon UI"
+  },
+  "version": "1.0.0",
+  "build": 1,
+  "entry": "App.tsx",
+  "minHostVersion": "1.0.0",
+  "protocols": {
+    "ui": 1,
+    "services": 1
+  },
+  "capabilities": [
+    {
+      "name": "ui.patch.structure",
+      "targets": ["composer.sendButton"]
+    },
+    {
+      "name": "ui.add",
+      "targets": ["main", "settings"]
+    },
+    {
+      "name": "composer.submit",
+      "targets": ["*"]
+    },
+    {
+      "name": "tools.provide",
+      "targets": ["MoonEcho"]
+    }
+  ],
+  "contributions": {
+    "api_version": 1,
+    "description": {
+      "zh-CN": "修改发送按钮并添加远程界面",
+      "en": "Customize the send button and add remote UI"
+    },
+    "ui": [
+      {
+        "id": "moon-send-button",
+        "kind": "replaceChildren",
+        "target": "composer.sendButton",
+        "icon": "moon",
+        "preserve": ["onPress", "disabled", "accessibilityLabel", "testID"]
+      },
+      {
+        "id": "moon-panel",
+        "kind": "panel",
+        "target": "main",
+        "export": "MoonPanel",
+        "preserve": []
+      }
+    ],
+    "tools": [
+      {
+        "name": "MoonEcho",
+        "description": "Returns the supplied text through the remote plugin engine",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string" }
+          },
+          "required": ["text"]
+        },
+        "read_only": true,
+        "availability": "static"
+      }
+    ],
+    "themes": [
+      {
+        "id": "moon",
+        "entry": "moon-theme.json"
+      }
+    ],
+    "skills": [
+      {
+        "path": "skills/moon"
+      }
+    ],
+    "config": {
+      "items": [
+        {
+          "key": "greeting",
+          "description": {
+            "en": "Greeting displayed by the moon plugin"
+          },
+          "default": "Hello moon"
+        }
+      ],
+      "read": [],
+      "write": []
+    },
+    "actions": ["provide_themes", "provide_tools", "read_config"]
+  }
+}

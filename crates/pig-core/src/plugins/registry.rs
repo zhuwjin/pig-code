@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use pig_protocol::{
-    CoreError, PLUGIN_API_VERSION, PluginAction, PluginCapability, PluginContributions,
-    PluginIssue, PluginPackageInfo, PluginPackageSource, PluginSnapshot, PluginSource,
+    CoreError, InstalledPluginMetadata, PLUGIN_API_VERSION, PluginAction, PluginCapability,
+    PluginContributions, PluginIssue, PluginManifest, PluginPackageInfo, PluginPackageSource,
+    PluginSnapshot, PluginSource,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -89,28 +90,63 @@ impl PluginRegistry {
         source: &PluginPackageSource,
     ) -> Result<PluginPackageInfo, CoreError> {
         let root = canonical(&source.root)?;
-        let identity: Identity = read_json(&root.join("gpui-shell.json"))?;
-        validate_id(&identity.id)?;
-        if identity.name.trim().is_empty() || identity.version.trim().is_empty() {
+        let manifest_path = root.join(pig_protocol::PLUGIN_MANIFEST_FILE);
+        let package_manifest = manifest_path
+            .is_file()
+            .then(|| read_json::<PluginManifest>(&manifest_path))
+            .transpose()?;
+        let identity = match &package_manifest {
+            Some(manifest) => manifest.id.clone(),
+            None => read_json::<Identity>(&root.join("gpui-shell.json"))?.id,
+        };
+        validate_id(&identity)?;
+        let (name, version, entry, contributions, capabilities) = match package_manifest {
+            Some(manifest) => (
+                manifest.name.fallback(),
+                manifest.version,
+                manifest.entry,
+                manifest.contributions,
+                manifest.capabilities,
+            ),
+            None => {
+                let identity: Identity = read_json(&root.join("gpui-shell.json"))?;
+                let contributions = match root.join(pig_protocol::PLUGIN_CONTRIBUTION_FILE) {
+                    path if path.is_file() => read_json(&path)?,
+                    _ => PluginContributions::default(),
+                };
+                (
+                    identity.name,
+                    identity.version,
+                    identity.entry,
+                    contributions,
+                    Vec::new(),
+                )
+            }
+        };
+        if name.trim().is_empty() || version.trim().is_empty() {
             return Err(manifest("plugin name and version must not be empty"));
         }
-        relative_file(&identity.entry)?;
-        self.validate_source(&root, &identity.id, &source.source)?;
-        let contributions = match root.join(pig_protocol::PLUGIN_CONTRIBUTION_FILE) {
-            path if path.is_file() => read_json(&path)?,
-            _ => PluginContributions::default(),
-        };
+        relative_file(&entry)?;
+        self.validate_source(&root, &identity, &source.source)?;
         validate_contributions(&root, &contributions)?;
-        let digest = package_digest(&root)?;
+        let installed = root.join(".pig-install.json");
+        let content_digest = package_digest(&root)?;
+        let digest = if installed.is_file() {
+            read_json::<InstalledPluginMetadata>(&installed)?.digest
+        } else {
+            content_digest.clone()
+        };
         Ok(PluginPackageInfo {
-            id: identity.id,
-            name: identity.name,
-            version: identity.version,
+            id: identity,
+            name,
+            version,
             digest,
+            content_digest,
             root,
             source: source.source.clone(),
             enabled: false,
             contributions,
+            capabilities,
         })
     }
 
@@ -441,7 +477,7 @@ impl PluginRegistry {
         capability: PluginCapability,
     ) -> Result<&'a PluginPackageInfo, CoreError> {
         let package = self.package(id, digest)?;
-        if package_digest(&package.root)? != digest {
+        if package_digest(&package.root)? != package.content_digest {
             return Err(permission(
                 "the plugin files changed after discovery; reload it first",
             ));
@@ -471,7 +507,9 @@ pub(crate) fn authorized_package(
     package: &PluginPackageInfo,
     trusted_workspace: Option<&crate::config::WorkspaceTrust>,
 ) -> bool {
-    if !package.enabled || package_digest(&package.root).ok().as_deref() != Some(&package.digest) {
+    if !package.enabled
+        || package_digest(&package.root).ok().as_deref() != Some(&package.content_digest)
+    {
         return false;
     }
     match &package.source {

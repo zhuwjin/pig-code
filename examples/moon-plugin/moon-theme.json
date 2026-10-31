@@ -1,0 +1,13 @@
+{
+  "id": "moon",
+  "name": "Moonlight",
+  "description": "A cool moonlight theme",
+  "kind": "theme",
+  "targetThemes": [],
+  "cssVars": {
+    "dark": {
+      "primary": "#a5b4fc",
+      "primary-foreground": "#1e1b4b"
+    }
+  }
+}

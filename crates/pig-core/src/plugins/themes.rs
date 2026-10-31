@@ -35,7 +35,7 @@ pub fn load_theme(
     if !package.enabled {
         return Err(permission("the plugin is disabled"));
     }
-    if package_digest(&package.root)? != package.digest {
+    if package_digest(&package.root)? != package.content_digest {
         return Err(permission("the plugin files changed after discovery"));
     }
     let root = canonical(&package.root)?;

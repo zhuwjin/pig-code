@@ -20,6 +20,7 @@ pub struct Agent {
     handle: pig_core::AgentHandle,
     cwd: PathBuf,
     data_dir: PathBuf,
+    plugins: crate::plugin_system::PluginSystemManager,
     _selftest_dir: Option<SelftestDir>,
 }
 
@@ -86,7 +87,7 @@ default_reasoning_level = "low"
             let _ = handle.ops.try_send(op);
         }
         let _ = handle.ops.try_send(Op::SyncPlugins {
-            packages: crate::theme::package_sources(&data_dir),
+            packages: crate::plugin_system::installed_sources(&data_dir),
         });
         if let Some(digest) = selftest_theme {
             let _ = handle.ops.try_send(Op::SetPluginEnabled {
@@ -96,6 +97,10 @@ default_reasoning_level = "low"
             });
         }
         Self {
+            plugins: crate::plugin_system::PluginSystemManager::new(
+                data_dir.clone(),
+                handle.ops.clone(),
+            ),
             handle,
             cwd,
             data_dir,
@@ -118,7 +123,7 @@ default_reasoning_level = "low"
     /// Rediscovers user plugin packages in the app's data directory.
     pub fn sync_plugins(&self) -> Result<(), String> {
         self.send_op(Op::SyncPlugins {
-            packages: crate::theme::package_sources(&self.data_dir),
+            packages: crate::plugin_system::installed_sources(&self.data_dir),
         })
     }
 
@@ -134,6 +139,41 @@ default_reasoning_level = "low"
             digest,
             enabled,
         })
+    }
+
+    /// Verifies and installs a signed plugin without rebuilding the app.
+    pub async fn install_plugin(
+        this: Instance<Self>,
+        package: String,
+        root: String,
+    ) -> Result<String, String> {
+        let plugins = this.with(|agent| agent.plugins.clone());
+        tokio::task::spawn_blocking(move || {
+            plugins.install(std::path::Path::new(&package), std::path::Path::new(&root))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|value| value.to_string())
+    }
+
+    /// Streams remote UI documents and plugin runtime events.
+    pub async fn listen_plugins(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
+        let events = this.with(|agent| agent.plugins.events());
+        while let Ok(event) = events.recv().await {
+            listener.post(event);
+        }
+    }
+
+    /// Routes a native UI event to the owning plugin engine.
+    pub fn dispatch_plugin_event(
+        &self,
+        instance: String,
+        node: String,
+        kind: String,
+        text: Option<String>,
+    ) -> Result<(), String> {
+        self.plugins
+            .dispatch_ui_event(&instance, &node, &kind, text)
     }
 
     /// Loads validated theme definitions from an enabled-plugin snapshot.
@@ -191,6 +231,7 @@ default_reasoning_level = "low"
     /// Streams ordered JSON arrays of core events until the agent stops.
     pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
         let events = this.with(|agent| agent.handle.events.clone());
+        let plugins = this.with(|agent| agent.plugins.clone());
         while let Ok(first) = events.recv().await {
             let mut batch = vec![first];
             while batch.len() < 128 {
@@ -198,6 +239,9 @@ default_reasoning_level = "low"
                     Ok(event) => batch.push(event),
                     Err(_) => break,
                 }
+            }
+            for event in &batch {
+                plugins.handle_core_event(event);
             }
             listener.post(encode_batch(&batch));
         }

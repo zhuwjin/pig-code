@@ -3,6 +3,7 @@ import { Button } from "nsh/base";
 import type { UiContext } from "../../ui-context";
 import { Icon } from "../icon";
 import { ModelSettings } from "./model-settings";
+import { PluginPages } from "../../plugins/remote-renderer";
 
 export function SettingsPage(props: UiContext & {
   onBack: () => void;
@@ -25,6 +26,13 @@ export function SettingsPage(props: UiContext & {
             <Text class="text-sm text-sidebar-foreground">外观</Text>
           </Button>
         </View>
+        <PluginPages
+          target="settings"
+          packages={props.store.pluginPackages()}
+          documents={props.store.pluginDocuments()}
+          runtime={props.store.pluginRuntime()}
+          onEvent={(instance, node, kind, text) => props.store.dispatchPluginEvent(instance, node, kind, text)}
+        />
       </View>
       <ModelSettings {...props} />
     </View>

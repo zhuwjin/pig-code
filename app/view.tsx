@@ -270,6 +270,7 @@ function App(props: UiContext) {
             store.setPluginEnabled(current, !current.enabled);
           }}
           onRefreshPackages={() => store.syncPlugins()}
+          onInstallPlugin={(packagePath, rootPath) => store.installPlugin(packagePath, rootPath)}
         />
       </If>
       <If when={searchVisible()}>

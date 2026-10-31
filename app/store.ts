@@ -16,6 +16,7 @@ import {
   PendingQuestion,
   PermissionSettings,
   PluginPackageInfo,
+  RemoteDocument,
   ProviderConfig,
   ProviderCredentialStatus,
   QueueItem,
@@ -66,6 +67,8 @@ export class AgentStore {
   readonly testingProviders = signal<Record<string, boolean>>({});
   readonly globalError = signal("");
   readonly pluginPackages = signal<PluginPackageInfo[]>([]);
+  readonly pluginDocuments = signal<Record<string, RemoteDocument>>({});
+  readonly pluginRuntime = signal<Record<string, { state: string; epoch?: number; message?: string }>>({});
   readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
   readonly themeError = signal("");
   private autoOpen = true;
@@ -89,6 +92,33 @@ export class AgentStore {
         for (const event of events) this.reduce(event);
       } catch (error) {
         this.globalError.set(`事件解析失败：${errorMessage(error)}`);
+      }
+    });
+    void this.agent.listenPlugins((raw) => {
+      try {
+        const message = JSON.parse(raw);
+        if (message.kind === "ui.document") {
+          const document = message.document as RemoteDocument;
+          const current = this.pluginDocuments()[document.instance];
+          if (current && (current.epoch > document.epoch || (current.epoch === document.epoch && current.sequence > document.sequence))) return;
+          this.pluginDocuments.update((documents) => ({ ...documents, [document.instance]: document }));
+        } else if (message.kind === "ui.reset") {
+          this.pluginDocuments.update((documents) => {
+            const next = { ...documents };
+            delete next[message.instance as string];
+            return next;
+          });
+        } else if (message.kind === "runtime") {
+          this.pluginRuntime.update((instances) => ({
+            ...instances,
+            [message.instance as string]: { state: message.state, epoch: message.epoch, message: message.message },
+          }));
+          if (message.state === "failed") this.globalError.set(`插件运行失败：${message.message ?? "未知错误"}`);
+        } else if (message.kind === "host.action" && message.name === "composer.submit") {
+          this.send();
+        }
+      } catch (error) {
+        this.globalError.set(`插件事件解析失败：${errorMessage(error)}`);
       }
     });
   }
@@ -526,6 +556,23 @@ export class AgentStore {
   syncPlugins(): void {
     try {
       this.agent.syncPlugins();
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  async installPlugin(packagePath: string, rootPath: string): Promise<void> {
+    try {
+      await this.agent.installPlugin(packagePath, rootPath);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+      throw error;
+    }
+  }
+
+  dispatchPluginEvent(instance: string, node: string, kind: string, text?: string): void {
+    try {
+      this.agent.dispatchPluginEvent(instance, node, kind, text ?? null);
     } catch (error) {
       this.globalError.set(errorMessage(error));
     }

@@ -174,17 +174,54 @@ export interface ProviderConfig {
   [key: string]: unknown;
 }
 
+export interface PluginUiContribution {
+  id: string;
+  kind: "replaceChildren" | "insertAfter" | "wrap" | "page" | "panel";
+  target: string;
+  export?: string;
+  icon?: string;
+  preserve: string[];
+}
+
+export interface PluginCapabilityRequest {
+  name: string;
+  targets: string[];
+}
+
 export interface PluginPackageInfo {
   id: string;
   name: string;
   version: string;
   digest: string;
   root: string;
+  source: "builtIn" | "user" | { project: { workspace: string } };
   enabled: boolean;
+  capabilities: PluginCapabilityRequest[];
   contributions: {
     themes?: { id: string; entry: string }[];
+    ui?: PluginUiContribution[];
     [key: string]: unknown;
   };
+}
+
+export interface RemoteNode {
+  id: string;
+  kind: string;
+  text: string | null;
+  exportName: string | null;
+  testId: string | null;
+  press: boolean;
+  children: string[];
+  style: Record<string, any>;
+}
+
+export interface RemoteDocument {
+  instance: string;
+  epoch: number;
+  sequence: number;
+  nodes: RemoteNode[];
+  roots: string[];
+  warnings: string[];
 }
 
 export interface AppConfig {

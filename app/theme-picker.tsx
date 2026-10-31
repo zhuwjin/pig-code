@@ -1,5 +1,5 @@
-import { colorScheme, Scroll, Text, View } from "nsh";
-import { Button } from "nsh/base";
+import { colorScheme, Scroll, Text, View, signal } from "nsh";
+import { Button, Input } from "nsh/base";
 import { PluginPackageInfo } from "./protocol";
 import { Icon } from "./components/icon";
 import { ThemeStore } from "./theme";
@@ -47,10 +47,13 @@ export function ThemePicker(props: {
   onChange: () => void;
   onTogglePackage: (plugin: PluginPackageInfo) => void;
   onRefreshPackages: () => void;
+  onInstallPlugin: (packagePath: string, rootPath: string) => Promise<void>;
 }) {
   const store = props.store;
-  const themePackages = () =>
-    props.packages.filter((plugin) => (plugin.contributions.themes?.length ?? 0) > 0);
+  const packagePath = signal("");
+  const rootPath = signal("");
+  const installing = signal(false);
+  const themePackages = () => props.packages;
   const activeStylePacks = () => store.activeStylePacks();
   return (
     <View class="absolute inset-0 z-50">
@@ -171,8 +174,28 @@ export function ThemePicker(props: {
             </If>
 
             <View class="gap-2">
+              <Text class="text-xs font-medium text-muted-foreground">安装签名插件</Text>
+              <Input testID="plugin-package-path" value={packagePath()} onChange={(text) => packagePath.set(text)} placeholder=".nshpkg 路径" class="rounded-(--radius) border border-input px-2 py-1 text-xs" />
+              <Input testID="plugin-root-path" value={rootPath()} onChange={(text) => rootPath.set(text)} placeholder="根公钥 root.pub 路径" class="rounded-(--radius) border border-input px-2 py-1 text-xs" />
+              <Button
+                testID="plugin-install"
+                disabled={installing() || !packagePath().trim() || !rootPath().trim()}
+                class="rounded-(--radius) bg-primary px-3 py-1.5 disabled:opacity-40"
+                onPress={async () => {
+                  installing.set(true);
+                  try {
+                    await props.onInstallPlugin(packagePath().trim(), rootPath().trim());
+                  } finally {
+                    installing.set(false);
+                  }
+                }}
+              >
+                <Text class="text-xs text-primary-foreground">{installing() ? "正在验证…" : "验证并安装"}</Text>
+              </Button>
+            </View>
+            <View class="gap-2">
               <View class="flex-row items-center">
-                <Text class="flex-1 text-xs font-medium text-muted-foreground">主题插件</Text>
+                <Text class="flex-1 text-xs font-medium text-muted-foreground">插件</Text>
                 <Button
                   testID="theme-plugins-refresh"
                   accessibilityLabel="刷新主题插件"

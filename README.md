@@ -17,32 +17,15 @@ nsh test                     # cargo test, then App.test.tsx, headless; --target
 nsh package --target web     # or ios, android, macos, linux, windows
 ```
 
-## Executable plugins
+## Unified plugins
 
-All default UI ships with the app as a trusted, built-in TSX bundle at `.nsh/out/default/bundle.js`; it is not downloaded and does
-not need plugin-signature verification. External `.nshpkg` packages only replace or extend those built-in surfaces.
+Signed `.nshpkg` packages are verified and installed at runtime without rebuilding or restarting the app. Open Appearance and
+provide the package path plus its trusted root public key. Enabling a package starts an independent NSH `Engine`; UI contributions
+arrive as versioned remote documents and are rendered by the host, while tools, themes, skills and configuration use the same
+instance identity and capability declarations. Disabling a package stops its engine and restores the original UI.
 
-`cargo run` starts the custom native host (Windows, macOS and Linux adapters) and registers `pig/plugin-surface`. The regular
-`nsh run` host does not register executable plugin surfaces and keeps the default composer. The custom host verifies the signed
-`.nshpkg`, runs it in an isolated `AppView`, and forwards composer actions and metrics through `HostChannel`.
-
-```sh
-nsh build App.tsx -o .nsh/out/default
-cargo run
-
-nsh build App.selftest.tsx -o .nsh/out/selftest
-PIG_BUNDLE=.nsh/out/selftest/bundle.js cargo run  # isolated mock environment
-```
-
-The sample in `examples/executable-plugin` provides a petal composer, a pet overlay and an approximate token-rate control. To
-rebuild its signed package with development keys kept out of source control:
-
-```sh
-nsh keygen .nsh/dev-keys/root
-nsh keygen .nsh/dev-keys/release
-nsh certify --root .nsh/dev-keys/root.secret --key .nsh/dev-keys/release.pub --apps 'com.pigcodets.plugins.*' -o .nsh/dev-keys/release.cert
-nsh publish examples/executable-plugin/App.tsx --key .nsh/dev-keys/release.secret --cert .nsh/dev-keys/release.cert
-```
+`examples/moon-plugin` demonstrates a moon send-button icon, a remote panel, a tool, a theme, a skill and configuration. The
+architecture and protocol contract live in `docs/PLUGIN_SYSTEM.md`.
 
 `nsh` describes the crate's exports with a small program of the crate and builds the app's hosts with it linked in.
 TSX edits are hot updates; Rust edits rebuild and restart the app. The first build writes the crate's TypeScript declarations into

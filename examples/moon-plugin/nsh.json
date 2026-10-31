@@ -1,0 +1,10 @@
+{
+  "name": "Moon UI",
+  "id": "com.pigcodets.plugins.moon",
+  "version": "1.0.0",
+  "build": 1,
+  "appearance": "system",
+  "capabilities": {
+    "host": ["composer.submit", "tools.result", "storage.write"]
+  }
+}

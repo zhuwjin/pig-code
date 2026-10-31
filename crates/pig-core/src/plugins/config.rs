@@ -415,6 +415,7 @@ mod tests {
             name: id.into(),
             version: "1".into(),
             digest: "digest".into(),
+            content_digest: "digest".into(),
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
@@ -427,6 +428,7 @@ mod tests {
                 actions: vec![PluginCapability::ReadConfig, PluginCapability::WriteConfig],
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         }
     }
 
