@@ -201,6 +201,7 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
   await app.waitFor("id:plugin-send-icon");
   await app.waitFor("text:Moon engine is running", { timeout: 10000 });
+  await app.waitFor("text:Dynamic moon note");
   await app.type("id:composer-input", "MOON_BUTTON_SUBMIT");
   await app.press("id:send-button");
   await app.waitFor("text:/MOON_BUTTON_SUBMIT/", { timeout: 10000 });
@@ -214,6 +215,11 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   await app.press("id:theme-picker-close");
   await app.waitFor("id:plugin-send-icon", { state: "gone" });
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { state: "gone" });
+  await app.press("id:title-theme-settings");
+  await app.press("id:plugin-uninstall-com.pigcodets.plugins.moon");
+  await app.press("id:plugin-uninstall-confirm");
+  await app.waitFor("id:theme-package-com.pigcodets.plugins.moon", { state: "gone" });
+  await app.press("id:theme-picker-close");
 });
 
 test("answers dangerous command approvals", async () => {

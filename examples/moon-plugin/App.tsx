@@ -15,6 +15,14 @@ host.on("tools.select", (call: any) => {
   });
 });
 
+host.post("contribution.register", {
+  id: "moon-dynamic-note",
+  kind: "insertAfter",
+  target: "composer.sendButton",
+  export: "MoonDynamicNote",
+  preserve: [],
+});
+
 export default function App() {
   const submitted = signal(false);
   return (
@@ -29,6 +37,7 @@ export default function App() {
       >
         <Text>{submitted() ? "Submitted through host" : "Submit through host"}</Text>
       </Button>
+      <Text accessibilityLabel="MoonDynamicNote" testID="moon-dynamic-note">Dynamic moon note</Text>
     </View>
   );
 }

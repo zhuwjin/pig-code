@@ -31,6 +31,7 @@ export function SettingsPage(props: UiContext & {
           packages={props.store.pluginPackages()}
           documents={props.store.pluginDocuments()}
           runtime={props.store.pluginRuntime()}
+          dynamic={props.store.pluginDynamic()}
           onEvent={(instance, node, kind, text) => props.store.dispatchPluginEvent(instance, node, kind, text)}
         />
       </View>

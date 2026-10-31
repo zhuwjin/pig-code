@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pig_protocol::{
     CoreError, PLUGIN_MARKETPLACE_API_VERSION, PluginMarketplaceCatalog, PluginMarketplaceFile,
     PluginMarketplaceInstall, PluginMarketplacePackage, PluginPackageSource, PluginSource,
+    SignedPluginDownload,
 };
 use sha2::{Digest as _, Sha256};
 
 use super::PluginRegistry;
 
 pub const DEFAULT_MARKETPLACE_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/zhuwjin/pig-code-plugins/main/index.json";
+    "https://raw.githubusercontent.com/zhuwjin/pig-code-ts-plugins/main/index.json";
 
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -239,6 +240,46 @@ fn valid_digest(digest: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Downloads one signed package without treating it as verified plugin code yet.
+pub async fn download_signed_package(
+    data_dir: &Path,
+    index_url: &str,
+    package: &PluginMarketplacePackage,
+) -> Result<SignedPluginDownload, CoreError> {
+    validate_package(package)?;
+    if package.files.len() != 1 || !package.files[0].path.ends_with(".nshpkg") {
+        return Err(manifest(
+            "a signed marketplace package must contain exactly one .nshpkg file",
+        ));
+    }
+    let file = &package.files[0];
+    let client = client()?;
+    let url = file_url(index_url, &format!("{}/{}", package.directory, file.path))?;
+    let bytes = download(&client, &url, MAX_PACKAGE_BYTES as usize).await?;
+    if bytes.len() as u64 != file.size {
+        return Err(manifest("the signed package has an unexpected size"));
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != file.sha256 {
+        return Err(manifest("the signed package failed its SHA-256 check"));
+    }
+    let directory = data_dir.join("plugins/downloads");
+    std::fs::create_dir_all(&directory).map_err(io)?;
+    crate::config::ensure_real_directory(&directory).map_err(io)?;
+    let target = directory.join(format!("{}-{}.nshpkg", package.id, package.digest));
+    let unique = NEXT_INSTALL.fetch_add(1, Ordering::Relaxed);
+    let staging = directory.join(format!(".download-{}-{unique}", package.id));
+    crate::config::write_settings_file(&staging, &bytes).map_err(io)?;
+    if let Err(error) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(io(error));
+    }
+    Ok(SignedPluginDownload {
+        package: package.id.clone(),
+        digest: package.digest.clone(),
+        package_path: target,
+    })
+}
+
 fn client() -> Result<reqwest::Client, CoreError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -440,6 +481,35 @@ mod tests {
         assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
         assert_eq!(snapshot.packages.len(), 1);
         assert!(!snapshot.packages[0].enabled);
+        server.join().expect("marketplace mock shutdown");
+    }
+
+    #[tokio::test]
+    async fn downloads_a_signed_package_without_verifying_it_in_core() {
+        let temp = TempDir::new();
+        let bytes = b"signed-package-fixture".to_vec();
+        let package = PluginMarketplacePackage {
+            id: "moon".into(),
+            name: "Moon".into(),
+            version: "1.0.0".into(),
+            directory: "packages/moon".into(),
+            description: Default::default(),
+            digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
+            files: vec![PluginMarketplaceFile {
+                path: "moon.nshpkg".into(),
+                size: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            }],
+        };
+        let (index_url, server) =
+            server(vec![("/packages/moon/moon.nshpkg".into(), bytes.clone())]);
+        let downloaded = download_signed_package(&temp.0.join("data"), &index_url, &package)
+            .await
+            .expect("download signed package");
+        assert_eq!(
+            std::fs::read(downloaded.package_path).expect("downloaded bytes"),
+            bytes
+        );
         server.join().expect("marketplace mock shutdown");
     }
 

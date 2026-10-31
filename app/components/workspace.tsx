@@ -36,6 +36,7 @@ export function Workspace(props: UiContext) {
           packages={store.pluginPackages()}
           documents={store.pluginDocuments()}
           runtime={store.pluginRuntime()}
+          dynamic={store.pluginDynamic()}
           onEvent={(instance, node, kind, text) => store.dispatchPluginEvent(instance, node, kind, text)}
         />
       </View>

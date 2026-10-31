@@ -262,6 +262,7 @@ function App(props: UiContext) {
         <ThemePicker
           store={themeStore}
           packages={store.pluginPackages()}
+          catalog={store.pluginCatalog()}
           error={store.themeError()}
           onClose={() => themePickerVisible.set(false)}
           onChange={saveTheme}
@@ -271,6 +272,9 @@ function App(props: UiContext) {
           }}
           onRefreshPackages={() => store.syncPlugins()}
           onInstallPlugin={(packagePath, rootPath) => store.installPlugin(packagePath, rootPath)}
+          onRefreshMarketplace={() => store.refreshMarketplace()}
+          onInstallMarketplace={(plugin, rootPath) => store.installMarketplacePlugin(plugin, rootPath)}
+          onUninstallPlugin={(plugin) => store.uninstallPlugin(plugin)}
         />
       </If>
       <If when={searchVisible()}>

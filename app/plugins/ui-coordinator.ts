@@ -25,10 +25,11 @@ export function uiContributions(
   target: string,
   kinds?: PluginUiContribution["kind"][],
   runtime: PluginRuntimeStates = {},
+  dynamic: Record<string, PluginUiContribution[]> = {},
 ): Array<{ pkg: PluginPackageInfo; contribution: PluginUiContribution }> {
   return packages
     .filter((pkg) => pkg.enabled && active(pkg, runtime))
-    .flatMap((pkg) => (pkg.contributions.ui ?? [])
+    .flatMap((pkg) => [...(pkg.contributions.ui ?? []), ...(dynamic[pluginInstance(pkg)] ?? [])]
       .filter((contribution) => contribution.target === target && (!kinds || kinds.includes(contribution.kind)))
       .filter((contribution) => permitted(pkg, contribution))
       .map((contribution) => ({ pkg, contribution })))
@@ -39,6 +40,7 @@ export function uiContribution(
   packages: PluginPackageInfo[],
   target: string,
   runtime: PluginRuntimeStates = {},
+  dynamic: Record<string, PluginUiContribution[]> = {},
 ): { pkg: PluginPackageInfo; contribution: PluginUiContribution } | null {
-  return uiContributions(packages, target, ["replaceChildren"], runtime)[0] ?? null;
+  return uiContributions(packages, target, ["replaceChildren"], runtime, dynamic)[0] ?? null;
 }

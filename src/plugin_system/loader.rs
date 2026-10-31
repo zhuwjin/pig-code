@@ -154,7 +154,7 @@ mod tests {
                 build: manifest.build,
             },
             capabilities: Some(serde_json::json!({
-                "host": ["composer.submit", "tools.result", "storage.write"]
+                "host": ["composer.submit", "tools.result", "storage.write", "contribution.register", "contribution.remove"]
             })),
             source,
             bytecode,

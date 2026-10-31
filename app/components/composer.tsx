@@ -1,4 +1,4 @@
-import { effect, keymap, signal, Text, token, View } from "nsh";
+import { effect, keymap, signal, Text, token, View, type JSX } from "nsh";
 import { Button, Input, Popover } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
@@ -8,7 +8,8 @@ import { ApprovalCard } from "./approval-card";
 import { ModelPicker, PermissionPicker, SlashCandidates } from "./composer-popups";
 import { Icon, type IconName } from "./icon";
 import { RemoteContribution } from "../plugins/remote-renderer";
-import { pluginInstance, uiContribution } from "../plugins/ui-coordinator";
+import { pluginInstance, uiContribution, uiContributions } from "../plugins/ui-coordinator";
+import type { PluginPackageInfo, PluginUiContribution } from "../protocol";
 import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
@@ -137,13 +138,9 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const showQueue = () => !props.hero && !approval() && !question() && (
     queue().pending.length > 0 || queue().steer.length > 0 || queue().paused || queue().held
   );
-  const sendContent = () => {
-    const patch = uiContribution(store.pluginPackages(), "composer.sendButton", store.pluginRuntime());
-    if (!patch) {
-      return <Icon name={running() ? "square" : "arrow-up"} size={running() ? 10 : 14} color={token("primary-foreground")} />;
-    }
+  const contributionContent = (patch: { pkg: PluginPackageInfo; contribution: PluginUiContribution }) => {
     if (patch.contribution.icon) {
-      return <Icon testID="plugin-send-icon" name={patch.contribution.icon as IconName} size={14} color={token("primary-foreground")} />;
+      return <Icon testID={patch.contribution.kind === "replaceChildren" ? "plugin-send-icon" : `plugin-${patch.contribution.kind}-icon`} name={patch.contribution.icon as IconName} size={14} color={token("primary-foreground")} />;
     }
     const instance = pluginInstance(patch.pkg);
     return (
@@ -153,6 +150,50 @@ export function Composer(props: UiContext & { hero?: boolean }) {
         exportName={patch.contribution.export}
         onEvent={(target, node, kind, text) => store.dispatchPluginEvent(target, node, kind, text)}
       />
+    );
+  };
+  const sendContent = () => {
+    const patch = uiContribution(store.pluginPackages(), "composer.sendButton", store.pluginRuntime(), store.pluginDynamic());
+    return patch
+      ? contributionContent(patch)
+      : <Icon name={running() ? "square" : "arrow-up"} size={running() ? 10 : 14} color={token("primary-foreground")} />;
+  };
+  const sendWithContributions = () => {
+    const patches = uiContributions(store.pluginPackages(), "composer.sendButton", undefined, store.pluginRuntime(), store.pluginDynamic());
+    const style = Object.assign({}, ...patches.filter((patch) => patch.contribution.kind === "patch").map((patch) => patch.contribution.style));
+    const replacement = patches.find((patch) => patch.contribution.kind === "replace");
+    const base = () => (
+      <Button
+        testID="send-button"
+        accessibilityLabel={running() ? "停止" : "发送"}
+        disabled={!running() && !store.draft().trim()}
+        class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
+        style={style}
+        onPress={() => store.submitOrStop()}
+      >
+        {replacement ? contributionContent(replacement) : sendContent()}
+      </Button>
+    );
+    let content: JSX.Element = base();
+    for (const patch of patches.filter((patch) => patch.contribution.kind === "wrap").reverse()) {
+      const instance = pluginInstance(patch.pkg);
+      content = (
+        <RemoteContribution
+          instance={instance}
+          document={store.pluginDocuments()[instance] ?? null}
+          exportName={patch.contribution.export}
+          hostChildren={content}
+          onEvent={(target, node, kind, text) => store.dispatchPluginEvent(target, node, kind, text)}
+        />
+      );
+    }
+    if (patches.some((patch) => patch.contribution.kind === "remove")) return null;
+    return (
+      <>
+        {patches.filter((patch) => patch.contribution.kind === "insertBefore").map(contributionContent)}
+        {content}
+        {patches.filter((patch) => patch.contribution.kind === "insertAfter").map(contributionContent)}
+      </>
     );
   };
   return (
@@ -203,15 +244,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
               <PermissionPicker {...props} />
               <View class="flex-1" />
               <ModelPicker {...props} />
-              <Button
-                testID="send-button"
-                accessibilityLabel={running() ? "停止" : "发送"}
-                disabled={!running() && !store.draft().trim()}
-                class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
-                onPress={() => store.submitOrStop()}
-              >
-                {sendContent()}
-              </Button>
+              {sendWithContributions()}
             </View>
           </If>
         </View>

@@ -1,6 +1,6 @@
 import { colorScheme, Scroll, Text, View, signal } from "nsh";
 import { Button, Input } from "nsh/base";
-import { PluginPackageInfo } from "./protocol";
+import { PluginMarketplacePackage, PluginPackageInfo } from "./protocol";
 import { Icon } from "./components/icon";
 import { ThemeStore } from "./theme";
 import { ThemeMode, themePreviewColor } from "./themes";
@@ -14,42 +14,53 @@ const MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
 function ThemePackageRow(props: {
   item: () => PluginPackageInfo;
   onToggle: (plugin: PluginPackageInfo) => void;
+  onRemove: () => void;
 }) {
   const plugin = () => props.item();
   return (
-    <Button
-      testID={`theme-package-${plugin().id}`}
-      selected={plugin().enabled}
-      accessibilityLabel={`${plugin().enabled ? "停用" : "启用"}插件 ${plugin().name}`}
-      class="rounded-(--radius) border border-border px-3 py-2 hover:bg-accent/50 selected:border-primary/60 selected:bg-accent/30"
-      onPress={() => props.onToggle(plugin())}
-    >
-      <View class="flex-row items-center gap-2">
-        <View class="min-w-0 flex-1 gap-0.5">
-          <Text numberOfLines={1} class="text-sm font-medium text-foreground">
-            {plugin().name}
-          </Text>
-          <Text numberOfLines={1} class="text-xs text-muted-foreground">
-            {plugin().id} · {plugin().version}
-          </Text>
+    <View class="flex-row items-center gap-1">
+      <Button
+        testID={`theme-package-${plugin().id}`}
+        selected={plugin().enabled}
+        accessibilityLabel={`${plugin().enabled ? "停用" : "启用"}插件 ${plugin().name}`}
+        class="flex-1 rounded-(--radius) border border-border px-3 py-2 hover:bg-accent/50 selected:border-primary/60 selected:bg-accent/30"
+        onPress={() => props.onToggle(plugin())}
+      >
+        <View class="flex-row items-center gap-2">
+          <View class="min-w-0 flex-1 gap-0.5">
+            <Text numberOfLines={1} class="text-sm font-medium text-foreground">
+              {plugin().name}
+            </Text>
+            <Text numberOfLines={1} class="text-xs text-muted-foreground">
+              {plugin().id} · {plugin().version}
+            </Text>
+          </View>
+          <Text class="text-xs text-muted-foreground">{plugin().enabled ? "已启用" : "已停用"}</Text>
         </View>
-        <Text class="text-xs text-muted-foreground">{plugin().enabled ? "已启用" : "已停用"}</Text>
-      </View>
-    </Button>
+      </Button>
+      <Button testID={`plugin-uninstall-${plugin().id}`} accessibilityLabel={`卸载插件 ${plugin().name}`} class="rounded-(--radius) px-2 py-1 hover:bg-destructive/10" onPress={props.onRemove}>
+        <Text class="text-xs text-destructive">卸载</Text>
+      </Button>
+    </View>
   );
 }
 
 export function ThemePicker(props: {
   store: ThemeStore;
   packages: PluginPackageInfo[];
+  catalog: PluginMarketplacePackage[];
   error?: string;
   onClose: () => void;
   onChange: () => void;
   onTogglePackage: (plugin: PluginPackageInfo) => void;
   onRefreshPackages: () => void;
   onInstallPlugin: (packagePath: string, rootPath: string) => Promise<void>;
+  onRefreshMarketplace: () => Promise<void>;
+  onInstallMarketplace: (plugin: PluginMarketplacePackage, rootPath: string) => Promise<void>;
+  onUninstallPlugin: (plugin: PluginPackageInfo) => void;
 }) {
   const store = props.store;
+  const pendingUninstall = signal<PluginPackageInfo | null>(null);
   const packagePath = signal("");
   const rootPath = signal("");
   const installing = signal(false);
@@ -174,6 +185,33 @@ export function ThemePicker(props: {
             </If>
 
             <View class="gap-2">
+              <View class="flex-row items-center">
+                <Text class="flex-1 text-xs font-medium text-muted-foreground">插件市场</Text>
+                <Button testID="market-refresh" class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onRefreshMarketplace}>
+                  <Text class="text-xs text-muted-foreground">刷新目录</Text>
+                </Button>
+              </View>
+              <If when={props.catalog.length === 0}>
+                <Text class="text-xs text-muted-foreground">刷新目录以查看可用插件。</Text>
+              </If>
+              <Each of={props.catalog} key={(plugin) => plugin.id}>
+                {(plugin) => (
+                  <View class="gap-1 rounded-(--radius) border border-border p-2">
+                    <Text class="text-xs font-medium text-foreground">{plugin().name} · {plugin().version}</Text>
+                    <Text class="text-xs text-muted-foreground">{plugin().id}</Text>
+                    <Button
+                      testID={`market-install-${plugin().id}`}
+                      disabled={!rootPath().trim()}
+                      class="rounded-(--radius) bg-primary px-2 py-1 disabled:opacity-40"
+                      onPress={() => props.onInstallMarketplace(plugin(), rootPath().trim())}
+                    >
+                      <Text class="text-xs text-primary-foreground">下载并安装</Text>
+                    </Button>
+                  </View>
+                )}
+              </Each>
+            </View>
+            <View class="gap-2">
               <Text class="text-xs font-medium text-muted-foreground">安装签名插件</Text>
               <Input testID="plugin-package-path" value={packagePath()} onChange={(text) => packagePath.set(text)} placeholder=".nshpkg 路径" class="rounded-(--radius) border border-input px-2 py-1 text-xs" />
               <Input testID="plugin-root-path" value={rootPath()} onChange={(text) => rootPath.set(text)} placeholder="根公钥 root.pub 路径" class="rounded-(--radius) border border-input px-2 py-1 text-xs" />
@@ -218,10 +256,33 @@ export function ThemePicker(props: {
                   <ThemePackageRow
                     item={plugin}
                     onToggle={(value) => props.onTogglePackage(value)}
+                    onRemove={() => pendingUninstall.set(plugin())}
                   />
                 )}
               </Each>
             </View>
+            <If when={pendingUninstall()}>
+              {(plugin) => (
+                <View class="gap-2 rounded-(--radius) border border-destructive/30 bg-destructive/10 p-3">
+                  <Text class="text-xs text-foreground">确认卸载 {plugin().name}？插件文件将被删除。</Text>
+                  <View class="flex-row gap-2">
+                    <Button
+                      testID="plugin-uninstall-confirm"
+                      class="rounded-(--radius) bg-destructive px-3 py-1"
+                      onPress={() => {
+                        props.onUninstallPlugin(plugin());
+                        pendingUninstall.set(null);
+                      }}
+                    >
+                      <Text class="text-xs text-background">确认卸载</Text>
+                    </Button>
+                    <Button testID="plugin-uninstall-cancel" class="rounded-(--radius) px-3 py-1 hover:bg-muted" onPress={() => pendingUninstall.set(null)}>
+                      <Text class="text-xs">取消</Text>
+                    </Button>
+                  </View>
+                </View>
+              )}
+            </If>
             <If when={props.error}>
               <Text selectable class="text-xs leading-5 text-destructive">
                 {props.error}

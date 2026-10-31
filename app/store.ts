@@ -16,6 +16,9 @@ import {
   PendingQuestion,
   PermissionSettings,
   PluginPackageInfo,
+  PluginUiContribution,
+  PluginMarketplacePackage,
+  PluginMarketplaceCatalog,
   RemoteDocument,
   ProviderConfig,
   ProviderCredentialStatus,
@@ -67,7 +70,9 @@ export class AgentStore {
   readonly testingProviders = signal<Record<string, boolean>>({});
   readonly globalError = signal("");
   readonly pluginPackages = signal<PluginPackageInfo[]>([]);
+  readonly pluginCatalog = signal<PluginMarketplacePackage[]>([]);
   readonly pluginDocuments = signal<Record<string, RemoteDocument>>({});
+  readonly pluginDynamic = signal<Record<string, PluginUiContribution[]>>({});
   readonly pluginRuntime = signal<Record<string, { state: string; epoch?: number; message?: string }>>({});
   readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
   readonly themeError = signal("");
@@ -102,9 +107,19 @@ export class AgentStore {
           const current = this.pluginDocuments()[document.instance];
           if (current && (current.epoch > document.epoch || (current.epoch === document.epoch && current.sequence > document.sequence))) return;
           this.pluginDocuments.update((documents) => ({ ...documents, [document.instance]: document }));
+        } else if (message.kind === "ui.patch" && message.dynamic) {
+          this.pluginDynamic.update((contributions) => ({
+            ...contributions,
+            [message.instance as string]: message.contributions as PluginUiContribution[],
+          }));
         } else if (message.kind === "ui.reset") {
           this.pluginDocuments.update((documents) => {
             const next = { ...documents };
+            delete next[message.instance as string];
+            return next;
+          });
+          this.pluginDynamic.update((contributions) => {
+            const next = { ...contributions };
             delete next[message.instance as string];
             return next;
           });
@@ -564,6 +579,35 @@ export class AgentStore {
   async installPlugin(packagePath: string, rootPath: string): Promise<void> {
     try {
       await this.agent.installPlugin(packagePath, rootPath);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+      throw error;
+    }
+  }
+
+  uninstallPlugin(plugin: PluginPackageInfo): void {
+    try {
+      this.agent.uninstallPlugin(plugin.id, plugin.digest);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+      throw error;
+    }
+  }
+
+  async refreshMarketplace(): Promise<void> {
+    try {
+      const raw = await this.agent.marketplaceCatalog(null);
+      const catalog = JSON.parse(raw) as PluginMarketplaceCatalog;
+      this.pluginCatalog.set(catalog.packages);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+      throw error;
+    }
+  }
+
+  async installMarketplacePlugin(plugin: PluginMarketplacePackage, rootPath: string): Promise<void> {
+    try {
+      await this.agent.installMarketplacePlugin(JSON.stringify(plugin), null, rootPath);
     } catch (error) {
       this.globalError.set(errorMessage(error));
       throw error;

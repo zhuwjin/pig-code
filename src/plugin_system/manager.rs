@@ -7,6 +7,7 @@ use nsh_core::{ApproxTextEngine, EventKind, EventPayload, MountBatch, PressEvent
 use nsh_engine::{App, Engine, EngineConfig, HostChannel, MountSink};
 use pig_protocol::{
     CoreError, Event, PluginPackageInfo, PluginSnapshot, PluginToolResult, PluginToolsSelection,
+    PluginUiContribution, PluginUiContributionKind,
 };
 
 use super::loader::{installed_package_path, load_verified};
@@ -24,6 +25,7 @@ struct Inner {
     trust_root: PathBuf,
     agent: async_channel::Sender<pig_protocol::Op>,
     instances: BTreeMap<String, PluginInstance>,
+    dynamic_ui: BTreeMap<String, Vec<PluginUiContribution>>,
     pending: BTreeMap<String, PendingCall>,
     input_counts: BTreeMap<(String, String), u32>,
     epoch: u64,
@@ -51,6 +53,7 @@ impl PluginSystemManager {
                 data_dir,
                 agent,
                 instances: BTreeMap::new(),
+                dynamic_ui: BTreeMap::new(),
                 pending: BTreeMap::new(),
                 input_counts: BTreeMap::new(),
                 epoch: 0,
@@ -74,8 +77,22 @@ impl PluginSystemManager {
             )
         };
         let verified = load_verified(package, root, &data_dir)?;
-        std::fs::copy(root, &trust_root)
-            .map_err(|error| format!("store plugin root key: {error}"))?;
+        let versions = data_dir.join("packages").join(&verified.manifest.id);
+        if let Ok(entries) = std::fs::read_dir(&versions) {
+            for entry in entries.filter_map(Result::ok) {
+                let version = entry.file_name().to_string_lossy().into_owned();
+                if version != verified.digest {
+                    self.stop(&instance_key(&verified.manifest.id, &version));
+                    std::fs::remove_dir_all(entry.path())
+                        .map_err(|error| format!("remove old plugin version: {error}"))?;
+                }
+            }
+        }
+        let same_root = std::fs::canonicalize(root).ok() == std::fs::canonicalize(&trust_root).ok();
+        if !same_root {
+            std::fs::copy(root, &trust_root)
+                .map_err(|error| format!("store plugin root key: {error}"))?;
+        }
         agent
             .try_send(pig_protocol::Op::SyncPlugins {
                 packages: super::loader::installed_sources(&data_dir),
@@ -86,6 +103,23 @@ impl PluginSystemManager {
             "digest": verified.digest,
             "root": verified.assets,
         }))
+    }
+
+    pub fn uninstall(&self, id: &str, digest: &str) -> Result<(), String> {
+        self.stop(&instance_key(id, digest));
+        let (data_dir, agent) = {
+            let inner = self.inner.lock().expect("plugin manager lock");
+            (inner.data_dir.clone(), inner.agent.clone())
+        };
+        let root = data_dir.join("packages").join(id).join(digest);
+        if root.exists() {
+            std::fs::remove_dir_all(root).map_err(|error| format!("remove plugin: {error}"))?;
+        }
+        agent
+            .try_send(pig_protocol::Op::SyncPlugins {
+                packages: super::loader::installed_sources(&data_dir),
+            })
+            .map_err(|error| error.to_string())
     }
 
     pub fn handle_core_event(&self, event: &Event) {
@@ -144,6 +178,71 @@ impl PluginSystemManager {
             .instances
             .get(&instance_key(id, digest))
             .map(|instance| instance.package.clone())
+    }
+
+    fn register_ui(
+        &self,
+        package: PluginPackageInfo,
+        contribution: PluginUiContribution,
+    ) -> Result<(), String> {
+        if contribution.id.trim().is_empty()
+            || [
+                "approval.",
+                "security.",
+                "credentials.",
+                "plugin.manager",
+                "plugins.",
+            ]
+            .iter()
+            .any(|prefix| contribution.target.starts_with(prefix))
+        {
+            return Err("the UI contribution target is not allowed".into());
+        }
+        let page = matches!(
+            contribution.kind,
+            PluginUiContributionKind::Page | PluginUiContributionKind::Panel
+        );
+        let style = matches!(contribution.kind, PluginUiContributionKind::Patch);
+        let capability = if page {
+            "ui.add"
+        } else if style {
+            "ui.patch.style"
+        } else {
+            "ui.patch.structure"
+        };
+        let allowed = package.capabilities.iter().any(|item| {
+            item.name == capability
+                && (item.targets.contains(&"*".into())
+                    || item.targets.contains(&contribution.target))
+        });
+        if !allowed {
+            return Err(format!("{capability} is not granted for this target"));
+        }
+        let key = instance_key(&package.id, &package.digest);
+        let mut inner = self.inner.lock().expect("plugin manager lock");
+        let contributions = inner.dynamic_ui.entry(key.clone()).or_default();
+        contributions.retain(|item| item.id != contribution.id);
+        contributions.push(contribution);
+        contributions.sort_by(|a, b| a.id.cmp(&b.id));
+        let contributions = contributions.clone();
+        drop(inner);
+        self.emit(serde_json::json!({
+            "kind":"ui.patch","dynamic":true,"instance":key,"package":package,"contributions":contributions
+        }));
+        Ok(())
+    }
+
+    fn remove_ui(&self, package: PluginPackageInfo, id: &str) {
+        let key = instance_key(&package.id, &package.digest);
+        let contributions = {
+            let mut inner = self.inner.lock().expect("plugin manager lock");
+            let contributions = inner.dynamic_ui.entry(key.clone()).or_default();
+            contributions.retain(|item| item.id != id);
+            contributions.clone()
+        };
+        self.emit(serde_json::json!({
+            "kind":"ui.patch","dynamic":true,"instance":key,"package":package,"contributions":contributions
+        }));
     }
 
     fn reconcile(&self, snapshot: &PluginSnapshot) {
@@ -265,6 +364,11 @@ impl PluginSystemManager {
         if let Some(instance) = instance {
             drop(instance.engine);
         }
+        self.inner
+            .lock()
+            .expect("plugin manager lock")
+            .dynamic_ui
+            .remove(key);
         self.emit(serde_json::json!({"kind":"ui.reset","instance":key}));
         self.emit(serde_json::json!({"kind":"runtime","instance":key,"state":"stopped"}));
     }
@@ -274,6 +378,30 @@ impl PluginSystemManager {
         let instance = instance_key(&package.id, &package.digest);
         host.handle("tools.result", move |call| {
             manager.complete_tool(call.data().clone());
+            call.resolve(serde_json::Value::Null);
+        });
+        let register = self.clone();
+        let register_package = package.clone();
+        host.handle(
+            "contribution.register",
+            move |call| match serde_json::from_value(call.data().clone())
+                .map_err(|error| error.to_string())
+                .and_then(|contribution| {
+                    register.register_ui(register_package.clone(), contribution)
+                }) {
+                Ok(()) => call.resolve(serde_json::Value::Null),
+                Err(error) => call.reject(error),
+            },
+        );
+        let remove = self.clone();
+        let remove_package = package.clone();
+        host.handle("contribution.remove", move |call| {
+            let id = call
+                .data()
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            remove.remove_ui(remove_package.clone(), id);
             call.resolve(serde_json::Value::Null);
         });
         let events = self.events.clone();

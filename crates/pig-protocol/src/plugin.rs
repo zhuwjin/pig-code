@@ -462,6 +462,8 @@ pub struct PluginUiContribution {
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]
+    pub style: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
     pub preserve: Vec<String>,
 }
 
@@ -470,7 +472,11 @@ pub struct PluginUiContribution {
 pub enum PluginUiContributionKind {
     ReplaceChildren,
     InsertAfter,
+    InsertBefore,
     Wrap,
+    Remove,
+    Patch,
+    Replace,
     Page,
     Panel,
 }
@@ -532,6 +538,13 @@ pub struct PluginMarketplaceFile {
 pub struct PluginMarketplaceInstall {
     pub package: String,
     pub digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedPluginDownload {
+    pub package: String,
+    pub digest: String,
+    pub package_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

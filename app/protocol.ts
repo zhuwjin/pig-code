@@ -176,16 +176,38 @@ export interface ProviderConfig {
 
 export interface PluginUiContribution {
   id: string;
-  kind: "replaceChildren" | "insertAfter" | "wrap" | "page" | "panel";
+  kind: "replaceChildren" | "insertAfter" | "insertBefore" | "wrap" | "remove" | "patch" | "replace" | "page" | "panel";
   target: string;
   export?: string;
   icon?: string;
+  style?: Record<string, any>;
   preserve: string[];
 }
 
 export interface PluginCapabilityRequest {
   name: string;
   targets: string[];
+}
+
+export interface PluginMarketplaceFile {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+export interface PluginMarketplacePackage {
+  id: string;
+  name: string;
+  version: string;
+  directory: string;
+  description: Record<string, string>;
+  digest: string;
+  files: PluginMarketplaceFile[];
+}
+
+export interface PluginMarketplaceCatalog {
+  api_version: number;
+  packages: PluginMarketplacePackage[];
 }
 
 export interface PluginPackageInfo {

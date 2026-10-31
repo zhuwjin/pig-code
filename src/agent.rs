@@ -156,6 +156,50 @@ default_reasoning_level = "low"
         .map(|value| value.to_string())
     }
 
+    /// Stops and removes one exact plugin installation.
+    pub fn uninstall_plugin(&self, package: String, digest: String) -> Result<(), String> {
+        self.plugins.uninstall(&package, &digest)
+    }
+
+    /// Reads the signed-plugin marketplace catalog.
+    pub async fn marketplace_catalog(
+        this: Instance<Self>,
+        index_url: Option<String>,
+    ) -> Result<String, String> {
+        let _ = &this;
+        let index_url =
+            index_url.unwrap_or_else(|| pig_core::plugins::DEFAULT_MARKETPLACE_INDEX_URL.into());
+        let catalog = pig_core::plugins::fetch_catalog(&index_url)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        serde_json::to_string(&catalog).map_err(|error| error.to_string())
+    }
+
+    /// Downloads and verifies one signed marketplace package.
+    pub async fn install_marketplace_plugin(
+        this: Instance<Self>,
+        package: String,
+        index_url: Option<String>,
+        root: String,
+    ) -> Result<String, String> {
+        let index_url =
+            index_url.unwrap_or_else(|| pig_core::plugins::DEFAULT_MARKETPLACE_INDEX_URL.into());
+        let data_dir = this.with(|agent| agent.data_dir.clone());
+        let package: pig_protocol::PluginMarketplacePackage =
+            serde_json::from_str(&package).map_err(|error| error.to_string())?;
+        let downloaded =
+            pig_core::plugins::download_signed_package(&data_dir, &index_url, &package)
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+        let plugins = this.with(|agent| agent.plugins.clone());
+        tokio::task::spawn_blocking(move || {
+            plugins.install(&downloaded.package_path, std::path::Path::new(&root))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|value| value.to_string())
+    }
+
     /// Streams remote UI documents and plugin runtime events.
     pub async fn listen_plugins(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
         let events = this.with(|agent| agent.plugins.events());
