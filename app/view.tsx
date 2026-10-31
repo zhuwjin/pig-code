@@ -45,29 +45,29 @@ function ThemeBackground(props: UiContext) {
 }
 
 function AnimatedResizablePanel(props: {
-  side: "left" | "right";
+  side: "left" | "right" | "bottom";
   open: boolean;
-  width: number;
+  size: number;
   minSize: number;
   animating: Signal<boolean>;
-  onResize: (width: number) => void;
+  onResize: (size: number) => void;
   children: JSX.Element;
 }) {
   const direction = props.side === "left" ? -1 : 1;
   const presented = signal(props.open);
   const animating = props.animating;
-  const slide = createAnimatedValue(props.open ? 0 : direction * props.width);
+  const slide = createAnimatedValue(props.open ? 0 : direction * props.size);
   let shown = props.open;
   let generation = 0;
   effect(() => {
     const open = props.open;
     if (shown === open) return;
     shown = open;
-    const width = untracked(() => props.width);
+    const size = untracked(() => props.size);
     generation += 1;
     const current = generation;
     if (reduceMotion()) {
-      slide.set(open ? 0 : direction * width);
+      slide.set(open ? 0 : direction * size);
       presented.set(open);
       animating.set(false);
       return;
@@ -80,7 +80,7 @@ function AnimatedResizablePanel(props: {
     animating.set(true);
     LayoutAnimation.configureNext({ duration: 220, update: { type: "easeOut" } });
     Animated.timing(slide, {
-      toValue: open ? 0 : direction * width,
+      toValue: open ? 0 : direction * size,
       duration: 220,
       easing: Easing.bezier(0, 0, 0.58, 1),
     }).start();
@@ -89,7 +89,7 @@ function AnimatedResizablePanel(props: {
   });
   return (
     <ResizablePanel
-      size={props.open ? props.width : 0}
+      size={props.open ? props.size : 0}
       minSize={props.open ? props.minSize : 0}
       fixed
       visible={presented()}
@@ -100,10 +100,12 @@ function AnimatedResizablePanel(props: {
         importantForAccessibility={props.open ? "yes" : "no-hide-descendants"}
       >
         <View
-          class="absolute bottom-0 top-0"
-          style={props.side === "left"
-            ? { left: 0, width: animating() ? props.width : "100%", transform: [{ translateX: slide }] }
-            : { right: 0, width: animating() ? props.width : "100%", transform: [{ translateX: slide }] }}
+          class={props.side === "bottom" ? "absolute bottom-0 left-0" : "absolute bottom-0 top-0"}
+          style={props.side === "bottom"
+            ? { left: 0, width: "100%", height: animating() ? props.size : "100%", transform: [{ translateY: slide }] }
+            : props.side === "left"
+              ? { left: 0, width: animating() ? props.size : "100%", transform: [{ translateX: slide }] }
+              : { right: 0, width: animating() ? props.size : "100%", transform: [{ translateX: slide }] }}
         >
           {props.children}
         </View>
@@ -124,6 +126,9 @@ function App(props: UiContext) {
   const rightWidth = signal(300);
   const rightAnimating = signal(false);
   const terminalVisible = signal(false);
+  const terminalHeight = signal(300);
+  const terminalAnimating = signal(false);
+  const terminalStarted = signal(false);
   const settingsVisible = signal(false);
   const themePickerVisible = signal(false);
   const searchVisible = signal(false);
@@ -136,7 +141,7 @@ function App(props: UiContext) {
     rightVisible.update((visible) => !visible);
   };
   const toggleTerminal = () => {
-    LayoutAnimation.configureNext(LayoutAnimation.create(200));
+    terminalStarted.set(true);
     terminalVisible.update((visible) => !visible);
   };
   effect(() => {
@@ -181,7 +186,7 @@ function App(props: UiContext) {
           <AnimatedResizablePanel
             side="left"
             open={sidebarVisible() && !settingsVisible()}
-            width={sidebarWidth()}
+            size={sidebarWidth()}
             minSize={200}
             animating={sidebarAnimating}
             onResize={(width) => sidebarWidth.set(width)}
@@ -206,23 +211,45 @@ function App(props: UiContext) {
                 onOpenThemes={() => themePickerVisible.set(true)}
                 onSaveTheme={saveTheme}
               />
-              <If when={!settingsVisible()}><Workspace {...props} /></If>
-              <If when={terminalVisible() && !settingsVisible()}>
-                <TerminalPanel {...props} onClose={toggleTerminal} />
-              </If>
-              <If when={settingsVisible()}>
-                <SettingsPage
-                  {...props}
-                  onBack={() => settingsVisible.set(false)}
-                  onOpenThemes={() => themePickerVisible.set(true)}
-                />
-              </If>
+              <ResizablePanelGroup
+                axis="vertical"
+                class="min-h-0 flex-1"
+                disabled={terminalAnimating()}
+                handleClass={terminalAnimating() ? "h-px w-full bg-transparent" : "h-px w-full bg-border"}
+                handleThumbClass={terminalAnimating() ? HANDLE_THUMB_HIDDEN : HANDLE_THUMB}
+                handleAccessibilityLabel="Resize the terminal"
+              >
+                <ResizablePanel minSize={160}>
+                  <View class="min-h-0 flex-1">
+                    <If when={!settingsVisible()}><Workspace {...props} /></If>
+                    <If when={settingsVisible()}>
+                      <SettingsPage
+                        {...props}
+                        onBack={() => settingsVisible.set(false)}
+                        onOpenThemes={() => themePickerVisible.set(true)}
+                      />
+                    </If>
+                  </View>
+                </ResizablePanel>
+                <If when={terminalStarted()}>
+                  <AnimatedResizablePanel
+                    side="bottom"
+                    open={terminalVisible() && !settingsVisible()}
+                    size={terminalHeight()}
+                    minSize={100}
+                    animating={terminalAnimating}
+                    onResize={(height) => terminalHeight.set(height)}
+                  >
+                    <TerminalPanel {...props} onClose={toggleTerminal} />
+                  </AnimatedResizablePanel>
+                </If>
+              </ResizablePanelGroup>
             </View>
           </ResizablePanel>
           <AnimatedResizablePanel
             side="right"
             open={rightVisible() && !settingsVisible()}
-            width={rightWidth()}
+            size={rightWidth()}
             minSize={280}
             animating={rightAnimating}
             onResize={(width) => rightWidth.set(width)}
