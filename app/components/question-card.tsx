@@ -111,7 +111,7 @@ export function QuestionCard(props: UiContext & { question: PendingQuestion }) {
                     return copy;
                   });
                 }}
-                class="rounded-(--radius) border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+                class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
               />
             </View>
           );

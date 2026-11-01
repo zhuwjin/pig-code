@@ -16,12 +16,16 @@ function openApp() {
 
 async function installMoon(app: Awaited<ReturnType<typeof openApp>>) {
   await app.press("id:title-theme-settings");
+  await app.press("id:settings-plugins");
   await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
   await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
+  expect(app.value("id:plugin-package-path")).toBe("target/test-tmp/moon-plugin/moon.nshpkg");
+  expect(app.value("id:plugin-root-path")).toBe("target/test-tmp/moon-plugin/root.pub");
+  expect(app.enabled("id:plugin-install")).toBe(true);
   await app.press("id:plugin-install");
   await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  await app.press("id:theme-picker-close");
+  await app.press("id:settings-back");
 }
 
 test("uses theme foreground for controls and preserves the full-color brand", () => {
@@ -202,12 +206,16 @@ test("runs a real shell in the terminal panel", async () => {
 test("installs a signed UI plugin and restores the host on disable", async () => {
   const app = await openApp();
   await app.press("id:title-theme-settings");
+  await app.press("id:settings-plugins");
   await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
   await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
+  expect(app.value("id:plugin-package-path")).toBe("target/test-tmp/moon-plugin/moon.nshpkg");
+  expect(app.value("id:plugin-root-path")).toBe("target/test-tmp/moon-plugin/root.pub");
+  expect(app.enabled("id:plugin-install")).toBe(true);
   await app.press("id:plugin-install");
   await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  await app.press("id:theme-picker-close");
+  await app.press("id:settings-back");
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
   await app.waitFor("id:plugin-send-icon");
   await app.waitFor("text:Moon engine is running", { timeout: 10000 });
@@ -223,15 +231,17 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   await app.waitFor("text:/MOON_REMOTE_SUBMIT/", { timeout: 10000 });
   await app.press("id:title-theme-settings");
   expect(app.count("id:theme-option-moon")).toBe(1);
+  await app.press("id:settings-plugins");
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  await app.press("id:theme-picker-close");
+  await app.press("id:settings-back");
   await app.waitFor("id:plugin-send-icon", { state: "gone" });
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { state: "gone" });
   await app.press("id:title-theme-settings");
+  await app.press("id:settings-plugins");
   await app.press("id:plugin-uninstall-com.pigcodets.plugins.moon");
   await app.press("id:plugin-uninstall-confirm");
   await app.waitFor("id:theme-package-com.pigcodets.plugins.moon", { state: "gone" });
-  await app.press("id:theme-picker-close");
+  await app.press("id:settings-back");
 }, 60000);
 
 test("answers dangerous command approvals", async () => {
@@ -286,7 +296,7 @@ test("applies named themes and appearance modes to native styles", async () => {
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
   await app.press("id:theme-mode-light");
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#262626ff");
-  await app.press("id:theme-picker-close");
+  await app.press("id:settings-back");
   expect(app.count("id:theme-picker")).toBe(0);
 });
 
@@ -300,10 +310,12 @@ test("loads, applies, disables and restores plugin themes", async () => {
   expect(app.spanStyle("✓").color).toBe("#c4b5fdff");
   expect(app.texts()).toContain("Moon Glass");
 
+  await app.press("id:settings-plugins");
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
   await app.waitFor("id:theme-option-moon", { state: "gone" });
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.press("id:settings-appearance");
   await app.waitFor("id:theme-option-moon");
   expect(app.spanStyle("✓").color).toBe("#c4b5fdff");
 });

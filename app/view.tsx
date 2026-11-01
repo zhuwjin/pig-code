@@ -4,7 +4,6 @@ import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { Window } from "nsh/desktop";
 import { AgentStore } from "./store";
 import { ThemeStore } from "./theme";
-import { ThemePicker } from "./theme-picker";
 import type { UiContext } from "./ui-context";
 import { Sidebar } from "./components/sidebar";
 import { TitleBar } from "./components/title-bar";
@@ -12,7 +11,7 @@ import { Workspace } from "./components/workspace";
 import { RightPanel } from "./components/right-panel";
 import { TerminalPanel } from "./components/terminal-panel";
 import { SearchPopup } from "./components/search-popup";
-import { SettingsPage } from "./components/settings/settings-page";
+import { SettingsPage, type SettingsPageId } from "./components/settings/settings-page";
 
 Window.setTitle("Pig Code");
 Window.setTitleBar("hidden", 44);
@@ -130,10 +129,14 @@ function App(props: UiContext) {
   const terminalAnimating = signal(false);
   const terminalStarted = signal(false);
   const settingsVisible = signal(false);
-  const themePickerVisible = signal(false);
+  const settingsPage = signal<SettingsPageId>("models");
   const searchVisible = signal(false);
   const panelsAnimating = () => sidebarAnimating() || rightAnimating();
   const saveTheme = () => store.saveThemePreference(themeStore.activeId(), themeStore.mode());
+  const openAppearance = () => {
+    settingsPage.set("appearance");
+    settingsVisible.set(true);
+  };
   const toggleSidebar = (visible: boolean) => {
     sidebarVisible.set(visible);
   };
@@ -194,7 +197,7 @@ function App(props: UiContext) {
         >
           <AnimatedResizablePanel
             side="left"
-            open={sidebarVisible() && !settingsVisible()}
+            open={sidebarVisible()}
             size={sidebarWidth()}
             minSize={200}
             animating={sidebarAnimating}
@@ -202,6 +205,10 @@ function App(props: UiContext) {
           >
             <Sidebar
               {...props}
+              mode={settingsVisible() ? "settings" : "workspace"}
+              settingsPage={settingsPage()}
+              onNavigateSettings={(page) => settingsPage.set(page)}
+              onBackSettings={() => settingsVisible.set(false)}
               onToggle={() => toggleSidebar(false)}
               onOpenSettings={() => settingsVisible.set(true)}
               onOpenSearch={() => searchVisible.set(true)}
@@ -217,7 +224,7 @@ function App(props: UiContext) {
                 onToggleSidebar={() => toggleSidebar(true)}
                 onToggleRight={toggleRight}
                 onToggleTerminal={toggleTerminal}
-                onOpenThemes={() => themePickerVisible.set(true)}
+                onOpenThemes={openAppearance}
                 onSaveTheme={saveTheme}
               />
               <ResizablePanelGroup
@@ -234,8 +241,7 @@ function App(props: UiContext) {
                     <If when={settingsVisible()}>
                       <SettingsPage
                         {...props}
-                        onBack={() => settingsVisible.set(false)}
-                        onOpenThemes={() => themePickerVisible.set(true)}
+                        page={settingsPage()}
                       />
                     </If>
                   </View>
@@ -267,29 +273,6 @@ function App(props: UiContext) {
           </AnimatedResizablePanel>
         </ResizablePanelGroup>
       </View>
-      <If when={themePickerVisible()}>
-        <ThemePicker
-          store={themeStore}
-          packages={store.pluginPackages()}
-          catalog={store.pluginCatalog()}
-          runtime={store.pluginRuntime()}
-          diagnostics={store.pluginUiDiagnostics()}
-          logs={store.pluginLogs()}
-          onRetryPackage={(plugin) => store.retryPlugin(plugin)}
-          error={store.themeError()}
-          onClose={() => themePickerVisible.set(false)}
-          onChange={saveTheme}
-          onTogglePackage={(plugin) => {
-            const current = store.pluginPackages().find((item) => item.id === plugin.id) ?? plugin;
-            store.setPluginEnabled(current, !current.enabled);
-          }}
-          onRefreshPackages={() => store.syncPlugins()}
-          onInstallPlugin={(packagePath, rootPath) => store.installPlugin(packagePath, rootPath)}
-          onRefreshMarketplace={() => store.refreshMarketplace()}
-          onInstallMarketplace={(plugin, rootPath) => store.installMarketplacePlugin(plugin, rootPath)}
-          onUninstallPlugin={(plugin) => store.uninstallPlugin(plugin)}
-        />
-      </If>
       <If when={searchVisible()}>
         <SearchPopup {...props} onClose={() => searchVisible.set(false)} />
       </If>

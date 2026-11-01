@@ -33,7 +33,7 @@ export function IconPicker(props: {
           onChange={(text) => query.set(text)}
           autoFocus
           placeholder="搜索图标、平台或模型"
-          class="rounded-(--radius) border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+          class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
         <Scroll class="max-h-96">
           <View class="flex-row flex-wrap gap-2 pr-1">

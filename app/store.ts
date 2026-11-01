@@ -10,6 +10,7 @@ import {
   GitStatusSnapshot,
   MarkdownItem,
   MessageDelivery,
+  ModelRegistryInfo,
   NoteItem,
   Payload,
   PendingApproval,
@@ -74,6 +75,7 @@ export class AgentStore {
   readonly providerCredentials = signal<Record<string, ProviderCredentialStatus>>({});
   readonly testResults = signal<Record<string, ConnectionTestResult>>({});
   readonly testingProviders = signal<Record<string, boolean>>({});
+  readonly modelInfo = signal<Record<string, ModelRegistryInfo | null>>({});
   readonly globalError = signal("");
   readonly pluginPackages = signal<PluginPackageInfo[]>([]);
   readonly pluginCatalog = signal<PluginMarketplacePackage[]>([]);
@@ -617,6 +619,10 @@ export class AgentStore {
     return sent;
   }
 
+  lookupModel(id: string): boolean {
+    return this.command({ ModelLookup: { id } });
+  }
+
   setProviderApiKey(providerId: string, secret: string): boolean {
     return this.command({ SetProviderApiKey: { provider_id: providerId, secret } });
   }
@@ -896,6 +902,9 @@ export class AgentStore {
       case "TestResult":
         this.testResults.update((all) => ({ ...all, [data.provider_id]: data.result }));
         this.testingProviders.update((all) => ({ ...all, [data.provider_id]: false }));
+        break;
+      case "ModelInfo":
+        this.modelInfo.update((all) => ({ ...all, [data.id]: data.info ?? null }));
         break;
       case "UserMessage":
         this.updateItems(sessionId!, (items) => [

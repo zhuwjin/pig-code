@@ -207,9 +207,9 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                         : "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息")}
                     class={themeStore.classes(
                       "composer.input",
-                      "max-h-40 min-h-16 px-1 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground",
+                      "max-h-40 min-h-10 px-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
                     )}
-                    style={patch.style}
+                    style={[{ fontSize: 14 }, patch.style]}
                     {...patch.accessibility}
                   />
                 )}

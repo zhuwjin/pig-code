@@ -136,7 +136,7 @@ export function ModelPicker(props: UiContext) {
           value={query()}
           onChange={(text) => query.set(text)}
           placeholder="搜索模型或提供商"
-          class="rounded-(--radius) border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+          class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
         <Scroll class="max-h-64">
           <View class="gap-1">

@@ -108,6 +108,7 @@ function renderNode(
     return (
       <Input
         testID={testID}
+        class="selection:bg-foreground"
         value={node.text ?? ""}
         submitBehavior="submit"
         style={style}

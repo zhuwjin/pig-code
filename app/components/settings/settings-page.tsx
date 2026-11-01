@@ -1,47 +1,57 @@
-import { Text, View } from "nsh";
-import { Button } from "nsh/base";
+import { View } from "nsh";
 import type { UiContext } from "../../ui-context";
-import { Icon } from "../icon";
+import type { IconName } from "../icon";
 import { ModelSettings } from "./model-settings";
-import { PluginPages } from "../../plugins/remote-renderer";
-import { UiNodeFactory, UiView } from "../../plugins/ui-node-factory";
+import { ThemePicker } from "../../theme-picker";
+import { hostPatchProps, UiNodeFactory } from "../../plugins/ui-node-factory";
 
-export function SettingsPage(props: UiContext & {
-  onBack: () => void;
-  onOpenThemes: () => void;
-}) {
+export type SettingsPageId = "models" | "appearance" | "plugins";
+
+export const SETTINGS_PAGES: { id: SettingsPageId; title: string; icon: IconName }[] = [
+  { id: "models", title: "模型设置", icon: "settings" },
+  { id: "appearance", title: "外观", icon: "sun" },
+  { id: "plugins", title: "插件管理", icon: "sliders-horizontal" },
+];
+
+export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
+  const pickerProps = (section: "appearance" | "plugins") => ({
+    section,
+    store: props.themeStore,
+    packages: () => props.store.pluginPackages(),
+    catalog: () => props.store.pluginCatalog(),
+    runtime: () => props.store.pluginRuntime(),
+    diagnostics: () => props.store.pluginUiDiagnostics(),
+    logs: () => props.store.pluginLogs(),
+    onRetryPackage: (plugin: Parameters<UiContext["store"]["retryPlugin"]>[0]) => props.store.retryPlugin(plugin),
+    error: () => section === "plugins"
+      ? props.store.globalError() || props.store.themeError()
+      : props.store.themeError(),
+    onChange: () => props.store.saveThemePreference(props.themeStore.activeId(), props.themeStore.mode()),
+    onTogglePackage: (plugin: Parameters<UiContext["store"]["setPluginEnabled"]>[0]) => {
+      const current = props.store.pluginPackages().find((item) => item.id === plugin.id) ?? plugin;
+      props.store.setPluginEnabled(current, !current.enabled);
+    },
+    onRefreshPackages: () => props.store.syncPlugins(),
+    onInstallPlugin: (packagePath: string, rootPath: string) => props.store.installPlugin(packagePath, rootPath),
+    onRefreshMarketplace: () => props.store.refreshMarketplace(),
+    onInstallMarketplace: (plugin: Parameters<UiContext["store"]["installMarketplacePlugin"]>[0], rootPath: string) =>
+      props.store.installMarketplacePlugin(plugin, rootPath),
+    onUninstallPlugin: (plugin: Parameters<UiContext["store"]["uninstallPlugin"]>[0]) => props.store.uninstallPlugin(plugin),
+  });
   return (
-    <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 flex-row bg-background")}>
-      <UiView uiId="settings.navigation" store={props.store} class={props.themeStore.classes("settings.nav", "w-56 shrink-0 border-r border-border bg-sidebar p-3")}>
-        <Button testID="settings-back" class="mb-4 flex-row items-center gap-2 rounded-(--radius) px-2 py-2 hover:bg-sidebar-accent" onPress={props.onBack}>
-          <Text class="text-sm text-sidebar-foreground">← 返回工作区</Text>
-        </Button>
-        <Text class="px-2 pb-3 text-xs font-medium text-muted-foreground">设置</Text>
-        <View class="gap-1">
-          <Button testID="settings-models" selected class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 selected:bg-sidebar-accent">
-            <Icon name="settings" size={15} />
-            <Text class="text-sm text-sidebar-foreground">模型设置</Text>
-          </Button>
-          <Button testID="settings-appearance" class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-sidebar-accent" onPress={props.onOpenThemes}>
-            <Icon name="sun" size={15} />
-            <Text class="text-sm text-sidebar-foreground">外观</Text>
-          </Button>
-        </View>
-        <PluginPages
-          target="settings"
-          packages={props.store.pluginPackages()}
-          documents={props.store.pluginDocuments()}
-          runtime={props.store.pluginRuntime()}
-          dynamic={props.store.pluginDynamic()}
-          onEvent={(instance, event) => props.store.dispatchPluginUiEvent(instance, event)}
-        />
-      </UiView>
+    <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 bg-background")}>
       <UiNodeFactory
         uiId="settings.content"
         store={props.store}
         render={(patch, children) => (
-          <View class="min-w-0 flex-1" style={patch.style} {...patch.accessibility}>
-            {children ?? <ModelSettings {...props} />}
+          <View class="min-w-0 flex-1" style={patch.style} {...hostPatchProps(patch)}>
+            {children ?? (
+              <>
+                <If when={props.page === "models"}><ModelSettings {...props} /></If>
+                <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
+                <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
+              </>
+            )}
           </View>
         )}
       />

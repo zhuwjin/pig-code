@@ -1,0 +1,958 @@
+[
+  {
+    "name": "BigModel Coding Plan",
+    "base_url": "https://open.bigmodel.cn/api/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://bigmodel.cn/coding-plan/personal/overview",
+    "icon": "zhipu",
+    "models": [
+      {
+        "id": "glm-5.3",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-flash",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-highspeed",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "BigModel API",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_format": "OpenAiChat",
+    "key_url": "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    "icon": "zhipu",
+    "models": [
+      {
+        "id": "glm-5.3",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-flash",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-flashx",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Z.ai Coding Plan",
+    "base_url": "https://api.z.ai/api/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://z.ai/manage-apikey/apikey-list",
+    "icon": "zai",
+    "models": [
+      {
+        "id": "glm-5.3",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-flash",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-highspeed",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Z.ai API",
+    "base_url": "https://api.z.ai/api/paas/v4",
+    "api_format": "OpenAiChat",
+    "key_url": "https://z.ai/manage-apikey/apikey-list",
+    "icon": "zai",
+    "models": [
+      {
+        "id": "glm-5.3",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-flash",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "glm-5.3-flashx",
+        "icon": "zai",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Kimi",
+    "base_url": "https://api.moonshot.cn/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://platform.kimi.com/console/api-keys",
+    "icon": "kimi",
+    "models": [
+      {
+        "id": "kimi-k3.1-pro",
+        "icon": "kimi",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "kimi-k3",
+        "icon": "kimi",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "kimi-k2.7-code",
+        "icon": "kimi",
+        "context": 262144,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "enabled"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "MiniMax",
+    "base_url": "https://api.minimaxi.com/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://platform.minimaxi.com/console/access?tab=api-keys",
+    "icon": "minimax",
+    "models": [
+      {
+        "id": "MiniMax-M3.1-Flash",
+        "icon": "minimax",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "MiniMax-M3",
+        "icon": "minimax",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "disabled",
+          "enabled"
+        ]
+      },
+      {
+        "id": "MiniMax-M2.7",
+        "icon": "minimax",
+        "context": 204800,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": false,
+        "reasoning": [
+          "disabled",
+          "enabled"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "DeepSeek",
+    "base_url": "https://api.deepseek.com/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://platform.deepseek.com/api_keys",
+    "icon": "deepseek",
+    "models": [
+      {
+        "id": "deepseek-v4-flash",
+        "icon": "deepseek",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "deepseek-flash",
+        "icon": "deepseek",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "deepseek-v4-pro",
+        "icon": "deepseek",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Alibaba Cloud Bailian (China)",
+    "base_url": "https://dashscope.aliyuncs.com/apps/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://bailian.console.aliyun.com/cn-beijing?tab=model",
+    "icon": "bailian",
+    "models": [
+      {
+        "id": "qwen3.8-max",
+        "icon": "qwen",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "id": "qwen3.8-flash",
+        "icon": "qwen",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Alibaba Cloud Bailian (International)",
+    "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "api_format": "OpenAiChat",
+    "key_url": "https://modelstudio.console.aliyun.com/ap-southeast-1?tab=dashboard",
+    "icon": "bailian",
+    "models": [
+      {
+        "id": "qwen3.8-max",
+        "icon": "qwen",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      {
+        "id": "qwen3.8-flash",
+        "icon": "qwen",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Xiaomi MiMo",
+    "base_url": "https://api.xiaomimimo.com/anthropic",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://platform.xiaomimimo.com/",
+    "icon": "xiaomimimo",
+    "models": [
+      {
+        "id": "mimo-v2.6-pro",
+        "icon": "xiaomimimo",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "enabled"
+        ]
+      },
+      {
+        "id": "mimo-v2.6-flash",
+        "icon": "xiaomimimo",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "enabled"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Anthropic",
+    "base_url": "https://api.anthropic.com",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://console.anthropic.com/settings/keys",
+    "icon": "anthropic",
+    "models": [
+      {
+        "id": "claude-opus-5-5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "input_pdf": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "input_pdf": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "input_pdf": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "claude-fable-5-1",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "input_pdf": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "OpenAI",
+    "base_url": "https://api.openai.com/v1",
+    "api_format": "OpenAiChat",
+    "key_url": "https://platform.openai.com/api-keys",
+    "icon": "openai",
+    "models": [
+      {
+        "id": "gpt-6.1-sol",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "gpt-6-astra",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "xAI",
+    "base_url": "https://api.x.ai/v1",
+    "api_format": "OpenAiChat",
+    "key_url": "https://console.x.ai",
+    "icon": "xai",
+    "models": [
+      {
+        "id": "grok-4.7",
+        "icon": "grok",
+        "context": 500000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      {
+        "id": "grok-4.6",
+        "icon": "grok",
+        "context": 500000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      {
+        "id": "grok-build-0.1",
+        "icon": "grok",
+        "context": 256000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "enabled"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "OpenRouter",
+    "base_url": "https://openrouter.ai/api",
+    "api_format": "AnthropicMessages",
+    "key_url": "https://openrouter.ai/keys",
+    "icon": "openrouter",
+    "models": [
+      {
+        "id": "anthropic/claude-sonnet-5.5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "moonshotai/kimi-k3.1-pro",
+        "icon": "kimi",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "openai/gpt-6.1-sol",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "deepseek/deepseek-v4.1-flash",
+        "icon": "deepseek",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "qwen/qwen3.8-max-prime",
+        "icon": "qwen",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      {
+        "id": "minimax/minimax-m3.1-flash",
+        "icon": "minimax",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Ollama Cloud",
+    "base_url": "https://ollama.com/v1",
+    "api_format": "OpenAiChat",
+    "key_url": "https://ollama.com/settings/keys",
+    "icon": "ollama",
+    "models": [
+      {
+        "id": "minimax-m3.1-flash",
+        "icon": "minimax",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "deepseek-v4.1-flash",
+        "icon": "deepseek",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "disabled",
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "mistral-large-4",
+        "icon": "mistral",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "none",
+          "high"
+        ]
+      },
+      {
+        "id": "glm-5.3",
+        "icon": "zai",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": false,
+        "cap_structured": false,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "kimi-k3",
+        "icon": "kimi",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "disabled",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "OpenCode Go",
+    "base_url": "https://opencode.ai/inference/go/openai/v1",
+    "api_format": "OpenAiChat",
+    "key_url": "https://opencode.ai/console",
+    "icon": "opencode",
+    "models": [
+      {
+        "id": "kimi-k3.1-pro",
+        "icon": "kimi",
+        "context": 1048576,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "minimax-m3.1-flash",
+        "icon": "minimax",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "disabled",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "gpt-6-luna",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "deepseek-v4.1-flash",
+        "icon": "deepseek",
+        "context": 1000000,
+        "max_output": 131072,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CommandCode",
+    "base_url": "https://api.commandcode.ai/provider/v1",
+    "api_format": "OpenAiChat",
+    "key_url": "https://commandcode.ai/settings/keys",
+    "icon": "commandcode",
+    "models": [
+      {
+        "id": "claude-opus-5-5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "icon": "claude",
+        "context": 1000000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": false,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "gpt-6.1-sol",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "gpt-6-luna",
+        "icon": "openai",
+        "context": 1050000,
+        "max_output": 128000,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      {
+        "id": "google/gemini-4-argon",
+        "icon": "gemini",
+        "context": 1000000,
+        "max_output": 65536,
+        "input_image": true,
+        "cap_structured": true,
+        "reasoning": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ]
+  }
+]

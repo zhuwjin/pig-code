@@ -5,11 +5,18 @@ import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
 import { Icon } from "./icon";
+import { SETTINGS_PAGES, type SettingsPageId } from "./settings/settings-page";
+import { PluginPages } from "../plugins/remote-renderer";
+import { UiView } from "../plugins/ui-node-factory";
 
 const workspaceExpanded = signal(true);
 const sidebarView = signal<"workspace" | "flat">("workspace");
 
 export function Sidebar(props: UiContext & {
+  mode: "workspace" | "settings";
+  settingsPage: SettingsPageId;
+  onNavigateSettings: (page: SettingsPageId) => void;
+  onBackSettings: () => void;
   onToggle: () => void;
   onOpenSettings: () => void;
   onOpenSearch: () => void;
@@ -43,38 +50,41 @@ export function Sidebar(props: UiContext & {
           <Icon name="panel-left" size={14} color={token("secondary-foreground")} />
         </Button>
       </View>
-      <View class="gap-1 p-2">
-        <Button
-          testID="new-task"
-          accessibilityLabel="新任务"
-          class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
-          onPress={() => store.newTask()}
-        >
-          <View class="flex-row items-center gap-2">
-            <Icon name="plus" />
-            <Text class="text-sm text-sidebar-foreground">新建任务</Text>
-            <View class="flex-1" />
-            <Text class="rounded border border-border px-1 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
-              {platform.os === "macos" ? "⌘N" : "Ctrl+N"}
-            </Text>
-          </View>
-        </Button>
-        <Button
-          testID="open-search"
-          accessibilityLabel="搜索"
-          class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
-          onPress={props.onOpenSearch}
-        >
-          <View class="flex-row items-center gap-2">
-            <Icon name="search" />
-            <Text class="text-sm text-sidebar-foreground">搜索</Text>
-            <View class="flex-1" />
-            <Text class="rounded border border-border px-1 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
-              {platform.os === "macos" ? "⌘K" : "Ctrl+K"}
-            </Text>
-          </View>
-        </Button>
-      </View>
+      <If when={props.mode === "workspace"}>
+        <View class="gap-1 p-2">
+          <Button
+            testID="new-task"
+            accessibilityLabel="新任务"
+            class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
+            onPress={() => store.newTask()}
+          >
+            <View class="flex-row items-center gap-2">
+              <Icon name="plus" />
+              <Text class="text-sm text-sidebar-foreground">新建任务</Text>
+              <View class="flex-1" />
+              <Text class="rounded border border-border px-1 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
+                {platform.os === "macos" ? "⌘N" : "Ctrl+N"}
+              </Text>
+            </View>
+          </Button>
+          <Button
+            testID="open-search"
+            accessibilityLabel="搜索"
+            class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
+            onPress={props.onOpenSearch}
+          >
+            <View class="flex-row items-center gap-2">
+              <Icon name="search" />
+              <Text class="text-sm text-sidebar-foreground">搜索</Text>
+              <View class="flex-1" />
+              <Text class="rounded border border-border px-1 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
+                {platform.os === "macos" ? "⌘K" : "Ctrl+K"}
+              </Text>
+            </View>
+          </Button>
+        </View>
+      </If>
+      <If when={props.mode === "workspace"}>
       <View class="flex-row items-center gap-1 pl-3 pr-2 py-1">
         <Text class="flex-1 text-xs text-muted-foreground">会话</Text>
         <If when={sidebarView() === "workspace"}>
@@ -131,7 +141,8 @@ export function Sidebar(props: UiContext & {
           </View>
         </Popover>
       </View>
-      <If when={sidebarView() === "workspace"}>
+      </If>
+      <If when={props.mode === "workspace" && sidebarView() === "workspace"}>
         <Button
           testID="workspace-row"
           accessibilityLabel={workspaceExpanded() ? "折叠当前工作区" : "展开当前工作区"}
@@ -147,7 +158,7 @@ export function Sidebar(props: UiContext & {
           </Text>
         </Button>
       </If>
-      <If when={sidebarView() === "flat" || workspaceExpanded()}>
+      <If when={props.mode === "workspace" && (sidebarView() === "flat" || workspaceExpanded())}>
         <List
           each={shownSessions()}
           keyExtractor={(item) => item.id}
@@ -175,17 +186,51 @@ export function Sidebar(props: UiContext & {
           )}
         </List>
       </If>
-      <If when={sidebarView() === "workspace" && !workspaceExpanded()}><View class="flex-1" /></If>
+      <If when={props.mode === "settings"}>
+        <UiView
+          uiId="settings.navigation"
+          store={store}
+          testID="settings-navigation"
+          class="flex-1"
+        >
+          <View class="gap-1 p-2">
+            <Text class="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">设置</Text>
+            <Each of={SETTINGS_PAGES} key={(item) => item.id}>
+              {(item) => (
+                <Button
+                  testID={`settings-${item().id}`}
+                  selected={props.settingsPage === item().id}
+                  accessibilityLabel={`打开${item().title}`}
+                  class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-sidebar-accent selected:bg-sidebar-accent"
+                  onPress={() => props.onNavigateSettings(item().id)}
+                >
+                  <Icon name={item().icon} size={15} />
+                  <Text class="text-sm text-sidebar-foreground">{item().title}</Text>
+                </Button>
+              )}
+            </Each>
+          </View>
+          <PluginPages
+            target="settings"
+            packages={store.pluginPackages()}
+            documents={store.pluginDocuments()}
+            runtime={store.pluginRuntime()}
+            dynamic={store.pluginDynamic()}
+            onEvent={(instance, event) => store.dispatchPluginUiEvent(instance, event)}
+          />
+        </UiView>
+      </If>
+      <If when={props.mode === "workspace" && sidebarView() === "workspace" && !workspaceExpanded()}><View class="flex-1" /></If>
       <View class="border-t border-sidebar-border p-2">
         <Button
-          testID="settings-open"
-          accessibilityLabel="模型与应用设置"
+          testID={props.mode === "settings" ? "settings-back" : "settings-open"}
+          accessibilityLabel={props.mode === "settings" ? "返回工作区" : "模型与应用设置"}
           class="rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
-          onPress={props.onOpenSettings}
+          onPress={props.mode === "settings" ? props.onBackSettings : props.onOpenSettings}
         >
           <View class="flex-row items-center gap-2">
             <Icon name="settings" />
-            <Text class="text-sm text-sidebar-foreground">设置</Text>
+            <Text class="text-sm text-sidebar-foreground">{props.mode === "settings" ? "返回工作区" : "设置"}</Text>
           </View>
         </Button>
       </View>

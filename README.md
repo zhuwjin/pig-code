@@ -19,8 +19,8 @@ nsh package --target web     # or ios, android, macos, linux, windows
 
 ## Unified plugins
 
-Signed `.nshpkg` packages are verified and installed at runtime without rebuilding or restarting the app. Open Appearance and
-provide the package path plus its trusted root public key. Enabling a package starts an independent NSH `Engine`; UI contributions
+Signed `.nshpkg` packages are verified and installed at runtime without rebuilding or restarting the app. Open Plugin Management
+and provide the package path plus its trusted root public key. Enabling a package starts an independent NSH `Engine`; UI contributions
 arrive as versioned remote documents and are rendered by the host, while tools, themes, skills and configuration use the same
 instance identity and capability declarations. Disabling a package stops its engine and restores the original UI.
 

@@ -90,7 +90,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
               if (result) choose(result);
             }}
             placeholder="搜索会话或工作区"
-            class="min-w-0 flex-1 text-sm text-foreground placeholder:text-muted-foreground"
+            class="min-w-0 flex-1 text-sm text-foreground selection:bg-foreground placeholder:text-muted-foreground"
           />
         </View>
         <Scroll class="max-h-[400px]">

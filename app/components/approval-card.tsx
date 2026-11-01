@@ -89,7 +89,7 @@ export function ApprovalCard(props: UiContext & { approval: PendingApproval }) {
           submitBehavior="submit"
           autoFocus
           placeholder="说明需要怎样修改计划"
-          class="rounded-(--radius) border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+          class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
       </If>
       <View class="flex-row flex-wrap items-center justify-end gap-2">

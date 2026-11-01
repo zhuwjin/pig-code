@@ -161,6 +161,18 @@ export interface ModelConfig {
   [key: string]: unknown;
 }
 
+export interface ModelRegistryInfo {
+  full_id: string;
+  context?: number | null;
+  input?: number | null;
+  output?: number | null;
+  reasoning: boolean;
+  reasoning_levels: string[];
+  input_modalities: string[];
+  structured_output?: boolean | null;
+  strict_tools?: boolean | null;
+}
+
 export interface ProviderConfig {
   id: string;
   name: string;
