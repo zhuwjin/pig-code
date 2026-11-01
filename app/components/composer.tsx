@@ -1,4 +1,4 @@
-import { effect, keymap, signal, Text, token, View, type JSX } from "nsh";
+import { effect, keymap, signal, Text, token, View, type YNode } from "nsh";
 import { Button, Input, Popover } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
@@ -6,10 +6,8 @@ import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { ApprovalCard } from "./approval-card";
 import { ModelPicker, PermissionPicker, SlashCandidates } from "./composer-popups";
-import { Icon, type IconName } from "./icon";
-import { RemoteContribution } from "../plugins/remote-renderer";
-import { pluginInstance, uiContribution, uiContributions } from "../plugins/ui-coordinator";
-import type { PluginPackageInfo, PluginUiContribution } from "../protocol";
+import { Icon } from "./icon";
+import { hostPatchProps, UiNodeFactory, UiView } from "../plugins/ui-node-factory";
 import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
@@ -80,6 +78,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const { store, themeStore } = props;
   const slashIndex = signal(0);
   const inputFocused = signal(false);
+  let inputNode: YNode | undefined;
   const sessionId = () => store.current();
   const running = () => {
     const id = sessionId();
@@ -138,69 +137,31 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const showQueue = () => !props.hero && !approval() && !question() && (
     queue().pending.length > 0 || queue().steer.length > 0 || queue().paused || queue().held
   );
-  const contributionContent = (patch: { pkg: PluginPackageInfo; contribution: PluginUiContribution }) => {
-    if (patch.contribution.icon) {
-      return <Icon testID={patch.contribution.kind === "replaceChildren" ? "plugin-send-icon" : `plugin-${patch.contribution.kind}-icon`} name={patch.contribution.icon as IconName} size={14} color={token("primary-foreground")} />;
-    }
-    const instance = pluginInstance(patch.pkg);
-    return (
-      <RemoteContribution
-        instance={instance}
-        document={store.pluginDocuments()[instance] ?? null}
-        exportName={patch.contribution.export}
-        onEvent={(target, node, kind, text) => store.dispatchPluginEvent(target, node, kind, text)}
-      />
-    );
-  };
-  const sendContent = () => {
-    const patch = uiContribution(store.pluginPackages(), "composer.sendButton", store.pluginRuntime(), store.pluginDynamic());
-    return patch
-      ? contributionContent(patch)
-      : <Icon name={running() ? "square" : "arrow-up"} size={running() ? 10 : 14} color={token("primary-foreground")} />;
-  };
-  const sendWithContributions = () => {
-    const patches = uiContributions(store.pluginPackages(), "composer.sendButton", undefined, store.pluginRuntime(), store.pluginDynamic());
-    const style = Object.assign({}, ...patches.filter((patch) => patch.contribution.kind === "patch").map((patch) => patch.contribution.style));
-    const replacement = patches.find((patch) => patch.contribution.kind === "replace");
-    const base = () => (
-      <Button
-        testID="send-button"
-        accessibilityLabel={running() ? "停止" : "发送"}
-        disabled={!running() && !store.draft().trim()}
-        class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
-        style={style}
-        onPress={() => store.submitOrStop()}
-      >
-        {replacement ? contributionContent(replacement) : sendContent()}
-      </Button>
-    );
-    let content: JSX.Element = base();
-    for (const patch of patches.filter((patch) => patch.contribution.kind === "wrap").reverse()) {
-      const instance = pluginInstance(patch.pkg);
-      content = (
-        <RemoteContribution
-          instance={instance}
-          document={store.pluginDocuments()[instance] ?? null}
-          exportName={patch.contribution.export}
-          hostChildren={content}
-          onEvent={(target, node, kind, text) => store.dispatchPluginEvent(target, node, kind, text)}
-        />
-      );
-    }
-    if (patches.some((patch) => patch.contribution.kind === "remove")) return null;
-    return (
-      <>
-        {patches.filter((patch) => patch.contribution.kind === "insertBefore").map(contributionContent)}
-        {content}
-        {patches.filter((patch) => patch.contribution.kind === "insertAfter").map(contributionContent)}
-      </>
-    );
-  };
+  const sendWithContributions = () => (
+    <UiNodeFactory
+      uiId="composer.sendButton"
+      store={store}
+      render={(patch, children) => (
+        <Button
+          testID="send-button"
+          accessibilityLabel={(patch.accessibility.accessibilityLabel as string | undefined) ?? (running() ? "停止" : "发送")}
+          disabled={patch.props.disabled === undefined ? !running() && !store.draft().trim() : Boolean(patch.props.disabled)}
+          class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
+          style={patch.style}
+          {...hostPatchProps(patch, { onPress: () => store.submitOrStop() })}
+        >
+          {children ?? <Icon name={running() ? "square" : "arrow-up"} size={running() ? 10 : 14} color={token("primary-foreground")} />}
+        </Button>
+      )}
+    />
+  );
   return (
     <View class={props.hero ? "p-3 pb-1" : "px-4 pb-4 pt-2"}>
       <View class="mx-auto w-full max-w-[860px]">
         <If when={showQueue()}><QueuePanel {...props} /></If>
-        <View
+        <UiView
+          uiId="composer.root"
+          store={store}
           class={themeStore.classes(
             "composer.root",
             "gap-2 rounded-2xl border border-input bg-composer px-3 pb-2 pt-2",
@@ -218,36 +179,50 @@ export function Composer(props: UiContext & { hero?: boolean }) {
               <If when={slashCommands().length > 0}>
                 <SlashCandidates query={slashQuery() ?? ""} selected={slashIndex()} onSelect={chooseSlash} />
               </If>
-              <Input
-                testID="composer-input"
-                value={store.draft()}
-                onChange={(text) => store.draft.set(text)}
-                onSubmit={() => submit()}
-                onFocus={() => inputFocused.set(true)}
-                onBlur={() => inputFocused.set(false)}
-                multiline
-                submitBehavior="submit"
-                placeholder={running()
-                  ? store.config()?.default_delivery === "steer"
-                    ? "继续输入以引导后续修改"
-                    : "继续输入以排队后续修改"
-                  : store.config()?.default_delivery === "steer"
-                    ? "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列"
-                    : "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息"}
-                class={themeStore.classes(
-                  "composer.input",
-                  "max-h-40 min-h-16 px-1 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground",
+              <UiNodeFactory
+                uiId="composer.input"
+                store={store}
+                captureFocus={() => inputFocused()}
+                restoreFocus={() => setTimeout(() => inputNode?.focus(), 0)}
+                render={(patch) => (
+                  <Input
+                    ref={(node) => inputNode = node}
+                    testID="composer-input"
+                    value={store.draft()}
+                    {...hostPatchProps(patch, {
+                      onChange: (text: string) => store.draft.set(text),
+                      onSubmit: () => submit(),
+                      onFocus: () => inputFocused.set(true),
+                      onBlur: () => inputFocused.set(false),
+                    })}
+                    multiline={patch.props.multiline === undefined ? true : Boolean(patch.props.multiline)}
+                    disabled={patch.props.disabled as boolean | undefined}
+                    submitBehavior="submit"
+                    placeholder={(patch.props.placeholder as string | undefined) ?? (running()
+                      ? store.config()?.default_delivery === "steer"
+                        ? "继续输入以引导后续修改"
+                        : "继续输入以排队后续修改"
+                      : store.config()?.default_delivery === "steer"
+                        ? "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列"
+                        : "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息")}
+                    class={themeStore.classes(
+                      "composer.input",
+                      "max-h-40 min-h-16 px-1 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground",
+                    )}
+                    style={patch.style}
+                    {...patch.accessibility}
+                  />
                 )}
               />
             </View>
-            <View class="flex-row items-center gap-2">
+            <UiView uiId="composer.actions" store={store} class="flex-row items-center gap-2">
               <PermissionPicker {...props} />
               <View class="flex-1" />
               <ModelPicker {...props} />
               {sendWithContributions()}
-            </View>
+            </UiView>
           </If>
-        </View>
+        </UiView>
       </View>
     </View>
   );

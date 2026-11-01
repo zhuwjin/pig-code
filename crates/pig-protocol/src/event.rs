@@ -618,6 +618,11 @@ pub enum Event {
     PluginSnapshot {
         snapshot: PluginSnapshot,
     },
+    PluginRuntimeContributionCommitted {
+        request_id: String,
+        epoch: u64,
+        snapshot: PluginSnapshot,
+    },
     PluginMarketplaceCatalog {
         result: Result<PluginMarketplaceCatalog, CoreError>,
     },

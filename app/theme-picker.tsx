@@ -1,9 +1,10 @@
 import { colorScheme, Scroll, Text, View, signal } from "nsh";
 import { Button, Input } from "nsh/base";
-import { PluginMarketplacePackage, PluginPackageInfo } from "./protocol";
+import { PluginMarketplacePackage, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
 import { ThemeStore } from "./theme";
 import { ThemeMode, themePreviewColor } from "./themes";
+import { pluginInstance } from "./plugins/ui-coordinator";
 
 const MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "浅色" },
@@ -13,10 +14,13 @@ const MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
 
 function ThemePackageRow(props: {
   item: () => PluginPackageInfo;
+  runtime?: PluginRuntimeState;
   onToggle: (plugin: PluginPackageInfo) => void;
+  onRetry?: () => void;
   onRemove: () => void;
 }) {
   const plugin = () => props.item();
+  const runtime = () => props.runtime;
   return (
     <View class="flex-row items-center gap-1">
       <Button
@@ -35,9 +39,27 @@ function ThemePackageRow(props: {
               {plugin().id} · {plugin().version}
             </Text>
           </View>
-          <Text class="text-xs text-muted-foreground">{plugin().enabled ? "已启用" : "已停用"}</Text>
+          <View class="items-end">
+            <Text class="text-xs text-muted-foreground">{runtime()?.state ?? (plugin().enabled ? "已启用" : "已停用")}</Text>
+            <If when={runtime()}>
+              <Text class="text-[10px] text-muted-foreground">
+                epoch {runtime()?.epoch} · 节点 {runtime()?.metrics?.nodes ?? 0} · 操作 {runtime()?.metrics?.operations ?? 0} · 请求 {runtime()?.metrics?.pendingRequests ?? 0} · 队列 {runtime()?.metrics?.queueDepth ?? 0}
+              </Text>
+              <Text class="text-[10px] text-muted-foreground">
+                网络 {runtime()?.metrics?.networkBytes ?? 0} B · 存储 {runtime()?.metrics?.storageBytes ?? 0} B · 超时 {runtime()?.metrics?.timedOutRequests ?? 0} · 取消 {runtime()?.metrics?.cancelledRequests ?? 0} · 丢弃 {runtime()?.metrics?.droppedEvents ?? 0}
+              </Text>
+            </If>
+            <If when={runtime()?.message}>
+              <Text numberOfLines={2} class="max-w-36 text-[10px] text-destructive">{runtime()?.message}</Text>
+            </If>
+          </View>
         </View>
       </Button>
+      <If when={runtime()?.state === "failed"}>
+        <Button testID={`plugin-retry-${plugin().id}`} class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onRetry}>
+          <Text class="text-xs">重试</Text>
+        </Button>
+      </If>
       <Button testID={`plugin-uninstall-${plugin().id}`} accessibilityLabel={`卸载插件 ${plugin().name}`} class="rounded-(--radius) px-2 py-1 hover:bg-destructive/10" onPress={props.onRemove}>
         <Text class="text-xs text-destructive">卸载</Text>
       </Button>
@@ -49,6 +71,10 @@ export function ThemePicker(props: {
   store: ThemeStore;
   packages: PluginPackageInfo[];
   catalog: PluginMarketplacePackage[];
+  runtime?: Record<string, PluginRuntimeState>;
+  diagnostics?: Record<string, string[]>;
+  logs?: Record<string, unknown[]>;
+  onRetryPackage?: (plugin: PluginPackageInfo) => void;
   error?: string;
   onClose: () => void;
   onChange: () => void;
@@ -251,11 +277,13 @@ export function ThemePicker(props: {
                   将主题包放入 ~/.pigcodets/plugins 后点击刷新。
                 </Text>
               </If>
-              <Each of={themePackages()} key={(plugin) => plugin.id}>
+              <Each of={themePackages()} key={(plugin) => `${plugin.id}:${plugin.digest}`}>
                 {(plugin) => (
                   <ThemePackageRow
                     item={plugin}
+                    runtime={props.runtime?.[pluginInstance(plugin())]}
                     onToggle={(value) => props.onTogglePackage(value)}
+                    onRetry={() => props.onRetryPackage?.(plugin())}
                     onRemove={() => pendingUninstall.set(plugin())}
                   />
                 )}
@@ -282,6 +310,22 @@ export function ThemePicker(props: {
                   </View>
                 </View>
               )}
+            </If>
+            <If when={Object.values(props.diagnostics ?? {}).flat().length > 0}>
+              <View testID="plugin-ui-diagnostics" class="gap-1 rounded-(--radius) border border-border p-2">
+                <Text class="text-xs font-medium text-foreground">UI 合成诊断</Text>
+                <Each of={Object.values(props.diagnostics ?? {}).flat().slice(0, 20)} key={(item) => item}>
+                  {(item) => <Text selectable class="text-xs leading-4 text-muted-foreground">{item()}</Text>}
+                </Each>
+              </View>
+            </If>
+            <If when={Object.values(props.logs ?? {}).some((logs) => logs.length > 0)}>
+              <View class="gap-1 rounded-(--radius) border border-border p-2">
+                <Text class="text-xs font-medium text-foreground">最近插件日志（已脱敏）</Text>
+                <Each of={Object.values(props.logs ?? {}).flatMap((logs) => logs.slice(-1))} key={(item) => JSON.stringify(item)}>
+                  {(item) => <Text selectable numberOfLines={3} class="font-mono text-[10px] text-muted-foreground">{JSON.stringify(item()).slice(0, 500)}</Text>}
+                </Each>
+              </View>
             </If>
             <If when={props.error}>
               <Text selectable class="text-xs leading-5 text-destructive">

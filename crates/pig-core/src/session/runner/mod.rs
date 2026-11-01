@@ -99,6 +99,9 @@ impl Manager {
         }
         let (task_notify_tx, task_notify_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::task::TaskChange>();
+        if let Err(error) = crate::plugins::PluginRegistry::reset_runtime(&data_dir) {
+            tracing::warn!("could not clear stale runtime plugin contributions: {error}");
+        }
         Self {
             config_path,
             sessions_dir,
@@ -300,6 +303,30 @@ impl Manager {
                 digest,
                 enabled,
             } => self.set_plugin_enabled(event_tx, package, digest, enabled),
+            Op::SyncPluginRuntimeContributions {
+                request_id,
+                package,
+                digest,
+                epoch,
+                generation,
+                contributions,
+            } => self.sync_plugin_runtime_contributions(
+                event_tx,
+                pig_protocol::PluginRuntimeContributionRequest {
+                    request_id,
+                    package,
+                    digest,
+                    epoch,
+                    generation,
+                    contributions,
+                },
+            ),
+            Op::CommitPluginUpdate { package, digest } => {
+                self.finish_plugin_update(event_tx, package, digest, true)
+            }
+            Op::CancelPluginUpdate { package, digest } => {
+                self.finish_plugin_update(event_tx, package, digest, false)
+            }
             Op::RefreshPluginMarketplace => self.refresh_plugin_marketplace(event_tx),
             Op::InstallMarketplacePlugin { package } => {
                 self.install_marketplace_plugin(event_tx, package)

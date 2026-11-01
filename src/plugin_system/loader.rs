@@ -79,7 +79,7 @@ pub fn read_manifest(assets: &Path) -> Result<PluginManifest, String> {
 }
 
 pub fn installed_sources(data_dir: &Path) -> Vec<PluginPackageSource> {
-    let mut sources = crate::theme::package_sources(data_dir);
+    let mut sources = Vec::new();
     let root = data_dir.join("packages");
     let Ok(packages) = std::fs::read_dir(root) else {
         return sources;
@@ -154,7 +154,7 @@ mod tests {
                 build: manifest.build,
             },
             capabilities: Some(serde_json::json!({
-                "host": ["composer.submit", "tools.result", "storage.write", "contribution.register", "contribution.remove"]
+                "host": ["plugin.protocol"]
             })),
             source,
             bytecode,
@@ -167,6 +167,14 @@ mod tests {
                 (
                     "moon-theme.json".into(),
                     std::fs::read("examples/moon-plugin/moon-theme.json").expect("theme bytes"),
+                ),
+                (
+                    "moon-glass.json".into(),
+                    std::fs::read("examples/moon-plugin/moon-glass.json").expect("style bytes"),
+                ),
+                (
+                    "background.svg".into(),
+                    std::fs::read("examples/moon-plugin/background.svg").expect("background bytes"),
                 ),
                 (
                     "skills/moon/SKILL.md".into(),

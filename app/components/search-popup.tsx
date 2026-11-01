@@ -6,10 +6,12 @@ import { Icon } from "./icon";
 
 type SearchResult = {
   id: string;
-  kind: "session" | "workspace";
+  kind: "session" | "workspace" | "command";
   title: string;
   detail: string;
   path: string;
+  pluginInstance?: string;
+  commandId?: string;
 };
 
 export function SearchPopup(props: UiContext & { onClose: () => void }) {
@@ -39,14 +41,27 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
         detail: cwd,
         path: cwd,
       }));
-    return [...sessions, ...workspaces].slice(0, 50);
+    const commands = props.store.pluginCommands()
+      .filter((command) => matches(command.title))
+      .map((command) => ({
+        id: `command:${command.instance}:${command.command.id}`,
+        kind: "command" as const,
+        title: command.title,
+        detail: "插件命令",
+        path: "",
+        pluginInstance: command.instance,
+        commandId: command.command.id,
+      }));
+    return [...sessions, ...workspaces, ...commands].slice(0, 50);
   };
   const choose = (result: SearchResult) => {
     if (result.kind === "session") {
       props.store.openSession(result.id);
-    } else {
+    } else if (result.kind === "workspace") {
       props.store.newTask();
       props.store.selectHeroWorkspace(result.path);
+    } else if (result.pluginInstance && result.commandId) {
+      props.store.runPluginCommand(result.pluginInstance, result.commandId);
     }
     props.onClose();
   };

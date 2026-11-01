@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const PLUGIN_API_VERSION: u32 = 1;
-pub const PLUGIN_CONTRIBUTION_FILE: &str = "pig-code.json";
 
 const fn api_version() -> u32 {
     PLUGIN_API_VERSION
@@ -34,6 +33,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub tools: Vec<PluginTool>,
     #[serde(default)]
+    pub commands: Vec<PluginCommand>,
+    #[serde(default)]
     pub credentials: Vec<PluginCredentialDeclaration>,
     #[serde(default)]
     pub http: Vec<PluginHttpOrigin>,
@@ -41,6 +42,28 @@ pub struct PluginContributions {
     pub config: PluginConfigDeclaration,
     #[serde(default)]
     pub actions: Vec<PluginCapability>,
+}
+
+impl PluginContributions {
+    pub fn merged(&self, runtime: &Self) -> Self {
+        let mut merged = self.clone();
+        merged.pages.extend(runtime.pages.clone());
+        merged.ui.extend(runtime.ui.clone());
+        merged.themes.extend(runtime.themes.clone());
+        merged.skills.extend(runtime.skills.clone());
+        merged.mcp.extend(runtime.mcp.clone());
+        merged.tools.extend(runtime.tools.clone());
+        merged.commands.extend(runtime.commands.clone());
+        merged
+    }
+
+    pub fn is_engine_backed(&self) -> bool {
+        self.ui.iter().any(|item| {
+            item.export.is_some() || matches!(item.kind, PluginUiContributionKind::Command)
+        }) || !self.tools.is_empty()
+            || !self.commands.is_empty()
+            || self.pages.iter().any(|page| page.enabled && page.entry.ends_with(".tsx"))
+    }
 }
 
 impl Default for PluginContributions {
@@ -54,6 +77,7 @@ impl Default for PluginContributions {
             skills: Vec::new(),
             mcp: Vec::new(),
             tools: Vec::new(),
+            commands: Vec::new(),
             credentials: Vec::new(),
             http: Vec::new(),
             config: PluginConfigDeclaration::default(),
@@ -226,6 +250,21 @@ pub struct PluginTool {
     pub read_only: bool,
     #[serde(default)]
     pub availability: PluginToolAvailability,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommand {
+    pub id: String,
+    pub title: BTreeMap<String, String>,
+    #[serde(default)]
+    pub page_id: Option<String>,
+    #[serde(default)]
+    pub export: Option<String>,
+    #[serde(default)]
+    pub order: u32,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,7 +491,7 @@ pub struct PluginCapabilityRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginUiContribution {
     pub id: String,
     pub kind: PluginUiContributionKind,
@@ -464,21 +503,42 @@ pub struct PluginUiContribution {
     #[serde(default)]
     pub style: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
+    pub props: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub accessibility: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
     pub preserve: Vec<String>,
+    #[serde(default)]
+    pub order: u32,
+    #[serde(default)]
+    pub move_target: Option<String>,
+    #[serde(default)]
+    pub base_revision: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PluginUiContributionKind {
+    Create,
     ReplaceChildren,
     InsertAfter,
     InsertBefore,
+    InsertFirst,
+    InsertLast,
+    Move,
     Wrap,
     Remove,
+    Restore,
     Patch,
     Replace,
     Page,
     Panel,
+    Route,
+    Settings,
+    Command,
+    Inline,
+    Overlay,
+    Decoration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +613,8 @@ pub struct PluginSnapshot {
     pub generation: u64,
     #[serde(default)]
     pub packages: Vec<PluginPackageInfo>,
+    #[serde(default)]
+    pub runtime_contributions: BTreeMap<String, PluginContributions>,
     #[serde(default)]
     pub credential_grants: Vec<PluginCredentialGrant>,
     #[serde(default)]
@@ -631,6 +693,8 @@ pub struct PluginServiceSnapshot {
     pub locale: String,
     pub scope: PluginScope,
     pub workspaces: Vec<PluginWorkspace>,
+    #[serde(default)]
+    pub session: Option<crate::PluginSessionProjection>,
     pub skills: PluginSkillsSnapshot,
     pub mcp: PluginMcpSnapshot,
 }

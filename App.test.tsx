@@ -14,6 +14,16 @@ function openApp() {
   });
 }
 
+async function installMoon(app: Awaited<ReturnType<typeof openApp>>) {
+  await app.press("id:title-theme-settings");
+  await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
+  await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
+  await app.press("id:plugin-install");
+  await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
+  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.press("id:theme-picker-close");
+}
+
 test("uses theme foreground for controls and preserves the full-color brand", () => {
   expect(iconTint("settings")).toBe(token("foreground"));
   expect(iconTint("folder-open", token("muted-foreground"))).toBe(token("muted-foreground"));
@@ -201,8 +211,10 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
   await app.waitFor("id:plugin-send-icon");
   await app.waitFor("text:Moon engine is running", { timeout: 10000 });
+  await app.waitFor("text:/UI ack [1-9]/", { timeout: 10000 });
   await app.waitFor("text:Dynamic moon note");
   await app.type("id:composer-input", "MOON_BUTTON_SUBMIT");
+  await app.waitFor("text:Host focus received", { timeout: 10000 });
   await app.press("id:send-button");
   await app.waitFor("text:/MOON_BUTTON_SUBMIT/", { timeout: 10000 });
   await app.press("id:moon-submit");
@@ -220,7 +232,7 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   await app.press("id:plugin-uninstall-confirm");
   await app.waitFor("id:theme-package-com.pigcodets.plugins.moon", { state: "gone" });
   await app.press("id:theme-picker-close");
-});
+}, 60000);
 
 test("answers dangerous command approvals", async () => {
   const app = await openApp();
@@ -280,20 +292,20 @@ test("applies named themes and appearance modes to native styles", async () => {
 
 test("loads, applies, disables and restores plugin themes", async () => {
   const app = await openApp();
+  await installMoon(app);
   await app.press("id:title-theme-settings");
-  await app.waitFor("id:theme-option-acme.midnight");
+  await app.waitFor("id:theme-option-moon");
   await app.press("id:theme-mode-dark");
-  await app.press("id:theme-option-acme.midnight");
-  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#e2e8f0ff");
-  expect(app.spanStyle("✓").color).toBe("#22d3eeff");
-  expect(app.texts()).toContain("Glass Wallpaper");
+  await app.press("id:theme-option-moon");
+  expect(app.spanStyle("✓").color).toBe("#c4b5fdff");
+  expect(app.texts()).toContain("Moon Glass");
 
-  await app.press("id:theme-package-acme.visual");
-  await app.waitFor("id:theme-option-acme.midnight", { state: "gone" });
+  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.waitFor("id:theme-option-moon", { state: "gone" });
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
-  await app.press("id:theme-package-acme.visual");
-  await app.waitFor("id:theme-option-acme.midnight");
-  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#e2e8f0ff");
+  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.waitFor("id:theme-option-moon");
+  expect(app.spanStyle("✓").color).toBe("#c4b5fdff");
 });
 
 test("applies configured interface and monospace fonts through theme tokens", () => {
@@ -308,18 +320,18 @@ test("applies configured interface and monospace fonts through theme tokens", ()
 
 test("registers partial plugin themes without losing fallback tokens", () => {
   const store = new ThemeStore();
-  store.hydrate("acme.midnight", "system");
+  store.hydrate("moon", "system");
   expect(store.active().id).toBe("pig");
   store.register([
     {
-      id: "acme.midnight",
+      id: "moon",
       name: "Midnight",
       description: "Plugin theme",
       cssVars: { dark: { background: "#101820" } },
     },
   ]);
   expect(store.active().source).toBe("plugin");
-  expect(store.catalog().filter((theme) => theme.id === "acme.midnight").length).toBe(1);
+  expect(store.catalog().filter((theme) => theme.id === "moon").length).toBe(1);
   expect(store.serialized()).toContain('"background":"#101820"');
   expect(store.serialized()).toContain('"tool-surface":"#171717"');
 });
@@ -328,7 +340,7 @@ test("merges and removes style packs by their target themes", () => {
   const store = new ThemeStore();
   store.register([
     {
-      id: "acme.glass",
+      id: "moon-glass",
       name: "Glass",
       kind: "style",
       targetThemes: ["pig"],

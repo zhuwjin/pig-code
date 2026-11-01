@@ -5,6 +5,7 @@ import { EmptyWorkspace } from "./hero";
 import { MessageList } from "./messages";
 import { PluginPages } from "../plugins/remote-renderer";
 import { StatusBar } from "./status-bar";
+import { UiView } from "../plugins/ui-node-factory";
 
 export function Workspace(props: UiContext) {
   const { store } = props;
@@ -30,16 +31,16 @@ export function Workspace(props: UiContext) {
         <StatusBar {...props} />
       </If>
       <If when={hero()}><EmptyWorkspace {...props} /></If>
-      <View class="absolute bottom-24 right-4 z-30 w-80 gap-2">
+      <UiView uiId="main.panelHost" store={store} class="absolute bottom-24 right-4 z-30 w-80 gap-2">
         <PluginPages
           target="main"
           packages={store.pluginPackages()}
           documents={store.pluginDocuments()}
           runtime={store.pluginRuntime()}
           dynamic={store.pluginDynamic()}
-          onEvent={(instance, node, kind, text) => store.dispatchPluginEvent(instance, node, kind, text)}
+          onEvent={(instance, event) => store.dispatchPluginUiEvent(instance, event)}
         />
-      </View>
+      </UiView>
     </View>
   );
 }

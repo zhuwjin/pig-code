@@ -44,6 +44,48 @@ impl Manager {
         self.emit_plugin_snapshot(event_tx, snapshot);
     }
 
+    pub(super) fn sync_plugin_runtime_contributions(
+        &mut self,
+        event_tx: async_channel::Sender<pig_protocol::Event>,
+        request: pig_protocol::PluginRuntimeContributionRequest,
+    ) {
+        let pig_protocol::PluginRuntimeContributionRequest {
+            request_id,
+            package,
+            digest,
+            epoch,
+            generation,
+            contributions,
+        } = request;
+        match self.plugins.sync_runtime_contributions(
+            &package,
+            &digest,
+            epoch,
+            generation,
+            contributions,
+        ) {
+            Ok(snapshot) => {
+                self.emit_plugin_snapshot(event_tx.clone(), snapshot.clone());
+                emit(
+                    &event_tx,
+                    pig_protocol::Event::PluginRuntimeContributionCommitted {
+                        request_id,
+                        epoch,
+                        snapshot,
+                    },
+                );
+            }
+            Err(error) => self.plugin_action_result(
+                &event_tx,
+                request_id,
+                package,
+                digest,
+                Err(error),
+                false,
+            ),
+        }
+    }
+
     pub(super) fn refresh_plugin_marketplace(
         &mut self,
         event_tx: async_channel::Sender<pig_protocol::Event>,
@@ -64,12 +106,16 @@ impl Manager {
     ) {
         let data_dir = self.data_dir.clone();
         tokio::spawn(async move {
-            let result = plugins::install_package(
+            let result = plugins::download_signed_package(
                 &data_dir,
                 plugins::DEFAULT_MARKETPLACE_INDEX_URL,
                 &package,
             )
-            .await;
+            .await
+            .map(|download| pig_protocol::PluginMarketplaceInstall {
+                package: download.package,
+                digest: download.digest,
+            });
             emit(
                 &event_tx,
                 pig_protocol::Event::PluginMarketplaceInstall { result },
@@ -97,6 +143,31 @@ impl Manager {
         }
     }
 
+    pub(super) fn finish_plugin_update(
+        &mut self,
+        event_tx: async_channel::Sender<pig_protocol::Event>,
+        package: String,
+        digest: String,
+        commit: bool,
+    ) {
+        let result = if commit {
+            self.plugins.commit_update(&package, &digest)
+        } else {
+            self.plugins.cancel_update(&package, &digest)
+        };
+        match result {
+            Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
+            Err(error) => self.plugin_action_result(
+                &event_tx,
+                String::new(),
+                package,
+                digest,
+                Err(error),
+                false,
+            ),
+        }
+    }
+
     pub(super) fn query_plugin(
         &mut self,
         event_tx: async_channel::Sender<pig_protocol::Event>,
@@ -106,12 +177,21 @@ impl Manager {
         scope: PluginScope,
         session_id: Option<String>,
     ) {
+        let (capability, target) = match (&scope, &session_id) {
+            (_, Some(session_id)) => ("session.read", session_id.clone()),
+            (PluginScope::Project { workspace }, None) => (
+                "workspace.read",
+                workspace.to_string_lossy().into_owned(),
+            ),
+            (PluginScope::User, None) => ("workspace.read", "*".to_owned()),
+        };
         let result = self
             .plugins
-            .authorize(
+            .authorize_named(
                 &package,
                 &digest,
-                &PluginAction::Refresh,
+                capability,
+                &target,
                 self.config.as_ref(),
             )
             .and_then(|()| self.plugin_services(scope, session_id));

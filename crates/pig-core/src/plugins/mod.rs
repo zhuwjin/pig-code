@@ -8,9 +8,7 @@ mod themes;
 mod tools;
 
 pub use http::request_http;
-pub use marketplace::{
-    DEFAULT_MARKETPLACE_INDEX_URL, download_signed_package, fetch_catalog, install_package,
-};
+pub use marketplace::{DEFAULT_MARKETPLACE_INDEX_URL, download_signed_package, fetch_catalog};
 pub use themes::load_theme;
 pub use tools::{PluginToolDispatcher, PluginToolFilter, PluginToolset};
 
@@ -28,6 +26,7 @@ pub use services::{
 use pig_protocol::{PluginSnapshot, PluginSource};
 
 pub(crate) const PLUGIN_STATE_FILE: &str = "plugins-state.json";
+pub(crate) const PLUGIN_RUNTIME_STATE_FILE: &str = "plugins-runtime.json";
 pub(crate) const REDACTED: &str = "${PIG_REDACTED}";
 const GENERATED_TYPES: &str = "gpui-kit.d.ts";
 const BUILTIN_PACKAGES: [&str; 1] = ["pig.websearch"];
@@ -38,6 +37,8 @@ pub struct PluginRegistry {
     pub(crate) snapshot: PluginSnapshot,
     enabled: std::collections::BTreeMap<String, String>,
     disabled_builtin: std::collections::BTreeMap<String, String>,
+    pending_updates: std::collections::BTreeMap<String, String>,
+    runtime_epochs: std::collections::BTreeMap<String, u64>,
     credential_grants: std::collections::BTreeSet<pig_protocol::PluginCredentialGrant>,
 }
 
@@ -84,13 +85,48 @@ mod tests {
 
     fn user_plugin(root: &Path) {
         write(
-            &root.join("gpui-shell.json"),
-            r#"{"id":"demo","name":"Demo","version":"1.0.0","entry":"main.js"}"#,
+            &root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "1.0.0",
+              "build": 1,
+              "entry": "App.tsx",
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "actions":["read_settings"],
+                "pages":[{"id":"home","entry":"App.tsx","title":{"en":"Home"}}]
+              }
+            }"#,
         );
-        write(&root.join("main.js"), "export default class Demo {}");
         write(
-            &root.join("pig-code.json"),
-            r#"{"actions":["read_settings"],"pages":[{"id":"home","entry":"main.js","title":{"en":"Home"}}]}"#,
+            &root.join("App.tsx"),
+            "export default function App() { return null; }",
+        );
+    }
+
+    fn extend_user_plugin(root: &Path, contributions: &str) {
+        let path = root.join("pig-plugin.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read plugin manifest"))
+                .expect("plugin manifest");
+        let contributions: serde_json::Value =
+            serde_json::from_str(contributions).expect("additional contributions");
+        manifest["contributions"]
+            .as_object_mut()
+            .expect("contributions object")
+            .extend(
+                contributions
+                    .as_object()
+                    .expect("contributions object")
+                    .clone(),
+            );
+        write(
+            &path,
+            &serde_json::to_string_pretty(&manifest).expect("manifest JSON"),
         );
     }
 
@@ -158,11 +194,25 @@ mod tests {
         let data = temp.0.join("data");
         let root = data.join("plugins/builtin/pig.websearch");
         write(
-            &root.join("gpui-shell.json"),
-            r#"{"id":"pig.websearch","name":"Web Search","version":"1.0.0","entry":"main.js"}"#,
+            &root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "pig.websearch",
+              "name": "Web Search",
+              "version": "1.0.0",
+              "build": 1,
+              "entry": "App.tsx",
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {}
+            }"#,
         );
-        write(&root.join("main.js"), "export default class Search {}");
-        write(&root.join("pig-code.json"), r#"{"actions":[]}"#);
+        write(
+            &root.join("App.tsx"),
+            "export default function App() { return null; }",
+        );
+        extend_user_plugin(&root, r#"{"actions":[]}"#);
         let sources = || {
             vec![PluginPackageSource {
                 root: root.clone(),
@@ -270,8 +320,8 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("plugin");
         user_plugin(&root);
-        write(
-            &root.join("pig-code.json"),
+        extend_user_plugin(
+            &root,
             r#"{
               "actions": ["provide_mcp"],
               "skills": [{"path":"skills/alpha"},{"path":"skills/beta"}],
@@ -340,8 +390,8 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("plugin");
         user_plugin(&root);
-        write(
-            &root.join("pig-code.json"),
+        extend_user_plugin(
+            &root,
             r#"{
               "actions": ["provide_tools", "http"],
               "tools": [{
@@ -422,8 +472,8 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("plugin");
         user_plugin(&root);
-        write(
-            &root.join("pig-code.json"),
+        extend_user_plugin(
+            &root,
             r#"{
               "actions": ["read_config", "write_config"],
               "config": {"items": [{"key": "mode", "default": "auto"}]}
@@ -495,8 +545,8 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("plugin");
         user_plugin(&root);
-        write(
-            &root.join("pig-code.json"),
+        extend_user_plugin(
+            &root,
             r#"{
               "actions": ["http", "manage_own_secrets"],
               "credentials": [
@@ -560,8 +610,8 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("plugin");
         user_plugin(&root);
-        write(
-            &root.join("pig-code.json"),
+        extend_user_plugin(
+            &root,
             r#"{
               "actions": ["provide_tools"],
               "tools": [{
@@ -577,5 +627,184 @@ mod tests {
             source: PluginSource::User,
         }]);
         assert_eq!(snapshot.errors.len(), 1);
+    }
+
+    #[test]
+    fn update_candidates_keep_the_old_version_until_commit_and_support_rollback() {
+        let temp = TempDir::new();
+        let first = temp.0.join("first");
+        let second = temp.0.join("second");
+        user_plugin(&first);
+        user_plugin(&second);
+        write(&second.join("App.tsx"), "export default function App() { return 'new'; }");
+        let data = temp.0.join("data");
+        let mut registry = PluginRegistry::new(data);
+        let sources = || {
+            vec![
+                PluginPackageSource {
+                    root: first.clone(),
+                    source: PluginSource::User,
+                },
+                PluginPackageSource {
+                    root: second.clone(),
+                    source: PluginSource::User,
+                },
+            ]
+        };
+        let initial = sync(&mut registry, &first);
+        let old_digest = initial.packages[0].digest.clone();
+        registry.set_enabled("demo", &old_digest, true).unwrap();
+        let discovered = registry.sync(sources());
+        let new_digest = discovered
+            .packages
+            .iter()
+            .find(|package| package.digest != old_digest)
+            .expect("new package")
+            .digest
+            .clone();
+        let pending = registry.set_enabled("demo", &new_digest, true).unwrap();
+        assert!(pending.packages.iter().all(|package| package.enabled));
+        registry
+            .sync_runtime_contributions(
+                "demo",
+                &old_digest,
+                1,
+                pending.generation,
+                pig_protocol::PluginContributions::default(),
+            )
+            .unwrap();
+        registry
+            .sync_runtime_contributions(
+                "demo",
+                &new_digest,
+                2,
+                pending.generation,
+                pig_protocol::PluginContributions::default(),
+            )
+            .unwrap();
+        let cancelled = registry.cancel_update("demo", &new_digest).unwrap();
+        assert!(cancelled.packages.iter().find(|package| package.digest == old_digest).unwrap().enabled);
+        assert!(!cancelled.packages.iter().find(|package| package.digest == new_digest).unwrap().enabled);
+        assert!(cancelled.runtime_contributions.contains_key(&format!("demo:{old_digest}")));
+        assert!(!cancelled.runtime_contributions.contains_key(&format!("demo:{new_digest}")));
+        registry.set_enabled("demo", &new_digest, true).unwrap();
+        registry
+            .sync_runtime_contributions(
+                "demo",
+                &new_digest,
+                3,
+                registry.snapshot.generation,
+                pig_protocol::PluginContributions::default(),
+            )
+            .unwrap();
+        let committed = registry.commit_update("demo", &new_digest).unwrap();
+        assert!(committed.runtime_contributions.contains_key(&format!("demo:{new_digest}")));
+        assert!(!committed.runtime_contributions.contains_key(&format!("demo:{old_digest}")));
+        assert!(committed.packages.iter().find(|package| package.digest == new_digest).unwrap().enabled);
+        assert!(!committed.packages.iter().find(|package| package.digest == old_digest).unwrap().enabled);
+        let restored = PluginRegistry::new(temp.0.join("data"));
+        assert!(restored.snapshot.packages.iter().find(|package| package.digest == new_digest).unwrap().enabled);
+    }
+
+    #[test]
+    fn dynamic_contributions_survive_rediscovery_and_respect_engine_epochs() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{"actions":["provide_tools","provide_themes","provide_mcp"]}"#,
+        );
+        let manifest_path = root.join("pig-plugin.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest")).unwrap();
+        manifest["capabilities"] = serde_json::json!([
+            {"name":"ui.add","targets":["main","commands"]}
+        ]);
+        write(&manifest_path, &serde_json::to_string(&manifest).unwrap());
+        write(
+            &root.join("runtime-theme.json"),
+            r#"{"id":"runtime-theme","name":"Runtime","cssVars":{"dark":{}}}"#,
+        );
+        write(
+            &root.join("skills/runtime/SKILL.md"),
+            "---\nname: runtime\ndescription: Runtime skill\n---\nRuntime instructions\n",
+        );
+        let data = temp.0.join("data");
+        let mut registry = PluginRegistry::new(data.clone());
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let engine_generation = registry.snapshot.generation;
+        let contributions: pig_protocol::PluginContributions = serde_json::from_value(
+            serde_json::json!({
+                "pages":[{"id":"runtime","entry":"App.tsx","title":{"en":"Runtime"}}],
+                "ui":[{"id":"runtime-panel","kind":"panel","target":"main","export":"App","preserve":[]}],
+                "themes":[{"id":"runtime-theme","entry":"runtime-theme.json"}],
+                "skills":[{"path":"skills/runtime"}],
+                "mcp":[{"name":"runtime","config":{"command":"runtime-server"}}],
+                "tools":[{"name":"DynamicEcho","description":"Echo","parameters":{"type":"object"}}],
+                "commands":[{"id":"runtime-command","title":{"en":"Runtime"},"order":0,"enabled":true}]
+            }),
+        )
+        .unwrap();
+        let accepted = registry
+            .sync_runtime_contributions(
+                "demo",
+                &digest,
+                7,
+                engine_generation,
+                contributions.clone(),
+            )
+            .expect("register all dynamic contribution kinds");
+        let registered = &accepted.runtime_contributions[&format!("demo:{digest}")];
+        assert_eq!(registered.pages.len(), 1);
+        assert_eq!(registered.ui.len(), 1);
+        assert_eq!(registered.themes.len(), 1);
+        assert_eq!(registered.skills.len(), 1);
+        assert_eq!(registered.mcp.len(), 1);
+        assert_eq!(registered.tools.len(), 1);
+        assert_eq!(registered.commands.len(), 1);
+
+        let rediscovered = sync(&mut registry, &root);
+        assert_eq!(
+            rediscovered.runtime_contributions[&format!("demo:{digest}")],
+            contributions
+        );
+        registry
+            .sync_runtime_contributions(
+                "demo",
+                &digest,
+                7,
+                engine_generation,
+                contributions.clone(),
+            )
+            .expect("an unchanged engine may register after another snapshot generation");
+        registry
+            .sync_runtime_contributions(
+                "demo",
+                &digest,
+                6,
+                registry.snapshot.generation,
+                pig_protocol::PluginContributions::default(),
+            )
+            .expect("an old engine cleanup is ignored");
+        assert!(registry.snapshot.runtime_contributions.contains_key(&format!("demo:{digest}")));
+        let runtime_path = data.join(PLUGIN_RUNTIME_STATE_FILE);
+        assert!(runtime_path.is_file());
+        let _service_registry = PluginRegistry::new(data.clone());
+        assert!(runtime_path.is_file(), "ordinary service registries must not clear live contributions");
+        PluginRegistry::reset_runtime(&data).expect("clear ephemeral state at startup");
+        assert!(!runtime_path.exists());
+        registry
+            .sync_runtime_contributions(
+                "demo",
+                &digest,
+                7,
+                registry.snapshot.generation,
+                pig_protocol::PluginContributions::default(),
+            )
+            .expect("the current engine removes its contributions");
+        assert!(registry.snapshot.runtime_contributions.is_empty());
     }
 }

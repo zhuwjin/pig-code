@@ -566,28 +566,38 @@ mod tests {
         let data = temp.0.join("data");
         std::fs::create_dir_all(&package).expect("package directory");
         std::fs::write(
-            package.join("gpui-shell.json"),
-            r#"{"id":"demo","name":"Demo","version":"1.0.0","entry":"main.js"}"#,
+            package.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "1.0.0",
+              "build": 1,
+              "entry": "App.tsx",
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "actions": ["provide_tools"],
+                "tools": [{
+                  "name": "DemoRead",
+                  "description": "Read demo data",
+                  "read_only": true,
+                  "parameters": {"type": "object"}
+                }, {
+                  "name": "DynamicRead",
+                  "description": "Read dynamic demo data",
+                  "read_only": true,
+                  "availability": "plugin",
+                  "parameters": {"type": "object"}
+                }]
+              }
+            }"#,
         )
         .unwrap();
-        std::fs::write(package.join("main.js"), "export default class Demo {}").unwrap();
         std::fs::write(
-            package.join("pig-code.json"),
-            r#"{
-              "actions": ["provide_tools"],
-              "tools": [{
-                "name": "DemoRead",
-                "description": "Read demo data",
-                "read_only": true,
-                "parameters": {"type": "object"}
-              }, {
-                "name": "DynamicRead",
-                "description": "Read dynamic demo data",
-                "read_only": true,
-                "availability": "plugin",
-                "parameters": {"type": "object"}
-              }]
-            }"#,
+            package.join("App.tsx"),
+            "export default function App() { return null; }",
         )
         .unwrap();
         let mut registry = super::super::PluginRegistry::new(data.clone());

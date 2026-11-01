@@ -5,6 +5,6 @@
   "build": 1,
   "appearance": "system",
   "capabilities": {
-    "host": ["composer.submit", "tools.result", "storage.write", "contribution.register", "contribution.remove"]
+    "host": ["plugin.protocol"]
   }
 }

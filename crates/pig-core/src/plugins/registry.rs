@@ -20,20 +20,9 @@ pub(crate) struct PersistedPlugins {
     #[serde(default)]
     pub disabled_builtin: BTreeMap<String, String>,
     #[serde(default)]
+    pub pending_updates: BTreeMap<String, String>,
+    #[serde(default)]
     pub credential_grants: BTreeSet<pig_protocol::PluginCredentialGrant>,
-}
-
-#[derive(Deserialize)]
-struct Identity {
-    id: String,
-    name: String,
-    #[serde(default = "unknown_version")]
-    version: String,
-    entry: String,
-}
-
-fn unknown_version() -> String {
-    "unknown".to_owned()
 }
 
 impl PluginRegistry {
@@ -52,10 +41,19 @@ impl PluginRegistry {
             },
             enabled: state.enabled,
             disabled_builtin: state.disabled_builtin,
+            pending_updates: state.pending_updates,
+            runtime_epochs: BTreeMap::new(),
             credential_grants: state.credential_grants,
         };
         registry.apply_enabled();
         registry
+    }
+
+    pub fn reset_runtime(data_dir: &Path) -> std::io::Result<()> {
+        match std::fs::remove_file(data_dir.join(super::PLUGIN_RUNTIME_STATE_FILE)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
     }
 
     pub fn sync(&mut self, sources: Vec<PluginPackageSource>) -> PluginSnapshot {
@@ -66,7 +64,12 @@ impl PluginRegistry {
         let mut ids = BTreeSet::new();
         for source in sources {
             match self.inspect(&source) {
-                Ok(package) if !ids.insert(package.id.clone()) => {
+                Ok(package)
+                    if !ids.insert(format!(
+                        "{}:{}:{:?}",
+                        package.id, package.digest, package.source
+                    )) =>
+                {
                     self.snapshot.errors.push(PluginIssue {
                         root: source.root,
                         error: manifest(format!("duplicate plugin id `{}`", package.id)),
@@ -79,10 +82,124 @@ impl PluginRegistry {
                 }),
             }
         }
-        self.snapshot.packages.sort_by(|a, b| a.id.cmp(&b.id));
+        self.snapshot.packages.sort_by(|a, b| {
+            a.id.cmp(&b.id)
+                .then_with(|| a.digest.cmp(&b.digest))
+                .then_with(|| a.root.cmp(&b.root))
+        });
+        self.pending_updates.retain(|id, digest| {
+            self.snapshot
+                .packages
+                .iter()
+                .any(|package| &package.id == id && &package.digest == digest)
+        });
+        let current: BTreeSet<String> = self
+            .snapshot
+            .packages
+            .iter()
+            .map(|package| format!("{}:{}", package.id, package.digest))
+            .collect();
+        self.snapshot
+            .runtime_contributions
+            .retain(|key, _| current.contains(key));
+        self.runtime_epochs.retain(|key, _| current.contains(key));
         self.apply_enabled();
         self.persist();
+        self.persist_runtime();
         self.snapshot.clone()
+    }
+
+    pub fn sync_runtime_contributions(
+        &mut self,
+        id: &str,
+        digest: &str,
+        epoch: u64,
+        generation: u64,
+        contributions: pig_protocol::PluginContributions,
+    ) -> Result<PluginSnapshot, CoreError> {
+        if generation > self.snapshot.generation {
+            return Err(permission(format!(
+                "the runtime contribution generation is from the future: received {generation}, current {}",
+                self.snapshot.generation
+            )));
+        }
+        let key = format!("{id}:{digest}");
+        if self
+            .runtime_epochs
+            .get(&key)
+            .is_some_and(|current| *current > epoch)
+        {
+            return Ok(self.snapshot.clone());
+        }
+        let empty = contributions.pages.is_empty()
+            && contributions.ui.is_empty()
+            && contributions.themes.is_empty()
+            && contributions.skills.is_empty()
+            && contributions.mcp.is_empty()
+            && contributions.tools.is_empty()
+            && contributions.commands.is_empty();
+        if empty {
+            if self.runtime_epochs.get(&key) == Some(&epoch) {
+                self.snapshot.runtime_contributions.remove(&key);
+                self.runtime_epochs.remove(&key);
+            } else {
+                let package = self.package(id, digest)?;
+                if !package.enabled {
+                    return Err(permission("a disabled plugin cannot register contributions"));
+                }
+                self.snapshot
+                    .runtime_contributions
+                    .insert(key.clone(), PluginContributions::default());
+                self.runtime_epochs.insert(key, epoch);
+            }
+            self.generation += 1;
+            self.snapshot.generation = self.generation;
+            self.persist();
+            self.persist_runtime();
+            return Ok(self.snapshot.clone());
+        }
+        let package = self.package(id, digest)?.clone();
+        if !package.enabled {
+            return Err(permission("a disabled plugin cannot register contributions"));
+        }
+        if !contributions.credentials.is_empty()
+            || !contributions.http.is_empty()
+            || !contributions.actions.is_empty()
+            || !contributions.config.items.is_empty()
+            || !contributions.config.read.is_empty()
+            || !contributions.config.write.is_empty()
+        {
+            return Err(permission(
+                "runtime contributions cannot change permissions, credentials, HTTP or configuration schemas",
+            ));
+        }
+        let mut validated = contributions.clone();
+        validated.actions = package.contributions.actions.clone();
+        validate_contributions(&package.root, &validated)?;
+        validate_ui_contributions(&validated, &package.capabilities)?;
+        self.snapshot.runtime_contributions.insert(key.clone(), contributions);
+        self.runtime_epochs.insert(key, epoch);
+        self.generation += 1;
+        self.snapshot.generation = self.generation;
+        self.persist();
+        self.persist_runtime();
+        Ok(self.snapshot.clone())
+    }
+
+    fn persist_runtime(&self) {
+        let path = self.data_dir.join(super::PLUGIN_RUNTIME_STATE_FILE);
+        if self.snapshot.runtime_contributions.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        match serde_json::to_vec(&self.snapshot.runtime_contributions) {
+            Ok(bytes) => {
+                if let Err(error) = crate::config::write_private_file(&path, &bytes) {
+                    tracing::warn!("could not save runtime plugin contributions: {error:?}");
+                }
+            }
+            Err(error) => tracing::warn!("could not serialize runtime contributions: {error}"),
+        }
     }
 
     pub(crate) fn inspect(
@@ -91,44 +208,28 @@ impl PluginRegistry {
     ) -> Result<PluginPackageInfo, CoreError> {
         let root = canonical(&source.root)?;
         let manifest_path = root.join(pig_protocol::PLUGIN_MANIFEST_FILE);
-        let package_manifest = manifest_path
-            .is_file()
-            .then(|| read_json::<PluginManifest>(&manifest_path))
-            .transpose()?;
-        let identity = match &package_manifest {
-            Some(manifest) => manifest.id.clone(),
-            None => read_json::<Identity>(&root.join("gpui-shell.json"))?.id,
-        };
-        validate_id(&identity)?;
-        let (name, version, entry, contributions, capabilities) = match package_manifest {
-            Some(manifest) => (
-                manifest.name.fallback(),
-                manifest.version,
-                manifest.entry,
-                manifest.contributions,
-                manifest.capabilities,
-            ),
-            None => {
-                let identity: Identity = read_json(&root.join("gpui-shell.json"))?;
-                let contributions = match root.join(pig_protocol::PLUGIN_CONTRIBUTION_FILE) {
-                    path if path.is_file() => read_json(&path)?,
-                    _ => PluginContributions::default(),
-                };
-                (
-                    identity.name,
-                    identity.version,
-                    identity.entry,
-                    contributions,
-                    Vec::new(),
-                )
-            }
-        };
+        let package_manifest: PluginManifest = read_json(&manifest_path)?;
+        if package_manifest.api_version != pig_protocol::PLUGIN_API_VERSION
+            || package_manifest.protocols.ui != 1
+            || package_manifest.protocols.services != 1
+            || package_manifest.build == 0
+        {
+            return Err(manifest("unsupported plugin manifest or protocol version"));
+        }
+        validate_id(&package_manifest.id)?;
+        let identity = package_manifest.id.clone();
+        let name = package_manifest.name.fallback();
+        let version = package_manifest.version;
+        let entry = package_manifest.entry;
+        let contributions = package_manifest.contributions;
+        let capabilities = package_manifest.capabilities;
         if name.trim().is_empty() || version.trim().is_empty() {
             return Err(manifest("plugin name and version must not be empty"));
         }
         relative_file(&entry)?;
         self.validate_source(&root, &identity, &source.source)?;
         validate_contributions(&root, &contributions)?;
+        validate_ui_contributions(&contributions, &capabilities)?;
         let installed = root.join(".pig-install.json");
         let content_digest = package_digest(&root)?;
         let digest = if installed.is_file() {
@@ -178,12 +279,14 @@ impl PluginRegistry {
 
     fn apply_enabled(&mut self) {
         for package in &mut self.snapshot.packages {
-            package.enabled = match package.source {
-                PluginSource::BuiltIn => {
-                    self.disabled_builtin.get(&package.id) != Some(&package.digest)
-                }
-                _ => self.enabled.get(&package.id) == Some(&package.digest),
-            };
+            let pending = self.pending_updates.get(&package.id) == Some(&package.digest);
+            package.enabled = pending
+                || match package.source {
+                    PluginSource::BuiltIn => {
+                        self.disabled_builtin.get(&package.id) != Some(&package.digest)
+                    }
+                    _ => self.enabled.get(&package.id) == Some(&package.digest),
+                };
         }
     }
 
@@ -192,6 +295,7 @@ impl PluginRegistry {
             packages: self.snapshot.packages.clone(),
             enabled: self.enabled.clone(),
             disabled_builtin: self.disabled_builtin.clone(),
+            pending_updates: self.pending_updates.clone(),
             credential_grants: self.credential_grants.clone(),
         };
         match serde_json::to_vec_pretty(&state) {
@@ -213,23 +317,75 @@ impl PluginRegistry {
         digest: &str,
         enabled: bool,
     ) -> Result<PluginSnapshot, CoreError> {
-        let package = self.package(id, digest)?;
-        if matches!(package.source, PluginSource::BuiltIn) {
-            if enabled {
+        let builtin = matches!(self.package(id, digest)?.source, PluginSource::BuiltIn);
+        if enabled {
+            let previous = self
+                .snapshot
+                .packages
+                .iter()
+                .find(|package| package.id == id && package.enabled && package.digest != digest)
+                .map(|package| package.digest.clone());
+            if previous.is_some() {
+                self.pending_updates.insert(id.to_owned(), digest.to_owned());
+            } else if builtin {
                 self.disabled_builtin.remove(id);
             } else {
+                self.enabled.insert(id.to_owned(), digest.to_owned());
+            }
+        } else if self.pending_updates.get(id) == Some(&digest.to_owned()) {
+            self.pending_updates.remove(id);
+        } else {
+            self.pending_updates.remove(id);
+            if builtin {
                 self.disabled_builtin
                     .insert(id.to_owned(), digest.to_owned());
+            } else {
+                self.enabled.remove(id);
             }
-        } else if enabled {
-            self.enabled.insert(id.to_owned(), digest.to_owned());
-        } else {
-            self.enabled.remove(id);
         }
         self.generation += 1;
         self.snapshot.generation = self.generation;
         self.apply_enabled();
         self.persist();
+        Ok(self.snapshot.clone())
+    }
+
+    pub fn commit_update(&mut self, id: &str, digest: &str) -> Result<PluginSnapshot, CoreError> {
+        let builtin = matches!(self.package(id, digest)?.source, PluginSource::BuiltIn);
+        self.pending_updates.remove(id);
+        if builtin {
+            self.disabled_builtin.remove(id);
+        } else {
+            self.enabled.insert(id.to_owned(), digest.to_owned());
+        }
+        self.snapshot.runtime_contributions.retain(|key, _| {
+            key == &format!("{id}:{digest}") || !key.starts_with(&format!("{id}:"))
+        });
+        self.runtime_epochs.retain(|key, _| {
+            key == &format!("{id}:{digest}") || !key.starts_with(&format!("{id}:"))
+        });
+        self.generation += 1;
+        self.snapshot.generation = self.generation;
+        self.apply_enabled();
+        self.persist();
+        self.persist_runtime();
+        Ok(self.snapshot.clone())
+    }
+
+    pub fn cancel_update(&mut self, id: &str, digest: &str) -> Result<PluginSnapshot, CoreError> {
+        self.package(id, digest)?;
+        if self.pending_updates.get(id) == Some(&digest.to_owned()) {
+            self.pending_updates.remove(id);
+        }
+        self.snapshot
+            .runtime_contributions
+            .remove(&format!("{id}:{digest}"));
+        self.runtime_epochs.remove(&format!("{id}:{digest}"));
+        self.generation += 1;
+        self.snapshot.generation = self.generation;
+        self.apply_enabled();
+        self.persist();
+        self.persist_runtime();
         Ok(self.snapshot.clone())
     }
 
@@ -284,6 +440,41 @@ impl PluginRegistry {
             .iter()
             .find(|package| package.id == id && package.digest == digest)
             .ok_or_else(|| permission("the plugin is unknown or its content digest changed"))
+    }
+
+    pub fn authorize_named(
+        &self,
+        id: &str,
+        digest: &str,
+        capability: &str,
+        target: &str,
+        config: Option<&pig_protocol::AppConfig>,
+    ) -> Result<(), CoreError> {
+        let package = self.package(id, digest)?;
+        if package_digest(&package.root)? != package.content_digest {
+            return Err(permission("the plugin files changed after discovery"));
+        }
+        if !package.enabled {
+            return Err(permission("the plugin is disabled"));
+        }
+        if let PluginSource::Project { workspace } = &package.source {
+            let trust = crate::config::WorkspaceTrust::for_config(config, workspace);
+            if !trust.admits(workspace) {
+                return Err(permission("the project workspace is not trusted"));
+            }
+        }
+        let granted = package.capabilities.iter().any(|item| {
+            item.name == capability
+                && (item.targets.iter().any(|allowed| allowed == "*")
+                    || item.targets.iter().any(|allowed| allowed == target))
+        });
+        if granted {
+            Ok(())
+        } else {
+            Err(permission(format!(
+                "{capability} is not granted for `{target}`"
+            )))
+        }
     }
 
     pub fn authorize(
@@ -699,7 +890,98 @@ fn validate_contributions(
             return Err(manifest(format!("skill `{}` has no SKILL.md", skill.path)));
         }
     }
+    let mut command_ids = BTreeSet::new();
+    for command in &contributions.commands {
+        validate_id(&command.id)?;
+        if !command_ids.insert(&command.id) || command.title.is_empty() {
+            return Err(manifest(format!(
+                "duplicate or untitled command `{}`",
+                command.id
+            )));
+        }
+    }
     super::config::validate_declaration(contributions)?;
+    Ok(())
+}
+
+fn validate_ui_contributions(
+    contributions: &PluginContributions,
+    capabilities: &[pig_protocol::PluginCapabilityRequest],
+) -> Result<(), CoreError> {
+    let mut ids = BTreeSet::new();
+    for contribution in &contributions.ui {
+        validate_id(&contribution.id)?;
+        if !ids.insert(&contribution.id) {
+            return Err(manifest(format!(
+                "duplicate UI contribution `{}`",
+                contribution.id
+            )));
+        }
+        if ["approval.", "security.", "credentials.", "plugins.", "plugin.manager"]
+            .iter()
+            .any(|prefix| contribution.target.starts_with(prefix))
+        {
+            return Err(permission("protected UI cannot be modified by a plugin"));
+        }
+        use pig_protocol::PluginUiContributionKind as Kind;
+        let page = matches!(
+            contribution.kind,
+            Kind::Page
+                | Kind::Panel
+                | Kind::Route
+                | Kind::Settings
+                | Kind::Command
+                | Kind::Overlay
+                | Kind::Decoration
+        );
+        let interaction = !contribution.props.is_empty()
+            && contribution
+                .props
+                .keys()
+                .any(|key| key.starts_with("on") || key == "disabled" || key == "focusable");
+        let capability = if page {
+            "ui.add"
+        } else if interaction {
+            "ui.interact"
+        } else if matches!(contribution.kind, Kind::Patch) {
+            "ui.patch.style"
+        } else {
+            "ui.patch.structure"
+        };
+        let granted = capabilities.iter().any(|item| {
+            item.name == capability
+                && (item.targets.iter().any(|target| target == "*")
+                    || item.targets.contains(&contribution.target))
+        });
+        if !granted {
+            return Err(permission(format!(
+                "UI contribution `{}` requires {capability} for `{}`",
+                contribution.id, contribution.target
+            )));
+        }
+        if matches!(contribution.kind, Kind::Move) && contribution.move_target.is_none() {
+            return Err(manifest("a move contribution requires moveTarget"));
+        }
+        if contribution
+            .preserve
+            .iter()
+            .any(|property| property.starts_with("on") && capability != "ui.interact")
+            && !matches!(capability, "ui.patch.structure")
+        {
+            return Err(permission("preserving host behavior requires structure permission"));
+        }
+    }
+    if !contributions.commands.is_empty()
+        && !capabilities.iter().any(|item| {
+            item.name == "ui.add"
+                && item
+                    .targets
+                    .iter()
+                    .any(|target| target == "*" || target == "commands")
+        })
+    {
+        return Err(permission("commands require ui.add for the commands surface"));
+    }
     Ok(())
 }
 

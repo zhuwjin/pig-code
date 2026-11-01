@@ -23,6 +23,10 @@
       "targets": ["main", "settings"]
     },
     {
+      "name": "ui.interact",
+      "targets": ["composer.input"]
+    },
+    {
       "name": "composer.submit",
       "targets": ["*"]
     },
@@ -72,6 +76,10 @@
       {
         "id": "moon",
         "entry": "moon-theme.json"
+      },
+      {
+        "id": "moon-glass",
+        "entry": "moon-glass.json"
       }
     ],
     "skills": [

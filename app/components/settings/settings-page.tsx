@@ -4,6 +4,7 @@ import type { UiContext } from "../../ui-context";
 import { Icon } from "../icon";
 import { ModelSettings } from "./model-settings";
 import { PluginPages } from "../../plugins/remote-renderer";
+import { UiNodeFactory, UiView } from "../../plugins/ui-node-factory";
 
 export function SettingsPage(props: UiContext & {
   onBack: () => void;
@@ -11,7 +12,7 @@ export function SettingsPage(props: UiContext & {
 }) {
   return (
     <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 flex-row bg-background")}>
-      <View class={props.themeStore.classes("settings.nav", "w-56 shrink-0 border-r border-border bg-sidebar p-3")}>
+      <UiView uiId="settings.navigation" store={props.store} class={props.themeStore.classes("settings.nav", "w-56 shrink-0 border-r border-border bg-sidebar p-3")}>
         <Button testID="settings-back" class="mb-4 flex-row items-center gap-2 rounded-(--radius) px-2 py-2 hover:bg-sidebar-accent" onPress={props.onBack}>
           <Text class="text-sm text-sidebar-foreground">← 返回工作区</Text>
         </Button>
@@ -32,10 +33,18 @@ export function SettingsPage(props: UiContext & {
           documents={props.store.pluginDocuments()}
           runtime={props.store.pluginRuntime()}
           dynamic={props.store.pluginDynamic()}
-          onEvent={(instance, node, kind, text) => props.store.dispatchPluginEvent(instance, node, kind, text)}
+          onEvent={(instance, event) => props.store.dispatchPluginUiEvent(instance, event)}
         />
-      </View>
-      <ModelSettings {...props} />
+      </UiView>
+      <UiNodeFactory
+        uiId="settings.content"
+        store={props.store}
+        render={(patch, children) => (
+          <View class="min-w-0 flex-1" style={patch.style} {...patch.accessibility}>
+            {children ?? <ModelSettings {...props} />}
+          </View>
+        )}
+      />
     </View>
   );
 }

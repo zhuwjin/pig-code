@@ -257,6 +257,22 @@ pub enum Op {
         digest: String,
         enabled: bool,
     },
+    SyncPluginRuntimeContributions {
+        request_id: String,
+        package: String,
+        digest: String,
+        epoch: u64,
+        generation: u64,
+        contributions: PluginContributions,
+    },
+    CommitPluginUpdate {
+        package: String,
+        digest: String,
+    },
+    CancelPluginUpdate {
+        package: String,
+        digest: String,
+    },
     RefreshPluginMarketplace,
     InstallMarketplacePlugin {
         package: PluginMarketplacePackage,

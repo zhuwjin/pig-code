@@ -1,32 +1,10 @@
-use std::path::Path;
-
-use pig_protocol::{PluginPackageInfo, PluginPackageSource, PluginSource};
+use pig_protocol::PluginPackageInfo;
 use serde::Serialize;
 
 #[derive(Serialize)]
 struct ThemeLoadResult {
     themes: Vec<pig_protocol::PluginThemeDefinition>,
     errors: Vec<String>,
-}
-
-pub fn package_sources(data_dir: &Path) -> Vec<PluginPackageSource> {
-    let root = data_dir.join("plugins");
-    let mut packages = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return packages;
-    };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let path = entry.path();
-        if path.join("gpui-shell.json").is_file() {
-            packages.push(PluginPackageSource {
-                root: path,
-                source: PluginSource::User,
-            });
-        }
-    }
-    packages
 }
 
 pub fn load_themes(packages_json: &str) -> Result<String, String> {
@@ -56,26 +34,11 @@ pub fn load_themes(packages_json: &str) -> Result<String, String> {
     serde_json::to_string(&result).map_err(|error| error.to_string())
 }
 
-pub fn install_selftest_theme(data_dir: &Path) -> String {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/acme.visual");
-    let target = data_dir.join("plugins/acme.visual");
-    std::fs::create_dir_all(&target).expect("create selftest theme package");
-    for file in [
-        "gpui-shell.json",
-        "pig-code.json",
-        "main.js",
-        "midnight.json",
-        "glass.json",
-        "background.svg",
-    ] {
-        std::fs::copy(source.join(file), target.join(file)).expect("copy selftest theme file");
-    }
-    pig_core::plugins::package_digest(&target).expect("digest selftest theme package")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pig_protocol::PluginSource;
+    use std::path::Path;
 
     #[test]
     fn example_package_loads_a_selectable_theme_and_style_pack() {
@@ -87,24 +50,23 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ));
-        let data = root.join("data");
-        let digest = install_selftest_theme(&data);
-        let package_root = data.join("plugins/acme.visual");
-        let contributions: pig_protocol::PluginContributions = serde_json::from_slice(
-            &std::fs::read(package_root.join("pig-code.json")).expect("read contributions"),
+        let package_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/moon-plugin");
+        let manifest: pig_protocol::PluginManifest = serde_json::from_slice(
+            &std::fs::read(package_root.join("pig-plugin.json")).expect("read manifest"),
         )
-        .expect("valid contributions");
+        .expect("valid manifest");
+        let digest = pig_core::plugins::package_digest(&package_root).expect("package digest");
         let package = PluginPackageInfo {
-            id: "acme.visual".into(),
-            name: "Acme Visual Themes".into(),
-            version: "1.0.0".into(),
+            id: manifest.id,
+            name: manifest.name.fallback(),
+            version: manifest.version,
             digest: digest.clone(),
             content_digest: digest,
             root: package_root,
             source: PluginSource::User,
             enabled: true,
-            contributions,
-            capabilities: Vec::new(),
+            contributions: manifest.contributions,
+            capabilities: manifest.capabilities,
         };
         let encoded =
             load_themes(&serde_json::to_string(&vec![package.clone()]).expect("encode package"))

@@ -276,25 +276,35 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
     let data = root.join("data");
     std::fs::create_dir_all(&package).expect("package directory");
     std::fs::write(
-        package.join("gpui-shell.json"),
-        r#"{"id":"demo","name":"Demo","version":"1.0.0","entry":"main.js"}"#,
-    )
-    .expect("identity");
-    std::fs::write(package.join("main.js"), "export default class Demo {}").expect("entry");
-    std::fs::write(
-        package.join("pig-code.json"),
+        package.join("pig-plugin.json"),
         r#"{
-          "actions": ["provide_tools"],
-          "tools": [{
-            "name": "DynamicRead",
-            "description": "Read dynamic data",
-            "read_only": true,
-            "availability": "plugin",
-            "parameters": {"type": "object"}
-          }]
+          "apiVersion": 1,
+          "id": "demo",
+          "name": "Demo",
+          "version": "1.0.0",
+          "build": 1,
+          "entry": "App.tsx",
+          "minHostVersion": "1.0.0",
+          "protocols": {"ui": 1, "services": 1},
+          "capabilities": [],
+          "contributions": {
+            "actions": ["provide_tools"],
+            "tools": [{
+              "name": "DynamicRead",
+              "description": "Read dynamic data",
+              "read_only": true,
+              "availability": "plugin",
+              "parameters": {"type": "object"}
+            }]
+          }
         }"#,
     )
-    .expect("contributions");
+    .expect("manifest");
+    std::fs::write(
+        package.join("App.tsx"),
+        "export default function App() { return null; }",
+    )
+    .expect("entry");
     let mut registry = crate::plugins::PluginRegistry::new(data.clone());
     let snapshot = registry.sync(vec![pig_protocol::PluginPackageSource {
         root: package,

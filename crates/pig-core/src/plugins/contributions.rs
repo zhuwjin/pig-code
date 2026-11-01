@@ -23,10 +23,22 @@ pub fn enabled_packages(
             detail: format!("{}: {error}", path.display()),
         }
     })?;
+    let runtime = std::fs::read(data_dir.join(super::PLUGIN_RUNTIME_STATE_FILE))
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<std::collections::BTreeMap<String, pig_protocol::PluginContributions>>(&bytes).ok()
+        })
+        .unwrap_or_default();
     let mut packages: Vec<_> = state
         .packages
         .into_iter()
         .filter(|package| authorized_package(data_dir, package, Some(trust)))
+        .map(|mut package| {
+            if let Some(contributions) = runtime.get(&format!("{}:{}", package.id, package.digest)) {
+                package.contributions = package.contributions.merged(contributions);
+            }
+            package
+        })
         .collect();
     packages.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(packages)

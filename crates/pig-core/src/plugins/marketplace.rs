@@ -4,12 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pig_protocol::{
     CoreError, PLUGIN_MARKETPLACE_API_VERSION, PluginMarketplaceCatalog, PluginMarketplaceFile,
-    PluginMarketplaceInstall, PluginMarketplacePackage, PluginPackageSource, PluginSource,
-    SignedPluginDownload,
+    PluginMarketplacePackage, SignedPluginDownload,
 };
 use sha2::{Digest as _, Sha256};
-
-use super::PluginRegistry;
 
 pub const DEFAULT_MARKETPLACE_INDEX_URL: &str =
     "https://raw.githubusercontent.com/zhuwjin/pig-code-ts-plugins/main/index.json";
@@ -27,121 +24,6 @@ pub async fn fetch_catalog(index_url: &str) -> Result<PluginMarketplaceCatalog, 
         .map_err(|error| transport(format!("invalid marketplace index: {error}")))?;
     validate_catalog(&catalog)?;
     Ok(catalog)
-}
-
-pub async fn install_package(
-    data_dir: &Path,
-    index_url: &str,
-    package: &PluginMarketplacePackage,
-) -> Result<PluginMarketplaceInstall, CoreError> {
-    validate_package(package)?;
-    let registry = PluginRegistry::new(data_dir.to_path_buf());
-    let root = data_dir.join("plugins");
-    let target = root.join(&package.id);
-    let has_target = match std::fs::symlink_metadata(&target) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(io(error)),
-    };
-    if has_target {
-        crate::config::require_real_directory(&target).map_err(io)?;
-    }
-    if has_target
-        && let Ok(existing) = registry.inspect(&PluginPackageSource {
-            root: target.clone(),
-            source: PluginSource::User,
-        })
-        && existing.digest == package.digest
-    {
-        return Ok(PluginMarketplaceInstall {
-            package: package.id.clone(),
-            digest: existing.digest,
-        });
-    }
-
-    std::fs::create_dir_all(&root).map_err(io)?;
-    crate::config::ensure_real_directory(&root).map_err(io)?;
-    let unique = format!(
-        "{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| manifest(error.to_string()))?
-            .as_nanos(),
-        NEXT_INSTALL.fetch_add(1, Ordering::Relaxed)
-    );
-    let staging = root.join(format!(".install-{}-{unique}", package.id));
-    let backup = root.join(format!(".backup-{}-{unique}", package.id));
-    crate::config::ensure_real_directory(&staging).map_err(io)?;
-    let client = client()?;
-    let staged = async {
-        for file in &package.files {
-            let url = file_url(index_url, &format!("{}/{}", package.directory, file.path))?;
-            let bytes = download(&client, &url, MAX_FILE_BYTES as usize).await?;
-            if bytes.len() as u64 != file.size {
-                return Err(manifest(format!(
-                    "marketplace file `{}` has an unexpected size",
-                    file.path
-                )));
-            }
-            if format!("{:x}", Sha256::digest(&bytes)) != file.sha256 {
-                return Err(manifest(format!(
-                    "marketplace file `{}` failed its SHA-256 check",
-                    file.path
-                )));
-            }
-            let destination = staging.join(&file.path);
-            if let Some(parent) = destination.parent() {
-                std::fs::create_dir_all(parent).map_err(io)?;
-                crate::config::ensure_real_directory(parent).map_err(io)?;
-            }
-            crate::config::write_settings_file(&destination, &bytes).map_err(io)?;
-        }
-        registry
-            .inspect(&PluginPackageSource {
-                root: staging.clone(),
-                source: PluginSource::User,
-            })
-            .and_then(|inspected| {
-                if inspected.id != package.id || inspected.version != package.version {
-                    return Err(manifest(
-                        "the downloaded package identity does not match the marketplace index",
-                    ));
-                }
-                if inspected.digest != package.digest {
-                    return Err(manifest(
-                        "the downloaded package digest does not match the marketplace index",
-                    ));
-                }
-                Ok(inspected.digest)
-            })
-    }
-    .await;
-    let digest = match staged {
-        Ok(digest) => digest,
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-    };
-
-    if has_target && let Err(error) = std::fs::rename(&target, &backup) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(io(error));
-    }
-    if let Err(error) = std::fs::rename(&staging, &target) {
-        if has_target {
-            let _ = std::fs::rename(&backup, &target);
-        }
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(io(error));
-    }
-    if has_target {
-        let _ = std::fs::remove_dir_all(&backup);
-    }
-    Ok(PluginMarketplaceInstall {
-        package: package.id.clone(),
-        digest,
-    })
 }
 
 fn validate_catalog(catalog: &PluginMarketplaceCatalog) -> Result<(), CoreError> {
@@ -388,34 +270,20 @@ mod tests {
 
     fn fixture(root: &Path) -> PluginMarketplacePackage {
         std::fs::create_dir_all(root).expect("create package fixture");
-        std::fs::write(
-            root.join("gpui-shell.json"),
-            r#"{"id":"demo","name":"Demo","version":"1.0.0","entry":"main.js"}"#,
-        )
-        .expect("write identity");
-        std::fs::write(root.join("pig-code.json"), r#"{"actions":[]}"#)
-            .expect("write contributions");
-        std::fs::write(root.join("main.js"), "export default class Demo {}\n")
-            .expect("write entry");
-        let files = ["gpui-shell.json", "pig-code.json", "main.js"]
-            .into_iter()
-            .map(|path| {
-                let bytes = std::fs::read(root.join(path)).expect("read fixture");
-                PluginMarketplaceFile {
-                    path: path.to_owned(),
-                    size: bytes.len() as u64,
-                    sha256: format!("{:x}", Sha256::digest(&bytes)),
-                }
-            })
-            .collect();
+        let bytes = b"signed fixture";
+        std::fs::write(root.join("moon.nshpkg"), bytes).expect("write signed fixture");
         PluginMarketplacePackage {
             id: "demo".into(),
             name: "Demo".into(),
             version: "1.0.0".into(),
             directory: "packages/demo".into(),
             description: Default::default(),
-            digest: super::super::package_digest(root).expect("fixture digest"),
-            files,
+            digest: format!("sha256:{:x}", Sha256::digest(bytes)),
+            files: vec![PluginMarketplaceFile {
+                path: "moon.nshpkg".into(),
+                size: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+            }],
         }
     }
 
@@ -447,41 +315,6 @@ mod tests {
             }
         });
         (format!("http://{address}/index.json"), handle)
-    }
-
-    #[tokio::test]
-    async fn downloads_verifies_and_installs_a_package() {
-        let temp = TempDir::new();
-        let package = fixture(&temp.0.join("repository/packages/demo"));
-        let catalog = PluginMarketplaceCatalog {
-            api_version: PLUGIN_MARKETPLACE_API_VERSION,
-            packages: vec![package],
-        };
-        let index = serde_json::to_vec_pretty(&catalog).expect("catalog JSON");
-        let mut responses = vec![("/index.json".to_owned(), index)];
-        responses.extend(catalog.packages[0].files.iter().map(|file| {
-            (
-                format!("/packages/demo/{}", file.path),
-                std::fs::read(temp.0.join("repository/packages/demo").join(&file.path))
-                    .expect("fixture response"),
-            )
-        }));
-        let (index_url, server) = server(responses);
-        let fetched = fetch_catalog(&index_url).await.expect("fetch catalog");
-        let installed = install_package(&temp.0.join("data"), &index_url, &fetched.packages[0])
-            .await
-            .expect("install package");
-        assert_eq!(installed.package, "demo");
-        assert_eq!(installed.digest, fetched.packages[0].digest);
-        let mut registry = PluginRegistry::new(temp.0.join("data"));
-        let snapshot = registry.sync(vec![PluginPackageSource {
-            root: temp.0.join("data/plugins/demo"),
-            source: PluginSource::User,
-        }]);
-        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
-        assert_eq!(snapshot.packages.len(), 1);
-        assert!(!snapshot.packages[0].enabled);
-        server.join().expect("marketplace mock shutdown");
     }
 
     #[tokio::test]
@@ -518,20 +351,17 @@ mod tests {
         let temp = TempDir::new();
         let target = temp.0.join("data/plugins/demo");
         let mut package = fixture(&target);
-        let original = std::fs::read(target.join("gpui-shell.json")).expect("original identity");
+        let original = std::fs::read(target.join("moon.nshpkg")).expect("original package");
         package.files[0].sha256 = "0".repeat(64);
         package.digest = format!("sha256:{}", "0".repeat(64));
-        let responses = vec![(
-            "/packages/demo/gpui-shell.json".to_owned(),
-            original.clone(),
-        )];
+        let responses = vec![("/packages/demo/moon.nshpkg".to_owned(), original.clone())];
         let (index_url, server) = server(responses);
-        let error = install_package(&temp.0.join("data"), &index_url, &package)
+        let error = download_signed_package(&temp.0.join("data"), &index_url, &package)
             .await
             .expect_err("the modified hash must fail");
         assert!(matches!(error, CoreError::PluginManifest { .. }));
         assert_eq!(
-            std::fs::read(target.join("gpui-shell.json")).expect("preserved identity"),
+            std::fs::read(target.join("moon.nshpkg")).expect("preserved package"),
             original
         );
         server.join().expect("marketplace mock shutdown");
@@ -543,7 +373,7 @@ mod tests {
         let mut package = fixture(&temp.0.join("fixture"));
         package.files[0].path = "../outside".into();
         assert!(validate_package(&package).is_err());
-        package.files[0].path = "gpui-shell.json".into();
+        package.files[0].path = "moon.nshpkg".into();
         package.directory = "../outside".into();
         assert!(validate_package(&package).is_err());
     }

@@ -1,0 +1,23 @@
+{
+  "id": "moon-glass",
+  "name": "Moon Glass",
+  "description": "A glass style pack for Moonlight",
+  "kind": "style",
+  "targetThemes": ["moon"],
+  "cssVars": {
+    "dark": {
+      "primary": "#c4b5fd"
+    }
+  },
+  "parts": {
+    "composer.root": {
+      "class": "rounded-3xl border-primary/50 bg-background/80 shadow-xl"
+    }
+  },
+  "background": {
+    "asset": "background.svg",
+    "opacity": 0.5,
+    "blur": 0,
+    "overlay": "bg-slate-950/35"
+  }
+}

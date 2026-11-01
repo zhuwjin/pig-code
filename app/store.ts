@@ -19,6 +19,9 @@ import {
   PluginUiContribution,
   PluginMarketplacePackage,
   PluginMarketplaceCatalog,
+  PluginRuntimeState,
+  PluginUiAck,
+  PluginUiEvent,
   RemoteDocument,
   ProviderConfig,
   ProviderCredentialStatus,
@@ -32,6 +35,9 @@ import {
 } from "./protocol";
 import { oppositeDelivery, parseSlashCommand, permissionsForMode } from "./commands";
 import { PluginThemeDefinition } from "./themes";
+import { acceptPluginEvent, clearPluginEvents } from "./plugins/event-adapter";
+import { PluginSequencer, remoteDocumentRejection, validatePluginEnvelope } from "./plugins/ui-protocol";
+import { pluginInstance, uiPlan } from "./plugins/ui-coordinator";
 
 let generatedId = 0;
 
@@ -73,7 +79,17 @@ export class AgentStore {
   readonly pluginCatalog = signal<PluginMarketplacePackage[]>([]);
   readonly pluginDocuments = signal<Record<string, RemoteDocument>>({});
   readonly pluginDynamic = signal<Record<string, PluginUiContribution[]>>({});
-  readonly pluginRuntime = signal<Record<string, { state: string; epoch?: number; message?: string }>>({});
+  readonly pluginRuntimeContributions = signal<Record<string, {
+    ui?: PluginUiContribution[];
+    themes?: { id: string; entry: string }[];
+    commands?: { id: string; title: Record<string, string>; page_id?: string | null; export?: string | null; order: number; enabled: boolean }[];
+  }>>({});
+  readonly pluginActivePackages = signal<Record<string, PluginPackageInfo>>({});
+  readonly pluginRuntime = signal<Record<string, PluginRuntimeState>>({});
+  readonly pluginOrder = signal<string[]>([]);
+  readonly pluginNavigation = signal<string | null>(null);
+  readonly pluginLogs = signal<Record<string, unknown[]>>({});
+  readonly pluginUiDiagnostics = signal<Record<string, string[]>>({});
   readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
   readonly themeError = signal("");
   private autoOpen = true;
@@ -81,6 +97,8 @@ export class AgentStore {
   private pendingText: string | null = null;
   private pendingDelivery: MessageDelivery = "queue";
   private themeLoadId = 0;
+  private pluginGeneration = 0;
+  private pluginSequencers = new Map<string, { epoch: number; sequences: PluginSequencer }>();
   private rateSession: string | null = null;
   private rateStartedAt = 0;
   private rateCharacters = 0;
@@ -102,35 +120,74 @@ export class AgentStore {
     void this.agent.listenPlugins((raw) => {
       try {
         const message = JSON.parse(raw);
-        if (message.kind === "ui.document") {
-          const document = message.document as RemoteDocument;
-          const current = this.pluginDocuments()[document.instance];
-          if (current && (current.epoch > document.epoch || (current.epoch === document.epoch && current.sequence > document.sequence))) return;
-          this.pluginDocuments.update((documents) => ({ ...documents, [document.instance]: document }));
-        } else if (message.kind === "ui.patch" && message.dynamic) {
-          this.pluginDynamic.update((contributions) => ({
-            ...contributions,
-            [message.instance as string]: message.contributions as PluginUiContribution[],
-          }));
+        if (!validatePluginEnvelope(message)) throw new Error("无效的插件协议信封");
+        const instance = message.instance;
+        let sequencer = this.pluginSequencers.get(instance);
+        if (!sequencer || message.epoch > sequencer.epoch) {
+          sequencer = { epoch: message.epoch, sequences: new PluginSequencer() };
+          this.pluginSequencers.set(instance, sequencer);
+        }
+        if (message.epoch < sequencer.epoch || !sequencer.sequences.accept(message.stream, message.sequence)) return;
+        if (message.kind === "ui.activate" || message.kind === "ui.commit") {
+          const body = message.body as Record<string, any>;
+          const document = (body?.instance ? body : body?.document) as RemoteDocument | null;
+          if (document) {
+            const current = this.pluginDocuments()[instance];
+            const rejection = remoteDocumentRejection(document, message, current);
+            if (rejection) {
+              this.acknowledgePluginUi(message, document, false, [rejection]);
+              return;
+            }
+            if (!current || current.epoch < document.epoch || current.sequence < document.sequence) {
+              this.pluginDocuments.update((documents) => ({ ...documents, [instance]: document }));
+            }
+            this.acknowledgePluginUi(message, document, true);
+          }
+          if (body?.package) {
+            this.pluginActivePackages.update((packages) => ({ ...packages, [instance]: body.package }));
+          }
+          if (body?.contributions) {
+            this.pluginDynamic.update((contributions) => ({
+              ...contributions,
+              [instance]: (body.contributions.ui ?? []) as PluginUiContribution[],
+            }));
+          }
         } else if (message.kind === "ui.reset") {
           this.pluginDocuments.update((documents) => {
             const next = { ...documents };
-            delete next[message.instance as string];
+            delete next[instance];
             return next;
           });
           this.pluginDynamic.update((contributions) => {
             const next = { ...contributions };
-            delete next[message.instance as string];
+            delete next[instance];
             return next;
           });
+          this.pluginActivePackages.update((packages) => {
+            const next = { ...packages };
+            delete next[instance];
+            return next;
+          });
+          clearPluginEvents(instance);
         } else if (message.kind === "runtime") {
-          this.pluginRuntime.update((instances) => ({
-            ...instances,
-            [message.instance as string]: { state: message.state, epoch: message.epoch, message: message.message },
+          const runtime = message.body as PluginRuntimeState;
+          const current = this.pluginRuntime()[instance];
+          if (current && (current.epoch > runtime.epoch ||
+            (current.epoch === runtime.epoch && current.generation > runtime.generation))) return;
+          this.pluginRuntime.update((instances) => ({ ...instances, [instance]: runtime }));
+          if (runtime.state === "active" || runtime.state === "failed" || runtime.state === "stopped") {
+            void this.loadPluginThemes(this.pluginPackages());
+          }
+          if (runtime.state === "failed") this.globalError.set(`插件运行失败：${runtime.message ?? "未知错误"}`);
+        } else if (message.kind === "host.action") {
+          const action = message.body as Record<string, any>;
+          if (action.name === "composer.submit") this.send();
+          if (action.name === "navigation.open") this.pluginNavigation.set(action.pageId);
+        } else if (message.kind === "log.event") {
+          this.pluginLogs.update((logs) => ({
+            ...logs,
+            [instance]: [...(logs[instance] ?? []), message.body].slice(-100),
           }));
-          if (message.state === "failed") this.globalError.set(`插件运行失败：${message.message ?? "未知错误"}`);
-        } else if (message.kind === "host.action" && message.name === "composer.submit") {
-          this.send();
         }
       } catch (error) {
         this.globalError.set(`插件事件解析失败：${errorMessage(error)}`);
@@ -614,9 +671,105 @@ export class AgentStore {
     }
   }
 
-  dispatchPluginEvent(instance: string, node: string, kind: string, text?: string): void {
+  private acknowledgePluginUi(
+    message: { instance: string; epoch: number; generation: number },
+    document: RemoteDocument,
+    accepted: boolean,
+    rejected: PluginUiAck["rejected"] = [],
+  ): void {
+    const ack: PluginUiAck = { accepted, revision: document.sequence, rejected };
     try {
-      this.agent.dispatchPluginEvent(instance, node, kind, text ?? null);
+      this.agent.ackPluginUi(message.instance, message.epoch, message.generation, JSON.stringify(ack));
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  dispatchPluginUiEvent(instance: string, event: PluginUiEvent): void {
+    const document = this.pluginDocuments()[instance];
+    if (!document || !acceptPluginEvent(event, document.epoch, document.generation, document)) return;
+    try {
+      this.agent.dispatchPluginEventJson(instance, JSON.stringify(event));
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  dispatchPluginHostEvent(instance: string, event: PluginUiEvent): void {
+    try {
+      this.agent.dispatchPluginHostEvent(instance, JSON.stringify(event));
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  reportPluginUiDiagnostics(target: string, conflicts: { winner: string; suppressed: string[] }[], rejected: { contribution: string; reason: string }[]): void {
+    const diagnostics = [
+      ...conflicts.map((conflict) => `${target}: ${conflict.winner} 生效，抑制 ${conflict.suppressed.join("、")}`),
+      ...rejected.map((item) => `${target}: ${item.contribution} 被拒绝（${item.reason}）`),
+    ];
+    const current = this.pluginUiDiagnostics()[target] ?? [];
+    if (current.length === diagnostics.length && current.every((item, index) => item === diagnostics[index])) return;
+    this.pluginUiDiagnostics.update((all) => ({ ...all, [target]: diagnostics }));
+  }
+
+  setPluginOrder(order: string[]): void {
+    this.pluginOrder.set([...new Set(order)]);
+  }
+
+  pluginCommands(): Array<{
+    instance: string;
+    title: string;
+    command: { id: string; title: Record<string, string>; page_id?: string | null; export?: string | null; order: number; enabled: boolean };
+  }> {
+    const declared = this.pluginPackages()
+      .filter((pkg) => pkg.enabled && this.pluginRuntime()[pluginInstance(pkg)]?.state === "active")
+      .flatMap((pkg) => {
+        const instance = pluginInstance(pkg);
+        const dynamic = this.pluginRuntimeContributions()[`${pkg.id}:${pkg.digest}`]?.commands ?? [];
+        return [...(pkg.contributions.commands ?? []), ...dynamic]
+          .filter((command) => command.enabled)
+          .map((command) => ({
+            instance,
+            command,
+            title: command.title["zh-CN"] ?? command.title.en ?? command.id,
+          }));
+      });
+    const ui = uiPlan(
+      this.pluginPackages(),
+      "commands",
+      ["command"],
+      this.pluginRuntime(),
+      this.pluginDynamic(),
+      this.pluginOrder(),
+    ).entries.map(({ instance, contribution }) => ({
+      instance,
+      command: {
+        id: contribution.id,
+        title: { en: typeof contribution.props?.title === "string" ? contribution.props.title : contribution.id },
+        page_id: typeof contribution.props?.pageId === "string" ? contribution.props.pageId : null,
+        export: contribution.export,
+        order: contribution.order ?? 0,
+        enabled: contribution.props?.disabled !== true,
+      },
+      title: typeof contribution.props?.title === "string" ? contribution.props.title : contribution.id,
+    }));
+    return [...declared, ...ui]
+      .sort((a, b) => a.command.order - b.command.order || a.command.id.localeCompare(b.command.id));
+  }
+
+  runPluginCommand(instance: string, commandId: string): void {
+    try {
+      const pageId = this.agent.dispatchPluginCommand(instance, commandId);
+      if (pageId) this.pluginNavigation.set(pageId);
+    } catch (error) {
+      this.globalError.set(errorMessage(error));
+    }
+  }
+
+  retryPlugin(plugin: PluginPackageInfo): void {
+    try {
+      this.agent.retryPlugin(plugin.id, plugin.digest);
     } catch (error) {
       this.globalError.set(errorMessage(error));
     }
@@ -633,7 +786,22 @@ export class AgentStore {
   private async loadPluginThemes(packages: PluginPackageInfo[]): Promise<void> {
     const loadId = ++this.themeLoadId;
     try {
-      const raw = await this.agent.loadThemes(JSON.stringify(packages));
+      const runtime = this.pluginRuntime();
+      const contributions = this.pluginRuntimeContributions();
+      const projected = packages.map((pkg) => {
+        const dynamic = contributions[`${pkg.id}:${pkg.digest}`] ?? {};
+        const needsEngine = (pkg.contributions.ui ?? []).some((item) => item.export) ||
+          (pkg.contributions.tools ?? []).length > 0 || (pkg.contributions.commands ?? []).length > 0;
+        return {
+          ...pkg,
+          enabled: pkg.enabled && (!needsEngine || runtime[pluginInstance(pkg)]?.state === "active"),
+          contributions: {
+            ...pkg.contributions,
+            themes: [...(pkg.contributions.themes ?? []), ...(dynamic.themes ?? [])],
+          },
+        };
+      });
+      const raw = await this.agent.loadThemes(JSON.stringify(projected));
       const result = JSON.parse(raw) as {
         themes: PluginThemeDefinition[];
         errors: string[];
@@ -709,8 +877,12 @@ export class AgentStore {
         this.gitDiff.set(data as GitDiffSnapshot);
         break;
       case "PluginSnapshot": {
+        const generation = data.snapshot.generation as number;
+        if (generation < this.pluginGeneration) break;
+        this.pluginGeneration = generation;
         const packages = data.snapshot.packages as PluginPackageInfo[];
         this.pluginPackages.set(packages);
+        this.pluginRuntimeContributions.set(data.snapshot.runtime_contributions ?? {});
         void this.loadPluginThemes(packages);
         break;
       }

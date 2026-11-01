@@ -47,6 +47,12 @@ pub fn snapshot(
         _ => false,
     };
     let session = session.filter(|_| status_applicable);
+    let session_projection = session
+        .as_ref()
+        .map(|session| pig_protocol::PluginSessionProjection {
+            id: session.id.clone(),
+            cwd: session.cwd.clone(),
+        });
     PluginServiceSnapshot {
         generation: registry.snapshot.generation,
         locale: String::new(),
@@ -54,6 +60,7 @@ pub fn snapshot(
         mcp: mcp_snapshot(&registry.data_dir, workspace.as_deref(), session, trust),
         scope,
         workspaces,
+        session: session_projection,
     }
 }
 

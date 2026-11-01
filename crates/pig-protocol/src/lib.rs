@@ -23,12 +23,14 @@ mod error;
 mod event;
 mod op;
 mod plugin;
+mod plugin_runtime;
 
 pub use config::*;
 pub use error::*;
 pub use event::*;
 pub use op::*;
 pub use plugin::*;
+pub use plugin_runtime::*;
 
 /// Sandbox policy (Codex's permission profile): the filesystem boundary.
 ///

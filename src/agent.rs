@@ -81,25 +81,17 @@ default_reasoning_level = "low"
             let data_dir = pig_utils::data_dir();
             (pig_core::spawn_agent(None, cwd.clone()), None, data_dir)
         };
-        let selftest_theme =
-            (selftest == Some(true)).then(|| crate::theme::install_selftest_theme(&data_dir));
         for op in [Op::ListSessions, Op::ListWorkspaces, Op::GetConfig] {
             let _ = handle.ops.try_send(op);
         }
         let _ = handle.ops.try_send(Op::SyncPlugins {
             packages: crate::plugin_system::installed_sources(&data_dir),
         });
-        if let Some(digest) = selftest_theme {
-            let _ = handle.ops.try_send(Op::SetPluginEnabled {
-                package: "acme.visual".into(),
-                digest,
-                enabled: true,
-            });
-        }
         Self {
             plugins: crate::plugin_system::PluginSystemManager::new(
                 data_dir.clone(),
                 handle.ops.clone(),
+                cwd.clone(),
             ),
             handle,
             cwd,
@@ -208,16 +200,58 @@ default_reasoning_level = "low"
         }
     }
 
-    /// Routes a native UI event to the owning plugin engine.
-    pub fn dispatch_plugin_event(
+    /// Routes a standardized remote UI event without losing its payload or revision.
+    pub fn dispatch_plugin_event_json(
         &self,
         instance: String,
-        node: String,
-        kind: String,
-        text: Option<String>,
+        event: String,
     ) -> Result<(), String> {
-        self.plugins
-            .dispatch_ui_event(&instance, &node, &kind, text)
+        let event: pig_protocol::PluginUiEvent =
+            serde_json::from_str(&event).map_err(|error| error.to_string())?;
+        self.plugins.dispatch_ui_event_full(&instance, event)
+    }
+
+    /// Routes an explicitly authorized host control event to its plugin engine.
+    pub fn dispatch_plugin_host_event(
+        &self,
+        instance: String,
+        event: String,
+    ) -> Result<(), String> {
+        let event: pig_protocol::PluginUiEvent =
+            serde_json::from_str(&event).map_err(|error| error.to_string())?;
+        self.plugins.dispatch_host_event(&instance, event)
+    }
+
+    /// Acknowledges an accepted or rejected host UI revision to its plugin engine.
+    pub fn ack_plugin_ui(
+        &self,
+        instance: String,
+        epoch: u64,
+        generation: u64,
+        ack: String,
+    ) -> Result<(), String> {
+        let ack: pig_protocol::PluginUiAck =
+            serde_json::from_str(&ack).map_err(|error| error.to_string())?;
+        self.plugins.acknowledge_ui(&instance, epoch, generation, ack)
+    }
+
+    /// Propagates the host locale to every independent plugin engine.
+    pub fn set_plugin_locale(&self, locale: String) {
+        self.plugins.set_locale(&locale);
+    }
+
+    /// Retries a failed instance after the automatic backoff budget is exhausted.
+    pub fn retry_plugin(&self, package: String, digest: String) -> Result<(), String> {
+        self.plugins.retry(&package, &digest)
+    }
+
+    /// Invokes a registered command on its owning independent engine.
+    pub fn dispatch_plugin_command(
+        &self,
+        instance: String,
+        command: String,
+    ) -> Result<Option<String>, String> {
+        self.plugins.dispatch_command(&instance, &command)
     }
 
     /// Loads validated theme definitions from an enabled-plugin snapshot.

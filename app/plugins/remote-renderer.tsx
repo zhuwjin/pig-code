@@ -1,80 +1,180 @@
-import { Scroll, Text, View, type JSX } from "nsh";
-import { Button, Input } from "nsh/base";
-import type { PluginPackageInfo, RemoteDocument, RemoteNode } from "../protocol";
+import { Image, Scroll, Text, View, type AccessibilityRole, type JSX } from "nsh";
+import { Input } from "nsh/base";
+import type {
+  PluginPackageInfo,
+  PluginUiContribution,
+  PluginUiEvent,
+  RemoteDocument,
+  RemoteNode,
+} from "../protocol";
+import { emitPluginEvent, nextEditCount } from "./event-adapter";
 import { pluginInstance, uiContributions, type PluginRuntimeStates } from "./ui-coordinator";
-import type { PluginUiContribution } from "../protocol";
+import { remoteAccessibility, remoteProps, remoteStyle, wants } from "./ui-protocol";
 
-export type PluginEventHandler = (instance: string, node: string, kind: string, text?: string) => void;
+export type PluginEventHandler = (instance: string, event: PluginUiEvent) => void;
 
-function visualStyle(node: RemoteNode): Record<string, any> {
-  const allowed = ["backgroundColor", "borderRadius", "opacity", "display", "color", "fontSize", "fontWeight", "lineHeight"];
-  return Object.fromEntries(allowed.filter((key) => key in node.style).map((key) => [key, node.style[key]]));
+interface RenderContext {
+  document: RemoteDocument;
+  nodes: Map<string, RemoteNode>;
+  onEvent: PluginEventHandler;
+  packages: PluginPackageInfo[];
+  contribution?: string;
+}
+
+function emit(context: RenderContext, node: RemoteNode, kind: string, payload: unknown = {}): void {
+  emitPluginEvent((event) => context.onEvent(context.document.instance, event), {
+    instance: context.document.instance,
+    contribution: context.contribution,
+    node,
+    kind,
+    payload,
+    surfaceRevision: context.document.sequence,
+  });
+}
+
+function eventProps(context: RenderContext, node: RemoteNode): Record<string, unknown> {
+  const props: Record<string, unknown> = {};
+  if (wants(node, "press")) props.onPress = (event: unknown) => emit(context, node, "press", event);
+  if (wants(node, "longPress")) props.onLongPress = (event: unknown) => emit(context, node, "longPress", event);
+  if (wants(node, "pressDown")) props.onPressDown = (event: unknown) => emit(context, node, "pressDown", event);
+  if (wants(node, "pressUp")) props.onPressUp = (event: unknown) => emit(context, node, "pressUp", event);
+  if (wants(node, "focus")) props.onFocus = () => emit(context, node, "focus");
+  if (wants(node, "blur")) props.onBlur = () => emit(context, node, "blur");
+  if (wants(node, "hoverIn")) props.onHoverIn = () => emit(context, node, "hoverIn");
+  if (wants(node, "hoverOut")) props.onHoverOut = () => emit(context, node, "hoverOut");
+  if (wants(node, "hoverMove")) props.onHoverMove = (event: unknown) => emit(context, node, "hoverMove", event);
+  if (wants(node, "mouseMove")) props.onMouseMove = (event: unknown) => emit(context, node, "mouseMove", event);
+  if (wants(node, "layout")) props.onLayout = (event: unknown) => emit(context, node, "layout", event);
+  if (wants(node, "accessibilityAction")) {
+    props.onAccessibilityAction = (event: unknown) => emit(context, node, "accessibilityAction", event);
+  }
+  return props;
+}
+
+function resource(context: RenderContext, source: string | null): string | null {
+  if (!source) return null;
+  if (source.startsWith("data:image/")) return source;
+  if (!source.startsWith("plugin://")) return null;
+  const pkg = context.packages.find((pkg) => pluginInstance(pkg) === context.document.instance);
+  if (!pkg) return null;
+  const prefix = `plugin://${pkg.id}/${pkg.digest}/`;
+  if (!source.startsWith(prefix)) return null;
+  const path = source.slice(prefix.length);
+  if (!path || path.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  const root = pkg.root.replace(/[\\/]+$/, "");
+  return `file://${root}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function renderNode(
-  document: RemoteDocument,
+  context: RenderContext,
   node: RemoteNode,
-  onEvent: PluginEventHandler,
-  visited: Set<string>,
+  visited: ReadonlySet<string>,
   hostChildren?: JSX.Element,
 ): JSX.Element {
-  if (visited.has(node.id)) return <Text>远程 UI 存在循环引用</Text>;
+  if (visited.has(node.id)) return <Text role="alert">远程 UI 存在循环引用</Text>;
   const nextVisited = new Set(visited);
   nextVisited.add(node.id);
-  const children = node.children.map((id) => {
-    const child = document.nodes.find((candidate) => candidate.id === id);
-    return child ? <>{renderNode(document, child, onEvent, nextVisited)}</> : null;
+  const children: JSX.Element[] = node.children.map((id) => {
+    const child = context.nodes.get(id);
+    return child ? <>{renderNode(context, child, nextVisited)}</> : null;
   });
   if (hostChildren) children.push(hostChildren);
-  const style = visualStyle(node);
+  const style = remoteStyle(node);
+  const props = remoteProps(node);
+  const accessibility = remoteAccessibility(node);
+  const events = eventProps(context, node);
   const testID = node.testId ?? undefined;
-  if (node.kind === "text") return <Text testID={testID} style={style}>{node.text ?? ""}</Text>;
-  if (node.kind === "scroll") return <Scroll testID={testID} class="min-h-0 flex-1" style={style}>{children}</Scroll>;
+  if (node.kind === "text") {
+    return <Text testID={testID} style={style} {...props} {...accessibility} {...events}>{node.text ?? ""}</Text>;
+  }
+  if (node.kind === "scroll") {
+    const scrollEvents: Record<string, unknown> = {};
+    if (wants(node, "scroll")) scrollEvents.onScroll = (event: unknown) => emit(context, node, "scroll", event);
+    if (wants(node, "scrollEnd")) scrollEvents.onScrollEnd = (event: unknown) => emit(context, node, "scrollEnd", event);
+    for (const kind of ["scrollDragStart", "scrollDragEnd", "momentumStart", "momentumEnd"] as const) {
+      if (wants(node, kind)) scrollEvents[`on${kind[0].toUpperCase()}${kind.slice(1)}`] = (event: unknown) => emit(context, node, kind, event);
+    }
+    return <Scroll testID={testID} class="min-h-0 flex-1" style={style} {...props} {...accessibility} {...events} {...scrollEvents}>{children}</Scroll>;
+  }
   if (node.kind === "input") {
+    const inputEvents: Record<string, unknown> = { ...events };
+    if (wants(node, "changeText")) inputEvents.onChange = (text: string) => emit(context, node, "changeText", { text, count: nextEditCount(context.document.instance, node.id) });
+    if (wants(node, "submit")) inputEvents.onSubmit = (event: { text: string }) => emit(context, node, "submit", { text: event.text, count: nextEditCount(context.document.instance, node.id) });
+    if (wants(node, "selectionChange")) inputEvents.onSelectionChange = (event: unknown) => emit(context, node, "selectionChange", event);
+    if (wants(node, "keyPress")) inputEvents.onKeyPress = (event: unknown) => emit(context, node, "keyPress", event);
+    if (wants(node, "compositionChange")) inputEvents.onCompositionChange = (event: unknown) => emit(context, node, "compositionChange", event);
+    if (wants(node, "contentSizeChange")) inputEvents.onContentSizeChange = (event: unknown) => emit(context, node, "contentSizeChange", event);
+    if (wants(node, "caretMove")) inputEvents.onCaretMove = (event: unknown) => emit(context, node, "caretMove", event);
     return (
       <Input
         testID={testID}
         value={node.text ?? ""}
-        onChange={(text) => onEvent(document.instance, node.id, "changeText", text)}
         submitBehavior="submit"
         style={style}
+        {...props}
+        {...accessibility}
+        {...inputEvents}
       />
     );
   }
-  if (node.press) {
-    return (
-      <Button testID={testID} class="rounded-(--radius) px-3 py-2 hover:bg-accent" style={style} onPress={() => onEvent(document.instance, node.id, "press")}>
-        {children}
-      </Button>
-    );
+  if (node.kind === "image") {
+    const source = resource(context, node.source);
+    if (!source) return <Text role="alert">无法解析签名资源：{node.source ?? "未提供"}</Text>;
+    return <Image testID={testID} src={source} style={style} {...props} {...accessibility} {...events} />;
   }
-  return <View testID={testID} class="gap-2" style={style}>{children}</View>;
+  return (
+    <View
+      testID={testID}
+      class="gap-2"
+      style={style}
+      {...props}
+      {...accessibility}
+      {...events}
+      role={node.press ? "button" : (accessibility.role as AccessibilityRole | undefined)}
+    >
+      {children}
+    </View>
+  );
 }
 
-function exportedNode(document: RemoteDocument, exportName?: string): RemoteNode | null {
-  if (exportName) {
-    const found = document.nodes.find((node) => node.exportName === exportName);
-    if (found) return found;
-  }
+function exportedNode(document: RemoteDocument, exportName?: string): RemoteNode | null | undefined {
+  if (exportName) return document.nodes.find((node) => node.exportName === exportName) ?? undefined;
   const root = document.roots[0];
   return document.nodes.find((node) => node.id === root) ?? document.nodes[0] ?? null;
 }
 
-export function RemoteContribution(props: {
+type RemoteContributionProps = {
   instance: string;
   document: RemoteDocument | null;
   exportName?: string;
   hostChildren?: JSX.Element;
+  packages?: PluginPackageInfo[];
+  contribution?: string;
   onEvent: PluginEventHandler;
-}) {
+};
+
+export function RemoteContribution(props: RemoteContributionProps) {
+  return <>{renderRemoteContribution(props)}</>;
+}
+
+function renderRemoteContribution(props: RemoteContributionProps): JSX.Element {
+  const value = props.document;
+  if (!value) return <Text class="text-xs text-muted-foreground">插件输出尚未就绪</Text>;
+  const node = exportedNode(value, props.exportName);
+  if (node === undefined) return <Text role="alert">插件未提供导出 {props.exportName}</Text>;
+  if (!node) return <Text class="text-xs text-muted-foreground">插件没有提供此界面</Text>;
+  const context: RenderContext = {
+    document: value,
+    nodes: new Map(value.nodes.map((node) => [node.id, node])),
+    onEvent: props.onEvent,
+    packages: props.packages ?? [],
+    contribution: props.contribution,
+  };
   return (
-    <If when={props.document} else={<Text class="text-xs text-muted-foreground">插件输出尚未就绪</Text>}>
-      {(document) => {
-        const node = exportedNode(document(), props.exportName);
-        if (!node) return <Text class="text-xs text-muted-foreground">插件没有提供此界面</Text>;
-        return renderNode(document(), node, props.onEvent, new Set(), props.hostChildren);
-      }}
-    </If>
+    <>
+      {value.warnings.length > 0 ? <Text role="alert">{value.warnings.join("\n")}</Text> : null}
+      {renderNode(context, node, new Set(), props.hostChildren)}
+    </>
   );
 }
 
@@ -84,20 +184,30 @@ export function PluginPages(props: {
   documents: Record<string, RemoteDocument>;
   runtime: PluginRuntimeStates;
   dynamic: Record<string, PluginUiContribution[]>;
+  pluginOrder?: readonly string[];
   onEvent: PluginEventHandler;
 }) {
-  const pages = () => uiContributions(props.packages, props.target, ["page", "panel"], props.runtime, props.dynamic);
+  const pages = () => uiContributions(
+    props.packages,
+    props.target,
+    ["page", "panel", "route", "settings", "overlay", "decoration"],
+    props.runtime,
+    props.dynamic,
+    props.pluginOrder ?? [],
+  );
   return (
-    <Each of={pages()} key={({ pkg, contribution }) => `${pluginInstance(pkg)}:${contribution.id}`}>
+    <Each of={pages()} key={(entry) => `${entry.instance}:${entry.contribution.id}`}>
       {(entry) => {
-        const { pkg, contribution } = entry();
+        const { pkg, contribution, instance } = entry();
         return (
           <View testID={`plugin-page-${pkg.id}-${contribution.id}`} class="gap-2 rounded-xl border border-border bg-card p-3">
             <Text class="text-sm font-semibold text-foreground">{pkg.name}</Text>
             <RemoteContribution
-              instance={pluginInstance(pkg)}
-              document={props.documents[pluginInstance(pkg)] ?? null}
-              exportName={contribution.export}
+              instance={instance}
+              document={props.documents[instance] ?? null}
+              exportName={contribution.export ?? undefined}
+              packages={props.packages}
+              contribution={contribution.id}
               onEvent={props.onEvent}
             />
           </View>

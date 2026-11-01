@@ -1,4 +1,4 @@
-import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, reduceMotion, signal, untracked } from "nsh";
+import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, locale as hostLocale, mount, reduceMotion, signal, untracked } from "nsh";
 import type { JSX, Signal } from "nsh";
 import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { Window } from "nsh/desktop";
@@ -148,6 +148,15 @@ function App(props: UiContext) {
     store.start();
   });
   effect(() => {
+    store.agent.setPluginLocale(hostLocale());
+  });
+  effect(() => {
+    const target = store.pluginNavigation();
+    if (!target) return;
+    settingsVisible.set(target !== "main");
+    store.pluginNavigation.set(null);
+  });
+  effect(() => {
     const config = store.config();
     if (config) {
       themeStore.hydrate(config.theme, config.theme_mode);
@@ -263,6 +272,10 @@ function App(props: UiContext) {
           store={themeStore}
           packages={store.pluginPackages()}
           catalog={store.pluginCatalog()}
+          runtime={store.pluginRuntime()}
+          diagnostics={store.pluginUiDiagnostics()}
+          logs={store.pluginLogs()}
+          onRetryPackage={(plugin) => store.retryPlugin(plugin)}
           error={store.themeError()}
           onClose={() => themePickerVisible.set(false)}
           onChange={saveTheme}

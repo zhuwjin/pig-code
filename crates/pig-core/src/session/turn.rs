@@ -2978,26 +2978,32 @@ mod tests {
         let package_root = data_dir.join("plugins/demo");
         std::fs::create_dir_all(&package_root).expect("plugin fixture");
         std::fs::write(
-            package_root.join("gpui-shell.json"),
-            r#"{"id":"demo","name":"Demo","version":"1.0.0","entry":"main.js"}"#,
-        )
-        .expect("plugin identity");
-        std::fs::write(
-            package_root.join("pig-code.json"),
+            package_root.join("pig-plugin.json"),
             r#"{
-              "tools": [{
-                "name": "DemoRead",
-                "description": "Read demo data",
-                "parameters": {"type": "object"},
-                "read_only": true
-              }],
-              "actions": ["provide_tools"]
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "1.0.0",
+              "build": 1,
+              "entry": "App.tsx",
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "tools": [{
+                  "name": "DemoRead",
+                  "description": "Read demo data",
+                  "parameters": {"type": "object"},
+                  "read_only": true
+                }],
+                "actions": ["provide_tools"]
+              }
             }"#,
         )
-        .expect("plugin contributions");
+        .expect("plugin manifest");
         std::fs::write(
-            package_root.join("main.js"),
-            "export default class Demo {}\n",
+            package_root.join("App.tsx"),
+            "export default function App() { return null; }\n",
         )
         .expect("plugin entry");
         let mut registry = crate::plugins::PluginRegistry::new(data_dir.clone());

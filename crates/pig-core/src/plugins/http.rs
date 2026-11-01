@@ -220,11 +220,10 @@ mod tests {
         let data = root.join("data");
         std::fs::create_dir_all(&package).expect("package directory");
         std::fs::write(
-            package.join("gpui-shell.json"),
-            r#"{"id":"demo","name":"Demo","version":"1.0.0","entry":"main.js"}"#,
+            package.join("App.tsx"),
+            "export default function App() { return null; }",
         )
         .unwrap();
-        std::fs::write(package.join("main.js"), "export default class Demo {}").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind HTTP mock");
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -255,21 +254,32 @@ mod tests {
             body
         });
         std::fs::write(
-            package.join("pig-code.json"),
+            package.join("pig-plugin.json"),
             format!(
                 r#"{{
-                  "actions": ["http"],
-                  "credentials": [{{
-                    "kind": "owned",
-                    "id": "test-credential",
-                    "label": "Test credential"
-                  }}],
-                  "http": [{{
-                    "id": "local",
-                    "url": "http://{address}/search",
-                    "methods": ["POST"],
-                    "credentials": ["test-credential"]
-                  }}]
+                  "apiVersion": 1,
+                  "id": "demo",
+                  "name": "Demo",
+                  "version": "1.0.0",
+                  "build": 1,
+                  "entry": "App.tsx",
+                  "minHostVersion": "1.0.0",
+                  "protocols": {{"ui": 1, "services": 1}},
+                  "capabilities": [],
+                  "contributions": {{
+                    "actions": ["http"],
+                    "credentials": [{{
+                      "kind": "owned",
+                      "id": "test-credential",
+                      "label": "Test credential"
+                    }}],
+                    "http": [{{
+                      "id": "local",
+                      "url": "http://{address}/search",
+                      "methods": ["POST"],
+                      "credentials": ["test-credential"]
+                    }}]
+                  }}
                 }}"#
             ),
         )

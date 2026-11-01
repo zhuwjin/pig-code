@@ -2,6 +2,7 @@ import { Accessor, List, Text, View } from "nsh";
 import { DiffView, TextView } from "nsh/base";
 import type { ChatItem, MarkdownItem, ToolItem } from "../protocol";
 import type { UiContext } from "../ui-context";
+import { UiView } from "../plugins/ui-node-factory";
 
 function UserRow(props: UiContext & { item: Accessor<ChatItem> }) {
   const item = () => props.item() as Extract<ChatItem, { kind: "user" }>;
@@ -135,7 +136,7 @@ function ToolRow(props: UiContext & { item: Accessor<ChatItem> }) {
 
 function MessageRow(props: UiContext & { item: Accessor<ChatItem> }) {
   return (
-    <View class="w-full">
+    <UiView uiId="message.item" store={props.store} class="w-full">
       <If when={props.item().kind === "user"}><UserRow {...props} /></If>
       <If when={props.item().kind === "markdown" || props.item().kind === "reasoning"}>
         <MarkdownRow {...props} />
@@ -146,7 +147,7 @@ function MessageRow(props: UiContext & { item: Accessor<ChatItem> }) {
           {props.item().kind === "note" ? (props.item() as Extract<ChatItem, { kind: "note" }>).text : ""}
         </Text>
       </If>
-    </View>
+    </UiView>
   );
 }
 
