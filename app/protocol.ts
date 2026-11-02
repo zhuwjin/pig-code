@@ -43,10 +43,64 @@ export interface GitDiffSnapshot {
   note?: "Truncated" | "TooLarge" | "Binary" | null;
 }
 
+export interface PendingImage {
+  bytes: number[];
+  mime: string;
+}
+
+export interface ComposerImage extends PendingImage {
+  id: string;
+  preview: string;
+}
+
+export interface Source {
+  url: string;
+  title: string;
+  snippet?: string | null;
+  start_index?: number | null;
+  end_index?: number | null;
+}
+
+export interface TurnUsageStats {
+  input: number;
+  cache_read: number;
+  output: number;
+  duration_ms: number;
+  api_ms: number;
+  ttft_ms: number;
+  ttft_steps: number;
+  api_steps: number;
+  tool_ms: number;
+  ended_at_ms: number;
+}
+
+export interface HookRun {
+  id: string;
+  hook_event: string;
+  label: string;
+  source?: unknown;
+  duration_ms: number;
+  state: "running" | "finished" | "failed" | "blocked";
+  reason?: string | null;
+}
+
+export interface AgentCard {
+  agent_id: string;
+  profile: string;
+  description: string;
+  model: string;
+  background: boolean;
+  finished: boolean;
+  live_note?: string | null;
+}
+
 export interface UserItem {
   kind: "user";
   id: string;
   text: string;
+  files: string[];
+  imageNums: number[];
+  sentAtMs: number;
 }
 
 export interface MarkdownItem {
@@ -54,6 +108,8 @@ export interface MarkdownItem {
   id: string;
   text: string;
   streaming: boolean;
+  turnId?: string;
+  sources?: Source[];
 }
 
 export interface ToolItem {
@@ -64,17 +120,137 @@ export interface ToolItem {
   detail: string;
   output: string;
   status: "input" | "running" | "done" | "error" | "stopped";
+  turnId?: string;
   edit?: EditDiff | null;
+  liveNote?: string | null;
+  agents?: AgentCard[];
+  approvalPending?: boolean;
 }
+
+export type RightPanelRequest =
+  | { kind: "changes"; key: string }
+  | { kind: "file"; key: string; path: string; cwd: string; line?: number }
+  | { kind: "subagent"; key: string; sessionId: string; agentId: string }
+  | { kind: "task"; key: string; task: TaskSummary }
+  | { kind: "compact"; key: string; text: string };
 
 export interface NoteItem {
   kind: "note";
   id: string;
   text: string;
   error: boolean;
+  noteKind?: "plain" | "compacting" | "compacted";
+  usedBefore?: number | null;
+  usedAfter?: number | null;
+  summary?: string | null;
 }
 
-export type ChatItem = UserItem | MarkdownItem | ToolItem | NoteItem;
+export interface TaskNotification {
+  id: string;
+  task_id: string;
+  kind: "shell" | "subagent";
+  status: TaskStatus;
+  exit_code?: number | null;
+  severity: "info" | "warning";
+  description: string;
+  title: string;
+  body: string;
+  duration_ms?: number | null;
+  turns?: number | null;
+  model?: string | null;
+  agent_id?: string | null;
+  record_path?: string | null;
+  output?: { type: "file"; path: string; bytes: number } | {
+    type: "preview";
+    text: string;
+    total_bytes: number;
+    truncated: boolean;
+  } | null;
+}
+
+export interface NotificationItem {
+  kind: "notification";
+  id: string;
+  notifications: TaskNotification[];
+  sentAtMs: number;
+}
+
+export type ChatItem = UserItem | MarkdownItem | ToolItem | NoteItem | NotificationItem;
+
+export interface TurnState {
+  id: string;
+  status: "running" | "done" | "stopped";
+  startedAt: number;
+  durationMs?: number;
+  stats?: TurnUsageStats | null;
+  finishReason?: "stop" | "tool_calls" | "length" | "content_filter" | "pause" | null;
+  changes: EditDiff[];
+  hooks: HookRun[];
+}
+
+export type TodoStatus = "Pending" | "InProgress" | "Done";
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+}
+
+export type TaskStatus = "queued" | "running" | "completed" | "failed" | "timed_out" | "killed" | "lost";
+export interface TaskSummary {
+  id: string;
+  kind: "shell" | "subagent";
+  command: string;
+  status: TaskStatus;
+  exit_code?: number | null;
+  reason?: string | null;
+  started_at_ms: number;
+  ended_at_ms?: number | null;
+  output_tail: string;
+  agent_id?: string | null;
+  spill_path?: string | null;
+}
+
+export interface ContextBreakdown {
+  system: number;
+  tools: number;
+  messages: number;
+}
+
+export interface ContextUsage {
+  used: number;
+  total: number;
+  cacheRead: number;
+  input: number;
+}
+
+export interface RetryStatus {
+  attempt: number;
+  max_attempts: number;
+  delay_ms: number;
+  reason: Payload;
+}
+
+export interface ProjectHooksNotice {
+  path: string;
+  count: number;
+}
+
+export interface SubagentItem {
+  role: string;
+  text: string;
+  tool?: string | null;
+  output?: string | null;
+  is_error: boolean;
+  stopped: boolean;
+}
+
+export interface SubagentHistory {
+  sessionId: string;
+  agentId: string;
+  title: string;
+  subtitle: string;
+  items: SubagentItem[];
+  running: boolean;
+}
 
 export type ApprovalDecision = "Allow" | "ApprovedForSession" | "approved_for_project" | "Reject";
 
@@ -107,7 +283,8 @@ export interface PendingQuestion {
 export interface QueueItem {
   id: string;
   text: string;
-  images?: unknown[];
+  permissions?: PermissionSettings;
+  images?: PendingImage[];
 }
 
 export type QueuePauseReason = "stopped" | "error" | "restarted";
@@ -348,6 +525,13 @@ export interface RemoteDocument {
   warnings: string[];
 }
 
+export type StatusBarItem = "compact" | "detailed" | "hidden";
+export interface StatusBarConfig {
+  activity: StatusBarItem;
+  usage: StatusBarItem;
+  context: StatusBarItem;
+}
+
 export interface AppConfig {
   default_provider?: string | null;
   default_model?: string | null;
@@ -357,6 +541,7 @@ export interface AppConfig {
   mono_font?: string | null;
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;
+  status_bar?: StatusBarConfig;
   [key: string]: unknown;
 }
 

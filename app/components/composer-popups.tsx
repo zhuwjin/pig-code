@@ -4,12 +4,14 @@ import { filterSlashCommands, modeForPermissions, permissionsForMode } from "../
 import type { SlashCommand } from "../commands";
 import type { ExecMode } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { Icon } from "./icon";
+import { Icon, type IconName } from "./icon";
+import { ProviderIcon } from "./settings/provider-icon";
+import { formatTokens } from "../conversation";
 
-const EXEC_MODES: { id: ExecMode; label: string; description: string }[] = [
-  { id: "read-only", label: "只读", description: "读取和分析，不修改工作区" },
-  { id: "auto", label: "自动", description: "在工作区内执行，危险操作仍需批准" },
-  { id: "full", label: "完全访问", description: "不使用沙箱，可修改任意文件" },
+const EXEC_MODES: { id: ExecMode; label: string; description: string; icon: IconName }[] = [
+  { id: "read-only", label: "只读", description: "读取和分析，不修改工作区", icon: "eye" },
+  { id: "auto", label: "自动", description: "在工作区内执行，危险操作仍需批准", icon: "shield-check" },
+  { id: "full", label: "完全访问", description: "不使用沙箱，可修改任意文件", icon: "shield-alert" },
 ];
 
 export function PermissionPicker(props: UiContext) {
@@ -42,7 +44,7 @@ export function PermissionPicker(props: UiContext) {
         popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
         trigger={
           <View role="button" testID="exec-mode" class="flex-row items-center gap-1 rounded-full px-3 py-1 hover:bg-accent">
-            <Icon name="shield-check" size={16} color={token(mode() === "full" ? "destructive" : mode() === "auto" ? "warning" : "muted-foreground")} />
+            <Icon name={EXEC_MODES.find((item) => item.id === mode())?.icon ?? "shield-check"} size={16} color={token(mode() === "full" ? "destructive" : mode() === "auto" ? "warning" : "muted-foreground")} />
             <Text class={mode() === "full" ? "text-sm text-destructive" : mode() === "auto" ? "text-sm text-warning" : "text-sm text-muted-foreground"}>{label()}</Text>
             <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
           </View>
@@ -86,10 +88,12 @@ export function PermissionPicker(props: UiContext) {
         <Button
           testID="plan-chip"
           accessibilityLabel="关闭 Plan 模式"
-          class="rounded-full bg-accent/60 px-2 py-1 hover:bg-accent"
+          class="group flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent"
           onPress={() => props.store.setPlanMode(false)}
         >
-          <Text class="text-xs text-foreground">Plan ×</Text>
+          <Icon name="lightbulb" size={15} class="group-hover:hidden" color={token("info")} />
+          <Icon name="x" size={14} class="hidden group-hover:block" color={token("muted-foreground")} />
+          <Text class="text-sm text-info">Plan</Text>
         </Button>
       </If>
     </View>
@@ -99,12 +103,17 @@ export function PermissionPicker(props: UiContext) {
 export function ModelPicker(props: UiContext) {
   const open = signal(false);
   const query = signal("");
+  const triggerWidth = signal(0);
   const models = () => {
     const normalized = query().trim().toLowerCase();
     return props.store.modelOptions().filter(({ provider, model }) =>
       !normalized || `${provider.name} ${model.name ?? model.id} ${model.id}`.toLowerCase().includes(normalized)
     );
   };
+  const providers = () => (props.store.config()?.providers ?? [])
+    .filter((provider) => provider.enabled)
+    .map((provider) => ({ provider, models: models().filter((option) => option.provider.id === provider.id) }))
+    .filter((entry) => entry.models.length > 0);
   const selected = () => props.store.selectedModel();
   const reasoning = () => props.store.configuration().reasoningLevel;
   const reasoningLabel = () => props.store.reasoningOptions().find((option) => option.id === reasoning())?.label;
@@ -117,13 +126,19 @@ export function ModelPicker(props: UiContext) {
       }}
       placement="top"
       align="end"
-      popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
+      popupClass="w-96 rounded-xl border border-border bg-popover p-2 shadow-xl"
       trigger={
-        <View role="button" testID="model-picker" class="max-w-56 flex-row items-center gap-1 rounded-full px-3 py-1 hover:bg-accent">
+        <View
+          role="button"
+          testID="model-picker"
+          class="max-w-56 flex-row items-center gap-1 rounded-full px-3 py-1 hover:bg-accent"
+          style={{ width: open() && triggerWidth() > 0 ? triggerWidth() : undefined }}
+          onLayout={(bounds) => { if (!open()) triggerWidth.set(bounds.size.width); }}
+        >
           <Text numberOfLines={1} class="text-sm text-foreground">
-            {props.store.currentModel() || "选择模型"}
+            {open() ? "选择模型" : (props.store.currentModel() || "选择模型")}
           </Text>
-          <If when={props.store.currentModel() && reasoningLabel()}>
+          <If when={!open() && props.store.currentModel() && reasoningLabel()}>
             <Text numberOfLines={1} class="text-sm text-muted-foreground">{reasoningLabel()}</Text>
           </If>
           <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
@@ -138,32 +153,48 @@ export function ModelPicker(props: UiContext) {
           placeholder="搜索模型或提供商"
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
-        <Scroll class="max-h-64">
+        <Scroll class="max-h-72">
           <View class="gap-1">
-            <Each of={models()} key={({ provider, model }) => `${provider.id}/${model.id}`}>
-              {(option) => {
-                const value = () => option();
-                const active = () => selected()?.provider.id === value().provider.id && selected()?.model.id === value().model.id;
-                return (
-                  <Button
-                    testID={`model-option-${value().provider.id}-${value().model.id}`}
-                    selected={active()}
-                    class="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-                    onPress={() => {
-                      props.store.selectModel(value().provider.id, value().model.id);
-                      open.set(false);
+            <Each of={providers()} key={(entry) => entry.provider.id}>
+              {(entry) => (
+                <View class="gap-1">
+                  <View class="flex-row items-center gap-2 px-3 pb-1 pt-2">
+                    <ProviderIcon icon={entry().provider.icon} size={16} />
+                    <Text class="text-xs font-medium text-muted-foreground">{entry().provider.name}</Text>
+                  </View>
+                  <Each of={entry().models} key={(option) => `${option.provider.id}/${option.model.id}`}>
+                    {(option) => {
+                      const value = () => option();
+                      const active = () => selected()?.provider.id === value().provider.id && selected()?.model.id === value().model.id;
+                      return (
+                        <Button
+                          testID={`model-option-${value().provider.id}-${value().model.id}`}
+                          selected={active()}
+                          class="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
+                          onPress={() => {
+                            props.store.selectModel(value().provider.id, value().model.id);
+                            open.set(false);
+                          }}
+                        >
+                          <View class="flex-row items-center gap-2">
+                            <ProviderIcon icon={value().model.icon} kind="model" size={20} />
+                            <View class="min-w-0 flex-1 gap-0.5">
+                              <Text numberOfLines={1} class="text-sm font-medium text-foreground">{value().model.name || value().model.id}</Text>
+                              <Text numberOfLines={1} class="text-xs text-muted-foreground">
+                                {value().model.id} · {formatTokens(value().model.context_window)}
+                              </Text>
+                            </View>
+                            <If when={value().model.input_image}>
+                              <Text class="rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">视觉</Text>
+                            </If>
+                            <If when={active()}><Text class="text-sm text-primary">✓</Text></If>
+                          </View>
+                        </Button>
+                      );
                     }}
-                  >
-                    <View class="flex-row items-center gap-2">
-                      <View class="min-w-0 flex-1 gap-0.5">
-                        <Text numberOfLines={1} class="text-sm font-medium text-foreground">{value().model.name || value().model.id}</Text>
-                        <Text numberOfLines={1} class="text-xs text-muted-foreground">{value().provider.name} · {value().model.id}</Text>
-                      </View>
-                      <If when={active()}><Text class="text-sm text-primary">✓</Text></If>
-                    </View>
-                  </Button>
-                );
-              }}
+                  </Each>
+                </View>
+              )}
             </Each>
             <If when={models().length === 0}>
               <Text class="px-3 py-4 text-center text-xs text-muted-foreground">没有匹配的可用模型</Text>
@@ -197,6 +228,17 @@ export function ModelPicker(props: UiContext) {
             </View>
           </View>
         </If>
+        <Button
+          testID="manage-models"
+          class="flex-row items-center gap-2 rounded-(--radius) border-t border-border px-3 py-2 hover:bg-accent"
+          onPress={() => {
+            open.set(false);
+            props.store.pluginNavigation.set("models");
+          }}
+        >
+          <Icon name="settings" size={14} color={token("muted-foreground")} />
+          <Text class="text-xs text-muted-foreground">管理模型</Text>
+        </Button>
       </View>
     </Popover>
   );

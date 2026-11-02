@@ -45,6 +45,17 @@ impl Agent {
                 pig_provider::mock::MOCK_FILE_CONTENT,
             )
             .expect("write selftest fixture");
+            let image_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/test-tmp/conversation");
+            std::fs::create_dir_all(&image_fixture).expect("create image fixture directory");
+            std::fs::write(
+                image_fixture.join("pixel.png"),
+                pig_utils::image::base64_decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNoaGj4DwAFhAKAjM1mJgAAAABJRU5ErkJggg==",
+                )
+                .expect("decode image fixture"),
+            )
+            .expect("write image fixture");
             let port = pig_provider::mock::start_mock_server();
             let config_path = root.join("config.toml");
             std::fs::write(
@@ -65,6 +76,7 @@ enabled = true
 id = "mock-model"
 context_window = 128000
 max_output_tokens = 8192
+input_image = true
 reasoning_levels = ["low", "high"]
 default_reasoning_level = "low"
 "#
@@ -306,6 +318,38 @@ default_reasoning_level = "low"
         })
     }
 
+    /// Reads a UTF-8 text preview for the right-side file panel.
+    pub fn read_file(&self, path: String, cwd: String) -> Result<String, String> {
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(cwd).join(path)
+        };
+        let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        const LIMIT: usize = 2 * 1024 * 1024;
+        let truncated = bytes.len() > LIMIT;
+        let content = String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).into_owned();
+        serde_json::to_string(&serde_json::json!({ "content": content, "truncated": truncated }))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Returns one persisted session attachment as an image data URL.
+    pub fn session_image_source(&self, session_id: String, image_number: u32) -> Result<String, String> {
+        let (bytes, mime) = self.load_session_image(&session_id, image_number)?;
+        Ok(format!(
+            "data:{mime};base64,{}",
+            pig_utils::image::base64_encode(&bytes)
+        ))
+    }
+
+    /// Returns one persisted session attachment for restoring a recalled draft.
+    pub fn session_image(&self, session_id: String, image_number: u32) -> Result<String, String> {
+        let (bytes, mime) = self.load_session_image(&session_id, image_number)?;
+        serde_json::to_string(&serde_json::json!({ "bytes": bytes, "mime": mime }))
+            .map_err(|error| error.to_string())
+    }
+
     /// Streams ordered JSON arrays of core events until the agent stops.
     pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
         let events = this.with(|agent| agent.handle.events.clone());
@@ -332,6 +376,28 @@ impl Agent {
             .ops
             .try_send(op)
             .map_err(|error| error.to_string())
+    }
+
+    fn load_session_image(&self, session_id: &str, image_number: u32) -> Result<(Vec<u8>, String), String> {
+        let directory = self
+            .data_dir
+            .join("sessions")
+            .join(format!("{session_id}.media"));
+        let expected = image_number.to_string();
+        let path = std::fs::read_dir(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.file_stem().is_some_and(|stem| stem == expected.as_str()))
+            .ok_or_else(|| format!("image {image_number} not found"))?;
+        let mime = match path.extension().and_then(|value| value.to_str()).unwrap_or("png") {
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        Ok((bytes, mime.to_string()))
     }
 }
 
@@ -375,6 +441,16 @@ mod tests {
     fn generic_commands_use_the_existing_serde_contract() {
         let op: Op = serde_json::from_str(r#""ListSessions""#).expect("unit op");
         assert!(matches!(op, Op::ListSessions));
+    }
+
+    #[test]
+    fn selftest_image_fixture_is_accepted_by_the_model_pipeline() {
+        let bytes = pig_utils::image::base64_decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNoaGj4DwAFhAKAjM1mJgAAAABJRU5ErkJggg==",
+        )
+        .expect("decode fixture");
+        pig_core::tool::compress_image_for_model(&bytes, "image/png")
+            .expect("compress selftest image fixture");
     }
 
     #[test]

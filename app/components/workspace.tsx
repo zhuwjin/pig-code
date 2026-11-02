@@ -17,9 +17,12 @@ export function Workspace(props: UiContext) {
     const id = store.current();
     return (id && store.errors()[id]) || store.globalError();
   };
-  const hero = () => items().length === 0;
+  const hero = () => {
+    const id = store.current();
+    return items().length === 0 && !(id && store.running()[id]);
+  };
   return (
-    <View class="relative min-w-0 flex-1 bg-background">
+    <View class="relative min-h-0 min-w-0 flex-1 bg-background">
       <If when={error()}>
         <View class="mx-auto mt-3 max-w-3xl rounded-(--radius) bg-destructive/10 px-3 py-2">
           <Text selectable class="text-sm text-destructive">{error()}</Text>

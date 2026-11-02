@@ -16,10 +16,12 @@ export function iconTint(name: IconName, color?: string): string | undefined {
 }
 
 function drawElement(cx: CanvasRenderingContext2D, element: IconElement): void {
+  if (element.tag === "path") {
+    if (element.filled) cx.fill(new Path2D(element.d));
+    cx.stroke(new Path2D(element.d));
+    return;
+  }
   switch (element.tag) {
-    case "path":
-      cx.stroke(new Path2D(element.d));
-      return;
     case "circle":
       cx.beginPath();
       cx.arc(element.cx, element.cy, element.r, 0, Math.PI * 2);
@@ -55,6 +57,7 @@ function drawElement(cx: CanvasRenderingContext2D, element: IconElement): void {
       break;
     }
   }
+  if (element.filled) cx.fill();
   cx.stroke();
 }
 
@@ -65,6 +68,7 @@ export function paintIcon(
   width: number,
 ): void {
   cx.scale(width / 24, width / 24);
+  cx.fillStyle = tint;
   cx.strokeStyle = tint;
   cx.lineWidth = 2;
   cx.lineCap = "round";
@@ -92,7 +96,7 @@ export function Icon(props: {
       />
     );
   }
-  const elements = ICON_ELEMENTS[props.name];
+  const elements = ICON_ELEMENTS[props.name as keyof typeof ICON_ELEMENTS];
   return (
     <Canvas
       testID={props.testID}

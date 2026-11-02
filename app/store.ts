@@ -1,10 +1,14 @@
-import { signal } from "nsh";
+import { batch, LayoutAnimation, signal } from "nsh";
 import { Agent } from "pig-code-ts/native";
 import {
   AppConfig,
   ApprovalDecision,
   ChatItem,
+  ComposerImage,
   ConnectionTestResult,
+  ContextBreakdown,
+  ContextUsage,
+  EditDiff,
   HeldDisposition,
   GitDiffSnapshot,
   GitStatusSnapshot,
@@ -14,6 +18,7 @@ import {
   NoteItem,
   Payload,
   PendingApproval,
+  PendingImage,
   PendingQuestion,
   PermissionSettings,
   PluginPackageInfo,
@@ -23,18 +28,26 @@ import {
   PluginRuntimeState,
   PluginUiAck,
   PluginUiEvent,
+  ProjectHooksNotice,
   RemoteDocument,
+  RetryStatus,
+  RightPanelRequest,
   ProviderConfig,
   ProviderCredentialStatus,
   QueueItem,
   QueueState,
   SessionConfiguration,
   SessionMeta,
+  SubagentHistory,
+  TaskSummary,
+  TodoItem,
   ToolItem,
+  TurnState,
   errorMessage,
   eventKind,
 } from "./protocol";
 import { oppositeDelivery, parseSlashCommand, permissionsForMode } from "./commands";
+import { composerImage } from "./media";
 import { PluginThemeDefinition } from "./themes";
 import { acceptPluginEvent, clearPluginEvents } from "./plugins/event-adapter";
 import { PluginSequencer, remoteDocumentRejection, validatePluginEnvelope } from "./plugins/ui-protocol";
@@ -44,16 +57,33 @@ let generatedId = 0;
 
 const EMPTY_QUEUE: QueueState = { pending: [], steer: [], paused: null, held: null };
 
+type PendingSubmission = {
+  text: string;
+  files: string[];
+  images: PendingImage[];
+  delivery: MessageDelivery;
+};
+
+type PendingMarkdownDelta = {
+  id: string;
+  kind: "markdown" | "reasoning";
+  text: string;
+  turnId?: string;
+};
+
 export class AgentStore {
   readonly agent: Agent;
   readonly cwd;
   readonly heroCwd = signal<string | null>(null);
   readonly draft = signal("");
+  readonly draftFiles = signal<string[]>([]);
+  readonly draftImages = signal<ComposerImage[]>([]);
   readonly sessions = signal<SessionMeta[]>([]);
   readonly current = signal<string | null>(null);
   readonly currentTitle = signal("新任务");
   readonly currentModel = signal("");
   readonly items = signal<Record<string, ChatItem[]>>({});
+  readonly turns = signal<Record<string, TurnState[]>>({});
   readonly running = signal<Record<string, boolean>>({});
   readonly approvals = signal<Record<string, PendingApproval[]>>({});
   readonly questions = signal<Record<string, PendingQuestion | null>>({});
@@ -67,8 +97,21 @@ export class AgentStore {
     planEnabled: false,
   });
   readonly errors = signal<Record<string, string>>({});
-  readonly contextUsage = signal<Record<string, string>>({});
+  readonly contextUsage = signal<Record<string, ContextUsage>>({});
+  readonly contextBreakdowns = signal<Record<string, ContextBreakdown>>({});
   readonly outputRate = signal<Record<string, number>>({});
+  readonly expandedItems = signal<Record<string, boolean>>({});
+  readonly expandedTurns = signal<Record<string, boolean>>({});
+  readonly copiedItems = signal<Record<string, boolean>>({});
+  readonly fileSearchResults = signal<{ query: string; results: string[] }>({ query: "", results: [] });
+  readonly todos = signal<Record<string, TodoItem[]>>({});
+  readonly tasks = signal<Record<string, TaskSummary[]>>({});
+  readonly sessionChanges = signal<Record<string, Record<string, EditDiff>>>({});
+  readonly retrying = signal<Record<string, RetryStatus | null>>({});
+  readonly hookRunning = signal<Record<string, { event: string; label: string } | null>>({});
+  readonly projectHooks = signal<Record<string, ProjectHooksNotice | null>>({});
+  readonly subagents = signal<Record<string, SubagentHistory>>({});
+  readonly rightPanelRequest = signal<RightPanelRequest | null>(null);
   readonly config = signal<AppConfig | null>(null);
   readonly gitStatus = signal<GitStatusSnapshot | null>(null);
   readonly gitDiff = signal<GitDiffSnapshot | null>(null);
@@ -96,14 +139,19 @@ export class AgentStore {
   readonly themeError = signal("");
   private autoOpen = true;
   private heroModelDirty = false;
-  private pendingText: string | null = null;
-  private pendingDelivery: MessageDelivery = "queue";
+  private pendingSubmission: PendingSubmission | null = null;
+  private activeTurns = new Map<string, string>();
+  private configuredSessions = new Set<string>();
+  private imageSourceCache = new Map<string, string>();
   private themeLoadId = 0;
   private pluginGeneration = 0;
   private pluginSequencers = new Map<string, { epoch: number; sequences: PluginSequencer }>();
   private rateSession: string | null = null;
   private rateStartedAt = 0;
   private rateCharacters = 0;
+  private rateRenderedAt = 0;
+  private pendingMarkdownDeltas = new Map<string, PendingMarkdownDelta[]>();
+  private markdownFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(selftest = false) {
     this.agent = new Agent(null, selftest);
@@ -114,7 +162,9 @@ export class AgentStore {
     void this.agent.listen((raw) => {
       try {
         const events = JSON.parse(raw);
-        for (const event of events) this.reduce(event);
+        batch(() => {
+          for (const event of events) this.reduce(event);
+        });
       } catch (error) {
         this.globalError.set(`事件解析失败：${errorMessage(error)}`);
       }
@@ -199,7 +249,7 @@ export class AgentStore {
 
   newTask(): void {
     this.autoOpen = false;
-    this.pendingText = null;
+    this.pendingSubmission = null;
     this.current.set(null);
     this.heroCwd.set(null);
     this.heroModelDirty = false;
@@ -250,7 +300,7 @@ export class AgentStore {
 
   openSession(sessionId: string): void {
     this.autoOpen = false;
-    this.pendingText = null;
+    this.pendingSubmission = null;
     try {
       this.agent.openSession(sessionId);
     } catch (error) {
@@ -335,7 +385,9 @@ export class AgentStore {
 
   send(delivery?: MessageDelivery): void {
     let text = this.draft().trim();
-    if (!text) return;
+    const files = this.draftFiles();
+    const images = this.draftImages().map(({ bytes, mime }) => ({ bytes, mime }));
+    if (!text && images.length === 0) return;
     const sessionId = this.current();
     if (sessionId && (this.questions()[sessionId] || (this.approvals()[sessionId] ?? []).length > 0)) {
       return;
@@ -361,7 +413,7 @@ export class AgentStore {
         return;
       }
       if (slash.name === "/clear") {
-        this.draft.set("");
+        this.clearDraft();
         this.clearTranscript();
         return;
       }
@@ -370,7 +422,7 @@ export class AgentStore {
         return;
       }
       if (this.command({ Compact: { session_id: sessionId, instruction: slash.instruction ?? null } })) {
-        this.draft.set("");
+        this.clearDraft();
       }
       return;
     }
@@ -381,13 +433,13 @@ export class AgentStore {
         SendMessage: {
           session_id: sessionId,
           content: text,
-          files: [],
-          images: [],
+          files,
+          images,
           permissions: configuration.permissions,
           delivery: running ? requestedDelivery : "queue",
         },
       })) {
-        this.draft.set("");
+        this.clearDraft();
       }
       return;
     }
@@ -401,20 +453,49 @@ export class AgentStore {
         plan_enabled: configuration.planEnabled,
       },
     })) {
-      this.pendingText = text;
-      this.pendingDelivery = requestedDelivery;
-      this.draft.set("");
+      this.pendingSubmission = { text, files, images, delivery: requestedDelivery };
+      this.clearDraft();
       this.globalError.set("");
     }
   }
 
-  submitOrStop(): void {
+  clearDraft(): void {
+    this.draft.set("");
+    this.draftFiles.set([]);
+    this.draftImages.set([]);
+    this.fileSearchResults.set({ query: "", results: [] });
+  }
+
+  addDraftFile(path: string): void {
+    if (!this.draftFiles().includes(path)) this.draftFiles.update((files) => [...files, path]);
+  }
+
+  removeDraftFile(path: string): void {
+    this.draftFiles.update((files) => files.filter((file) => file !== path));
+  }
+
+  addDraftImages(images: ComposerImage[]): void {
+    this.draftImages.update((current) => [...current, ...images].slice(0, 8));
+  }
+
+  removeDraftImage(id: string): void {
+    this.draftImages.update((images) => images.filter((image) => image.id !== id));
+  }
+
+  searchFiles(query: string): void {
     const sessionId = this.current();
-    if (sessionId && this.running()[sessionId]) {
-      this.command({ Interrupt: { session_id: sessionId } });
-      return;
-    }
-    this.send();
+    this.command({
+      SearchFiles: {
+        session_id: sessionId ?? "",
+        query,
+        cwd: sessionId ? null : (this.heroCwd() ?? this.cwd()),
+      },
+    });
+  }
+
+  stop(): void {
+    const sessionId = this.current();
+    if (sessionId) this.command({ Interrupt: { session_id: sessionId } }, sessionId);
   }
 
   sendWithOppositeDelivery(): void {
@@ -425,10 +506,13 @@ export class AgentStore {
     const sessionId = this.current();
     if (!sessionId) {
       this.newTask();
-      this.draft.set("");
+      this.clearDraft();
       return;
     }
     this.items.update((all) => ({ ...all, [sessionId]: [] }));
+    this.turns.update((all) => ({ ...all, [sessionId]: [] }));
+    this.sessionChanges.update((all) => ({ ...all, [sessionId]: {} }));
+    this.activeTurns.delete(sessionId);
     this.errors.update((all) => ({ ...all, [sessionId]: "" }));
   }
 
@@ -444,6 +528,9 @@ export class AgentStore {
         ...all,
         [sessionId]: (all[sessionId] ?? []).filter((item) => item.requestId !== approval.requestId),
       }));
+      this.updateItems(sessionId, (items) => items.map((item) =>
+        item.kind === "tool" && item.approvalPending ? { ...item, approvalPending: false } : item
+      ));
     }
   }
 
@@ -466,12 +553,18 @@ export class AgentStore {
   }
 
   reorderQueued(id: string, direction: -1 | 1): void {
+    this.reorderQueuedBy(id, direction);
+  }
+
+  reorderQueuedBy(id: string, offset: number): void {
     const queue = this.currentQueue();
     const lane = queue.steer.some((item) => item.id === id) ? queue.steer : queue.pending;
     const index = lane.findIndex((item) => item.id === id);
-    const target = index + direction;
-    if (index < 0 || target < 0 || target >= lane.length) return;
-    this.queueCommand("ReorderQueued", { id, before_id: lane[target]?.id ?? null });
+    if (index < 0 || offset === 0) return;
+    const target = Math.max(0, Math.min(lane.length - 1, index + offset));
+    if (target === index) return;
+    const beforeId = target < index ? lane[target]?.id ?? null : lane[target + 1]?.id ?? null;
+    this.queueCommand("ReorderQueued", { id, before_id: beforeId });
   }
 
   sendQueuedNow(id: string): void {
@@ -479,7 +572,14 @@ export class AgentStore {
   }
 
   editQueued(item: QueueItem): void {
-    if (this.queueCommand("CancelQueued", { id: item.id })) this.draft.set(item.text);
+    if (this.queueCommand("CancelQueued", { id: item.id })) {
+      this.draft.set(item.text);
+      this.draftImages.set((item.images ?? []).map(composerImage));
+    }
+  }
+
+  reorderQueuedBefore(id: string, beforeId: string | null): void {
+    this.queueCommand("ReorderQueued", { id, before_id: beforeId });
   }
 
   resumeQueue(): void {
@@ -493,6 +593,188 @@ export class AgentStore {
   private queueCommand(kind: string, data: Payload): boolean {
     const sessionId = this.current();
     return sessionId ? this.command({ [kind]: { session_id: sessionId, ...data } }, sessionId) : false;
+  }
+
+  currentTurns(): TurnState[] {
+    const id = this.current();
+    return id ? (this.turns()[id] ?? []) : [];
+  }
+
+  currentTodos(): TodoItem[] {
+    const id = this.current();
+    return id ? (this.todos()[id] ?? []) : [];
+  }
+
+  currentTasks(): TaskSummary[] {
+    const id = this.current();
+    return id ? (this.tasks()[id] ?? []) : [];
+  }
+
+  currentChanges(): EditDiff[] {
+    const id = this.current();
+    return id ? Object.values(this.sessionChanges()[id] ?? {}) : [];
+  }
+
+  currentUsage(): ContextUsage | undefined {
+    const id = this.current();
+    return id ? this.contextUsage()[id] : undefined;
+  }
+
+  currentBreakdown(): ContextBreakdown | undefined {
+    const id = this.current();
+    return id ? this.contextBreakdowns()[id] : undefined;
+  }
+
+  sessionTotals(): {
+    turns: number;
+    steps: number;
+    output: number;
+    decodeMs: number;
+    apiMs: number;
+    toolMs: number;
+    ttftMs: number;
+    ttftSteps: number;
+  } {
+    const totals = { turns: 0, steps: 0, output: 0, decodeMs: 0, apiMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0 };
+    for (const turn of this.currentTurns()) {
+      if (turn.status === "running" || ((turn.durationMs ?? 0) === 0 && !turn.stats)) continue;
+      totals.turns += 1;
+      const stats = turn.stats;
+      if (!stats) continue;
+      totals.steps += stats.api_steps;
+      totals.apiMs += stats.api_ms;
+      totals.toolMs += stats.tool_ms;
+      totals.ttftMs += stats.ttft_ms;
+      totals.ttftSteps += stats.ttft_steps;
+      const decodeMs = stats.api_ms - stats.ttft_ms;
+      if (stats.ttft_ms > 0 && decodeMs > 0) {
+        totals.output += stats.output;
+        totals.decodeMs += decodeMs;
+      }
+    }
+    return totals;
+  }
+
+  isExpanded(id: string): boolean {
+    return this.expandedItems()[id] ?? false;
+  }
+
+  toggleExpanded(id: string): void {
+    LayoutAnimation.configureNext({ duration: 200, update: { type: "easeOut" } });
+    this.expandedItems.update((all) => ({ ...all, [id]: !this.isExpanded(id) }));
+  }
+
+  isTurnExpanded(id: string): boolean {
+    return this.expandedTurns()[id] ?? false;
+  }
+
+  toggleTurnExpanded(id: string): void {
+    LayoutAnimation.configureNext({ duration: 200, update: { type: "easeOut" } });
+    this.expandedTurns.update((all) => ({ ...all, [id]: !this.isTurnExpanded(id) }));
+  }
+
+  markCopied(id: string): void {
+    this.copiedItems.update((all) => ({ ...all, [id]: true }));
+    setTimeout(() => this.copiedItems.update((all) => ({ ...all, [id]: false })), 1200);
+  }
+
+  openChanges(): void {
+    this.refreshGitStatus();
+    this.rightPanelRequest.set({ kind: "changes", key: `changes-${Date.now()}` });
+  }
+
+  openFile(path: string, line?: number): void {
+    this.rightPanelRequest.set({
+      kind: "file",
+      key: `file-${path}-${line ?? 0}-${Date.now()}`,
+      path,
+      cwd: this.cwd(),
+      line,
+    });
+  }
+
+  openCompactSummary(text: string): void {
+    this.rightPanelRequest.set({ kind: "compact", key: `compact-${Date.now()}`, text });
+  }
+
+  openSubagent(agentId: string): void {
+    const sessionId = this.current();
+    if (!sessionId) return;
+    this.command({ LoadSubagent: { session_id: sessionId, agent_id: agentId } }, sessionId);
+    this.rightPanelRequest.set({ kind: "subagent", key: `agent-${agentId}-${Date.now()}`, sessionId, agentId });
+  }
+
+  openTask(task: TaskSummary): void {
+    this.rightPanelRequest.set({ kind: "task", key: `task-${task.id}-${Date.now()}`, task });
+  }
+
+  readFile(path: string, cwd: string): { content: string; truncated: boolean } {
+    return JSON.parse(this.agent.readFile(path, cwd)) as { content: string; truncated: boolean };
+  }
+
+  sessionImageSource(sessionId: string, imageNumber: number): string {
+    const key = `${sessionId}:${imageNumber}`;
+    const cached = this.imageSourceCache.get(key);
+    if (cached !== undefined) return cached;
+    try {
+      const source = this.agent.sessionImageSource(sessionId, imageNumber);
+      this.imageSourceCache.set(key, source);
+      return source;
+    } catch {
+      this.imageSourceCache.set(key, "");
+      return "";
+    }
+  }
+
+  forkTurn(turnId: string): void {
+    const sessionId = this.current();
+    if (!sessionId) return;
+    const index = this.currentTurns().findIndex((turn) => turn.id === turnId);
+    if (index >= 0) this.command({ ForkSession: { session_id: sessionId, turns: index + 1 } }, sessionId);
+  }
+
+  recallLastMessage(): void {
+    const sessionId = this.current();
+    if (!sessionId || this.running()[sessionId]) return;
+    const items = this.items()[sessionId] ?? [];
+    const user = items.findLast((item) => item.kind === "user");
+    if (!user || user.kind !== "user") return;
+    this.draft.set(user.text);
+    this.draftFiles.set(user.files);
+    const images = user.imageNums.flatMap((imageNumber) => {
+      try {
+        const image = JSON.parse(this.agent.sessionImage(sessionId, imageNumber)) as PendingImage;
+        return [{
+          ...image,
+          id: `recalled-${imageNumber}`,
+          preview: this.agent.sessionImageSource(sessionId, imageNumber),
+        }];
+      } catch {
+        return [];
+      }
+    });
+    this.draftImages.set(images);
+    this.command({ RecallLastMessage: { session_id: sessionId } }, sessionId);
+  }
+
+  retryNow(): void {
+    const sessionId = this.current();
+    if (sessionId) this.command({ RetryNow: { session_id: sessionId } }, sessionId);
+  }
+
+  trustProjectHooks(): void {
+    const sessionId = this.current();
+    if (sessionId) this.command({ TrustProjectHooks: { session_id: sessionId } }, sessionId);
+  }
+
+  dismissProjectHooks(): void {
+    const sessionId = this.current();
+    if (sessionId) this.projectHooks.update((all) => ({ ...all, [sessionId]: null }));
+  }
+
+  revertFile(path: string): void {
+    const sessionId = this.current();
+    if (sessionId) this.command({ RevertFile: { session_id: sessionId, path } }, sessionId);
   }
 
   private command(op: Payload, sessionId?: string): boolean {
@@ -824,6 +1106,7 @@ export class AgentStore {
     const kind = eventKind(event);
     const data = event[kind] ?? {};
     const sessionId = typeof data.session_id === "string" ? data.session_id : null;
+    if (kind !== "ReasoningDelta" && kind !== "TextDelta") this.flushMarkdownDeltas();
     switch (kind) {
       case "SessionList": {
         const sessions = (data.sessions as SessionMeta[]).filter((item) => !item.archived);
@@ -838,6 +1121,17 @@ export class AgentStore {
         this.autoOpen = false;
         this.current.set(sessionId);
         this.cwd.set(data.cwd);
+        const cold = !this.configuredSessions.has(sessionId!);
+        this.configuredSessions.add(sessionId!);
+        if (cold) {
+          this.activeTurns.delete(sessionId!);
+          this.items.update((all) => ({ ...all, [sessionId!]: [] }));
+          this.turns.update((all) => ({ ...all, [sessionId!]: [] }));
+          this.sessionChanges.update((all) => ({ ...all, [sessionId!]: {} }));
+          this.retrying.update((all) => ({ ...all, [sessionId!]: null }));
+          this.hookRunning.update((all) => ({ ...all, [sessionId!]: null }));
+          this.projectHooks.update((all) => ({ ...all, [sessionId!]: null }));
+        }
         this.configurations.update((all) => ({
           ...all,
           [sessionId!]: {
@@ -852,17 +1146,17 @@ export class AgentStore {
         this.currentTitle.set(
           this.sessions().find((item) => item.id === sessionId)?.title ?? "当前会话",
         );
-        const pending = this.pendingText;
-        this.pendingText = null;
+        const pending = this.pendingSubmission;
+        this.pendingSubmission = null;
         if (pending) {
           this.command({
             SendMessage: {
               session_id: sessionId!,
-              content: pending,
-              files: [],
-              images: [],
+              content: pending.text,
+              files: pending.files,
+              images: pending.images,
               permissions: this.configuration().permissions,
-              delivery: this.pendingDelivery,
+              delivery: pending.delivery,
             },
           }, sessionId!);
         }
@@ -909,21 +1203,45 @@ export class AgentStore {
       case "UserMessage":
         this.updateItems(sessionId!, (items) => [
           ...items,
-          { kind: "user", id: `user-${++generatedId}`, text: data.text },
+          {
+            kind: "user",
+            id: `user-${++generatedId}`,
+            text: data.text,
+            files: data.files ?? [],
+            imageNums: data.image_nums ?? [],
+            sentAtMs: data.sent_at_ms ?? 0,
+          },
         ]);
         break;
+      case "MessageRecalled":
+        this.updateItems(sessionId!, (items) => {
+          const index = items.map((item) => item.kind).lastIndexOf("user");
+          return index < 0 ? items : items.slice(0, index);
+        });
+        this.turns.update((all) => ({ ...all, [sessionId!]: (all[sessionId!] ?? []).slice(0, -1) }));
+        break;
       case "ReasoningDelta":
+        this.clearRetry(sessionId!);
         this.recordRateDelta(sessionId!, String(data.delta ?? ""));
-        this.upsertMarkdown(sessionId!, data.item_id, "reasoning", data.delta, true, true);
+        this.queueMarkdownDelta(sessionId!, data.item_id, "reasoning", String(data.delta ?? ""));
         break;
       case "TextDelta":
+        this.clearRetry(sessionId!);
         this.recordRateDelta(sessionId!, String(data.delta ?? ""));
-        this.upsertMarkdown(sessionId!, data.item_id, "markdown", data.delta, true, true);
+        this.queueMarkdownDelta(sessionId!, data.item_id, "markdown", String(data.delta ?? ""));
         break;
       case "TextDone":
         this.upsertMarkdown(sessionId!, data.item_id, "markdown", data.full_text, false, false);
         break;
+      case "Sources":
+        this.updateItems(sessionId!, (items) => items.map((item) =>
+          item.kind === "markdown" && item.id === data.item_id
+            ? { ...item, sources: data.sources ?? [] }
+            : item
+        ));
+        break;
       case "ToolInputStart":
+        this.clearRetry(sessionId!);
         this.upsertTool(sessionId!, data.item_id, { tool: data.tool, status: "input" });
         break;
       case "ToolInputDelta":
@@ -933,11 +1251,13 @@ export class AgentStore {
         this.updateItems(sessionId!, (items) => items.filter((item) => item.id !== data.item_id));
         break;
       case "ToolCallBegin":
+        this.clearRetry(sessionId!);
         this.upsertTool(sessionId!, data.item_id, {
           tool: data.tool,
           summary: data.input_summary,
           detail: data.detail,
           status: "running",
+          approvalPending: false,
         });
         break;
       case "ToolCallEnd":
@@ -945,8 +1265,56 @@ export class AgentStore {
           output: data.output,
           status: data.stopped ? "stopped" : data.is_error ? "error" : "done",
           edit: data.edit,
+          liveNote: null,
+          approvalPending: false,
         });
         break;
+      case "SubagentProgress":
+        this.upsertTool(sessionId!, data.item_id, { liveNote: data.note });
+        break;
+      case "SubagentCard":
+        this.updateItems(sessionId!, (items) => items.map((item) => {
+          if (item.kind !== "tool" || item.id !== data.item_id) return item;
+          const agents = [...(item.agents ?? []), {
+            agent_id: data.agent_id,
+            profile: data.profile,
+            description: data.description,
+            model: data.model,
+            background: data.background,
+            finished: false,
+          }];
+          return { ...item, agents };
+        }));
+        break;
+      case "SubagentActivity": {
+        const key = `${sessionId!}:${data.agent_id}`;
+        this.subagents.update((all) => {
+          const previous = all[key];
+          if (!previous) return all;
+          return {
+            ...all,
+            [key]: {
+              ...previous,
+              running: !data.finished,
+              items: data.item ? [...previous.items, data.item] : previous.items,
+            },
+          };
+        });
+        this.updateItems(sessionId!, (items) => items.map((item) => {
+          if (item.kind !== "tool" || !item.agents?.some((agent) => agent.agent_id === data.agent_id)) return item;
+          return {
+            ...item,
+            agents: item.agents.map((agent) => agent.agent_id === data.agent_id
+              ? {
+                  ...agent,
+                  finished: agent.finished || data.finished,
+                  live_note: data.finished ? null : (data.item?.text ?? agent.live_note),
+                }
+              : agent),
+          };
+        }));
+        break;
+      }
       case "QueueChanged":
         this.updateQueue(sessionId!, { pending: data.items });
         break;
@@ -983,6 +1351,13 @@ export class AgentStore {
             ],
           };
         });
+        this.updateItems(sessionId!, (items) => {
+          const index = items.findLastIndex((item) => item.kind === "tool" && item.tool === data.tool && item.status === "running");
+          if (index < 0) return items;
+          const next = [...items];
+          next[index] = { ...next[index], approvalPending: true } as ToolItem;
+          return next;
+        });
         break;
       case "QuestionRequested":
         this.questions.update((all) => ({
@@ -996,32 +1371,148 @@ export class AgentStore {
       case "PlanModeChanged":
         this.updateConfigurationFor(sessionId!, { planEnabled: data.enabled });
         break;
-      case "TurnStarted":
+      case "TurnStarted": {
+        const turn: TurnState = {
+          id: data.turn_id,
+          status: "running",
+          startedAt: Date.now(),
+          changes: [],
+          hooks: [],
+        };
+        this.activeTurns.set(sessionId!, turn.id);
+        this.turns.update((all) => ({ ...all, [sessionId!]: [...(all[sessionId!] ?? []), turn] }));
+        this.clearRetry(sessionId!);
         this.startRate(sessionId!);
         this.setRunning(sessionId!, true);
         break;
+      }
       case "TurnComplete":
+        this.finishTurn(sessionId!, "done", data.duration_ms, data.stats, data.finish_reason);
+        break;
       case "TurnAborted":
-        this.setRunning(sessionId!, false);
-        this.approvals.update((all) => ({ ...all, [sessionId!]: [] }));
-        this.questions.update((all) => ({ ...all, [sessionId!]: null }));
+        this.finishTurn(sessionId!, "stopped");
+        break;
+      case "TurnFileChanges":
+        this.updateTurn(sessionId!, { changes: data.files ?? [] });
         break;
       case "ContextUsage":
         this.contextUsage.update((all) => ({
           ...all,
-          [sessionId!]: `${data.used.toLocaleString()} / ${data.total.toLocaleString()} tokens`,
+          [sessionId!]: {
+            used: data.used,
+            total: data.total,
+            cacheRead: data.cache_read_total ?? 0,
+            input: data.input_total ?? 0,
+          },
         }));
         break;
+      case "ContextBreakdownChanged":
+        this.contextBreakdowns.update((all) => ({ ...all, [sessionId!]: data.breakdown }));
+        break;
+      case "FileChanged":
+        this.sessionChanges.update((all) => ({
+          ...all,
+          [sessionId!]: {
+            ...(all[sessionId!] ?? {}),
+            [data.path]: {
+              path: data.path,
+              unified_diff: data.unified_diff,
+              additions: data.additions,
+              deletions: data.deletions,
+            },
+          },
+        }));
+        break;
+      case "FileReverted":
+        this.sessionChanges.update((all) => {
+          const changes = { ...(all[sessionId!] ?? {}) };
+          delete changes[data.path];
+          return { ...all, [sessionId!]: changes };
+        });
+        break;
+      case "TodoListChanged":
+        this.todos.update((all) => ({ ...all, [sessionId!]: data.items ?? [] }));
+        break;
+      case "TaskListChanged":
+        this.tasks.update((all) => ({ ...all, [sessionId!]: data.tasks ?? [] }));
+        break;
+      case "TaskNotificationBatch":
+        this.updateItems(sessionId!, (items) => [...items, {
+          kind: "notification",
+          id: `notification-${++generatedId}`,
+          notifications: data.notifications ?? [],
+          sentAtMs: data.sent_at_ms ?? 0,
+        }]);
+        break;
+      case "RetryStatus":
+        this.retrying.update((all) => ({ ...all, [sessionId!]: data.status }));
+        break;
+      case "HookStatus":
+        this.hookRunning.update((all) => ({
+          ...all,
+          [sessionId!]: data.state === "running" ? { event: data.hook_event, label: data.label } : null,
+        }));
+        break;
+      case "HookRunFinished":
+        this.updateTurn(sessionId!, {
+          hooks: [...(this.currentTurn(sessionId!)?.hooks ?? []), {
+            id: `hook-${++generatedId}`,
+            hook_event: data.hook_event,
+            label: data.label,
+            source: data.source,
+            duration_ms: data.duration_ms,
+            state: data.state,
+            reason: data.reason,
+          }],
+        });
+        break;
+      case "ProjectHooksPending":
+        this.projectHooks.update((all) => ({
+          ...all,
+          [sessionId!]: { path: data.path, count: data.count },
+        }));
+        break;
+      case "ProjectHooksTrusted":
+        this.projectHooks.update((all) => ({ ...all, [sessionId!]: null }));
+        break;
+      case "FileSearchResults":
+        this.fileSearchResults.set({ query: data.query, results: data.results ?? [] });
+        break;
+      case "SubagentHistory": {
+        const key = `${sessionId!}:${data.agent_id}`;
+        this.subagents.update((all) => ({
+          ...all,
+          [key]: {
+            sessionId: sessionId!,
+            agentId: data.agent_id,
+            title: data.title,
+            subtitle: data.subtitle,
+            items: data.items ?? [],
+            running: data.running ?? false,
+          },
+        }));
+        break;
+      }
       case "CompactStarted":
-        this.addNote(sessionId!, "正在压缩上下文…", false);
+        this.addNote(sessionId!, "正在压缩上下文…", false, { noteKind: "compacting" });
         break;
       case "ContextCompacted":
-        this.addNote(sessionId!, data.note, false);
+        this.updateItems(sessionId!, (items) => items.filter((item) => item.kind !== "note" || item.noteKind !== "compacting"));
+        this.addNote(sessionId!, data.note, false, {
+          noteKind: "compacted",
+          usedBefore: data.used_before,
+          usedAfter: data.used_after,
+          summary: data.summary,
+        });
         break;
       case "Error":
         if (sessionId) {
-          this.setError(sessionId, errorMessage(data.error));
-          if (data.fatal !== false) this.setRunning(sessionId, false);
+          const message = errorMessage(data.error);
+          this.setError(sessionId, message);
+          if (data.fatal !== false) {
+            this.finishTurn(sessionId, "stopped");
+            this.addNote(sessionId, message, true);
+          }
         } else {
           this.globalError.set(errorMessage(data.error));
         }
@@ -1049,6 +1540,108 @@ export class AgentStore {
     }));
   }
 
+  private currentTurn(sessionId: string): TurnState | undefined {
+    const turns = this.turns()[sessionId] ?? [];
+    const activeId = this.activeTurns.get(sessionId);
+    return turns.find((turn) => turn.id === activeId) ?? turns[turns.length - 1];
+  }
+
+  private updateTurn(sessionId: string, changes: Partial<TurnState>): void {
+    const activeId = this.activeTurns.get(sessionId);
+    this.turns.update((all) => {
+      const turns = [...(all[sessionId] ?? [])];
+      const index = activeId
+        ? turns.findIndex((turn) => turn.id === activeId)
+        : turns.length - 1;
+      if (index < 0) return all;
+      turns[index] = { ...turns[index], ...changes };
+      return { ...all, [sessionId]: turns };
+    });
+  }
+
+  private finishTurn(
+    sessionId: string,
+    status: "done" | "stopped",
+    durationMs?: number,
+    stats?: TurnState["stats"],
+    finishReason?: TurnState["finishReason"],
+  ): void {
+    const turn = this.currentTurn(sessionId);
+    if (turn?.status === "running") {
+      this.updateTurn(sessionId, {
+        status,
+        durationMs: durationMs ?? Math.max(0, Date.now() - turn.startedAt),
+        stats,
+        finishReason,
+      });
+    }
+    this.setRunning(sessionId, false);
+    this.clearRetry(sessionId);
+    this.hookRunning.update((all) => ({ ...all, [sessionId]: null }));
+    this.approvals.update((all) => ({ ...all, [sessionId]: [] }));
+    this.questions.update((all) => ({ ...all, [sessionId]: null }));
+    this.updateItems(sessionId, (items) => items.map((item) => {
+      if (item.kind === "reasoning" && item.streaming) return { ...item, streaming: false };
+      if (item.kind === "tool" && item.approvalPending) return { ...item, approvalPending: false };
+      return item;
+    }));
+  }
+
+  private clearRetry(sessionId: string): void {
+    if (!this.retrying()[sessionId]) return;
+    this.retrying.update((all) => ({ ...all, [sessionId]: null }));
+  }
+
+  private queueMarkdownDelta(
+    sessionId: string,
+    id: string,
+    kind: PendingMarkdownDelta["kind"],
+    text: string,
+  ): void {
+    if (!text) return;
+    const deltas = this.pendingMarkdownDeltas.get(sessionId) ?? [];
+    const turnId = this.activeTurns.get(sessionId);
+    const previous = deltas[deltas.length - 1];
+    if (previous?.id === id && previous.kind === kind && previous.turnId === turnId) {
+      previous.text += text;
+    } else {
+      deltas.push({ id, kind, text, turnId });
+    }
+    this.pendingMarkdownDeltas.set(sessionId, deltas);
+    if (this.markdownFlushTimer !== null) return;
+    this.markdownFlushTimer = setTimeout(() => this.flushMarkdownDeltas(), 32);
+  }
+
+  private flushMarkdownDeltas(): void {
+    if (this.markdownFlushTimer !== null) clearTimeout(this.markdownFlushTimer);
+    this.markdownFlushTimer = null;
+    if (this.pendingMarkdownDeltas.size === 0) return;
+    const pending = [...this.pendingMarkdownDeltas];
+    this.pendingMarkdownDeltas.clear();
+    batch(() => {
+      for (const [sessionId, deltas] of pending) {
+        this.updateItems(sessionId, (items) => {
+          const next = [...items];
+          for (const delta of deltas) {
+            const index = next.findIndex((item) => item.id === delta.id);
+            if (index < 0) {
+              next.push({ kind: delta.kind, id: delta.id, text: delta.text, streaming: true, turnId: delta.turnId });
+              continue;
+            }
+            const previous = next[index] as MarkdownItem;
+            next[index] = {
+              ...previous,
+              text: previous.text + delta.text,
+              streaming: true,
+              turnId: previous.turnId ?? delta.turnId,
+            };
+          }
+          return next;
+        });
+      }
+    });
+  }
+
   private upsertMarkdown(
     sessionId: string,
     id: string,
@@ -1059,13 +1652,15 @@ export class AgentStore {
   ): void {
     this.updateItems(sessionId, (items) => {
       const index = items.findIndex((item) => item.id === id);
-      if (index < 0) return [...items, { kind, id, text, streaming }];
+      const turnId = this.activeTurns.get(sessionId);
+      if (index < 0) return [...items, { kind, id, text, streaming, turnId }];
       const next = [...items];
       const previous = next[index] as MarkdownItem;
       next[index] = {
         ...previous,
         text: append ? previous.text + text : text,
         streaming,
+        turnId: previous.turnId ?? turnId,
       };
       return next;
     });
@@ -1079,6 +1674,7 @@ export class AgentStore {
   ): void {
     this.updateItems(sessionId, (items) => {
       const index = items.findIndex((item) => item.id === id);
+      const turnId = this.activeTurns.get(sessionId);
       if (index < 0) {
         return [
           ...items,
@@ -1090,6 +1686,7 @@ export class AgentStore {
             detail: changes.detail ?? "",
             output: changes.output ?? "",
             status: changes.status ?? "running",
+            turnId,
             edit: changes.edit,
           } satisfies ToolItem,
         ];
@@ -1099,6 +1696,7 @@ export class AgentStore {
       next[index] = {
         ...previous,
         ...changes,
+        turnId: previous.turnId ?? turnId,
         detail: appendDetail ? previous.detail + (changes.detail ?? "") : (changes.detail ?? previous.detail),
       };
       return next;
@@ -1109,21 +1707,25 @@ export class AgentStore {
     this.rateSession = sessionId;
     this.rateStartedAt = Date.now();
     this.rateCharacters = 0;
+    this.rateRenderedAt = 0;
     this.outputRate.update((all) => ({ ...all, [sessionId]: 0 }));
   }
 
   private recordRateDelta(sessionId: string, delta: string): void {
     if (this.rateSession !== sessionId) this.startRate(sessionId);
     this.rateCharacters += delta.length;
-    const elapsed = Math.max((Date.now() - this.rateStartedAt) / 1000, 0.05);
+    const now = Date.now();
+    if (now - this.rateRenderedAt < 200) return;
+    this.rateRenderedAt = now;
+    const elapsed = Math.max((now - this.rateStartedAt) / 1000, 0.05);
     const tokensPerSecond = Math.max(0, Math.round(this.rateCharacters / 4 / elapsed));
     this.outputRate.update((all) => ({ ...all, [sessionId]: tokensPerSecond }));
   }
 
-  private addNote(sessionId: string, text: string, error: boolean): void {
+  private addNote(sessionId: string, text: string, error: boolean, extra: Partial<NoteItem> = {}): void {
     this.updateItems(sessionId, (items) => [
       ...items,
-      { kind: "note", id: `note-${++generatedId}`, text, error } satisfies NoteItem,
+      { kind: "note", id: `note-${++generatedId}`, text, error, ...extra } satisfies NoteItem,
     ]);
   }
 

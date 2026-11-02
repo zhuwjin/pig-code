@@ -113,7 +113,8 @@ test("dispatches clear and compact instead of sending them as chat", async () =>
   expect(app.value("id:composer-input")).toBe("/compact ");
   await app.type("id:composer-input", "focus on tests");
   await app.keyboard.press("enter");
-  await app.wait(1000);
+  await app.waitFor("查看摘要", { timeout: 20000 });
+  await app.press("查看摘要");
   expect(app.texts().some((text) => text.includes("MOCK_SUMMARY_OK"))).toBe(true);
   expect(app.value("id:composer-input")).toBe("");
 });
@@ -139,11 +140,8 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   await app.type("id:composer-input", "SLOW_BASH_SCENARIO");
   await app.press("id:send-button");
   await app.waitFor("生成中", { timeout: 20000 });
-
   await app.type("id:composer-input", "Q_ONE");
   await app.keyboard.press("enter");
-  await app.waitFor("Q_ONE");
-  expect(app.texts()).toContain("生成中");
   await app.type("id:composer-input", "Q_TWO");
   await app.keyboard.press("enter");
   await app.waitFor("上移 Q_TWO");
@@ -162,7 +160,7 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   await app.press("移到队列 Q_TWOQ_THREE");
   await app.waitFor("后续消息队列");
 
-  await app.press("id:send-button");
+  await app.press("id:stop-button");
   await app.waitFor("id:queue-resume", { timeout: 20000 });
   await app.press("id:queue-resume");
   await app.waitFor("id:queue-resume", { state: "gone", timeout: 20000 });

@@ -156,8 +156,15 @@ function App(props: UiContext) {
   effect(() => {
     const target = store.pluginNavigation();
     if (!target) return;
+    if (target !== "main") settingsPage.set(target as SettingsPageId);
     settingsVisible.set(target !== "main");
     store.pluginNavigation.set(null);
+  });
+  effect(() => {
+    const request = store.rightPanelRequest();
+    if (!request) return;
+    settingsVisible.set(false);
+    rightVisible.set(true);
   });
   effect(() => {
     const config = store.config();

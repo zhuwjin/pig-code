@@ -52,6 +52,25 @@ test("draws original SVG geometry at the requested size and tint", () => {
   expect(strokes).toBe(ICON_ELEMENTS.sun.length);
 });
 
+test("draws filled dots from the generated catalog without losing their strokes", () => {
+  expect(Object.keys(ICON_ELEMENTS).length).toBe(1832);
+  let fills = 0;
+  let strokes = 0;
+  const context = {
+    scale() {},
+    beginPath() {},
+    arc() {},
+    fill() { fills += 1; },
+    stroke() { strokes += 1; },
+  } as unknown as CanvasRenderingContext2D;
+  const elements = ICON_ELEMENTS["chart-scatter"];
+  paintIcon(context, elements, "#f5f5f5ff", 12);
+  expect(elements.filter((element) => element.filled).length).toBe(5);
+  expect(fills).toBe(5);
+  expect(strokes).toBe(elements.length);
+  expect(context.fillStyle).toBe("#f5f5f5ff");
+});
+
 test("keeps the macOS traffic-light zone clear and places the interactive wordmark", async () => {
   const app = await openApp();
   expect(app.count("id:sidebar-brand")).toBe(0);
@@ -102,7 +121,9 @@ test("creates, streams and replays a session", async () => {
   await app.type("id:composer-input", "read the mock file");
   await app.press("id:send-button");
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
-  expect(app.texts()).toContain("Read");
+  await app.waitFor("text:/工作了/");
+  await app.press("text:/工作了/");
+  await app.waitFor("读取");
   expect(app.value("id:composer-input")).toBe("");
 
   await app.press("id:new-task");

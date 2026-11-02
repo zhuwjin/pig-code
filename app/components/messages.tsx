@@ -1,171 +1,707 @@
-import { Accessor, List, Text, View } from "nsh";
-import { DiffView, TextView } from "nsh/base";
-import type { ChatItem, MarkdownItem, ToolItem } from "../protocol";
+import {
+  Accessor,
+  Clipboard,
+  Image,
+  List,
+  type YNode,
+  Scroll,
+  Text,
+  View,
+  computed,
+  effect,
+  keymap,
+  openUrl,
+  signal,
+  token,
+} from "nsh";
+import { Button, Collapsible, Input, TextView } from "nsh/base";
+import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, UserItem } from "../protocol";
 import type { UiContext } from "../ui-context";
+import {
+  buildConversationRows,
+  conversationRowsEqual,
+  type ConversationRow,
+  formatClock,
+  formatDuration,
+  formatTokens,
+  lastNonEmptyLine,
+  mentionSegments,
+  userMessageIsLong,
+} from "../conversation";
 import { UiView } from "../plugins/ui-node-factory";
+import { Icon } from "./icon";
+import { ToolRow } from "./tool-card";
+import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
 
-function UserRow(props: UiContext & { item: Accessor<ChatItem> }) {
-  const item = () => props.item() as Extract<ChatItem, { kind: "user" }>;
+type MessageProps = UiContext & {
+  textFor: (item: MarkdownItem) => string;
+  onImage: (source: string, label: string) => void;
+};
+
+function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
+  const item = () => props.item();
+  const long = () => userMessageIsLong(item().text);
+  const open = () => props.store.isExpanded(`user-${item().id}`);
+  const copied = () => props.store.copiedItems()[`user-copy-${item().id}`] ?? false;
+  const segments = () => mentionSegments(item().text, item().files, item().imageNums.length);
+  const unmatched = () => item().files.filter((file) => !item().text.includes(`@${file}`));
+  const canRecall = () => {
+    const id = props.store.current();
+    if (!id || props.store.running()[id]) return false;
+    return (props.store.items()[id] ?? []).findLast((entry) => entry.kind === "user")?.id === item().id;
+  };
   return (
-    <View class="items-end px-1">
+    <View class="group items-end gap-1 px-1">
+      <If when={unmatched().length > 0}>
+        <View class="max-w-[80%] flex-row flex-wrap justify-end gap-1">
+          <Each of={unmatched()} key={(path) => path}>
+            {(path) => (
+              <Button
+                class="flex-row items-center gap-1 rounded bg-accent px-2 py-0.5"
+                onPress={() => props.store.openFile(path())}
+              >
+                <Icon name="file-text" size={12} color={token("muted-foreground")} />
+                <Text class="text-xs text-foreground">{path()}</Text>
+              </Button>
+            )}
+          </Each>
+        </View>
+      </If>
       <View
         class={props.themeStore.classes(
           "chat.user",
-          "max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-3",
+          "rounded-2xl bg-accent px-3 py-2",
         )}
+        style={{ maxWidth: "80%" }}
       >
-        <Text selectable class="text-sm leading-6 text-primary-foreground">{item().text}</Text>
-      </View>
-    </View>
-  );
-}
-
-function MessageMetrics(props: UiContext) {
-  const rate = () => {
-    const id = props.store.current();
-    return id ? (props.store.outputRate()[id] ?? 0) : 0;
-  };
-  return (
-    <If when={rate() > 0}>
-      <View class="mt-1 flex-row items-center gap-2">
-        <Text class="text-xs text-muted-foreground">≈ {rate()} token/s</Text>
-      </View>
-    </If>
-  );
-}
-
-function MarkdownRow(props: UiContext & { item: Accessor<ChatItem> }) {
-  const item = () => props.item() as MarkdownItem;
-  const { themeStore } = props;
-  return (
-    <View class="px-1 py-1">
-      <If when={item().kind === "reasoning"}>
-        <View class="rounded-(--radius) border border-border bg-muted/30 px-3 py-2">
-          <Text class="mb-1 text-xs font-medium text-muted-foreground">思考过程</Text>
-          <Text selectable class="text-sm leading-6 text-muted-foreground">{item().text}</Text>
-        </View>
-      </If>
-      <If when={item().kind === "markdown"}>
-        <TextView
-          markdown={item().text}
-          options={{ streaming: item().streaming }}
-          selectable
-          classes={{
-            root: themeStore.classes("chat.markdown", "text-sm leading-6 text-foreground"),
-            codeBlock: themeStore.classes("markdown.code-block", "border-border bg-tool-surface"),
-            codeBlockHeader: "text-muted-foreground",
-            code: themeStore.classes("markdown.inline-code", "rounded bg-muted text-foreground"),
-            link: "text-info",
-            table: "border-border",
-            tableHead: "bg-muted",
-            rule: "border-border",
-            alertNote: "border-info/40 bg-info/10 text-info",
-            alertTip: "border-success/40 bg-success/10 text-success",
-            alertImportant: "border-primary/40 bg-primary/10 text-foreground",
-            alertWarning: "border-warning/40 bg-warning/10 text-warning",
-            alertCaution: "border-destructive/40 bg-destructive/10 text-destructive",
-          }}
-          codeBlockActions={[{ id: "copy", label: "复制" }]}
-        />
-        <MessageMetrics {...props} />
-      </If>
-    </View>
-  );
-}
-
-function statusLabel(status: ToolItem["status"]): string {
-  switch (status) {
-    case "input": return "接收参数";
-    case "running": return "执行中";
-    case "done": return "完成";
-    case "error": return "失败";
-    case "stopped": return "已停止";
-  }
-}
-
-function ToolRow(props: UiContext & { item: Accessor<ChatItem> }) {
-  const item = () => props.item() as ToolItem;
-  const { themeStore } = props;
-  return (
-    <View class="overflow-hidden rounded-(--radius) border border-border bg-tool-surface">
-      <View class="flex-row items-center gap-2 border-b border-border px-3 py-2">
-        <Text class="flex-1 text-sm font-medium text-foreground">{item().tool}</Text>
-        <Text class="text-xs text-muted-foreground">{statusLabel(item().status)}</Text>
-      </View>
-      <View class="gap-2 px-3 py-3">
-        <If when={item().summary}>
-          <Text selectable numberOfLines={4} class="font-mono text-xs leading-5 text-muted-foreground">
-            {item().summary}
-          </Text>
-        </If>
-        <If when={item().detail && item().status === "input"}>
-          <Text numberOfLines={5} class="font-mono text-xs leading-5 text-muted-foreground">
-            {item().detail}
-          </Text>
-        </If>
-        <If when={item().output}>
-          <Text selectable numberOfLines={10} class="font-mono text-xs leading-5 text-foreground">
-            {item().output.length > 5000 ? `${item().output.slice(0, 5000)}\n… 输出已截断` : item().output}
-          </Text>
-        </If>
-        <If when={item().edit}>
-          <View class={themeStore.classes("diff.root", "h-80 overflow-hidden rounded-(--radius) border border-border")}>
-            <DiffView
-              patch={item().edit!.unified_diff}
-              language={item().edit!.path}
-              layout="unified"
-              softWrap
-              classes={{
-                gutter: themeStore.classes("diff.gutter", "bg-tool-surface"),
-                lineAdded: themeStore.classes("diff.line-added", "bg-diff-added"),
-                lineDeleted: themeStore.classes("diff.line-deleted", "bg-diff-deleted"),
-                wordAdded: themeStore.classes("diff.word-added", "bg-diff-added-word"),
-                wordDeleted: themeStore.classes("diff.word-deleted", "bg-diff-deleted-word"),
-                indicatorAdded: "bg-success",
-                indicatorDeleted: "bg-destructive",
-                separator: "bg-muted text-muted-foreground",
-                fileHeader: "bg-secondary text-secondary-foreground",
+        <If when={item().imageNums.length > 0}>
+          <View class="flex-row flex-wrap gap-2 pb-2">
+            <Each of={item().imageNums} key={(number) => number}>
+              {(number, index) => {
+                const source = () => props.store.current()
+                  ? props.store.sessionImageSource(props.store.current()!, number())
+                  : "";
+                return (
+                  <Button
+                    testID={`user-image-${item().id}-${number()}`}
+                    accessibilityLabel={`图片 ${index() + 1}`}
+                    class="h-32 w-40 overflow-hidden rounded-lg border border-border"
+                    onPress={() => props.onImage(source(), `图片 ${index() + 1}`)}
+                  >
+                    <If when={source()}>
+                      <Image src={source()} resizeMode="cover" class="h-32 w-40" fadeDuration={150} />
+                    </If>
+                  </Button>
+                );
               }}
-            />
+            </Each>
+          </View>
+        </If>
+        <View selectable class={long() && !open() ? "max-h-28 flex-row flex-wrap items-center overflow-hidden" : "flex-row flex-wrap items-center"}>
+          <Each of={segments()} key={(segment) => `${segment.type}-${segment.text}-${segment.index ?? 0}`}>
+            {(segment) => (
+              <View class="flex-row items-center">
+                <If when={segment().type === "text"}>
+                  <Text class="text-sm leading-6 text-foreground">{segment().text}</Text>
+                </If>
+                <If when={segment().type !== "text"}>
+                  <Button
+                    class="flex-row items-center gap-1 rounded bg-accent/60 px-1.5 py-0.5 hover:bg-accent"
+                    onPress={() => {
+                      if (segment().type === "file") props.store.openFile(segment().text);
+                      else if (props.store.current()) {
+                        const number = item().imageNums[segment().index ?? 0];
+                        props.onImage(props.store.sessionImageSource(props.store.current()!, number), segment().text);
+                      }
+                    }}
+                  >
+                    <Icon name={segment().type === "file" ? "file-text" : "image"} size={12} color={token("muted-foreground")} />
+                    <Text class="text-xs text-foreground underline">
+                      {segment().type === "file" ? segment().text.split(/[\\/]/).pop() : segment().text}
+                    </Text>
+                  </Button>
+                </If>
+              </View>
+            )}
+          </Each>
+        </View>
+        <If when={long() && !open()}>
+          <View class="items-center pt-1">
+            <Button
+              testID={`user-expand-${item().id}`}
+              accessibilityLabel="展开消息"
+              class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
+              onPress={() => props.store.toggleExpanded(`user-${item().id}`)}
+            >
+              <Icon name="chevron-down" size={13} color={token("muted-foreground")} />
+            </Button>
+          </View>
+        </If>
+        <If when={long() && open()}>
+          <View class="items-center pt-1">
+            <Button
+              testID={`user-collapse-${item().id}`}
+              accessibilityLabel="收起消息"
+              class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
+              onPress={() => props.store.toggleExpanded(`user-${item().id}`)}
+            >
+              <Icon name="chevron-up" size={13} color={token("muted-foreground")} />
+            </Button>
           </View>
         </If>
       </View>
+      <View class="flex-row items-center gap-1 opacity-0 group-hover:opacity-100">
+        <Text class="mr-1 text-xs text-muted-foreground">{formatClock(item().sentAtMs)}</Text>
+        <Button
+          testID={`copy-user-${item().id}`}
+          accessibilityLabel="复制用户消息"
+          class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
+          onPress={() => {
+            void Clipboard.writeText(item().text).then(() => props.store.markCopied(`user-copy-${item().id}`));
+          }}
+        >
+          <Icon name={copied() ? "check" : "copy"} size={12} color={token(copied() ? "success" : "muted-foreground")} />
+        </Button>
+        <If when={canRecall()}>
+          <Button
+            testID={`recall-${item().id}`}
+            accessibilityLabel="撤回并编辑"
+            class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
+            onPress={() => props.store.recallLastMessage()}
+          >
+            <Icon name="undo-2" size={12} color={token("muted-foreground")} />
+          </Button>
+        </If>
+      </View>
     </View>
   );
 }
 
-function MessageRow(props: UiContext & { item: Accessor<ChatItem> }) {
+function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
+  const item = () => props.item();
+  const open = () => props.store.isExpanded(item().id);
+  const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
   return (
-    <UiView uiId="message.item" store={props.store} class="w-full">
-      <If when={props.item().kind === "user"}><UserRow {...props} /></If>
-      <If when={props.item().kind === "markdown" || props.item().kind === "reasoning"}>
-        <MarkdownRow {...props} />
-      </If>
-      <If when={props.item().kind === "tool"}><ToolRow {...props} /></If>
-      <If when={props.item().kind === "note"}>
-        <Text class="px-1 py-2 text-sm text-muted-foreground">
-          {props.item().kind === "note" ? (props.item() as Extract<ChatItem, { kind: "note" }>).text : ""}
+    <Collapsible
+      open={open()}
+      content={
+        <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
+          <Scroll class="max-h-80">
+            <Text selectable class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
+          </Scroll>
+        </View>
+      }
+    >
+      <View
+        role="button"
+        testID={`thinking-${item().id}`}
+        accessibilityState={{ expanded: open() }}
+        class="flex-row items-center gap-2 py-1"
+        onPress={() => props.store.toggleExpanded(item().id)}
+      >
+        <Icon name="brain" size={16} color={token("muted-foreground")} />
+        <Text class={item().streaming ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm text-muted-foreground"}>
+          {item().streaming ? "思考中" : turn()?.durationMs ? formatDuration(turn()!.durationMs!, "思考了 ") : "思考过程"}
         </Text>
+        <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>
+          <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-muted-foreground">
+            · {lastNonEmptyLine(props.textFor(item()))}
+          </Text>
+        </If>
+        <View class="flex-1" />
+        <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
+      </View>
+    </Collapsible>
+  );
+}
+
+function MarkdownRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
+  const item = () => props.item();
+  const { themeStore } = props;
+  return (
+    <View class="gap-1 px-1 py-1">
+      <TextView
+        markdown={props.textFor(item())}
+        options={{ streaming: item().streaming }}
+        selectable
+        classes={{
+          root: themeStore.classes("chat.markdown", "text-sm leading-6 text-foreground"),
+          codeBlock: themeStore.classes("markdown.code-block", "border-border bg-tool-surface"),
+          codeBlockHeader: "text-muted-foreground",
+          code: themeStore.classes("markdown.inline-code", "rounded bg-muted text-foreground"),
+          link: "text-info",
+          table: "border-border",
+          tableHead: "bg-muted",
+          rule: "border-border",
+          alertNote: "border-info/40 bg-info/10 text-info",
+          alertTip: "border-success/40 bg-success/10 text-success",
+          alertImportant: "border-primary/40 bg-primary/10 text-foreground",
+          alertWarning: "border-warning/40 bg-warning/10 text-warning",
+          alertCaution: "border-destructive/40 bg-destructive/10 text-destructive",
+        }}
+        codeBlockActions={[{ id: "copy", label: "复制" }]}
+      />
+      <If when={(item().sources?.length ?? 0) > 0}>
+        <View class="flex-row flex-wrap items-center gap-2">
+          <Text class="text-xs text-muted-foreground">来源</Text>
+          <Each of={item().sources ?? []} key={(source) => source.url}>
+            {(source) => (
+              <Button
+                class="rounded px-1 py-0.5 hover:bg-accent"
+                onPress={() => openUrl(source().url.trim())}
+                tooltip={source().snippet ?? source().url}
+              >
+                <Text class="text-xs text-info underline">{source().title || source().url}</Text>
+              </Button>
+            )}
+          </Each>
+        </View>
       </If>
+    </View>
+  );
+}
+
+function NoteRow(props: UiContext & { item: Accessor<NoteItem> }) {
+  const item = () => props.item();
+  if (item().noteKind === "compacting" || item().noteKind === "compacted") {
+    const label = () => item().noteKind === "compacting"
+      ? "正在压缩上下文…"
+      : item().usedBefore != null && item().usedAfter != null
+        ? `上下文已压缩（${formatTokens(item().usedBefore!)} → ${formatTokens(item().usedAfter!)} tokens）`
+        : "上下文已压缩";
+    return (
+      <View class="w-full flex-row items-center gap-3 py-2">
+        <View class="h-px flex-1 bg-border" />
+        <Text class={item().noteKind === "compacting" ? "text-sm text-foreground animate-pulse" : "text-sm text-muted-foreground"}>{label()}</Text>
+        <If when={item().noteKind === "compacted"}>
+          <Button onPress={() => props.store.openCompactSummary(item().summary ?? item().text)}>
+            <Text class="text-sm text-info hover:underline">查看摘要</Text>
+          </Button>
+        </If>
+        <View class="h-px flex-1 bg-border" />
+      </View>
+    );
+  }
+  return (
+    <View class="w-full items-center px-1 py-2">
+      <Text selectable class={item().error ? "text-center text-xs text-muted-foreground" : "text-center text-xs text-muted-foreground"}>
+        {item().error ? `⚠ ${item().text}` : item().text}
+      </Text>
+    </View>
+  );
+}
+
+function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }) {
+  const item = () => props.item();
+  return (
+    <View class="gap-2">
+      <Each of={item().notifications} key={(notification) => notification.id}>
+        {(notification) => (
+          <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
+            <Button
+              testID={`notification-${notification().id}`}
+              class="flex-row items-start gap-3 px-3 py-3 hover:bg-accent"
+              onPress={() => {
+                if (notification().kind === "subagent" && notification().agent_id) {
+                  props.store.openSubagent(notification().agent_id!);
+                  return;
+                }
+                const task = props.store.currentTasks().find((candidate) => candidate.id === notification().task_id);
+                if (task) props.store.openTask(task);
+              }}
+            >
+              <Icon name={notification().kind === "subagent" ? "bot" : "square-terminal"} size={17} color={token("muted-foreground")} />
+              <View class="min-w-0 flex-1 gap-1">
+                <View class="flex-row items-center gap-2">
+                  <Text numberOfLines={1} class="min-w-0 flex-1 text-left text-sm font-medium text-foreground">
+                    {notification().title || notification().description}
+                  </Text>
+                  <Text class={notification().severity === "warning" ? "text-xs text-warning" : "text-xs text-success"}>
+                    {notification().status === "completed" ? "完成" : notification().status === "failed" ? "失败" : notification().status}
+                  </Text>
+                </View>
+                <Text selectable class="text-left text-xs leading-5 text-muted-foreground">{notification().body}</Text>
+                <If when={notification().output?.type === "preview"}>
+                  <Text numberOfLines={4} class="text-left font-mono text-xs text-foreground">
+                    {(notification().output as { text?: string } | null | undefined)?.text ?? ""}
+                  </Text>
+                </If>
+              </View>
+            </Button>
+          </View>
+        )}
+      </Each>
+    </View>
+  );
+}
+
+function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
+  const item = () => props.item();
+  return (
+    <View>
+      <If when={item().kind === "user"}>
+        <UserRow {...props} item={() => item() as UserItem} />
+      </If>
+      <If when={item().kind === "reasoning"}>
+        <ReasoningRow {...props} item={() => item() as MarkdownItem} />
+      </If>
+      <If when={item().kind === "markdown"}>
+        <MarkdownRow {...props} item={() => item() as MarkdownItem} />
+      </If>
+      <If when={item().kind === "tool"}>
+        <ToolRow {...props} item={() => item() as Extract<ChatItem, { kind: "tool" }>} />
+      </If>
+      <If when={item().kind === "note"}>
+        <NoteRow {...props} item={() => item() as NoteItem} />
+      </If>
+      <If when={item().kind === "notification"}>
+        <NotificationRow {...props} item={() => item() as NotificationItem} />
+      </If>
+    </View>
+  );
+}
+
+function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; active: boolean; navEligible: boolean }) {
+  const row = () => props.row();
+  return (
+    <UiView
+      uiId="message.item"
+      store={props.store}
+      class={props.active
+        ? `w-full rounded-lg bg-warning/10 ${props.navEligible ? "px-12" : ""}`
+        : `w-full ${props.navEligible ? "px-12" : ""}`}
+    >
+      <View class="mx-auto w-full max-w-[860px] px-4">
+        <If when={row().type === "item"}>
+          <ItemMessageRow {...props} item={() => (row() as Extract<ConversationRow, { type: "item" }>).item} />
+        </If>
+        <If when={row().type === "work"}>
+          <WorkRow {...props} turn={() => (row() as Extract<ConversationRow, { type: "work" }>).turn}>
+            <View class="gap-4 pt-4">
+              <Each of={(row() as Extract<ConversationRow, { type: "work" }>).items} key={(item) => item.id}>
+                {(item) => <ItemMessageRow {...props} item={item} />}
+              </Each>
+            </View>
+          </WorkRow>
+        </If>
+        <If when={row().type === "changes"}>
+          <TurnChangesRow {...props} turn={() => (row() as Extract<ConversationRow, { type: "changes" }>).turn} />
+        </If>
+        <If when={row().type === "actions"}>
+          <TurnActionsRow
+            {...props}
+            turn={() => (row() as Extract<ConversationRow, { type: "actions" }>).turn}
+            markdownText={() => (row() as Extract<ConversationRow, { type: "actions" }>).markdown.map((item) => item.text).join("\n\n")}
+          />
+        </If>
+      </View>
     </UiView>
   );
 }
 
-export function MessageList(props: UiContext & { items: ChatItem[] }) {
+function retryLabel(status: NonNullable<ReturnType<UiContext["store"]["retrying"]>[string]>): string {
+  const reason = Object.keys(status.reason)[0] ?? "Network";
+  const label = reason === "RateLimit" ? "请求受限" : reason === "Server" ? "服务错误" : reason === "EmptyCompletion" ? "空响应" : "网络错误";
+  const wait = Math.round(status.delay_ms / 1000);
+  return `正在重试（${status.attempt}/${status.max_attempts}）${wait ? `，${wait} 秒后` : ""} · ${label}`;
+}
+
+function TailRows(props: UiContext & { navEligible: boolean }) {
+  const now = signal(Date.now());
+  effect(() => {
+    const timer = setInterval(() => now.set(Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  const id = () => props.store.current();
+  const running = () => id() ? (props.store.running()[id()!] ?? false) : false;
+  const turn = () => props.store.currentTurns().findLast((candidate) => candidate.status === "running");
+  const retry = () => id() ? props.store.retrying()[id()!] : null;
+  const hook = () => id() ? props.store.hookRunning()[id()!] : null;
+  const notice = () => id() ? props.store.projectHooks()[id()!] : null;
   return (
-    <View class="flex-1 items-center">
-      <View class="w-full max-w-4xl flex-1 px-4">
-        <List
-          each={props.items}
-          keyExtractor={(item) => item.id}
-          estimatedItemSize={120}
-          maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
-          class="flex-1"
-          contentClass="gap-4 py-4"
-        >
-          {(item) => <MessageRow {...props} item={item} />}
-        </List>
+    <View class={`w-full pb-4 pt-2 ${props.navEligible ? "px-12" : ""}`}>
+      <View class="mx-auto w-full max-w-[860px] gap-4 px-4">
+        <If when={running()}>
+          <View class="flex-row items-center gap-2">
+            <Icon name="loader-circle" size={14} class="animate-spin" color={token("muted-foreground")} />
+            <Text class="text-xs text-muted-foreground animate-pulse">
+              {formatDuration(turn() ? now() - turn()!.startedAt : 0, "正在工作 ")}
+            </Text>
+          </View>
+        </If>
+        <If when={retry()}>
+          {(value) => (
+            <View class="flex-row items-center gap-2">
+              <Icon name="loader-circle" size={13} class="animate-spin" color={token("muted-foreground")} />
+              <Text class="flex-1 text-xs text-muted-foreground">{retryLabel(value())}</Text>
+              <Button testID="retry-now" class="rounded-full border border-border px-2 py-0.5" onPress={() => props.store.retryNow()}>
+                <Text class="text-xs text-foreground">立即重试</Text>
+              </Button>
+            </View>
+          )}
+        </If>
+        <If when={hook()}>
+          {(value) => (
+            <View class="flex-row items-center gap-2">
+              <Icon name="loader-circle" size={13} class="animate-spin" color={token("muted-foreground")} />
+              <Text class="text-xs text-muted-foreground">正在运行 Hook · {value().event}（{value().label}）</Text>
+            </View>
+          )}
+        </If>
+        <If when={notice()}>
+          {(value) => (
+            <View class="flex-row items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
+              <Text class="min-w-0 flex-1 text-xs text-foreground">
+                {value().path} 中有 {value().count} 个项目 Hook 尚未信任
+              </Text>
+              <Button testID="hooks-trust" class="rounded-full border border-border px-2 py-0.5" onPress={() => props.store.trustProjectHooks()}>
+                <Text class="text-xs text-foreground">信任</Text>
+              </Button>
+              <Button testID="hooks-dismiss" class="px-1" onPress={() => props.store.dismissProjectHooks()}>
+                <Text class="text-xs text-muted-foreground">忽略</Text>
+              </Button>
+            </View>
+          )}
+        </If>
       </View>
+    </View>
+  );
+}
+
+export function MessageList(props: UiContext & { items: ChatItem[] }) {
+  const rows = computed(
+    () => buildConversationRows(props.items, props.store.currentTurns()),
+    { equals: conversationRowsEqual },
+  );
+  const textOverrides = signal<Record<string, string>>({});
+  effect(() => {
+    const next: Record<string, string> = {};
+    for (const item of props.items) {
+      if (item.kind === "markdown" || item.kind === "reasoning") next[item.id] = item.text;
+    }
+    textOverrides.set(next);
+  });
+  const textFor = (item: MarkdownItem) => textOverrides()[item.id] ?? item.text;
+  const userRows = () => rows().flatMap((row, index) => row.type === "item" && row.item.kind === "user"
+    ? [{ row, index, user: row.item }]
+    : []);
+  const latestVisible = signal(false);
+  const activeTurn = signal(0);
+  const hoveredTurn = signal<string | null>(null);
+  const searchOpen = signal(false);
+  const query = signal("");
+  const activeMatch = signal(0);
+  const viewportWidth = signal(0);
+  const lightbox = signal<{ source: string; label: string } | null>(null);
+  let list: YNode | undefined;
+  let userScrolledAway = false;
+  let lastOffset = 0;
+  let followedSession: string | null = null;
+  effect(() => {
+    const session = props.store.current();
+    if (session !== followedSession) {
+      followedSession = session;
+      userScrolledAway = false;
+      lastOffset = 0;
+      latestVisible.set(false);
+    }
+    rows();
+    textOverrides();
+    if (userScrolledAway) return;
+    const timer = setTimeout(() => list?.scrollToEnd({ animated: false }), 0);
+    return () => clearTimeout(timer);
+  });
+  const matches = () => {
+    const normalized = query().trim().toLowerCase();
+    if (!normalized) return [];
+    const itemMatches = (item: ChatItem) => {
+      if (item.kind === "user" || item.kind === "markdown" || item.kind === "reasoning" || item.kind === "note") {
+        return item.text.toLowerCase().includes(normalized);
+      }
+      if (item.kind === "tool") return `${item.tool} ${item.summary} ${item.output}`.toLowerCase().includes(normalized);
+      if (item.kind === "notification") {
+        return item.notifications.some((notification) => `${notification.title} ${notification.body}`.toLowerCase().includes(normalized));
+      }
+      return false;
+    };
+    return rows().filter((row) => {
+      if (row.type === "work") return row.items.some(itemMatches);
+      if (row.type !== "item") return false;
+      return itemMatches(row.item);
+    });
+  };
+  const goMatch = (direction: -1 | 1) => {
+    const found = matches();
+    if (!found.length) return;
+    const next = (activeMatch() + direction + found.length) % found.length;
+    activeMatch.set(next);
+    const index = rows().findIndex((row) => row.id === found[next].id);
+    if (index >= 0) {
+      userScrolledAway = true;
+      list?.scrollToIndex({ index, viewPosition: 0.5, animated: true });
+    }
+  };
+  effect(() => keymap.bind({
+    "ctrl+f": () => searchOpen.set(true),
+    "cmd+f": () => searchOpen.set(true),
+    escape: () => {
+      if (lightbox()) lightbox.set(null);
+      else if (searchOpen()) searchOpen.set(false);
+    },
+  }, { when: "always" }));
+  const activeSearchRow = () => matches()[activeMatch()]?.id;
+  const hovered = () => userRows().find((entry) => entry.user.id === hoveredTurn());
+  const previewText = (userId: string) => {
+    const start = props.items.findIndex((item) => item.id === userId);
+    if (start < 0) return "";
+    const nextUser = props.items.findIndex((item, index) => index > start && item.kind === "user");
+    return props.items.slice(start + 1, nextUser < 0 ? undefined : nextUser)
+      .flatMap((item) => item.kind === "markdown" ? [item.text] : [])
+      .join("\n")
+      .slice(0, 300);
+  };
+  let hoverOpenTimer: ReturnType<typeof setTimeout> | undefined;
+  let hoverCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  const hoverIn = (id: string) => {
+    if (hoverCloseTimer) clearTimeout(hoverCloseTimer);
+    if (hoverOpenTimer) clearTimeout(hoverOpenTimer);
+    hoverOpenTimer = setTimeout(() => hoveredTurn.set(id), 120);
+  };
+  const hoverOut = () => {
+    if (hoverOpenTimer) clearTimeout(hoverOpenTimer);
+    hoverCloseTimer = setTimeout(() => hoveredTurn.set(null), 80);
+  };
+  effect(() => () => {
+    if (hoverOpenTimer) clearTimeout(hoverOpenTimer);
+    if (hoverCloseTimer) clearTimeout(hoverCloseTimer);
+  });
+  return (
+    <View
+      class="relative min-h-0 min-w-0 flex-1"
+      onLayout={(event) => viewportWidth.set(event.size.width)}
+    >
+      <List
+        ref={(node) => { list = node; }}
+        testID="message-list"
+        each={rows()}
+        keyExtractor={(row) => row.id}
+        estimatedItemSize={28}
+        class="min-w-0 flex-1"
+        contentClass="gap-4"
+        scrollbar
+        header={<View class="h-4" />}
+        footer={<TailRows {...props} navEligible={userRows().length >= 2} />}
+        onScroll={(event) => {
+          const distance = event.contentSize.height - event.offset.y - event.size.height;
+          if (event.offset.y < lastOffset - 1) userScrolledAway = distance > 120;
+          if (distance <= 120) userScrolledAway = false;
+          lastOffset = event.offset.y;
+          latestVisible.set(userScrolledAway && distance > 120);
+        }}
+        onViewableItemsChange={({ viewableItems }) => {
+          const first = viewableItems[0]?.index ?? 0;
+          const users = userRows();
+          let active = 0;
+          users.forEach((entry, index) => {
+            if (entry.index <= first) active = index;
+          });
+          activeTurn.set(active);
+        }}
+      >
+        {(row) => <MessageRow {...props} row={row} textFor={textFor} active={row().id === activeSearchRow()} navEligible={userRows().length >= 2} onImage={(source, label) => lightbox.set({ source, label })} />}
+      </List>
+      <If when={latestVisible()}>
+        <Button
+          testID="latest-messages"
+          class="absolute bottom-3 right-3 flex-row items-center gap-1 rounded-full border border-border bg-popover px-3 py-1.5 shadow-lg"
+          onPress={() => {
+            userScrolledAway = false;
+            list?.scrollToEnd({ animated: false });
+          }}
+        >
+          <Icon name="arrow-down" size={13} color={token("muted-foreground")} />
+          <Text class="text-xs text-foreground">最新</Text>
+        </Button>
+      </If>
+      <If when={userRows().length >= 2 && viewportWidth() >= 720}>
+        <View class="absolute bottom-24 left-2 top-1/2 z-20 justify-center gap-1.5">
+          <Each of={userRows()} key={(entry) => entry.user.id}>
+            {(entry, index) => (
+              <View
+                class="relative"
+                onHoverIn={() => hoverIn(entry().user.id)}
+                onHoverOut={hoverOut}
+              >
+                <Button
+                  testID={`turn-nav-${entry().user.id}`}
+                  accessibilityLabel={`跳转到回合 ${index() + 1}`}
+                  class={activeTurn() === index() ? "h-7 w-1.5 rounded-full bg-muted-foreground" : "h-5 w-1 rounded-full bg-muted-foreground/40 hover:w-1.5 hover:bg-muted-foreground"}
+                  onPress={() => {
+                    userScrolledAway = true;
+                    list?.scrollToIndex({ index: entry().index, viewPosition: 0, animated: true });
+                  }}
+                />
+              </View>
+            )}
+          </Each>
+        </View>
+      </If>
+      <If when={hovered()}>
+        {(value) => (
+          <View class="absolute bottom-24 left-8 z-30 w-80 gap-2 rounded-xl border border-border bg-popover p-3 shadow-xl pointer-events-none">
+            <Text numberOfLines={2} class="text-sm text-foreground">{value().user.text}</Text>
+            <Text numberOfLines={3} class="text-sm text-muted-foreground">
+              {previewText(value().user.id) || "暂无文字回复"}
+            </Text>
+          </View>
+        )}
+      </If>
+      <If when={searchOpen()}>
+        <View class="absolute right-3 top-2 z-40 flex-row items-center gap-1 rounded-lg border border-border bg-popover p-1.5 shadow-xl">
+          <Input
+            testID="thread-search-input"
+            autoFocus
+            value={query()}
+            onChange={(value) => {
+              query.set(value);
+              activeMatch.set(0);
+            }}
+            onSubmit={() => goMatch(1)}
+            placeholder="搜索当前对话"
+            class="w-64 px-2 text-sm text-foreground"
+          />
+          <Text class="text-xs text-muted-foreground">{matches().length ? activeMatch() + 1 : 0}/{matches().length}</Text>
+          <Button accessibilityLabel="上一个结果" class="h-7 w-7 items-center justify-center" onPress={() => goMatch(-1)}>
+            <Icon name="chevron-up" size={13} color={token("muted-foreground")} />
+          </Button>
+          <Button accessibilityLabel="下一个结果" class="h-7 w-7 items-center justify-center" onPress={() => goMatch(1)}>
+            <Icon name="chevron-down" size={13} color={token("muted-foreground")} />
+          </Button>
+          <Button accessibilityLabel="关闭搜索" class="h-7 w-7 items-center justify-center" onPress={() => searchOpen.set(false)}>
+            <Icon name="x" size={13} color={token("muted-foreground")} />
+          </Button>
+        </View>
+      </If>
+      <If when={lightbox()}>
+        {(value) => (
+          <View class="absolute inset-0 z-50 bg-black/85">
+            <Button accessibilityLabel="关闭图片" class="absolute inset-0" onPress={() => lightbox.set(null)} />
+            <View class="absolute inset-8 items-center justify-center pointer-events-none">
+              <Image src={value().source} resizeMode="contain" class="h-full w-full" />
+            </View>
+            <View class="absolute left-4 top-4 rounded bg-black/50 px-2 py-1">
+              <Text class="text-xs text-white">{value().label}</Text>
+            </View>
+            <Button
+              accessibilityLabel="关闭图片"
+              class="absolute right-4 top-4 h-8 w-8 items-center justify-center rounded-full bg-black/50"
+              onPress={() => lightbox.set(null)}
+            >
+              <Icon name="x" size={16} color="#ffffff" />
+            </Button>
+          </View>
+        )}
+      </If>
     </View>
   );
 }

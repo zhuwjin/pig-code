@@ -1,4 +1,4 @@
-import { Scroll, Text, View } from "nsh";
+import { PanResponder, Scroll, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import type { QueueItem } from "../protocol";
 import type { UiContext } from "../ui-context";
@@ -10,9 +10,38 @@ function QueueRow(props: UiContext & {
   steer: boolean;
 }) {
   const item = () => props.item();
+  const dragY = signal(0);
+  const dragging = signal(false);
+  const pan = PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 3,
+    onPanResponderGrant: () => dragging.set(true),
+    onPanResponderMove: (_, gesture) => dragY.set(gesture.dy),
+    onPanResponderRelease: (_, gesture) => {
+      props.store.reorderQueuedBy(item().id, Math.round(gesture.dy / 72));
+      dragY.set(0);
+      dragging.set(false);
+    },
+    onPanResponderTerminate: () => {
+      dragY.set(0);
+      dragging.set(false);
+    },
+  });
   return (
-    <View class="gap-2 rounded-(--radius) border border-border bg-background/70 px-3 py-2">
+    <View
+      class={dragging()
+        ? "z-10 gap-2 rounded-(--radius) border border-border bg-background px-3 py-2 opacity-90 shadow-xl"
+        : "gap-2 rounded-(--radius) border border-border bg-background/70 px-3 py-2"}
+      style={{ transform: [{ translateY: dragY() }] }}
+    >
       <View class="flex-row items-center gap-2">
+        <View
+          testID={`queue-drag-${item().id}`}
+          accessibilityLabel="拖动排序"
+          class="w-4 cursor-grab items-center"
+          {...pan.panHandlers}
+        >
+          <Text class="text-xs text-muted-foreground">⋮⋮</Text>
+        </View>
         <Text numberOfLines={2} class="min-w-0 flex-1 text-xs leading-5 text-foreground">{item().text}</Text>
         <If when={(item().images?.length ?? 0) > 0}>
           <Text class="text-xs text-muted-foreground">{item().images?.length} 张图片</Text>
