@@ -1,5 +1,6 @@
 import { Accessor, Clipboard, Scroll, Text, token, View } from "nsh";
 import { Button, Collapsible, DiffView, Editor, TextView } from "nsh/base";
+import { t } from "../i18n";
 import type { AgentCard, ToolItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import {
@@ -34,7 +35,7 @@ function CodeCard(props: UiContext & {
         <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.title}</Text>
         <Button
           testID={`wrap-${props.id}`}
-          accessibilityLabel={wrap() ? "关闭自动换行" : "自动换行"}
+          accessibilityLabel={t(wrap() ? "tools.wrap_off" : "tools.wrap_on")}
           class="h-6 w-6 items-center justify-center rounded hover:bg-accent"
           onPress={() => props.store.toggleExpanded(`wrap-${props.id}`)}
         >
@@ -42,7 +43,7 @@ function CodeCard(props: UiContext & {
         </Button>
         <Button
           testID={`copy-${props.id}`}
-          accessibilityLabel="复制代码"
+          accessibilityLabel={t("tools.copy_code")}
           class="h-6 w-6 items-center justify-center rounded hover:bg-accent"
           onPress={() => copyText(props, `copy-${props.id}`, props.code())}
         >
@@ -73,15 +74,18 @@ function ReadBody(props: UiContext & { item: Accessor<ToolItem> }) {
   return (
     <View class="gap-2">
       <If when={parsed()}>
-        {(value) => (
-          <CodeCard
-            {...props}
-            id={props.item().id}
-            title={`${pathParts(props.item().summary).name} · ${value().lines.length} 行${readFirstLine(firstLine()) && readFirstLine(firstLine())! > 1 ? ` · 从 ${readFirstLine(firstLine())} 行` : ""}`}
-            code={() => [...value().lines.map((line) => line.text), ...value().notes].join("\n")}
-            language={props.item().summary}
-          />
-        )}
+        {(value) => {
+          const start = readFirstLine(firstLine());
+          return (
+            <CodeCard
+              {...props}
+              id={props.item().id}
+              title={`${pathParts(props.item().summary).name} · ${t("tools.lines", { count: value().lines.length })}${start && start > 1 ? t("tools.from_line", { line: start }) : ""}`}
+              code={() => [...value().lines.map((line) => line.text), ...value().notes].join("\n")}
+              language={props.item().summary}
+            />
+          );
+        }}
       </If>
       <If when={!parsed()}><GenericBody {...props} /></If>
     </View>
@@ -94,15 +98,15 @@ function BashBody(props: UiContext & { item: Accessor<ToolItem> }) {
       <CodeCard
         {...props}
         id={`${props.item().id}-command`}
-        title="命令"
+        title={t("tools.command")}
         code={() => props.item().summary || props.item().detail}
         language="bash"
       />
       <CodeCard
         {...props}
         id={`${props.item().id}-output`}
-        title="输出"
-        code={() => props.item().output || (props.item().status === "stopped" ? "已停止" : "无输出")}
+        title={t("tools.output")}
+        code={() => props.item().output || (props.item().status === "stopped" ? t("tools.stopped") : t("tools.no_output"))}
         language="text"
         error={props.item().status === "error"}
       />
@@ -167,7 +171,7 @@ function GenericBody(props: UiContext & { item: Accessor<ToolItem> }) {
           </If>
           <If when={!item().output && item().status !== "input" && item().status !== "running"}>
             <Text class="font-mono text-xs text-muted-foreground">
-              {item().status === "stopped" ? "已停止" : "无输出"}
+              {item().status === "stopped" ? t("tools.stopped") : t("tools.no_output")}
             </Text>
           </If>
         </View>
@@ -273,7 +277,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
           <Icon name="bot" size={16} color={token("muted-foreground")} />
           <Text class="text-sm font-medium text-muted-foreground">Swarm</Text>
           <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-muted-foreground">{props.item().summary}</Text>
-          <Text class="text-xs text-info">{complete()}/{agents().length} 完成</Text>
+          <Text class="text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
           <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
         </View>
       </Collapsible>
@@ -302,7 +306,7 @@ function AgentRow(props: UiContext & { agent: Accessor<AgentCard>; status: ToolI
           </Text>
         </View>
         <If when={finished()}>
-          <Text class="text-xs text-success">完成</Text>
+          <Text class="text-xs text-success">{t("tools.done")}</Text>
         </If>
         <If when={!finished()}>
           <Icon name="loader-circle" size={14} class="animate-spin" color={token("muted-foreground")} />
@@ -348,7 +352,7 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
       >
         <Icon name="lightbulb" size={16} color={token("info")} />
         <Text class="flex-1 text-sm text-foreground">
-          {item().status === "done" && approved() ? "计划已批准" : item().status === "input" || item().status === "running" ? "等待计划确认" : "计划未批准"}
+          {t(item().status === "done" && approved() ? "tools.plan_approved" : item().status === "input" || item().status === "running" ? "tools.plan_waiting" : "tools.plan_not_approved")}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
@@ -399,7 +403,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
               </Text>
             </Button>
             <If when={readLineCount(item().output) > 0}>
-              <Text class="shrink-0 text-xs text-muted-foreground">{readLineCount(item().output)} 行</Text>
+              <Text class="shrink-0 text-xs text-muted-foreground">{t("tools.lines", { count: readLineCount(item().output) })}</Text>
             </If>
           </If>
           <If when={item().tool !== "Read"}>
@@ -418,7 +422,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
             </If>
           </If>
           <If when={item().approvalPending}>
-            <Text class="shrink-0 text-xs text-warning">等待批准</Text>
+            <Text class="shrink-0 text-xs text-warning">{t("tools.waiting_approval")}</Text>
           </If>
           <If when={item().status === "error"}>
             <Icon name="x" size={13} color={token("destructive")} />

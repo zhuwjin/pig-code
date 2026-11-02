@@ -1,5 +1,6 @@
 import { effect, keymap, Scroll, signal, Text, View } from "nsh";
 import { Button, Input } from "nsh/base";
+import { t } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { Icon } from "./icon";
@@ -25,7 +26,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
       .map((session) => ({
         id: session.id,
         kind: "session" as const,
-        title: session.title || "未命名会话",
+        title: session.title || t("search.untitled_session"),
         detail: session.cwd,
         path: session.cwd,
       }));
@@ -47,7 +48,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
         id: `command:${command.instance}:${command.command.id}`,
         kind: "command" as const,
         title: command.title,
-        detail: "插件命令",
+        detail: t("search.plugin_command"),
         path: "",
         pluginInstance: command.instance,
         commandId: command.command.id,
@@ -76,7 +77,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
   }, { when: "always" }));
   return (
     <View class="absolute inset-0 z-50">
-      <Button accessibilityLabel="关闭搜索" class="absolute inset-0 bg-black/30" onPress={props.onClose} />
+      <Button accessibilityLabel={t("search.close_label")} class="absolute inset-0 bg-black/30" onPress={props.onClose} />
       <View class="absolute inset-x-0 top-[15%] mx-auto max-h-[480px] w-[560px] max-w-[90%] overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
         <View class="flex-row items-center gap-2 border-b border-border px-3 py-2">
           <Icon name="search" />
@@ -89,7 +90,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
               const result = results()[selected()];
               if (result) choose(result);
             }}
-            placeholder="搜索会话或工作区"
+            placeholder={t("search.placeholder")}
             class="min-w-0 flex-1 text-sm text-foreground selection:bg-foreground placeholder:text-muted-foreground"
           />
         </View>
@@ -111,7 +112,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
               )}
             </Each>
             <If when={results().length === 0}>
-              <Text class="px-3 py-6 text-center text-sm text-muted-foreground">没有匹配结果</Text>
+              <Text class="px-3 py-6 text-center text-sm text-muted-foreground">{t("search.no_results")}</Text>
             </If>
           </View>
         </Scroll>

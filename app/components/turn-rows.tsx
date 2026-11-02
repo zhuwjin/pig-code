@@ -1,5 +1,6 @@
 import { Accessor, Clipboard, Text, token, View, type JSX } from "nsh";
 import { Button, Collapsible, Popover } from "nsh/base";
+import { t } from "../i18n";
 import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration, formatTokens, turnSpeed } from "../conversation";
@@ -16,7 +17,7 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
         onPress={() => props.store.toggleTurnExpanded(turn().id)}
       >
         <Text class="text-xs text-muted-foreground">
-          {turn().status === "stopped" ? "已停止" : formatDuration(turn().durationMs ?? 0, "工作了 ")}
+          {turn().status === "stopped" ? t("turn.stopped") : formatDuration(turn().durationMs ?? 0, t("turn.worked_for"))}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>
@@ -33,7 +34,7 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
     <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
       <View class="flex-row items-center gap-2 px-3 py-2.5">
         <Icon name="file-pen" size={16} color={token("muted-foreground")} />
-        <Text class="flex-1 text-sm font-medium text-muted-foreground">修改了 {turn().changes.length} 个文件</Text>
+        <Text class="flex-1 text-sm font-medium text-muted-foreground">{t("turn.files_changed", { count: turn().changes.length })}</Text>
         <Text class="font-mono text-xs text-success">+{totals().additions}</Text>
         <Text class="font-mono text-xs text-destructive">-{totals().deletions}</Text>
       </View>
@@ -53,7 +54,7 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
               <Text class="font-mono text-xs text-destructive">-{change().deletions}</Text>
               <Button
                 testID={`revert-${turn().id}-${change().path}`}
-                accessibilityLabel={`还原 ${change().path}`}
+                accessibilityLabel={t("turn.restore", { path: change().path })}
                 class="rounded px-1.5 py-0.5 opacity-0 hover:bg-muted group-hover:opacity-100"
                 onPress={() => props.store.revertFile(change().path)}
               >
@@ -69,7 +70,7 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
           onPress={() => props.store.toggleExpanded(`turn-changes-${turn().id}`)}
         >
           <Text class="text-xs text-muted-foreground">
-            {open() ? "收起" : `还有 ${turn().changes.length - 3} 个文件`}
+            {open() ? t("common.collapse") : t("turn.more_files", { count: turn().changes.length - 3 })}
           </Text>
           <Icon name={open() ? "chevron-up" : "chevron-down"} size={12} color={token("muted-foreground")} />
         </Button>
@@ -106,22 +107,22 @@ function StatsPopover(props: UiContext & { turn: Accessor<TurnState>; kind: "spe
       <If when={stats()}>
         {(value) => (
           <View class="gap-2">
-            <Text class="text-sm font-medium text-foreground">{props.kind === "speed" ? "回合速度" : "回合 Token 用量"}</Text>
+            <Text class="text-sm font-medium text-foreground">{t(props.kind === "speed" ? "turn.speed_title" : "turn.usage_title")}</Text>
             <View class="h-px bg-border" />
-            <StatLine label="回合耗时" value={formatDuration(turn().durationMs ?? 0)} />
-            <StatLine label="API 步数" value={String(value().api_steps)} />
+            <StatLine label={t("turn.duration")} value={formatDuration(turn().durationMs ?? 0)} />
+            <StatLine label={t("turn.api_steps")} value={String(value().api_steps)} />
             <If when={props.kind === "speed"}>
-              <StatLine label="模型耗时" value={formatCompactDuration(value().api_ms)} />
-              <StatLine label="首 Token 平均延迟" value={value().ttft_steps ? formatCompactDuration(value().ttft_ms / value().ttft_steps) : "—"} />
-              <StatLine label="工具累计耗时" value={formatCompactDuration(value().tool_ms)} />
-              <StatLine label="纯解码速度" value={speed() ? `${speed()!.toFixed(1)} tok/s` : "—"} />
+              <StatLine label={t("turn.model_time")} value={formatCompactDuration(value().api_ms)} />
+              <StatLine label={t("turn.first_token")} value={value().ttft_steps ? formatCompactDuration(value().ttft_ms / value().ttft_steps) : "—"} />
+              <StatLine label={t("turn.tool_time")} value={formatCompactDuration(value().tool_ms)} />
+              <StatLine label={t("turn.decode_speed")} value={speed() ? `${speed()!.toFixed(1)} tok/s` : "—"} />
             </If>
             <If when={props.kind === "usage"}>
-              <StatLine label="输入" value={value().input.toLocaleString()} />
-              <StatLine label="缓存读取" value={value().cache_read.toLocaleString()} />
-              <StatLine label="输出" value={value().output.toLocaleString()} />
+              <StatLine label={t("turn.input")} value={value().input.toLocaleString()} />
+              <StatLine label={t("turn.cache_read")} value={value().cache_read.toLocaleString()} />
+              <StatLine label={t("turn.output")} value={value().output.toLocaleString()} />
               <StatLine
-                label="缓存命中率"
+                label={t("turn.cache_hit")}
                 value={value().input + value().cache_read > 0
                   ? `${(value().cache_read / (value().input + value().cache_read) * 100).toFixed(1)}%`
                   : "—"}
@@ -161,7 +162,7 @@ export function TurnActionsRow(props: UiContext & {
         <View class="flex-row items-center gap-1">
           <Icon name="shield-alert" size={12} color={token("warning")} />
           <Text class="text-xs text-warning">
-            {turn().finishReason === "length" ? "回复因长度限制被截断" : "回复因内容过滤而停止"}
+            {t(turn().finishReason === "length" ? "turn.truncated" : "turn.filtered")}
           </Text>
         </View>
       </If>
@@ -169,7 +170,7 @@ export function TurnActionsRow(props: UiContext & {
         <If when={props.markdownText()}>
           <Button
             testID={`copy-turn-${turn().id}`}
-            accessibilityLabel="复制回答"
+            accessibilityLabel={t("turn.copy_answer")}
             class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
             onPress={() => {
               void Clipboard.writeText(props.markdownText()).then(() => props.store.markCopied(`turn-copy-${turn().id}`));
@@ -180,7 +181,7 @@ export function TurnActionsRow(props: UiContext & {
         </If>
         <Button
           testID={`fork-${turn().id}`}
-          accessibilityLabel="从此回合 Fork"
+          accessibilityLabel={t("turn.fork")}
           class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
           onPress={() => props.store.forkTurn(turn().id)}
         >
@@ -189,7 +190,7 @@ export function TurnActionsRow(props: UiContext & {
         <If when={turn().hooks.length > 0}>
           <Button
             testID={`hooks-${turn().id}`}
-            accessibilityLabel="查看 Hook 汇总"
+            accessibilityLabel={t("turn.hooks_summary")}
             class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
             onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`)}
           >
@@ -202,7 +203,7 @@ export function TurnActionsRow(props: UiContext & {
           <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>
         </If>
         <If when={!stats() && turn().durationMs}>
-          <Text class="text-xs text-muted-foreground">回合结束 · {formatCompactDuration(turn().durationMs!)}</Text>
+          <Text class="text-xs text-muted-foreground">{t("turn.finished", { duration: formatCompactDuration(turn().durationMs!) })}</Text>
         </If>
       </View>
       <Collapsible open={hooksOpen()} content={
@@ -214,7 +215,7 @@ export function TurnActionsRow(props: UiContext & {
                   <Text class="flex-1 text-xs font-medium text-foreground">{hook().label}</Text>
                   <Text class="text-xs text-muted-foreground">{formatCompactDuration(hook().duration_ms)}</Text>
                   <Text class={hook().state === "failed" || hook().state === "blocked" ? "text-xs text-destructive" : "text-xs text-success"}>
-                    {hook().state === "finished" ? "完成" : hook().state === "blocked" ? "已阻止" : "失败"}
+                    {t(hook().state === "finished" ? "turn.hook.finished" : hook().state === "blocked" ? "turn.hook.blocked" : "turn.hook.failed")}
                   </Text>
                 </View>
                 <Text class="text-xs text-muted-foreground">{hook().hook_event}</Text>

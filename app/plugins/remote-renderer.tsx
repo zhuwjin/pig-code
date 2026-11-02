@@ -1,5 +1,6 @@
 import { Image, Scroll, Text, View, type AccessibilityRole, type JSX } from "nsh";
 import { Input } from "nsh/base";
+import { t } from "../i18n";
 import type {
   PluginPackageInfo,
   PluginUiContribution,
@@ -71,7 +72,7 @@ function renderNode(
   visited: ReadonlySet<string>,
   hostChildren?: JSX.Element,
 ): JSX.Element {
-  if (visited.has(node.id)) return <Text role="alert">远程 UI 存在循环引用</Text>;
+  if (visited.has(node.id)) return <Text role="alert">{t("plugins.remote.cycle")}</Text>;
   const nextVisited = new Set(visited);
   nextVisited.add(node.id);
   const children: JSX.Element[] = node.children.map((id) => {
@@ -120,7 +121,7 @@ function renderNode(
   }
   if (node.kind === "image") {
     const source = resource(context, node.source);
-    if (!source) return <Text role="alert">无法解析签名资源：{node.source ?? "未提供"}</Text>;
+    if (!source) return <Text role="alert">{t("plugins.remote.unresolved_resource", { source: node.source ?? t("common.not_provided") })}</Text>;
     return <Image testID={testID} src={source} style={style} {...props} {...accessibility} {...events} />;
   }
   return (
@@ -160,10 +161,10 @@ export function RemoteContribution(props: RemoteContributionProps) {
 
 function renderRemoteContribution(props: RemoteContributionProps): JSX.Element {
   const value = props.document;
-  if (!value) return <Text class="text-xs text-muted-foreground">插件输出尚未就绪</Text>;
+  if (!value) return <Text class="text-xs text-muted-foreground">{t("plugins.remote.not_ready")}</Text>;
   const node = exportedNode(value, props.exportName);
-  if (node === undefined) return <Text role="alert">插件未提供导出 {props.exportName}</Text>;
-  if (!node) return <Text class="text-xs text-muted-foreground">插件没有提供此界面</Text>;
+  if (node === undefined) return <Text role="alert">{t("plugins.remote.missing_export", { name: props.exportName ?? "" })}</Text>;
+  if (!node) return <Text class="text-xs text-muted-foreground">{t("plugins.remote.missing_view")}</Text>;
   const context: RenderContext = {
     document: value,
     nodes: new Map(value.nodes.map((node) => [node.id, node])),

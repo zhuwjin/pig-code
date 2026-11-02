@@ -1,5 +1,6 @@
 import { Scroll, signal, Text, View } from "nsh";
 import { Button, Input } from "nsh/base";
+import { t } from "../../i18n";
 import { Icon } from "../icon";
 import { ProviderIcon } from "./provider-icon";
 import { presetMatchesQuery, SORTED_PROVIDER_PRESETS, type PresetProvider } from "./provider-presets";
@@ -13,12 +14,12 @@ export function PresetPicker(props: {
   const presets = () => SORTED_PROVIDER_PRESETS.filter((preset) => presetMatchesQuery(preset, query()));
   return (
     <View class="absolute inset-0 z-50 items-center justify-center">
-      <Button accessibilityLabel="关闭供应商预设" class="absolute inset-0 bg-black/30" onPress={props.onClose} />
+      <Button accessibilityLabel={t("settings.models.preset.close_label")} class="absolute inset-0 bg-black/30" onPress={props.onClose} />
       <View testID="preset-picker" class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl">
         <View class="flex-row items-center">
-          <Text class="flex-1 text-lg font-semibold text-foreground">添加供应商</Text>
-          <Button testID="preset-picker-close" accessibilityLabel="关闭供应商预设" class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onClose}>
-            <Text class="text-sm text-muted-foreground">关闭</Text>
+          <Text class="flex-1 text-lg font-semibold text-foreground">{t("settings.models.preset.title")}</Text>
+          <Button testID="preset-picker-close" accessibilityLabel={t("settings.models.preset.close_label")} class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onClose}>
+            <Text class="text-sm text-muted-foreground">{t("common.close")}</Text>
           </Button>
         </View>
         <Input
@@ -26,12 +27,12 @@ export function PresetPicker(props: {
           value={query()}
           onChange={(text) => query.set(text)}
           autoFocus
-          placeholder="搜索供应商、地址或模型"
+          placeholder={t("settings.models.preset.search")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
         <Scroll class="max-h-[480px]">
           <View class="gap-4 pr-1">
-            <Text class="text-sm text-muted-foreground">选择预设快速创建，或添加自定义供应商。</Text>
+            <Text class="text-sm text-muted-foreground">{t("settings.models.preset.description")}</Text>
             <View class="flex-row flex-wrap gap-2">
               <Button
                 testID="preset-custom"
@@ -43,8 +44,8 @@ export function PresetPicker(props: {
                     <Icon name="plus" size={16} />
                   </View>
                   <View class="min-w-0 flex-1 gap-0.5">
-                    <Text class="text-sm font-medium text-foreground">自定义供应商</Text>
-                    <Text numberOfLines={1} class="text-xs text-muted-foreground">配置兼容的 API 地址</Text>
+                    <Text class="text-sm font-medium text-foreground">{t("settings.models.custom_provider")}</Text>
+                    <Text numberOfLines={1} class="text-xs text-muted-foreground">{t("settings.models.preset.custom_description")}</Text>
                   </View>
                 </View>
               </Button>
@@ -70,13 +71,13 @@ export function PresetPicker(props: {
               </Each>
             </View>
             <If when={presets().length === 0}>
-              <Text testID="preset-picker-empty" class="text-sm text-muted-foreground">没有匹配的供应商</Text>
+              <Text testID="preset-picker-empty" class="text-sm text-muted-foreground">{t("settings.models.no_matching_providers")}</Text>
             </If>
           </View>
         </Scroll>
         <View class="flex-row justify-end">
           <Button testID="cancel-preset-picker" class="rounded-(--radius) border border-border px-3 py-1.5 hover:bg-muted" onPress={props.onClose}>
-            <Text class="text-xs text-foreground">取消</Text>
+            <Text class="text-xs text-foreground">{t("common.cancel")}</Text>
           </Button>
         </View>
       </View>

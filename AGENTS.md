@@ -14,3 +14,11 @@ Before writing or modifying UI, consult the official NSH examples or documentati
 - [Coding guides](https://nsh.dev/docs/coding-guides/)
 
 Run `nsh check && nsh test` after making changes.
+
+## Internationalization
+
+- UI copy lives in `app/locales/en.json` and `app/locales/zh-CN.json` under hierarchical semantic keys (`settings.appearance.title`, `settings.appearance.mode.light`); call `t("settings.appearance.title", { name })` from `app/i18n.ts`. English is the fallback.
+- Keep both catalogs in sync. A word with different meanings in different contexts gets a distinct key; do not reuse a generic key across contexts.
+- Source code, comments and docs are English-only. Only locale catalogs and documentation may contain other languages.
+- Tests may pin `locale: "zh-CN"` and assert localized copy.
+- Do not add new hardcoded UI strings.

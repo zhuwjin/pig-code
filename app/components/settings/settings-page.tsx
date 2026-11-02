@@ -1,4 +1,5 @@
 import { View } from "nsh";
+import type { MessageKey } from "../../i18n";
 import type { UiContext } from "../../ui-context";
 import type { IconName } from "../icon";
 import { ModelSettings } from "./model-settings";
@@ -7,10 +8,10 @@ import { hostPatchProps, UiNodeFactory } from "../../plugins/ui-node-factory";
 
 export type SettingsPageId = "models" | "appearance" | "plugins";
 
-export const SETTINGS_PAGES: { id: SettingsPageId; title: string; icon: IconName }[] = [
-  { id: "models", title: "模型设置", icon: "settings" },
-  { id: "appearance", title: "外观", icon: "sun" },
-  { id: "plugins", title: "插件管理", icon: "sliders-horizontal" },
+export const SETTINGS_PAGES: { id: SettingsPageId; titleKey: MessageKey; icon: IconName }[] = [
+  { id: "models", titleKey: "settings.nav.models", icon: "settings" },
+  { id: "appearance", titleKey: "settings.nav.appearance", icon: "sun" },
+  { id: "plugins", titleKey: "settings.nav.plugins", icon: "sliders-horizontal" },
 ];
 
 export function SettingsPage(props: UiContext & { page: SettingsPageId }) {

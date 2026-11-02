@@ -1,5 +1,6 @@
 import { Text, View } from "nsh";
 import { Button, Input, Switch } from "nsh/base";
+import { t, tCount } from "../../i18n";
 import type { ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
 import { ProviderIcon, ProviderIconButton } from "./provider-icon";
@@ -20,7 +21,7 @@ function formatShort(provider: ProviderConfig): string {
 
 function reasoningLabel(model: () => ModelConfig): string {
   const levels = model().reasoning_levels ?? [];
-  return levels.length ? levels.map((level) => model().reasoning_labels?.[level] ?? level).join("、") : "—";
+  return levels.length ? levels.map((level) => model().reasoning_labels?.[level] ?? level).join(t("common.list_separator")) : "—";
 }
 
 function FleetModelRow(props: UiContext & {
@@ -35,7 +36,7 @@ function FleetModelRow(props: UiContext & {
     <View class="flex-row items-center gap-2 border-t border-border px-3 py-2 hover:bg-accent/30">
       <ProviderIconButton
         testID={`model-icon-picker-${provider.id}-${model().id}`}
-        accessibilityLabel={`选择模型图标 ${model().name || model().id}`}
+        accessibilityLabel={t("settings.models.select_icon", { name: model().name || model().id })}
         icon={() => model().icon}
         kind="model"
         size={20}
@@ -48,7 +49,7 @@ function FleetModelRow(props: UiContext & {
       <Text class="w-14 shrink-0 text-sm text-foreground">{formatTokens(model().context_window)}</Text>
       <Text class="w-14 shrink-0 text-sm text-foreground">{formatTokens(model().max_output_tokens)}</Text>
       <View class="w-28 shrink-0 flex-row gap-1">
-        <If when={model().input_image}><Text class="text-[10px] text-muted-foreground">视觉</Text></If>
+        <If when={model().input_image}><Text class="text-[10px] text-muted-foreground">{t("settings.models.vision")}</Text></If>
         <If when={model().input_pdf}><Text class="text-[10px] text-muted-foreground">PDF</Text></If>
         <If when={!model().input_image && !model().input_pdf}><Text class="text-xs text-muted-foreground">—</Text></If>
       </View>
@@ -56,7 +57,7 @@ function FleetModelRow(props: UiContext & {
       <View class="w-12 shrink-0">
         <Switch
           testID={`model-toggle-${provider.id}-${model().id}`}
-          accessibilityLabel={`${model().enabled ? "停用" : "启用"}模型 ${model().id}`}
+          accessibilityLabel={t(model().enabled ? "settings.models.disable_model" : "settings.models.enable_model", { id: model().id })}
           checked={model().enabled}
           onChange={(checked) => store.setModelEnabled(provider.id, model().id, checked)}
           trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
@@ -66,19 +67,19 @@ function FleetModelRow(props: UiContext & {
       <View class="w-20 shrink-0 flex-row justify-end gap-1">
         <Button
           testID={`model-edit-${provider.id}-${model().id}`}
-          accessibilityLabel={`编辑模型 ${model().id}`}
+          accessibilityLabel={t("settings.models.edit_model", { id: model().id })}
           class="rounded px-1.5 py-1 hover:bg-accent"
           onPress={props.onEdit}
         >
-          <Text class="text-[11px] text-muted-foreground">编辑</Text>
+          <Text class="text-[11px] text-muted-foreground">{t("common.edit")}</Text>
         </Button>
         <Button
           testID={`model-delete-${provider.id}-${model().id}`}
-          accessibilityLabel={`删除模型 ${model().id}`}
+          accessibilityLabel={t("settings.models.delete_model", { id: model().id })}
           class="rounded px-1.5 py-1 hover:bg-destructive/10"
           onPress={() => store.deleteModel(provider.id, model().id)}
         >
-          <Text class="text-[11px] text-destructive">删除</Text>
+          <Text class="text-[11px] text-destructive">{t("common.delete")}</Text>
         </Button>
       </View>
     </View>
@@ -113,24 +114,24 @@ export function FleetView(props: UiContext & {
             testID="all-model-search"
             value={props.query}
             onChange={props.onQuery}
-            placeholder="搜索模型或供应商"
+            placeholder={t("settings.models.search_all")}
             class="rounded-(--radius) border border-border bg-card px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
           />
         </View>
         <View class="flex-1" />
         <Button testID="fleet-provider-add" class="rounded-(--radius) border border-border px-3 py-2 hover:bg-accent" onPress={props.onAddProvider}>
-          <Text class="text-sm text-foreground">＋ 添加供应商 …</Text>
+          <Text class="text-sm text-foreground">{t("settings.models.add_provider")}</Text>
         </Button>
       </View>
       <View class="rounded-lg border border-border bg-card">
         <View class="flex-row items-center gap-2 px-3 py-2">
-          <Text class="flex-1 text-xs text-muted-foreground">模型</Text>
-          <Text class="w-14 text-xs text-muted-foreground">上下文</Text>
-          <Text class="w-14 text-xs text-muted-foreground">输出</Text>
-          <Text class="w-28 text-xs text-muted-foreground">能力</Text>
-          <Text class="w-36 text-xs text-muted-foreground">推理等级</Text>
-          <Text class="w-12 text-xs text-muted-foreground">启用</Text>
-          <Text class="w-20 text-right text-xs text-muted-foreground">操作</Text>
+          <Text class="flex-1 text-xs text-muted-foreground">{t("settings.models.table.model")}</Text>
+          <Text class="w-14 text-xs text-muted-foreground">{t("settings.models.table.context")}</Text>
+          <Text class="w-14 text-xs text-muted-foreground">{t("settings.models.table.output")}</Text>
+          <Text class="w-28 text-xs text-muted-foreground">{t("settings.models.table.capabilities")}</Text>
+          <Text class="w-36 text-xs text-muted-foreground">{t("settings.models.table.reasoning")}</Text>
+          <Text class="w-12 text-xs text-muted-foreground">{t("settings.models.table.enabled")}</Text>
+          <Text class="w-20 text-right text-xs text-muted-foreground">{t("settings.models.table.actions")}</Text>
         </View>
         <Each of={groups()} key={(group) => group.provider.id}>
           {(group) => {
@@ -143,8 +144,8 @@ export function FleetView(props: UiContext & {
                   <ProviderIcon icon={() => provider().icon} size={18} />
                   <Text numberOfLines={1} class="text-sm font-semibold text-foreground">{provider().name}</Text>
                   <Text class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{formatShort(provider())}</Text>
-                  <Text class="text-xs text-muted-foreground">{provider().models.length} 个模型</Text>
-                  <If when={!hasKey()}><Text class="text-xs text-warning">缺少密钥</Text></If>
+                  <Text class="text-xs text-muted-foreground">{tCount("settings.models.model_count", provider().models.length)}</Text>
+                  <If when={!hasKey()}><Text class="text-xs text-warning">{t("settings.models.missing_key")}</Text></If>
                   <View class="flex-1" />
                   <View class="w-12">
                     <Switch
@@ -161,7 +162,7 @@ export function FleetView(props: UiContext & {
                       class="rounded px-1.5 py-1 hover:bg-accent"
                       onPress={() => props.onSelectProvider(provider().id)}
                     >
-                      <Text class="text-[11px] text-muted-foreground">供应商设置</Text>
+                      <Text class="text-[11px] text-muted-foreground">{t("settings.models.provider_settings")}</Text>
                     </Button>
                   </View>
                 </View>
@@ -183,7 +184,7 @@ export function FleetView(props: UiContext & {
                       class="w-full rounded-(--radius) border border-dashed border-border px-3 py-2 hover:bg-accent"
                       onPress={() => props.onEditModel(provider().id)}
                     >
-                      <Text class="text-xs text-muted-foreground">＋ 添加模型 …</Text>
+                      <Text class="text-xs text-muted-foreground">{t("settings.models.add_model")}</Text>
                     </Button>
                   </View>
                 </If>
@@ -193,7 +194,7 @@ export function FleetView(props: UiContext & {
         </Each>
         <If when={groups().length === 0}>
           <View class="items-center border-t border-border py-8">
-            <Text class="text-sm text-muted-foreground">{props.query.trim() ? "没有匹配的模型" : "还没有供应商"}</Text>
+            <Text class="text-sm text-muted-foreground">{t(props.query.trim() ? "settings.models.no_matching_models" : "settings.models.no_providers")}</Text>
           </View>
         </If>
       </View>

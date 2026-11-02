@@ -2,31 +2,36 @@ import { Scroll, signal, Text, token, View } from "nsh";
 import { AlertDialog, Button, Checkbox, Input, Popover } from "nsh/base";
 import { filterSlashCommands, modeForPermissions, permissionsForMode } from "../commands";
 import type { SlashCommand } from "../commands";
+import { t } from "../i18n";
+import type { MessageKey } from "../i18n";
 import type { ExecMode } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { Icon, type IconName } from "./icon";
 import { ProviderIcon } from "./settings/provider-icon";
 import { formatTokens } from "../conversation";
 
-const EXEC_MODES: { id: ExecMode; label: string; description: string; icon: IconName }[] = [
-  { id: "read-only", label: "只读", description: "读取和分析，不修改工作区", icon: "eye" },
-  { id: "auto", label: "自动", description: "在工作区内执行，危险操作仍需批准", icon: "shield-check" },
-  { id: "full", label: "完全访问", description: "不使用沙箱，可修改任意文件", icon: "shield-alert" },
+const EXEC_MODES: { id: ExecMode; labelKey: MessageKey; descriptionKey: MessageKey; icon: IconName }[] = [
+  { id: "read-only", labelKey: "permissions.mode.read_only", descriptionKey: "permissions.mode.read_only_description", icon: "eye" },
+  { id: "auto", labelKey: "permissions.mode.auto", descriptionKey: "permissions.mode.auto_description", icon: "shield-check" },
+  { id: "full", labelKey: "permissions.mode.full", descriptionKey: "permissions.mode.full_description", icon: "shield-alert" },
 ];
 
 export function PermissionPicker(props: UiContext) {
   const open = signal(false);
   const configuration = () => props.store.configuration();
   const mode = () => modeForPermissions(configuration().permissions);
-  const label = () => EXEC_MODES.find((item) => item.id === mode())?.label ?? "自定义";
+  const label = () => {
+    const item = EXEC_MODES.find((entry) => entry.id === mode());
+    return item ? t(item.labelKey) : t("permissions.mode.custom");
+  };
   const select = async (value: ExecMode) => {
     if (value === "full") {
       const answer = await AlertDialog.show({
-        title: "启用完全访问？",
-        description: "Agent 将不受工作区沙箱限制，也不会进行常规操作审批。仅在你信任当前任务时启用。",
+        title: t("permissions.full_access.title"),
+        description: t("permissions.full_access.description"),
         actions: [
-          { id: "cancel", label: "取消", role: "cancel" },
-          { id: "full", label: "启用完全访问", role: "destructive" },
+          { id: "cancel", label: t("common.cancel"), role: "cancel" },
+          { id: "full", label: t("permissions.full_access.enable"), role: "destructive" },
         ],
       });
       if (answer !== "full") return;
@@ -61,8 +66,8 @@ export function PermissionPicker(props: UiContext) {
               >
                 <View class="flex-row items-center gap-2">
                   <View class="min-w-0 flex-1 gap-0.5">
-                    <Text class="text-sm font-medium text-foreground">{item().label}</Text>
-                    <Text class="text-xs leading-5 text-muted-foreground">{item().description}</Text>
+                    <Text class="text-sm font-medium text-foreground">{t(item().labelKey)}</Text>
+                    <Text class="text-xs leading-5 text-muted-foreground">{t(item().descriptionKey)}</Text>
                   </View>
                   <If when={mode() === item().id}><Text class="text-sm text-primary">✓</Text></If>
                 </View>
@@ -78,8 +83,8 @@ export function PermissionPicker(props: UiContext) {
             indicatorClass="h-4 w-4 rounded border border-border"
           >
             <View class="flex-1 gap-0.5">
-              <Text class="text-sm font-medium text-foreground">Plan 模式</Text>
-              <Text class="text-xs leading-5 text-muted-foreground">先制定计划，批准后再修改文件</Text>
+              <Text class="text-sm font-medium text-foreground">{t("composer.plan_mode")}</Text>
+              <Text class="text-xs leading-5 text-muted-foreground">{t("composer.plan_mode_description")}</Text>
             </View>
           </Checkbox>
         </View>
@@ -87,7 +92,7 @@ export function PermissionPicker(props: UiContext) {
       <If when={configuration().planEnabled}>
         <Button
           testID="plan-chip"
-          accessibilityLabel="关闭 Plan 模式"
+          accessibilityLabel={t("composer.close_plan_mode")}
           class="group flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent"
           onPress={() => props.store.setPlanMode(false)}
         >
@@ -136,7 +141,7 @@ export function ModelPicker(props: UiContext) {
           onLayout={(bounds) => { if (!open()) triggerWidth.set(bounds.size.width); }}
         >
           <Text numberOfLines={1} class="text-sm text-foreground">
-            {open() ? "选择模型" : (props.store.currentModel() || "选择模型")}
+            {open() ? t("composer.select_model") : (props.store.currentModel() || t("composer.select_model"))}
           </Text>
           <If when={!open() && props.store.currentModel() && reasoningLabel()}>
             <Text numberOfLines={1} class="text-sm text-muted-foreground">{reasoningLabel()}</Text>
@@ -150,7 +155,7 @@ export function ModelPicker(props: UiContext) {
           testID="model-search"
           value={query()}
           onChange={(text) => query.set(text)}
-          placeholder="搜索模型或提供商"
+          placeholder={t("composer.search_models")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
         <Scroll class="max-h-72">
@@ -185,7 +190,7 @@ export function ModelPicker(props: UiContext) {
                               </Text>
                             </View>
                             <If when={value().model.input_image}>
-                              <Text class="rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">视觉</Text>
+                              <Text class="rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">{t("settings.models.vision")}</Text>
                             </If>
                             <If when={active()}><Text class="text-sm text-primary">✓</Text></If>
                           </View>
@@ -197,13 +202,13 @@ export function ModelPicker(props: UiContext) {
               )}
             </Each>
             <If when={models().length === 0}>
-              <Text class="px-3 py-4 text-center text-xs text-muted-foreground">没有匹配的可用模型</Text>
+              <Text class="px-3 py-4 text-center text-xs text-muted-foreground">{t("composer.no_models")}</Text>
             </If>
           </View>
         </Scroll>
         <If when={props.store.reasoningOptions().length > 0}>
           <View class="gap-1 border-t border-border pt-2">
-            <Text class="px-2 text-xs font-medium text-muted-foreground">推理等级</Text>
+            <Text class="px-2 text-xs font-medium text-muted-foreground">{t("composer.reasoning_level")}</Text>
             <View class="flex-row flex-wrap gap-1">
               <Button
                 testID="reasoning-off"
@@ -211,7 +216,7 @@ export function ModelPicker(props: UiContext) {
                 class="rounded-full px-3 py-1 hover:bg-accent selected:bg-accent"
                 onPress={() => props.store.setReasoning(null)}
               >
-                <Text class="text-xs text-foreground">关闭</Text>
+                <Text class="text-xs text-foreground">{t("composer.reasoning_off")}</Text>
               </Button>
               <Each of={props.store.reasoningOptions()} key={(option) => option.id}>
                 {(option) => (
@@ -237,7 +242,7 @@ export function ModelPicker(props: UiContext) {
           }}
         >
           <Icon name="settings" size={14} color={token("muted-foreground")} />
-          <Text class="text-xs text-muted-foreground">管理模型</Text>
+          <Text class="text-xs text-muted-foreground">{t("composer.manage_models")}</Text>
         </Button>
       </View>
     </Popover>
@@ -261,7 +266,7 @@ export function SlashCandidates(props: {
             onPress={() => props.onSelect(command().name)}
           >
             <Text class="w-20 font-mono text-xs text-foreground">{command().name}</Text>
-            <Text class="min-w-0 flex-1 text-xs text-muted-foreground">{command().description}</Text>
+            <Text class="min-w-0 flex-1 text-xs text-muted-foreground">{t(command().descriptionKey)}</Text>
           </Button>
         )}
       </Each>

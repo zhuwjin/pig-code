@@ -15,6 +15,7 @@ import { PluginSequencer, remoteDocumentRejection, safeHostStyle } from "./app/p
 function openApp() {
   return open("./App.selftest.tsx", {
     platform: "macos",
+    locale: "zh-CN",
     width: 1280,
     height: 800,
   });

@@ -134,6 +134,7 @@ test("splits file and image mentions and identifies long user bubbles", () => {
 function openApp() {
   return open("./App.selftest.tsx", {
     platform: "macos",
+    locale: "zh-CN",
     width: 1280,
     height: 800,
   });

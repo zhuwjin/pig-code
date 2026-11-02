@@ -1,5 +1,6 @@
 import { signal, Text, token, View, type JSX } from "nsh";
 import { Button, Popover } from "nsh/base";
+import { t } from "../i18n";
 import type { TaskStatus, TaskSummary } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { changeTotals, formatDuration } from "../conversation";
@@ -7,13 +8,13 @@ import { Icon, type IconName } from "./icon";
 
 function taskStatus(status: TaskStatus): string {
   switch (status) {
-    case "queued": return "排队中";
-    case "running": return "运行中";
-    case "completed": return "完成";
-    case "failed": return "失败";
-    case "timed_out": return "超时";
-    case "killed": return "已停止";
-    case "lost": return "已丢失";
+    case "queued": return t("tasks.status.queued");
+    case "running": return t("tasks.status.running");
+    case "completed": return t("tasks.status.completed");
+    case "failed": return t("tasks.status.failed");
+    case "timed_out": return t("tasks.status.timed_out");
+    case "killed": return t("tasks.status.killed");
+    case "lost": return t("tasks.status.lost");
   }
 }
 
@@ -36,14 +37,14 @@ function TaskPanel(props: UiContext & { kind: "shell" | "subagent" }) {
               onPress={() => filter.set(value())}
             >
               <Text class="text-xs text-muted-foreground">
-                {value() === "running" ? "运行中" : value() === "finished" ? "已完成" : "全部"}
+                {t(value() === "running" ? "tasks.filter.running" : value() === "finished" ? "tasks.filter.finished" : "tasks.filter.all")}
               </Text>
             </Button>
           )}
         </Each>
       </View>
       <If when={tasks().length === 0}>
-        <Text class="py-4 text-center text-xs text-muted-foreground">暂无任务</Text>
+        <Text class="py-4 text-center text-xs text-muted-foreground">{t("tasks.empty")}</Text>
       </If>
       <Each of={tasks()} key={(task) => task.id}>
         {(task) => <TaskRow {...props} task={task} />}
@@ -122,7 +123,7 @@ export function ComposerAux(props: UiContext) {
           {...props}
           id="tasks"
           icon="square-terminal"
-          label="后台终端"
+          label={t("tasks.background_terminal")}
           running={running(shell())}
           content={<TaskPanel {...props} kind="shell" />}
         />
@@ -132,7 +133,7 @@ export function ComposerAux(props: UiContext) {
           {...props}
           id="agent-tasks"
           icon="bot"
-          label="后台 Agent"
+          label={t("tasks.background_agent")}
           running={running(agents())}
           content={<TaskPanel {...props} kind="subagent" />}
         />
@@ -144,7 +145,7 @@ export function ComposerAux(props: UiContext) {
           onPress={() => props.store.openChanges()}
         >
           <Icon name="diff" size={15} color={token("muted-foreground")} />
-          <Text class="text-sm text-muted-foreground">变更</Text>
+          <Text class="text-sm text-muted-foreground">{t("tasks.changes")}</Text>
           <Text class="font-mono text-xs text-success">+{totals().additions}</Text>
           <Text class="font-mono text-xs text-destructive">-{totals().deletions}</Text>
         </Button>
@@ -154,10 +155,10 @@ export function ComposerAux(props: UiContext) {
           {...props}
           id="todos"
           icon="list-todo"
-          label={`${done()}/${todos().length} 待办`}
+          label={t("tasks.todo_count", { done: done(), total: todos().length })}
           content={
             <View class="gap-2">
-              <Text class="text-sm font-medium text-foreground">待办事项</Text>
+              <Text class="text-sm font-medium text-foreground">{t("tasks.todos")}</Text>
               <Each of={todos()} key={(todo) => `${todo.content}-${todo.status}`}>
                 {(todo) => (
                   <View class="flex-row items-start gap-2">

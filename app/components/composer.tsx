@@ -2,6 +2,7 @@ import { effect, Image, keymap, signal, Text, token, View, type YNode } from "ns
 import { Button, Dialog, Input, Popover } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
+import { t } from "../i18n";
 import { fileComposerImage } from "../media";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
@@ -33,7 +34,7 @@ function WorkspaceSelector(props: UiContext) {
           <View role="button" testID="hero-cwd" class="flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent">
             <Icon name="folder-closed" color={token("muted-foreground")} />
             <Text class={selected() ? "text-sm text-foreground" : "text-sm text-muted-foreground"}>
-              {selected() ? workspaceName(selected()!) : "选择工作区"}
+              {selected() ? workspaceName(selected()!) : t("composer.select_workspace")}
             </Text>
             <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
           </View>
@@ -67,7 +68,7 @@ function WorkspaceSelector(props: UiContext) {
                 open.set(false);
               }}
             >
-              <Text class="text-sm text-muted-foreground">清除工作区</Text>
+              <Text class="text-sm text-muted-foreground">{t("composer.clear_workspace")}</Text>
             </Button>
           </If>
         </View>
@@ -87,7 +88,7 @@ function AttachmentStrip(props: UiContext & { onPreview: (source: string) => voi
             <View class="max-w-56 flex-row items-center gap-1 rounded-lg bg-accent px-2 py-1">
               <Icon name="file-text" size={13} color={token("muted-foreground")} />
               <Text numberOfLines={1} class="min-w-0 text-xs text-foreground">{path().split(/[\\/]/).pop()}</Text>
-              <Button accessibilityLabel={`移除 ${path()}`} onPress={() => props.store.removeDraftFile(path())}>
+              <Button accessibilityLabel={t("composer.remove_attachment", { path: path() })} onPress={() => props.store.removeDraftFile(path())}>
                 <Icon name="x" size={11} color={token("muted-foreground")} />
               </Button>
             </View>
@@ -104,7 +105,7 @@ function AttachmentStrip(props: UiContext & { onPreview: (source: string) => voi
                 <Image src={image().preview} resizeMode="cover" class="h-16 w-20" />
               </Button>
               <Button
-                accessibilityLabel="移除图片"
+                accessibilityLabel={t("composer.remove_image")}
                 class="absolute -right-1 -top-1 h-5 w-5 items-center justify-center rounded-full border border-border bg-background"
                 onPress={() => props.store.removeDraftImage(image().id)}
               >
@@ -139,7 +140,7 @@ function MentionCandidates(props: {
         )}
       </Each>
       <If when={props.paths.length === 0}>
-        <Text class="px-3 py-3 text-xs text-muted-foreground">没有匹配文件</Text>
+        <Text class="px-3 py-3 text-xs text-muted-foreground">{t("composer.no_matching_files")}</Text>
       </If>
     </View>
   );
@@ -276,7 +277,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
       render={(patch, children) => (
         <Button
           testID="send-button"
-          accessibilityLabel={(patch.accessibility.accessibilityLabel as string | undefined) ?? "发送"}
+          accessibilityLabel={(patch.accessibility.accessibilityLabel as string | undefined) ?? t("composer.send")}
           disabled={patch.props.disabled === undefined
             ? !store.draft().trim() && store.draftImages().length === 0
             : Boolean(patch.props.disabled)}
@@ -346,7 +347,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                           const converted = await Promise.all(images.map(fileComposerImage));
                           store.addDraftImages(converted);
                           if (images.length < event.files.filter((file) => file.type.startsWith("image/")).length) {
-                            store.globalError.set("每条消息最多添加 8 张图片");
+                            store.globalError.set(t("composer.image_limit"));
                           }
                           for (const uri of event.uris) {
                             const path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/^\/(?=[A-Za-z]:)/, ""));
@@ -359,13 +360,13 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                     disabled={patch.props.disabled as boolean | undefined}
                     pasteBehavior="report"
                     submitBehavior="submit"
-                    placeholder={(patch.props.placeholder as string | undefined) ?? (running()
+                    placeholder={(patch.props.placeholder as string | undefined) ?? t(running()
                       ? store.config()?.default_delivery === "steer"
-                        ? "继续输入以引导后续修改"
-                        : "继续输入以排队后续修改"
+                        ? "composer.steer_hint"
+                        : "composer.queue_hint"
                       : store.config()?.default_delivery === "steer"
-                        ? "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列"
-                        : "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息")}
+                        ? "composer.steer_keys"
+                        : "composer.queue_keys")}
                     class={themeStore.classes(
                       "composer.input",
                       "max-h-40 min-h-10 px-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
@@ -383,7 +384,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
               <If when={running()}>
                 <Button
                   testID="stop-button"
-                  accessibilityLabel="停止"
+                  accessibilityLabel={t("composer.stop")}
                   class="h-6 w-6 items-center justify-center rounded-full bg-destructive"
                   onPress={() => store.stop()}
                 >
@@ -406,7 +407,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
             {(source) => <Image src={source()} resizeMode="contain" class="h-full w-full" />}
           </If>
           <Button
-            accessibilityLabel="关闭图片"
+            accessibilityLabel={t("composer.close_image")}
             class="absolute right-3 top-3 h-8 w-8 items-center justify-center rounded-full bg-black/50"
             onPress={() => preview.set(null)}
           >

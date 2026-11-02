@@ -1,3 +1,4 @@
+import type { MessageKey } from "./i18n";
 import type { ExecMode, MessageDelivery, PermissionSettings } from "./protocol";
 
 export interface SlashCommand {
@@ -5,11 +6,11 @@ export interface SlashCommand {
   instruction?: string;
 }
 
-export const SLASH_COMMANDS = [
-  { name: "/clear", description: "清空当前消息显示" },
-  { name: "/compact", description: "压缩上下文，可附加重点关注的内容" },
-  { name: "/plan", description: "切换 Plan 模式，支持 on / off" },
-] as const;
+export const SLASH_COMMANDS: { name: SlashCommand["name"]; descriptionKey: MessageKey }[] = [
+  { name: "/clear", descriptionKey: "commands.clear" },
+  { name: "/compact", descriptionKey: "commands.compact" },
+  { name: "/plan", descriptionKey: "commands.plan" },
+];
 
 export function parseSlashCommand(text: string): SlashCommand | null {
   const trimmed = text.trim();

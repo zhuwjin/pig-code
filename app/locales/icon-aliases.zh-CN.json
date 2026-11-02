@@ -1,0 +1,22 @@
+[
+  ["智谱", "zhipu"],
+  ["月之暗面", "kimi"],
+  ["深度求索", "deepseek"],
+  ["稀宇", "minimax"],
+  ["百炼", "bailian"],
+  ["通义", "qwen"],
+  ["千问", "qwen"],
+  ["小米", "xiaomimimo"],
+  ["混元", "hunyuan"],
+  ["文心", "wenxin"],
+  ["豆包", "doubao"],
+  ["火山", "volcengine"],
+  ["阶跃", "stepfun"],
+  ["商汤", "sensenova"],
+  ["零一万物", "zeroone"],
+  ["讯飞", "iflytekcloud"],
+  ["谷歌", "google"],
+  ["微软", "microsoft"],
+  ["亚马逊", "aws"],
+  ["英伟达", "nvidia"]
+]

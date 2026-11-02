@@ -1,6 +1,7 @@
 import { List, Text, View, platform, signal, token } from "nsh";
 import { Button, Popover } from "nsh/base";
 import { titleBar } from "nsh/desktop";
+import { t } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
@@ -43,7 +44,7 @@ export function Sidebar(props: UiContext & {
         <If when={platform.os !== "macos"}><SidebarBrand /></If>
         <Button
           testID="sidebar-toggle"
-          accessibilityLabel="折叠侧边栏"
+          accessibilityLabel={t("sidebar.collapse")}
           class="h-8 w-8 items-center justify-center rounded-(--radius) hover:bg-sidebar-accent active:bg-accent"
           onPress={props.onToggle}
         >
@@ -54,13 +55,13 @@ export function Sidebar(props: UiContext & {
         <View class="gap-1 p-2">
           <Button
             testID="new-task"
-            accessibilityLabel="新任务"
+            accessibilityLabel={t("sidebar.new_task")}
             class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
             onPress={() => store.newTask()}
           >
             <View class="flex-row items-center gap-2">
               <Icon name="plus" />
-              <Text class="text-sm text-sidebar-foreground">新建任务</Text>
+              <Text class="text-sm text-sidebar-foreground">{t("sidebar.new_task")}</Text>
               <View class="flex-1" />
               <Text class="rounded border border-border px-1 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
                 {platform.os === "macos" ? "⌘N" : "Ctrl+N"}
@@ -69,13 +70,13 @@ export function Sidebar(props: UiContext & {
           </Button>
           <Button
             testID="open-search"
-            accessibilityLabel="搜索"
+            accessibilityLabel={t("sidebar.search")}
             class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
             onPress={props.onOpenSearch}
           >
             <View class="flex-row items-center gap-2">
               <Icon name="search" />
-              <Text class="text-sm text-sidebar-foreground">搜索</Text>
+              <Text class="text-sm text-sidebar-foreground">{t("sidebar.search")}</Text>
               <View class="flex-1" />
               <Text class="rounded border border-border px-1 text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
                 {platform.os === "macos" ? "⌘K" : "Ctrl+K"}
@@ -86,11 +87,11 @@ export function Sidebar(props: UiContext & {
       </If>
       <If when={props.mode === "workspace"}>
       <View class="flex-row items-center gap-1 pl-3 pr-2 py-1">
-        <Text class="flex-1 text-xs text-muted-foreground">会话</Text>
+        <Text class="flex-1 text-xs text-muted-foreground">{t("sidebar.sessions")}</Text>
         <If when={sidebarView() === "workspace"}>
           <Button
             testID="toggle-workspace"
-            accessibilityLabel={workspaceExpanded() ? "折叠工作区" : "展开工作区"}
+            accessibilityLabel={t(workspaceExpanded() ? "sidebar.collapse_workspace" : "sidebar.expand_workspace")}
             class="h-6 w-6 items-center justify-center rounded-(--radius) hover:bg-sidebar-accent"
             onPress={() => workspaceExpanded.update((expanded) => !expanded)}
           >
@@ -123,7 +124,7 @@ export function Sidebar(props: UiContext & {
                 manageOpen.set(false);
               }}
             >
-              <Text class="flex-1 text-sm text-foreground">按工作区分组</Text>
+              <Text class="flex-1 text-sm text-foreground">{t("sidebar.group_by_workspace")}</Text>
               <If when={sidebarView() === "workspace"}><Text class="text-sm">✓</Text></If>
             </Button>
             <Button
@@ -135,7 +136,7 @@ export function Sidebar(props: UiContext & {
                 manageOpen.set(false);
               }}
             >
-              <Text class="flex-1 text-sm text-foreground">全部会话</Text>
+              <Text class="flex-1 text-sm text-foreground">{t("sidebar.all_sessions")}</Text>
               <If when={sidebarView() === "flat"}><Text class="text-sm">✓</Text></If>
             </Button>
           </View>
@@ -145,7 +146,7 @@ export function Sidebar(props: UiContext & {
       <If when={props.mode === "workspace" && sidebarView() === "workspace"}>
         <Button
           testID="workspace-row"
-          accessibilityLabel={workspaceExpanded() ? "折叠当前工作区" : "展开当前工作区"}
+          accessibilityLabel={t(workspaceExpanded() ? "sidebar.collapse_current_workspace" : "sidebar.expand_current_workspace")}
           class="mx-2 flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent"
           onPress={() => workspaceExpanded.update((expanded) => !expanded)}
         >
@@ -176,7 +177,7 @@ export function Sidebar(props: UiContext & {
             >
               <View class="gap-1">
                 <Text numberOfLines={1} class="text-sm text-sidebar-foreground">
-                  {session().title || "未命名会话"}
+                  {session().title || t("sidebar.untitled_session")}
                 </Text>
                 <Text numberOfLines={1} class="text-xs text-muted-foreground">
                   {session().cwd}
@@ -194,18 +195,18 @@ export function Sidebar(props: UiContext & {
           class="flex-1"
         >
           <View class="gap-1 p-2">
-            <Text class="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">设置</Text>
+            <Text class="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">{t("sidebar.settings")}</Text>
             <Each of={SETTINGS_PAGES} key={(item) => item.id}>
               {(item) => (
                 <Button
                   testID={`settings-${item().id}`}
                   selected={props.settingsPage === item().id}
-                  accessibilityLabel={`打开${item().title}`}
+                  accessibilityLabel={t("sidebar.open_page", { name: t(item().titleKey) })}
                   class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-sidebar-accent selected:bg-sidebar-accent"
                   onPress={() => props.onNavigateSettings(item().id)}
                 >
                   <Icon name={item().icon} size={15} />
-                  <Text class="text-sm text-sidebar-foreground">{item().title}</Text>
+                  <Text class="text-sm text-sidebar-foreground">{t(item().titleKey)}</Text>
                 </Button>
               )}
             </Each>
@@ -224,13 +225,13 @@ export function Sidebar(props: UiContext & {
       <View class="border-t border-sidebar-border p-2">
         <Button
           testID={props.mode === "settings" ? "settings-back" : "settings-open"}
-          accessibilityLabel={props.mode === "settings" ? "返回工作区" : "模型与应用设置"}
+          accessibilityLabel={t(props.mode === "settings" ? "sidebar.return_workspace" : "sidebar.open_settings")}
           class="rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
           onPress={props.mode === "settings" ? props.onBackSettings : props.onOpenSettings}
         >
           <View class="flex-row items-center gap-2">
             <Icon name="settings" />
-            <Text class="text-sm text-sidebar-foreground">{props.mode === "settings" ? "返回工作区" : "设置"}</Text>
+            <Text class="text-sm text-sidebar-foreground">{t(props.mode === "settings" ? "sidebar.return_workspace" : "sidebar.settings")}</Text>
           </View>
         </Button>
       </View>

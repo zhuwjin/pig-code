@@ -169,14 +169,14 @@ export const BUILTIN_THEMES: readonly ThemeDefinition[] = [
   {
     id: DEFAULT_THEME_ID,
     name: "Pig",
-    description: "Pig 中性色",
+    description: "Pig neutral palette",
     source: "builtin",
     cssVars: PIG_CSS_VARS,
   },
   {
     id: "ocean",
     name: "Ocean",
-    description: "清晰的蓝色界面",
+    description: "Clear blue interface",
     source: "builtin",
     cssVars: {
       theme: {

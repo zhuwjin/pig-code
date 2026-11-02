@@ -15,6 +15,7 @@ import {
   token,
 } from "nsh";
 import { Button, Collapsible, Input, TextView } from "nsh/base";
+import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, UserItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import {
@@ -84,9 +85,9 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
                 return (
                   <Button
                     testID={`user-image-${item().id}-${number()}`}
-                    accessibilityLabel={`图片 ${index() + 1}`}
+                    accessibilityLabel={t("messages.image_label", { index: index() + 1 })}
                     class="h-32 w-40 overflow-hidden rounded-lg border border-border"
-                    onPress={() => props.onImage(source(), `图片 ${index() + 1}`)}
+                    onPress={() => props.onImage(source(), t("messages.image_label", { index: index() + 1 }))}
                   >
                     <If when={source()}>
                       <Image src={source()} resizeMode="cover" class="h-32 w-40" fadeDuration={150} />
@@ -129,7 +130,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
           <View class="items-center pt-1">
             <Button
               testID={`user-expand-${item().id}`}
-              accessibilityLabel="展开消息"
+              accessibilityLabel={t("messages.expand")}
               class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
               onPress={() => props.store.toggleExpanded(`user-${item().id}`)}
             >
@@ -141,7 +142,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
           <View class="items-center pt-1">
             <Button
               testID={`user-collapse-${item().id}`}
-              accessibilityLabel="收起消息"
+              accessibilityLabel={t("messages.collapse")}
               class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
               onPress={() => props.store.toggleExpanded(`user-${item().id}`)}
             >
@@ -154,7 +155,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
         <Text class="mr-1 text-xs text-muted-foreground">{formatClock(item().sentAtMs)}</Text>
         <Button
           testID={`copy-user-${item().id}`}
-          accessibilityLabel="复制用户消息"
+          accessibilityLabel={t("messages.copy_user")}
           class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
           onPress={() => {
             void Clipboard.writeText(item().text).then(() => props.store.markCopied(`user-copy-${item().id}`));
@@ -165,7 +166,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
         <If when={canRecall()}>
           <Button
             testID={`recall-${item().id}`}
-            accessibilityLabel="撤回并编辑"
+            accessibilityLabel={t("messages.retract_edit")}
             class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
             onPress={() => props.store.recallLastMessage()}
           >
@@ -201,7 +202,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
         <Text class={item().streaming ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm text-muted-foreground"}>
-          {item().streaming ? "思考中" : turn()?.durationMs ? formatDuration(turn()!.durationMs!, "思考了 ") : "思考过程"}
+          {item().streaming ? t("messages.thinking") : turn()?.durationMs ? formatDuration(turn()!.durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
         </Text>
         <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>
           <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-muted-foreground">
@@ -239,11 +240,11 @@ function MarkdownRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
           alertWarning: "border-warning/40 bg-warning/10 text-warning",
           alertCaution: "border-destructive/40 bg-destructive/10 text-destructive",
         }}
-        codeBlockActions={[{ id: "copy", label: "复制" }]}
+        codeBlockActions={[{ id: "copy", label: t("common.copy") }]}
       />
       <If when={(item().sources?.length ?? 0) > 0}>
         <View class="flex-row flex-wrap items-center gap-2">
-          <Text class="text-xs text-muted-foreground">来源</Text>
+          <Text class="text-xs text-muted-foreground">{t("messages.sources")}</Text>
           <Each of={item().sources ?? []} key={(source) => source.url}>
             {(source) => (
               <Button
@@ -265,17 +266,17 @@ function NoteRow(props: UiContext & { item: Accessor<NoteItem> }) {
   const item = () => props.item();
   if (item().noteKind === "compacting" || item().noteKind === "compacted") {
     const label = () => item().noteKind === "compacting"
-      ? "正在压缩上下文…"
+      ? t("store.compacting")
       : item().usedBefore != null && item().usedAfter != null
-        ? `上下文已压缩（${formatTokens(item().usedBefore!)} → ${formatTokens(item().usedAfter!)} tokens）`
-        : "上下文已压缩";
+        ? t("messages.compacted", { before: formatTokens(item().usedBefore!), after: formatTokens(item().usedAfter!) })
+        : t("messages.compacted_plain");
     return (
       <View class="w-full flex-row items-center gap-3 py-2">
         <View class="h-px flex-1 bg-border" />
         <Text class={item().noteKind === "compacting" ? "text-sm text-foreground animate-pulse" : "text-sm text-muted-foreground"}>{label()}</Text>
         <If when={item().noteKind === "compacted"}>
           <Button onPress={() => props.store.openCompactSummary(item().summary ?? item().text)}>
-            <Text class="text-sm text-info hover:underline">查看摘要</Text>
+            <Text class="text-sm text-info hover:underline">{t("messages.view_summary")}</Text>
           </Button>
         </If>
         <View class="h-px flex-1 bg-border" />
@@ -317,7 +318,7 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
                     {notification().title || notification().description}
                   </Text>
                   <Text class={notification().severity === "warning" ? "text-xs text-warning" : "text-xs text-success"}>
-                    {notification().status === "completed" ? "完成" : notification().status === "failed" ? "失败" : notification().status}
+                    {notification().status === "completed" ? t("messages.notification.completed") : notification().status === "failed" ? t("messages.notification.failed") : notification().status}
                   </Text>
                 </View>
                 <Text selectable class="text-left text-xs leading-5 text-muted-foreground">{notification().body}</Text>
@@ -401,9 +402,10 @@ function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; acti
 
 function retryLabel(status: NonNullable<ReturnType<UiContext["store"]["retrying"]>[string]>): string {
   const reason = Object.keys(status.reason)[0] ?? "Network";
-  const label = reason === "RateLimit" ? "请求受限" : reason === "Server" ? "服务错误" : reason === "EmptyCompletion" ? "空响应" : "网络错误";
+  const label = t(reason === "RateLimit" ? "messages.retry.rate_limit" : reason === "Server" ? "messages.retry.server" : reason === "EmptyCompletion" ? "messages.retry.empty_completion" : "messages.retry.network");
   const wait = Math.round(status.delay_ms / 1000);
-  return `正在重试（${status.attempt}/${status.max_attempts}）${wait ? `，${wait} 秒后` : ""} · ${label}`;
+  const waitText = wait ? t("messages.retry.wait", { secs: wait }) : "";
+  return `${t("messages.retry.progress", { attempt: status.attempt, max: status.max_attempts })}${waitText} · ${label}`;
 }
 
 function TailRows(props: UiContext & { navEligible: boolean }) {
@@ -425,7 +427,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
           <View class="flex-row items-center gap-2">
             <Icon name="loader-circle" size={14} class="animate-spin" color={token("muted-foreground")} />
             <Text class="text-xs text-muted-foreground animate-pulse">
-              {formatDuration(turn() ? now() - turn()!.startedAt : 0, "正在工作 ")}
+              {formatDuration(turn() ? now() - turn()!.startedAt : 0, t("messages.working_for"))}
             </Text>
           </View>
         </If>
@@ -435,7 +437,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
               <Icon name="loader-circle" size={13} class="animate-spin" color={token("muted-foreground")} />
               <Text class="flex-1 text-xs text-muted-foreground">{retryLabel(value())}</Text>
               <Button testID="retry-now" class="rounded-full border border-border px-2 py-0.5" onPress={() => props.store.retryNow()}>
-                <Text class="text-xs text-foreground">立即重试</Text>
+                <Text class="text-xs text-foreground">{t("messages.retry_now")}</Text>
               </Button>
             </View>
           )}
@@ -444,7 +446,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
           {(value) => (
             <View class="flex-row items-center gap-2">
               <Icon name="loader-circle" size={13} class="animate-spin" color={token("muted-foreground")} />
-              <Text class="text-xs text-muted-foreground">正在运行 Hook · {value().event}（{value().label}）</Text>
+              <Text class="text-xs text-muted-foreground">{t("messages.hook_running", { event: value().event, label: value().label })}</Text>
             </View>
           )}
         </If>
@@ -452,13 +454,13 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
           {(value) => (
             <View class="flex-row items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
               <Text class="min-w-0 flex-1 text-xs text-foreground">
-                {value().path} 中有 {value().count} 个项目 Hook 尚未信任
+                {tCount("messages.hooks_untrusted", value().count, { path: value().path })}
               </Text>
               <Button testID="hooks-trust" class="rounded-full border border-border px-2 py-0.5" onPress={() => props.store.trustProjectHooks()}>
-                <Text class="text-xs text-foreground">信任</Text>
+                <Text class="text-xs text-foreground">{t("messages.trust")}</Text>
               </Button>
               <Button testID="hooks-dismiss" class="px-1" onPress={() => props.store.dismissProjectHooks()}>
-                <Text class="text-xs text-muted-foreground">忽略</Text>
+                <Text class="text-xs text-muted-foreground">{t("messages.ignore")}</Text>
               </Button>
             </View>
           )}
@@ -620,7 +622,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
           }}
         >
           <Icon name="arrow-down" size={13} color={token("muted-foreground")} />
-          <Text class="text-xs text-foreground">最新</Text>
+          <Text class="text-xs text-foreground">{t("messages.latest")}</Text>
         </Button>
       </If>
       <If when={userRows().length >= 2 && viewportWidth() >= 720}>
@@ -634,7 +636,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
               >
                 <Button
                   testID={`turn-nav-${entry().user.id}`}
-                  accessibilityLabel={`跳转到回合 ${index() + 1}`}
+                  accessibilityLabel={t("messages.jump_turn", { index: index() + 1 })}
                   class={activeTurn() === index() ? "h-7 w-1.5 rounded-full bg-muted-foreground" : "h-5 w-1 rounded-full bg-muted-foreground/40 hover:w-1.5 hover:bg-muted-foreground"}
                   onPress={() => {
                     userScrolledAway = true;
@@ -651,7 +653,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
           <View class="absolute bottom-24 left-8 z-30 w-80 gap-2 rounded-xl border border-border bg-popover p-3 shadow-xl pointer-events-none">
             <Text numberOfLines={2} class="text-sm text-foreground">{value().user.text}</Text>
             <Text numberOfLines={3} class="text-sm text-muted-foreground">
-              {previewText(value().user.id) || "暂无文字回复"}
+              {previewText(value().user.id) || t("messages.no_text_reply")}
             </Text>
           </View>
         )}
@@ -667,17 +669,17 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
               activeMatch.set(0);
             }}
             onSubmit={() => goMatch(1)}
-            placeholder="搜索当前对话"
+            placeholder={t("messages.search_placeholder")}
             class="w-64 px-2 text-sm text-foreground"
           />
           <Text class="text-xs text-muted-foreground">{matches().length ? activeMatch() + 1 : 0}/{matches().length}</Text>
-          <Button accessibilityLabel="上一个结果" class="h-7 w-7 items-center justify-center" onPress={() => goMatch(-1)}>
+          <Button accessibilityLabel={t("messages.prev_result")} class="h-7 w-7 items-center justify-center" onPress={() => goMatch(-1)}>
             <Icon name="chevron-up" size={13} color={token("muted-foreground")} />
           </Button>
-          <Button accessibilityLabel="下一个结果" class="h-7 w-7 items-center justify-center" onPress={() => goMatch(1)}>
+          <Button accessibilityLabel={t("messages.next_result")} class="h-7 w-7 items-center justify-center" onPress={() => goMatch(1)}>
             <Icon name="chevron-down" size={13} color={token("muted-foreground")} />
           </Button>
-          <Button accessibilityLabel="关闭搜索" class="h-7 w-7 items-center justify-center" onPress={() => searchOpen.set(false)}>
+          <Button accessibilityLabel={t("messages.close_search")} class="h-7 w-7 items-center justify-center" onPress={() => searchOpen.set(false)}>
             <Icon name="x" size={13} color={token("muted-foreground")} />
           </Button>
         </View>
@@ -685,7 +687,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
       <If when={lightbox()}>
         {(value) => (
           <View class="absolute inset-0 z-50 bg-black/85">
-            <Button accessibilityLabel="关闭图片" class="absolute inset-0" onPress={() => lightbox.set(null)} />
+            <Button accessibilityLabel={t("messages.close_image")} class="absolute inset-0" onPress={() => lightbox.set(null)} />
             <View class="absolute inset-8 items-center justify-center pointer-events-none">
               <Image src={value().source} resizeMode="contain" class="h-full w-full" />
             </View>
@@ -693,7 +695,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
               <Text class="text-xs text-white">{value().label}</Text>
             </View>
             <Button
-              accessibilityLabel="关闭图片"
+              accessibilityLabel={t("messages.close_image")}
               class="absolute right-4 top-4 h-8 w-8 items-center justify-center rounded-full bg-black/50"
               onPress={() => lightbox.set(null)}
             >

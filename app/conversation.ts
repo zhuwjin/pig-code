@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import type { ChatItem, EditDiff, MarkdownItem, TurnState, TurnUsageStats } from "./protocol";
 import type { IconName } from "./components/icon";
 
@@ -93,7 +94,9 @@ export function conversationRowsEqual(previous: ConversationRow[], next: Convers
 
 export function formatDuration(ms: number, prefix = ""): string {
   const seconds = Math.max(1, Math.round(ms / 1000));
-  const value = seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+  const value = seconds >= 60
+    ? t("conversation.duration.minutes_seconds", { minutes: Math.floor(seconds / 60), seconds: seconds % 60 })
+    : t("conversation.duration.seconds", { seconds });
   return `${prefix}${value}`;
 }
 
@@ -148,20 +151,20 @@ export function toolIcon(tool: string): IconName {
 }
 
 export function toolLabel(tool: string, running: boolean): string {
-  if (isExecTool(tool)) return running ? "运行中" : "终端";
+  if (isExecTool(tool)) return running ? t("tools.running") : t("tools.terminal");
   switch (tool) {
-    case "Read": return "读取";
-    case "Write": return running ? "写入中" : "写入";
-    case "Edit": return running ? "编辑中" : "编辑";
-    case "Glob": return "查找文件";
-    case "Grep": return "搜索内容";
-    case "TodoList": return "待办事项";
-    case "FetchURL": return "读取网页";
+    case "Read": return t("tools.read");
+    case "Write": return running ? t("tools.writing") : t("tools.write");
+    case "Edit": return running ? t("tools.editing") : t("tools.edit");
+    case "Glob": return t("tools.glob");
+    case "Grep": return t("tools.grep");
+    case "TodoList": return t("tools.todo");
+    case "FetchURL": return t("tools.fetch_url");
     case "TaskList":
     case "TaskOutput":
-    case "TaskStop": return "后台任务";
-    case "AskUserQuestion": return "询问用户";
-    case "ExitPlanMode": return "实施计划";
+    case "TaskStop": return t("tools.background_task");
+    case "AskUserQuestion": return t("tools.ask_user");
+    case "ExitPlanMode": return t("tools.exit_plan");
     default: return tool;
   }
 }

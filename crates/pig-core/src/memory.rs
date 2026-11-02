@@ -12,7 +12,7 @@
 //! ZCode's default-index recall), and the memory directory is registered as
 //! a read-write root (approval-free Write/Edit/Read, absolute-path only —
 //! see task::SessionToolState::extra_rw_roots). The user shapes memory the
-//! same way ("记住X" / "忘掉X") or edits the plain files on disk; there is no
+//! same way ("remember X" / "forget X") or edits the plain files on disk; there is no
 //! dedicated manual path. Mid-session index changes ride the turn_reminder
 //! change-triggered channel (the reminder carries the fresh index, same as
 //! AGENTS.md changes).

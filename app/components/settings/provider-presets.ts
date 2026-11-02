@@ -1,3 +1,5 @@
+import { t } from "../../i18n";
+import type { MessageKey } from "../../i18n";
 import type { ApiFormat, ModelConfig, ProviderConfig } from "../../protocol";
 import presetJson from "../../presets/providers.json";
 
@@ -61,16 +63,16 @@ export function defaultReasoningParams(levels: string[], format: ApiFormat): Rec
   }));
 }
 
-const REASONING_LABELS: Record<string, string> = {
-  none: "关闭",
-  disabled: "关闭",
-  enabled: "开启",
-  minimal: "极简",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-  max: "最高",
+const REASONING_LABELS: Record<string, MessageKey> = {
+  none: "settings.models.reasoning.none",
+  disabled: "settings.models.reasoning.none",
+  enabled: "settings.models.reasoning.enabled",
+  minimal: "settings.models.reasoning.minimal",
+  low: "settings.models.reasoning.low",
+  medium: "settings.models.reasoning.medium",
+  high: "settings.models.reasoning.high",
+  xhigh: "settings.models.reasoning.xhigh",
+  max: "settings.models.reasoning.max",
 };
 
 export function providerFromPreset(preset: PresetProvider, id: string): ProviderConfig {
@@ -100,7 +102,7 @@ export function providerFromPreset(preset: PresetProvider, id: string): Provider
         web_search_tool: null,
         reasoning_levels: reasoningLevels,
         default_reasoning_level: null,
-        reasoning_labels: Object.fromEntries(reasoningLevels.map((level) => [level, REASONING_LABELS[level] ?? level])),
+        reasoning_labels: Object.fromEntries(reasoningLevels.map((level) => [level, REASONING_LABELS[level] ? t(REASONING_LABELS[level]) : level])),
         reasoning_params: defaultReasoningParams(reasoningLevels, preset.api_format),
         parallel_tool_calls: true,
       };

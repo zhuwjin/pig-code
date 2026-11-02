@@ -2,22 +2,24 @@ import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
 import { Button, Input } from "nsh/base";
 import { PluginMarketplacePackage, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
+import { t } from "./i18n";
+import type { MessageKey } from "./i18n";
 import { ThemeStore } from "./theme";
 import { DEFAULT_THEME_ID, ThemeDefinition, ThemeMode, themePreviewColor } from "./themes";
 import { pluginInstance } from "./plugins/ui-coordinator";
 
-const MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
-  { value: "light", label: "亮色" },
-  { value: "dark", label: "暗色" },
-  { value: "system", label: "跟随系统" },
+const MODE_OPTIONS: { value: ThemeMode; label: MessageKey }[] = [
+  { value: "light", label: "settings.appearance.mode.light" },
+  { value: "dark", label: "settings.appearance.mode.dark" },
+  { value: "system", label: "settings.appearance.mode.system" },
 ];
 
 type ThemeFilter = "all" | "light" | "dark";
 
-const THEME_FILTERS: { value: ThemeFilter; label: string }[] = [
-  { value: "all", label: "全部" },
-  { value: "light", label: "亮色" },
-  { value: "dark", label: "暗色" },
+const THEME_FILTERS: { value: ThemeFilter; label: MessageKey }[] = [
+  { value: "all", label: "settings.appearance.filter.all" },
+  { value: "light", label: "settings.appearance.filter.light" },
+  { value: "dark", label: "settings.appearance.filter.dark" },
 ];
 
 function themeModeOf(theme: ThemeDefinition): "light" | "dark" {
@@ -46,7 +48,7 @@ function MiniWindow(props: { dark: boolean }) {
   );
 }
 
-function ModeCard(props: { option: { value: ThemeMode; label: string }; selected: boolean; onPress: () => void }) {
+function ModeCard(props: { option: { value: ThemeMode; label: MessageKey }; selected: boolean; onPress: () => void }) {
   const value = () => props.option.value;
   return (
     <Button testID={`theme-mode-${props.option.value}`} class="items-center gap-1.5" onPress={props.onPress}>
@@ -64,7 +66,7 @@ function ModeCard(props: { option: { value: ThemeMode; label: string }; selected
         <View class={`h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${props.selected ? "border-primary" : "border-muted-foreground"}`}>
           <If when={props.selected}><View class="h-1.5 w-1.5 rounded-full bg-primary" /></If>
         </View>
-        <Text class="text-sm text-foreground">{props.option.label}</Text>
+        <Text class="text-sm text-foreground">{t(props.option.label)}</Text>
       </View>
     </Button>
   );
@@ -84,7 +86,7 @@ function ThemePackageRow(props: {
       <Button
         testID={`theme-package-${plugin().id}`}
         selected={plugin().enabled}
-        accessibilityLabel={`${plugin().enabled ? "停用" : "启用"}插件 ${plugin().name}`}
+        accessibilityLabel={t(plugin().enabled ? "settings.plugins.toggle.disable" : "settings.plugins.toggle.enable", { name: plugin().name })}
         class="flex-1 rounded-(--radius) border border-border px-3 py-2 hover:bg-accent/50 selected:border-primary/60 selected:bg-accent/30"
         onPress={() => props.onToggle(plugin())}
       >
@@ -94,13 +96,25 @@ function ThemePackageRow(props: {
             <Text numberOfLines={1} class="text-xs text-muted-foreground">{plugin().id} · {plugin().version}</Text>
           </View>
           <View class="items-end">
-            <Text class="text-xs text-muted-foreground">{runtime()?.state ?? (plugin().enabled ? "已启用" : "已停用")}</Text>
+            <Text class="text-xs text-muted-foreground">{runtime()?.state ?? t(plugin().enabled ? "settings.plugins.state.enabled" : "settings.plugins.state.disabled")}</Text>
             <If when={runtime()}>
               <Text class="text-[10px] text-muted-foreground">
-                epoch {runtime()?.epoch} · 节点 {runtime()?.metrics?.nodes ?? 0} · 操作 {runtime()?.metrics?.operations ?? 0} · 请求 {runtime()?.metrics?.pendingRequests ?? 0} · 队列 {runtime()?.metrics?.queueDepth ?? 0}
+                {t("settings.plugins.metrics.resources", {
+                  epoch: runtime()?.epoch ?? 0,
+                  nodes: runtime()?.metrics?.nodes ?? 0,
+                  operations: runtime()?.metrics?.operations ?? 0,
+                  requests: runtime()?.metrics?.pendingRequests ?? 0,
+                  queue: runtime()?.metrics?.queueDepth ?? 0,
+                })}
               </Text>
               <Text class="text-[10px] text-muted-foreground">
-                网络 {runtime()?.metrics?.networkBytes ?? 0} B · 存储 {runtime()?.metrics?.storageBytes ?? 0} B · 超时 {runtime()?.metrics?.timedOutRequests ?? 0} · 取消 {runtime()?.metrics?.cancelledRequests ?? 0} · 丢弃 {runtime()?.metrics?.droppedEvents ?? 0}
+                {t("settings.plugins.metrics.network", {
+                  network: runtime()?.metrics?.networkBytes ?? 0,
+                  storage: runtime()?.metrics?.storageBytes ?? 0,
+                  timeout: runtime()?.metrics?.timedOutRequests ?? 0,
+                  cancelled: runtime()?.metrics?.cancelledRequests ?? 0,
+                  dropped: runtime()?.metrics?.droppedEvents ?? 0,
+                })}
               </Text>
             </If>
             <If when={runtime()?.message}>
@@ -111,11 +125,11 @@ function ThemePackageRow(props: {
       </Button>
       <If when={runtime()?.state === "failed"}>
         <Button testID={`plugin-retry-${plugin().id}`} class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onRetry}>
-          <Text class="text-xs">重试</Text>
+          <Text class="text-xs">{t("settings.plugins.retry")}</Text>
         </Button>
       </If>
-      <Button testID={`plugin-uninstall-${plugin().id}`} accessibilityLabel={`卸载插件 ${plugin().name}`} class="rounded-(--radius) px-2 py-1 hover:bg-destructive/10" onPress={props.onRemove}>
-        <Text class="text-xs text-destructive">卸载</Text>
+      <Button testID={`plugin-uninstall-${plugin().id}`} accessibilityLabel={t("settings.plugins.uninstall.label", { name: plugin().name })} class="rounded-(--radius) px-2 py-1 hover:bg-destructive/10" onPress={props.onRemove}>
+        <Text class="text-xs text-destructive">{t("settings.plugins.uninstall.action")}</Text>
       </Button>
     </View>
   );
@@ -187,10 +201,10 @@ export function ThemePicker(props: ThemePickerProps) {
         <View class="w-full max-w-[960px] gap-6 p-6">
           <View class="gap-2 border-b border-border pb-4">
             <Text class="text-xl font-semibold text-foreground">
-              {props.section === "appearance" ? "主题" : "插件管理"}
+              {t(props.section === "appearance" ? "settings.appearance.title" : "settings.plugins.title")}
             </Text>
             <Text class="text-sm text-muted-foreground">
-              {props.section === "appearance" ? "选择配色主题，立即生效并保存。" : "安装、配置和管理签名插件"}
+              {t(props.section === "appearance" ? "settings.appearance.description" : "settings.plugins.description")}
             </Text>
           </View>
           <If when={props.section === "appearance"}>
@@ -206,7 +220,7 @@ export function ThemePicker(props: ThemePickerProps) {
                           class="rounded-full border border-border px-3 py-1 text-muted-foreground selected:border-foreground selected:text-foreground"
                           onPress={() => themeFilter.set(option().value)}
                         >
-                          <Text class="text-xs">{option().label}</Text>
+                          <Text class="text-xs">{t(option().label)}</Text>
                         </Button>
                       )}
                     </Each>
@@ -216,7 +230,7 @@ export function ThemePicker(props: ThemePickerProps) {
                       testID="theme-search"
                       value={themeQuery()}
                       onChange={(text) => themeQuery.set(text)}
-                      placeholder="搜索主题…"
+                      placeholder={t("settings.appearance.search")}
                       class="w-full rounded-(--radius) border border-border bg-background pl-8 pr-3 py-2 selection:bg-foreground text-xs text-foreground placeholder:text-muted-foreground"
                     />
                     <Icon name="search" size={13} color={token("muted-foreground")} class="absolute left-2 top-1/2 -translate-y-1/2" />
@@ -228,7 +242,7 @@ export function ThemePicker(props: ThemePickerProps) {
                       <Button
                         testID={`theme-option-${theme().id}`}
                         selected={store.activeId() === theme().id}
-                        accessibilityLabel={`选择主题 ${theme().name}`}
+                        accessibilityLabel={t("settings.appearance.select", { name: theme().name })}
                         class="w-[132px] shrink-0 flex-col items-stretch gap-2 rounded-xl border border-border bg-card p-2 hover:bg-accent/30"
                         style={{ borderColor: store.activeId() === theme().id ? themePreviewColor(theme(), "primary", themeModeOf(theme())) : undefined }}
                         onPress={() => {
@@ -243,20 +257,20 @@ export function ThemePicker(props: ThemePickerProps) {
                         </View>
                         <View class="flex-row items-center justify-between gap-1">
                           <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-foreground">{theme().name}</Text>
-                          <Text class="shrink-0 text-xs text-muted-foreground">{themeModeOf(theme()) === "dark" ? "暗色" : "亮色"}</Text>
+                          <Text class="shrink-0 text-xs text-muted-foreground">{t(themeModeOf(theme()) === "dark" ? "settings.appearance.badge.dark" : "settings.appearance.badge.light")}</Text>
                         </View>
                       </Button>
                     )}
                   </Each>
                   <If when={filteredThemes().length === 0}>
-                    <Text class="py-3 text-sm text-muted-foreground">没有匹配的主题</Text>
+                    <Text class="py-3 text-sm text-muted-foreground">{t("settings.appearance.no_matches")}</Text>
                   </If>
                 </View>
               </View>
               <View class="gap-3">
                 <View class="gap-1">
-                  <Text class="text-lg font-semibold text-foreground">主题模式</Text>
-                  <Text class="text-sm text-muted-foreground">跟随系统，或固定使用亮色、暗色。</Text>
+                  <Text class="text-lg font-semibold text-foreground">{t("settings.appearance.mode.title")}</Text>
+                  <Text class="text-sm text-muted-foreground">{t("settings.appearance.mode.description")}</Text>
                 </View>
                 <View class="flex-row flex-wrap gap-4">
                   <Each of={MODE_OPTIONS} key={(option) => option.value}>
@@ -272,7 +286,7 @@ export function ThemePicker(props: ThemePickerProps) {
               </View>
               <If when={activeStylePacks().length > 0}>
                 <View class="gap-1">
-                  <Text class="text-xs font-medium text-muted-foreground">正在叠加的样式包</Text>
+                  <Text class="text-xs font-medium text-muted-foreground">{t("settings.appearance.style_packs.active")}</Text>
                   <Text selectable class="text-xs leading-5 text-muted-foreground">
                     {activeStylePacks().map((theme) => theme.name).join("、")}
                   </Text>
@@ -282,7 +296,7 @@ export function ThemePicker(props: ThemePickerProps) {
                 <Text selectable class="text-xs leading-5 text-destructive">{props.error?.()}</Text>
               </If>
               <Text class="text-xs leading-5 text-muted-foreground">
-                样式包可修改当前主题；更新插件后需要重新启用。
+                {t("settings.appearance.style_packs.note")}
               </Text>
             </View>
           </If>
@@ -295,13 +309,13 @@ export function ThemePicker(props: ThemePickerProps) {
               </If>
               <View class="gap-2">
                 <View class="flex-row items-center">
-                  <Text class="flex-1 text-xs font-medium text-muted-foreground">插件市场</Text>
+                  <Text class="flex-1 text-xs font-medium text-muted-foreground">{t("settings.plugins.market.title")}</Text>
                   <Button testID="market-refresh" class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onRefreshMarketplace}>
-                    <Text class="text-xs text-muted-foreground">刷新目录</Text>
+                    <Text class="text-xs text-muted-foreground">{t("settings.plugins.market.refresh")}</Text>
                   </Button>
                 </View>
                 <If when={props.catalog().length === 0}>
-                  <Text class="text-xs text-muted-foreground">刷新目录以查看可用插件。</Text>
+                  <Text class="text-xs text-muted-foreground">{t("settings.plugins.market.empty")}</Text>
                 </If>
                 <Each of={props.catalog()} key={(plugin) => plugin.id}>
                   {(plugin) => (
@@ -314,26 +328,26 @@ export function ThemePicker(props: ThemePickerProps) {
                         class="rounded-(--radius) bg-primary px-3 py-1.5 disabled:opacity-40"
                         onPress={() => props.onInstallMarketplace(plugin(), rootPath().trim())}
                       >
-                        <Text class="text-xs text-primary-foreground">下载并安装</Text>
+                        <Text class="text-xs text-primary-foreground">{t("settings.plugins.market.install")}</Text>
                       </Button>
                     </View>
                   )}
                 </Each>
               </View>
               <View class="gap-2">
-                <Text class="text-xs font-medium text-muted-foreground">安装签名插件</Text>
+                <Text class="text-xs font-medium text-muted-foreground">{t("settings.plugins.signed.title")}</Text>
                 <Input
                   testID="plugin-package-path"
                   value={packagePath()}
                   onChange={(text) => packagePath.set(text)}
-                  placeholder=".nshpkg 路径"
+                  placeholder={t("settings.plugins.signed.package_path")}
                   class="rounded-(--radius) border border-input px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
                 />
                 <Input
                   testID="plugin-root-path"
                   value={rootPath()}
                   onChange={(text) => rootPath.set(text)}
-                  placeholder="根公钥 root.pub 路径"
+                  placeholder={t("settings.plugins.signed.root_path")}
                   class="rounded-(--radius) border border-input px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
                 />
                 <Button
@@ -349,27 +363,27 @@ export function ThemePicker(props: ThemePickerProps) {
                     }
                   }}
                 >
-                  <Text class="text-xs text-primary-foreground">{installing() ? "正在验证…" : "验证并安装"}</Text>
+                  <Text class="text-xs text-primary-foreground">{installing() ? t("settings.plugins.signed.verifying") : t("settings.plugins.signed.verify")}</Text>
                 </Button>
               </View>
               <View class="gap-2">
                 <View class="flex-row items-center">
-                  <Text class="flex-1 text-xs font-medium text-muted-foreground">已安装插件</Text>
+                  <Text class="flex-1 text-xs font-medium text-muted-foreground">{t("settings.plugins.installed.title")}</Text>
                   <Button
                     testID="theme-plugins-refresh"
-                    accessibilityLabel="刷新主题插件"
+                    accessibilityLabel={t("settings.plugins.installed.refresh_label")}
                     class="rounded-(--radius) px-2 py-1 hover:bg-muted"
                     onPress={props.onRefreshPackages}
                   >
                     <View class="flex-row items-center gap-1">
                       <Icon name="refresh-cw" size={12} />
-                      <Text class="text-xs text-muted-foreground">刷新</Text>
+                      <Text class="text-xs text-muted-foreground">{t("settings.plugins.installed.refresh")}</Text>
                     </View>
                   </Button>
                 </View>
                 <If when={props.packages().length === 0}>
                   <View class="items-center rounded-xl border border-dashed border-border px-6 py-10">
-                    <Text class="text-sm text-muted-foreground">尚未安装插件，可从市场或签名包开始。</Text>
+                    <Text class="text-sm text-muted-foreground">{t("settings.plugins.installed.empty")}</Text>
                   </View>
                 </If>
                 <Each of={props.packages()} key={(plugin) => `${plugin.id}:${plugin.digest}`}>
@@ -387,7 +401,7 @@ export function ThemePicker(props: ThemePickerProps) {
               <If when={pendingUninstall()}>
                 {(plugin) => (
                   <View class="gap-2 rounded-(--radius) border border-destructive/30 bg-destructive/10 p-3">
-                    <Text class="text-xs text-foreground">确认卸载 {plugin().name}？插件文件将被删除。</Text>
+                    <Text class="text-xs text-foreground">{t("settings.plugins.uninstall.confirm", { name: plugin().name })}</Text>
                     <View class="flex-row gap-2">
                       <Button
                         testID="plugin-uninstall-confirm"
@@ -397,10 +411,10 @@ export function ThemePicker(props: ThemePickerProps) {
                           pendingUninstall.set(null);
                         }}
                       >
-                        <Text class="text-xs text-background">确认卸载</Text>
+                        <Text class="text-xs text-background">{t("settings.plugins.uninstall.confirm_action")}</Text>
                       </Button>
                       <Button testID="plugin-uninstall-cancel" class="rounded-(--radius) px-3 py-1 hover:bg-muted" onPress={() => pendingUninstall.set(null)}>
-                        <Text class="text-xs">取消</Text>
+                        <Text class="text-xs">{t("common.cancel")}</Text>
                       </Button>
                     </View>
                   </View>
@@ -408,7 +422,7 @@ export function ThemePicker(props: ThemePickerProps) {
               </If>
               <If when={Object.values(props.diagnostics?.() ?? {}).flat().length > 0}>
                 <View testID="plugin-ui-diagnostics" class="gap-1 rounded-(--radius) border border-border p-3">
-                  <Text class="text-xs font-medium text-foreground">UI 合成诊断</Text>
+                  <Text class="text-xs font-medium text-foreground">{t("settings.plugins.diagnostics.ui")}</Text>
                   <Each of={Object.values(props.diagnostics?.() ?? {}).flat().slice(0, 20)} key={(item) => item}>
                     {(item) => <Text selectable class="text-xs leading-4 text-muted-foreground">{item()}</Text>}
                   </Each>
@@ -416,7 +430,7 @@ export function ThemePicker(props: ThemePickerProps) {
               </If>
               <If when={Object.values(props.logs?.() ?? {}).some((logs) => logs.length > 0)}>
                 <View class="gap-1 rounded-(--radius) border border-border p-3">
-                  <Text class="text-xs font-medium text-foreground">最近插件日志（已脱敏）</Text>
+                  <Text class="text-xs font-medium text-foreground">{t("settings.plugins.diagnostics.logs")}</Text>
                   <Each of={Object.values(props.logs?.() ?? {}).flatMap((logs) => logs.slice(-1))} key={(item) => JSON.stringify(item)}>
                     {(item) => <Text selectable numberOfLines={3} class="font-mono text-[10px] text-muted-foreground">{JSON.stringify(item()).slice(0, 500)}</Text>}
                   </Each>

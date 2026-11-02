@@ -1,5 +1,6 @@
 import { Scroll, signal, Text, View } from "nsh";
 import { Button, Input } from "nsh/base";
+import { t, tCount } from "../../i18n";
 import type { ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
 import { FleetView } from "./fleet-view";
@@ -49,7 +50,7 @@ export function ModelSettings(props: UiContext) {
     const id = nextProviderId(providers());
     const provider: ProviderConfig = {
       id,
-      name: "自定义供应商",
+      name: t("settings.models.custom_provider"),
       base_url: "https://",
       requires_api_key: true,
       api_format: "OpenAiChat",
@@ -109,9 +110,9 @@ export function ModelSettings(props: UiContext) {
           <View class="min-w-0 flex-1 gap-0.5">
             <View class="flex-row items-center gap-1">
               <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground">{provider.name}</Text>
-              <If when={!hasKey}><Text class="text-xs text-warning">缺少密钥</Text></If>
+              <If when={!hasKey}><Text class="text-xs text-warning">{t("settings.models.missing_key")}</Text></If>
             </View>
-            <Text numberOfLines={1} class="text-xs text-muted-foreground">{provider.models.length} 个模型</Text>
+            <Text numberOfLines={1} class="text-xs text-muted-foreground">{tCount("settings.models.model_count", provider.models.length)}</Text>
           </View>
           <View class={provider.enabled ? "h-2 w-2 rounded-full bg-success" : "h-2 w-2 rounded-full bg-muted-foreground"} />
         </View>
@@ -121,18 +122,18 @@ export function ModelSettings(props: UiContext) {
   return (
     <View class={props.themeStore.classes("settings.models", "relative min-w-0 flex-1")}>
       <View class="gap-2 border-b border-border px-6 py-5">
-        <Text class="text-xl font-semibold text-foreground">模型设置</Text>
-        <Text class="text-sm text-muted-foreground">管理模型供应商、连接方式与可用模型。</Text>
+        <Text class="text-xl font-semibold text-foreground">{t("settings.models.title")}</Text>
+        <Text class="text-sm text-muted-foreground">{t("settings.models.description")}</Text>
         <View class="mt-2 flex-row items-center gap-3">
           <View class="flex-row rounded-full bg-muted p-1">
             <Button testID="providers-tab" selected={view() === "providers"} class="rounded-full px-3 py-1.5 selected:bg-background" onPress={() => { view.set("providers"); editor.set(null); }}>
-              <Text class="text-xs text-foreground">供应商</Text>
+              <Text class="text-xs text-foreground">{t("settings.models.providers_tab")}</Text>
             </Button>
             <Button testID="models-tab" selected={view() === "models"} class="rounded-full px-3 py-1.5 selected:bg-background" onPress={() => { view.set("models"); editor.set(null); }}>
-              <Text class="text-xs text-foreground">全部模型</Text>
+              <Text class="text-xs text-foreground">{t("settings.models.all_models_tab")}</Text>
             </Button>
           </View>
-          <Text class="text-xs text-muted-foreground">{view() === "providers" ? "按供应商管理连接与模型" : "查看并维护所有供应商的模型"}</Text>
+          <Text class="text-xs text-muted-foreground">{t(view() === "providers" ? "settings.models.providers_hint" : "settings.models.models_hint")}</Text>
         </View>
       </View>
       <If when={store.globalError()}>
@@ -161,11 +162,11 @@ export function ModelSettings(props: UiContext) {
                   testID="provider-search"
                   value={providerQuery()}
                   onChange={(text) => providerQuery.set(text)}
-                  placeholder="搜索供应商"
+                  placeholder={t("settings.models.search_providers")}
                   class="rounded-(--radius) border border-border bg-card px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
                 />
                 <Button testID="provider-add" class="rounded-(--radius) border border-border bg-card px-3 py-2 hover:bg-accent" onPress={() => presetOpen.set(true)}>
-                  <Text class="text-sm text-foreground">＋ 添加供应商 …</Text>
+                  <Text class="text-sm text-foreground">{t("settings.models.add_provider")}</Text>
                 </Button>
                 <Scroll class="max-h-[520px]">
                   <View class="gap-2 pr-1">
@@ -174,7 +175,7 @@ export function ModelSettings(props: UiContext) {
                     </Each>
                     <If when={enabledProviders().length > 0 && disabledProviders().length > 0}>
                       <View class="flex-row items-center gap-2 px-1 pt-2">
-                        <Text class="text-xs text-muted-foreground">已停用</Text>
+                        <Text class="text-xs text-muted-foreground">{t("settings.models.disabled_section")}</Text>
                         <View class="h-px flex-1 bg-border" />
                       </View>
                     </If>
@@ -182,7 +183,7 @@ export function ModelSettings(props: UiContext) {
                       {(provider) => providerRow(provider())}
                     </Each>
                     <If when={filteredProviders().length === 0 && providerQuery().trim()}>
-                      <Text class="px-1 py-3 text-center text-xs text-muted-foreground">没有匹配的供应商</Text>
+                      <Text class="px-1 py-3 text-center text-xs text-muted-foreground">{t("settings.models.no_matching_providers")}</Text>
                     </If>
                   </View>
                 </Scroll>
@@ -204,7 +205,7 @@ export function ModelSettings(props: UiContext) {
                 </Each>
                 <If when={!selected()}>
                   <View class="h-full min-h-64 items-center justify-center gap-2 text-muted-foreground">
-                    <Text class="text-sm text-muted-foreground">选择或添加一个供应商开始配置。</Text>
+                    <Text class="text-sm text-muted-foreground">{t("settings.models.empty_selection")}</Text>
                   </View>
                 </If>
               </View>

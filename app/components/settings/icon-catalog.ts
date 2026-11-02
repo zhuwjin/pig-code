@@ -527,7 +527,7 @@ export const ICON_CATALOG: IconMeta[] = [
   { id: "unionalpha", title: "UnionAlpha", asset: icon215, darkAsset: darkIcon215 },
   { id: "voyage", title: "Voyage", asset: icon216 },
   { id: "wenxin", title: "Wenxin", asset: icon217 },
-  { id: "xuanyuan", title: "轩辕", asset: icon218 },
+  { id: "xuanyuan", title: "Xuanyuan", asset: icon218 },
   { id: "yi", title: "Yi", asset: icon219, darkAsset: darkIcon219 },
 ];
 

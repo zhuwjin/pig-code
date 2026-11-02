@@ -3,6 +3,7 @@ import { expect, open, test } from "nsh/test";
 function openApp() {
   return open("./App.selftest.tsx", {
     platform: "macos",
+    locale: "zh-CN",
     width: 1440,
     height: 900,
   });

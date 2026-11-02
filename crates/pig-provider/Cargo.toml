@@ -15,12 +15,12 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", 
 tokio-util = "0.7"
 tracing = "0.1"
 
-# unix 取内核版本（uname，SDK 用户代理里的 os.release()）
+# Unix: the kernel version via uname, for os.release() in the SDK user agent
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Windows 取系统版本（RtlGetVersion，SDK 用户代理里的 os.release()）；
-# windows-rs 0.57 把 RtlGetVersion 放在 Wdk 命名空间，OSVERSIONINFOW 在 Win32
+# Windows: the system version via RtlGetVersion, for os.release() in the SDK user agent;
+# windows-rs 0.57 keeps RtlGetVersion in the Wdk namespace and OSVERSIONINFOW in Win32
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = ["Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
 

@@ -2,6 +2,7 @@ import { Canvas, Clipboard, PanResponder, Scroll, Text, View, colorScheme, effec
 import type { Signal, YNode } from "nsh";
 import { Button, Input } from "nsh/base";
 import { Terminal as NativeTerminal } from "pig-code-ts/native";
+import { t } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { Icon } from "./icon";
 
@@ -279,12 +280,12 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
                 >
                   <Icon name="square-terminal" size={14} />
                   <Text class="text-sm text-foreground">
-                    {`${tab()?.shell() ?? "shell"}${tab()?.exited() ? "（已退出）" : ""}`}
+                    {`${tab()?.shell() ?? "shell"}${tab()?.exited() ? t("terminal.exited_suffix") : ""}`}
                   </Text>
                 </Button>
                 <Button
                   testID={`terminal-tab-close-${id()}`}
-                  accessibilityLabel="关闭终端标签"
+                  accessibilityLabel={t("terminal.close_tab")}
                   class="h-5 w-5 items-center justify-center rounded-(--radius) hover:bg-accent"
                   onPress={() => closeTab(id())}
                 >
@@ -297,7 +298,7 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
         <View class="flex-1" />
         <Button
           testID="terminal-new-tab"
-          accessibilityLabel="新建终端标签"
+          accessibilityLabel={t("terminal.new_tab")}
           class="h-6 w-6 items-center justify-center rounded-(--radius) hover:bg-accent"
           onPress={openTab}
         >
@@ -305,7 +306,7 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
         </Button>
         <Button
           testID="terminal-close"
-          accessibilityLabel="折叠终端"
+          accessibilityLabel={t("terminal.collapse")}
           class="h-6 w-6 items-center justify-center rounded-(--radius) hover:bg-accent"
           onPress={props.onClose}
         >
@@ -317,13 +318,13 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
       </If>
       <If when={tabIds().length === 0}>
         <View class="flex-1 items-center justify-center gap-2">
-          <Text class="text-sm text-muted-foreground">没有终端</Text>
+          <Text class="text-sm text-muted-foreground">{t("terminal.empty")}</Text>
           <Button
             testID="terminal-empty-new"
             class="rounded-(--radius) border border-border px-3 py-1 hover:bg-accent"
             onPress={openTab}
           >
-            <Text class="text-xs text-foreground">新建终端</Text>
+            <Text class="text-xs text-foreground">{t("terminal.new")}</Text>
           </Button>
         </View>
       </If>
@@ -437,14 +438,14 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
             </Text>
             <If when={selection()}>
               <Text testID="terminal-selection" class="absolute bottom-0 left-0 h-px w-px overflow-hidden opacity-0 pointer-events-none">
-                已选择终端文本
+                {t("terminal.text_selected")}
               </Text>
             </If>
           </Scroll>
           <Input
             ref={(node) => { input = node; }}
             testID="terminal-input"
-            accessibilityLabel="终端输入"
+            accessibilityLabel={t("terminal.input_label")}
             value={draft()}
             onChange={changeInput}
             onKeyPress={(event) => {

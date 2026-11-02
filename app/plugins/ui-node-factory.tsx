@@ -1,4 +1,5 @@
 import { computed, Text, View, token, type JSX } from "nsh";
+import { t } from "../i18n";
 import type { AgentStore } from "../store";
 import type { PluginUiContribution } from "../protocol";
 import { Icon, type IconName } from "../components/icon";
@@ -127,7 +128,7 @@ function renderUiNode(props: UiNodeFactoryProps, plan: PluginUiPlan): JSX.Elemen
     if (entry.contribution.icon) {
       return <Icon testID={entry.contribution.kind === "replaceChildren" ? "plugin-send-icon" : `plugin-${entry.contribution.kind}-icon`} name={entry.contribution.icon as IconName} size={14} color={token("primary-foreground")} />;
     }
-    if (!entry.contribution.export) return <Text role="alert">插件贡献 {entry.contribution.id} 没有可渲染内容</Text>;
+    if (!entry.contribution.export) return <Text role="alert">{t("plugins.no_renderable", { id: entry.contribution.id })}</Text>;
     return (
       <RemoteContribution
         instance={entry.instance}

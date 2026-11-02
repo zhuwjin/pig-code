@@ -1,5 +1,6 @@
 import { effect, openUrl, Scroll, signal, Text, token, View } from "nsh";
 import { Button, Input, Popover, Switch } from "nsh/base";
+import { t } from "../../i18n";
 import type { ApiFormat, ConnectionTestResult, ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
 import { Icon } from "../icon";
@@ -27,9 +28,9 @@ function formatShort(format: ApiFormat): string {
 
 function resultText(result: ConnectionTestResult): { text: string; ok: boolean } {
   switch (result.result) {
-    case "connected": return { text: `连接成功 · HTTP ${result.status}`, ok: true };
-    case "timeout": return { text: `连接超时 · ${result.secs} 秒`, ok: false };
-    case "failed": return { text: `连接失败 · ${result.detail}`, ok: false };
+    case "connected": return { text: t("settings.provider.connected", { status: result.status }), ok: true };
+    case "timeout": return { text: t("settings.provider.timeout", { secs: result.secs }), ok: false };
+    case "failed": return { text: t("settings.provider.failed", { detail: result.detail }), ok: false };
   }
 }
 
@@ -46,7 +47,7 @@ function ModelRow(props: UiContext & {
     <View class={`flex-row items-center gap-2 px-3 py-2 ${props.separator ? "border-t border-border" : ""}`}>
       <ProviderIconButton
         testID={`model-icon-picker-${provider().id}-${model().id}`}
-        accessibilityLabel={`选择模型图标 ${model().name || model().id}`}
+        accessibilityLabel={t("settings.models.select_icon", { name: model().name || model().id })}
         icon={() => model().icon}
         kind="model"
         size={20}
@@ -57,27 +58,27 @@ function ModelRow(props: UiContext & {
         <Text numberOfLines={1} class="min-w-0 font-mono text-xs text-muted-foreground">{model().id}</Text>
       </If>
       <Text class="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{formatTokens(model().context_window)}</Text>
-      <If when={model().input_image}><Text class="text-[10px] text-muted-foreground">视觉</Text></If>
+      <If when={model().input_image}><Text class="text-[10px] text-muted-foreground">{t("settings.models.vision")}</Text></If>
       <View class="flex-1" />
       <Button
         testID={`model-edit-${provider().id}-${model().id}`}
-        accessibilityLabel={`编辑模型 ${model().id}`}
+        accessibilityLabel={t("settings.models.edit_model", { id: model().id })}
         class="rounded px-2 py-1 hover:bg-accent"
         onPress={props.onEdit}
       >
-        <Text class="text-[11px] text-muted-foreground">编辑</Text>
+        <Text class="text-[11px] text-muted-foreground">{t("common.edit")}</Text>
       </Button>
       <Button
         testID={`model-delete-${provider().id}-${model().id}`}
-        accessibilityLabel={`删除模型 ${model().id}`}
+        accessibilityLabel={t("settings.models.delete_model", { id: model().id })}
         class="rounded px-2 py-1 hover:bg-destructive/10"
         onPress={() => store.deleteModel(provider().id, model().id)}
       >
-        <Text class="text-[11px] text-destructive">删除</Text>
+        <Text class="text-[11px] text-destructive">{t("common.delete")}</Text>
       </Button>
       <Switch
         testID={`model-toggle-${provider().id}-${model().id}`}
-        accessibilityLabel={`${model().enabled ? "停用" : "启用"}模型 ${model().id}`}
+        accessibilityLabel={t(model().enabled ? "settings.models.disable_model" : "settings.models.enable_model", { id: model().id })}
         checked={model().enabled}
         onChange={(checked) => store.setModelEnabled(provider().id, model().id, checked)}
         trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
@@ -133,15 +134,15 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
       <View class="flex-row items-center gap-2">
         <Button
           testID={`provider-edit-${provider().id}`}
-          accessibilityLabel="展开或折叠连接配置"
+          accessibilityLabel={t("settings.provider.toggle_connection")}
           class="min-w-0 flex-1 flex-row items-center gap-2 rounded-(--radius)"
           onPress={() => collapsed.update((value) => !value)}
         >
-          <Text class="text-sm text-muted-foreground">连接配置</Text>
+          <Text class="text-sm text-muted-foreground">{t("settings.provider.connection")}</Text>
           <If when={collapsed()}>
             <Text class="rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{formatShort(provider().api_format)}</Text>
             <Text numberOfLines={1} class="min-w-0 max-w-80 font-mono text-xs text-muted-foreground">{provider().base_url}</Text>
-            <If when={!hasKey()}><Text class="text-xs text-warning">缺少密钥</Text></If>
+            <If when={!hasKey()}><Text class="text-xs text-warning">{t("settings.models.missing_key")}</Text></If>
           </If>
           <View class="flex-1" />
         </Button>
@@ -152,12 +153,12 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
           onPress={() => store.testProvider(provider().id)}
         >
           <Icon name="globe" size={14} color={token("foreground")} />
-          <Text class="text-xs text-foreground">{store.testingProviders()[provider().id] ? "测试中…" : "测试连接"}</Text>
+          <Text class="text-xs text-foreground">{store.testingProviders()[provider().id] ? t("settings.provider.testing") : t("settings.provider.test")}</Text>
         </Button>
         <View
           testID={`provider-chevron-${provider().id}`}
           role="button"
-          accessibilityLabel="展开或折叠连接配置"
+          accessibilityLabel={t("settings.provider.toggle_connection")}
           class="shrink-0 cursor-pointer"
           onPress={() => collapsed.update((value) => !value)}
         >
@@ -168,7 +169,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
         <View class="gap-3">
           <View class="flex-row gap-3">
             <View class="min-w-0 flex-1 gap-1">
-              <Text class="text-sm text-muted-foreground">名称</Text>
+              <Text class="text-sm text-muted-foreground">{t("settings.provider.name")}</Text>
               <Input
                 testID="provider-name"
                 value={name()}
@@ -180,7 +181,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               />
             </View>
             <View class="min-w-0 flex-1 gap-1">
-              <Text class="text-sm text-muted-foreground">连接地址</Text>
+              <Text class="text-sm text-muted-foreground">{t("settings.provider.base_url")}</Text>
               <Input
                 testID="provider-base-url"
                 value={baseUrl()}
@@ -194,7 +195,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
           </View>
           <View class="flex-row items-start gap-3">
             <View class="min-w-0 flex-1 gap-1">
-              <Text class="text-sm text-muted-foreground">API 协议</Text>
+              <Text class="text-sm text-muted-foreground">{t("settings.provider.api_format")}</Text>
               <Popover
                 open={formatOpen()}
                 onOpenChange={(open) => formatOpen.set(open)}
@@ -233,7 +234,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                 <Text class="text-sm text-muted-foreground">API Key</Text>
                 <Switch
                   testID="provider-requires-key"
-                  accessibilityLabel="需要 API Key"
+                  accessibilityLabel={t("settings.provider.requires_key")}
                   checked={provider().requires_api_key ?? true}
                   onChange={(checked) => save({ requires_api_key: checked })}
                   trackClass="h-4 w-7 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
@@ -246,12 +247,12 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                   class="rounded px-1 py-0.5 hover:bg-muted disabled:opacity-30"
                   onPress={() => store.clearProviderApiKey(provider().id)}
                 >
-                  <Text class="text-[11px] text-muted-foreground">清除密钥</Text>
+                  <Text class="text-[11px] text-muted-foreground">{t("settings.provider.clear_key")}</Text>
                 </Button>
                 <If when={provider().key_url}>
                   {(url) => (
                     <Button testID={`provider-key-link-${provider().id}`} class="flex-row items-center gap-0.5 rounded px-0" onPress={() => void openUrl(url())}>
-                      <Text class="text-xs text-foreground underline">获取密钥</Text>
+                      <Text class="text-xs text-foreground underline">{t("settings.provider.get_key")}</Text>
                       <Icon name="external-link" size={12} color={token("foreground")} />
                     </Button>
                   )}
@@ -267,12 +268,12 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                   }}
                   readonly={provider().requires_api_key === false}
                   masked={masked()}
-                  placeholder={provider().requires_api_key === false ? "无需 API Key" : hasKey() ? "留空以保留已保存的密钥" : "输入 API Key"}
+                  placeholder={t(provider().requires_api_key === false ? "settings.provider.key_not_required" : hasKey() ? "settings.provider.key_saved_placeholder" : "settings.provider.key_placeholder")}
                   class={`min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-3 py-2 h-9 selection:bg-foreground font-mono text-sm text-foreground placeholder:text-muted-foreground ${provider().requires_api_key === false ? "opacity-50" : ""}`}
                 />
                 <Button
                   testID="provider-toggle-mask"
-                  accessibilityLabel={masked() ? "显示密钥" : "隐藏密钥"}
+                  accessibilityLabel={t(masked() ? "settings.provider.show_key" : "settings.provider.hide_key")}
                   disabled={provider().requires_api_key === false}
                   class="h-9 items-center justify-center rounded-(--radius) px-2 hover:bg-accent disabled:opacity-30"
                   onPress={() => masked.update((value) => !value)}
@@ -312,7 +313,7 @@ export function ProviderDetail(props: UiContext & {
       <View class="flex-row items-center gap-3 rounded-xl border border-border bg-card p-4">
         <ProviderIconButton
           testID={`provider-icon-picker-${provider().id}`}
-          accessibilityLabel={`选择供应商图标 ${provider().name}`}
+          accessibilityLabel={t("settings.provider.select_icon", { name: provider().name })}
           icon={() => provider().icon}
           size={28}
           buttonClass="rounded-md p-1"
@@ -321,7 +322,7 @@ export function ProviderDetail(props: UiContext & {
         <Text numberOfLines={1} class="min-w-0 flex-1 text-lg font-semibold text-foreground">{provider().name}</Text>
         <Switch
           testID={`provider-toggle-${provider().id}`}
-          accessibilityLabel={`${provider().enabled ? "停用" : "启用"}供应商 ${provider().name}`}
+          accessibilityLabel={t(provider().enabled ? "settings.provider.disable" : "settings.provider.enable", { name: provider().name })}
           checked={provider().enabled}
           onChange={(checked) => store.setProviderEnabled(provider().id, checked)}
           trackClass="h-6 w-10 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
@@ -335,23 +336,23 @@ export function ProviderDetail(props: UiContext & {
             else deleteArmed.set(true);
           }}
         >
-          <Text class="text-xs text-destructive">{deleteArmed() ? "确认删除" : "删除"}</Text>
+          <Text class="text-xs text-destructive">{deleteArmed() ? t("common.confirm_delete") : t("common.delete")}</Text>
         </Button>
       </View>
       <ConnectionCard {...props} />
       <View class="gap-3 rounded-xl border border-border bg-card p-4">
         <View class="flex-row items-center gap-2">
-          <Text class="text-sm font-medium text-foreground">模型</Text>
+          <Text class="text-sm font-medium text-foreground">{t("settings.models.section")}</Text>
           <Text class="text-xs text-muted-foreground">{provider().models.length}</Text>
           <View class="flex-1" />
           <Button testID={`model-add-${provider().id}`} class="rounded-(--radius) bg-muted px-3 py-1.5 hover:bg-accent" onPress={() => props.onEditModel()}>
-            <Text class="text-xs text-foreground">＋ 添加模型 …</Text>
+            <Text class="text-xs text-foreground">{t("settings.models.add_model")}</Text>
           </Button>
         </View>
         <If when={provider().models.length === 0}>
           <View class="flex-row items-center gap-2 rounded-lg border border-dashed border-border px-4 py-3">
             <Text class="text-sm font-semibold text-muted-foreground">i</Text>
-            <Text class="text-sm text-muted-foreground">还没有模型，点击“添加模型”创建。</Text>
+            <Text class="text-sm text-muted-foreground">{t("settings.models.empty")}</Text>
           </View>
         </If>
         <If when={provider().models.length > 0}>

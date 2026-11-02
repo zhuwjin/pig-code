@@ -1,5 +1,6 @@
 import { Scroll, signal, Text, View } from "nsh";
 import { Button, Input } from "nsh/base";
+import { t } from "../../i18n";
 import { resolveIcon } from "./icon-catalog";
 import { searchIcons } from "./icon-search";
 import { ProviderIcon } from "./provider-icon";
@@ -16,15 +17,15 @@ export function IconPicker(props: {
   const kind = () => props.kind;
   return (
     <View class="absolute inset-0 z-50 items-center justify-center">
-      <Button accessibilityLabel="关闭图标选择" class="absolute inset-0 bg-black/30" onPress={props.onClose} />
+      <Button accessibilityLabel={t("settings.models.icon_picker.close_label")} class="absolute inset-0 bg-black/30" onPress={props.onClose} />
       <View testID="icon-picker" class="w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl">
         <View class="flex-row items-center gap-3">
           <View class="min-w-0 flex-1 gap-0.5">
-            <Text class="text-lg font-semibold text-foreground">选择图标</Text>
+            <Text class="text-lg font-semibold text-foreground">{t("settings.models.icon_picker.title")}</Text>
             <Text numberOfLines={1} class="text-xs text-muted-foreground">{props.targetName}</Text>
           </View>
-          <Button testID="icon-picker-close" accessibilityLabel="取消图标选择" class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onClose}>
-            <Text class="text-sm text-muted-foreground">关闭</Text>
+          <Button testID="icon-picker-close" accessibilityLabel={t("settings.models.icon_picker.cancel_label")} class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onClose}>
+            <Text class="text-sm text-muted-foreground">{t("common.close")}</Text>
           </Button>
         </View>
         <Input
@@ -32,7 +33,7 @@ export function IconPicker(props: {
           value={query()}
           onChange={(text) => query.set(text)}
           autoFocus
-          placeholder="搜索图标、平台或模型"
+          placeholder={t("settings.models.icon_picker.search")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
         <Scroll class="max-h-96">
@@ -45,7 +46,7 @@ export function IconPicker(props: {
             >
               <ProviderIcon kind={kind()} size={24} />
               <Text numberOfLines={1} class="w-full text-center text-xs text-foreground">
-                {kind() === "model" ? "默认 Brain" : "默认 Server"}
+                {t(kind() === "model" ? "settings.models.icon_picker.default_brain" : "settings.models.icon_picker.default_server")}
               </Text>
             </Button>
             <Each of={options()} key={(option) => option.id}>
@@ -63,12 +64,12 @@ export function IconPicker(props: {
             </Each>
           </View>
           <If when={options().length === 0}>
-            <Text class="p-4 text-sm text-muted-foreground">没有匹配的图标</Text>
+            <Text class="p-4 text-sm text-muted-foreground">{t("settings.models.icon_picker.no_matches")}</Text>
           </If>
         </Scroll>
         <View class="flex-row justify-end">
           <Button testID="cancel-icon-picker" class="rounded-(--radius) border border-border px-3 py-1.5 hover:bg-muted" onPress={props.onClose}>
-            <Text class="text-xs text-foreground">取消</Text>
+            <Text class="text-xs text-foreground">{t("common.cancel")}</Text>
           </Button>
         </View>
       </View>

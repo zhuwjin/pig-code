@@ -1,5 +1,6 @@
 import { Text, token, View, type JSX } from "nsh";
 import { Popover, Progress } from "nsh/base";
+import { t } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { formatCompactDuration, formatTokens } from "../conversation";
 import { Icon } from "./icon";
@@ -63,7 +64,7 @@ export function StatusBar(props: UiContext) {
         <If when={running()}>
           <View class="flex-row items-center gap-1.5">
             <View class="h-1.5 w-1.5 rounded-full bg-success" />
-            <Text class="text-xs text-muted-foreground">生成中</Text>
+            <Text class="text-xs text-muted-foreground">{t("status.generating")}</Text>
           </View>
         </If>
         <If when={running() && rate() > 0}>
@@ -74,18 +75,18 @@ export function StatusBar(props: UiContext) {
             <View role="button" class="flex-row items-center gap-1 rounded-full px-1.5 py-0.5 hover:bg-accent">
               <Icon name="gauge" size={13} color={token("muted-foreground")} />
               <Text class="text-xs text-muted-foreground">
-                {totals().turns} 回合 · {totals().steps} 步{speed() ? ` · ${Math.round(speed()!)} tok/s` : ""}
+                {t("status.turns_steps", { turns: totals().turns, steps: totals().steps })}{speed() ? ` · ${Math.round(speed()!)} tok/s` : ""}
               </Text>
             </View>,
             <View class="gap-2">
-              <Text class="text-sm font-medium text-foreground">会话活动</Text>
+              <Text class="text-sm font-medium text-foreground">{t("status.session_activity")}</Text>
               <View class="h-px bg-border" />
-              <DetailLine label="已完成回合" value={String(totals().turns)} />
-              <DetailLine label="API 步数" value={String(totals().steps)} />
-              <DetailLine label="模型累计耗时" value={formatCompactDuration(totals().apiMs)} />
-              <DetailLine label="工具累计耗时" value={formatCompactDuration(totals().toolMs)} />
-              <DetailLine label="首 Token 平均延迟" value={totals().ttftSteps ? formatCompactDuration(totals().ttftMs / totals().ttftSteps) : "—"} />
-              <DetailLine label="加权解码速度" value={speed() ? `${speed()!.toFixed(1)} tok/s` : "—"} />
+              <DetailLine label={t("status.completed_turns")} value={String(totals().turns)} />
+              <DetailLine label={t("status.api_steps")} value={String(totals().steps)} />
+              <DetailLine label={t("status.model_time")} value={formatCompactDuration(totals().apiMs)} />
+              <DetailLine label={t("status.tool_time")} value={formatCompactDuration(totals().toolMs)} />
+              <DetailLine label={t("status.first_token")} value={totals().ttftSteps ? formatCompactDuration(totals().ttftMs / totals().ttftSteps) : "—"} />
+              <DetailLine label={t("status.decode_speed")} value={speed() ? `${speed()!.toFixed(1)} tok/s` : "—"} />
             </View>,
           )}
         </If>
@@ -95,16 +96,16 @@ export function StatusBar(props: UiContext) {
               <Icon name="database" size={13} color={token("muted-foreground")} />
               <Text class="text-xs text-muted-foreground">
                 {formatTokens((usage()?.input ?? 0) + (usage()?.cacheRead ?? 0) + totals().output)} tokens
-                {cacheHit() != null ? ` · 缓存 ${cacheHit()!.toFixed(1)}%` : ""}
+                {cacheHit() != null ? ` · ${t("status.cache_suffix", { percent: cacheHit()!.toFixed(1) })}` : ""}
               </Text>
             </View>,
             <View class="gap-2">
-              <Text class="text-sm font-medium text-foreground">会话 Token 用量</Text>
+              <Text class="text-sm font-medium text-foreground">{t("status.token_usage")}</Text>
               <View class="h-px bg-border" />
-              <DetailLine label="输入" value={(usage()?.input ?? 0).toLocaleString()} />
-              <DetailLine label="缓存读取" value={(usage()?.cacheRead ?? 0).toLocaleString()} />
-              <DetailLine label="输出" value={totals().output.toLocaleString()} />
-              <DetailLine label="缓存命中率" value={cacheHit() == null ? "—" : `${cacheHit()!.toFixed(1)}%`} />
+              <DetailLine label={t("status.input")} value={(usage()?.input ?? 0).toLocaleString()} />
+              <DetailLine label={t("status.cache_read")} value={(usage()?.cacheRead ?? 0).toLocaleString()} />
+              <DetailLine label={t("status.output")} value={totals().output.toLocaleString()} />
+              <DetailLine label={t("status.cache_hit")} value={cacheHit() == null ? "—" : `${cacheHit()!.toFixed(1)}%`} />
             </View>,
           )}
           {popup("context",
@@ -114,16 +115,16 @@ export function StatusBar(props: UiContext) {
             </View>,
             <View class="gap-2">
               <View class="flex-row items-center">
-                <Text class="flex-1 text-sm font-medium text-foreground">上下文已使用 {Math.round(contextRatio() * 100)}%</Text>
+                <Text class="flex-1 text-sm font-medium text-foreground">{t("status.context_used", { percent: Math.round(contextRatio() * 100) })}</Text>
                 <Text class="font-mono text-xs text-muted-foreground">~{formatTokens(usage()?.used ?? 0)} / {formatTokens(usage()?.total ?? 0)}</Text>
               </View>
               <Progress value={contextRatio() * 100} class="h-1.5" />
               <If when={store.currentBreakdown()}>
                 {(value) => (
                   <View class="gap-1.5">
-                    <DetailLine label="系统提示（估算）" value={`~${formatTokens(value().system)}`} />
-                    <DetailLine label="工具 Schema（估算）" value={`~${formatTokens(value().tools)}`} />
-                    <DetailLine label="对话（估算）" value={`~${formatTokens(value().messages)}`} />
+                    <DetailLine label={t("status.system_prompt")} value={`~${formatTokens(value().system)}`} />
+                    <DetailLine label={t("status.tool_schema")} value={`~${formatTokens(value().tools)}`} />
+                    <DetailLine label={t("status.messages")} value={`~${formatTokens(value().messages)}`} />
                   </View>
                 )}
               </If>

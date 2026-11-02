@@ -4,11 +4,23 @@ import { expect, open, test } from "nsh/test";
 import { iconTint, paintIcon } from "./app/components/icon";
 import { ICON_ELEMENTS } from "./app/components/icon-elements";
 import { createParticles, scatterParticles, stepParticles } from "./app/hero-particles";
+import en from "./app/locales/en.json";
+import zhCN from "./app/locales/zh-CN.json";
 import { ThemeStore } from "./app/theme";
+
+function catalogKeys(value: Record<string, unknown>, prefix = ""): string[] {
+  return Object.entries(value).flatMap(([key, child]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return typeof child === "object" && child !== null
+      ? catalogKeys(child as Record<string, unknown>, path)
+      : [path];
+  }).sort();
+}
 
 function openApp() {
   return open("./App.selftest.tsx", {
     platform: "macos",
+    locale: "zh-CN",
     width: 1280,
     height: 800,
   });
@@ -340,6 +352,43 @@ test("filters themes and switches appearance for single-mode palettes", async ()
   expect(app.count("id:theme-option-ayu-light")).toBe(1);
   expect(app.count("id:theme-option-ayu-dark")).toBe(1);
   expect(app.count("id:theme-option-aurora-light")).toBe(0);
+});
+
+test("locale catalogs keep the same keys", () => {
+  expect(catalogKeys(en)).toEqual(catalogKeys(zhCN));
+});
+
+test("renders the main shell in English for en-US", async () => {
+  const app = await open("./App.selftest.tsx", {
+    platform: "macos",
+    locale: "en-US",
+    width: 1280,
+    height: 800,
+  });
+  const texts = app.texts();
+  expect(texts).toContain("New task");
+  expect(texts).toContain("Search");
+  expect(texts).toContain("Summarize this workspace");
+  expect(texts).toContain("Write unit tests");
+
+  await app.press("id:settings-open");
+  const settings = app.texts();
+  expect(settings).toContain("Models");
+  expect(settings).toContain("Appearance");
+  expect(settings).toContain("Plugins");
+});
+
+test("renders the theme page in English for en-US", async () => {
+  const app = await open("./App.selftest.tsx", {
+    platform: "macos",
+    locale: "en-US",
+    width: 1280,
+    height: 800,
+  });
+  await app.press("id:title-theme-settings");
+  expect(app.texts()).toContain("Theme");
+  expect(app.texts()).toContain("Theme mode");
+  expect(app.texts()).toContain("Follow the system, or pin light or dark.");
 });
 
 test("loads, applies, disables and restores plugin themes", async () => {

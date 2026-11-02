@@ -1,5 +1,6 @@
 import { batch, LayoutAnimation, signal } from "nsh";
 import { Agent } from "pig-code-ts/native";
+import { t } from "./i18n";
 import {
   AppConfig,
   ApprovalDecision,
@@ -80,7 +81,7 @@ export class AgentStore {
   readonly draftImages = signal<ComposerImage[]>([]);
   readonly sessions = signal<SessionMeta[]>([]);
   readonly current = signal<string | null>(null);
-  readonly currentTitle = signal("新任务");
+  readonly currentTitle = signal(t("store.new_task"));
   readonly currentModel = signal("");
   readonly items = signal<Record<string, ChatItem[]>>({});
   readonly turns = signal<Record<string, TurnState[]>>({});
@@ -166,13 +167,13 @@ export class AgentStore {
           for (const event of events) this.reduce(event);
         });
       } catch (error) {
-        this.globalError.set(`事件解析失败：${errorMessage(error)}`);
+        this.globalError.set(t("store.error.event_parse", { error: errorMessage(error) }));
       }
     });
     void this.agent.listenPlugins((raw) => {
       try {
         const message = JSON.parse(raw);
-        if (!validatePluginEnvelope(message)) throw new Error("无效的插件协议信封");
+        if (!validatePluginEnvelope(message)) throw new Error(t("store.error.invalid_plugin_envelope"));
         const instance = message.instance;
         let sequencer = this.pluginSequencers.get(instance);
         if (!sequencer || message.epoch > sequencer.epoch) {
@@ -230,7 +231,7 @@ export class AgentStore {
           if (runtime.state === "active" || runtime.state === "failed" || runtime.state === "stopped") {
             void this.loadPluginThemes(this.pluginPackages());
           }
-          if (runtime.state === "failed") this.globalError.set(`插件运行失败：${runtime.message ?? "未知错误"}`);
+          if (runtime.state === "failed") this.globalError.set(t("store.error.plugin_runtime", { message: runtime.message ?? t("store.error.unknown") }));
         } else if (message.kind === "host.action") {
           const action = message.body as Record<string, any>;
           if (action.name === "composer.submit") this.send();
@@ -242,7 +243,7 @@ export class AgentStore {
           }));
         }
       } catch (error) {
-        this.globalError.set(`插件事件解析失败：${errorMessage(error)}`);
+        this.globalError.set(t("store.error.plugin_event_parse", { error: errorMessage(error) }));
       }
     });
   }
@@ -253,7 +254,7 @@ export class AgentStore {
     this.current.set(null);
     this.heroCwd.set(null);
     this.heroModelDirty = false;
-    this.currentTitle.set("新任务");
+    this.currentTitle.set(t("store.new_task"));
     this.currentModel.set("");
     this.applyHeroDefaults();
     this.globalError.set("");
@@ -409,7 +410,7 @@ export class AgentStore {
       text = instruction;
     } else if (slash) {
       if (running) {
-        this.globalError.set("请先停止当前回合，再执行这个命令。");
+        this.globalError.set(t("store.error.stop_turn_first"));
         return;
       }
       if (slash.name === "/clear") {
@@ -418,7 +419,7 @@ export class AgentStore {
         return;
       }
       if (!sessionId) {
-        this.globalError.set("请先发送一条消息创建会话。");
+        this.globalError.set(t("store.error.send_first"));
         return;
       }
       if (this.command({ Compact: { session_id: sessionId, instruction: slash.instruction ?? null } })) {
@@ -993,8 +994,16 @@ export class AgentStore {
 
   reportPluginUiDiagnostics(target: string, conflicts: { winner: string; suppressed: string[] }[], rejected: { contribution: string; reason: string }[]): void {
     const diagnostics = [
-      ...conflicts.map((conflict) => `${target}: ${conflict.winner} 生效，抑制 ${conflict.suppressed.join("、")}`),
-      ...rejected.map((item) => `${target}: ${item.contribution} 被拒绝（${item.reason}）`),
+      ...conflicts.map((conflict) => t("store.conflict.winner", {
+        target,
+        winner: conflict.winner,
+        suppressed: conflict.suppressed.join(t("common.list_separator")),
+      })),
+      ...rejected.map((item) => t("store.conflict.rejected", {
+        target,
+        contribution: item.contribution,
+        reason: item.reason,
+      })),
     ];
     const current = this.pluginUiDiagnostics()[target] ?? [];
     if (current.length === diagnostics.length && current.every((item, index) => item === diagnostics[index])) return;
@@ -1144,7 +1153,7 @@ export class AgentStore {
         }));
         this.syncCurrentModelName(data.model || "");
         this.currentTitle.set(
-          this.sessions().find((item) => item.id === sessionId)?.title ?? "当前会话",
+          this.sessions().find((item) => item.id === sessionId)?.title ?? t("store.current_session"),
         );
         const pending = this.pendingSubmission;
         this.pendingSubmission = null;
@@ -1494,7 +1503,7 @@ export class AgentStore {
         break;
       }
       case "CompactStarted":
-        this.addNote(sessionId!, "正在压缩上下文…", false, { noteKind: "compacting" });
+        this.addNote(sessionId!, t("store.compacting"), false, { noteKind: "compacting" });
         break;
       case "ContextCompacted":
         this.updateItems(sessionId!, (items) => items.filter((item) => item.kind !== "note" || item.noteKind !== "compacting"));

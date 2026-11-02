@@ -1,5 +1,6 @@
 import { Scroll, Text, View, effect, signal, token } from "nsh";
 import { Button, Collapsible, DiffView, Editor, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
+import { t } from "../i18n";
 import type { GitFileChange, RightPanelRequest, SubagentItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { formatDuration, pathParts } from "../conversation";
@@ -17,11 +18,11 @@ function tabId(request: RightPanelRequest): string {
 
 function tabTitle(request: RightPanelRequest): string {
   switch (request.kind) {
-    case "changes": return "变更";
+    case "changes": return t("right_panel.tab.changes");
     case "file": return pathParts(request.path).name;
-    case "subagent": return "子代理";
-    case "task": return "任务输出";
-    case "compact": return "压缩摘要";
+    case "subagent": return t("right_panel.tab.subagent");
+    case "task": return t("right_panel.tab.task");
+    case "compact": return t("right_panel.tab.compact");
   }
 }
 
@@ -77,15 +78,15 @@ function ChangesContent(props: UiContext) {
   return (
     <View class="min-h-0 flex-1">
       <View class="h-9 shrink-0 flex-row items-center gap-2 border-b border-border px-3">
-        <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{diff() ? diff()!.path : "文件变更"}</Text>
+        <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{diff() ? diff()!.path : t("right_panel.file_changes")}</Text>
         <If when={diff()}>
           <Button testID="git-diff-back" class="rounded px-2 py-1 hover:bg-accent" onPress={() => store.closeGitDiff()}>
-            <Text class="text-xs text-muted-foreground">返回</Text>
+            <Text class="text-xs text-muted-foreground">{t("common.back")}</Text>
           </Button>
         </If>
         <Button
           testID="right-refresh"
-          accessibilityLabel="刷新变更"
+          accessibilityLabel={t("right_panel.refresh_changes")}
           class="h-7 w-7 items-center justify-center rounded hover:bg-accent"
           onPress={() => store.refreshGitStatus()}
         >
@@ -97,7 +98,7 @@ function ChangesContent(props: UiContext) {
           <View class="min-h-0 flex-1">
             <If when={value().note}>
               <Text class="px-3 py-2 text-xs text-muted-foreground">
-                {value().note === "Binary" ? "二进制文件无法显示文本 diff" : value().note === "TooLarge" ? "文件过大，无法显示 diff" : "diff 已截断"}
+                {t(value().note === "Binary" ? "right_panel.diff.binary" : value().note === "TooLarge" ? "right_panel.diff.too_large" : "right_panel.diff.truncated")}
               </Text>
             </If>
             <View class={themeStore.classes("diff.root", "min-h-0 flex-1")}>
@@ -107,19 +108,19 @@ function ChangesContent(props: UiContext) {
         )}
       </If>
       <If when={!diff() && !status()}>
-        <View class="flex-1 items-center justify-center"><Text class="text-sm text-muted-foreground">正在读取变更…</Text></View>
+        <View class="flex-1 items-center justify-center"><Text class="text-sm text-muted-foreground">{t("right_panel.reading_changes")}</Text></View>
       </If>
       <If when={!diff() && status()?.is_git === false}>
         <View class="flex-1 items-center justify-center px-6">
-          <Text class="text-center text-sm text-muted-foreground">当前目录不是 Git 仓库</Text>
+          <Text class="text-center text-sm text-muted-foreground">{t("right_panel.not_git")}</Text>
         </View>
       </If>
       <If when={!diff() && status()?.is_git}>
         <Scroll class="flex-1" contentClass="p-2">
-          <ChangeSection {...props} title="未暂存" changes={status()!.unstaged} staged={false} />
-          <ChangeSection {...props} title="已暂存" changes={status()!.staged} staged />
+          <ChangeSection {...props} title={t("right_panel.unstaged")} changes={status()!.unstaged} staged={false} />
+          <ChangeSection {...props} title={t("right_panel.staged")} changes={status()!.staged} staged />
           <If when={status()!.unstaged.length + status()!.staged.length === 0}>
-            <Text class="px-3 py-8 text-center text-sm text-muted-foreground">没有文件变更</Text>
+            <Text class="px-3 py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_changes")}</Text>
           </If>
         </Scroll>
       </If>
@@ -149,7 +150,7 @@ function FileContent(props: UiContext & { request: Extract<RightPanelRequest, { 
     <View class="min-h-0 flex-1">
       <View class="h-9 shrink-0 flex-row items-center gap-2 border-b border-border px-3">
         <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.request.path}</Text>
-        <If when={truncated()}><Text class="text-xs text-warning">仅显示前 2 MB</Text></If>
+        <If when={truncated()}><Text class="text-xs text-warning">{t("right_panel.first_2mb")}</Text></If>
       </View>
       <If when={error()}>
         <View class="flex-1 items-center justify-center p-6"><Text selectable class="text-center text-sm text-destructive">{error()}</Text></View>
@@ -187,7 +188,7 @@ function TaskContent(props: UiContext & { request: Extract<RightPanelRequest, { 
         <Text numberOfLines={1} class="text-xs font-medium text-foreground">{task().command}</Text>
         <Text class="text-xs text-muted-foreground">
           {task().status} · {formatDuration((task().ended_at_ms ?? Date.now()) - task().started_at_ms)}
-          {task().exit_code != null ? ` · 退出码 ${task().exit_code}` : ""}
+          {task().exit_code != null ? t("right_panel.exit_code", { code: task().exit_code ?? 0 }) : ""}
         </Text>
       </View>
       <Editor value={output()} language="text" readOnly softWrap lineNumbers={false} class="min-h-0 flex-1" />
@@ -204,14 +205,14 @@ function SubagentItemRow(props: UiContext & { item: SubagentItem; index: number;
         open={open()}
         content={
           <View class="ml-6 mt-1 rounded-lg bg-tool-surface p-2">
-            <Text selectable class="font-mono text-xs leading-5 text-foreground">{props.item.output || "无输出"}</Text>
+            <Text selectable class="font-mono text-xs leading-5 text-foreground">{props.item.output || t("tools.no_output")}</Text>
           </View>
         }
       >
         <View role="button" class="flex-row items-center gap-2 py-1" onPress={() => props.store.toggleExpanded(id)}>
           <Icon name="chevron-right" size={12} color={token("muted-foreground")} />
           <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">
-            {props.item.tool ?? "工具"} · {props.item.text}
+            {props.item.tool ?? t("right_panel.tool")} · {props.item.text}
           </Text>
         </View>
       </Collapsible>
@@ -234,11 +235,11 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
       <View class="gap-1 border-b border-border px-3 py-2">
         <View class="flex-row items-center gap-2">
           <Text numberOfLines={1} class="min-w-0 flex-1 text-xs font-medium text-foreground">
-            {history()?.title ?? "正在读取子代理…"}
+            {history()?.title ?? t("right_panel.loading_subagent")}
           </Text>
           <If when={history()?.running}>
             <View class="h-1.5 w-1.5 rounded-full bg-success" />
-            <Text class="text-xs text-muted-foreground">运行中</Text>
+            <Text class="text-xs text-muted-foreground">{t("right_panel.running")}</Text>
           </If>
         </View>
         <Text numberOfLines={1} class="text-xs text-muted-foreground">{history()?.subtitle ?? props.request.agentId}</Text>
@@ -248,7 +249,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
           {(item, index) => <SubagentItemRow {...props} item={item()} index={index()} agentId={props.request.agentId} />}
         </Each>
         <If when={history() && history()!.items.length === 0}>
-          <Text class="py-8 text-center text-sm text-muted-foreground">暂无对话记录</Text>
+          <Text class="py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_conversation")}</Text>
         </If>
       </Scroll>
     </View>
@@ -328,7 +329,7 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
                     </Text>
                     <Button
                       testID={`right-tab-close-${id()}`}
-                      accessibilityLabel={`关闭 ${tabTitle(tab())}`}
+                      accessibilityLabel={t("right_panel.close_tab", { name: tabTitle(tab()) })}
                       class="h-5 w-5 items-center justify-center rounded opacity-0 hover:bg-accent group-hover:opacity-100"
                       onPress={() => closeTab(id())}
                     >
@@ -342,7 +343,7 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
         </Scroll>
         <Button
           testID="right-panel-close"
-          accessibilityLabel="关闭右侧面板"
+          accessibilityLabel={t("right_panel.close_panel")}
           class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
           onPress={props.onClose}
         >

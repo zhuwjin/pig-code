@@ -5,6 +5,7 @@ import { searchIcons } from "./app/components/settings/icon-search";
 function openApp() {
   return open("./App.selftest.tsx", {
     platform: "macos",
+    locale: "zh-CN",
     width: 1440,
     height: 900,
   });

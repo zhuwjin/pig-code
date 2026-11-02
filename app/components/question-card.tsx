@@ -1,5 +1,6 @@
 import { effect, keymap, signal, Text, View } from "nsh";
 import { Button, Input } from "nsh/base";
+import { t } from "../i18n";
 import type { PendingQuestion, QuestionItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 
@@ -69,12 +70,12 @@ export function QuestionCard(props: UiContext & { question: PendingQuestion }) {
             <View class="gap-3">
               <View class="gap-1">
                 <Text class="text-xs text-muted-foreground">
-                  问题 {page() + 1} / {props.question.questions.length}
+                  {t("question.progress", { current: page() + 1, total: props.question.questions.length })}
                   {question().header ? ` · ${question().header}` : ""}
                 </Text>
                 <Text class="text-sm font-semibold text-foreground">{question().question}</Text>
                 <If when={question().multi_select}>
-                  <Text class="text-xs text-muted-foreground">可选择多项，也可以填写其他回答。</Text>
+                  <Text class="text-xs text-muted-foreground">{t("question.multi_hint")}</Text>
                 </If>
               </View>
               <View class="gap-2">
@@ -102,7 +103,7 @@ export function QuestionCard(props: UiContext & { question: PendingQuestion }) {
               <Input
                 testID={`question-other-${page()}`}
                 value={other()}
-                placeholder="其他回答（可选）"
+                placeholder={t("question.other_placeholder")}
                 onChange={(text) => {
                   const index = page();
                   others.update((all) => {
@@ -123,12 +124,12 @@ export function QuestionCard(props: UiContext & { question: PendingQuestion }) {
           class="rounded-(--radius) px-3 py-2 hover:bg-muted"
           onPress={() => props.store.answerQuestion(null)}
         >
-          <Text class="text-sm text-muted-foreground">跳过 Esc</Text>
+          <Text class="text-sm text-muted-foreground">{t("question.skip")}</Text>
         </Button>
         <View class="flex-1" />
         <If when={page() > 0}>
           <Button class="rounded-(--radius) border border-border px-3 py-2" onPress={() => page.update((value) => value - 1)}>
-            <Text class="text-sm text-foreground">上一题</Text>
+            <Text class="text-sm text-foreground">{t("question.previous")}</Text>
           </Button>
         </If>
         <Button
@@ -141,7 +142,7 @@ export function QuestionCard(props: UiContext & { question: PendingQuestion }) {
           }}
         >
           <Text class="text-sm text-primary-foreground">
-            {page() + 1 < props.question.questions.length ? "下一题" : "提交"}
+            {t(page() + 1 < props.question.questions.length ? "question.next" : "question.submit")}
           </Text>
         </Button>
       </View>
