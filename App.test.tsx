@@ -311,7 +311,6 @@ test("applies named themes and appearance modes to native styles", async () => {
   await app.press("id:theme-mode-dark");
   await app.press("id:theme-option-ocean");
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#cbd5e1ff");
-  expect(app.spanStyle("✓").color).toBe("#3b82f6ff");
 
   await app.press("id:theme-option-pig");
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
@@ -321,6 +320,28 @@ test("applies named themes and appearance modes to native styles", async () => {
   expect(app.count("id:theme-picker")).toBe(0);
 });
 
+test("filters themes and switches appearance for single-mode palettes", async () => {
+  const app = await openApp();
+  await app.press("id:title-theme-settings");
+
+  await app.press("id:theme-filter-dark");
+  expect(app.count("id:theme-option-aurora-light")).toBe(0);
+  expect(app.count("id:theme-option-adventure")).toBe(1);
+
+  await app.press("id:theme-filter-light");
+  await app.press("id:theme-option-aurora-light");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#020617ff");
+
+  await app.press("id:theme-mode-dark");
+  expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
+
+  await app.press("id:theme-filter-all");
+  await app.type("id:theme-search", "ayu");
+  expect(app.count("id:theme-option-ayu-light")).toBe(1);
+  expect(app.count("id:theme-option-ayu-dark")).toBe(1);
+  expect(app.count("id:theme-option-aurora-light")).toBe(0);
+});
+
 test("loads, applies, disables and restores plugin themes", async () => {
   const app = await openApp();
   await installMoon(app);
@@ -328,7 +349,6 @@ test("loads, applies, disables and restores plugin themes", async () => {
   await app.waitFor("id:theme-option-moon");
   await app.press("id:theme-mode-dark");
   await app.press("id:theme-option-moon");
-  expect(app.spanStyle("✓").color).toBe("#c4b5fdff");
   expect(app.texts()).toContain("Moon Glass");
 
   await app.press("id:settings-plugins");
@@ -338,7 +358,6 @@ test("loads, applies, disables and restores plugin themes", async () => {
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
   await app.press("id:settings-appearance");
   await app.waitFor("id:theme-option-moon");
-  expect(app.spanStyle("✓").color).toBe("#c4b5fdff");
 });
 
 test("applies configured interface and monospace fonts through theme tokens", () => {

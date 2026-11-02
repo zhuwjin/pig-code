@@ -76,7 +76,8 @@ export class ThemeStore {
     }
     this.hydrated = true;
     if (themeId) this.activeId.set(themeId);
-    this.setMode(mode === "light" || mode === "dark" ? mode : "system");
+    const activeMode = this.active().mode;
+    this.setMode(activeMode ?? (mode === "light" || mode === "dark" ? mode : "system"));
   }
 
   hydrateFonts(ui: string | null | undefined, mono: string | null | undefined): void {
@@ -86,10 +87,11 @@ export class ThemeStore {
   }
 
   select(themeId: string): void {
-    if (this.selectableThemes().some((theme) => theme.id === themeId)) {
-      this.userModified = true;
-      this.activeId.set(themeId);
-    }
+    const theme = this.selectableThemes().find((item) => item.id === themeId);
+    if (!theme) return;
+    this.userModified = true;
+    this.activeId.set(themeId);
+    if (theme.mode) this.setMode(theme.mode);
   }
 
   setMode(mode: ThemeMode): void {

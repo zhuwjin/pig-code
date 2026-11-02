@@ -1,16 +1,74 @@
-import { colorScheme, Scroll, Text, View, signal } from "nsh";
+import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
 import { Button, Input } from "nsh/base";
 import { PluginMarketplacePackage, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
 import { ThemeStore } from "./theme";
-import { ThemeMode, themePreviewColor } from "./themes";
+import { DEFAULT_THEME_ID, ThemeDefinition, ThemeMode, themePreviewColor } from "./themes";
 import { pluginInstance } from "./plugins/ui-coordinator";
 
 const MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
-  { value: "light", label: "浅色" },
-  { value: "dark", label: "深色" },
+  { value: "light", label: "亮色" },
+  { value: "dark", label: "暗色" },
   { value: "system", label: "跟随系统" },
 ];
+
+type ThemeFilter = "all" | "light" | "dark";
+
+const THEME_FILTERS: { value: ThemeFilter; label: string }[] = [
+  { value: "all", label: "全部" },
+  { value: "light", label: "亮色" },
+  { value: "dark", label: "暗色" },
+];
+
+function themeModeOf(theme: ThemeDefinition): "light" | "dark" {
+  return theme.mode ?? (colorScheme() === "dark" ? "dark" : "light");
+}
+
+function MiniWindow(props: { dark: boolean }) {
+  const wallpaper = props.dark ? "#26262b" : "#dfe4ec";
+  const window = props.dark ? "#1b1b1e" : "#ffffff";
+  const bar = props.dark ? "#3a3a42" : "#ccd2db";
+  return (
+    <View class="h-[60px] w-[100px] shrink-0 p-[7px]" style={{ backgroundColor: wallpaper }}>
+      <View class="h-full w-full overflow-hidden rounded-[4px]" style={{ backgroundColor: window }}>
+        <View class="h-[11px] w-full flex-row items-center gap-[2px] px-1" style={{ backgroundColor: bar }}>
+          <View class="h-[3px] w-[3px] rounded-full" style={{ backgroundColor: "#ff5f57" }} />
+          <View class="h-[3px] w-[3px] rounded-full" style={{ backgroundColor: "#febc2e" }} />
+          <View class="h-[3px] w-[3px] rounded-full" style={{ backgroundColor: "#28c840" }} />
+        </View>
+        <View class="gap-[3px] p-[5px]">
+          <View class="h-[3px] w-[30px] rounded-full" style={{ backgroundColor: "#3b82f6" }} />
+          <View class="h-[3px] w-[54px] rounded-full" style={{ backgroundColor: bar }} />
+          <View class="h-[3px] w-[40px] rounded-full" style={{ backgroundColor: bar }} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function ModeCard(props: { option: { value: ThemeMode; label: string }; selected: boolean; onPress: () => void }) {
+  const value = () => props.option.value;
+  return (
+    <Button testID={`theme-mode-${props.option.value}`} class="items-center gap-1.5" onPress={props.onPress}>
+      <View class={`h-16 w-[104px] overflow-hidden rounded-(--radius) border-2 ${props.selected ? "border-primary" : "border-border"}`}>
+        <If when={value() === "system"}>
+          <View class="h-full w-full flex-row">
+            <View class="h-full w-[50px] overflow-hidden"><MiniWindow dark={false} /></View>
+            <View class="h-full w-[50px] flex-row justify-end overflow-hidden"><MiniWindow dark={true} /></View>
+          </View>
+        </If>
+        <If when={value() === "light"}><MiniWindow dark={false} /></If>
+        <If when={value() === "dark"}><MiniWindow dark={true} /></If>
+      </View>
+      <View class="flex-row items-center gap-1.5">
+        <View class={`h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${props.selected ? "border-primary" : "border-muted-foreground"}`}>
+          <If when={props.selected}><View class="h-1.5 w-1.5 rounded-full bg-primary" /></If>
+        </View>
+        <Text class="text-sm text-foreground">{props.option.label}</Text>
+      </View>
+    </Button>
+  );
+}
 
 function ThemePackageRow(props: {
   item: () => PluginPackageInfo;
@@ -88,85 +146,126 @@ export function ThemePicker(props: ThemePickerProps) {
   const packagePath = signal("");
   const rootPath = signal("");
   const installing = signal(false);
+  const themeFilter = signal<ThemeFilter>("all");
+  const themeQuery = signal("");
+  const filteredThemes = () => {
+    const query = themeQuery().trim().toLowerCase();
+    const filter = themeFilter();
+    return store.selectableThemes().filter((theme) => {
+      if (filter !== "all" && themeModeOf(theme) !== filter) return false;
+      return !query || theme.name.toLowerCase().includes(query) ||
+        (theme.description ?? "").toLowerCase().includes(query);
+    });
+  };
+  const chooseMode = (choice: ThemeMode) => {
+    const active = store.active();
+    if (choice === "system") {
+      if (active.mode) store.select(DEFAULT_THEME_ID);
+      store.setMode(choice);
+    } else if (active.mode && active.mode !== choice) {
+      const base = active.name.replace(/ (Light|Dark)$/i, "");
+      const match = store.selectableThemes().find((theme) =>
+        theme.mode === choice && theme.name.replace(/ (Light|Dark)$/i, "") === base
+      );
+      if (match) store.select(match.id);
+      else {
+        store.select(DEFAULT_THEME_ID);
+        store.setMode(choice);
+      }
+    } else {
+      store.setMode(choice);
+    }
+    props.onChange();
+  };
   const activeStylePacks = () => store.activeStylePacks();
   return (
     <View
       testID={props.section === "appearance" ? "theme-picker" : "plugin-manager-page"}
       class="relative min-w-0 flex-1 bg-background"
     >
-      <View class="gap-2 border-b border-border px-6 py-5">
-        <Text class="text-xl font-semibold text-foreground">
-          {props.section === "appearance" ? "外观与主题" : "插件管理"}
-        </Text>
-        <Text class="text-sm text-muted-foreground">
-          {props.section === "appearance" ? "选择后立即生效" : "安装、配置和管理签名插件"}
-        </Text>
-      </View>
       <Scroll class="flex-1">
-        <View class="mx-auto w-full max-w-[960px] gap-6 p-6">
+        <View class="w-full max-w-[960px] gap-6 p-6">
+          <View class="gap-2 border-b border-border pb-4">
+            <Text class="text-xl font-semibold text-foreground">
+              {props.section === "appearance" ? "主题" : "插件管理"}
+            </Text>
+            <Text class="text-sm text-muted-foreground">
+              {props.section === "appearance" ? "选择配色主题，立即生效并保存。" : "安装、配置和管理签名插件"}
+            </Text>
+          </View>
           <If when={props.section === "appearance"}>
             <View class="gap-6">
-              <View class="gap-2">
-                <Text class="text-xs font-medium text-muted-foreground">外观</Text>
-                <View class="flex-row gap-1 rounded-(--radius) bg-muted p-1">
-                  <Each of={MODE_OPTIONS} key={(option) => option.value}>
-                    {(option) => (
-                      <Button
-                        testID={`theme-mode-${option().value}`}
-                        selected={store.mode() === option().value}
-                        class="flex-1 items-center rounded-(--radius) px-2 py-1.5 selected:bg-background"
-                        onPress={() => {
-                          store.setMode(option().value);
-                          props.onChange();
-                        }}
-                      >
-                        <Text class="text-xs text-foreground">{option().label}</Text>
-                      </Button>
-                    )}
-                  </Each>
+              <View class="gap-3">
+                <View class="flex-row items-center justify-between gap-3">
+                  <View class="flex-row flex-wrap gap-2">
+                    <Each of={THEME_FILTERS} key={(option) => option.value}>
+                      {(option) => (
+                        <Button
+                          testID={`theme-filter-${option().value}`}
+                          selected={themeFilter() === option().value}
+                          class="rounded-full border border-border px-3 py-1 text-muted-foreground selected:border-foreground selected:text-foreground"
+                          onPress={() => themeFilter.set(option().value)}
+                        >
+                          <Text class="text-xs">{option().label}</Text>
+                        </Button>
+                      )}
+                    </Each>
+                  </View>
+                  <View class="relative w-[200px]">
+                    <Input
+                      testID="theme-search"
+                      value={themeQuery()}
+                      onChange={(text) => themeQuery.set(text)}
+                      placeholder="搜索主题…"
+                      class="w-full rounded-(--radius) border border-border bg-background pl-8 pr-3 py-2 selection:bg-foreground text-xs text-foreground placeholder:text-muted-foreground"
+                    />
+                    <Icon name="search" size={13} color={token("muted-foreground")} class="absolute left-2 top-1/2 -translate-y-1/2" />
+                  </View>
                 </View>
-              </View>
-              <View class="gap-2">
-                <Text class="text-xs font-medium text-muted-foreground">主题</Text>
-                <View class="gap-2">
-                  <Each of={store.selectableThemes()} key={(theme) => theme.id}>
+                <View class="flex-row flex-wrap gap-2">
+                  <Each of={filteredThemes()} key={(theme) => theme.id}>
                     {(theme) => (
                       <Button
                         testID={`theme-option-${theme().id}`}
                         selected={store.activeId() === theme().id}
                         accessibilityLabel={`选择主题 ${theme().name}`}
-                        class="rounded-(--radius) border border-border p-3 hover:bg-accent/50 selected:border-primary selected:bg-accent/40"
+                        class="w-[132px] shrink-0 flex-col items-stretch gap-2 rounded-xl border border-border bg-card p-2 hover:bg-accent/30"
+                        style={{ borderColor: store.activeId() === theme().id ? themePreviewColor(theme(), "primary", themeModeOf(theme())) : undefined }}
                         onPress={() => {
                           store.select(theme().id);
                           props.onChange();
                         }}
                       >
-                        <View class="flex-row items-center gap-3">
-                          <View
-                            class="h-10 w-12 overflow-hidden rounded-md border border-border"
-                            style={{ backgroundColor: themePreviewColor(theme(), "background", colorScheme()) }}
-                          >
-                            <View class="h-3 w-full" style={{ backgroundColor: themePreviewColor(theme(), "title-bar", colorScheme()) }} />
-                            <View class="flex-1 justify-center px-2">
-                              <View class="h-2 w-7 rounded-full" style={{ backgroundColor: themePreviewColor(theme(), "primary", colorScheme()) }} />
-                            </View>
-                          </View>
-                          <View class="min-w-0 flex-1 gap-0.5">
-                            <View class="flex-row items-center gap-2">
-                              <Text class="flex-1 text-sm font-medium text-foreground">{theme().name}</Text>
-                              <If when={theme().source === "plugin"}>
-                                <Text class="text-xs text-muted-foreground">插件</Text>
-                              </If>
-                            </View>
-                            <Text numberOfLines={1} class="text-xs text-muted-foreground">
-                              {theme().description ?? "自定义主题"}
-                            </Text>
-                          </View>
-                          <If when={store.activeId() === theme().id}>
-                            <Text class="text-sm text-primary">✓</Text>
-                          </If>
+                        <View class="h-[54px] w-full gap-1 overflow-hidden rounded-md p-[7px]" style={{ backgroundColor: themePreviewColor(theme(), "background", themeModeOf(theme())) }}>
+                          <View class="h-1 w-10 rounded-full" style={{ backgroundColor: themePreviewColor(theme(), "primary", themeModeOf(theme())) }} />
+                          <View class="h-1 w-[66px] rounded-full opacity-70" style={{ backgroundColor: themePreviewColor(theme(), "foreground", themeModeOf(theme())) }} />
+                          <View class="h-1 w-[34px] rounded-full opacity-40" style={{ backgroundColor: themePreviewColor(theme(), "foreground", themeModeOf(theme())) }} />
+                        </View>
+                        <View class="flex-row items-center justify-between gap-1">
+                          <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-foreground">{theme().name}</Text>
+                          <Text class="shrink-0 text-xs text-muted-foreground">{themeModeOf(theme()) === "dark" ? "暗色" : "亮色"}</Text>
                         </View>
                       </Button>
+                    )}
+                  </Each>
+                  <If when={filteredThemes().length === 0}>
+                    <Text class="py-3 text-sm text-muted-foreground">没有匹配的主题</Text>
+                  </If>
+                </View>
+              </View>
+              <View class="gap-3">
+                <View class="gap-1">
+                  <Text class="text-lg font-semibold text-foreground">主题模式</Text>
+                  <Text class="text-sm text-muted-foreground">跟随系统，或固定使用亮色、暗色。</Text>
+                </View>
+                <View class="flex-row flex-wrap gap-4">
+                  <Each of={MODE_OPTIONS} key={(option) => option.value}>
+                    {(option) => (
+                      <ModeCard
+                        option={option()}
+                        selected={store.mode() === option().value}
+                        onPress={() => chooseMode(option().value)}
+                      />
                     )}
                   </Each>
                 </View>

@@ -1,3 +1,5 @@
+import themeCatalog from "./presets/themes.json";
+
 export type ThemeMode = "system" | "light" | "dark";
 export type ThemeKind = "theme" | "style";
 export type ThemeTokenValue = string | number;
@@ -27,6 +29,7 @@ export interface ThemeDefinition {
   source: "builtin" | "plugin";
   kind?: ThemeKind;
   targetThemes?: string[];
+  mode?: "light" | "dark";
   cssVars: ThemeCssVars;
   parts?: Record<string, ThemePart>;
   background?: ThemeBackground | null;
@@ -149,6 +152,19 @@ const PIG_CSS_VARS: ThemeCssVars = {
   },
 };
 
+interface CatalogTheme {
+  id: string;
+  name: string;
+  description?: string;
+  mode: "light" | "dark";
+  cssVars: ThemeCssVars;
+}
+
+const ZED_THEMES: ThemeDefinition[] = (themeCatalog as CatalogTheme[]).map((theme) => ({
+  ...theme,
+  source: "builtin",
+}));
+
 export const BUILTIN_THEMES: readonly ThemeDefinition[] = [
   {
     id: DEFAULT_THEME_ID,
@@ -232,6 +248,7 @@ export const BUILTIN_THEMES: readonly ThemeDefinition[] = [
       },
     },
   },
+  ...ZED_THEMES,
 ];
 
 export function mergeCssVars(base: ThemeCssVars, overrides: ThemeCssVars): ThemeCssVars {
