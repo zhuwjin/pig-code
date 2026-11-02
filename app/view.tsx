@@ -1,9 +1,10 @@
-import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, locale as hostLocale, mount, reduceMotion, signal, untracked } from "nsh";
+import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, reduceMotion, signal, untracked } from "nsh";
 import type { JSX, Signal } from "nsh";
 import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { Window } from "nsh/desktop";
 import { AgentStore } from "./store";
 import { ThemeStore } from "./theme";
+import { appLocale, setLanguagePreference } from "./i18n";
 import type { UiContext } from "./ui-context";
 import { Sidebar } from "./components/sidebar";
 import { TitleBar } from "./components/title-bar";
@@ -151,7 +152,7 @@ function App(props: UiContext) {
     store.start();
   });
   effect(() => {
-    store.agent.setPluginLocale(hostLocale());
+    store.agent.setPluginLocale(appLocale());
   });
   effect(() => {
     const target = store.pluginNavigation();
@@ -171,6 +172,7 @@ function App(props: UiContext) {
     if (config) {
       themeStore.hydrate(config.theme, config.theme_mode);
       themeStore.hydrateFonts(config.ui_font, config.mono_font);
+      setLanguagePreference(config.language === "zh-CN" || config.language === "en" ? config.language : "system");
     }
   });
   effect(() => {

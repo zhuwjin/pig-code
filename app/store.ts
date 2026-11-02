@@ -137,6 +137,7 @@ export class AgentStore {
   readonly pluginLogs = signal<Record<string, unknown[]>>({});
   readonly pluginUiDiagnostics = signal<Record<string, string[]>>({});
   readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
+  readonly fontFamilies = signal<string[]>([]);
   readonly themeError = signal("");
   private autoOpen = true;
   private heroModelDirty = false;
@@ -160,6 +161,11 @@ export class AgentStore {
   }
 
   start(): void {
+    try {
+      this.fontFamilies.set(this.agent.listFonts());
+    } catch {
+      this.fontFamilies.set([]);
+    }
     void this.agent.listen((raw) => {
       try {
         const events = JSON.parse(raw);
@@ -811,6 +817,16 @@ export class AgentStore {
   saveThemePreference(theme: string, mode: "system" | "light" | "dark"): void {
     const config = this.config();
     if (config) this.saveConfig({ ...config, theme, theme_mode: mode });
+  }
+
+  saveLanguage(language: "system" | "zh-CN" | "en"): void {
+    const config = this.config();
+    if (config) this.saveConfig({ ...config, language: language === "system" ? null : language });
+  }
+
+  saveFonts(ui: string, mono: string): void {
+    const config = this.config();
+    if (config) this.saveConfig({ ...config, ui_font: ui.trim() || null, mono_font: mono.trim() || null });
   }
 
   saveConfig(config: AppConfig): boolean {

@@ -1,9 +1,9 @@
 import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
-import { Button, Input } from "nsh/base";
+import { Button, Input, Popover } from "nsh/base";
 import { PluginMarketplacePackage, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
-import { t } from "./i18n";
-import type { MessageKey } from "./i18n";
+import { languagePreference, setLanguagePreference, t } from "./i18n";
+import type { LanguagePreference, MessageKey } from "./i18n";
 import { ThemeStore } from "./theme";
 import { DEFAULT_THEME_ID, ThemeDefinition, ThemeMode, themePreviewColor } from "./themes";
 import { pluginInstance } from "./plugins/ui-coordinator";
@@ -21,6 +21,17 @@ const THEME_FILTERS: { value: ThemeFilter; label: MessageKey }[] = [
   { value: "light", label: "settings.appearance.filter.light" },
   { value: "dark", label: "settings.appearance.filter.dark" },
 ];
+
+const LANGUAGE_OPTIONS: { value: LanguagePreference; labelKey: MessageKey }[] = [
+  { value: "system", labelKey: "settings.appearance.language.system" },
+  { value: "zh-CN", labelKey: "settings.appearance.language.zh_cn" },
+  { value: "en", labelKey: "settings.appearance.language.en" },
+];
+
+function languageLabel(value: LanguagePreference): string {
+  const option = LANGUAGE_OPTIONS.find((item) => item.value === value);
+  return t(option?.labelKey ?? "settings.appearance.language.system");
+}
 
 function themeModeOf(theme: ThemeDefinition): "light" | "dark" {
   return theme.mode ?? (colorScheme() === "dark" ? "dark" : "light");
@@ -45,6 +56,89 @@ function MiniWindow(props: { dark: boolean }) {
         </View>
       </View>
     </View>
+  );
+}
+
+function FontSelect(props: {
+  testID: string;
+  value: () => string;
+  fonts: () => string[];
+  onChange: (family: string | null) => void;
+}) {
+  const open = signal(false);
+  const query = signal("");
+  const filtered = () => {
+    const normalized = query().trim().toLowerCase();
+    return normalized ? props.fonts().filter((font) => font.toLowerCase().includes(normalized)) : props.fonts();
+  };
+  return (
+    <Popover
+      open={open()}
+      onOpenChange={(next) => {
+        if (next) query.set("");
+        open.set(next);
+      }}
+      placement="bottom"
+      align="end"
+      popupClass="w-72 rounded-xl border border-border bg-popover p-2 shadow-xl"
+      trigger={
+        <View role="button" testID={props.testID} class="h-9 w-64 cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
+          <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground" style={props.value() ? { fontFamily: props.value() } : undefined}>
+            {props.value() || t("settings.appearance.fonts.system_default")}
+          </Text>
+          <Icon name="chevron-down" size={12} />
+        </View>
+      }
+    >
+      <View class="gap-2">
+        <View class="relative w-full">
+          <Input
+            testID={`${props.testID}-search`}
+            autoFocus
+            value={query()}
+            onChange={(text) => query.set(text)}
+            placeholder={t("settings.appearance.fonts.search")}
+            class="w-full rounded-(--radius) border border-border bg-background pl-8 pr-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
+          />
+          <Icon name="search" size={13} color={token("muted-foreground")} class="absolute left-2 top-1/2 -translate-y-1/2" />
+        </View>
+        <Scroll class="max-h-72">
+          <View class="gap-1">
+            <Button
+              testID={`${props.testID}-system`}
+              selected={!props.value()}
+              class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent selected:bg-accent/60"
+              onPress={() => {
+                props.onChange(null);
+                open.set(false);
+              }}
+            >
+              <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground">{t("settings.appearance.fonts.system_default")}</Text>
+              <If when={!props.value()}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
+            </Button>
+            <Each of={filtered()} key={(font) => font}>
+              {(font, index) => (
+                <Button
+                  testID={`${props.testID}-option-${index()}`}
+                  selected={props.value() === font()}
+                  class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent selected:bg-accent/60"
+                  onPress={() => {
+                    props.onChange(font());
+                    open.set(false);
+                  }}
+                >
+                  <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground" style={{ fontFamily: font() }}>{font()}</Text>
+                  <If when={props.value() === font()}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
+                </Button>
+              )}
+            </Each>
+            <If when={filtered().length === 0}>
+              <Text class="px-2 py-3 text-center text-xs text-muted-foreground">{t("settings.appearance.fonts.no_matches")}</Text>
+            </If>
+          </View>
+        </Scroll>
+      </View>
+    </Popover>
   );
 }
 
@@ -140,12 +234,15 @@ interface ThemePickerProps {
   store: ThemeStore;
   packages: () => PluginPackageInfo[];
   catalog: () => PluginMarketplacePackage[];
+  fontFamilies: () => string[];
   runtime?: () => Record<string, PluginRuntimeState>;
   diagnostics?: () => Record<string, string[]>;
   logs?: () => Record<string, unknown[]>;
   onRetryPackage?: (plugin: PluginPackageInfo) => void;
   error?: () => string | undefined;
   onChange: () => void;
+  onLanguageChange: (language: LanguagePreference) => void;
+  onFontsChange: (ui: string, mono: string) => void;
   onTogglePackage: (plugin: PluginPackageInfo) => void;
   onRefreshPackages: () => void;
   onInstallPlugin: (packagePath: string, rootPath: string) => Promise<void>;
@@ -160,8 +257,26 @@ export function ThemePicker(props: ThemePickerProps) {
   const packagePath = signal("");
   const rootPath = signal("");
   const installing = signal(false);
+  const languageOpen = signal(false);
+  const uiFont = signal(store.fonts().ui ?? "");
+  const monoFont = signal(store.fonts().mono ?? "");
   const themeFilter = signal<ThemeFilter>("all");
   const themeQuery = signal("");
+  const chooseUiFont = (family: string | null) => {
+    uiFont.set(family ?? "");
+    store.hydrateFonts(family ?? "", monoFont());
+    props.onFontsChange(family ?? "", monoFont());
+  };
+  const chooseMonoFont = (family: string | null) => {
+    monoFont.set(family ?? "");
+    store.hydrateFonts(uiFont(), family ?? "");
+    props.onFontsChange(uiFont(), family ?? "");
+  };
+  const chooseLanguage = (value: LanguagePreference) => {
+    setLanguagePreference(value);
+    props.onLanguageChange(value);
+    languageOpen.set(false);
+  };
   const filteredThemes = () => {
     const query = themeQuery().trim().toLowerCase();
     const filter = themeFilter();
@@ -282,6 +397,59 @@ export function ThemePicker(props: ThemePickerProps) {
                       />
                     )}
                   </Each>
+                </View>
+              </View>
+              <View class="gap-3">
+                <Text class="text-lg font-semibold text-foreground">{t("settings.appearance.localization.title")}</Text>
+                <View class="rounded-xl border border-border">
+                  <View class="flex-row items-center gap-4 border-b border-border p-4">
+                    <View class="min-w-0 flex-1 gap-0.5">
+                      <Text class="text-sm font-medium text-foreground">{t("settings.appearance.language.label")}</Text>
+                      <Text class="text-xs text-muted-foreground">{t("settings.appearance.language.description")}</Text>
+                    </View>
+                    <Popover
+                      open={languageOpen()}
+                      onOpenChange={(open) => languageOpen.set(open)}
+                      placement="bottom"
+                      align="end"
+                      popupClass="w-64 rounded-xl border border-border bg-popover p-1 shadow-xl"
+                      trigger={
+                        <View role="button" testID="language-select" class="h-9 w-64 cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
+                          <Text class="flex-1 text-sm text-foreground">{languageLabel(languagePreference())}</Text>
+                          <Icon name="chevron-down" size={12} />
+                        </View>
+                      }
+                    >
+                      <View class="gap-1">
+                        <Each of={LANGUAGE_OPTIONS} key={(option) => option.value}>
+                          {(option) => (
+                            <Button
+                              testID={`language-option-${option().value}`}
+                              selected={languagePreference() === option().value}
+                              class="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
+                              onPress={() => chooseLanguage(option().value)}
+                            >
+                              <Text class="text-sm text-foreground">{t(option().labelKey)}</Text>
+                            </Button>
+                          )}
+                        </Each>
+                      </View>
+                    </Popover>
+                  </View>
+                  <View class="flex-row items-center gap-4 border-b border-border p-4">
+                    <View class="min-w-0 flex-1 gap-0.5">
+                      <Text class="text-sm font-medium text-foreground">{t("settings.appearance.fonts.ui")}</Text>
+                      <Text class="text-xs text-muted-foreground">{t("settings.appearance.fonts.ui_description")}</Text>
+                    </View>
+                    <FontSelect testID="ui-font-select" value={() => uiFont()} fonts={() => props.fontFamilies()} onChange={chooseUiFont} />
+                  </View>
+                  <View class="flex-row items-center gap-4 p-4">
+                    <View class="min-w-0 flex-1 gap-0.5">
+                      <Text class="text-sm font-medium text-foreground">{t("settings.appearance.fonts.mono")}</Text>
+                      <Text class="text-xs text-muted-foreground">{t("settings.appearance.fonts.mono_description")}</Text>
+                    </View>
+                    <FontSelect testID="mono-font-select" value={() => monoFont()} fonts={() => props.fontFamilies()} onChange={chooseMonoFont} />
+                  </View>
                 </View>
               </View>
               <If when={activeStylePacks().length > 0}>

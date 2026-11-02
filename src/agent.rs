@@ -118,6 +118,11 @@ default_reasoning_level = "low"
         self.cwd.display().to_string()
     }
 
+    /// Installed font family names for the appearance font pickers.
+    pub fn list_fonts(&self) -> Vec<String> {
+        pig_core::fonts::installed_font_families()
+    }
+
     /// Sends any JSON-encoded `Op` from `pig-protocol`.
     pub fn send(&self, op: String) -> Result<(), String> {
         let op = serde_json::from_str(&op).map_err(|error| error.to_string())?;

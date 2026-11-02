@@ -539,6 +539,7 @@ export interface AppConfig {
   providers: ProviderConfig[];
   ui_font?: string | null;
   mono_font?: string | null;
+  language?: "system" | "zh-CN" | "en" | null;
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;
   status_bar?: StatusBarConfig;

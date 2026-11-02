@@ -20,6 +20,7 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     store: props.themeStore,
     packages: () => props.store.pluginPackages(),
     catalog: () => props.store.pluginCatalog(),
+    fontFamilies: () => props.store.fontFamilies(),
     runtime: () => props.store.pluginRuntime(),
     diagnostics: () => props.store.pluginUiDiagnostics(),
     logs: () => props.store.pluginLogs(),
@@ -28,6 +29,8 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
       ? props.store.globalError() || props.store.themeError()
       : props.store.themeError(),
     onChange: () => props.store.saveThemePreference(props.themeStore.activeId(), props.themeStore.mode()),
+    onLanguageChange: (language: Parameters<UiContext["store"]["saveLanguage"]>[0]) => props.store.saveLanguage(language),
+    onFontsChange: (ui: string, mono: string) => props.store.saveFonts(ui, mono),
     onTogglePackage: (plugin: Parameters<UiContext["store"]["setPluginEnabled"]>[0]) => {
       const current = props.store.pluginPackages().find((item) => item.id === plugin.id) ?? plugin;
       props.store.setPluginEnabled(current, !current.enabled);

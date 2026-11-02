@@ -1,8 +1,15 @@
-import { locale } from "nsh";
+import { locale, signal } from "nsh";
 import en from "./locales/en.json";
 import zhCN from "./locales/zh-CN.json";
 
 export type AppLocale = "en" | "zh-CN";
+export type LanguagePreference = "system" | AppLocale;
+
+export const languagePreference = signal<LanguagePreference>("system");
+
+export function setLanguagePreference(value: LanguagePreference): void {
+  languagePreference.set(value);
+}
 
 type LeafKeys<T, Prefix extends string = ""> = {
   [K in keyof T & string]: T[K] extends string
@@ -22,6 +29,8 @@ function lookup(messages: unknown, key: string): string | undefined {
 }
 
 export function appLocale(): AppLocale {
+  const preference = languagePreference();
+  if (preference !== "system") return preference;
   return locale().toLowerCase().startsWith("zh") ? "zh-CN" : "en";
 }
 

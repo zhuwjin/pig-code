@@ -59,6 +59,26 @@
       "style_packs": {
         "active": "Active style packs",
         "note": "Style packs can modify the current theme; re-enable them after updating a plugin."
+      },
+      "localization": {
+        "title": "Language & fonts",
+        "description": "Follow the system or choose a language. Leave fonts blank for the system default."
+      },
+      "language": {
+        "label": "Language",
+        "system": "Follow system",
+        "zh_cn": "中文",
+        "en": "English",
+        "description": "Interface language. Follow system uses the system language."
+      },
+      "fonts": {
+        "ui": "UI font",
+        "mono": "Monospace font",
+        "system_default": "System default",
+        "ui_description": "Set the interface text font.",
+        "mono_description": "Set the monospace font for code and terminal.",
+        "search": "Search...",
+        "no_matches": "No matching fonts"
       }
     },
     "models": {

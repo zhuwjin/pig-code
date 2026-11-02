@@ -59,6 +59,26 @@
       "style_packs": {
         "active": "正在叠加的样式包",
         "note": "样式包可修改当前主题；更新插件后需要重新启用。"
+      },
+      "localization": {
+        "title": "语言与字体",
+        "description": "可跟随系统或选择语言；字体留空使用系统默认。"
+      },
+      "language": {
+        "label": "语言",
+        "system": "跟随系统",
+        "zh_cn": "中文",
+        "en": "English",
+        "description": "界面显示语言；跟随系统时按系统语言自动选择。"
+      },
+      "fonts": {
+        "ui": "界面字体",
+        "mono": "等宽字体",
+        "system_default": "系统默认",
+        "ui_description": "设置界面文字字体。",
+        "mono_description": "设置代码和终端使用的等宽字体。",
+        "search": "搜索…",
+        "no_matches": "没有匹配的字体"
       }
     },
     "models": {

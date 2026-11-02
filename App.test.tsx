@@ -358,6 +358,25 @@ test("locale catalogs keep the same keys", () => {
   expect(catalogKeys(en)).toEqual(catalogKeys(zhCN));
 });
 
+test("switches language and applies fonts from appearance settings", async () => {
+  const app = await openApp();
+  await app.press("id:title-theme-settings");
+  await app.press("id:language-select");
+  await app.press("id:language-option-en");
+  expect(app.texts()).toContain("Theme");
+  expect(app.texts()).toContain("Language & fonts");
+
+  await app.press("id:ui-font-select");
+  await app.type("id:ui-font-select-search", "Menlo");
+  await app.press("id:ui-font-select-option-0");
+  expect(app.texts()).toContain("Menlo");
+
+  await app.press("id:language-select");
+  await app.press("id:language-option-zh-CN");
+  expect(app.texts()).toContain("主题");
+  expect(app.texts()).toContain("语言与字体");
+});
+
 test("renders the main shell in English for en-US", async () => {
   const app = await open("./App.selftest.tsx", {
     platform: "macos",

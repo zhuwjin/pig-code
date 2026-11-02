@@ -13,6 +13,7 @@ mod api_usage;
 pub mod config;
 pub mod credentials;
 pub mod files;
+pub mod fonts;
 pub mod git;
 pub mod hooks;
 pub mod mcp;
