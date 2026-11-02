@@ -23,7 +23,7 @@ export function ModelSettings(props: UiContext) {
   const providerQuery = signal("");
   const fleetQuery = signal("");
   const selectedId = signal<string | null>(null);
-  const editor = signal<{ providerId: string; modelId?: string } | null>(null);
+  const editor = signal<{ providerId: string; modelId?: string; provider: ProviderConfig } | null>(null);
   const presetOpen = signal(false);
   const providers = () => store.config()?.providers ?? [];
   const filteredProviders = () => {
@@ -33,14 +33,12 @@ export function ModelSettings(props: UiContext) {
   const enabledProviders = () => filteredProviders().filter((provider) => provider.enabled);
   const disabledProviders = () => filteredProviders().filter((provider) => !provider.enabled);
   const selected = () => providers().find((provider) => provider.id === selectedId()) ?? providers()[0];
-  const modelProvider = () => {
-    const current = editor();
-    return current ? providers().find((provider) => provider.id === current.providerId) : undefined;
-  };
   const openModel = (providerId: string, modelId?: string) => {
+    const provider = providers().find((item) => item.id === providerId);
+    if (!provider) return;
     selectedId.set(providerId);
     view.set("providers");
-    editor.set({ providerId, modelId });
+    editor.set({ providerId, modelId, provider });
   };
   const selectProvider = (providerId: string) => {
     selectedId.set(providerId);
@@ -214,10 +212,10 @@ export function ModelSettings(props: UiContext) {
           </If>
         </View>
       </Scroll>
-      <Each of={modelProvider() ? [modelProvider()!] : []}>
-        {(provider) => {
-          const modelId = editor()?.modelId;
-          return <ModelEditor {...props} provider={provider()} model={provider().models.find((model) => model.id === modelId)} onClose={() => editor.set(null)} />;
+      <Each of={editor() ? [editor()!] : []} key={(entry) => entry.providerId}>
+        {(entry) => {
+          const current = entry();
+          return <ModelEditor {...props} provider={current.provider} model={current.provider.models.find((model) => model.id === current.modelId)} onClose={() => editor.set(null)} />;
         }}
       </Each>
       <If when={presetOpen()}>

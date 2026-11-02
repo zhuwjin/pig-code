@@ -1,14 +1,14 @@
-import { effect, openUrl, Scroll, signal, Text, View } from "nsh";
+import { effect, openUrl, Scroll, signal, Text, token, View } from "nsh";
 import { Button, Input, Popover, Switch } from "nsh/base";
 import type { ApiFormat, ConnectionTestResult, ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
 import { Icon } from "../icon";
-import { ProviderIcon } from "./provider-icon";
+import { ProviderIconButton } from "./provider-icon";
 
 const FORMATS: { id: ApiFormat; label: string; short: string }[] = [
-  { id: "OpenAiChat", label: "OpenAI Chat", short: "Chat" },
-  { id: "OpenAiResponses", label: "OpenAI Responses", short: "Responses" },
-  { id: "AnthropicMessages", label: "Anthropic", short: "Anthropic" },
+  { id: "OpenAiChat", label: "OpenAI Chat Completions (/chat/completions)", short: "OpenAI Chat" },
+  { id: "OpenAiResponses", label: "OpenAI Responses (/responses)", short: "OpenAI Responses" },
+  { id: "AnthropicMessages", label: "Anthropic Messages (/v1/messages)", short: "Anthropic" },
 ];
 
 function formatTokens(value: number): string {
@@ -19,6 +19,10 @@ function formatTokens(value: number): string {
 
 function formatLabel(format: ApiFormat): string {
   return FORMATS.find((item) => item.id === format)?.label ?? format;
+}
+
+function formatShort(format: ApiFormat): string {
+  return FORMATS.find((item) => item.id === format)?.short ?? format;
 }
 
 function resultText(result: ConnectionTestResult): { text: string; ok: boolean } {
@@ -40,14 +44,14 @@ function ModelRow(props: UiContext & {
   const renamed = model().name && model().name !== model().id;
   return (
     <View class={`flex-row items-center gap-2 px-3 py-2 ${props.separator ? "border-t border-border" : ""}`}>
-      <Button
+      <ProviderIconButton
         testID={`model-icon-picker-${provider().id}-${model().id}`}
         accessibilityLabel={`选择模型图标 ${model().name || model().id}`}
-        class="rounded-md p-0.5 hover:bg-accent"
+        icon={() => model().icon}
+        kind="model"
+        size={20}
         onPress={props.onPickIcon}
-      >
-        <ProviderIcon icon={() => model().icon} kind="model" size={20} />
-      </Button>
+      />
       <Text numberOfLines={1} class="shrink-0 text-sm text-foreground">{renamed ? model().name : model().id}</Text>
       <If when={renamed}>
         <Text numberOfLines={1} class="min-w-0 font-mono text-xs text-muted-foreground">{model().id}</Text>
@@ -106,11 +110,23 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
     collapsed.set(hasKey());
   });
   const save = (changes: Partial<ProviderConfig>) => store.upsertProvider({ ...provider(), ...changes });
-  const saveKey = () => {
-    if (apiKey().trim()) {
-      store.setProviderApiKey(provider().id, apiKey().trim());
-      apiKey.set("");
-    }
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleSave = () => {
+    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    const providerId = provider().id;
+    const nextName = name();
+    const nextBaseUrl = baseUrl();
+    const nextKey = apiKey();
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      const current = store.config()?.providers.find((item) => item.id === providerId);
+      if (!current) return;
+      store.upsertProvider({ ...current, name: nextName, base_url: nextBaseUrl });
+      if (nextKey.trim()) {
+        store.setProviderApiKey(providerId, nextKey.trim());
+        apiKey.set("");
+      }
+    }, 500);
   };
   return (
     <View class="gap-3 rounded-xl border border-border bg-card p-4">
@@ -118,26 +134,35 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
         <Button
           testID={`provider-edit-${provider().id}`}
           accessibilityLabel="展开或折叠连接配置"
-          class="min-w-0 flex-1 flex-row items-center gap-2 rounded-(--radius) hover:bg-accent/40"
+          class="min-w-0 flex-1 flex-row items-center gap-2 rounded-(--radius)"
           onPress={() => collapsed.update((value) => !value)}
         >
           <Text class="text-sm text-muted-foreground">连接配置</Text>
           <If when={collapsed()}>
-            <Text class="rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{formatLabel(provider().api_format)}</Text>
+            <Text class="rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{formatShort(provider().api_format)}</Text>
             <Text numberOfLines={1} class="min-w-0 max-w-80 font-mono text-xs text-muted-foreground">{provider().base_url}</Text>
             <If when={!hasKey()}><Text class="text-xs text-warning">缺少密钥</Text></If>
           </If>
           <View class="flex-1" />
-          <Icon name="chevron-down" class={collapsed() ? "-rotate-90" : undefined} size={14} />
         </Button>
         <Button
           testID={`provider-test-${provider().id}`}
           disabled={store.testingProviders()[provider().id]}
-          class="shrink-0 rounded-(--radius) border border-border px-3 py-1.5 hover:bg-accent disabled:opacity-50"
+          class="shrink-0 flex-row items-center gap-1.5 rounded-(--radius) border border-border px-3 py-1.5 hover:bg-accent disabled:opacity-50"
           onPress={() => store.testProvider(provider().id)}
         >
+          <Icon name="globe" size={14} color={token("foreground")} />
           <Text class="text-xs text-foreground">{store.testingProviders()[provider().id] ? "测试中…" : "测试连接"}</Text>
         </Button>
+        <View
+          testID={`provider-chevron-${provider().id}`}
+          role="button"
+          accessibilityLabel="展开或折叠连接配置"
+          class="shrink-0 cursor-pointer"
+          onPress={() => collapsed.update((value) => !value)}
+        >
+          <Icon name="chevron-right" class={collapsed() ? undefined : "rotate-90"} size={16} color={token("muted-foreground")} />
+        </View>
       </View>
       <If when={!collapsed()}>
         <View class="gap-3">
@@ -147,9 +172,10 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               <Input
                 testID="provider-name"
                 value={name()}
-                onChange={(text) => name.set(text)}
-                onSubmit={() => save({ name: name() })}
-                onBlur={() => save({ name: name() })}
+                onChange={(text) => {
+                  name.set(text);
+                  scheduleSave();
+                }}
                 class="rounded-(--radius) border border-border bg-background px-3 py-2 h-9 selection:bg-foreground text-sm text-foreground"
               />
             </View>
@@ -158,9 +184,10 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               <Input
                 testID="provider-base-url"
                 value={baseUrl()}
-                onChange={(text) => baseUrl.set(text)}
-                onSubmit={() => save({ base_url: baseUrl() })}
-                onBlur={() => save({ base_url: baseUrl() })}
+                onChange={(text) => {
+                  baseUrl.set(text);
+                  scheduleSave();
+                }}
                 class="rounded-(--radius) border border-border bg-background px-3 py-2 h-9 selection:bg-foreground font-mono text-xs text-foreground"
               />
             </View>
@@ -173,10 +200,10 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                 onOpenChange={(open) => formatOpen.set(open)}
                 placement="bottom"
                 align="start"
-                popupClass="w-56 rounded-xl border border-border bg-popover p-1 shadow-xl"
+                popupClass="w-96 rounded-xl border border-border bg-popover p-1 shadow-xl"
                 trigger={
                   <View role="button" testID="provider-format" class="h-9 w-full cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
-                    <Text class="flex-1 text-xs text-foreground">{formatLabel(format())}</Text>
+                    <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-foreground">{formatLabel(format())}</Text>
                     <Icon name="chevron-down" size={12} />
                   </View>
                 }
@@ -194,7 +221,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                           formatOpen.set(false);
                         }}
                       >
-                        <Text class="text-xs text-foreground">{item().label}</Text>
+                        <Text numberOfLines={1} class="text-xs text-foreground">{item().label}</Text>
                       </Button>
                     )}
                   </Each>
@@ -202,13 +229,30 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               </Popover>
             </View>
             <View class="min-w-0 flex-1 gap-1">
-              <View class="flex-row items-center gap-1">
+              <View class="flex-row items-center gap-2">
                 <Text class="text-sm text-muted-foreground">API Key</Text>
+                <Switch
+                  testID="provider-requires-key"
+                  accessibilityLabel="需要 API Key"
+                  checked={provider().requires_api_key ?? true}
+                  onChange={(checked) => save({ requires_api_key: checked })}
+                  trackClass="h-4 w-7 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
+                  thumbClass="h-3 w-3 rounded-full bg-background shadow-sm transition-transform checked:translate-x-3"
+                />
                 <View class="flex-1" />
+                <Button
+                  testID={`provider-clear-key-${provider().id}`}
+                  disabled={!hasKey() || provider().requires_api_key === false}
+                  class="rounded px-1 py-0.5 hover:bg-muted disabled:opacity-30"
+                  onPress={() => store.clearProviderApiKey(provider().id)}
+                >
+                  <Text class="text-[11px] text-muted-foreground">清除密钥</Text>
+                </Button>
                 <If when={provider().key_url}>
                   {(url) => (
-                    <Button class="rounded px-1 hover:bg-muted" onPress={() => void openUrl(url())}>
-                      <Text class="text-xs text-primary">获取密钥</Text>
+                    <Button testID={`provider-key-link-${provider().id}`} class="flex-row items-center gap-0.5 rounded px-0" onPress={() => void openUrl(url())}>
+                      <Text class="text-xs text-foreground underline">获取密钥</Text>
+                      <Icon name="external-link" size={12} color={token("foreground")} />
                     </Button>
                   )}
                 </If>
@@ -217,44 +261,26 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                 <Input
                   testID="provider-api-key"
                   value={apiKey()}
-                  onChange={(text) => apiKey.set(text)}
-                  onSubmit={saveKey}
-                  onBlur={saveKey}
+                  onChange={(text) => {
+                    apiKey.set(text);
+                    scheduleSave();
+                  }}
+                  readonly={provider().requires_api_key === false}
                   masked={masked()}
-                  placeholder={hasKey() ? "留空以保留已保存的密钥" : "输入 API Key"}
-                  class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-3 py-2 h-9 selection:bg-foreground font-mono text-sm text-foreground placeholder:text-muted-foreground"
+                  placeholder={provider().requires_api_key === false ? "无需 API Key" : hasKey() ? "留空以保留已保存的密钥" : "输入 API Key"}
+                  class={`min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-3 py-2 h-9 selection:bg-foreground font-mono text-sm text-foreground placeholder:text-muted-foreground ${provider().requires_api_key === false ? "opacity-50" : ""}`}
                 />
                 <Button
                   testID="provider-toggle-mask"
                   accessibilityLabel={masked() ? "显示密钥" : "隐藏密钥"}
-                  class="h-9 items-center justify-center rounded-(--radius) px-2 hover:bg-accent"
+                  disabled={provider().requires_api_key === false}
+                  class="h-9 items-center justify-center rounded-(--radius) px-2 hover:bg-accent disabled:opacity-30"
                   onPress={() => masked.update((value) => !value)}
                 >
-                  <Icon name={masked() ? "eye-off" : "eye"} size={14} color={undefined} />
+                  <If when={masked()}><Icon name="eye-off" size={14} /></If>
+                  <If when={!masked()}><Icon name="eye" size={14} /></If>
                 </Button>
               </View>
-              <View class="flex-row items-center gap-2">
-                <Text class="text-xs text-muted-foreground">需要 API Key</Text>
-                <Switch
-                  testID="provider-requires-key"
-                  checked={provider().requires_api_key ?? true}
-                  onChange={(checked) => save({ requires_api_key: checked })}
-                  trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
-                  thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
-                />
-                <View class="flex-1" />
-                <Button
-                  testID={`provider-clear-key-${provider().id}`}
-                  disabled={!hasKey() || provider().requires_api_key === false}
-                  class="rounded px-2 py-1 hover:bg-muted disabled:opacity-30"
-                  onPress={() => store.clearProviderApiKey(provider().id)}
-                >
-                  <Text class="text-[11px] text-muted-foreground">清除密钥</Text>
-                </Button>
-              </View>
-              <Text class="text-xs text-muted-foreground">
-                {credential() === "configured" ? "密钥已保存" : credential() === "not_required" || provider().requires_api_key === false ? "无需密钥" : credential() === "unavailable" ? "密钥库不可用" : "尚未配置密钥"}
-              </Text>
             </View>
           </View>
           <If when={result()}>
@@ -284,14 +310,14 @@ export function ProviderDetail(props: UiContext & {
   return (
     <View class="min-w-0 gap-4">
       <View class="flex-row items-center gap-3 rounded-xl border border-border bg-card p-4">
-        <Button
+        <ProviderIconButton
           testID={`provider-icon-picker-${provider().id}`}
           accessibilityLabel={`选择供应商图标 ${provider().name}`}
-          class="rounded-md p-1 hover:bg-accent"
+          icon={() => provider().icon}
+          size={28}
+          buttonClass="rounded-md p-1"
           onPress={props.onPickProviderIcon}
-        >
-          <ProviderIcon icon={() => provider().icon} size={28} />
-        </Button>
+        />
         <Text numberOfLines={1} class="min-w-0 flex-1 text-lg font-semibold text-foreground">{provider().name}</Text>
         <Switch
           testID={`provider-toggle-${provider().id}`}

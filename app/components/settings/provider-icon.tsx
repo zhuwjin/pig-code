@@ -1,4 +1,5 @@
-import { Image, token, View } from "nsh";
+import { colorScheme, Image, token, View } from "nsh";
+import { Button } from "nsh/base";
 import { Icon } from "../icon";
 import { resolveIcon } from "./icon-catalog";
 
@@ -22,11 +23,39 @@ export function ProviderIcon(props: {
         </View>
       }
     >
-      {(value) => (
-        <View testID={`provider-icon-${value().id}`} accessibilityLabel={value().title} class="shrink-0" style={{ width: size, height: size }}>
-          <Image src={value().asset} resizeMode="contain" class="h-full w-full" />
-        </View>
-      )}
+      {(value) => {
+        const asset = () => colorScheme() === "dark" ? value().darkAsset ?? value().asset : value().asset;
+        return (
+          <View testID={`provider-icon-${value().id}`} accessibilityLabel={value().title} class="shrink-0" style={{ width: size, height: size }}>
+            <Image src={asset()} resizeMode="contain" class="h-full w-full" />
+          </View>
+        );
+      }}
     </If>
+  );
+}
+
+export function ProviderIconButton(props: {
+  testID?: string;
+  accessibilityLabel: string;
+  icon?: string | null | (() => string | null | undefined);
+  kind?: "provider" | "model";
+  size?: number;
+  buttonClass?: string;
+  onPress: () => void;
+}) {
+  const size = props.size ?? 20;
+  return (
+    <Button
+      testID={props.testID}
+      accessibilityLabel={props.accessibilityLabel}
+      class={`group relative ${props.buttonClass ?? "rounded-md p-0.5"}`}
+      onPress={props.onPress}
+    >
+      <ProviderIcon icon={props.icon} kind={props.kind} size={size} />
+      <View class="absolute inset-0 items-center justify-center rounded-md bg-black/30 opacity-0 group-hover:opacity-100">
+        <Icon name="pencil" size={Math.round(size * 0.5)} color="#fff" />
+      </View>
+    </Button>
   );
 }

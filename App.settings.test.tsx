@@ -63,6 +63,7 @@ test("creates, edits and deletes providers and models through real config", asyn
   await app.press("id:provider-add");
   await app.press("id:preset-custom");
   await app.waitFor("id:model-add-custom-1");
+  if (app.count("id:provider-name") === 0) await app.press("id:provider-edit-custom-1");
   await app.clear("id:provider-name");
   await app.type("id:provider-name", "Mock Copy");
   await app.press("id:provider-requires-key");
@@ -125,10 +126,9 @@ test("stores and clears provider keys without exposing them in the page", async 
   await app.press("id:provider-toggle-mask");
   await app.press("id:provider-toggle-mask");
   await app.type("id:provider-api-key", "selftest-secret");
-  await app.submit("id:provider-api-key");
-  await app.waitFor("密钥已保存", { timeout: 20000 });
+  await app.waitUntil(() => app.value("id:provider-api-key") === "", { timeout: 20000 });
   expect(app.texts()).not.toContain("selftest-secret");
 
   await app.press("id:provider-clear-key-mock");
-  await app.waitFor("尚未配置密钥", { timeout: 20000 });
+  await app.waitUntil(() => !app.enabled("id:provider-clear-key-mock"), { timeout: 20000 });
 });

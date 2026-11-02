@@ -95,6 +95,29 @@ NSH main 的 `crates/nsh-core/src/ops.rs` 仍将 `UiTheme` 标为 `internal`，�
 
 等待公开且稳定的根主题 API 或 TypeScript 声明后，移除局部豁免并检查动态主题切换。无需仅为这项声明问题升级。
 
+## 非阻塞的组件导出
+
+### 5. `nsh/base` 的 `Link` 与 `Select` 导出
+
+**现状**
+
+0.3.0 的 `nsh/base` 没有导出 `Link`，也没有导出 `Select`：
+
+- 设置页“获取密钥”使用 `Button` + `openUrl` 模拟链接外观，见 `app/components/settings/provider-detail.tsx`。
+- API 协议选择使用 `Popover` + `Button` 实现，见同一文件的格式选择器。
+
+两处当前功能正常，不为此单独升级。
+
+**升级后的处理**
+
+- 新版提供 `Link` 后，用官方组件替换“获取密钥”的 `Button` + `openUrl`，保留下划线文字和外链图标。
+- 新版提供 `Select` 后，评估是否替换格式选择器；替换时保持现有外观、键盘操作和选择后立即保存的行为。
+
+**验收**
+
+- “获取密钥”由系统打开 `provider.key_url`，不改变页面状态。
+- 格式选择器的触发器宽度、长标签显示、键盘操作和保存时机与当前一致。
+
 ## 不属于 NSH 新版本待办
 
 - 设置页供应商表单问题属于项目自身的页面或测试问题。

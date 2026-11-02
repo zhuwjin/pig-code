@@ -2,7 +2,7 @@ import { Text, View } from "nsh";
 import { Button, Input, Switch } from "nsh/base";
 import type { ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
-import { ProviderIcon } from "./provider-icon";
+import { ProviderIcon, ProviderIconButton } from "./provider-icon";
 
 function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`;
@@ -33,14 +33,14 @@ function FleetModelRow(props: UiContext & {
   const renamed = model().name && model().name !== model().id;
   return (
     <View class="flex-row items-center gap-2 border-t border-border px-3 py-2 hover:bg-accent/30">
-      <Button
+      <ProviderIconButton
         testID={`model-icon-picker-${provider.id}-${model().id}`}
         accessibilityLabel={`选择模型图标 ${model().name || model().id}`}
-        class="rounded-md p-0.5 hover:bg-accent"
+        icon={() => model().icon}
+        kind="model"
+        size={20}
         onPress={props.onPickIcon}
-      >
-        <ProviderIcon icon={() => model().icon} kind="model" size={20} />
-      </Button>
+      />
       <View class="min-w-0 flex-1 gap-0.5">
         <Text numberOfLines={1} class="text-sm font-medium text-foreground">{renamed ? model().name : model().id}</Text>
         <If when={renamed}><Text numberOfLines={1} class="font-mono text-xs text-muted-foreground">{model().id}</Text></If>
