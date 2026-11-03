@@ -1,5 +1,5 @@
 import { Image, Scroll, Text, View, type AccessibilityRole, type JSX } from "nsh";
-import { Input } from "nsh/base";
+import { Input, Popover } from "nsh/base";
 import { t } from "../i18n";
 import type {
   PluginPackageInfo,
@@ -117,6 +117,29 @@ function renderNode(
         {...accessibility}
         {...inputEvents}
       />
+    );
+  }
+  if (node.kind === "popover") {
+    const trigger = children[0] ?? <View />;
+    const content = children.slice(1);
+    const placement = ["top", "bottom", "left", "right"].includes(String(node.props.placement))
+      ? node.props.placement as "top" | "bottom" | "left" | "right"
+      : "top";
+    const align = ["start", "center", "end"].includes(String(node.props.align))
+      ? node.props.align as "start" | "center" | "end"
+      : "start";
+    return (
+      <Popover
+        testID={testID}
+        open={node.props.open === true}
+        onOpenChange={(value) => emit(context, node, "openChange", { open: value })}
+        placement={placement}
+        align={align}
+        popupClass="w-72 rounded-xl border border-border bg-popover p-3 shadow-xl"
+        trigger={<View class="flex-row items-center">{trigger}</View>}
+      >
+        <View class="gap-2">{content}</View>
+      </Popover>
     );
   }
   if (node.kind === "image") {

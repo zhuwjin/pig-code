@@ -505,6 +505,10 @@ Discovered
 composer.sendButton
 message.item
 message.markdown
+message.turnStats
+status.activity
+status.usage
+status.context
 sidebar.sessionList
 settings.navigation
 ```
@@ -518,6 +522,10 @@ settings.navigation
 - 未注册节点不能被远程修改，避免整个应用成为无边界攻击面。
 - 这是统一的 UI 可寻址机制，不是给每个按钮编写不同的插件回调。
 - 合成计划与宿主渲染分属两个组件边界：只有插件计划或远程文档变化才重建对应合成结果，宿主自身的文本、IME、焦点和光标状态不进入该订阅范围。不能用始终为真的对象驱动 `If` 来冒充数据订阅。
+- 远程文档的 `epoch`、`generation`、`sequence` 都参与宿主渲染 key，避免只比较合成计划而一直保留初始空文档。
+- 统计展示完全由插件提供：宿主只注册 `message.turnStats`、`status.activity`、`status.usage`、`status.context` 挂载点，不内置统计摘要或详情弹窗；未安装或未启用统计插件时这些区域为空。
+- `session.read` 的会话投影包含会话统计、上下文用量、回合列表、实时速度与当前回合。回合用稳定顺序索引对应 `TurnStats:N` 导出，不依赖 UI 内部的 turn id。该 API 是通用只读能力，其他插件也可使用。
+- 通用 `context` 事件提供当前 session id 和显示模式；`popover` 节点及其 `openChange` 事件用于插件自有的摘要和详情弹窗。远程节点 id 与挂载目标地址分开校验，不能把弹窗节点 id 误当成挂载目标。
 
 ### 8.3 插件 UI 投影
 
@@ -1109,6 +1117,9 @@ TSX UI 协调与渲染
 | 官方指纹、第三方市场信任锚和市场源持久化 | `src/plugin_system/marketplace.rs` |
 | 市场源维护、目录、安装和更新界面 | `app/components/settings/marketplace.tsx` |
 | 插件编译、清单与资源打包、发布签名 | `examples/publish-plugin.rs` |
+| 会话与回合统计快照 | `crates/pig-core/src/session/stats.rs` |
+| 统计插件与远程详情弹窗 | `packages/token-stats-plugin/`（市场仓库） |
+| 统计挂载与文档校验回归 | `App.stats.test.tsx` |
 | NSH 挂载投影、增量文档和图/资源校验 | `src/plugin_system/mount_projector.rs` |
 | 配置、HTTP、凭据、工作区、会话、资源和私有存储 | `src/plugin_system/services.rs` |
 | 语义节点与确定性合成 | `app/plugins/base-ui-registry.ts`、`app/plugins/ui-coordinator.ts` |

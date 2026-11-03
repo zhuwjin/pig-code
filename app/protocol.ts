@@ -236,6 +236,35 @@ export interface ContextUsage {
   input: number;
 }
 
+export interface PluginContextUsage {
+  used: number;
+  total: number;
+  cacheReadTotal: number;
+  inputTotal: number;
+}
+
+export interface PluginSessionStats {
+  running: boolean;
+  outputRate: number;
+  turns: number;
+  steps: number;
+  output: number;
+  decodeMs: number;
+  apiMs: number;
+  toolMs: number;
+  ttftMs: number;
+  ttftSteps: number;
+  usage?: PluginContextUsage | null;
+  breakdown?: ContextBreakdown | null;
+}
+
+export interface PluginTurnStats {
+  id?: string | null;
+  index: number;
+  durationMs: number;
+  stats?: TurnUsageStats | null;
+}
+
 export interface RetryStatus {
   attempt: number;
   max_attempts: number;

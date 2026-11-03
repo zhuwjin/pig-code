@@ -201,6 +201,9 @@ impl Session {
         self.turn_ttft_steps = 0;
         self.turn_api_steps = 0;
         self.turn_tool_ms = 0;
+        self.turn_active = true;
+        self.rate_started_at = None;
+        self.rate_characters = 0;
         self.overflow_recovered = false;
         // A model switch invalidates the request-shape baseline; compact,
         // media reprojection and recall clear it at their own sites.
@@ -866,6 +869,7 @@ impl Session {
                         step_first_token_at.get_or_insert(at);
                         forwarded_content = true;
                         reasoning.push_str(&delta);
+                        self.record_output_delta(&delta);
                         self.emit(
                             |session_id| Event::ReasoningDelta {
                                 session_id,
@@ -881,6 +885,7 @@ impl Session {
                         step_first_token_at.get_or_insert(at);
                         forwarded_content = true;
                         text.push_str(&delta);
+                        self.record_output_delta(&delta);
                         self.emit(
                             |session_id| Event::TextDelta {
                                 session_id,

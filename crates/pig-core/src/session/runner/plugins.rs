@@ -506,10 +506,17 @@ impl Manager {
         {
             entry.mcp_status = Some(statuses);
         }
+        let (stats, turns) = entry
+            .session
+            .as_ref()
+            .map(|session| session.plugin_stats())
+            .unwrap_or_default();
         Some(SessionServices {
             id,
             cwd: entry.cwd.clone(),
             statuses: entry.mcp_status.clone(),
+            stats,
+            turns,
         })
     }
 

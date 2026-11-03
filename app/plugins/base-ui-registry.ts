@@ -23,6 +23,10 @@ register({ uiId: "sidebar.root", component: "panel", schemaVersion: 1, preserved
 register({ uiId: "sidebar.sessionList", component: "list", schemaVersion: 1, preservedBehavior: ["items", "onOpen"] });
 register({ uiId: "message.item", component: "message", schemaVersion: 1, preservedBehavior: ["item", "behavior"] });
 register({ uiId: "message.markdown", component: "message", schemaVersion: 1, preservedBehavior: ["markdown", "selectable"] });
+register({ uiId: "message.turnStats", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
+register({ uiId: "status.activity", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
+register({ uiId: "status.usage", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
+register({ uiId: "status.context", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
 register({ uiId: "settings.navigation", component: "navigation", schemaVersion: 1, preservedBehavior: ["items", "onNavigate"] });
 register({ uiId: "settings.content", component: "panel", schemaVersion: 1, preservedBehavior: ["children"] });
 register({ uiId: "main.panelHost", component: "panel", schemaVersion: 1, preservedBehavior: ["children", "dismiss"] });

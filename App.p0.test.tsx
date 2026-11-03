@@ -140,7 +140,8 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   const app = await openApp();
   await app.type("id:composer-input", "SLOW_BASH_SCENARIO");
   await app.press("id:send-button");
-  await app.waitFor("生成中", { timeout: 20000 });
+  await app.waitFor("id:stop-button", { timeout: 20000 });
+  expect(app.count("id:stats-summary-SessionActivity")).toBe(0);
   await app.type("id:composer-input", "Q_ONE");
   await app.keyboard.press("enter");
   await app.type("id:composer-input", "Q_TWO");

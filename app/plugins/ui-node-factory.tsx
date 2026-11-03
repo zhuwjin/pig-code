@@ -1,4 +1,4 @@
-import { computed, Text, View, token, type JSX } from "nsh";
+import { computed, effect, Text, View, token, type JSX } from "nsh";
 import { t } from "../i18n";
 import type { AgentStore } from "../store";
 import type { PluginUiContribution } from "../protocol";
@@ -23,6 +23,8 @@ type UiNodeFactoryProps = {
   children?: JSX.Element;
   captureFocus?: () => boolean;
   restoreFocus?: () => void;
+  context?: () => Record<string, unknown>;
+  exportName?: () => string;
   render: (patch: HostPatch, children?: JSX.Element) => JSX.Element;
 };
 
@@ -93,10 +95,29 @@ export function UiNodeFactory(props: UiNodeFactoryProps): JSX.Element {
   }, {
     equals: (previous, next) => JSON.stringify(previous) === JSON.stringify(next),
   });
+  effect(() => {
+    const context = props.context?.();
+    if (!context) return;
+    for (const entry of plan().entries) {
+      if (!entry.contribution.export) continue;
+      props.store.dispatchPluginHostEvent(entry.instance, createPluginHostEvent({
+        instance: entry.instance,
+        contribution: entry.contribution.id,
+        node: props.uiId,
+        kind: "context",
+        payload: context,
+        surfaceRevision: BaseUiRegistry.revision(),
+      }));
+    }
+  });
+  const documentRevision = () => Object.values(props.store.pluginDocuments())
+    .map((document) => `${document.instance}:${document.epoch}:${document.generation}:${document.sequence}`)
+    .sort()
+    .join("|");
   let displaced = false;
   let restoreFocus = false;
   return (
-    <Each of={[plan()]} key={(current) => JSON.stringify(current)}>
+    <Each of={[plan()]} key={() => `${JSON.stringify(plan())}:${documentRevision()}`}>
       {(current) => {
         const nextDisplaced = current().entries.some((entry) =>
           ["remove", "replace", "move"].includes(entry.contribution.kind)
@@ -133,7 +154,7 @@ function renderUiNode(props: UiNodeFactoryProps, plan: PluginUiPlan): JSX.Elemen
       <RemoteContribution
         instance={entry.instance}
         document={props.store.pluginDocuments()[entry.instance] ?? null}
-        exportName={entry.contribution.export}
+        exportName={props.exportName?.() ?? entry.contribution.export ?? undefined}
         hostChildren={hostChildren}
         packages={props.store.pluginPackages()}
         contribution={entry.contribution.id}

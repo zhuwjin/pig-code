@@ -12,6 +12,8 @@ pub struct SessionServices {
     pub id: String,
     pub cwd: PathBuf,
     pub statuses: Option<Vec<McpServerStatus>>,
+    pub stats: pig_protocol::PluginSessionStats,
+    pub turns: Vec<pig_protocol::PluginTurnStats>,
 }
 
 pub fn snapshot(
@@ -52,6 +54,8 @@ pub fn snapshot(
         .map(|session| pig_protocol::PluginSessionProjection {
             id: session.id.clone(),
             cwd: session.cwd.clone(),
+            stats: session.stats.clone(),
+            turns: session.turns.clone(),
         });
     PluginServiceSnapshot {
         generation: registry.snapshot.generation,

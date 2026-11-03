@@ -470,11 +470,50 @@ pub struct PluginServiceResponse {
     pub result: Result<serde_json::Value, PluginProtocolError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginContextUsage {
+    pub used: u64,
+    pub total: u64,
+    pub cache_read_total: u64,
+    pub input_total: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginSessionStats {
+    pub running: bool,
+    pub output_rate: u64,
+    pub turns: u64,
+    pub steps: u64,
+    pub output: u64,
+    pub decode_ms: u64,
+    pub api_ms: u64,
+    pub tool_ms: u64,
+    pub ttft_ms: u64,
+    pub ttft_steps: u64,
+    pub usage: Option<PluginContextUsage>,
+    pub breakdown: Option<crate::ContextBreakdown>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginTurnStats {
+    pub id: Option<String>,
+    pub index: u64,
+    pub duration_ms: u64,
+    pub stats: Option<crate::TurnUsageStats>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginSessionProjection {
     pub id: String,
     pub cwd: std::path::PathBuf,
+    #[serde(default)]
+    pub stats: PluginSessionStats,
+    #[serde(default)]
+    pub turns: Vec<PluginTurnStats>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

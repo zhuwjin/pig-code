@@ -44,6 +44,7 @@ mod subagent;
 mod tests;
 mod title;
 mod turn;
+mod stats;
 mod usage;
 
 pub use approval::approval_detail;
@@ -220,6 +221,10 @@ pub struct Session {
     /// approval wait + execution (concurrent read-only calls overlap, so this
     /// is a sum of spans, not the segment's wall time)
     turn_tool_ms: u64,
+    stats_turns: Vec<pig_protocol::PluginTurnStats>,
+    turn_active: bool,
+    rate_started_at: Option<Instant>,
+    rate_characters: u64,
     /// Session totals (restored on replay): uncached input / cache-hit input,
     /// used for the average cache hit rate
     input_total: u64,

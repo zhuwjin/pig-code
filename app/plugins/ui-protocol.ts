@@ -185,7 +185,7 @@ export function remoteDocumentRejection(
   const ids = new Set<string>();
   for (const node of document.nodes) {
     if (!node || typeof node.id !== "string" || !node.id || ids.has(node.id) ||
-      !["view", "text", "scroll", "input", "image"].includes(node.kind) ||
+      !["view", "text", "scroll", "input", "image", "popover"].includes(node.kind) ||
       !Array.isArray(node.children) || node.children.some((child) => typeof child !== "string")) {
       return reject("invalid_operation", "document contains a duplicate or invalid node");
     }

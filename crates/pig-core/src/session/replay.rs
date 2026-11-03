@@ -295,7 +295,7 @@ impl Session {
                     tool_ms,
                     has_usage,
                     finish_reason,
-                    ..
+                    turn_id,
                 } => {
                     if !in_assistant {
                         replay_turns += 1;
@@ -323,6 +323,12 @@ impl Session {
                         api_steps: *api_steps,
                         tool_ms: *tool_ms,
                         ended_at_ms: *ended_at_ms,
+                    });
+                    self.stats_turns.push(pig_protocol::PluginTurnStats {
+                        id: turn_id.clone(),
+                        index: self.stats_turns.len() as u64,
+                        duration_ms: *duration_ms,
+                        stats: stats.clone(),
                     });
                     // duration_ms=0 preserves the "replay wrap-up event" semantics (does not trigger new-turn
                     // logic such as plan-mode pending steps); the footer's real duration comes from stats

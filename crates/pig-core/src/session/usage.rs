@@ -55,6 +55,7 @@ impl Session {
         duration_ms: u64,
         finish_reason: Option<pig_protocol::FinishReason>,
     ) -> Option<pig_protocol::TurnUsageStats> {
+        self.turn_active = false;
         let has_usage = self.turn_input + self.turn_cache_read + self.turn_output > 0;
         if !has_usage && finish_reason.is_none() {
             return None;
@@ -92,7 +93,7 @@ impl Session {
             finish_reason,
             turn_id: self.usage_turn_id.clone(),
         });
-        has_usage.then_some(pig_protocol::TurnUsageStats {
+        let stats = has_usage.then_some(pig_protocol::TurnUsageStats {
             input: self.turn_input,
             cache_read: self.turn_cache_read,
             output: self.turn_output,
@@ -103,6 +104,13 @@ impl Session {
             api_steps: self.turn_api_steps,
             tool_ms: self.turn_tool_ms,
             ended_at_ms,
-        })
+        });
+        self.stats_turns.push(pig_protocol::PluginTurnStats {
+            id: self.usage_turn_id.clone(),
+            index: self.stats_turns.len() as u64,
+            duration_ms,
+            stats: stats.clone(),
+        });
+        stats
     }
 }

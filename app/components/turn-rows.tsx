@@ -1,10 +1,11 @@
 import { Accessor, Clipboard, Text, token, View, type JSX } from "nsh";
-import { Button, Collapsible, Popover } from "nsh/base";
+import { Button, Collapsible } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { changeTotals, formatClock, formatCompactDuration, formatDuration, formatTokens, turnSpeed } from "../conversation";
+import { changeTotals, formatClock, formatCompactDuration, formatDuration } from "../conversation";
 import { Icon } from "./icon";
+import { UiNodeFactory } from "../plugins/ui-node-factory";
 
 export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children: JSX.Element }) {
   const turn = () => props.turn();
@@ -79,71 +80,6 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
   );
 }
 
-function StatsPopover(props: UiContext & { turn: Accessor<TurnState>; kind: "speed" | "usage" }) {
-  const turn = () => props.turn();
-  const stats = () => turn().stats;
-  const open = () => props.store.isExpanded(`stats-${turn().id}-${props.kind}`);
-  const speed = () => stats() ? turnSpeed(stats()!) : null;
-  return (
-    <Popover
-      open={open()}
-      onOpenChange={(value) => {
-        if (value !== open()) props.store.toggleExpanded(`stats-${turn().id}-${props.kind}`);
-      }}
-      placement="top"
-      align="start"
-      popupClass="w-72 rounded-xl border border-border bg-popover p-3 shadow-xl"
-      trigger={
-        <View role="button" class="h-5 flex-row items-center gap-1 rounded px-1 hover:bg-accent">
-          <Icon name={props.kind === "speed" ? "gauge" : "database"} size={12} color={token("muted-foreground")} />
-          <Text class="text-xs text-muted-foreground">
-            {props.kind === "speed"
-              ? (speed() ? `${speed()!.toFixed(1)} tok/s` : formatCompactDuration(turn().durationMs ?? 0))
-              : (stats() ? `${formatTokens(stats()!.input + stats()!.cache_read + stats()!.output)} tok` : "—")}
-          </Text>
-        </View>
-      }
-    >
-      <If when={stats()}>
-        {(value) => (
-          <View class="gap-2">
-            <Text class="text-sm font-medium text-foreground">{t(props.kind === "speed" ? "turn.speed_title" : "turn.usage_title")}</Text>
-            <View class="h-px bg-border" />
-            <StatLine label={t("turn.duration")} value={formatDuration(turn().durationMs ?? 0)} />
-            <StatLine label={t("turn.api_steps")} value={String(value().api_steps)} />
-            <If when={props.kind === "speed"}>
-              <StatLine label={t("turn.model_time")} value={formatCompactDuration(value().api_ms)} />
-              <StatLine label={t("turn.first_token")} value={value().ttft_steps ? formatCompactDuration(value().ttft_ms / value().ttft_steps) : "—"} />
-              <StatLine label={t("turn.tool_time")} value={formatCompactDuration(value().tool_ms)} />
-              <StatLine label={t("turn.decode_speed")} value={speed() ? `${speed()!.toFixed(1)} tok/s` : "—"} />
-            </If>
-            <If when={props.kind === "usage"}>
-              <StatLine label={t("turn.input")} value={value().input.toLocaleString()} />
-              <StatLine label={t("turn.cache_read")} value={value().cache_read.toLocaleString()} />
-              <StatLine label={t("turn.output")} value={value().output.toLocaleString()} />
-              <StatLine
-                label={t("turn.cache_hit")}
-                value={value().input + value().cache_read > 0
-                  ? `${(value().cache_read / (value().input + value().cache_read) * 100).toFixed(1)}%`
-                  : "—"}
-              />
-            </If>
-          </View>
-        )}
-      </If>
-    </Popover>
-  );
-}
-
-function StatLine(props: { label: string; value: string }) {
-  return (
-    <View class="flex-row items-center gap-3">
-      <Text class="flex-1 text-xs text-muted-foreground">{props.label}</Text>
-      <Text class="font-mono text-xs text-foreground">{props.value}</Text>
-    </View>
-  );
-}
-
 export function TurnActionsRow(props: UiContext & {
   turn: Accessor<TurnState>;
   markdownText: Accessor<string>;
@@ -198,8 +134,13 @@ export function TurnActionsRow(props: UiContext & {
           </Button>
         </If>
         <If when={stats()}>
-          <StatsPopover {...props} kind="speed" />
-          <StatsPopover {...props} kind="usage" />
+          <UiNodeFactory
+            uiId="message.turnStats"
+            store={props.store}
+            context={() => ({ sessionId: props.store.current() })}
+            exportName={() => `TurnStats:${props.store.currentTurns().findIndex((candidate) => candidate.id === turn().id)}`}
+            render={() => <View />}
+          />
           <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>
         </If>
         <If when={!stats() && turn().durationMs}>

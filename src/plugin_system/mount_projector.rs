@@ -319,7 +319,7 @@ pub fn validate_document(document: &RemoteDocument, resource_prefix: &str) -> Re
     let mut nodes = BTreeMap::new();
     let mut parents = BTreeMap::new();
     for node in &document.nodes {
-        if !matches!(node.kind.as_str(), "view" | "text" | "scroll" | "input" | "image") {
+        if !matches!(node.kind.as_str(), "view" | "text" | "scroll" | "input" | "image" | "popover") {
             return Err(format!("unsupported remote node kind `{}`", node.kind));
         }
         if nodes.insert(node.id.as_str(), node).is_some() {
@@ -369,7 +369,7 @@ fn supported_remote_event(event: &str) -> bool {
             | "focus" | "blur" | "selectionChange" | "keyPress" | "compositionChange"
             | "contentSizeChange" | "caretMove" | "scroll" | "scrollEnd" | "scrollDragStart"
             | "scrollDragEnd" | "momentumStart" | "momentumEnd" | "mouseMove" | "hoverIn"
-            | "hoverOut" | "hoverMove" | "accessibilityAction" | "layout"
+            | "hoverOut" | "hoverMove" | "accessibilityAction" | "layout" | "openChange"
     )
 }
 

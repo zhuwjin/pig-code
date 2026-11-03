@@ -1269,11 +1269,12 @@ impl PluginSystemManager {
                 return Err("plugin engine is not active".into());
             }
             let property = match event.kind.as_str() {
-                "press" => "onPress",
-                "changeText" => "onChange",
-                "focus" => "onFocus",
-                "blur" => "onBlur",
-                "keyPress" => "onKeyPress",
+                "context" | "openChange" => None,
+                "press" => Some("onPress"),
+                "changeText" => Some("onChange"),
+                "focus" => Some("onFocus"),
+                "blur" => Some("onBlur"),
+                "keyPress" => Some("onKeyPress"),
                 _ => return Err("unsupported host UI event".into()),
             };
             let contribution = instance
@@ -1282,18 +1283,21 @@ impl PluginSystemManager {
                 .iter()
                 .chain(instance.package.contributions.ui.iter())
                 .find(|contribution| {
-                    contribution.id == event.contribution && contribution.target == event.node
+                    contribution.id == event.contribution
+                        && (event.kind == "openChange" || contribution.target == event.node)
                 })
                 .ok_or_else(|| "host UI contribution is not registered".to_owned())?;
-            if contribution.props.get(property).and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || !super::services::capability_granted(
-                    &instance.package,
-                    "ui.interact",
-                    &event.node,
-                )
-            {
-                return Err("host UI interaction is not authorized".into());
+            if let Some(property) = property {
+                if contribution.props.get(property).and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                    || !super::services::capability_granted(
+                        &instance.package,
+                        "ui.interact",
+                        &event.node,
+                    )
+                {
+                    return Err("host UI interaction is not authorized".into());
+                }
             }
             if !event.payload.is_object()
                 || serde_json::to_vec(&event.payload).map_err(|error| error.to_string())?.len()
@@ -1326,6 +1330,9 @@ impl PluginSystemManager {
         key: &str,
         event: PluginUiEvent,
     ) -> Result<(), String> {
+        if event.kind == "openChange" {
+            return self.dispatch_host_event(key, event);
+        }
         let (control, id, event_kind, payload, scroll) = {
             let mut inner = self.inner.lock().expect("plugin manager lock");
             let instance = inner
