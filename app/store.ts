@@ -38,6 +38,7 @@ import {
   QueueItem,
   QueueState,
   SessionConfiguration,
+  SessionContentHit,
   SessionMeta,
   WorkspaceMeta,
   SubagentHistory,
@@ -547,6 +548,10 @@ export class AgentStore {
         cwd: sessionId ? null : (this.heroCwd() ?? this.cwd()),
       },
     });
+  }
+
+  async searchSessionContent(query: string): Promise<SessionContentHit[]> {
+    return JSON.parse(await this.agent.searchSessionContent(query)) as SessionContentHit[];
   }
 
   stop(): void {

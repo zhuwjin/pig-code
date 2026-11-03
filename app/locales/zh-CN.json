@@ -310,8 +310,38 @@
     "untitled_session": "未命名会话",
     "plugin_command": "插件命令",
     "close_label": "关闭搜索",
-    "placeholder": "搜索会话或工作区",
-    "no_results": "没有匹配结果"
+    "clear_label": "清空搜索",
+    "placeholder": "搜索会话或工作区…",
+    "no_results": "没有匹配结果",
+    "tabs": {
+      "all": "全部",
+      "workspaces": "工作区",
+      "sessions": "会话"
+    },
+    "groups": {
+      "workspaces": {
+        "one": "工作区 {count}",
+        "other": "工作区 {count}"
+      },
+      "sessions": {
+        "one": "会话 {count}",
+        "other": "会话 {count}"
+      },
+      "content": {
+        "one": "内容匹配 {count}",
+        "other": "内容匹配 {count}"
+      },
+      "commands": {
+        "one": "命令 {count}",
+        "other": "命令 {count}"
+      }
+    },
+    "hints": {
+      "select": "选择",
+      "open": "打开",
+      "filter": "过滤",
+      "close": "关闭"
+    }
   },
   "plugins": {
     "no_renderable": "插件贡献 {id} 没有可渲染内容",

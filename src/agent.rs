@@ -323,6 +323,31 @@ default_reasoning_level = "low"
         })
     }
 
+    /// Searches persisted conversation text without blocking the UI thread.
+    pub async fn search_session_content(
+        this: Instance<Self>,
+        query: String,
+    ) -> Result<String, String> {
+        let sessions_dir = this.with(|agent| agent.data_dir.join("sessions"));
+        let hits = tokio::task::spawn_blocking(move || {
+            pig_core::rollout::search_sessions_by_content(&sessions_dir, &query)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        let hits: Vec<_> = hits
+            .into_iter()
+            .map(|hit| {
+                serde_json::json!({
+                    "session_id": hit.session_id,
+                    "before": hit.before,
+                    "hit": hit.hit,
+                    "after": hit.after,
+                })
+            })
+            .collect();
+        serde_json::to_string(&hits).map_err(|error| error.to_string())
+    }
+
     /// Reads a UTF-8 text preview for the right-side file panel.
     pub fn read_file(&self, path: String, cwd: String) -> Result<String, String> {
         let path = PathBuf::from(path);

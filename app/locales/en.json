@@ -310,8 +310,38 @@
     "untitled_session": "Untitled session",
     "plugin_command": "Plugin command",
     "close_label": "Close search",
-    "placeholder": "Search sessions or workspaces",
-    "no_results": "No matching results"
+    "clear_label": "Clear search",
+    "placeholder": "Search sessions or workspaces…",
+    "no_results": "No matching results",
+    "tabs": {
+      "all": "All",
+      "workspaces": "Workspaces",
+      "sessions": "Sessions"
+    },
+    "groups": {
+      "workspaces": {
+        "one": "{count} workspace",
+        "other": "{count} workspaces"
+      },
+      "sessions": {
+        "one": "{count} session",
+        "other": "{count} sessions"
+      },
+      "content": {
+        "one": "{count} content match",
+        "other": "{count} content matches"
+      },
+      "commands": {
+        "one": "{count} command",
+        "other": "{count} commands"
+      }
+    },
+    "hints": {
+      "select": "navigate",
+      "open": "open",
+      "filter": "filter",
+      "close": "close"
+    }
   },
   "plugins": {
     "no_renderable": "Plugin contribution {id} has no renderable content",

@@ -21,6 +21,13 @@ export interface WorkspaceMeta {
   hidden: boolean;
 }
 
+export interface SessionContentHit {
+  session_id: string;
+  before: string;
+  hit: string;
+  after: string;
+}
+
 export interface EditDiff {
   path: string;
   unified_diff: string;
