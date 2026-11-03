@@ -232,23 +232,27 @@ export function Sidebar(props: UiContext & {
   };
   const workspaceItems = () => (
     <>
-      <MenuItem testID="workspace-new-task" class="rounded-(--radius) px-3 py-2 hover:bg-accent" onSelect={() => store.newTaskInWorkspace(store.cwd())}>
-        <Text class="text-sm text-foreground">{t("sidebar.new_task")}</Text>
+      <MenuItem testID="workspace-new-task" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent" onSelect={() => store.newTaskInWorkspace(store.cwd())}>
+        <Icon testID="workspace-new-task-icon" name="plus" size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t("sidebar.new_task")}</Text>
       </MenuItem>
-      <MenuSeparator class="my-1 h-px bg-border" />
-      <MenuItem testID="workspace-copy-path" class="rounded-(--radius) px-3 py-2 hover:bg-accent" onSelect={() => void Clipboard.writeText(store.cwd())}>
-        <Text class="text-sm text-foreground">{t("sidebar.copy_path")}</Text>
+      <MenuSeparator class="my-0.5 h-px bg-border" />
+      <MenuItem testID="workspace-copy-path" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent" onSelect={() => void Clipboard.writeText(store.cwd())}>
+        <Icon testID="workspace-copy-path-icon" name="copy" size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t("sidebar.copy_path")}</Text>
       </MenuItem>
       <MenuItem
         testID="workspace-rename"
-        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
         onSelect={() => startRename("workspace", store.cwd(), currentWorkspaceName())}
       >
-        <Text class="text-sm text-foreground">{t("sidebar.rename")}</Text>
+        <Icon testID="workspace-rename-icon" name="pencil" size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t("sidebar.rename")}</Text>
       </MenuItem>
-      <MenuSeparator class="my-1 h-px bg-border" />
-      <MenuItem testID="workspace-remove" class="rounded-(--radius) px-3 py-2 hover:bg-accent" onSelect={() => store.removeWorkspace(store.cwd())}>
-        <Text class="text-sm text-foreground">{t("sidebar.remove_workspace")}</Text>
+      <MenuSeparator class="my-0.5 h-px bg-border" />
+      <MenuItem testID="workspace-remove" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent" onSelect={() => store.removeWorkspace(store.cwd())}>
+        <Icon testID="workspace-remove-icon" name="folder-minus" size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t("sidebar.remove_workspace")}</Text>
       </MenuItem>
     </>
   );
@@ -256,39 +260,43 @@ export function Sidebar(props: UiContext & {
     <>
       <MenuItem
         testID={`session-rename-${session().id}`}
-        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
         onSelect={() => startRename("session", session().id, session().title)}
       >
-        <Text class="text-sm text-foreground">{t("sidebar.rename")}</Text>
+        <Icon testID="session-rename-icon" name="pencil" size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t("sidebar.rename")}</Text>
       </MenuItem>
       <MenuItem
         testID={`session-pin-${session().id}`}
-        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
         onSelect={() => store.setSessionPinned(session().id, !session().pinned)}
       >
-        <Text class="text-sm text-foreground">{t(session().pinned ? "sidebar.unpin" : "sidebar.pin")}</Text>
+        <Icon testID="session-pin-icon" name={session().pinned ? "star-off" : "star"} size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t(session().pinned ? "sidebar.unpin" : "sidebar.pin")}</Text>
       </MenuItem>
       <MenuItem
         testID={`session-archive-${session().id}`}
-        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
         onSelect={() => store.setSessionArchived(session().id, !session().archived)}
       >
-        <Text class="text-sm text-foreground">{t(session().archived ? "sidebar.unarchive" : "sidebar.archive")}</Text>
+        <Icon testID="session-archive-icon" name={session().archived ? "undo-2" : "inbox"} size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t(session().archived ? "sidebar.unarchive" : "sidebar.archive")}</Text>
       </MenuItem>
-      <MenuSeparator class="my-1 h-px bg-border" />
+      <MenuSeparator class="my-0.5 h-px bg-border" />
       <MenuItem
         testID={`session-delete-${session().id}`}
-        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
         onSelect={() => store.deleteSession(session().id)}
       >
-        <Text class="text-sm text-foreground">{t("sidebar.delete_session")}</Text>
+        <Icon testID="session-delete-icon" name="trash" size={13} color={token("muted-foreground")} />
+        <Text class="flex-1 text-sm text-foreground">{t("sidebar.delete_session")}</Text>
       </MenuItem>
     </>
   );
   const renderWorkspaceRow = () => (
     <>
       <If when={renaming()?.kind === "workspace"}>
-        <View class="mb-1 flex-row items-center rounded-(--radius) px-2 py-1">
+        <View class="mb-0 flex-row items-center rounded-(--radius) px-2 py-1.5">
           <Input
             testID="workspace-rename-input"
             autoFocus
@@ -296,19 +304,19 @@ export function Sidebar(props: UiContext & {
             onChange={(value) => renameValue.set(value)}
             onSubmit={commitRename}
             onBlur={commitRename}
-            class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1 text-sm text-foreground"
+            class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1.5 text-sm text-foreground"
           />
         </View>
       </If>
       <If when={renaming()?.kind !== "workspace"}>
         <ContextMenu
-          popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+          popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
           trigger={
-            <View class="group relative mb-1">
+            <View class="group relative mb-0">
               <Button
                 testID="workspace-row"
                 accessibilityLabel={t(workspaceExpanded() ? "sidebar.collapse_current_workspace" : "sidebar.expand_current_workspace")}
-                class={`w-full flex-row items-center gap-2 rounded-(--radius) px-2 py-1 ${workspaceMenuOpen() ? "bg-sidebar-accent pr-14" : "hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-14"}`}
+                class={`w-full flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 ${workspaceMenuOpen() ? "bg-sidebar-accent pr-14" : "hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-14"}`}
                 onPress={() => workspaceExpanded.update((expanded) => !expanded)}
               >
                 <Icon
@@ -325,7 +333,7 @@ export function Sidebar(props: UiContext & {
                   onOpenChange={(value) => workspaceMenuOpen.set(value)}
                   placement="bottom"
                   align="end"
-                  popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+                  popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
                   trigger={
                     <View role="button" testID="workspace-menu" accessibilityLabel={t("sidebar.workspace_menu")} class="h-6 w-6 flex-row items-center justify-center rounded-(--radius) hover:bg-foreground/10">
                       <Icon name="ellipsis" size={14} color={token("muted-foreground")} />
@@ -354,7 +362,7 @@ export function Sidebar(props: UiContext & {
   const renderSessionRow = (session: () => SessionMeta, detailed: () => boolean) => (
     <>
       <If when={renaming()?.kind === "session" && renaming()?.id === session().id}>
-        <View class={`flex-row items-center py-1 ${detailed() ? "px-2" : "pl-8 pr-2"}`}>
+        <View class={`flex-row items-center py-1.5 ${detailed() ? "px-2" : "pl-8 pr-2"}`}>
           <Input
             testID="session-rename-input"
             autoFocus
@@ -362,13 +370,13 @@ export function Sidebar(props: UiContext & {
             onChange={(value) => renameValue.set(value)}
             onSubmit={commitRename}
             onBlur={commitRename}
-            class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1 text-sm text-foreground"
+            class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1.5 text-sm text-foreground"
           />
         </View>
       </If>
       <If when={renaming()?.kind !== "session" || renaming()?.id !== session().id}>
         <ContextMenu
-          popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+          popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
           trigger={
             <View class="group relative">
               <Button
@@ -376,7 +384,7 @@ export function Sidebar(props: UiContext & {
                 selected={store.current() === session().id}
                 class={themeStore.classes(
                   "sidebar.session",
-                  `w-full flex-row items-center rounded-(--radius) py-1 hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-14 selected:bg-sidebar-accent ${detailed() ? "px-2" : "pl-8 pr-2"}`,
+                  `w-full flex-row items-center rounded-(--radius) py-1.5 hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-14 selected:bg-sidebar-accent ${detailed() ? "px-2" : "pl-8 pr-2"}`,
                 )}
                 onPress={() => store.openSession(session().id)}
               >
@@ -461,7 +469,7 @@ export function Sidebar(props: UiContext & {
           <Button
             testID="new-task"
             accessibilityLabel={t("sidebar.new_task")}
-            class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
+            class="group rounded-(--radius) px-2 py-1.5 hover:bg-sidebar-accent active:bg-accent"
             onPress={() => store.newTask()}
           >
             <View class="flex-row items-center gap-2">
@@ -476,7 +484,7 @@ export function Sidebar(props: UiContext & {
           <Button
             testID="open-search"
             accessibilityLabel={t("sidebar.search")}
-            class="group rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
+            class="group rounded-(--radius) px-2 py-1.5 hover:bg-sidebar-accent active:bg-accent"
             onPress={props.onOpenSearch}
           >
             <View class="flex-row items-center gap-2">
@@ -491,7 +499,7 @@ export function Sidebar(props: UiContext & {
         </View>
       </If>
       <If when={props.mode === "workspace"}>
-      <View class="flex-row items-center gap-1 pl-3 pr-2 py-1">
+      <View class="flex-row items-center gap-1 pl-3 pr-2 py-0.5">
         <Text class="flex-1 text-xs text-muted-foreground">{t("sidebar.sessions")}</Text>
         <If when={sidebarView() === "workspace"}>
           <Button
@@ -512,18 +520,18 @@ export function Sidebar(props: UiContext & {
           onOpenChange={(value) => manageOpen.set(value)}
           placement="bottom"
           align="end"
-          popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+          popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
           trigger={
             <View role="button" testID="list-manage" class="h-6 w-6 items-center justify-center rounded-(--radius) hover:bg-sidebar-accent">
               <Icon name="sliders-horizontal" size={12} color={token("secondary-foreground")} />
             </View>
           }
         >
-          <View class="gap-1">
-            <Text class="px-3 pb-1 pt-1 text-sm text-muted-foreground">{t("sidebar.view")}</Text>
+          <View class="gap-0.5">
+            <Text class="px-2 pb-0.5 pt-1 text-xs text-muted-foreground">{t("sidebar.view")}</Text>
             <MenuItem
               testID="list-view-flat"
-              class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-accent"
+              class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
               onSelect={() => {
                 sidebarView.set("flat");
                 manageOpen.set(false);
@@ -537,7 +545,7 @@ export function Sidebar(props: UiContext & {
             </MenuItem>
             <MenuItem
               testID="list-view-workspace"
-              class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-accent"
+              class="flex-row items-center gap-2 rounded-(--radius) px-2 py-0.5 hover:bg-accent"
               onSelect={() => {
                 sidebarView.set("workspace");
                 manageOpen.set(false);
@@ -559,12 +567,12 @@ export function Sidebar(props: UiContext & {
           each={shownSessions()}
           keyExtractor={(item) => item.id}
           class="flex-1"
-          contentClass="gap-1 px-2 pb-2"
+          contentClass="gap-0.5 px-2 pb-1"
           header={
             <>
               <If when={sidebarView() === "workspace" && pinnedSessions().length > 0}>
-                <View testID="pinned-sessions" class="gap-1">
-                  <Text class="px-1 py-1 text-xs text-muted-foreground">{t("sidebar.pinned")}</Text>
+                <View testID="pinned-sessions" class="gap-0.5">
+                  <Text class="px-1 py-0.5 text-xs text-muted-foreground">{t("sidebar.pinned")}</Text>
                   <Each of={pinnedSessions()} key={(session) => session.id}>
                     {(session) => renderSessionRow(session, () => true)}
                   </Each>
@@ -578,7 +586,7 @@ export function Sidebar(props: UiContext & {
           footer={
             <If when={sidebarView() === "workspace" && (canShowMore() || workspacePageOpen())}>
               <View class="pl-6">
-                <View class="flex-row items-center gap-3 px-2 py-1">
+                <View class="flex-row items-center gap-3 px-2 py-0.5">
                   <If when={canShowMore()}>
                     <Button
                       testID="workspace-more"
@@ -650,7 +658,7 @@ export function Sidebar(props: UiContext & {
         <Button
           testID={props.mode === "settings" ? "settings-back" : "settings-open"}
           accessibilityLabel={t(props.mode === "settings" ? "sidebar.return_workspace" : "sidebar.open_settings")}
-          class="rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent active:bg-accent"
+          class="rounded-(--radius) px-2 py-0.5 hover:bg-sidebar-accent active:bg-accent"
           onPress={props.mode === "settings" ? props.onBackSettings : props.onOpenSettings}
         >
           <View class="flex-row items-center gap-2">

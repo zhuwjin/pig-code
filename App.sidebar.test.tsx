@@ -108,6 +108,10 @@ test("supports workspace hover actions and the context menu", async () => {
 
   await app.rightClick("id:workspace-row");
   expect(app.count("id:workspace-new-task")).toBe(1);
+  expect(app.count("id:workspace-new-task-icon")).toBe(1);
+  expect(app.count("id:workspace-copy-path-icon")).toBe(1);
+  expect(app.count("id:workspace-rename-icon")).toBe(1);
+  expect(app.count("id:workspace-remove-icon")).toBe(1);
   expect(app.count("text:复制路径")).toBe(1);
   expect(app.count("text:重命名")).toBe(1);
   expect(app.count("text:移除工作区")).toBe(1);
@@ -144,6 +148,10 @@ test("renames, pins, archives and deletes sessions through row actions", async (
   expect(app.count("text:置顶")).toBe(1);
   expect(app.count("text:归档")).toBe(1);
   expect(app.count("text:删除会话")).toBe(1);
+  expect(app.count("id:session-rename-icon")).toBe(1);
+  expect(app.count("id:session-pin-icon")).toBe(1);
+  expect(app.count("id:session-archive-icon")).toBe(1);
+  expect(app.count("id:session-delete-icon")).toBe(1);
   await app.press("text:重命名");
   await app.clear("id:session-rename-input");
   await app.type("id:session-rename-input", "Renamed session");
