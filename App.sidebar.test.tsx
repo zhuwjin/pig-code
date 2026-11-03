@@ -2,6 +2,7 @@ import { expect, open, test } from "nsh/test";
 import { languagePreference, setLanguagePreference } from "./app/i18n";
 import { ICON_ELEMENTS } from "./app/components/icon-elements";
 import {
+  blendColors,
   formatSessionTime,
   nextWorkspaceSessionLimit,
   sessionTitleScroll,
@@ -10,6 +11,11 @@ import {
 
 test("uses filled geometry for pinned stars", () => {
   expect(ICON_ELEMENTS["star-fill"].every((element) => element.filled)).toBe(true);
+});
+
+test("blends six and eight digit hex colors for the sidebar surface", () => {
+  expect(blendColors("#0a0a0aff", "#d4d4d4ff", 0.05)).toBe("#141414");
+  expect(blendColors("#0a0a0a", "#d4d4d4", 0.05)).toBe("#141414");
 });
 
 test("formats session timestamps like the original sidebar", () => {

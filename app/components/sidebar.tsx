@@ -64,9 +64,9 @@ function SessionTiming(props: { store: UiContext["store"]; session: () => Sessio
   );
 }
 
-function blendColors(background: string, foreground: string, amount: number): string {
+export function blendColors(background: string, foreground: string, amount: number): string {
   const channels = (color: string): number[] | null => {
-    if (!/^#[0-9a-f]{6}$/i.test(color)) return null;
+    if (!/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color)) return null;
     return [1, 3, 5].map((index) => parseInt(color.slice(index, index + 2), 16));
   };
   const base = channels(background);
