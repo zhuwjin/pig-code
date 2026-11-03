@@ -53,7 +53,8 @@
     "nav": {
       "models": "模型设置",
       "appearance": "外观",
-      "plugins": "插件管理"
+      "plugins": "插件管理",
+      "marketplace": "插件市场"
     },
     "appearance": {
       "title": "主题",
@@ -259,12 +260,6 @@
         "confirm": "确认卸载 {name}？插件文件将被删除。",
         "confirm_action": "确认卸载"
       },
-      "market": {
-        "title": "插件市场",
-        "refresh": "刷新目录",
-        "empty": "刷新目录以查看可用插件。",
-        "install": "下载并安装"
-      },
       "signed": {
         "title": "安装签名插件",
         "package_path": ".nshpkg 路径",
@@ -281,6 +276,41 @@
       "diagnostics": {
         "ui": "UI 合成诊断",
         "logs": "最近插件日志（已脱敏）"
+      }
+    },
+    "marketplace": {
+      "title": "插件市场",
+      "description": "浏览可信市场，每个签名插件包验证通过后才会安装。",
+      "refresh": "刷新",
+      "refreshing": "正在刷新…",
+      "loading": "正在加载市场…",
+      "empty": "打开市场以加载目录。",
+      "no_packages": "这个市场还没有插件。",
+      "packages": {
+        "one": "{count} 个插件",
+        "other": "{count} 个插件"
+      },
+      "official_badge": "官方",
+      "install": "安装",
+      "installing": "正在安装…",
+      "installed": "已安装",
+      "update": "更新",
+      "sources": {
+        "title": "市场来源",
+        "remove_label": "移除市场 {name}",
+        "remove_confirm": "确认移除 {name}？已安装插件会保留，但保存的受信根公钥将被删除。",
+        "remove": "移除"
+      },
+      "add": {
+        "title": "添加市场",
+        "description": "输入 index.json 地址。仓库还必须包含 root.pub 和签名的 .nshpkg 插件包。",
+        "url_placeholder": "https://…/index.json",
+        "preview": "检查",
+        "previewing": "正在检查…",
+        "fingerprint": "根公钥指纹（SHA-256）",
+        "trust_notice": "请通过其他可靠渠道核对这个指纹。确认后会用于后续安装和更新，密钥变化不会被静默信任。",
+        "confirm": "信任并添加",
+        "official_exists": "官方市场已经内置，无需重复添加。"
       }
     }
   },

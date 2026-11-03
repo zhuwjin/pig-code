@@ -815,6 +815,22 @@ requestId + sessionId + workspaceId + instance + epoch + tool + args + cancellat
 - 市场不能绕过根证书、签名、吊销或用户授权。
 - 自动更新默认关闭；启用后仍按权限变化要求确认。
 
+官方与第三方仓库使用相同布局：
+
+```text
+root.pub
+index.json
+packages/<plugin-id>/<package>.nshpkg
+```
+
+`root.pub` 是 NSH `keygen` 生成的根公钥，私钥 `.secret` 只用于发布签名，绝不能进入仓库。`index.json` 使用 `api_version: 1`；每个包的 `directory` 与 `files[].path` 共同定位一个签名 `.nshpkg`，`digest` 为 `sha256:<整个包字节的 SHA-256>`，`files[].sha256` 为同一哈希的无前缀形式，发布前必须重新计算，不能复用旧包的摘要。
+
+官方市场为 `https://github.com/zhuwjin/pig-code-ts-plugins`，客户端读取其 raw `main/index.json`，只内置根公钥指纹而不内置完整公钥。安装时下载 `root.pub`，先经 NSH 公钥解析得到规范 Base64，再计算该 Base64 文本（不含换行）的 SHA-256，与内置指纹比较，匹配后才进入包签名验证。指纹为 `sha256:488ba14b57449a35989a3a1d27a8fdf7d9596d6e9c427b46c9669639104df9c3`。
+
+第三方市场先同时校验目录和读取 `root.pub`，界面展示同一算法得到的完整指纹；用户通过其他可靠渠道核对并确认后，客户端才保存市场记录和公钥。后续安装与更新只使用已保存公钥。仓库换钥不会被静默接受，必须移除市场后重新走指纹确认；已保存公钥被篡改也会在安装前失败。市场记录保存在 `<data>/plugin-marketplaces.json`，信任锚保存在 `<data>/plugin-marketplaces/<source-id>/root.pub`。移除市场只删除市场记录和信任锚，不卸载已经安装的插件。
+
+发布流程使用 NSH 原生信任链：根私钥签发限定 app id 和有效期的发布证书，发布私钥配合证书生成签名包，例如 `nsh certify --root <root.secret> --key <release.pub> --apps <app-id> --out <release.cert>`，然后在客户端项目根目录执行 `cargo run --example publish-plugin -- <plugin-project> --key <release.secret> --cert <release.cert> --out <repository>/packages/<plugin-id>/<package>.nshpkg`。这个发布示例校验 `nsh.json` 与 `pig-plugin.json` 的 id、version、build 一致，打包 TSX、Pig 清单、主题、技能和 `assets/` 资源。纯 TSX 插件通过 `nsh publish` 发布时，JSON 会作为 JS 值内联，只有导入的图片和字体会自动成为签名资源，`pig-plugin.json` 不会自动作为独立清单资源带入；这是当前纯 TSX 发布流程不能只用 `nsh publish` 的原因。若完全使用官方 CLI，也可以为插件引入 Rust crate，并通过 `registry.assets(assets!())` 携带任意资源文件，但对这个纯按钮插件而言会增加不必要的工程复杂度。发布证书和发布公钥可以公开，根私钥与发布私钥都必须离线保管。
+
 ## 13. 资源、存储与国际化
 
 ### 13.1 资源引用
@@ -966,6 +982,7 @@ crates/pig-core/src/plugins/
 src/plugin_system/
   mod.rs
   manager.rs
+  marketplace.rs
   loader.rs
   engine.rs
   protocol.rs
@@ -1089,6 +1106,9 @@ TSX UI 协调与渲染
 | 协议信封、协商、文档、确认、服务和指标 | `crates/pig-protocol/src/plugin_runtime.rs` |
 | 安装、签名、授权、原子注册快照和更新回滚 | `crates/pig-core/src/plugins/` |
 | 生命周期、请求关联、健康检查、重试和命令/事件路由 | `src/plugin_system/manager.rs` |
+| 官方指纹、第三方市场信任锚和市场源持久化 | `src/plugin_system/marketplace.rs` |
+| 市场源维护、目录、安装和更新界面 | `app/components/settings/marketplace.tsx` |
+| 插件编译、清单与资源打包、发布签名 | `examples/publish-plugin.rs` |
 | NSH 挂载投影、增量文档和图/资源校验 | `src/plugin_system/mount_projector.rs` |
 | 配置、HTTP、凭据、工作区、会话、资源和私有存储 | `src/plugin_system/services.rs` |
 | 语义节点与确定性合成 | `app/plugins/base-ui-registry.ts`、`app/plugins/ui-coordinator.ts` |

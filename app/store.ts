@@ -26,6 +26,8 @@ import {
   PluginUiContribution,
   PluginMarketplacePackage,
   PluginMarketplaceCatalog,
+  PluginMarketplacePreview,
+  PluginMarketplaceSource,
   PluginRuntimeState,
   PluginUiAck,
   PluginUiEvent,
@@ -125,7 +127,12 @@ export class AgentStore {
   readonly modelInfo = signal<Record<string, ModelRegistryInfo | null>>({});
   readonly globalError = signal("");
   readonly pluginPackages = signal<PluginPackageInfo[]>([]);
-  readonly pluginCatalog = signal<PluginMarketplacePackage[]>([]);
+  readonly pluginCatalog = signal<Record<string, PluginMarketplacePackage[]>>({});
+  readonly pluginMarketplaces = signal<PluginMarketplaceSource[]>([]);
+  readonly activePluginMarketplace = signal("official");
+  readonly pluginMarketplaceLoading = signal<Record<string, boolean>>({});
+  readonly pluginMarketplaceErrors = signal<Record<string, string>>({});
+  readonly pluginMarketplaceInstalling = signal<{ sourceId: string; packageId: string } | null>(null);
   readonly pluginDocuments = signal<Record<string, RemoteDocument>>({});
   readonly pluginDynamic = signal<Record<string, PluginUiContribution[]>>({});
   readonly pluginRuntimeContributions = signal<Record<string, {
@@ -169,6 +176,7 @@ export class AgentStore {
     } catch {
       this.fontFamilies.set([]);
     }
+    this.refreshPluginMarketplaces();
     void this.agent.listen((raw) => {
       try {
         const events = JSON.parse(raw);
@@ -1010,23 +1018,87 @@ export class AgentStore {
     }
   }
 
-  async refreshMarketplace(): Promise<void> {
+  refreshPluginMarketplaces(): void {
     try {
-      const raw = await this.agent.marketplaceCatalog(null);
-      const catalog = JSON.parse(raw) as PluginMarketplaceCatalog;
-      this.pluginCatalog.set(catalog.packages);
+      const sources = JSON.parse(this.agent.marketplaceSources()) as PluginMarketplaceSource[];
+      this.pluginMarketplaces.set(sources);
     } catch (error) {
       this.globalError.set(errorMessage(error));
-      throw error;
     }
   }
 
-  async installMarketplacePlugin(plugin: PluginMarketplacePackage, rootPath: string): Promise<void> {
+  selectPluginMarketplace(id: string): void {
+    if (this.pluginMarketplaces().some((source) => source.id === id)) {
+      this.activePluginMarketplace.set(id);
+    }
+  }
+
+  async previewPluginMarketplace(indexUrl: string): Promise<PluginMarketplacePreview> {
+    const raw = await this.agent.previewMarketplace(indexUrl);
+    return JSON.parse(raw) as PluginMarketplacePreview;
+  }
+
+  addPluginMarketplace(preview: PluginMarketplacePreview): string {
+    const sources = JSON.parse(this.agent.addMarketplace(JSON.stringify(preview))) as PluginMarketplaceSource[];
+    this.pluginMarketplaces.set(sources);
+    return sources.find((source) => source.index_url === preview.index_url)?.id ?? preview.id;
+  }
+
+  removePluginMarketplace(id: string): void {
+    const sources = JSON.parse(this.agent.removeMarketplace(id)) as PluginMarketplaceSource[];
+    this.pluginMarketplaces.set(sources);
+    this.pluginCatalog.update((all) => {
+      const next = { ...all };
+      delete next[id];
+      return next;
+    });
+    this.pluginMarketplaceLoading.update((all) => {
+      const next = { ...all };
+      delete next[id];
+      return next;
+    });
+    this.pluginMarketplaceErrors.update((all) => {
+      const next = { ...all };
+      delete next[id];
+      return next;
+    });
+    if (this.activePluginMarketplace() === id) this.activePluginMarketplace.set("official");
+  }
+
+  async refreshMarketplace(sourceId = this.activePluginMarketplace()): Promise<void> {
+    const source = this.pluginMarketplaces().find((item) => item.id === sourceId);
+    if (!source || this.pluginMarketplaceLoading()[sourceId]) return;
+    this.pluginMarketplaceLoading.update((all) => ({ ...all, [sourceId]: true }));
+    this.pluginMarketplaceErrors.update((all) => ({ ...all, [sourceId]: "" }));
     try {
-      await this.agent.installMarketplacePlugin(JSON.stringify(plugin), null, rootPath);
+      const raw = await this.agent.marketplaceCatalog(source.index_url);
+      const catalog = JSON.parse(raw) as PluginMarketplaceCatalog;
+      if (!this.pluginMarketplaces().some((item) => item.id === sourceId)) return;
+      this.pluginCatalog.update((all) => ({ ...all, [sourceId]: catalog.packages }));
     } catch (error) {
-      this.globalError.set(errorMessage(error));
-      throw error;
+      if (!this.pluginMarketplaces().some((item) => item.id === sourceId)) return;
+      this.pluginMarketplaceErrors.update((all) => ({ ...all, [sourceId]: errorMessage(error) }));
+    } finally {
+      if (this.pluginMarketplaces().some((item) => item.id === sourceId)) {
+        this.pluginMarketplaceLoading.update((all) => ({ ...all, [sourceId]: false }));
+      }
+    }
+  }
+
+  async installMarketplacePlugin(
+    plugin: PluginMarketplacePackage,
+    sourceId = this.activePluginMarketplace(),
+  ): Promise<void> {
+    const source = this.pluginMarketplaces().find((item) => item.id === sourceId);
+    if (!source || this.pluginMarketplaceInstalling()) return;
+    this.pluginMarketplaceInstalling.set({ sourceId, packageId: plugin.id });
+    this.pluginMarketplaceErrors.update((all) => ({ ...all, [sourceId]: "" }));
+    try {
+      await this.agent.installMarketplacePlugin(JSON.stringify(plugin), source.index_url, null);
+    } catch (error) {
+      this.pluginMarketplaceErrors.update((all) => ({ ...all, [sourceId]: errorMessage(error) }));
+    } finally {
+      this.pluginMarketplaceInstalling.set(null);
     }
   }
 

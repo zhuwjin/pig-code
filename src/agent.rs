@@ -175,13 +175,51 @@ default_reasoning_level = "low"
         this: Instance<Self>,
         index_url: Option<String>,
     ) -> Result<String, String> {
-        let _ = &this;
         let index_url =
             index_url.unwrap_or_else(|| pig_core::plugins::DEFAULT_MARKETPLACE_INDEX_URL.into());
+        if this.with(|agent| agent._selftest_dir.is_some())
+            && index_url == pig_core::plugins::DEFAULT_MARKETPLACE_INDEX_URL
+        {
+            return serde_json::to_string(&pig_protocol::PluginMarketplaceCatalog {
+                api_version: pig_protocol::PLUGIN_MARKETPLACE_API_VERSION,
+                packages: Vec::new(),
+            })
+            .map_err(|error| error.to_string());
+        }
         let catalog = pig_core::plugins::fetch_catalog(&index_url)
             .await
             .map_err(|error| format!("{error:?}"))?;
         serde_json::to_string(&catalog).map_err(|error| error.to_string())
+    }
+
+    /// Lists the built-in and explicitly trusted marketplaces.
+    pub fn marketplace_sources(&self) -> Result<String, String> {
+        let sources = crate::plugin_system::marketplace::sources(&self.data_dir)?;
+        serde_json::to_string(&sources).map_err(|error| error.to_string())
+    }
+
+    /// Validates a marketplace and reads its root key without trusting it.
+    pub async fn preview_marketplace(
+        this: Instance<Self>,
+        index_url: String,
+    ) -> Result<String, String> {
+        let _ = &this;
+        let preview = crate::plugin_system::marketplace::preview(index_url).await?;
+        serde_json::to_string(&preview).map_err(|error| error.to_string())
+    }
+
+    /// Persists a marketplace only after the user confirms its previewed root key.
+    pub fn add_marketplace(&self, preview: String) -> Result<String, String> {
+        let preview: crate::plugin_system::marketplace::MarketplacePreview =
+            serde_json::from_str(&preview).map_err(|error| error.to_string())?;
+        let sources = crate::plugin_system::marketplace::add(&self.data_dir, preview)?;
+        serde_json::to_string(&sources).map_err(|error| error.to_string())
+    }
+
+    /// Removes a custom marketplace without removing its installed packages.
+    pub fn remove_marketplace(&self, id: String) -> Result<String, String> {
+        let sources = crate::plugin_system::marketplace::remove(&self.data_dir, &id)?;
+        serde_json::to_string(&sources).map_err(|error| error.to_string())
     }
 
     /// Downloads and verifies one signed marketplace package.
@@ -189,11 +227,18 @@ default_reasoning_level = "low"
         this: Instance<Self>,
         package: String,
         index_url: Option<String>,
-        root: String,
+        root: Option<String>,
     ) -> Result<String, String> {
         let index_url =
             index_url.unwrap_or_else(|| pig_core::plugins::DEFAULT_MARKETPLACE_INDEX_URL.into());
         let data_dir = this.with(|agent| agent.data_dir.clone());
+        let root = match root.filter(|root| !root.trim().is_empty()) {
+            Some(root) => PathBuf::from(root),
+            None if index_url == pig_core::plugins::DEFAULT_MARKETPLACE_INDEX_URL => {
+                crate::plugin_system::marketplace::official_root(&data_dir).await?
+            }
+            None => crate::plugin_system::marketplace::trusted_root(&data_dir, &index_url)?,
+        };
         let package: pig_protocol::PluginMarketplacePackage =
             serde_json::from_str(&package).map_err(|error| error.to_string())?;
         let downloaded =
@@ -202,7 +247,7 @@ default_reasoning_level = "low"
                 .map_err(|error| format!("{error:?}"))?;
         let plugins = this.with(|agent| agent.plugins.clone());
         tokio::task::spawn_blocking(move || {
-            plugins.install(&downloaded.package_path, std::path::Path::new(&root))
+            plugins.install(&downloaded.package_path, &root)
         })
         .await
         .map_err(|error| error.to_string())?

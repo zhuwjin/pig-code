@@ -53,7 +53,8 @@
     "nav": {
       "models": "Models",
       "appearance": "Appearance",
-      "plugins": "Plugins"
+      "plugins": "Plugins",
+      "marketplace": "Marketplace"
     },
     "appearance": {
       "title": "Theme",
@@ -259,12 +260,6 @@
         "confirm": "Uninstall {name}? The plugin files will be deleted.",
         "confirm_action": "Confirm uninstall"
       },
-      "market": {
-        "title": "Plugin marketplace",
-        "refresh": "Refresh catalog",
-        "empty": "Refresh the catalog to see available plugins.",
-        "install": "Download and install"
-      },
       "signed": {
         "title": "Install signed plugin",
         "package_path": ".nshpkg path",
@@ -281,6 +276,41 @@
       "diagnostics": {
         "ui": "UI composition diagnostics",
         "logs": "Recent plugin logs (redacted)"
+      }
+    },
+    "marketplace": {
+      "title": "Plugin marketplace",
+      "description": "Browse trusted sources and verify every signed package before installation.",
+      "refresh": "Refresh",
+      "refreshing": "Refreshing…",
+      "loading": "Loading marketplace…",
+      "empty": "Open a marketplace to load its catalog.",
+      "no_packages": "This marketplace has no packages yet.",
+      "packages": {
+        "one": "{count} package",
+        "other": "{count} packages"
+      },
+      "official_badge": "Official",
+      "install": "Install",
+      "installing": "Installing…",
+      "installed": "Installed",
+      "update": "Update",
+      "sources": {
+        "title": "Marketplaces",
+        "remove_label": "Remove marketplace {name}",
+        "remove_confirm": "Remove {name}? Installed plugins are kept, but its trusted root key will be deleted.",
+        "remove": "Remove"
+      },
+      "add": {
+        "title": "Add marketplace",
+        "description": "Use an index.json URL. The repository must also contain root.pub and signed .nshpkg packages.",
+        "url_placeholder": "https://…/index.json",
+        "preview": "Check",
+        "previewing": "Checking…",
+        "fingerprint": "Root key fingerprint (SHA-256)",
+        "trust_notice": "Confirm this fingerprint out of band. It will be reused for future installs and updates; key changes are never trusted silently.",
+        "confirm": "Trust and add",
+        "official_exists": "The official marketplace is already built in."
       }
     }
   },

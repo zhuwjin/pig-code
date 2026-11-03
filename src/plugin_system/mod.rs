@@ -1,4 +1,5 @@
 mod loader;
+pub mod marketplace;
 mod manager;
 mod mount_projector;
 mod services;

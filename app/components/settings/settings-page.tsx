@@ -3,15 +3,17 @@ import type { MessageKey } from "../../i18n";
 import type { UiContext } from "../../ui-context";
 import type { IconName } from "../icon";
 import { ModelSettings } from "./model-settings";
+import { PluginMarketplace } from "./marketplace";
 import { ThemePicker } from "../../theme-picker";
 import { hostPatchProps, UiNodeFactory } from "../../plugins/ui-node-factory";
 
-export type SettingsPageId = "models" | "appearance" | "plugins";
+export type SettingsPageId = "models" | "appearance" | "plugins" | "marketplace";
 
 export const SETTINGS_PAGES: { id: SettingsPageId; titleKey: MessageKey; icon: IconName }[] = [
   { id: "models", titleKey: "settings.nav.models", icon: "settings" },
   { id: "appearance", titleKey: "settings.nav.appearance", icon: "sun" },
   { id: "plugins", titleKey: "settings.nav.plugins", icon: "sliders-horizontal" },
+  { id: "marketplace", titleKey: "settings.nav.marketplace", icon: "globe" },
 ];
 
 export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
@@ -19,7 +21,6 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     section,
     store: props.themeStore,
     packages: () => props.store.pluginPackages(),
-    catalog: () => props.store.pluginCatalog(),
     fontFamilies: () => props.store.fontFamilies(),
     runtime: () => props.store.pluginRuntime(),
     diagnostics: () => props.store.pluginUiDiagnostics(),
@@ -37,9 +38,6 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     },
     onRefreshPackages: () => props.store.syncPlugins(),
     onInstallPlugin: (packagePath: string, rootPath: string) => props.store.installPlugin(packagePath, rootPath),
-    onRefreshMarketplace: () => props.store.refreshMarketplace(),
-    onInstallMarketplace: (plugin: Parameters<UiContext["store"]["installMarketplacePlugin"]>[0], rootPath: string) =>
-      props.store.installMarketplacePlugin(plugin, rootPath),
     onUninstallPlugin: (plugin: Parameters<UiContext["store"]["uninstallPlugin"]>[0]) => props.store.uninstallPlugin(plugin),
   });
   return (
@@ -54,6 +52,7 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
                 <If when={props.page === "models"}><ModelSettings {...props} /></If>
                 <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
                 <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
+                <If when={props.page === "marketplace"}><PluginMarketplace {...props} /></If>
               </>
             )}
           </View>

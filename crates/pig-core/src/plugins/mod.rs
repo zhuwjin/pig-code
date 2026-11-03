@@ -8,7 +8,9 @@ mod themes;
 mod tools;
 
 pub use http::request_http;
-pub use marketplace::{DEFAULT_MARKETPLACE_INDEX_URL, download_signed_package, fetch_catalog};
+pub use marketplace::{
+    DEFAULT_MARKETPLACE_INDEX_URL, download_signed_package, fetch_catalog, fetch_root_public_key,
+};
 pub use themes::load_theme;
 pub use tools::{PluginToolDispatcher, PluginToolFilter, PluginToolset};
 

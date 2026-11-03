@@ -1,6 +1,6 @@
 import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
 import { Button, Input, Popover } from "nsh/base";
-import { PluginMarketplacePackage, PluginPackageInfo, PluginRuntimeState } from "./protocol";
+import { PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
 import { languagePreference, setLanguagePreference, t } from "./i18n";
 import type { LanguagePreference, MessageKey } from "./i18n";
@@ -233,7 +233,6 @@ interface ThemePickerProps {
   section: "appearance" | "plugins";
   store: ThemeStore;
   packages: () => PluginPackageInfo[];
-  catalog: () => PluginMarketplacePackage[];
   fontFamilies: () => string[];
   runtime?: () => Record<string, PluginRuntimeState>;
   diagnostics?: () => Record<string, string[]>;
@@ -246,8 +245,6 @@ interface ThemePickerProps {
   onTogglePackage: (plugin: PluginPackageInfo) => void;
   onRefreshPackages: () => void;
   onInstallPlugin: (packagePath: string, rootPath: string) => Promise<void>;
-  onRefreshMarketplace: () => Promise<void>;
-  onInstallMarketplace: (plugin: PluginMarketplacePackage, rootPath: string) => Promise<void>;
   onUninstallPlugin: (plugin: PluginPackageInfo) => void;
 }
 
@@ -475,33 +472,6 @@ export function ThemePicker(props: ThemePickerProps) {
                   <Text selectable class="text-xs leading-5 text-destructive">{props.error?.()}</Text>
                 </View>
               </If>
-              <View class="gap-2">
-                <View class="flex-row items-center">
-                  <Text class="flex-1 text-xs font-medium text-muted-foreground">{t("settings.plugins.market.title")}</Text>
-                  <Button testID="market-refresh" class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onRefreshMarketplace}>
-                    <Text class="text-xs text-muted-foreground">{t("settings.plugins.market.refresh")}</Text>
-                  </Button>
-                </View>
-                <If when={props.catalog().length === 0}>
-                  <Text class="text-xs text-muted-foreground">{t("settings.plugins.market.empty")}</Text>
-                </If>
-                <Each of={props.catalog()} key={(plugin) => plugin.id}>
-                  {(plugin) => (
-                    <View class="gap-1 rounded-(--radius) border border-border p-3">
-                      <Text class="text-sm font-medium text-foreground">{plugin().name} · {plugin().version}</Text>
-                      <Text class="text-xs text-muted-foreground">{plugin().id}</Text>
-                      <Button
-                        testID={`market-install-${plugin().id}`}
-                        disabled={!rootPath().trim()}
-                        class="rounded-(--radius) bg-primary px-3 py-1.5 disabled:opacity-40"
-                        onPress={() => props.onInstallMarketplace(plugin(), rootPath().trim())}
-                      >
-                        <Text class="text-xs text-primary-foreground">{t("settings.plugins.market.install")}</Text>
-                      </Button>
-                    </View>
-                  )}
-                </Each>
-              </View>
               <View class="gap-2">
                 <Text class="text-xs font-medium text-muted-foreground">{t("settings.plugins.signed.title")}</Text>
                 <Input

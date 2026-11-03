@@ -420,6 +420,18 @@ export interface PluginMarketplaceCatalog {
   packages: PluginMarketplacePackage[];
 }
 
+export interface PluginMarketplaceSource {
+  id: string;
+  name: string;
+  index_url: string;
+  official: boolean;
+  fingerprint: string;
+}
+
+export interface PluginMarketplacePreview extends PluginMarketplaceSource {
+  public_key: string;
+}
+
 export interface PluginPackageInfo {
   id: string;
   name: string;
