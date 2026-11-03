@@ -14,6 +14,13 @@ export interface SessionMeta {
   permissions?: PermissionSettings;
 }
 
+export interface WorkspaceMeta {
+  path: string;
+  added_at: number;
+  alias?: string | null;
+  hidden: boolean;
+}
+
 export interface EditDiff {
   path: string;
   unified_diff: string;

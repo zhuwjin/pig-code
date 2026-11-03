@@ -39,6 +39,7 @@ import {
   QueueState,
   SessionConfiguration,
   SessionMeta,
+  WorkspaceMeta,
   SubagentHistory,
   TaskSummary,
   TodoItem,
@@ -80,6 +81,7 @@ export class AgentStore {
   readonly draftFiles = signal<string[]>([]);
   readonly draftImages = signal<ComposerImage[]>([]);
   readonly sessions = signal<SessionMeta[]>([]);
+  readonly workspaces = signal<WorkspaceMeta[]>([]);
   readonly current = signal<string | null>(null);
   readonly currentTitle = signal(t("store.new_task"));
   readonly currentModel = signal("");
@@ -313,6 +315,53 @@ export class AgentStore {
     } catch (error) {
       this.globalError.set(errorMessage(error));
     }
+  }
+
+  newTaskInWorkspace(path: string): void {
+    this.newTask();
+    this.selectHeroWorkspace(path);
+  }
+
+  setSessionPinned(sessionId: string, pinned: boolean): void {
+    this.updateSessionMeta(sessionId, { pinned });
+  }
+
+  setSessionArchived(sessionId: string, archived: boolean): void {
+    this.updateSessionMeta(sessionId, { archived });
+  }
+
+  renameSession(sessionId: string, title: string): void {
+    if (this.updateSessionMeta(sessionId, { title }) && this.current() === sessionId) {
+      this.currentTitle.set(title);
+    }
+  }
+
+  deleteSession(sessionId: string): void {
+    if (this.command({ DeleteSession: { session_id: sessionId } }) && this.current() === sessionId) {
+      this.newTask();
+    }
+  }
+
+  removeWorkspace(path: string): void {
+    this.command({ RemoveWorkspace: { path } });
+  }
+
+  renameWorkspace(path: string, alias: string | null): void {
+    this.command({ RenameWorkspace: { path, alias } });
+  }
+
+  private updateSessionMeta(
+    sessionId: string,
+    changes: { pinned?: boolean; archived?: boolean; title?: string },
+  ): boolean {
+    return this.command({
+      UpdateSessionMeta: {
+        session_id: sessionId,
+        pinned: changes.pinned ?? null,
+        archived: changes.archived ?? null,
+        title: changes.title ?? null,
+      },
+    });
   }
 
   configuration(): SessionConfiguration {
@@ -1133,6 +1182,9 @@ export class AgentStore {
     const sessionId = typeof data.session_id === "string" ? data.session_id : null;
     if (kind !== "ReasoningDelta" && kind !== "TextDelta") this.flushMarkdownDeltas();
     switch (kind) {
+      case "WorkspaceList":
+        this.workspaces.set(data.workspaces as WorkspaceMeta[]);
+        break;
       case "SessionList": {
         const sessions = (data.sessions as SessionMeta[]).filter((item) => !item.archived);
         this.sessions.set(sessions);

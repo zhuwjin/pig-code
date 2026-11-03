@@ -96,7 +96,6 @@ export function Icon(props: {
       />
     );
   }
-  const elements = ICON_ELEMENTS[props.name as keyof typeof ICON_ELEMENTS];
   return (
     <Canvas
       testID={props.testID}
@@ -104,6 +103,7 @@ export function Icon(props: {
       pointerEvents="none"
       style={{ width: size, height: size }}
       draw={(cx, { width }) => {
+        const elements = ICON_ELEMENTS[props.name as keyof typeof ICON_ELEMENTS];
         paintIcon(cx, elements, iconTint(props.name, props.color)!, width);
       }}
     />

@@ -15,31 +15,33 @@ const ALIASES: [string, string][] = [
   ["siliconflow", "siliconcloud"], ["lm studio", "lmstudio"], ["glm", "glmv"],
 ];
 
-function aliases(): [string, string][] {
-  return [...ALIASES, ...(zhAliases as [string, string][])];
-}
+const ALL_ALIASES: [string, string][] = [...ALIASES, ...(zhAliases as [string, string][])];
 
 function normalize(text: string): string {
   return text.toLowerCase().split(/[^\p{L}\p{N}]+/gu).filter(Boolean).join(" ");
-}
-
-function compact(text: string): string {
-  return normalize(text).replaceAll(" ", "");
 }
 
 function keys(meta: IconMeta): string[] {
   return [
     meta.id,
     meta.title,
-    ...aliases().filter(([, target]) => target === meta.id).map(([alias]) => alias),
+    ...ALL_ALIASES.filter(([, target]) => target === meta.id).map(([alias]) => alias),
   ];
 }
+
+const SEARCH_INDEX = ICON_CATALOG.map((meta) => ({
+  meta,
+  keys: keys(meta).map((key) => {
+    const normalized = normalize(key);
+    return { normalized, compact: normalized.replaceAll(" ", "") };
+  }),
+}));
 
 export function searchIcons(query: string): IconMeta[] {
   const normalized = normalize(query);
   if (!normalized) return ICON_CATALOG;
-  const compactQuery = compact(query);
-  return ICON_CATALOG.filter((meta) => keys(meta).some((key) =>
-    normalize(key).includes(normalized) || (compactQuery && compact(key).includes(compactQuery))
-  ));
+  const compactQuery = normalized.replaceAll(" ", "");
+  return SEARCH_INDEX.filter(({ keys }) => keys.some((key) =>
+    key.normalized.includes(normalized) || (compactQuery && key.compact.includes(compactQuery))
+  )).map(({ meta }) => meta);
 }

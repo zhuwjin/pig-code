@@ -19,14 +19,35 @@
     "collapse_workspace": "Collapse workspace",
     "expand_workspace": "Expand workspace",
     "group_by_workspace": "Group by workspace",
-    "all_sessions": "All sessions",
+    "view": "View",
+    "view_flat": "Flat list",
     "collapse_current_workspace": "Collapse current workspace",
     "expand_current_workspace": "Expand current workspace",
     "untitled_session": "Untitled session",
     "settings": "Settings",
     "open_page": "Open {name}",
     "return_workspace": "Back to workspace",
-    "open_settings": "Model and app settings"
+    "open_settings": "Model and app settings",
+    "workspace_menu": "Workspace menu",
+    "copy_path": "Copy path",
+    "rename": "Rename",
+    "remove_workspace": "Remove workspace",
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "pinned": "Pinned",
+    "archive": "Archive",
+    "unarchive": "Unarchive",
+    "delete_session": "Delete session",
+    "show_more": "Show more",
+    "collapse_sessions": "Collapse",
+    "time": {
+      "just_now": "just now",
+      "minutes": "{count} min",
+      "hours": "{count} h",
+      "days": "{count} d",
+      "weeks": "{count}w",
+      "months": "{count}mo"
+    }
   },
   "settings": {
     "nav": {

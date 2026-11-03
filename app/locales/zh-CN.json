@@ -19,14 +19,35 @@
     "collapse_workspace": "折叠工作区",
     "expand_workspace": "展开工作区",
     "group_by_workspace": "按工作区分组",
-    "all_sessions": "全部会话",
+    "view": "视图",
+    "view_flat": "平铺列表",
     "collapse_current_workspace": "折叠当前工作区",
     "expand_current_workspace": "展开当前工作区",
     "untitled_session": "未命名会话",
     "settings": "设置",
     "open_page": "打开{name}",
     "return_workspace": "返回工作区",
-    "open_settings": "模型与应用设置"
+    "open_settings": "模型与应用设置",
+    "workspace_menu": "工作区菜单",
+    "copy_path": "复制路径",
+    "rename": "重命名",
+    "remove_workspace": "移除工作区",
+    "pin": "置顶",
+    "unpin": "取消置顶",
+    "pinned": "置顶",
+    "archive": "归档",
+    "unarchive": "取消归档",
+    "delete_session": "删除会话",
+    "show_more": "展开更多",
+    "collapse_sessions": "收起",
+    "time": {
+      "just_now": "刚刚",
+      "minutes": "{count} 分钟",
+      "hours": "{count} 小时",
+      "days": "{count} 天",
+      "weeks": "{count} 周",
+      "months": "{count} 个月"
+    }
   },
   "settings": {
     "nav": {

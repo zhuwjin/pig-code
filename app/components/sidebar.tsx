@@ -1,7 +1,8 @@
-import { List, Text, View, platform, signal, token } from "nsh";
-import { Button, Popover } from "nsh/base";
+import { Canvas, Clipboard, Easing, List, Text, View, createAnimatedValue, effect, platform, signal, token } from "nsh";
+import { Button, ContextMenu, Input, Menu, MenuItem, MenuSeparator } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
+import type { SessionMeta } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
@@ -10,8 +11,172 @@ import { SETTINGS_PAGES, type SettingsPageId } from "./settings/settings-page";
 import { PluginPages } from "../plugins/remote-renderer";
 import { UiView } from "../plugins/ui-node-factory";
 
+const WORKSPACE_PAGE_SIZE = 5;
 const workspaceExpanded = signal(true);
+const workspaceShown = signal(WORKSPACE_PAGE_SIZE);
+const workspacePageOpen = signal(false);
 const sidebarView = signal<"workspace" | "flat">("workspace");
+
+export function formatSessionTime(updatedAt: number, nowSeconds = Math.floor(Date.now() / 1000)): string {
+  const diff = Math.max(0, Math.floor(nowSeconds - updatedAt));
+  if (diff < 60) return t("sidebar.time.just_now");
+  if (diff < 3600) return t("sidebar.time.minutes", { count: Math.floor(diff / 60) });
+  if (diff < 86400) return t("sidebar.time.hours", { count: Math.floor(diff / 3600) });
+  const days = Math.floor(diff / 86400);
+  if (days < 7) return t("sidebar.time.days", { count: days });
+  if (days < 30) return t("sidebar.time.weeks", { count: Math.floor(days / 7) });
+  return t("sidebar.time.months", { count: Math.floor(days / 30) });
+}
+
+export function workspaceSessionLimit(shown: number, open: boolean): number {
+  return open ? shown : WORKSPACE_PAGE_SIZE;
+}
+
+export function nextWorkspaceSessionLimit(shown: number, open: boolean): number {
+  return workspaceSessionLimit(shown, open) + WORKSPACE_PAGE_SIZE;
+}
+
+export function sessionTitleScroll(titleWidth: number, viewportWidth: number): { offset: number; duration: number } {
+  const distance = Math.max(0, titleWidth - viewportWidth + 2);
+  return { offset: -distance, duration: distance / 94 * 1000 };
+}
+
+function SessionTiming(props: { store: UiContext["store"]; session: () => SessionMeta }) {
+  const running = () => props.store.running()[props.session().id] ?? false;
+  const waitingApproval = () => (props.store.approvals()[props.session().id] ?? []).length > 0;
+  return (
+    <>
+      <If when={waitingApproval()}>
+        <View class="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: token("warning") }} />
+      </If>
+      <If when={running()}>
+        <Icon name="loader-circle" size={12} class="shrink-0 animate-spin" color={token("muted-foreground")} />
+      </If>
+      <If when={!running()}>
+        <Text
+          testID={`session-time-${props.session().id}`}
+          class="shrink-0 text-xs text-muted-foreground"
+        >
+          {formatSessionTime(props.session().updated_at)}
+        </Text>
+      </If>
+    </>
+  );
+}
+
+function blendColors(background: string, foreground: string, amount: number): string {
+  const channels = (color: string): number[] | null => {
+    if (!/^#[0-9a-f]{6}$/i.test(color)) return null;
+    return [1, 3, 5].map((index) => parseInt(color.slice(index, index + 2), 16));
+  };
+  const base = channels(background);
+  const overlay = channels(foreground);
+  if (!base || !overlay) return background;
+  return `#${base.map((channel, index) =>
+    Math.round(channel * (1 - amount) + overlay[index] * amount).toString(16).padStart(2, "0")
+  ).join("")}`;
+}
+
+function SessionTitle(props: { session: () => SessionMeta; selected: () => boolean; fontFamily?: string | null }) {
+  const offset = createAnimatedValue(0);
+  const hovering = signal(false);
+  const fade = signal(false);
+  const text = () => props.session().title || t("sidebar.untitled_session");
+  const titleWidth = signal(0);
+  let viewportWidth = 0;
+  let started = false;
+  let currentTitle = "";
+  let run = 0;
+  let scheduled: number | undefined;
+  const start = () => {
+    const scroll = sessionTitleScroll(titleWidth(), viewportWidth);
+    fade.set(scroll.offset < -1);
+    if (started || !hovering()) return;
+    if (scroll.offset >= -1) {
+      fade.set(false);
+      return;
+    }
+    started = true;
+    fade.set(true);
+    const currentRun = run;
+    void offset.timing(scroll.offset, {
+      duration: scroll.duration,
+      easing: Easing.linear,
+      delay: 480,
+    }).then((finished) => {
+      if (finished && run === currentRun) fade.set(false);
+    });
+  };
+  effect(() => {
+    const titleKey = `${props.session().id}:${props.session().title}`;
+    const active = hovering();
+    if (currentTitle !== titleKey) {
+      currentTitle = titleKey;
+      titleWidth.set(0);
+    }
+    started = false;
+    run += 1;
+    offset.stop();
+    offset.set(0);
+    fade.set(sessionTitleScroll(titleWidth(), viewportWidth).offset < -1);
+    if (active) scheduled = requestAnimationFrame(start);
+    return () => {
+      run += 1;
+      if (scheduled !== undefined) cancelAnimationFrame(scheduled);
+      scheduled = undefined;
+      offset.stop();
+    };
+  });
+  return (
+    <View
+      class="relative min-w-0 flex-1 overflow-hidden"
+      onLayout={(bounds) => {
+        viewportWidth = bounds.size.width;
+        start();
+      }}
+      onHoverIn={() => hovering.set(true)}
+      onHoverOut={() => hovering.set(false)}
+    >
+      <Canvas
+        class="absolute h-px w-px opacity-0"
+        pointerEvents="none"
+        style={{ width: 1, height: 1 }}
+        draw={(cx) => {
+          cx.font = `14px ${props.fontFamily ? JSON.stringify(props.fontFamily) : "system-ui"}`;
+          titleWidth.set(cx.measureText(text()).width);
+          start();
+        }}
+      />
+      <Text
+        testID="session-title-text"
+        numberOfLines={1}
+        ellipsizeMode="clip"
+        class="shrink-0 whitespace-nowrap text-left text-sm text-sidebar-foreground"
+        style={{ width: titleWidth() > 0 ? titleWidth() : undefined, transform: [{ translateX: offset }] }}
+      >
+        {text()}
+      </Text>
+      <If when={fade()}>
+        <Canvas
+          testID="session-title-fade"
+          class="absolute right-0 top-0 h-5 w-5"
+          pointerEvents="none"
+          style={{ width: 20, height: 20 }}
+          draw={(cx, { width, height }) => {
+            const gradient = cx.createLinearGradient(0, 0, width, 0);
+            const background = hovering() || props.selected()
+              ? token("sidebar-accent")
+              : blendColors(token("sidebar"), token("foreground"), 0.05);
+            gradient.addColorStop(0, background.length === 7 ? `${background}00` : `${background.slice(0, 7)}00`);
+            gradient.addColorStop(1, background);
+            cx.fillStyle = gradient;
+            cx.fillRect(0, 0, width, height);
+          }}
+        />
+      </If>
+    </View>
+  );
+}
 
 export function Sidebar(props: UiContext & {
   mode: "workspace" | "settings";
@@ -24,12 +189,252 @@ export function Sidebar(props: UiContext & {
 }) {
   const { store, themeStore } = props;
   const manageOpen = signal(false);
-  const sessions = () => store.sessions().filter((session) => session.cwd === store.cwd());
-  const shownSessions = () => sidebarView() === "workspace"
-    ? sessions()
-    : [...store.sessions()].sort((a, b) =>
-      Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at
-    );
+  const workspaceMenuOpen = signal(false);
+  const renaming = signal<{ kind: "workspace" | "session"; id: string } | null>(null);
+  const renameValue = signal("");
+  const workspaceMeta = () => store.workspaces().find((workspace) => workspace.path === store.cwd());
+  const currentWorkspaceName = () => workspaceMeta()?.alias || workspaceName(store.cwd());
+  const workspaceHidden = () => workspaceMeta()?.hidden ?? false;
+  const startRename = (kind: "workspace" | "session", id: string, value: string) => {
+    renaming.set({ kind, id });
+    renameValue.set(value);
+  };
+  const commitRename = () => {
+    const target = renaming();
+    if (!target) return;
+    const value = renameValue().trim();
+    renaming.set(null);
+    if (target.kind === "workspace") {
+      store.renameWorkspace(target.id, !value || value === workspaceName(target.id) ? null : value);
+    } else if (value) {
+      store.renameSession(target.id, value);
+    }
+  };
+  const pinnedSessions = () => store.sessions()
+    .filter((session) => session.pinned)
+    .sort((a, b) => b.updated_at - a.updated_at);
+  const sessions = () => store.sessions()
+    .filter((session) => session.cwd === store.cwd() && !session.pinned)
+    .sort((a, b) => b.updated_at - a.updated_at);
+  const shownSessions = () => {
+    if (sidebarView() === "flat") {
+      return [...store.sessions()].sort((a, b) =>
+        Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at
+      );
+    }
+    if (workspaceHidden() || !workspaceExpanded()) return [];
+    return sessions().slice(0, workspaceSessionLimit(workspaceShown(), workspacePageOpen()));
+  };
+  const canShowMore = () => sessions().length > workspaceSessionLimit(workspaceShown(), workspacePageOpen());
+  const showMore = () => {
+    workspaceShown.set(nextWorkspaceSessionLimit(workspaceShown(), workspacePageOpen()));
+    workspacePageOpen.set(true);
+  };
+  const workspaceItems = () => (
+    <>
+      <MenuItem testID="workspace-new-task" class="rounded-(--radius) px-3 py-2 hover:bg-accent" onSelect={() => store.newTaskInWorkspace(store.cwd())}>
+        <Text class="text-sm text-foreground">{t("sidebar.new_task")}</Text>
+      </MenuItem>
+      <MenuSeparator class="my-1 h-px bg-border" />
+      <MenuItem testID="workspace-copy-path" class="rounded-(--radius) px-3 py-2 hover:bg-accent" onSelect={() => void Clipboard.writeText(store.cwd())}>
+        <Text class="text-sm text-foreground">{t("sidebar.copy_path")}</Text>
+      </MenuItem>
+      <MenuItem
+        testID="workspace-rename"
+        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        onSelect={() => startRename("workspace", store.cwd(), currentWorkspaceName())}
+      >
+        <Text class="text-sm text-foreground">{t("sidebar.rename")}</Text>
+      </MenuItem>
+      <MenuSeparator class="my-1 h-px bg-border" />
+      <MenuItem testID="workspace-remove" class="rounded-(--radius) px-3 py-2 hover:bg-accent" onSelect={() => store.removeWorkspace(store.cwd())}>
+        <Text class="text-sm text-foreground">{t("sidebar.remove_workspace")}</Text>
+      </MenuItem>
+    </>
+  );
+  const sessionItems = (session: () => SessionMeta) => (
+    <>
+      <MenuItem
+        testID={`session-rename-${session().id}`}
+        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        onSelect={() => startRename("session", session().id, session().title)}
+      >
+        <Text class="text-sm text-foreground">{t("sidebar.rename")}</Text>
+      </MenuItem>
+      <MenuItem
+        testID={`session-pin-${session().id}`}
+        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        onSelect={() => store.setSessionPinned(session().id, !session().pinned)}
+      >
+        <Text class="text-sm text-foreground">{t(session().pinned ? "sidebar.unpin" : "sidebar.pin")}</Text>
+      </MenuItem>
+      <MenuItem
+        testID={`session-archive-${session().id}`}
+        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        onSelect={() => store.setSessionArchived(session().id, !session().archived)}
+      >
+        <Text class="text-sm text-foreground">{t(session().archived ? "sidebar.unarchive" : "sidebar.archive")}</Text>
+      </MenuItem>
+      <MenuSeparator class="my-1 h-px bg-border" />
+      <MenuItem
+        testID={`session-delete-${session().id}`}
+        class="rounded-(--radius) px-3 py-2 hover:bg-accent"
+        onSelect={() => store.deleteSession(session().id)}
+      >
+        <Text class="text-sm text-foreground">{t("sidebar.delete_session")}</Text>
+      </MenuItem>
+    </>
+  );
+  const renderWorkspaceRow = () => (
+    <>
+      <If when={renaming()?.kind === "workspace"}>
+        <View class="mb-1 flex-row items-center rounded-(--radius) px-2 py-1">
+          <Input
+            testID="workspace-rename-input"
+            autoFocus
+            value={renameValue()}
+            onChange={(value) => renameValue.set(value)}
+            onSubmit={commitRename}
+            onBlur={commitRename}
+            class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1 text-sm text-foreground"
+          />
+        </View>
+      </If>
+      <If when={renaming()?.kind !== "workspace"}>
+        <ContextMenu
+          popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+          trigger={
+            <View class="group relative mb-1">
+              <Button
+                testID="workspace-row"
+                accessibilityLabel={t(workspaceExpanded() ? "sidebar.collapse_current_workspace" : "sidebar.expand_current_workspace")}
+                class={`w-full flex-row items-center gap-2 rounded-(--radius) px-2 py-1 ${workspaceMenuOpen() ? "bg-sidebar-accent pr-14" : "hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-14"}`}
+                onPress={() => workspaceExpanded.update((expanded) => !expanded)}
+              >
+                <Icon
+                  name={workspaceExpanded() ? "folder-open" : "folder-closed"}
+                  color={token("muted-foreground")}
+                />
+                <Text numberOfLines={1} class="min-w-0 flex-1 text-left text-sm text-sidebar-foreground">
+                  {currentWorkspaceName()}
+                </Text>
+              </Button>
+              <View class={`absolute right-1 top-0 bottom-0 items-center gap-1 ${workspaceMenuOpen() ? "flex" : "hidden group-hover:flex"}`}>
+                <Menu
+                  open={workspaceMenuOpen()}
+                  onOpenChange={(value) => workspaceMenuOpen.set(value)}
+                  placement="bottom"
+                  align="end"
+                  popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+                  trigger={
+                    <View role="button" testID="workspace-menu" accessibilityLabel={t("sidebar.workspace_menu")} class="h-6 w-6 flex-row items-center justify-center rounded-(--radius) hover:bg-foreground/10">
+                      <Icon name="ellipsis" size={14} color={token("muted-foreground")} />
+                    </View>
+                  }
+                >
+                  {workspaceItems()}
+                </Menu>
+                <Button
+                  testID="workspace-add"
+                  accessibilityLabel={t("sidebar.new_task")}
+                  class="h-6 w-6 flex-row items-center justify-center rounded-(--radius) hover:bg-foreground/10"
+                  onPress={() => store.newTaskInWorkspace(store.cwd())}
+                >
+                  <Icon name="plus" size={14} color={token("muted-foreground")} />
+                </Button>
+              </View>
+            </View>
+          }
+        >
+          {workspaceItems()}
+        </ContextMenu>
+      </If>
+    </>
+  );
+  const renderSessionRow = (session: () => SessionMeta, detailed: () => boolean) => (
+    <>
+      <If when={renaming()?.kind === "session" && renaming()?.id === session().id}>
+        <View class={`flex-row items-center py-1 ${detailed() ? "px-2" : "pl-8 pr-2"}`}>
+          <Input
+            testID="session-rename-input"
+            autoFocus
+            value={renameValue()}
+            onChange={(value) => renameValue.set(value)}
+            onSubmit={commitRename}
+            onBlur={commitRename}
+            class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1 text-sm text-foreground"
+          />
+        </View>
+      </If>
+      <If when={renaming()?.kind !== "session" || renaming()?.id !== session().id}>
+        <ContextMenu
+          popupClass="w-48 rounded-xl border border-border bg-popover p-2 shadow-xl"
+          trigger={
+            <View class="group relative">
+              <Button
+                testID={`session-${session().id}`}
+                selected={store.current() === session().id}
+                class={themeStore.classes(
+                  "sidebar.session",
+                  `w-full flex-row items-center rounded-(--radius) py-1 hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-14 selected:bg-sidebar-accent ${detailed() ? "px-2" : "pl-8 pr-2"}`,
+                )}
+                onPress={() => store.openSession(session().id)}
+              >
+                <If when={!detailed()}>
+                  <View class="min-w-0 flex-1 flex-row items-center gap-2">
+                    <SessionTitle session={session} selected={() => store.current() === session().id} fontFamily={themeStore.fonts().ui} />
+                    <View class="flex-row items-center gap-2 group-hover:hidden">
+                      <SessionTiming store={store} session={session} />
+                    </View>
+                  </View>
+                </If>
+                <If when={detailed()}>
+                  <View testID="session-detail" class="min-w-0 flex-1 gap-0.5">
+                    <View class="flex-row items-center gap-2">
+                      <SessionTitle session={session} selected={() => store.current() === session().id} fontFamily={themeStore.fonts().ui} />
+                      <View class="flex-row items-center gap-2 group-hover:hidden">
+                        <SessionTiming store={store} session={session} />
+                      </View>
+                    </View>
+                    <View class="flex-row items-center gap-1">
+                      <Icon name="folder-closed" size={12} color={token("muted-foreground")} />
+                      <Text
+                        testID={`session-workspace-${session().id}`}
+                        numberOfLines={1}
+                        class="min-w-0 flex-1 text-left text-xs text-muted-foreground"
+                      >
+                        {workspaceName(session().cwd)}
+                      </Text>
+                    </View>
+                  </View>
+                </If>
+              </Button>
+              <View class="absolute right-1 top-0 bottom-0 hidden items-center gap-1 group-hover:flex">
+                <Button
+                  testID={`pin-${session().id}`}
+                  accessibilityLabel={t(session().pinned ? "sidebar.unpin" : "sidebar.pin")}
+                  class="h-6 w-6 flex-row items-center justify-center rounded-(--radius) hover:bg-foreground/10"
+                  onPress={() => store.setSessionPinned(session().id, !session().pinned)}
+                >
+                  <Icon name={session().pinned ? "star-fill" : "star"} size={14} color={token("muted-foreground")} />
+                </Button>
+                <Button
+                  testID={`archive-${session().id}`}
+                  accessibilityLabel={t(session().archived ? "sidebar.unarchive" : "sidebar.archive")}
+                  class="h-6 w-6 flex-row items-center justify-center rounded-(--radius) hover:bg-foreground/10"
+                  onPress={() => store.setSessionArchived(session().id, !session().archived)}
+                >
+                  <Icon name={session().archived ? "undo-2" : "inbox"} size={14} color={token("muted-foreground")} />
+                </Button>
+              </View>
+            </View>
+          }
+        >
+          {sessionItems(session)}
+        </ContextMenu>
+      </If>
+    </>
+  );
   return (
     <View
       style={themeStore.styles("sidebar.root")}
@@ -102,7 +507,7 @@ export function Sidebar(props: UiContext & {
             />
           </Button>
         </If>
-        <Popover
+        <Menu
           open={manageOpen()}
           onOpenChange={(value) => manageOpen.set(value)}
           placement="bottom"
@@ -115,76 +520,96 @@ export function Sidebar(props: UiContext & {
           }
         >
           <View class="gap-1">
-            <Button
-              testID="list-view-workspace"
-              selected={sidebarView() === "workspace"}
-              class="flex-row items-center rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-              onPress={() => {
-                sidebarView.set("workspace");
-                manageOpen.set(false);
-              }}
-            >
-              <Text class="flex-1 text-sm text-foreground">{t("sidebar.group_by_workspace")}</Text>
-              <If when={sidebarView() === "workspace"}><Text class="text-sm">✓</Text></If>
-            </Button>
-            <Button
+            <Text class="px-3 pb-1 pt-1 text-sm text-muted-foreground">{t("sidebar.view")}</Text>
+            <MenuItem
               testID="list-view-flat"
-              selected={sidebarView() === "flat"}
-              class="flex-row items-center rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-              onPress={() => {
+              class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-accent"
+              onSelect={() => {
                 sidebarView.set("flat");
                 manageOpen.set(false);
               }}
             >
-              <Text class="flex-1 text-sm text-foreground">{t("sidebar.all_sessions")}</Text>
-              <If when={sidebarView() === "flat"}><Text class="text-sm">✓</Text></If>
-            </Button>
+              <Icon name="list" size={14} color={token("muted-foreground")} />
+              <Text class="flex-1 text-sm text-foreground">{t("sidebar.view_flat")}</Text>
+              <If when={sidebarView() === "flat"}>
+                <Icon name="check" size={14} color={token("foreground")} />
+              </If>
+            </MenuItem>
+            <MenuItem
+              testID="list-view-workspace"
+              class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-accent"
+              onSelect={() => {
+                sidebarView.set("workspace");
+                manageOpen.set(false);
+              }}
+            >
+              <Icon name="folder-kanban" size={14} color={token("muted-foreground")} />
+              <Text class="flex-1 text-sm text-foreground">{t("sidebar.group_by_workspace")}</Text>
+              <If when={sidebarView() === "workspace"}>
+                <Icon name="check" size={14} color={token("foreground")} />
+              </If>
+            </MenuItem>
           </View>
-        </Popover>
+        </Menu>
       </View>
       </If>
-      <If when={props.mode === "workspace" && sidebarView() === "workspace"}>
-        <Button
-          testID="workspace-row"
-          accessibilityLabel={t(workspaceExpanded() ? "sidebar.collapse_current_workspace" : "sidebar.expand_current_workspace")}
-          class="mx-2 flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent"
-          onPress={() => workspaceExpanded.update((expanded) => !expanded)}
-        >
-          <Icon
-            name={workspaceExpanded() ? "folder-open" : "folder-closed"}
-            color={token("muted-foreground")}
-          />
-          <Text numberOfLines={1} class="flex-1 text-sm text-sidebar-foreground">
-            {workspaceName(store.cwd())}
-          </Text>
-        </Button>
-      </If>
-      <If when={props.mode === "workspace" && (sidebarView() === "flat" || workspaceExpanded())}>
+      <If when={props.mode === "workspace"}>
         <List
+          testID="session-list"
           each={shownSessions()}
           keyExtractor={(item) => item.id}
           class="flex-1"
           contentClass="gap-1 px-2 pb-2"
-        >
-          {(session) => (
-            <Button
-              selected={store.current() === session().id}
-              class={themeStore.classes(
-                "sidebar.session",
-                `rounded-(--radius) py-2 hover:bg-sidebar-accent selected:bg-sidebar-accent ${sidebarView() === "workspace" ? "pl-8 pr-3" : "px-3"}`,
-              )}
-              onPress={() => store.openSession(session().id)}
-            >
-              <View class="gap-1">
-                <Text numberOfLines={1} class="text-sm text-sidebar-foreground">
-                  {session().title || t("sidebar.untitled_session")}
-                </Text>
-                <Text numberOfLines={1} class="text-xs text-muted-foreground">
-                  {session().cwd}
-                </Text>
+          header={
+            <>
+              <If when={sidebarView() === "workspace" && pinnedSessions().length > 0}>
+                <View testID="pinned-sessions" class="gap-1">
+                  <Text class="px-1 py-1 text-xs text-muted-foreground">{t("sidebar.pinned")}</Text>
+                  <Each of={pinnedSessions()} key={(session) => session.id}>
+                    {(session) => renderSessionRow(session, () => true)}
+                  </Each>
+                </View>
+              </If>
+              <If when={sidebarView() === "workspace" && !workspaceHidden()}>
+                {renderWorkspaceRow()}
+              </If>
+            </>
+          }
+          footer={
+            <If when={sidebarView() === "workspace" && (canShowMore() || workspacePageOpen())}>
+              <View class="pl-6">
+                <View class="flex-row items-center gap-3 px-2 py-1">
+                  <If when={canShowMore()}>
+                    <Button
+                      testID="workspace-more"
+                      accessibilityLabel={t("sidebar.show_more")}
+                      class="flex-row items-center gap-1 rounded-(--radius) px-1 hover:bg-sidebar-accent"
+                      onPress={showMore}
+                    >
+                      <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
+                      <Text class="text-xs text-muted-foreground">{t("sidebar.show_more")}</Text>
+                    </Button>
+                  </If>
+                  <If when={canShowMore() && workspacePageOpen()}>
+                    <Text class="text-xs text-muted-foreground">·</Text>
+                  </If>
+                  <If when={workspacePageOpen()}>
+                    <Button
+                      testID="workspace-collapse"
+                      accessibilityLabel={t("sidebar.collapse_sessions")}
+                      class="flex-row items-center gap-1 rounded-(--radius) px-1 hover:bg-sidebar-accent"
+                      onPress={() => workspacePageOpen.set(false)}
+                    >
+                      <Icon name="chevron-up" size={12} color={token("muted-foreground")} />
+                      <Text class="text-xs text-muted-foreground">{t("sidebar.collapse_sessions")}</Text>
+                    </Button>
+                  </If>
+                </View>
               </View>
-            </Button>
-          )}
+            </If>
+          }
+        >
+          {(session) => renderSessionRow(session, () => sidebarView() === "flat")}
         </List>
       </If>
       <If when={props.mode === "settings"}>
@@ -221,7 +646,6 @@ export function Sidebar(props: UiContext & {
           />
         </UiView>
       </If>
-      <If when={props.mode === "workspace" && sidebarView() === "workspace" && !workspaceExpanded()}><View class="flex-1" /></If>
       <View class="border-t border-sidebar-border p-2">
         <Button
           testID={props.mode === "settings" ? "settings-back" : "settings-open"}
