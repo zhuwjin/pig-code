@@ -1,10 +1,10 @@
 # NSH 新版本待办
 
-当前项目的 `nsh-core`、`nsh-base`、`nsh-engine` 和 `nsh-testing` 均使用 `0.3.0`（见 `Cargo.toml`）。
+当前项目的 `nsh-core`、`nsh-base`、`nsh-engine` 和 `nsh-testing` 均使用 `0.4.0`（见 `Cargo.toml`）。
 
 本文只记录依赖 NSH 新版本的事项，不记录 Pig Code 自己的功能 TODO。NSH main 中存在某项实现，不代表它已经发布，也不代表可以直接替换当前版本；升级时必须重新检查公开 API 和兼容性。
 
-## 已决定等待
+## 已发布，待接入
 
 ### 1. 工具卡片和工作详情的逐步展开/收起
 
@@ -12,7 +12,7 @@
 
 当前 `Collapsible` 在 `open` 变化时一次性挂载或卸载内容。快速展开时，完整内容会在容器动画结束前显示；`LayoutAnimation` 只改变布局位置，不能逐步裁剪内容。
 
-已决定暂不自建 `Reveal` 组件，等待 NSH 正式发布 `Collapsible.reveal`。
+NSH `0.4.0` 已提供 `Collapsible.reveal`，当前项目尚未接入；仍不自建 `Reveal` 组件。
 
 **涉及位置**
 
@@ -101,17 +101,17 @@ NSH main 的 `crates/nsh-core/src/ops.rs` 仍将 `UiTheme` 标为 `internal`，�
 
 **现状**
 
-0.3.0 的 `nsh/base` 没有导出 `Link`，也没有导出 `Select`：
+NSH `0.4.0` 已导出 `Link` 和 `Select`，当前项目尚未迁移：
 
 - 设置页“获取密钥”使用 `Button` + `openUrl` 模拟链接外观，见 `app/components/settings/provider-detail.tsx`。
 - API 协议选择使用 `Popover` + `Button` 实现，见同一文件的格式选择器。
 
-两处当前功能正常，不为此单独升级。
+两处当前功能正常，本次依赖升级不扩大为组件替换。
 
-**升级后的处理**
+**后续处理**
 
-- 新版提供 `Link` 后，用官方组件替换“获取密钥”的 `Button` + `openUrl`，保留下划线文字和外链图标。
-- 新版提供 `Select` 后，评估是否替换格式选择器；替换时保持现有外观、键盘操作和选择后立即保存的行为。
+- 用官方 `Link` 替换“获取密钥”的 `Button` + `openUrl`，保留下划线文字和外链图标。
+- 评估是否用 `Select` 替换格式选择器；替换时保持现有外观、键盘操作和选择后立即保存的行为。
 
 **验收**
 

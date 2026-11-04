@@ -130,17 +130,16 @@ function SessionTitle(props: { session: () => SessionMeta; selected: () => boole
   return (
     <View
       class="relative min-w-0 flex-1 overflow-hidden"
-      onLayout={(bounds) => {
+      onLayout={({ bounds }) => {
         viewportWidth = bounds.size.width;
         start();
       }}
-      onHoverIn={() => hovering.set(true)}
-      onHoverOut={() => hovering.set(false)}
+      onMouseEnter={() => hovering.set(true)}
+      onMouseLeave={() => hovering.set(false)}
     >
       <Canvas
         class="absolute h-px w-px opacity-0"
-        pointerEvents="none"
-        style={{ width: 1, height: 1 }}
+        style={{ pointerEvents: "none", width: 1, height: 1 }}
         draw={(cx) => {
           cx.font = `14px ${props.fontFamily ? JSON.stringify(props.fontFamily) : "system-ui"}`;
           titleWidth.set(cx.measureText(text()).width);
@@ -149,10 +148,8 @@ function SessionTitle(props: { session: () => SessionMeta; selected: () => boole
       />
       <Text
         testID="session-title-text"
-        numberOfLines={1}
-        ellipsizeMode="clip"
         class="shrink-0 whitespace-nowrap text-left text-sm text-sidebar-foreground"
-        style={{ width: titleWidth() > 0 ? titleWidth() : undefined, transform: [{ translateX: offset }] }}
+        style={{ numberOfLines: 1, textOverflow: "clip", width: titleWidth() > 0 ? titleWidth() : undefined, transform: [{ translateX: offset }] }}
       >
         {text()}
       </Text>
@@ -160,8 +157,7 @@ function SessionTitle(props: { session: () => SessionMeta; selected: () => boole
         <Canvas
           testID="session-title-fade"
           class="absolute right-0 top-0 h-5 w-5"
-          pointerEvents="none"
-          style={{ width: 20, height: 20 }}
+          style={{ pointerEvents: "none", width: 20, height: 20 }}
           draw={(cx, { width, height }) => {
             const gradient = cx.createLinearGradient(0, 0, width, 0);
             const background = hovering() || props.selected()
@@ -301,7 +297,7 @@ export function Sidebar(props: UiContext & {
             testID="workspace-rename-input"
             autoFocus
             value={renameValue()}
-            onChange={(value) => renameValue.set(value)}
+            onChange={({ value }) => renameValue.set(value)}
             onSubmit={commitRename}
             onBlur={commitRename}
             class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1.5 text-sm text-foreground"
@@ -323,14 +319,14 @@ export function Sidebar(props: UiContext & {
                   name={workspaceExpanded() ? "folder-open" : "folder-closed"}
                   color={token("muted-foreground")}
                 />
-                <Text numberOfLines={1} class="min-w-0 flex-1 text-left text-sm text-sidebar-foreground">
+                <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-sm text-sidebar-foreground">
                   {currentWorkspaceName()}
                 </Text>
               </Button>
               <View class={`absolute right-1 top-0 bottom-0 items-center gap-1 ${workspaceMenuOpen() ? "flex" : "hidden group-hover:flex"}`}>
                 <Menu
                   open={workspaceMenuOpen()}
-                  onOpenChange={(value) => workspaceMenuOpen.set(value)}
+                  onOpenChange={({ open: value }) => workspaceMenuOpen.set(value)}
                   placement="bottom"
                   align="end"
                   popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
@@ -367,7 +363,7 @@ export function Sidebar(props: UiContext & {
             testID="session-rename-input"
             autoFocus
             value={renameValue()}
-            onChange={(value) => renameValue.set(value)}
+            onChange={({ value }) => renameValue.set(value)}
             onSubmit={commitRename}
             onBlur={commitRename}
             class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-2 py-1.5 text-sm text-foreground"
@@ -408,7 +404,7 @@ export function Sidebar(props: UiContext & {
                       <Icon name="folder-closed" size={12} color={token("muted-foreground")} />
                       <Text
                         testID={`session-workspace-${session().id}`}
-                        numberOfLines={1}
+                        style={{ numberOfLines: 1 }}
                         class="min-w-0 flex-1 text-left text-xs text-muted-foreground"
                       >
                         {workspaceName(session().cwd)}
@@ -517,7 +513,7 @@ export function Sidebar(props: UiContext & {
         </If>
         <Menu
           open={manageOpen()}
-          onOpenChange={(value) => manageOpen.set(value)}
+          onOpenChange={({ open: value }) => manageOpen.set(value)}
           placement="bottom"
           align="end"
           popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"

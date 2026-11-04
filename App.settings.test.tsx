@@ -26,6 +26,7 @@ test("opens model settings, lists models and tests the connection", async () => 
   await app.press("id:provider-format-OpenAiChat");
   await app.press("id:provider-test-mock");
   await app.waitFor("连接成功 · HTTP 200", { timeout: 20000 });
+  expect(app.spanStyle("text:连接成功 · HTTP 200").color).toBe("#16a34aff");
   await app.press("id:settings-appearance");
   await app.waitFor("id:theme-picker");
   await app.press("id:settings-back");

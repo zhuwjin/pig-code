@@ -25,7 +25,7 @@ export function PresetPicker(props: {
         <Input
           testID="preset-search"
           value={query()}
-          onChange={(text) => query.set(text)}
+          onChange={({ value: text }) => query.set(text)}
           autoFocus
           placeholder={t("settings.models.preset.search")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
@@ -45,7 +45,7 @@ export function PresetPicker(props: {
                   </View>
                   <View class="min-w-0 flex-1 gap-0.5">
                     <Text class="text-sm font-medium text-foreground">{t("settings.models.custom_provider")}</Text>
-                    <Text numberOfLines={1} class="text-xs text-muted-foreground">{t("settings.models.preset.custom_description")}</Text>
+                    <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{t("settings.models.preset.custom_description")}</Text>
                   </View>
                 </View>
               </Button>
@@ -61,8 +61,8 @@ export function PresetPicker(props: {
                         <ProviderIcon icon={preset().icon} size={32} />
                       </View>
                       <View class="min-w-0 flex-1 gap-0.5">
-                        <Text numberOfLines={1} class="text-sm font-medium text-foreground">{preset().name}</Text>
-                        <Text numberOfLines={1} class="text-xs text-muted-foreground">{preset().base_url}</Text>
+                        <Text style={{ numberOfLines: 1 }} class="text-sm font-medium text-foreground">{preset().name}</Text>
+                        <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{preset().base_url}</Text>
                       </View>
                       <Icon name="chevron-down" class="-rotate-90" size={14} />
                     </View>

@@ -74,7 +74,7 @@ function FontSelect(props: {
   return (
     <Popover
       open={open()}
-      onOpenChange={(next) => {
+      onOpenChange={({ open: next }) => {
         if (next) query.set("");
         open.set(next);
       }}
@@ -83,7 +83,7 @@ function FontSelect(props: {
       popupClass="w-72 rounded-xl border border-border bg-popover p-2 shadow-xl"
       trigger={
         <View role="button" testID={props.testID} class="h-9 w-64 cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
-          <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground" style={props.value() ? { fontFamily: props.value() } : undefined}>
+          <Text class="min-w-0 flex-1 text-sm text-foreground" style={props.value() ? { numberOfLines: 1, fontFamily: props.value() } : { numberOfLines: 1 }}>
             {props.value() || t("settings.appearance.fonts.system_default")}
           </Text>
           <Icon name="chevron-down" size={12} />
@@ -96,7 +96,7 @@ function FontSelect(props: {
             testID={`${props.testID}-search`}
             autoFocus
             value={query()}
-            onChange={(text) => query.set(text)}
+            onChange={({ value: text }) => query.set(text)}
             placeholder={t("settings.appearance.fonts.search")}
             class="w-full rounded-(--radius) border border-border bg-background pl-8 pr-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
           />
@@ -113,7 +113,7 @@ function FontSelect(props: {
                 open.set(false);
               }}
             >
-              <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground">{t("settings.appearance.fonts.system_default")}</Text>
+              <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{t("settings.appearance.fonts.system_default")}</Text>
               <If when={!props.value()}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
             </Button>
             <Each of={filtered()} key={(font) => font}>
@@ -127,7 +127,7 @@ function FontSelect(props: {
                     open.set(false);
                   }}
                 >
-                  <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground" style={{ fontFamily: font() }}>{font()}</Text>
+                  <Text class="min-w-0 flex-1 text-sm text-foreground" style={{ numberOfLines: 1, fontFamily: font() }}>{font()}</Text>
                   <If when={props.value() === font()}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
                 </Button>
               )}
@@ -186,8 +186,8 @@ function ThemePackageRow(props: {
       >
         <View class="flex-row items-center gap-2">
           <View class="min-w-0 flex-1 gap-0.5">
-            <Text numberOfLines={1} class="text-sm font-medium text-foreground">{plugin().name}</Text>
-            <Text numberOfLines={1} class="text-xs text-muted-foreground">{plugin().id} · {plugin().version}</Text>
+            <Text style={{ numberOfLines: 1 }} class="text-sm font-medium text-foreground">{plugin().name}</Text>
+            <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{plugin().id} · {plugin().version}</Text>
           </View>
           <View class="items-end">
             <Text class="text-xs text-muted-foreground">{runtime()?.state ?? t(plugin().enabled ? "settings.plugins.state.enabled" : "settings.plugins.state.disabled")}</Text>
@@ -212,7 +212,7 @@ function ThemePackageRow(props: {
               </Text>
             </If>
             <If when={runtime()?.message}>
-              <Text numberOfLines={2} class="max-w-36 text-[10px] text-destructive">{runtime()?.message}</Text>
+              <Text style={{ numberOfLines: 2 }} class="max-w-36 text-[10px] text-destructive">{runtime()?.message}</Text>
             </If>
           </View>
         </View>
@@ -341,7 +341,7 @@ export function ThemePicker(props: ThemePickerProps) {
                     <Input
                       testID="theme-search"
                       value={themeQuery()}
-                      onChange={(text) => themeQuery.set(text)}
+                      onChange={({ value: text }) => themeQuery.set(text)}
                       placeholder={t("settings.appearance.search")}
                       class="w-full rounded-(--radius) border border-border bg-background pl-8 pr-3 py-2 selection:bg-foreground text-xs text-foreground placeholder:text-muted-foreground"
                     />
@@ -368,7 +368,7 @@ export function ThemePicker(props: ThemePickerProps) {
                           <View class="h-1 w-[34px] rounded-full opacity-40" style={{ backgroundColor: themePreviewColor(theme(), "foreground", themeModeOf(theme())) }} />
                         </View>
                         <View class="flex-row items-center justify-between gap-1">
-                          <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-foreground">{theme().name}</Text>
+                          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-foreground">{theme().name}</Text>
                           <Text class="shrink-0 text-xs text-muted-foreground">{t(themeModeOf(theme()) === "dark" ? "settings.appearance.badge.dark" : "settings.appearance.badge.light")}</Text>
                         </View>
                       </Button>
@@ -406,7 +406,7 @@ export function ThemePicker(props: ThemePickerProps) {
                     </View>
                     <Popover
                       open={languageOpen()}
-                      onOpenChange={(open) => languageOpen.set(open)}
+                      onOpenChange={({ open }) => languageOpen.set(open)}
                       placement="bottom"
                       align="end"
                       popupClass="w-64 rounded-xl border border-border bg-popover p-1 shadow-xl"
@@ -452,13 +452,13 @@ export function ThemePicker(props: ThemePickerProps) {
               <If when={activeStylePacks().length > 0}>
                 <View class="gap-1">
                   <Text class="text-xs font-medium text-muted-foreground">{t("settings.appearance.style_packs.active")}</Text>
-                  <Text selectable class="text-xs leading-5 text-muted-foreground">
+                  <Text style={{ userSelect: "text" }} class="text-xs leading-5 text-muted-foreground">
                     {activeStylePacks().map((theme) => theme.name).join("、")}
                   </Text>
                 </View>
               </If>
               <If when={props.error?.()}>
-                <Text selectable class="text-xs leading-5 text-destructive">{props.error?.()}</Text>
+                <Text style={{ userSelect: "text" }} class="text-xs leading-5 text-destructive">{props.error?.()}</Text>
               </If>
               <Text class="text-xs leading-5 text-muted-foreground">
                 {t("settings.appearance.style_packs.note")}
@@ -469,7 +469,7 @@ export function ThemePicker(props: ThemePickerProps) {
             <View class="gap-6">
               <If when={props.error?.()}>
                 <View class="rounded-(--radius) bg-destructive/10 px-3 py-2">
-                  <Text selectable class="text-xs leading-5 text-destructive">{props.error?.()}</Text>
+                  <Text style={{ userSelect: "text" }} class="text-xs leading-5 text-destructive">{props.error?.()}</Text>
                 </View>
               </If>
               <View class="gap-2">
@@ -477,14 +477,14 @@ export function ThemePicker(props: ThemePickerProps) {
                 <Input
                   testID="plugin-package-path"
                   value={packagePath()}
-                  onChange={(text) => packagePath.set(text)}
+                  onChange={({ value: text }) => packagePath.set(text)}
                   placeholder={t("settings.plugins.signed.package_path")}
                   class="rounded-(--radius) border border-input px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
                 />
                 <Input
                   testID="plugin-root-path"
                   value={rootPath()}
-                  onChange={(text) => rootPath.set(text)}
+                  onChange={({ value: text }) => rootPath.set(text)}
                   placeholder={t("settings.plugins.signed.root_path")}
                   class="rounded-(--radius) border border-input px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
                 />
@@ -562,7 +562,7 @@ export function ThemePicker(props: ThemePickerProps) {
                 <View testID="plugin-ui-diagnostics" class="gap-1 rounded-(--radius) border border-border p-3">
                   <Text class="text-xs font-medium text-foreground">{t("settings.plugins.diagnostics.ui")}</Text>
                   <Each of={Object.values(props.diagnostics?.() ?? {}).flat().slice(0, 20)} key={(item) => item}>
-                    {(item) => <Text selectable class="text-xs leading-4 text-muted-foreground">{item()}</Text>}
+                    {(item) => <Text style={{ userSelect: "text" }} class="text-xs leading-4 text-muted-foreground">{item()}</Text>}
                   </Each>
                 </View>
               </If>
@@ -570,7 +570,7 @@ export function ThemePicker(props: ThemePickerProps) {
                 <View class="gap-1 rounded-(--radius) border border-border p-3">
                   <Text class="text-xs font-medium text-foreground">{t("settings.plugins.diagnostics.logs")}</Text>
                   <Each of={Object.values(props.logs?.() ?? {}).flatMap((logs) => logs.slice(-1))} key={(item) => JSON.stringify(item)}>
-                    {(item) => <Text selectable numberOfLines={3} class="font-mono text-[10px] text-muted-foreground">{JSON.stringify(item()).slice(0, 500)}</Text>}
+                    {(item) => <Text style={{ userSelect: "text", numberOfLines: 3 }} class="font-mono text-[10px] text-muted-foreground">{JSON.stringify(item()).slice(0, 500)}</Text>}
                   </Each>
                 </View>
               </If>

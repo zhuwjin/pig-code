@@ -1,5 +1,5 @@
 import { Canvas, Clipboard, PanResponder, Scroll, Text, View, colorScheme, effect, keymap, signal, token } from "nsh";
-import type { Signal, YNode } from "nsh";
+import type { InputRef, ScrollRef, Signal } from "nsh";
 import { Button, Input } from "nsh/base";
 import { Terminal as NativeTerminal } from "pig-code-ts/native";
 import { t } from "../i18n";
@@ -65,8 +65,8 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
   const error = signal("");
   const draft = signal("");
   let nextId = 1;
-  let input: YNode | null = null;
-  let scroll: YNode | null = null;
+  let input: InputRef | null = null;
+  let scroll: ScrollRef | null = null;
   const activeTab = () => tabs.find((tab) => tab.id === activeId());
   const focusInput = () => input?.focus();
   const selection = () => activeTab()?.selection() ?? null;
@@ -331,7 +331,7 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
       <If when={tabIds().length > 0}>
         <View
           class="relative min-h-0 flex-1"
-          onLayout={(bounds) => {
+          onLayout={({ bounds }) => {
             viewport.set({ width: bounds.size.width, height: bounds.size.height });
           }}
         >
@@ -447,7 +447,7 @@ export function TerminalPanel(props: UiContext & { onClose: () => void }) {
             testID="terminal-input"
             accessibilityLabel={t("terminal.input_label")}
             value={draft()}
-            onChange={changeInput}
+            onChange={({ value }) => changeInput(value)}
             onKeyPress={(event) => {
               if (event.key === "Enter") {
                 write("\r");

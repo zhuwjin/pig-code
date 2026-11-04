@@ -42,7 +42,7 @@ function ChangeSection(props: UiContext & {
             onPress={() => props.store.openGitDiff(change().path, props.staged)}
           >
             <Text class="w-4 shrink-0 text-xs text-muted-foreground">{change().status}</Text>
-            <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground">{change().path}</Text>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{change().path}</Text>
             <Text class="text-xs text-success">+{change().additions}</Text>
             <Text class="text-xs text-destructive">-{change().deletions}</Text>
           </Button>
@@ -78,7 +78,7 @@ function ChangesContent(props: UiContext) {
   return (
     <View class="min-h-0 flex-1">
       <View class="h-9 shrink-0 flex-row items-center gap-2 border-b border-border px-3">
-        <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{diff() ? diff()!.path : t("right_panel.file_changes")}</Text>
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{diff() ? diff()!.path : t("right_panel.file_changes")}</Text>
         <If when={diff()}>
           <Button testID="git-diff-back" class="rounded px-2 py-1 hover:bg-accent" onPress={() => store.closeGitDiff()}>
             <Text class="text-xs text-muted-foreground">{t("common.back")}</Text>
@@ -149,11 +149,11 @@ function FileContent(props: UiContext & { request: Extract<RightPanelRequest, { 
   return (
     <View class="min-h-0 flex-1">
       <View class="h-9 shrink-0 flex-row items-center gap-2 border-b border-border px-3">
-        <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.request.path}</Text>
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.request.path}</Text>
         <If when={truncated()}><Text class="text-xs text-warning">{t("right_panel.first_2mb")}</Text></If>
       </View>
       <If when={error()}>
-        <View class="flex-1 items-center justify-center p-6"><Text selectable class="text-center text-sm text-destructive">{error()}</Text></View>
+        <View class="flex-1 items-center justify-center p-6"><Text style={{ userSelect: "text" }} class="text-center text-sm text-destructive">{error()}</Text></View>
       </If>
       <If when={!error()}>
         <Editor
@@ -185,7 +185,7 @@ function TaskContent(props: UiContext & { request: Extract<RightPanelRequest, { 
   return (
     <View class="min-h-0 flex-1">
       <View class="gap-1 border-b border-border px-3 py-2">
-        <Text numberOfLines={1} class="text-xs font-medium text-foreground">{task().command}</Text>
+        <Text style={{ numberOfLines: 1 }} class="text-xs font-medium text-foreground">{task().command}</Text>
         <Text class="text-xs text-muted-foreground">
           {task().status} · {formatDuration((task().ended_at_ms ?? Date.now()) - task().started_at_ms)}
           {task().exit_code != null ? t("right_panel.exit_code", { code: task().exit_code ?? 0 }) : ""}
@@ -205,13 +205,13 @@ function SubagentItemRow(props: UiContext & { item: SubagentItem; index: number;
         open={open()}
         content={
           <View class="ml-6 mt-1 rounded-lg bg-tool-surface p-2">
-            <Text selectable class="font-mono text-xs leading-5 text-foreground">{props.item.output || t("tools.no_output")}</Text>
+            <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{props.item.output || t("tools.no_output")}</Text>
           </View>
         }
       >
         <View role="button" class="flex-row items-center gap-2 py-1" onPress={() => props.store.toggleExpanded(id)}>
           <Icon name="chevron-right" size={12} color={token("muted-foreground")} />
-          <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">
             {props.item.tool ?? t("right_panel.tool")} · {props.item.text}
           </Text>
         </View>
@@ -221,7 +221,7 @@ function SubagentItemRow(props: UiContext & { item: SubagentItem; index: number;
   return (
     <View class={props.item.role === "user" ? "items-end" : "items-start"}>
       <View class={props.item.role === "user" ? "max-w-[85%] rounded-xl bg-accent px-3 py-2" : "w-full px-1 py-1"}>
-        <Text selectable class="text-sm leading-6 text-foreground">{props.item.text}</Text>
+        <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-foreground">{props.item.text}</Text>
       </View>
     </View>
   );
@@ -234,7 +234,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
     <View class="min-h-0 flex-1">
       <View class="gap-1 border-b border-border px-3 py-2">
         <View class="flex-row items-center gap-2">
-          <Text numberOfLines={1} class="min-w-0 flex-1 text-xs font-medium text-foreground">
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs font-medium text-foreground">
             {history()?.title ?? t("right_panel.loading_subagent")}
           </Text>
           <If when={history()?.running}>
@@ -242,7 +242,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
             <Text class="text-xs text-muted-foreground">{t("right_panel.running")}</Text>
           </If>
         </View>
-        <Text numberOfLines={1} class="text-xs text-muted-foreground">{history()?.subtitle ?? props.request.agentId}</Text>
+        <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{history()?.subtitle ?? props.request.agentId}</Text>
       </View>
       <Scroll class="flex-1" contentClass="gap-3 p-3">
         <Each of={history()?.items ?? []} key={(item) => `${item.role}-${item.text}-${item.output ?? ""}`}>
@@ -324,7 +324,7 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
                     class="group h-10 flex-row items-center gap-1 px-2"
                     onPress={() => activeKey.set(id())}
                   >
-                    <Text class={activeKey() === id() ? "max-w-32 text-xs text-foreground" : "max-w-32 text-xs text-muted-foreground"} numberOfLines={1}>
+                    <Text class={activeKey() === id() ? "max-w-32 text-xs text-foreground" : "max-w-32 text-xs text-muted-foreground"} style={{ numberOfLines: 1 }}>
                       {tabTitle(tab())}
                     </Text>
                     <Button

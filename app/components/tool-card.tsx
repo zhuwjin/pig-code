@@ -32,7 +32,7 @@ function CodeCard(props: UiContext & {
   return (
     <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
       <View class="h-8 flex-row items-center gap-2 border-b border-border px-3">
-        <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.title}</Text>
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.title}</Text>
         <Button
           testID={`wrap-${props.id}`}
           accessibilityLabel={t(wrap() ? "tools.wrap_off" : "tools.wrap_on")}
@@ -129,10 +129,10 @@ function SearchBody(props: UiContext & { item: Accessor<ToolItem> }) {
                       class="flex-row items-center gap-2 rounded px-2 py-1.5 hover:bg-accent"
                       onPress={() => props.store.openFile(row().path, row().line)}
                     >
-                      <Text numberOfLines={1} class="w-56 shrink-0 text-left font-mono text-xs text-info">
+                      <Text style={{ numberOfLines: 1 }} class="w-56 shrink-0 text-left font-mono text-xs text-info">
                         {row().path}{row().line ? `:${row().line}` : ""}
                       </Text>
-                      <Text numberOfLines={1} class="min-w-0 flex-1 text-left font-mono text-xs text-foreground">
+                      <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left font-mono text-xs text-foreground">
                         {row().content ?? ""}
                       </Text>
                     </Button>
@@ -159,10 +159,10 @@ function GenericBody(props: UiContext & { item: Accessor<ToolItem> }) {
       <Scroll class="max-h-60" contentClass="gap-2 px-3 py-2">
         <View class="gap-2">
           <If when={showInput() && item().detail}>
-            <Text selectable class="font-mono text-xs leading-5 text-foreground">{item().detail}</Text>
+            <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{item().detail}</Text>
           </If>
           <If when={item().output}>
-            <Text selectable class={item().status === "error"
+            <Text style={{ userSelect: "text" }} class={item().status === "error"
               ? "font-mono text-xs leading-5 text-destructive"
               : "font-mono text-xs leading-5 text-foreground"}
             >
@@ -190,7 +190,7 @@ function StreamingDiffBody(props: UiContext & { item: Accessor<ToolItem> }) {
           <Each of={rows()} key={(row) => row.id}>
             {(row) => (
               <View class={row().kind === "added" ? "border-l-2 border-success bg-diff-added px-2 py-0.5" : "border-l-2 border-destructive bg-diff-deleted px-2 py-0.5"}>
-                <Text selectable class="font-mono text-xs leading-5 text-foreground">{row().text || " "}</Text>
+                <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{row().text || " "}</Text>
               </View>
             )}
           </Each>
@@ -276,7 +276,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
         >
           <Icon name="bot" size={16} color={token("muted-foreground")} />
           <Text class="text-sm font-medium text-muted-foreground">Swarm</Text>
-          <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-muted-foreground">{props.item().summary}</Text>
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-muted-foreground">{props.item().summary}</Text>
           <Text class="text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
           <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
         </View>
@@ -300,8 +300,8 @@ function AgentRow(props: UiContext & { agent: Accessor<AgentCard>; status: ToolI
           <Icon name="bot" size={18} color={token("muted-foreground")} />
         </View>
         <View class="min-w-0 flex-1 gap-0.5">
-          <Text numberOfLines={1} class="text-left text-sm font-medium text-foreground">{agent().description}</Text>
-          <Text numberOfLines={1} class="text-left text-xs text-muted-foreground">
+          <Text style={{ numberOfLines: 1 }} class="text-left text-sm font-medium text-foreground">{agent().description}</Text>
+          <Text style={{ numberOfLines: 1 }} class="text-left text-xs text-muted-foreground">
             {agent().profile} · {agent().model}
           </Text>
         </View>
@@ -314,7 +314,7 @@ function AgentRow(props: UiContext & { agent: Accessor<AgentCard>; status: ToolI
       </Button>
       <If when={agent().live_note}>
         <View class="flex-row items-center gap-2 px-3 pb-2 pl-12">
-          <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{agent().live_note}</Text>
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{agent().live_note}</Text>
         </View>
       </If>
     </View>
@@ -398,7 +398,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
               class="min-w-0 flex-1"
               onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
             >
-              <Text numberOfLines={1} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
+              <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
                 {summary()}
               </Text>
             </Button>
@@ -407,7 +407,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
             </If>
           </If>
           <If when={item().tool !== "Read"}>
-            <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-muted-foreground">{summary()}</Text>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-muted-foreground">{summary()}</Text>
           </If>
           <If when={item().edit}>
             <Text class="shrink-0 font-mono text-xs text-success">+{item().edit!.additions}</Text>
@@ -432,7 +432,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         <If when={item().liveNote && running()}>
           <View class="flex-row items-center gap-2 pl-6">
             <Icon name="loader-circle" size={12} class="animate-spin" color={token("muted-foreground")} />
-            <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">{item().liveNote}</Text>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{item().liveNote}</Text>
           </View>
         </If>
       </Collapsible>

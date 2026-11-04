@@ -1,4 +1,4 @@
-import { effect, keymap, List, signal, Text, token, View, type YNode } from "nsh";
+import { effect, keymap, List, signal, Text, token, View, type InputRef, type ListRef } from "nsh";
 import { Button, Dialog, Input } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { SessionContentHit, SessionMeta, WorkspaceMeta } from "../protocol";
@@ -118,10 +118,10 @@ function ResultLine(props: { result: () => SearchResult }) {
         size={16}
         color={token("muted-foreground")}
       />
-      <Text numberOfLines={1} class="min-w-0 flex-1 text-left text-sm text-foreground">
+      <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-sm text-foreground">
         {props.result().title}
       </Text>
-      <Text numberOfLines={1} class="min-w-0 max-w-60 shrink-0 text-right text-xs text-muted-foreground">
+      <Text style={{ numberOfLines: 1 }} class="min-w-0 max-w-60 shrink-0 text-right text-xs text-muted-foreground">
         {props.result().detail}
       </Text>
     </View>
@@ -159,13 +159,13 @@ function SearchResultButton(props: {
         <View class="gap-0.5">
           <ResultLine result={result} />
           <View class="min-w-0 flex-1 flex-row items-center pl-6">
-            <Text numberOfLines={1} class="max-w-[45%] shrink-0 text-xs text-muted-foreground">
+            <Text style={{ numberOfLines: 1 }} class="max-w-[45%] shrink-0 text-xs text-muted-foreground">
               {result().snippet?.before}
             </Text>
             <Text class="shrink-0 rounded-sm bg-accent px-0.5 text-xs text-foreground">
               {result().snippet?.hit}
             </Text>
-            <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-muted-foreground">
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">
               {result().snippet?.after}
             </Text>
           </View>
@@ -195,8 +195,8 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
   const tab = signal<SearchTab>("all");
   const selected = signal(0);
   const content = signal<{ query: string; hits: SessionContentHit[] }>({ query: "", hits: [] });
-  let input: YNode | undefined;
-  let list: YNode | undefined;
+  let input: InputRef | undefined;
+  let list: ListRef | undefined;
   const results = () => buildSearchResults({
     query: query(),
     tab: tab(),
@@ -292,7 +292,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
       open
       animation="fade"
       backdropClass="bg-popover/90"
-      onOpenChange={(open) => { if (!open) props.onClose(); }}
+      onOpenChange={({ open }) => { if (!open) props.onClose(); }}
       testID="global-search-dialog"
       class="mx-auto mt-[120px] w-[600px] max-w-[90%] overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
     >
@@ -303,7 +303,7 @@ export function SearchPopup(props: UiContext & { onClose: () => void }) {
           testID="global-search-input"
           autoFocus
           value={query()}
-          onChange={(value) => query.set(value)}
+          onChange={({ value }) => query.set(value)}
           onSubmit={() => {
             const result = results()[selected()];
             if (result) choose(result);

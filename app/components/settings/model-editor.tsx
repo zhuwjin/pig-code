@@ -1,4 +1,4 @@
-import { effect, Scroll, signal, Text, View } from "nsh";
+import { effect, Scroll, signal, Text, token, View } from "nsh";
 import { Button, Checkbox, Input, Switch } from "nsh/base";
 import { t } from "../../i18n";
 import type { MessageKey } from "../../i18n";
@@ -243,13 +243,13 @@ export function ModelEditor(props: UiContext & {
               <View class="flex-row items-center gap-2">
                 <Text class="text-xs text-muted-foreground">{t("settings.models.field.id")}</Text>
                 <If when={lookupState() === "pending"}><Text class="text-xs text-muted-foreground">{t("settings.models.lookup.pending")}</Text></If>
-                <If when={lookupState() === "notfound"}><Text class="text-xs text-warning">{t("settings.models.lookup.not_found")}</Text></If>
+                <If when={lookupState() === "notfound"}><Text class="text-xs" style={{ color: token("warning") }}>{t("settings.models.lookup.not_found")}</Text></If>
                 <If when={lookupState() === "idle"}><Text class="text-[10px] text-muted-foreground">{t("settings.models.lookup.hint")}</Text></If>
               </View>
               <Input
                 testID="model-id"
                 value={id()}
-                onChange={(text) => id.set(text)}
+                onChange={({ value: text }) => id.set(text)}
                 onSubmit={() => lookup()}
                 onBlur={() => lookup()}
                 placeholder="deepseek-flash"
@@ -258,16 +258,16 @@ export function ModelEditor(props: UiContext & {
             </View>
             <View class="gap-1">
               <Text class="text-xs text-muted-foreground">{t("settings.models.field.display_name")}</Text>
-              <Input testID="model-name" value={name()} onChange={(text) => name.set(text)} placeholder="DeepSeek Flash" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground" />
+              <Input testID="model-name" value={name()} onChange={({ value: text }) => name.set(text)} placeholder="DeepSeek Flash" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground" />
             </View>
             <View class="flex-row gap-3">
               <View class="flex-1 gap-1">
                 <Text class="text-xs text-muted-foreground">{t("settings.models.field.context_window")}</Text>
-                <Input testID="model-context" value={contextWindow()} onChange={(text) => contextWindow.set(text)} keyboardType="number-pad" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-sm text-foreground" />
+                <Input testID="model-context" value={contextWindow()} onChange={({ value: text }) => contextWindow.set(text)} keyboardType="number-pad" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-sm text-foreground" />
               </View>
               <View class="flex-1 gap-1">
                 <Text class="text-xs text-muted-foreground">{t("settings.models.field.max_output")}</Text>
-                <Input testID="model-max-output" value={maxOutput()} onChange={(text) => maxOutput.set(text)} keyboardType="number-pad" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-sm text-foreground" />
+                <Input testID="model-max-output" value={maxOutput()} onChange={({ value: text }) => maxOutput.set(text)} keyboardType="number-pad" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-sm text-foreground" />
               </View>
             </View>
             <View class="flex-row items-center gap-2">
@@ -275,7 +275,7 @@ export function ModelEditor(props: UiContext & {
               <Switch
                 testID="model-enabled"
                 checked={enabled()}
-                onChange={(checked) => enabled.set(checked)}
+                onChange={({ checked }) => enabled.set(checked)}
                 trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
                 thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
               />
@@ -287,18 +287,18 @@ export function ModelEditor(props: UiContext & {
             <If when={advanced()}>
               <View class="gap-3">
                 <View class="flex-row flex-wrap gap-3">
-                  <Checkbox testID="model-vision" checked={inputImage()} onChange={(checked) => inputImage.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_image")}</Text></Checkbox>
-                  <Checkbox testID="model-pdf" checked={inputPdf()} onChange={(checked) => inputPdf.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_pdf")}</Text></Checkbox>
+                  <Checkbox testID="model-vision" checked={inputImage()} onChange={({ checked }) => inputImage.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_image")}</Text></Checkbox>
+                  <Checkbox testID="model-pdf" checked={inputPdf()} onChange={({ checked }) => inputPdf.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_pdf")}</Text></Checkbox>
                 </View>
                 <View class="flex-row flex-wrap gap-3">
-                  <Checkbox testID="cap-structured" checked={capStructured()} onChange={(checked) => capStructured.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.structured_output")}</Text></Checkbox>
-                  <Checkbox testID="cap-strict-tools" checked={capStrictTools()} onChange={(checked) => capStrictTools.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.strict_tools")}</Text></Checkbox>
+                  <Checkbox testID="cap-structured" checked={capStructured()} onChange={({ checked }) => capStructured.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.structured_output")}</Text></Checkbox>
+                  <Checkbox testID="cap-strict-tools" checked={capStrictTools()} onChange={({ checked }) => capStrictTools.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.strict_tools")}</Text></Checkbox>
                 </View>
                 <If when={props.provider.api_format !== "OpenAiChat"}>
-                  <Checkbox testID="cap-web-search" checked={capWebSearch()} onChange={(checked) => capWebSearch.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.web_search")}</Text></Checkbox>
+                  <Checkbox testID="cap-web-search" checked={capWebSearch()} onChange={({ checked }) => capWebSearch.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.web_search")}</Text></Checkbox>
                   <View class="gap-1">
                     <Text class="text-xs text-muted-foreground">{t("settings.models.field.web_search_definition")}</Text>
-                    <Input testID="web-search-json" multiline value={webSearchJson()} onChange={(text) => webSearchJson.set(text)} class="min-h-20 rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-xs text-foreground" />
+                    <Input testID="web-search-json" multiline value={webSearchJson()} onChange={({ value: text }) => webSearchJson.set(text)} class="min-h-20 rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-xs text-foreground" />
                   </View>
                 </If>
                 <If when={props.provider.api_format === "OpenAiChat"}>
@@ -320,10 +320,10 @@ export function ModelEditor(props: UiContext & {
                       )}
                     </Each>
                     <View class="w-24">
-                      <Input testID="model-reasoning" value={newLevel()} onChange={(text) => newLevel.set(text)} placeholder={t("settings.models.field.level_placeholder")} class="rounded-(--radius) border border-border bg-background px-2 py-1 selection:bg-foreground font-mono text-xs text-foreground" />
+                      <Input testID="model-reasoning" value={newLevel()} onChange={({ value: text }) => newLevel.set(text)} placeholder={t("settings.models.field.level_placeholder")} class="rounded-(--radius) border border-border bg-background px-2 py-1 selection:bg-foreground font-mono text-xs text-foreground" />
                     </View>
                     <View class="w-28">
-                      <Input testID="model-reasoning-label" value={newLabel()} onChange={(text) => newLabel.set(text)} placeholder={t("settings.models.field.label_placeholder")} class="rounded-(--radius) border border-border bg-background px-2 py-1 selection:bg-foreground text-xs text-foreground" />
+                      <Input testID="model-reasoning-label" value={newLabel()} onChange={({ value: text }) => newLabel.set(text)} placeholder={t("settings.models.field.label_placeholder")} class="rounded-(--radius) border border-border bg-background px-2 py-1 selection:bg-foreground text-xs text-foreground" />
                     </View>
                     <Button testID="add-level" class="rounded-(--radius) px-2 py-1 hover:bg-accent" onPress={addLevel}>
                       <Icon name="plus" size={13} />
@@ -347,11 +347,11 @@ export function ModelEditor(props: UiContext & {
                 </View>
                 <View class="gap-1">
                   <Text class="text-xs text-muted-foreground">{t("settings.models.field.params_json")}</Text>
-                  <Input testID="model-params-json" multiline value={paramsJson()} onChange={(text) => paramsJson.set(text)} class="min-h-24 rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-xs text-foreground" />
+                  <Input testID="model-params-json" multiline value={paramsJson()} onChange={({ value: text }) => paramsJson.set(text)} class="min-h-24 rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-xs text-foreground" />
                 </View>
               </View>
             </If>
-            <If when={error()}><Text selectable class="text-xs leading-5 text-destructive">{error()}</Text></If>
+            <If when={error()}><Text style={{ userSelect: "text" }} class="text-xs leading-5 text-destructive">{error()}</Text></If>
           </View>
         </Scroll>
         <View class="flex-row items-center gap-2">

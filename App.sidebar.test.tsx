@@ -191,7 +191,7 @@ test("computes one-way title scrolling from the measured overflow", () => {
   const scroll = sessionTitleScroll(142, 116);
   expect(scroll.offset).toBe(-28);
   expect(Math.round(scroll.duration)).toBe(298);
-  expect(sessionTitleScroll(100, 116).offset).toBe(0);
+  expect(Math.abs(sessionTitleScroll(100, 116).offset)).toBe(0);
   expect(sessionTitleScroll(100, 116).duration).toBe(0);
 });
 

@@ -2144,15 +2144,20 @@ fn native_event(event: &PluginUiEvent) -> Result<NativeEvent, String> {
         ),
         "layout" => (EventKind::Layout, EventPayload::Layout(bounds(payload)), None),
         "mouseMove" | "hoverMove" => (
-            if event.kind == "mouseMove" { EventKind::MouseMove } else { EventKind::HoverMove },
-            EventPayload::Map(vec![
-                ("x", PayloadValue::Number(field(payload.get("position").unwrap_or(payload), "x"))),
-                ("y", PayloadValue::Number(field(payload.get("position").unwrap_or(payload), "y"))),
-            ]),
+            EventKind::MouseMove,
+            EventPayload::Mouse(nsh_core::MouseEvent::new(point(), point(), Default::default(), None)),
             None,
         ),
-        "hoverIn" => (EventKind::HoverIn, EventPayload::None, None),
-        "hoverOut" => (EventKind::HoverOut, EventPayload::None, None),
+        "hoverIn" => (
+            EventKind::MouseEnter,
+            EventPayload::Mouse(nsh_core::MouseEvent::new(point(), point(), Default::default(), None)),
+            None,
+        ),
+        "hoverOut" => (
+            EventKind::MouseLeave,
+            EventPayload::Mouse(nsh_core::MouseEvent::new(point(), point(), Default::default(), None)),
+            None,
+        ),
         "accessibilityAction" => (
             EventKind::AccessibilityAction,
             EventPayload::Map(vec![("actionName", PayloadValue::Str(

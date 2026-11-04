@@ -1,4 +1,4 @@
-import { effect, Image, keymap, signal, Text, token, View, type YNode } from "nsh";
+import { effect, Image, keymap, signal, Text, token, View, type InputRef } from "nsh";
 import { Button, Dialog, Input, Popover } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
@@ -26,7 +26,7 @@ function WorkspaceSelector(props: UiContext) {
     <View class="w-full flex-row items-center gap-2 border-b border-border pb-1">
       <Popover
         open={open()}
-        onOpenChange={(value) => open.set(value)}
+        onOpenChange={({ open: value }) => open.set(value)}
         placement="top"
         align="start"
         popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
@@ -53,8 +53,8 @@ function WorkspaceSelector(props: UiContext) {
                 }}
               >
                 <View class="min-w-0 gap-0.5">
-                  <Text numberOfLines={1} class="text-sm text-foreground">{workspaceName(path())}</Text>
-                  <Text numberOfLines={1} class="text-xs text-muted-foreground">{path()}</Text>
+                  <Text style={{ numberOfLines: 1 }} class="text-sm text-foreground">{workspaceName(path())}</Text>
+                  <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{path()}</Text>
                 </View>
               </Button>
             )}
@@ -87,7 +87,7 @@ function AttachmentStrip(props: UiContext & { onPreview: (source: string) => voi
           {(path) => (
             <View class="max-w-56 flex-row items-center gap-1 rounded-lg bg-accent px-2 py-1">
               <Icon name="file-text" size={13} color={token("muted-foreground")} />
-              <Text numberOfLines={1} class="min-w-0 text-xs text-foreground">{path().split(/[\\/]/).pop()}</Text>
+              <Text style={{ numberOfLines: 1 }} class="min-w-0 text-xs text-foreground">{path().split(/[\\/]/).pop()}</Text>
               <Button accessibilityLabel={t("composer.remove_attachment", { path: path() })} onPress={() => props.store.removeDraftFile(path())}>
                 <Icon name="x" size={11} color={token("muted-foreground")} />
               </Button>
@@ -102,7 +102,7 @@ function AttachmentStrip(props: UiContext & { onPreview: (source: string) => voi
                 class="h-16 w-20 overflow-hidden rounded-lg border border-border"
                 onPress={() => props.onPreview(image().preview)}
               >
-                <Image src={image().preview} resizeMode="cover" class="h-16 w-20" />
+                <Image src={image().preview} style={{ objectFit: "cover" }} class="h-16 w-20" />
               </Button>
               <Button
                 accessibilityLabel={t("composer.remove_image")}
@@ -135,7 +135,7 @@ function MentionCandidates(props: {
             onPress={() => props.onSelect(path())}
           >
             <Icon name="file-text" size={14} color={token("muted-foreground")} />
-            <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-foreground">{path()}</Text>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-foreground">{path()}</Text>
           </Button>
         )}
       </Each>
@@ -153,7 +153,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const inputFocused = signal(false);
   const caret = signal(0);
   const preview = signal<string | null>(null);
-  let inputNode: YNode | undefined;
+  let inputNode: InputRef | undefined;
   const sessionId = () => store.current();
   const running = () => {
     const id = sessionId();
@@ -334,7 +334,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                     testID="composer-input"
                     value={store.draft()}
                     {...hostPatchProps(patch, {
-                      onChange: (text: string) => store.draft.set(text),
+                      onChange: ({ value }: { value: string }) => store.draft.set(value),
                       onSubmit: () => submit(),
                       onFocus: () => inputFocused.set(true),
                       onBlur: () => inputFocused.set(false),
@@ -400,11 +400,11 @@ export function Composer(props: UiContext & { hero?: boolean }) {
         open={Boolean(preview())}
         animation="fade"
         backdropClass="bg-black/85"
-        onOpenChange={(open) => { if (!open) preview.set(null); }}
+        onOpenChange={({ open }) => { if (!open) preview.set(null); }}
       >
         <View class="relative h-[720px] w-[1000px] max-w-[92%] items-center justify-center">
           <If when={preview()}>
-            {(source) => <Image src={source()} resizeMode="contain" class="h-full w-full" />}
+            {(source) => <Image src={source()} style={{ objectFit: "contain" }} class="h-full w-full" />}
           </If>
           <Button
             accessibilityLabel={t("composer.close_image")}

@@ -3,7 +3,7 @@ import {
   Clipboard,
   Image,
   List,
-  type YNode,
+  type ListRef,
   Scroll,
   Text,
   View,
@@ -90,7 +90,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
                     onPress={() => props.onImage(source(), t("messages.image_label", { index: index() + 1 }))}
                   >
                     <If when={source()}>
-                      <Image src={source()} resizeMode="cover" class="h-32 w-40" fadeDuration={150} />
+                      <Image src={source()} style={{ objectFit: "cover" }} class="h-32 w-40" fadeDuration={150} />
                     </If>
                   </Button>
                 );
@@ -188,7 +188,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
       content={
         <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
           <Scroll class="max-h-80">
-            <Text selectable class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
+            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
           </Scroll>
         </View>
       }
@@ -205,7 +205,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
           {item().streaming ? t("messages.thinking") : turn()?.durationMs ? formatDuration(turn()!.durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
         </Text>
         <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>
-          <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-muted-foreground">
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-muted-foreground">
             · {lastNonEmptyLine(props.textFor(item()))}
           </Text>
         </If>
@@ -285,7 +285,7 @@ function NoteRow(props: UiContext & { item: Accessor<NoteItem> }) {
   }
   return (
     <View class="w-full items-center px-1 py-2">
-      <Text selectable class={item().error ? "text-center text-xs text-muted-foreground" : "text-center text-xs text-muted-foreground"}>
+      <Text style={{ userSelect: "text" }} class={item().error ? "text-center text-xs text-muted-foreground" : "text-center text-xs text-muted-foreground"}>
         {item().error ? `⚠ ${item().text}` : item().text}
       </Text>
     </View>
@@ -314,16 +314,16 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
               <Icon name={notification().kind === "subagent" ? "bot" : "square-terminal"} size={17} color={token("muted-foreground")} />
               <View class="min-w-0 flex-1 gap-1">
                 <View class="flex-row items-center gap-2">
-                  <Text numberOfLines={1} class="min-w-0 flex-1 text-left text-sm font-medium text-foreground">
+                  <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-sm font-medium text-foreground">
                     {notification().title || notification().description}
                   </Text>
                   <Text class={notification().severity === "warning" ? "text-xs text-warning" : "text-xs text-success"}>
                     {notification().status === "completed" ? t("messages.notification.completed") : notification().status === "failed" ? t("messages.notification.failed") : notification().status}
                   </Text>
                 </View>
-                <Text selectable class="text-left text-xs leading-5 text-muted-foreground">{notification().body}</Text>
+                <Text style={{ userSelect: "text" }} class="text-left text-xs leading-5 text-muted-foreground">{notification().body}</Text>
                 <If when={notification().output?.type === "preview"}>
-                  <Text numberOfLines={4} class="text-left font-mono text-xs text-foreground">
+                  <Text style={{ numberOfLines: 4 }} class="text-left font-mono text-xs text-foreground">
                     {(notification().output as { text?: string } | null | undefined)?.text ?? ""}
                   </Text>
                 </If>
@@ -495,7 +495,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   const activeMatch = signal(0);
   const viewportWidth = signal(0);
   const lightbox = signal<{ source: string; label: string } | null>(null);
-  let list: YNode | undefined;
+  let list: ListRef | undefined;
   let userScrolledAway = false;
   let lastOffset = 0;
   let followedSession: string | null = null;
@@ -580,7 +580,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   return (
     <View
       class="relative min-h-0 min-w-0 flex-1"
-      onLayout={(event) => viewportWidth.set(event.size.width)}
+      onLayout={({ bounds }) => viewportWidth.set(bounds.size.width)}
     >
       <List
         ref={(node) => { list = node; }}
@@ -631,8 +631,8 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
             {(entry, index) => (
               <View
                 class="relative"
-                onHoverIn={() => hoverIn(entry().user.id)}
-                onHoverOut={hoverOut}
+                onMouseEnter={() => hoverIn(entry().user.id)}
+                onMouseLeave={hoverOut}
               >
                 <Button
                   testID={`turn-nav-${entry().user.id}`}
@@ -651,8 +651,8 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
       <If when={hovered()}>
         {(value) => (
           <View class="absolute bottom-24 left-8 z-30 w-80 gap-2 rounded-xl border border-border bg-popover p-3 shadow-xl pointer-events-none">
-            <Text numberOfLines={2} class="text-sm text-foreground">{value().user.text}</Text>
-            <Text numberOfLines={3} class="text-sm text-muted-foreground">
+            <Text style={{ numberOfLines: 2 }} class="text-sm text-foreground">{value().user.text}</Text>
+            <Text style={{ numberOfLines: 3 }} class="text-sm text-muted-foreground">
               {previewText(value().user.id) || t("messages.no_text_reply")}
             </Text>
           </View>
@@ -664,7 +664,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
             testID="thread-search-input"
             autoFocus
             value={query()}
-            onChange={(value) => {
+            onChange={({ value }) => {
               query.set(value);
               activeMatch.set(0);
             }}
@@ -689,7 +689,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
           <View class="absolute inset-0 z-50 bg-black/85">
             <Button accessibilityLabel={t("messages.close_image")} class="absolute inset-0" onPress={() => lightbox.set(null)} />
             <View class="absolute inset-8 items-center justify-center pointer-events-none">
-              <Image src={value().source} resizeMode="contain" class="h-full w-full" />
+              <Image src={value().source} style={{ objectFit: "contain" }} class="h-full w-full" />
             </View>
             <View class="absolute left-4 top-4 rounded bg-black/50 px-2 py-1">
               <Text class="text-xs text-white">{value().label}</Text>

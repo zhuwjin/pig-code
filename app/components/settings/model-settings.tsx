@@ -1,4 +1,4 @@
-import { Scroll, signal, Text, View } from "nsh";
+import { Scroll, signal, Text, token, View } from "nsh";
 import { Button, Input } from "nsh/base";
 import { t, tCount } from "../../i18n";
 import type { ModelConfig, ProviderConfig } from "../../protocol";
@@ -109,12 +109,12 @@ export function ModelSettings(props: UiContext) {
           <ProviderIcon icon={provider.icon} size={20} />
           <View class="min-w-0 flex-1 gap-0.5">
             <View class="flex-row items-center gap-1">
-              <Text numberOfLines={1} class="min-w-0 flex-1 text-sm text-foreground">{provider.name}</Text>
-              <If when={!hasKey}><Text class="text-xs text-warning">{t("settings.models.missing_key")}</Text></If>
+              <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{provider.name}</Text>
+              <If when={!hasKey}><Text class="text-xs" style={{ color: token("warning") }}>{t("settings.models.missing_key")}</Text></If>
             </View>
-            <Text numberOfLines={1} class="text-xs text-muted-foreground">{tCount("settings.models.model_count", provider.models.length)}</Text>
+            <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{tCount("settings.models.model_count", provider.models.length)}</Text>
           </View>
-          <View class={provider.enabled ? "h-2 w-2 rounded-full bg-success" : "h-2 w-2 rounded-full bg-muted-foreground"} />
+          <View class="h-2 w-2 rounded-full" style={{ backgroundColor: token(provider.enabled ? "success" : "muted-foreground") }} />
         </View>
       </Button>
     );
@@ -138,7 +138,7 @@ export function ModelSettings(props: UiContext) {
       </View>
       <If when={store.globalError()}>
         <View class="mx-6 mt-4 rounded-(--radius) bg-destructive/10 px-3 py-2">
-          <Text selectable class="text-xs leading-5 text-destructive">{store.globalError()}</Text>
+          <Text style={{ userSelect: "text" }} class="text-xs leading-5 text-destructive">{store.globalError()}</Text>
         </View>
       </If>
       <Scroll class="flex-1">
@@ -161,7 +161,7 @@ export function ModelSettings(props: UiContext) {
                 <Input
                   testID="provider-search"
                   value={providerQuery()}
-                  onChange={(text) => providerQuery.set(text)}
+                  onChange={({ value: text }) => providerQuery.set(text)}
                   placeholder={t("settings.models.search_providers")}
                   class="rounded-(--radius) border border-border bg-card px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
                 />

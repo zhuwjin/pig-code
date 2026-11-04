@@ -66,7 +66,7 @@ export function ApprovalCard(props: UiContext & { approval: PendingApproval }) {
       </If>
       <If when={!plan()}>
         <Scroll class="max-h-52 rounded-(--radius) bg-background">
-          <Text selectable class="p-3 font-mono text-xs leading-5 text-foreground">
+          <Text style={{ userSelect: "text" }} class="p-3 font-mono text-xs leading-5 text-foreground">
             {props.approval.tool === "ExecCommand" ? `$ ${props.approval.detail}` : props.approval.detail}
           </Text>
         </Scroll>
@@ -75,18 +75,18 @@ export function ApprovalCard(props: UiContext & { approval: PendingApproval }) {
         <View class="gap-1">
           <Text class="text-xs font-medium text-foreground">{t("approval.write_dirs")}</Text>
           <Each of={props.approval.requestedWriteRoots} key={(root) => root}>
-            {(root) => <Text selectable class="font-mono text-xs text-muted-foreground">{root()}</Text>}
+            {(root) => <Text style={{ userSelect: "text" }} class="font-mono text-xs text-muted-foreground">{root()}</Text>}
           </Each>
         </View>
       </If>
       <If when={!plan()}>
-        <Text numberOfLines={1} class="text-xs text-muted-foreground">{t("approval.cwd", { cwd: props.store.cwd() })}</Text>
+        <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{t("approval.cwd", { cwd: props.store.cwd() })}</Text>
       </If>
       <If when={revise()}>
         <Input
           testID="plan-revision-input"
           value={feedback()}
-          onChange={(text) => feedback.set(text)}
+          onChange={({ value: text }) => feedback.set(text)}
           onSubmit={submitRevision}
           submitBehavior="submit"
           autoFocus

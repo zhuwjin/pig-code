@@ -34,7 +34,7 @@ export function PermissionPicker(props: UiContext) {
           { id: "full", label: t("permissions.full_access.enable"), role: "destructive" },
         ],
       });
-      if (answer !== "full") return;
+      if (answer.action !== "full") return;
     }
     props.store.setPermissions(permissionsForMode(value));
     open.set(false);
@@ -43,7 +43,7 @@ export function PermissionPicker(props: UiContext) {
     <View class="flex-row items-center gap-1.5">
       <Popover
         open={open()}
-        onOpenChange={(value) => open.set(value)}
+        onOpenChange={({ open: value }) => open.set(value)}
         placement="top"
         align="start"
         popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
@@ -78,7 +78,7 @@ export function PermissionPicker(props: UiContext) {
           <Checkbox
             testID="plan-mode"
             checked={configuration().planEnabled}
-            onChange={(checked) => props.store.setPlanMode(checked)}
+            onChange={({ checked }) => props.store.setPlanMode(checked)}
             class="flex-row items-center gap-3 rounded-(--radius) px-3 py-2 hover:bg-accent"
             indicatorClass="h-4 w-4 rounded border border-border"
           >
@@ -125,7 +125,7 @@ export function ModelPicker(props: UiContext) {
   return (
     <Popover
       open={open()}
-      onOpenChange={(value) => {
+      onOpenChange={({ open: value }) => {
         open.set(value);
         if (!value) query.set("");
       }}
@@ -138,13 +138,13 @@ export function ModelPicker(props: UiContext) {
           testID="model-picker"
           class="max-w-56 flex-row items-center gap-1 rounded-full px-3 py-1 hover:bg-accent"
           style={{ width: open() && triggerWidth() > 0 ? triggerWidth() : undefined }}
-          onLayout={(bounds) => { if (!open()) triggerWidth.set(bounds.size.width); }}
+          onLayout={({ bounds }) => { if (!open()) triggerWidth.set(bounds.size.width); }}
         >
-          <Text numberOfLines={1} class="text-sm text-foreground">
+          <Text style={{ numberOfLines: 1 }} class="text-sm text-foreground">
             {open() ? t("composer.select_model") : (props.store.currentModel() || t("composer.select_model"))}
           </Text>
           <If when={!open() && props.store.currentModel() && reasoningLabel()}>
-            <Text numberOfLines={1} class="text-sm text-muted-foreground">{reasoningLabel()}</Text>
+            <Text style={{ numberOfLines: 1 }} class="text-sm text-muted-foreground">{reasoningLabel()}</Text>
           </If>
           <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
         </View>
@@ -154,7 +154,7 @@ export function ModelPicker(props: UiContext) {
         <Input
           testID="model-search"
           value={query()}
-          onChange={(text) => query.set(text)}
+          onChange={({ value: text }) => query.set(text)}
           placeholder={t("composer.search_models")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
@@ -184,8 +184,8 @@ export function ModelPicker(props: UiContext) {
                           <View class="flex-row items-center gap-2">
                             <ProviderIcon icon={value().model.icon} kind="model" size={20} />
                             <View class="min-w-0 flex-1 gap-0.5">
-                              <Text numberOfLines={1} class="text-sm font-medium text-foreground">{value().model.name || value().model.id}</Text>
-                              <Text numberOfLines={1} class="text-xs text-muted-foreground">
+                              <Text style={{ numberOfLines: 1 }} class="text-sm font-medium text-foreground">{value().model.name || value().model.id}</Text>
+                              <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">
                                 {value().model.id} · {formatTokens(value().model.context_window)}
                               </Text>
                             </View>

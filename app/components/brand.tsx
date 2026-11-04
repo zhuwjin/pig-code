@@ -20,7 +20,7 @@ export function SidebarBrand() {
       <BrandMark />
       <Text
         testID="sidebar-brand-name"
-        numberOfLines={1}
+        style={{ numberOfLines: 1 }}
         class="text-sm font-semibold text-foreground"
       >
         Pig Code

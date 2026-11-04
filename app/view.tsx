@@ -15,7 +15,7 @@ import { SearchPopup } from "./components/search-popup";
 import { SettingsPage, type SettingsPageId } from "./components/settings/settings-page";
 
 Window.setTitle("Pig Code");
-Window.setTitleBar("hidden", 44);
+Window.setTitleBar({ style: "hidden", height: 44 });
 
 function ThemeBackground(props: UiContext) {
   const background = () => props.themeStore.background();
@@ -27,12 +27,11 @@ function ThemeBackground(props: UiContext) {
           <View class="absolute inset-0 pointer-events-none">
             <Image
               src={background.asset}
-              resizeMode="cover"
               class={props.themeStore.classes(
                 "app.background",
                 `absolute inset-0 ${background.blur ? `blur-[${background.blur}px]` : ""}`,
               )}
-              style={props.themeStore.styles("app.background", { opacity: background.opacity ?? 1 })}
+              style={props.themeStore.styles("app.background", { objectFit: "cover", opacity: background.opacity ?? 1 })}
             />
             <If when={background.overlay}>
               <View class={`absolute inset-0 ${background.overlay ?? ""}`} />
@@ -93,7 +92,7 @@ function AnimatedResizablePanel(props: {
       minSize={props.open ? props.minSize : 0}
       fixed
       visible={presented()}
-      onResize={props.onResize}
+      onResize={({ size }) => props.onResize(size)}
     >
       <View
         class="relative h-full w-full overflow-hidden"

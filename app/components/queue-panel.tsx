@@ -43,7 +43,7 @@ function QueueRow(props: UiContext & {
         >
           <Text class="text-xs text-muted-foreground">⋮⋮</Text>
         </View>
-        <Text numberOfLines={2} class="min-w-0 flex-1 text-xs leading-5 text-foreground">{item().text}</Text>
+        <Text style={{ numberOfLines: 2 }} class="min-w-0 flex-1 text-xs leading-5 text-foreground">{item().text}</Text>
         <If when={(item().images?.length ?? 0) > 0}>
           <Text class="text-xs text-muted-foreground">{tCount("queue.image_count", item().images?.length ?? 0)}</Text>
         </If>
@@ -143,7 +143,7 @@ export function QueuePanel(props: UiContext) {
       <If when={queue().held}>
         <View class="gap-2 rounded-(--radius) border border-warning/40 bg-warning/10 p-3">
           <Text class="text-xs font-medium text-foreground">{t("queue.paused_title")}</Text>
-          <Text numberOfLines={2} class="text-xs leading-5 text-muted-foreground">{queue().held}</Text>
+          <Text style={{ numberOfLines: 2 }} class="text-xs leading-5 text-muted-foreground">{queue().held}</Text>
           <View class="flex-row flex-wrap gap-2">
             <Button testID="held-clear" class="rounded px-2 py-1 hover:bg-muted" onPress={() => props.store.resolveHeld("clear_queue_and_send")}>
               <Text class="text-xs text-destructive">{t("queue.clear_and_send")}</Text>

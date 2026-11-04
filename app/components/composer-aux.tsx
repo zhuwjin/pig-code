@@ -62,7 +62,7 @@ function TaskRow(props: UiContext & { task: () => TaskSummary }) {
       onPress={() => props.store.openTask(task())}
     >
       <View class="flex-row items-center gap-2">
-        <Text numberOfLines={1} class="min-w-0 flex-1 text-left text-xs font-medium text-foreground">{task().command}</Text>
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-xs font-medium text-foreground">{task().command}</Text>
         <Text class={task().status === "failed" ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
           {taskStatus(task().status)}
         </Text>
@@ -85,7 +85,7 @@ function AuxPopover(props: UiContext & {
   return (
     <Popover
       open={open()}
-      onOpenChange={(value) => {
+      onOpenChange={({ open: value }) => {
         if (value !== open()) props.store.toggleExpanded(`aux-${props.id}`);
       }}
       placement="top"

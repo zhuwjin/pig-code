@@ -44,7 +44,7 @@ export function TitleBar(props: UiContext & {
           </Button>
         </If>
         <View class="min-w-0 flex-1 flex-row items-center gap-1.5">
-          <Text numberOfLines={1} class="text-sm text-foreground">
+          <Text style={{ numberOfLines: 1 }} class="text-sm text-foreground">
             {store.current()
               ? `${workspaceName(store.cwd())} / ${store.currentTitle()}`
               : "Pig Code v0.1.0"}

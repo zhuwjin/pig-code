@@ -228,7 +228,7 @@ test("searches within the transcript", async () => {
   await app.waitFor("text:/工作了/");
   await app.type("id:composer-input", "read the mock file again");
   await app.press("id:send-button");
-  await app.waitFor("text:/2 回合/", { timeout: 20000 });
+  await app.waitFor("label:跳转到回合 2", { timeout: 20000 });
 
   expect(app.count("label:跳转到回合 1")).toBe(1);
   expect(app.count("label:跳转到回合 2")).toBe(1);

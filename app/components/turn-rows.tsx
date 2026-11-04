@@ -47,7 +47,7 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
                 class="min-w-0 flex-1"
                 onPress={() => props.store.openFile(change().path)}
               >
-                <Text numberOfLines={1} class="text-left font-mono text-xs text-muted-foreground group-hover:text-info group-hover:underline">
+                <Text style={{ numberOfLines: 1 }} class="text-left font-mono text-xs text-muted-foreground group-hover:text-info group-hover:underline">
                   {change().path}
                 </Text>
               </Button>

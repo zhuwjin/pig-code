@@ -27,7 +27,7 @@ export function ProviderIcon(props: {
         const asset = () => colorScheme() === "dark" ? value().darkAsset ?? value().asset : value().asset;
         return (
           <View testID={`provider-icon-${value().id}`} accessibilityLabel={value().title} class="shrink-0" style={{ width: size, height: size }}>
-            <Image src={asset()} resizeMode="contain" class="h-full w-full" />
+            <Image src={asset()} style={{ objectFit: "contain" }} class="h-full w-full" />
           </View>
         );
       }}

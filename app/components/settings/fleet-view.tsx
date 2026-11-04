@@ -1,4 +1,4 @@
-import { Text, View } from "nsh";
+import { Text, token, View } from "nsh";
 import { Button, Input, Switch } from "nsh/base";
 import { t, tCount } from "../../i18n";
 import type { ModelConfig, ProviderConfig } from "../../protocol";
@@ -43,8 +43,8 @@ function FleetModelRow(props: UiContext & {
         onPress={props.onPickIcon}
       />
       <View class="min-w-0 flex-1 gap-0.5">
-        <Text numberOfLines={1} class="text-sm font-medium text-foreground">{renamed ? model().name : model().id}</Text>
-        <If when={renamed}><Text numberOfLines={1} class="font-mono text-xs text-muted-foreground">{model().id}</Text></If>
+        <Text style={{ numberOfLines: 1 }} class="text-sm font-medium text-foreground">{renamed ? model().name : model().id}</Text>
+        <If when={renamed}><Text style={{ numberOfLines: 1 }} class="font-mono text-xs text-muted-foreground">{model().id}</Text></If>
       </View>
       <Text class="w-14 shrink-0 text-sm text-foreground">{formatTokens(model().context_window)}</Text>
       <Text class="w-14 shrink-0 text-sm text-foreground">{formatTokens(model().max_output_tokens)}</Text>
@@ -53,13 +53,13 @@ function FleetModelRow(props: UiContext & {
         <If when={model().input_pdf}><Text class="text-[10px] text-muted-foreground">PDF</Text></If>
         <If when={!model().input_image && !model().input_pdf}><Text class="text-xs text-muted-foreground">—</Text></If>
       </View>
-      <Text numberOfLines={1} class="w-36 shrink-0 text-xs text-muted-foreground">{reasoningLabel(model)}</Text>
+      <Text style={{ numberOfLines: 1 }} class="w-36 shrink-0 text-xs text-muted-foreground">{reasoningLabel(model)}</Text>
       <View class="w-12 shrink-0">
         <Switch
           testID={`model-toggle-${provider.id}-${model().id}`}
           accessibilityLabel={t(model().enabled ? "settings.models.disable_model" : "settings.models.enable_model", { id: model().id })}
           checked={model().enabled}
-          onChange={(checked) => store.setModelEnabled(provider.id, model().id, checked)}
+          onChange={({ checked }) => store.setModelEnabled(provider.id, model().id, checked)}
           trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
           thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
         />
@@ -113,7 +113,7 @@ export function FleetView(props: UiContext & {
           <Input
             testID="all-model-search"
             value={props.query}
-            onChange={props.onQuery}
+            onChange={({ value }) => props.onQuery(value)}
             placeholder={t("settings.models.search_all")}
             class="rounded-(--radius) border border-border bg-card px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
           />
@@ -142,16 +142,16 @@ export function FleetView(props: UiContext & {
               <>
                 <View class="flex-row items-center gap-2 border-t border-border bg-muted/40 px-3 py-2">
                   <ProviderIcon icon={() => provider().icon} size={18} />
-                  <Text numberOfLines={1} class="text-sm font-semibold text-foreground">{provider().name}</Text>
+                  <Text style={{ numberOfLines: 1 }} class="text-sm font-semibold text-foreground">{provider().name}</Text>
                   <Text class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{formatShort(provider())}</Text>
                   <Text class="text-xs text-muted-foreground">{tCount("settings.models.model_count", provider().models.length)}</Text>
-                  <If when={!hasKey()}><Text class="text-xs text-warning">{t("settings.models.missing_key")}</Text></If>
+                  <If when={!hasKey()}><Text class="text-xs" style={{ color: token("warning") }}>{t("settings.models.missing_key")}</Text></If>
                   <View class="flex-1" />
                   <View class="w-12">
                     <Switch
                       testID={`provider-toggle-${provider().id}`}
                       checked={provider().enabled}
-                      onChange={(checked) => store.setProviderEnabled(provider().id, checked)}
+                      onChange={({ checked }) => store.setProviderEnabled(provider().id, checked)}
                       trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
                       thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
                     />

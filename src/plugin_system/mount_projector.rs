@@ -248,14 +248,22 @@ pub fn project_batch(
                 node.source = source
                     .map(|source| resource_uri(&source.uri, resource_prefix))
                     .transpose()?;
-                node.props.insert(
-                    "resizeMode".into(),
-                    format!("{:?}", resize_mode).to_lowercase().into(),
-                );
+                let object_fit = match resize_mode {
+                    nsh_core::ResizeMode::Cover => "cover",
+                    nsh_core::ResizeMode::Contain => "contain",
+                    nsh_core::ResizeMode::Stretch => "fill",
+                    nsh_core::ResizeMode::Center => "none",
+                    nsh_core::ResizeMode::ScaleDown => "scale-down",
+                };
+                style_object(node).insert("objectFit".into(), object_fit.into());
             }
             MountItem::Component { name, .. } => {
                 return Err(format!("native components are not allowed: {name}"));
             }
+            MountItem::Command {
+                command: nsh_core::Command::Tokens(_),
+                ..
+            } => {}
             MountItem::Command { .. } => {
                 return Err("imperative native commands must use the remote UI protocol".into());
             }
@@ -280,7 +288,11 @@ pub fn project_batch(
             | MountItem::NativeProps { .. }
             | MountItem::ModalConfig { .. }
             | MountItem::ComponentPropSlots { .. }
-            | MountItem::ComponentProps { .. } => {}
+            | MountItem::ComponentProps { .. }
+            | MountItem::Shader { .. }
+            | MountItem::ShaderTransition { .. }
+            | MountItem::NavShader { .. }
+            | MountItem::ShaderInput { .. } => {}
         }
     }
     if nodes.len() > MAX_REMOTE_NODES {
@@ -436,9 +448,8 @@ fn remote_event_name(kind: EventKind) -> Option<&'static str> {
         EventKind::MomentumStart => "momentumStart",
         EventKind::MomentumEnd => "momentumEnd",
         EventKind::MouseMove => "mouseMove",
-        EventKind::HoverIn => "hoverIn",
-        EventKind::HoverOut => "hoverOut",
-        EventKind::HoverMove => "hoverMove",
+        EventKind::MouseEnter => "hoverIn",
+        EventKind::MouseLeave => "hoverOut",
         EventKind::AccessibilityAction => "accessibilityAction",
         EventKind::Layout => "layout",
         _ => return None,

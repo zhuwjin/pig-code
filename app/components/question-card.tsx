@@ -104,7 +104,7 @@ export function QuestionCard(props: UiContext & { question: PendingQuestion }) {
                 testID={`question-other-${page()}`}
                 value={other()}
                 placeholder={t("question.other_placeholder")}
-                onChange={(text) => {
+                onChange={({ value: text }) => {
                   const index = page();
                   others.update((all) => {
                     const copy = [...all];

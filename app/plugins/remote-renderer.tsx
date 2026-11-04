@@ -41,9 +41,9 @@ function eventProps(context: RenderContext, node: RemoteNode): Record<string, un
   if (wants(node, "pressUp")) props.onPressUp = (event: unknown) => emit(context, node, "pressUp", event);
   if (wants(node, "focus")) props.onFocus = () => emit(context, node, "focus");
   if (wants(node, "blur")) props.onBlur = () => emit(context, node, "blur");
-  if (wants(node, "hoverIn")) props.onHoverIn = () => emit(context, node, "hoverIn");
-  if (wants(node, "hoverOut")) props.onHoverOut = () => emit(context, node, "hoverOut");
-  if (wants(node, "hoverMove")) props.onHoverMove = (event: unknown) => emit(context, node, "hoverMove", event);
+  if (wants(node, "hoverIn")) props.onMouseEnter = (event: unknown) => emit(context, node, "hoverIn", event);
+  if (wants(node, "hoverOut")) props.onMouseLeave = (event: unknown) => emit(context, node, "hoverOut", event);
+  if (wants(node, "hoverMove")) props.onMouseMove = (event: unknown) => emit(context, node, "hoverMove", event);
   if (wants(node, "mouseMove")) props.onMouseMove = (event: unknown) => emit(context, node, "mouseMove", event);
   if (wants(node, "layout")) props.onLayout = (event: unknown) => emit(context, node, "layout", event);
   if (wants(node, "accessibilityAction")) {
@@ -132,7 +132,7 @@ function renderNode(
       <Popover
         testID={testID}
         open={node.props.open === true}
-        onOpenChange={(value) => emit(context, node, "openChange", { open: value })}
+        onOpenChange={({ open: value }) => emit(context, node, "openChange", { open: value })}
         placement={placement}
         align={align}
         popupClass="w-72 rounded-xl border border-border bg-popover p-3 shadow-xl"

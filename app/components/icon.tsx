@@ -90,9 +90,8 @@ export function Icon(props: {
         testID={props.testID}
         src={pigIcon}
         accessibilityLabel="Pig Code"
-        resizeMode="contain"
         class={props.class ?? "shrink-0"}
-        style={{ width: size, height: size }}
+        style={{ objectFit: "contain", width: size, height: size }}
       />
     );
   }
@@ -100,8 +99,7 @@ export function Icon(props: {
     <Canvas
       testID={props.testID}
       class={props.class ?? "shrink-0"}
-      pointerEvents="none"
-      style={{ width: size, height: size }}
+      style={{ pointerEvents: "none", width: size, height: size }}
       draw={(cx, { width }) => {
         const elements = ICON_ELEMENTS[props.name as keyof typeof ICON_ELEMENTS];
         paintIcon(cx, elements, iconTint(props.name, props.color)!, width);

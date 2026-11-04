@@ -154,8 +154,8 @@ export function PluginMarketplace(props: UiContext) {
             <If when={activeSource()}>
               {(source) => (
                 <View class="gap-1">
-                  <Text selectable class="text-xs text-muted-foreground">{source().index_url}</Text>
-                  <Text selectable class="font-mono text-[10px] text-muted-foreground">{source().fingerprint}</Text>
+                  <Text style={{ userSelect: "text" }} class="text-xs text-muted-foreground">{source().index_url}</Text>
+                  <Text style={{ userSelect: "text" }} class="font-mono text-[10px] text-muted-foreground">{source().fingerprint}</Text>
                 </View>
               )}
             </If>
@@ -197,7 +197,7 @@ export function PluginMarketplace(props: UiContext) {
               <Input
                 testID="marketplace-url-input"
                 value={url()}
-                onChange={(value) => url.set(value)}
+                onChange={({ value }) => url.set(value)}
                 onSubmit={() => void previewSource()}
                 placeholder={t("settings.marketplace.add.url_placeholder")}
                 class="min-w-0 flex-1 rounded-(--radius) border border-input bg-background px-3 py-2 text-sm text-foreground selection:bg-foreground placeholder:text-muted-foreground"
@@ -219,7 +219,7 @@ export function PluginMarketplace(props: UiContext) {
                   <Text class="text-sm font-medium text-foreground">{candidate().name}</Text>
                   <View class="gap-1">
                     <Text class="text-xs text-muted-foreground">{t("settings.marketplace.add.fingerprint")}</Text>
-                    <Text selectable testID="marketplace-preview-fingerprint" class="font-mono text-xs text-foreground">{candidate().fingerprint}</Text>
+                    <Text style={{ userSelect: "text" }} testID="marketplace-preview-fingerprint" class="font-mono text-xs text-foreground">{candidate().fingerprint}</Text>
                   </View>
                   <Text class="text-xs leading-5 text-muted-foreground">{t("settings.marketplace.add.trust_notice")}</Text>
                   <View class="flex-row gap-2">
@@ -234,7 +234,7 @@ export function PluginMarketplace(props: UiContext) {
               )}
             </If>
             <If when={managementError()}>
-              <Text selectable testID="marketplace-management-error" class="text-xs leading-5 text-destructive">{managementError()}</Text>
+              <Text style={{ userSelect: "text" }} testID="marketplace-management-error" class="text-xs leading-5 text-destructive">{managementError()}</Text>
             </If>
           </View>
 
@@ -245,7 +245,7 @@ export function PluginMarketplace(props: UiContext) {
             </View>
             <If when={catalogError()}>
               <View class="rounded-(--radius) bg-destructive/10 px-3 py-2">
-                <Text selectable class="text-xs leading-5 text-destructive">{catalogError()}</Text>
+                <Text style={{ userSelect: "text" }} class="text-xs leading-5 text-destructive">{catalogError()}</Text>
               </View>
             </If>
             <If when={loading() && !loaded()}>
@@ -272,8 +272,8 @@ export function PluginMarketplace(props: UiContext) {
                   <View class="gap-2 rounded-(--radius) border border-border p-3">
                     <View class="flex-row items-center gap-3">
                       <View class="min-w-0 flex-1 gap-1">
-                        <Text numberOfLines={1} class="text-sm font-semibold text-foreground">{plugin().name}</Text>
-                        <Text numberOfLines={1} class="font-mono text-xs text-muted-foreground">{plugin().id} · {plugin().version}</Text>
+                        <Text style={{ numberOfLines: 1 }} class="text-sm font-semibold text-foreground">{plugin().name}</Text>
+                        <Text style={{ numberOfLines: 1 }} class="font-mono text-xs text-muted-foreground">{plugin().id} · {plugin().version}</Text>
                       </View>
                       <Button
                         testID={`market-install-${plugin().id}`}

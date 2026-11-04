@@ -60,11 +60,11 @@ export function ParticleWordmark() {
       accessibilityLabel="Pig Code"
       role="image"
       class="h-[120px] w-[420px] max-w-full"
-      onLayout={(bounds) => {
+      onLayout={({ bounds }) => {
         size = { width: bounds.size.width, height: bounds.size.height };
       }}
-      onHoverMove={(event) => setPointer(designPoint(event.position))}
-      onHoverOut={() => setPointer(null)}
+      onMouseMove={(event) => setPointer(designPoint(event.position))}
+      onMouseLeave={() => setPointer(null)}
       onPress={() => {
         if (reduceMotion()) return;
         scatterParticles(particles, seed);

@@ -85,7 +85,7 @@ function App() {
                   testID="json"
                   multiline
                   value={params()}
-                  onChange={(text) => params.set(text)}
+                  onChange={({ value: text }) => params.set(text)}
                   style={{
                     height: 110,
                     padding: 10,
@@ -107,7 +107,7 @@ function App() {
             <Input
               testID="search"
               value={query()}
-              onChange={(text) => query.set(text)}
+              onChange={({ value: text }) => query.set(text)}
               placeholder={t("settings.appearance.search")}
               style={{
                 height: 36,

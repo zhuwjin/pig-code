@@ -53,9 +53,9 @@ function ModelRow(props: UiContext & {
         size={20}
         onPress={props.onPickIcon}
       />
-      <Text numberOfLines={1} class="shrink-0 text-sm text-foreground">{renamed ? model().name : model().id}</Text>
+      <Text style={{ numberOfLines: 1 }} class="shrink-0 text-sm text-foreground">{renamed ? model().name : model().id}</Text>
       <If when={renamed}>
-        <Text numberOfLines={1} class="min-w-0 font-mono text-xs text-muted-foreground">{model().id}</Text>
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 font-mono text-xs text-muted-foreground">{model().id}</Text>
       </If>
       <Text class="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{formatTokens(model().context_window)}</Text>
       <If when={model().input_image}><Text class="text-[10px] text-muted-foreground">{t("settings.models.vision")}</Text></If>
@@ -80,7 +80,7 @@ function ModelRow(props: UiContext & {
         testID={`model-toggle-${provider().id}-${model().id}`}
         accessibilityLabel={t(model().enabled ? "settings.models.disable_model" : "settings.models.enable_model", { id: model().id })}
         checked={model().enabled}
-        onChange={(checked) => store.setModelEnabled(provider().id, model().id, checked)}
+        onChange={({ checked }) => store.setModelEnabled(provider().id, model().id, checked)}
         trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
         thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
       />
@@ -141,8 +141,8 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
           <Text class="text-sm text-muted-foreground">{t("settings.provider.connection")}</Text>
           <If when={collapsed()}>
             <Text class="rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{formatShort(provider().api_format)}</Text>
-            <Text numberOfLines={1} class="min-w-0 max-w-80 font-mono text-xs text-muted-foreground">{provider().base_url}</Text>
-            <If when={!hasKey()}><Text class="text-xs text-warning">{t("settings.models.missing_key")}</Text></If>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 max-w-80 font-mono text-xs text-muted-foreground">{provider().base_url}</Text>
+            <If when={!hasKey()}><Text class="text-xs" style={{ color: token("warning") }}>{t("settings.models.missing_key")}</Text></If>
           </If>
           <View class="flex-1" />
         </Button>
@@ -173,7 +173,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               <Input
                 testID="provider-name"
                 value={name()}
-                onChange={(text) => {
+                onChange={({ value: text }) => {
                   name.set(text);
                   scheduleSave();
                 }}
@@ -185,7 +185,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               <Input
                 testID="provider-base-url"
                 value={baseUrl()}
-                onChange={(text) => {
+                onChange={({ value: text }) => {
                   baseUrl.set(text);
                   scheduleSave();
                 }}
@@ -198,13 +198,13 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
               <Text class="text-sm text-muted-foreground">{t("settings.provider.api_format")}</Text>
               <Popover
                 open={formatOpen()}
-                onOpenChange={(open) => formatOpen.set(open)}
+                onOpenChange={({ open }) => formatOpen.set(open)}
                 placement="bottom"
                 align="start"
                 popupClass="w-96 rounded-xl border border-border bg-popover p-1 shadow-xl"
                 trigger={
                   <View role="button" testID="provider-format" class="h-9 w-full cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
-                    <Text numberOfLines={1} class="min-w-0 flex-1 text-xs text-foreground">{formatLabel(format())}</Text>
+                    <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-foreground">{formatLabel(format())}</Text>
                     <Icon name="chevron-down" size={12} />
                   </View>
                 }
@@ -222,7 +222,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                           formatOpen.set(false);
                         }}
                       >
-                        <Text numberOfLines={1} class="text-xs text-foreground">{item().label}</Text>
+                        <Text style={{ numberOfLines: 1 }} class="text-xs text-foreground">{item().label}</Text>
                       </Button>
                     )}
                   </Each>
@@ -236,7 +236,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                   testID="provider-requires-key"
                   accessibilityLabel={t("settings.provider.requires_key")}
                   checked={provider().requires_api_key ?? true}
-                  onChange={(checked) => save({ requires_api_key: checked })}
+                  onChange={({ checked }) => save({ requires_api_key: checked })}
                   trackClass="h-4 w-7 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
                   thumbClass="h-3 w-3 rounded-full bg-background shadow-sm transition-transform checked:translate-x-3"
                 />
@@ -262,7 +262,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                 <Input
                   testID="provider-api-key"
                   value={apiKey()}
-                  onChange={(text) => {
+                  onChange={({ value: text }) => {
                     apiKey.set(text);
                     scheduleSave();
                   }}
@@ -287,7 +287,7 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
           <If when={result()}>
             {(value) => {
               const display = () => resultText(value());
-              return <Text selectable class={display().ok ? "text-xs leading-5 text-success" : "text-xs leading-5 text-destructive"}>{display().text}</Text>;
+              return <Text class="text-xs leading-5" style={{ userSelect: "text", color: token(display().ok ? "success" : "destructive") }}>{display().text}</Text>;
             }}
           </If>
         </View>
@@ -319,12 +319,12 @@ export function ProviderDetail(props: UiContext & {
           buttonClass="rounded-md p-1"
           onPress={props.onPickProviderIcon}
         />
-        <Text numberOfLines={1} class="min-w-0 flex-1 text-lg font-semibold text-foreground">{provider().name}</Text>
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-lg font-semibold text-foreground">{provider().name}</Text>
         <Switch
           testID={`provider-toggle-${provider().id}`}
           accessibilityLabel={t(provider().enabled ? "settings.provider.disable" : "settings.provider.enable", { name: provider().name })}
           checked={provider().enabled}
-          onChange={(checked) => store.setProviderEnabled(provider().id, checked)}
+          onChange={({ checked }) => store.setProviderEnabled(provider().id, checked)}
           trackClass="h-6 w-10 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
           thumbClass="h-5 w-5 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
         />

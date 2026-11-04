@@ -124,6 +124,7 @@ export function documentIsCurrent(document: RemoteDocument, epoch: number, gener
 export const REMOTE_STYLE_KEYS = new Set([
   "backgroundColor", "borderColor", "borderRadius", "borderWidth", "opacity", "display", "overflow",
   "color", "fontSize", "fontWeight", "fontFamily", "lineHeight", "letterSpacing", "textAlign",
+  "numberOfLines", "textOverflow", "userSelect", "objectFit",
   "width", "height", "minWidth", "minHeight", "maxWidth", "maxHeight", "flex", "flexGrow", "flexShrink",
   "flexDirection", "flexWrap", "alignItems", "alignContent", "alignSelf", "justifyContent", "gap",
   "padding", "paddingHorizontal", "paddingVertical", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
@@ -133,8 +134,8 @@ export const REMOTE_STYLE_KEYS = new Set([
 
 export const REMOTE_PROP_KEYS = new Set([
   "placeholder", "multiline", "submitBehavior", "maxLength", "readonly", "autoFocus", "focusable", "disabled",
-  "numberOfLines", "ellipsizeMode", "selectable", "horizontal", "scrollbar", "scrollable", "bounces",
-  "resizeMode", "keyboardDismissMode", "scrollEventThrottle", "contentOffset", "contentInset", "selectedRange",
+  "horizontal", "scrollbar", "scrollable", "bounces",
+  "keyboardDismissMode", "scrollEventThrottle", "contentOffset", "contentInset", "selectedRange",
   "allowFontScaling", "maxFontSizeMultiplier", "autoCapitalize", "autoCorrect", "returnKeyType", "keyboardType",
 ]);
 
@@ -144,7 +145,19 @@ export const REMOTE_ACCESSIBILITY_KEYS = new Set([
 ]);
 
 export function remoteStyle(node: RemoteNode): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(node.style ?? {}).filter(([key]) => REMOTE_STYLE_KEYS.has(key)));
+  const style = Object.fromEntries(Object.entries(node.style ?? {}).filter(([key]) => REMOTE_STYLE_KEYS.has(key)));
+  const props = node.props ?? {};
+  if (style.numberOfLines === undefined && typeof props.numberOfLines === "number") style.numberOfLines = props.numberOfLines;
+  if (style.textOverflow === undefined && typeof props.ellipsizeMode === "string") {
+    style.textOverflow = props.ellipsizeMode === "middle" ? "ellipsis-middle"
+      : props.ellipsizeMode === "start" ? "ellipsis-start"
+      : props.ellipsizeMode;
+  }
+  if (style.userSelect === undefined && typeof props.selectable === "boolean") style.userSelect = props.selectable ? "text" : "none";
+  if (style.objectFit === undefined && typeof props.resizeMode === "string") {
+    style.objectFit = props.resizeMode === "stretch" ? "fill" : props.resizeMode === "center" ? "none" : props.resizeMode;
+  }
+  return style;
 }
 
 export function remoteProps(node: RemoteNode): Record<string, unknown> {
@@ -207,6 +220,7 @@ export function remoteDocumentRejection(
 const HOST_SAFE_STYLE_KEYS = new Set([
   "backgroundColor", "borderColor", "borderRadius", "borderWidth", "opacity", "display", "overflow",
   "color", "fontSize", "fontWeight", "fontFamily", "lineHeight", "letterSpacing", "textAlign",
+  "numberOfLines", "textOverflow", "userSelect", "objectFit",
   "width", "height", "minWidth", "minHeight", "maxWidth", "maxHeight", "flex", "flexGrow", "flexShrink",
   "flexDirection", "flexWrap", "alignItems", "alignContent", "alignSelf", "justifyContent", "gap",
   "padding", "paddingHorizontal", "paddingVertical", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
@@ -226,7 +240,7 @@ function safeHostStyleValue(key: string, value: unknown): boolean {
     return /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(value);
   }
   if (key === "fontFamily") return /^[\w .-]+$/.test(value);
-  if (["display", "flexDirection", "flexWrap", "alignItems", "alignContent", "alignSelf", "justifyContent", "overflow", "fontWeight", "textAlign"].includes(key)) {
+  if (["display", "flexDirection", "flexWrap", "alignItems", "alignContent", "alignSelf", "justifyContent", "overflow", "fontWeight", "textAlign", "textOverflow", "userSelect", "objectFit"].includes(key)) {
     return /^[a-zA-Z][a-zA-Z0-9-]{0,31}$/.test(value);
   }
   return /^-?\d+(\.\d+)?(px|%)?$/.test(value) || value === "auto";

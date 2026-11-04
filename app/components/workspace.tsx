@@ -25,7 +25,7 @@ export function Workspace(props: UiContext) {
     <View class="relative min-h-0 min-w-0 flex-1 bg-background">
       <If when={error()}>
         <View class="mx-auto mt-3 max-w-3xl rounded-(--radius) bg-destructive/10 px-3 py-2">
-          <Text selectable class="text-sm text-destructive">{error()}</Text>
+          <Text style={{ userSelect: "text" }} class="text-sm text-destructive">{error()}</Text>
         </View>
       </If>
       <If when={!hero()}>
