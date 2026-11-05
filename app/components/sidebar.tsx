@@ -1,14 +1,14 @@
 import { Canvas, Clipboard, Easing, List, Text, View, createAnimatedValue, effect, platform, signal, token } from "nsh";
 import { Button, ContextMenu, Input, Menu, MenuItem, MenuSeparator } from "nsh/base";
 import { titleBar } from "nsh/desktop";
-import { t } from "../i18n";
+import { appLocale, t } from "../i18n";
 import type { SessionMeta } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
 import { Icon } from "./icon";
 import { SETTINGS_PAGES, type SettingsPageId } from "./settings/settings-page";
-import { PluginPages } from "../plugins/remote-renderer";
+import { PluginSurfacePages } from "../plugins/surface";
 import { UiView } from "../plugins/ui-node-factory";
 
 const WORKSPACE_PAGE_SIZE = 5;
@@ -640,13 +640,15 @@ export function Sidebar(props: UiContext & {
               )}
             </Each>
           </View>
-          <PluginPages
+          <PluginSurfacePages
             target="settings"
             packages={store.pluginPackages()}
-            documents={store.pluginDocuments()}
             runtime={store.pluginRuntime()}
             dynamic={store.pluginDynamic()}
-            onEvent={(instance, event) => store.dispatchPluginUiEvent(instance, event)}
+            pluginOrder={store.pluginOrder()}
+            theme={themeStore.serialized()}
+            locale={appLocale()}
+            appearance={themeStore.mode()}
           />
         </UiView>
       </If>

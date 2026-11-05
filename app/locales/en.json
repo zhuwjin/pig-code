@@ -374,6 +374,9 @@
     }
   },
   "plugins": {
+    "surface": {
+      "ready": "Loaded"
+    },
     "no_renderable": "Plugin contribution {id} has no renderable content",
     "remote": {
       "cycle": "The remote UI has a circular reference",

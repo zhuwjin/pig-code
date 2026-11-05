@@ -55,6 +55,13 @@
         "target": "main",
         "export": "MoonPanel",
         "preserve": []
+      },
+      {
+        "id": "moon-surface-panel",
+        "kind": "settings",
+        "target": "settings",
+        "export": "MoonPanel",
+        "preserve": []
       }
     ],
     "tools": [

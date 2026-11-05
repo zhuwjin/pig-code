@@ -1,8 +1,10 @@
 mod loader;
-pub mod marketplace;
 mod manager;
+pub mod marketplace;
 mod mount_projector;
 mod services;
+#[cfg(windows)]
+pub(crate) mod surface;
 
 pub use loader::installed_sources;
 pub use manager::PluginSystemManager;

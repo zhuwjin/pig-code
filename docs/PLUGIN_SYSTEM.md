@@ -5,6 +5,8 @@
 > 最终方案：**签名插件包 + 按授权作用域隔离的独立插件 Engine + 版本化远程 UI/服务协议**。
 >
 > 本架构不依赖自定义 `cargo run` 宿主，不要求修改 NSH 源码，不手工维护 `.nsh/` 中的生成文件。插件安装、启用、禁用、更新和卸载不要求重新编译 Pig Code，也不要求重启应用。
+>
+> 当前迁移状态：共享内存 Registry 与稳定私有数据 key 已完成；Windows 已在设置页完成签名插件嵌套 AppView 的 Surface PoC。其他宿主 UI 仍使用下述远程投影链路，直到新 Surface / UiContribution / Host API 覆盖后删除。
 
 ## 1. 设计目标与最终决策
 
@@ -388,7 +390,7 @@ Discovered
 
 包哈希、验证和资源提取在工作线程执行；Engine 和 UI 操作按各自线程约束执行，宿主主线程不等待插件返回。
 
-不需要 `AppView`，不需要自定义平台 `NativeComponent`，不需要修改 NSH。
+现有远程 UI 链路不需要 `AppView` 或自定义平台 `NativeComponent`。Surface 迁移试点使用正式 `#[native_components]` 接口，不修改 NSH；Windows 原生组件创建时必须立即拥有稳定的 AppView 窗口身份，因为平台只在组件创建时收养一次 `window()` 返回的 HWND。签名验证和包读取仍在工作线程完成，验证后的 bundle 才回到 UI 线程加载。
 
 ### 6.2 实例隔离
 
@@ -1124,6 +1126,7 @@ TSX UI 协调与渲染
 | 统计插件与远程详情弹窗 | `packages/token-stats-plugin/`（市场仓库） |
 | 统计挂载与文档校验回归 | `App.stats.test.tsx` |
 | NSH 挂载投影、增量文档和图/资源校验 | `src/plugin_system/mount_projector.rs` |
+| Windows 嵌套 AppView、验签加载、主题和销毁 | `src/plugin_system/surface.rs`、`app/plugins/surface.tsx` |
 | 配置、HTTP、凭据、工作区、会话、资源和私有存储 | `src/plugin_system/services.rs` |
 | 语义节点与确定性合成 | `app/plugins/base-ui-registry.ts`、`app/plugins/ui-coordinator.ts` |
 | 宿主补丁、焦点恢复与 keyed 响应式更新 | `app/plugins/ui-node-factory.tsx` |
@@ -1141,6 +1144,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 nsh test
 cargo test signed_moon_package_loads_and_wrong_root_is_refused
 nsh test --filter "signed UI plugin" --target macos
+nsh test --filter "signed UI plugin" --target windows
 ```
 
-单独执行 macOS 场景前必须重建签名夹具；`--target macos` 不会先运行 Rust 测试，不能复用修改前的旧包。真实场景覆盖安装、月亮按钮、远程页面、宿主焦点回执、首次 `ui.ack`、两次提交、主题、禁用恢复和卸载。
+单独执行平台场景前必须重建签名夹具；平台目标不会先运行对应 Rust 夹具测试，不能复用修改前的旧包。默认 headless runner 不注册原生组件，Surface 必须使用真实平台宿主验证。Windows 场景覆盖签名安装、嵌套 AppView、主题、禁用恢复和卸载；其余场景覆盖月亮按钮、远程页面、宿主焦点回执、首次 `ui.ack` 和两次提交。

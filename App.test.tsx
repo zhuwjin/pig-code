@@ -1,4 +1,4 @@
-import { token } from "nsh";
+import { platform, token } from "nsh";
 import type { CanvasRenderingContext2D } from "nsh";
 import { expect, open, test } from "nsh/test";
 import { iconTint, paintIcon } from "./app/components/icon";
@@ -248,6 +248,14 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   await app.press("id:plugin-install");
   await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  if (app.texts().includes("已停用")) {
+    await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  }
+  await app.waitFor("text:active", { timeout: 10000 });
+  if (platform.os === "windows") {
+    await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-surface-panel", { timeout: 10000 });
+    await app.waitFor("text:已加载", { timeout: 10000 });
+  }
   await app.press("id:settings-back");
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
   await app.waitFor("id:plugin-send-icon");
@@ -266,6 +274,9 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   expect(app.count("id:theme-option-moon")).toBe(1);
   await app.press("id:settings-plugins");
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  if (platform.os === "windows") {
+    await app.waitFor("text:已加载", { state: "gone" });
+  }
   await app.press("id:settings-back");
   await app.waitFor("id:plugin-send-icon", { state: "gone" });
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { state: "gone" });

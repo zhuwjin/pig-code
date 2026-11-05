@@ -11,3 +11,8 @@ fn native(registry: &mut Registry) {
     registry.class::<agent::Agent>();
     registry.class::<terminal::Terminal>();
 }
+
+#[native_components(windows)]
+fn components(components: &nsh_platform_windows::Components) {
+    plugin_system::surface::register(components);
+}

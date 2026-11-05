@@ -374,6 +374,9 @@
     }
   },
   "plugins": {
+    "surface": {
+      "ready": "已加载"
+    },
     "no_renderable": "插件贡献 {id} 没有可渲染内容",
     "remote": {
       "cycle": "远程 UI 存在循环引用",
