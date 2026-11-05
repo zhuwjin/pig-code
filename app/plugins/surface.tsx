@@ -1,33 +1,80 @@
-import { Text, View, nativeComponent, signal, type JSX } from "nsh";
+import { Text, View, effect, nativeComponent, platform, signal, type JSX } from "nsh";
+import type { Agent } from "pig-code-ts/native";
 import { t } from "../i18n";
-import type { PluginPackageInfo, PluginUiContribution } from "../protocol";
+import { errorMessage, type PluginPackageInfo, type PluginUiContribution } from "../protocol";
 import { uiContributions, type PluginRuntimeStates } from "./ui-coordinator";
 
 type SurfaceAppearance = "system" | "light" | "dark";
 
-type NativeSurfaceProps = {
+type SurfaceRegistration = {
   instance: string;
+  surface: string;
   contribution: string;
   revision: number;
   packageRoot: string;
+};
+
+type NativeSurfaceProps = {
+  surface: string;
   theme: string;
   locale: string;
   appearance: SurfaceAppearance;
 };
 
 type NativeSurfaceEvents = {
-  ready: { instance: string; contribution: string; revision: number };
+  ready: { surface: string; instance: string; contribution: string; revision: number };
   error: { message: string };
 };
 
 const NativeSurface = nativeComponent<NativeSurfaceProps, NativeSurfaceEvents>("pig.pluginSurface", {
-  props: ["instance", "contribution", "revision", "packageRoot", "theme", "locale", "appearance"],
+  props: ["surface", "theme", "locale", "appearance"],
   events: ["ready", "error"],
 });
 
-export function PluginSurface(props: NativeSurfaceProps & { testID: string }): JSX.Element {
+export function PluginSurface(props: {
+  agent: Agent;
+  instance: string;
+  contribution: string;
+  revision: number;
+  sessionId: string | null;
+  theme: string;
+  locale: string;
+  appearance: SurfaceAppearance;
+  testID: string;
+}): JSX.Element {
+  const registration = signal<SurfaceRegistration | null>(null);
   const ready = signal(false);
   const error = signal("");
+  effect(() => {
+    const instance = props.instance;
+    const contribution = props.contribution;
+    props.revision;
+    const sessionId = props.sessionId;
+    let mounted: SurfaceRegistration | null = null;
+    let disposed = false;
+    registration.set(null);
+    ready.set(false);
+    error.set("");
+    try {
+      const next = JSON.parse(props.agent.mountPluginSurface(
+        instance,
+        contribution,
+        JSON.stringify({ sessionId }),
+      )) as SurfaceRegistration;
+      if (disposed) {
+        props.agent.unmountPluginSurface(next.surface);
+      } else {
+        mounted = next;
+        registration.set(next);
+      }
+    } catch (cause) {
+      error.set(errorMessage(cause));
+    }
+    return () => {
+      disposed = true;
+      if (mounted) props.agent.unmountPluginSurface(mounted.surface);
+    };
+  });
   return (
     <View class="min-h-0 flex-1">
       <If when={ready()}>
@@ -35,11 +82,15 @@ export function PluginSurface(props: NativeSurfaceProps & { testID: string }): J
           {t("plugins.surface.ready")}
         </Text>
       </If>
-      {error() ? <Text role="alert">{error()}</Text> : (
+      {error() ? <Text role="alert">{error()}</Text> : registration() && platform.os === "windows" ? (
         <NativeSurface
-          {...props}
+          surface={registration()!.surface}
+          theme={props.theme}
+          locale={props.locale}
+          appearance={props.appearance}
           class="min-h-0 flex-1"
-          onReady={() => {
+          onReady={(event) => {
+            if (event.surface !== registration()?.surface) return;
             error.set("");
             ready.set(true);
           }}
@@ -48,7 +99,7 @@ export function PluginSurface(props: NativeSurfaceProps & { testID: string }): J
             error.set(event.message);
           }}
         />
-      )}
+      ) : null}
     </View>
   );
 }
@@ -59,9 +110,11 @@ export function PluginSurfacePages(props: {
   runtime: PluginRuntimeStates;
   dynamic: Record<string, PluginUiContribution[]>;
   pluginOrder?: readonly string[];
+  sessionId: string | null;
   theme: string;
   locale: string;
   appearance: SurfaceAppearance;
+  agent: Agent;
 }): JSX.Element {
   const pages = () => uiContributions(
     props.packages,
@@ -84,11 +137,12 @@ export function PluginSurfacePages(props: {
           >
             <Text class="text-sm font-semibold text-foreground">{pkg.name}</Text>
             <PluginSurface
+              agent={props.agent}
               testID={testID}
               instance={instance}
               contribution={contribution.id}
-              revision={(props.runtime[instance]?.attempt ?? 0) + 1}
-              packageRoot={pkg.root}
+              revision={props.runtime[instance]?.generation ?? 1}
+              sessionId={props.sessionId}
               theme={props.theme}
               locale={props.locale}
               appearance={props.appearance}

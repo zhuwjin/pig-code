@@ -516,6 +516,55 @@ pub struct PluginSessionProjection {
     pub turns: Vec<PluginTurnStats>,
 }
 
+pub const PLUGIN_HOST_API_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginHostContext {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginHostRequest {
+    pub api_version: u32,
+    pub instance: String,
+    pub surface: String,
+    pub contribution: String,
+    pub revision: u64,
+    pub request_id: String,
+    pub method: PluginHostMethod,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginHostMethod {
+    #[serde(rename = "session.snapshot")]
+    SessionSnapshot,
+    #[serde(rename = "session.subscribe")]
+    SessionSubscribe,
+    #[serde(rename = "session.unsubscribe")]
+    SessionUnsubscribe,
+    #[serde(rename = "storage.read")]
+    StorageRead,
+    #[serde(rename = "storage.write")]
+    StorageWrite,
+    #[serde(rename = "navigation.open")]
+    NavigationOpen,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginHostResponse {
+    pub api_version: u32,
+    pub surface: String,
+    pub revision: u64,
+    pub request_id: String,
+    pub result: Result<serde_json::Value, PluginProtocolError>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginResource {

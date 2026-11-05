@@ -1,4 +1,4 @@
-import { platform, token } from "nsh";
+import { token } from "nsh";
 import type { CanvasRenderingContext2D } from "nsh";
 import { expect, open, test } from "nsh/test";
 import { iconTint, paintIcon } from "./app/components/icon";
@@ -26,9 +26,15 @@ function openApp() {
   });
 }
 
+async function realPlatform(app: Awaited<ReturnType<typeof openApp>>): Promise<boolean> {
+  return (await app.screenshot().catch(() => null)) !== null;
+}
+
 async function installMoon(app: Awaited<ReturnType<typeof openApp>>) {
   await app.press("id:title-theme-settings");
+  await app.waitFor("id:settings-plugins");
   await app.press("id:settings-plugins");
+  await app.waitFor("id:plugin-package-path");
   await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
   await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
   expect(app.value("id:plugin-package-path")).toBe("target/test-tmp/moon-plugin/moon.nshpkg");
@@ -238,8 +244,16 @@ test("runs a real shell in the terminal panel", async () => {
 
 test("installs a signed UI plugin and restores the host on disable", async () => {
   const app = await openApp();
+  await app.waitFor("id:composer-input");
+  await app.type("id:composer-input", "MOON_SURFACE_SESSION");
+  await app.waitUntil(() => app.enabled("id:send-button"), { timeout: 10000 });
+  await app.press("id:send-button");
+  await app.waitFor("text:/MOON_SURFACE_SESSION/", { timeout: 10000 });
+  await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
   await app.press("id:title-theme-settings");
+  await app.waitFor("id:settings-plugins");
   await app.press("id:settings-plugins");
+  await app.waitFor("id:plugin-package-path");
   await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
   await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
   expect(app.value("id:plugin-package-path")).toBe("target/test-tmp/moon-plugin/moon.nshpkg");
@@ -252,9 +266,13 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
     await app.press("id:theme-package-com.pigcodets.plugins.moon");
   }
   await app.waitFor("text:active", { timeout: 10000 });
-  if (platform.os === "windows") {
+  if (await realPlatform(app)) {
     await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-surface-panel", { timeout: 10000 });
-    await app.waitFor("text:已加载", { timeout: 10000 });
+    await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-surface-secondary", { timeout: 10000 });
+    await app.waitUntil(() => app.count("text:已加载") === 2, { timeout: 10000 });
+    await app.waitFor("text:/存储 [1-9][0-9]* B/", { timeout: 10000 });
+    const screenshot = await app.screenshot("target/test-tmp/moon-surface-host-api.png");
+    expect(screenshot.length).toBeGreaterThan(10000);
   }
   await app.press("id:settings-back");
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
@@ -274,8 +292,9 @@ test("installs a signed UI plugin and restores the host on disable", async () =>
   expect(app.count("id:theme-option-moon")).toBe(1);
   await app.press("id:settings-plugins");
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  if (platform.os === "windows") {
+  if (await realPlatform(app)) {
     await app.waitFor("text:已加载", { state: "gone" });
+    await app.waitFor("text:/存储 0 B/", { timeout: 10000 });
   }
   await app.press("id:settings-back");
   await app.waitFor("id:plugin-send-icon", { state: "gone" });

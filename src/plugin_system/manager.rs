@@ -28,18 +28,19 @@ const MAX_PENDING_TOOLS: usize = 32;
 
 #[derive(Clone)]
 pub struct PluginSystemManager {
-    inner: Arc<Mutex<Inner>>,
-    events: async_channel::Sender<String>,
-    receiver: async_channel::Receiver<String>,
-    gateway: HostServiceGateway,
+    pub(super) inner: Arc<Mutex<Inner>>,
+    pub(super) events: async_channel::Sender<String>,
+    pub(super) receiver: async_channel::Receiver<String>,
+    pub(super) gateway: HostServiceGateway,
+    pub(super) surface_work: async_channel::Sender<super::host_api::SurfaceWork>,
 }
 
-struct Inner {
-    data_dir: PathBuf,
+pub(super) struct Inner {
+    pub(super) data_dir: PathBuf,
     trust_root: PathBuf,
     agent: async_channel::Sender<pig_protocol::Op>,
     workspace: PathBuf,
-    instances: BTreeMap<String, PluginInstance>,
+    pub(super) instances: BTreeMap<String, PluginInstance>,
     desired: BTreeMap<String, (PluginPackageInfo, u64)>,
     latest_generation: u64,
     retries: BTreeMap<String, RetryInstance>,
@@ -47,6 +48,9 @@ struct Inner {
     pending: BTreeMap<String, PendingCall>,
     retired_outgoing: BTreeMap<String, (u64, PluginSequenceTracker)>,
     epoch: u64,
+    pub(super) surfaces: BTreeMap<String, super::host_api::SurfaceState>,
+    pub(super) surface_requests: BTreeMap<String, super::host_api::PendingSurfaceRequest>,
+    pub(super) surface_revision: u64,
 }
 
 struct RetryInstance {
@@ -56,39 +60,39 @@ struct RetryInstance {
     at: Instant,
 }
 
-struct PluginInstance {
-    package: PluginPackageInfo,
-    host: HostChannel,
-    engine: Option<Engine>,
-    epoch: u64,
-    generation: u64,
-    engine_generation: u64,
-    state: PluginLifecycleState,
-    attempt: u32,
-    negotiation: Option<PluginNegotiation>,
-    ready: bool,
-    started_at: Instant,
-    last_health: Instant,
-    health_token: u64,
-    incoming: PluginSequenceTracker,
-    outgoing: PluginSequenceTracker,
-    staged_contributions: PluginContributions,
-    active_contributions: PluginContributions,
-    staged_document: Option<RemoteDocument>,
-    document: Option<RemoteDocument>,
-    pending_frame: Option<RemoteDocument>,
-    contribution_sync: Option<String>,
-    contributions_dirty: bool,
-    metrics: PluginRuntimeMetrics,
-    event_ids: BTreeSet<String>,
-    event_order: VecDeque<String>,
-    logs: VecDeque<serde_json::Value>,
-    log_window: Instant,
-    log_count: u32,
+pub(super) struct PluginInstance {
+    pub(super) package: PluginPackageInfo,
+    pub(super) host: HostChannel,
+    pub(super) engine: Option<Engine>,
+    pub(super) epoch: u64,
+    pub(super) generation: u64,
+    pub(super) engine_generation: u64,
+    pub(super) state: PluginLifecycleState,
+    pub(super) attempt: u32,
+    pub(super) negotiation: Option<PluginNegotiation>,
+    pub(super) ready: bool,
+    pub(super) started_at: Instant,
+    pub(super) last_health: Instant,
+    pub(super) health_token: u64,
+    pub(super) incoming: PluginSequenceTracker,
+    pub(super) outgoing: PluginSequenceTracker,
+    pub(super) staged_contributions: PluginContributions,
+    pub(super) active_contributions: PluginContributions,
+    pub(super) staged_document: Option<RemoteDocument>,
+    pub(super) document: Option<RemoteDocument>,
+    pub(super) pending_frame: Option<RemoteDocument>,
+    pub(super) contribution_sync: Option<String>,
+    pub(super) contributions_dirty: bool,
+    pub(super) metrics: PluginRuntimeMetrics,
+    pub(super) event_ids: BTreeSet<String>,
+    pub(super) event_order: VecDeque<String>,
+    pub(super) logs: VecDeque<serde_json::Value>,
+    pub(super) log_window: Instant,
+    pub(super) log_count: u32,
 }
 
 impl PluginInstance {
-    fn new(
+    pub(super) fn new(
         package: PluginPackageInfo,
         host: HostChannel,
         epoch: u64,
@@ -162,6 +166,7 @@ impl PluginSystemManager {
         workspace: PathBuf,
     ) -> Self {
         let (events, receiver) = async_channel::bounded(2048);
+        let (surface_work, surface_receiver) = async_channel::bounded(128);
         let manager = Self {
             inner: Arc::new(Mutex::new(Inner {
                 trust_root: data_dir.join("plugin-root.pub"),
@@ -176,11 +181,16 @@ impl PluginSystemManager {
                 pending: BTreeMap::new(),
                 retired_outgoing: BTreeMap::new(),
                 epoch: 0,
+                surfaces: BTreeMap::new(),
+                surface_requests: BTreeMap::new(),
+                surface_revision: 0,
             })),
             events,
             receiver,
             gateway: HostServiceGateway::new(data_dir, agent),
+            surface_work,
         };
+        manager.start_surface_worker(surface_receiver);
         manager.start_maintenance();
         manager
     }
@@ -432,6 +442,7 @@ impl PluginSystemManager {
             }
             _ => {}
         }
+        self.note_session_event(event);
     }
 
     fn start_tool_call(&self, call: pig_protocol::PluginToolCall, selection: bool) {
@@ -1262,6 +1273,10 @@ impl PluginSystemManager {
     }
 
     fn send_service_reply(&self, reply: ServiceReply) {
+        if reply.request_id.starts_with("surface-request-") {
+            self.complete_surface_request(reply);
+            return;
+        }
         let current = self
             .inner
             .lock()
@@ -1535,7 +1550,7 @@ impl PluginSystemManager {
         }
     }
 
-    fn stop(&self, key: &str) {
+    pub(super) fn stop(&self, key: &str) {
         let instance = {
             let mut inner = self.inner.lock().expect("plugin manager lock");
             inner.retries.remove(key);
@@ -1545,6 +1560,7 @@ impl PluginSystemManager {
         let Some(mut instance) = instance else {
             return;
         };
+        self.retire_instance_surfaces(key);
         self.inner
             .lock()
             .expect("plugin manager lock")
@@ -1681,6 +1697,7 @@ impl PluginSystemManager {
         let Some(mut instance) = removed else {
             return;
         };
+        self.retire_instance_surfaces(key);
         let actual_epoch = instance.epoch;
         self.inner
             .lock()
@@ -1807,6 +1824,7 @@ impl PluginSystemManager {
         let weak: Weak<Mutex<Inner>> = Arc::downgrade(&self.inner);
         let gateway = self.gateway.clone();
         let events = self.events.clone();
+        let surface_work = self.surface_work.clone();
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(250));
@@ -1818,6 +1836,7 @@ impl PluginSystemManager {
                     events: events.clone(),
                     receiver: async_channel::bounded(1).1,
                     gateway: gateway.clone(),
+                    surface_work: surface_work.clone(),
                 };
                 manager.maintenance();
             }
@@ -1829,6 +1848,7 @@ impl PluginSystemManager {
         for reply in self.gateway.expire() {
             self.send_service_reply(reply);
         }
+        self.refresh_subscriptions();
         let now = Instant::now();
         let retries: Vec<RetryInstance> = {
             let mut inner = self.inner.lock().expect("plugin manager lock");
@@ -1949,6 +1969,7 @@ impl PluginSystemManager {
         runtime.instance = key.to_owned();
         let (network_bytes, timed_out_requests, cancelled_requests) =
             self.gateway.usage(key, runtime.epoch);
+        let surface_pending = self.surface_pending_count(key, runtime.epoch);
         let pending = {
             let inner = self.inner.lock().expect("plugin manager lock");
             inner
@@ -1957,6 +1978,7 @@ impl PluginSystemManager {
                 .filter(|pending| pending.instance == key && pending.epoch == runtime.epoch)
                 .count()
                 + self.gateway.pending_count(key, runtime.epoch)
+                + surface_pending
         };
         let queue_depth = pending
             + usize::from(
@@ -1986,7 +2008,7 @@ impl PluginSystemManager {
         );
     }
 
-    fn emit_instance_envelope(
+    pub(super) fn emit_instance_envelope(
         &self,
         key: &str,
         identity: (u64, u64),
@@ -2454,7 +2476,7 @@ fn sanitize_log(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
-fn next_event_id() -> u64 {
+pub(super) fn next_event_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

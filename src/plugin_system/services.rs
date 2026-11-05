@@ -514,6 +514,36 @@ impl HostServiceGateway {
         replies
     }
 
+    pub fn cancel_requests(&self, request_ids: &[String]) -> Vec<ServiceReply> {
+        let ids: Vec<String> = self
+            .pending
+            .lock()
+            .expect("plugin service pending lock")
+            .iter()
+            .filter(|(_, pending)| request_ids.contains(&pending.external_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| {
+                self.take(&id).map(|pending| {
+                    self.usage
+                        .lock()
+                        .expect("plugin service usage lock")
+                        .entry((pending.instance.clone(), pending.epoch))
+                        .or_default()
+                        .cancelled_requests += 1;
+                    self.finish(
+                        pending,
+                        Err(protocol_error(
+                            PluginErrorCode::Cancelled,
+                            "plugin service request was cancelled",
+                        )),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub fn pending_count(&self, instance: &str, epoch: u64) -> usize {
         self.pending
             .lock()

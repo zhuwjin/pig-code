@@ -198,7 +198,17 @@ impl Manager {
             .lock()
             .expect("plugin registry lock")
             .authorize_named(&package, &digest, capability, &target, self.config.as_ref());
-        let result = authorized.and_then(|()| self.plugin_services(scope, session_id));
+        let session_cwd = session_id
+            .as_deref()
+            .and_then(|id| self.sessions.get(id).map(|entry| entry.cwd.clone()));
+        let result = authorized.and_then(|()| {
+            if !session_scope_permitted(&scope, session_cwd.as_deref()) {
+                return Err(CoreError::PluginPermission {
+                    detail: "a project plugin cannot read a session from another workspace".into(),
+                });
+            }
+            self.plugin_services(scope, session_id)
+        });
         emit(
             &event_tx,
             pig_protocol::Event::PluginServices {
@@ -565,4 +575,45 @@ fn json(value: impl serde::Serialize) -> Result<serde_json::Value, CoreError> {
     serde_json::to_value(value).map_err(|error| CoreError::Internal {
         detail: error.to_string(),
     })
+}
+
+fn session_scope_permitted(scope: &PluginScope, session_cwd: Option<&std::path::Path>) -> bool {
+    match scope {
+        PluginScope::User => true,
+        PluginScope::Project { workspace } => {
+            session_cwd.is_none_or(|cwd| cwd.starts_with(workspace))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use pig_protocol::PluginScope;
+
+    use super::session_scope_permitted;
+
+    #[test]
+    fn project_session_reads_stay_inside_their_workspace() {
+        let scope = PluginScope::Project {
+            workspace: PathBuf::from("C:/workspace"),
+        };
+        assert!(session_scope_permitted(
+            &scope,
+            Some(Path::new("C:/workspace"))
+        ));
+        assert!(session_scope_permitted(
+            &scope,
+            Some(Path::new("C:/workspace/nested"))
+        ));
+        assert!(!session_scope_permitted(
+            &scope,
+            Some(Path::new("C:/workspace-other"))
+        ));
+        assert!(session_scope_permitted(
+            &PluginScope::User,
+            Some(Path::new("C:/workspace-other"))
+        ));
+    }
 }

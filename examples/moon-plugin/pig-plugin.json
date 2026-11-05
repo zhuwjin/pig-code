@@ -33,6 +33,14 @@
     {
       "name": "tools.provide",
       "targets": ["MoonEcho"]
+    },
+    {
+      "name": "session.read",
+      "targets": ["*"]
+    },
+    {
+      "name": "navigation.open",
+      "targets": ["main"]
     }
   ],
   "contributions": {
@@ -58,6 +66,13 @@
       },
       {
         "id": "moon-surface-panel",
+        "kind": "settings",
+        "target": "settings",
+        "export": "MoonPanel",
+        "preserve": []
+      },
+      {
+        "id": "moon-surface-secondary",
         "kind": "settings",
         "target": "settings",
         "export": "MoonPanel",

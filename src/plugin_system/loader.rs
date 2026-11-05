@@ -154,7 +154,7 @@ mod tests {
                 build: manifest.build,
             },
             capabilities: Some(serde_json::json!({
-                "host": ["plugin.protocol"]
+                "host": ["plugin.protocol", "pig.host"]
             })),
             source,
             bytecode,
@@ -193,7 +193,7 @@ mod tests {
         let loaded = load_verified(&package_path, &root_path, &directory.join("data"))
             .expect("load signed moon package");
         assert_eq!(loaded.manifest.id, "com.pigcodets.plugins.moon");
-        assert_eq!(loaded.manifest.contributions.ui.len(), 3);
+        assert_eq!(loaded.manifest.contributions.ui.len(), 4);
         let first_digest =
             pig_core::plugins::package_digest(&loaded.assets).expect("first content digest");
         load_verified(

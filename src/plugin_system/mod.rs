@@ -1,3 +1,4 @@
+pub(crate) mod host_api;
 mod loader;
 mod manager;
 pub mod marketplace;

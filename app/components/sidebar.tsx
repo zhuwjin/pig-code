@@ -646,6 +646,8 @@ export function Sidebar(props: UiContext & {
             runtime={store.pluginRuntime()}
             dynamic={store.pluginDynamic()}
             pluginOrder={store.pluginOrder()}
+            sessionId={store.current()}
+            agent={store.agent}
             theme={themeStore.serialized()}
             locale={appLocale()}
             appearance={themeStore.mode()}

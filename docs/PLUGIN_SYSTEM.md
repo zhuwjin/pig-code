@@ -2,11 +2,11 @@
 
 > 文档性质：统一架构、实现契约与验收标准。
 >
-> 最终方案：**签名插件包 + 按授权作用域隔离的独立插件 Engine + 版本化远程 UI/服务协议**。
+> 目标架构：**签名插件包 + 统一 Registry 与生命周期 + Surface/语义贡献 + 版本化 Host API**。旧远程 UI 协议只保留到迁移完成前。
 >
 > 本架构不依赖自定义 `cargo run` 宿主，不要求修改 NSH 源码，不手工维护 `.nsh/` 中的生成文件。插件安装、启用、禁用、更新和卸载不要求重新编译 Pig Code，也不要求重启应用。
 >
-> 当前迁移状态：共享内存 Registry 与稳定私有数据 key 已完成；Windows 已在设置页完成签名插件嵌套 AppView 的 Surface PoC。其他宿主 UI 仍使用下述远程投影链路，直到新 Surface / UiContribution / Host API 覆盖后删除。
+> 当前迁移状态：共享内存 Registry 与稳定私有数据 key 已完成；Windows 已完成设置页签名插件嵌套 AppView、最小 Host API 和真实窗口视觉验收。其他宿主 UI 仍使用下述远程投影链路，直到新 Surface / UiContribution / Host API 覆盖后删除。
 
 ## 1. 设计目标与最终决策
 
@@ -399,6 +399,19 @@ Discovered
 - 同一插件在不同授权作用域中不共享 VM、订阅、存储或请求状态。
 - 多窗口共享同一实例的注册数据，但每个窗口有独立 UI surface 和节点映射。
 - 会话数据按 `workspace_id`、`session_id` 和权限投影，禁止通过全局单例跨会话读取。
+
+### 6.2.1 Windows Surface Host API 垂直切片
+
+`pig.host` 的版本 1 已实现 Session/Usage 快照与订阅、私有 KV 读写和导航动作。宿主为每次实际挂载分配不透明 `SurfaceId` 和 revision，插件请求必须同时匹配 `instance`、`surface`、`contribution`、`revision` 和 `requestId`。包路径、digest、会话上下文和后端运行代次由管理器绑定，不能由插件在请求中改写；新的 Host API 不暴露旧的 `epoch/generation` 字段。
+
+- 每个 AppView 使用独立 `HostChannel`。同步存储在宿主有界工作队列中执行，异步 core 调用通过 `HostReply` 回复，不阻塞插件 Engine 回调。项目插件的 SessionRead 在 core 执行点额外校验会话 cwd 位于项目工作区内，不能借通配 target 读取其他工作区。
+- Session 订阅只有在首次带权限校验的快照成功后才建立；同一 Surface 同时只能有一个订阅，重复 requestId 和重复订阅会被拒绝。
+- 已提交的会话、回合、工具和 Usage 事件按 Surface 合并刷新；每个订阅有自己的 revision。取消订阅、卸载、禁用和故障都会取消对应请求并丢弃迟到响应，不影响同实例的其他 Surface。
+- Surface 注册信息来自当前 active 实例和已声明贡献。签名包仍在工作线程重新验签，Windows 保持 AppView/HWND 身份稳定，Drop 先注销请求和订阅，再停止视图。
+- `plugin.appearance` 启动参数和 `pig.host.environment` 事件同步宿主的 `system/light/dark` 模式；插件通过 NSH 的 `setColorScheme` 应用它。主题 token 由 `AppView::set_theme_overrides` 更新，不能只同步 token 而遗漏模式。
+- `nsh/storage` 不经 NSH capabilities 控制，因此 Surface 必须注入独立 `StorageBackend`，使用稳定 `PluginDataKey` 下的 `nsh/storage.json`，不能回退到系统共享目录。重载先停止旧 Engine 再切换后端，Host API 与原生 KV 都不会因 digest 更新而丢失命名空间。
+
+当前 Moon 示例为兼容旧后端仍共享入口，Surface 通过独立 `pig.host` 通道执行；后续会把可选后端入口与 Surface 入口拆开。当前只迁移设置页的两个验证 Surface，token-stats、Composer、Fragment、macOS 和 Linux 尚未迁移，旧远程 UI 主链路仍未删除。
 
 ### 6.3 资源限制
 
@@ -1127,6 +1140,7 @@ TSX UI 协调与渲染
 | 统计挂载与文档校验回归 | `App.stats.test.tsx` |
 | NSH 挂载投影、增量文档和图/资源校验 | `src/plugin_system/mount_projector.rs` |
 | Windows 嵌套 AppView、验签加载、主题和销毁 | `src/plugin_system/surface.rs`、`app/plugins/surface.tsx` |
+| Surface 注册、版本化 Host API、会话订阅与取消 | `src/plugin_system/host_api.rs`、`crates/pig-protocol/src/plugin_runtime.rs` |
 | 配置、HTTP、凭据、工作区、会话、资源和私有存储 | `src/plugin_system/services.rs` |
 | 语义节点与确定性合成 | `app/plugins/base-ui-registry.ts`、`app/plugins/ui-coordinator.ts` |
 | 宿主补丁、焦点恢复与 keyed 响应式更新 | `app/plugins/ui-node-factory.tsx` |
@@ -1147,4 +1161,4 @@ nsh test --filter "signed UI plugin" --target macos
 nsh test --filter "signed UI plugin" --target windows
 ```
 
-单独执行平台场景前必须重建签名夹具；平台目标不会先运行对应 Rust 夹具测试，不能复用修改前的旧包。默认 headless runner 不注册原生组件，Surface 必须使用真实平台宿主验证。Windows 场景覆盖签名安装、嵌套 AppView、主题、禁用恢复和卸载；其余场景覆盖月亮按钮、远程页面、宿主焦点回执、首次 `ui.ack` 和两次提交。
+单独执行平台场景前必须重建签名夹具；平台目标不会先运行对应 Rust 夹具测试，不能复用修改前的旧包。默认 headless runner 不注册原生组件，Surface 必须使用真实平台宿主验证。测试驱动的 `platform.os` 不是被测应用的平台标识，真实平台分支通过 `app.screenshot()` 的能力探测；测试驱动读取不到嵌套 AppView 内部文本，因此宿主断言、HostChannel 行为测试和真实截图共同验收，不能只等待 `ready`。Windows 场景覆盖签名安装、两个 Surface、真实 KV 写入、会话统计、主题对比度、禁用恢复和卸载，截图输出到 `target/test-tmp/moon-surface-host-api.png`；其余场景覆盖月亮按钮、远程页面、宿主焦点回执、首次 `ui.ack` 和两次提交。

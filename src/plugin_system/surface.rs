@@ -1,16 +1,21 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_core::platform::{Appearance, Locale};
-use nsh_engine::{App, Bundle, HostChannel};
+use nsh_core::{
+    platform::{Appearance, Locale},
+    storage::{StorageBackend, StorageChange},
+};
+use nsh_engine::{App, Bundle, FileStorage};
 use nsh_platform_windows::{
     AppOptions, AppView, AssetBase, ComponentContext, Components, NativeComponent,
 };
 use serde_json::{Value as JsonValue, json};
 
+use super::host_api::{self, SurfaceDescriptor, SurfaceMount};
 use super::loader::{installed_package_path, load_verified};
 
 pub const PLUGIN_SURFACE: &str = "pig.pluginSurface";
@@ -24,10 +29,7 @@ pub fn register(components: &Components) {
 
 #[derive(Clone)]
 struct SurfaceProps {
-    instance: String,
-    contribution: String,
-    revision: u64,
-    package_root: Option<PathBuf>,
+    surface: String,
     theme: Option<String>,
     locale: Option<Locale>,
     appearance: Appearance,
@@ -36,10 +38,7 @@ struct SurfaceProps {
 impl Default for SurfaceProps {
     fn default() -> Self {
         Self {
-            instance: String::new(),
-            contribution: String::new(),
-            revision: 0,
-            package_root: None,
+            surface: String::new(),
             theme: None,
             locale: None,
             appearance: Appearance::System,
@@ -47,35 +46,7 @@ impl Default for SurfaceProps {
     }
 }
 
-impl SurfaceProps {
-    fn signature(&self) -> Option<String> {
-        Some(format!(
-            "{}:{}:{}:{}",
-            self.package_root.as_deref()?.display(),
-            self.instance,
-            self.contribution,
-            self.revision
-        ))
-    }
-
-    fn host_params(&self) -> serde_json::Map<String, JsonValue> {
-        json!({
-            "plugin": {
-                "instance": self.instance,
-                "contribution": self.contribution,
-                "revision": self.revision,
-                "epoch": 0,
-                "generation": self.revision,
-            }
-        })
-        .as_object()
-        .expect("surface host params")
-        .clone()
-    }
-}
-
 struct LoadedSurface {
-    signature: String,
     bundle: Bundle,
     assets: PathBuf,
 }
@@ -85,84 +56,166 @@ struct LoadResult {
     result: Result<LoadedSurface, String>,
 }
 
+#[derive(Default)]
+struct SurfaceKv {
+    current: Mutex<Option<Arc<FileStorage>>>,
+}
+
+impl SurfaceKv {
+    fn bind(&self, directory: &Path) {
+        *self.current.lock().expect("surface storage lock") = Some(FileStorage::open(directory));
+    }
+
+    fn clear(&self) {
+        *self.current.lock().expect("surface storage lock") = None;
+    }
+
+    fn current(&self) -> Option<Arc<FileStorage>> {
+        self.current.lock().expect("surface storage lock").clone()
+    }
+}
+
+impl StorageBackend for SurfaceKv {
+    fn load(&self) -> Result<BTreeMap<String, String>, String> {
+        match self.current() {
+            Some(storage) => storage.load(),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    fn write(&self, change: StorageChange) {
+        if let Some(storage) = self.current() {
+            storage.write(change);
+        }
+    }
+}
+
 struct PluginSurface {
     context: ComponentContext,
     props: RefCell<SurfaceProps>,
+    mount: RefCell<Option<SurfaceMount>>,
+    storage: Arc<SurfaceKv>,
     view: RefCell<Option<Rc<AppView>>>,
     requested: RefCell<Option<String>>,
     loaded: RefCell<Option<LoadedSurface>>,
     results: Arc<Mutex<Vec<LoadResult>>>,
+    environment: RefCell<Option<Appearance>>,
 }
 
 impl PluginSurface {
     fn new(context: ComponentContext) -> Self {
-        let view = AppView::new(None, AppOptions::default()).ok();
-        if let Some(view) = &view {
-            view.host().handle("plugin.protocol", |call| {
-                call.resolve(JsonValue::Null);
-            });
-        }
+        let limits = nsh_engine::Limits {
+            memory_bytes: 64 * 1024 * 1024,
+            load_budget: Duration::from_secs(3),
+            call_budget: Duration::from_millis(750),
+            ..nsh_engine::Limits::default()
+        };
+        let storage = Arc::new(SurfaceKv::default());
+        let view = AppView::new(
+            None,
+            AppOptions {
+                app_id: "com.example.pigcodets".into(),
+                title: "Pig Code plugin".into(),
+                storage: Some(storage.clone()),
+                limits,
+                ..AppOptions::default()
+            },
+        )
+        .ok();
         Self {
             context,
             props: RefCell::new(SurfaceProps::default()),
+            mount: RefCell::new(None),
+            storage,
             view: RefCell::new(view),
             requested: RefCell::new(None),
             loaded: RefCell::new(None),
             results: Arc::new(Mutex::new(Vec::new())),
+            environment: RefCell::new(None),
         }
     }
 
     fn sync(&self) {
-        self.ensure_view();
+        self.attach();
+        self.sync_host_environment();
         self.start_load();
         self.finish_loads();
     }
 
-    fn ensure_view(&self) {
-        if self.view.borrow().is_some() {
+    fn sync_host_environment(&self) {
+        let appearance = self.props.borrow().appearance;
+        let Some(view) = self.view.borrow().as_ref().cloned() else {
+            return;
+        };
+        if self.mount.borrow().is_none() {
             return;
         }
-        let props = self.props.borrow().clone();
-        let Some(root) = props.package_root.clone() else {
+        let name = match appearance {
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+            Appearance::System => "system",
+        };
+        let mut params = view.host().params();
+        let Some(plugin) = params.get_mut("plugin").and_then(JsonValue::as_object_mut) else {
             return;
         };
-        let host = HostChannel::new();
-        host.set_params(props.host_params());
-        host.handle("plugin.protocol", |call| {
-            call.resolve(JsonValue::Null);
-        });
-        let mut limits = nsh_engine::Limits::default();
-        limits.memory_bytes = 64 * 1024 * 1024;
-        limits.load_budget = Duration::from_secs(3);
-        limits.call_budget = Duration::from_millis(750);
-        let options = AppOptions {
-            app_id: "com.example.pigcodets".into(),
-            title: "Pig Code plugin".into(),
-            appearance: props.appearance,
-            asset_base: Some(AssetBase::Directory(root)),
-            data_dir: package_data_dir(&props).map(|path| path.join("surfaces")),
-            host,
-            limits,
-            ..AppOptions::default()
-        };
-        match AppView::new(None, options) {
-            Ok(view) => {
-                if let Some(theme) = props.theme.as_deref() {
-                    self.apply_theme(view.as_ref(), Some(theme));
-                }
-                view.set_locale(props.locale);
-                self.context.set_size(320.0, 240.0);
-                *self.view.borrow_mut() = Some(view);
-                self.load_retained(&props);
-            }
-            Err(error) => self.report_error(error.to_string()),
+        plugin.insert("appearance".into(), name.into());
+        view.host().set_params(params);
+        if self.environment.borrow().as_ref() != Some(&appearance) {
+            let _ = view
+                .host()
+                .send("pig.host.environment", json!({ "appearance": name }));
+            *self.environment.borrow_mut() = Some(appearance);
         }
     }
 
-    fn start_load(&self) {
-        let Some(signature) = self.props.borrow().signature() else {
+    fn attach(&self) {
+        let id = self.props.borrow().surface.clone();
+        let attached = self
+            .mount
+            .borrow()
+            .as_ref()
+            .is_some_and(|mount| mount.descriptor.surface == id);
+        if id.is_empty() || attached {
+            return;
+        }
+        self.release();
+        let Some(view) = self.view.borrow().as_ref().cloned() else {
+            self.report_error("could not create the plugin AppView".into());
             return;
         };
+        match host_api::attach(&id, view.host()) {
+            Ok(mount) => {
+                self.storage.bind(&mount.descriptor.storage_dir);
+                self.context.set_size(320.0, 240.0);
+                *self.mount.borrow_mut() = Some(mount);
+            }
+            Err(error) => self.report_error(error),
+        }
+    }
+
+    fn descriptor(&self) -> Option<SurfaceDescriptor> {
+        self.mount
+            .borrow()
+            .as_ref()
+            .map(|mount| mount.descriptor.clone())
+    }
+
+    fn signature(descriptor: &SurfaceDescriptor) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            descriptor.package_root.display(),
+            descriptor.instance,
+            descriptor.contribution,
+            descriptor.revision
+        )
+    }
+
+    fn start_load(&self) {
+        let Some(descriptor) = self.descriptor() else {
+            return;
+        };
+        let signature = Self::signature(&descriptor);
         if self.requested.borrow().as_deref() == Some(signature.as_str()) {
             return;
         }
@@ -170,18 +223,14 @@ impl PluginSurface {
         if let Some(view) = self.view.borrow().as_ref() {
             view.stop();
         }
-        let props = self.props.borrow().clone();
-        let Some(root) = props.package_root.clone() else {
-            return;
-        };
+        let root = descriptor.package_root;
         let package = installed_package_path(&root);
         let trust = package_trust_root(&root);
-        let data_dir = package_data_dir(&props).unwrap_or_else(|| root.clone());
+        let data_dir = package_data_dir(&root).unwrap_or_else(|| root.clone());
         let results = self.results.clone();
         let context = self.context.clone();
         std::thread::spawn(move || {
             let result = load_verified(&package, &trust, &data_dir).map(|verified| LoadedSurface {
-                signature: signature.clone(),
                 bundle: verified.bundle,
                 assets: verified.assets,
             });
@@ -202,7 +251,6 @@ impl PluginSurface {
             }
             match load.result {
                 Ok(loaded) => {
-                    self.ensure_view();
                     let Some(view) = self.view.borrow().as_ref().cloned() else {
                         continue;
                     };
@@ -210,48 +258,23 @@ impl PluginSurface {
                     self.apply_theme(&view, props.theme.as_deref());
                     view.set_locale(props.locale);
                     view.set_asset_base(Some(AssetBase::Directory(loaded.assets.clone())));
-                    view.host().set_params(props.host_params());
                     view.load(App::Js(loaded.bundle.clone()));
                     *self.loaded.borrow_mut() = Some(loaded);
-                    self.context.emit(
-                        "ready",
-                        json!({
-                            "instance": props.instance,
-                            "contribution": props.contribution,
-                            "revision": props.revision,
-                        }),
-                    );
+                    if let Some(descriptor) = self.descriptor() {
+                        self.context.emit(
+                            "ready",
+                            json!({
+                                "surface": descriptor.surface,
+                                "instance": descriptor.instance,
+                                "contribution": descriptor.contribution,
+                                "revision": descriptor.revision,
+                            }),
+                        );
+                    }
                 }
                 Err(error) => self.report_error(error),
             }
         }
-    }
-
-    fn load_retained(&self, props: &SurfaceProps) {
-        let Some(signature) = props.signature() else {
-            return;
-        };
-        let Some(view) = self.view.borrow().as_ref().cloned() else {
-            return;
-        };
-        let loaded = self.loaded.borrow();
-        let Some(loaded) = loaded
-            .as_ref()
-            .filter(|loaded| loaded.signature == signature)
-        else {
-            return;
-        };
-        view.set_asset_base(Some(AssetBase::Directory(loaded.assets.clone())));
-        view.host().set_params(props.host_params());
-        view.load(App::Js(loaded.bundle.clone()));
-        self.context.emit(
-            "ready",
-            json!({
-                "instance": props.instance,
-                "contribution": props.contribution,
-                "revision": props.revision,
-            }),
-        );
     }
 
     fn apply_theme(&self, view: &AppView, theme: Option<&str>) {
@@ -262,6 +285,17 @@ impl PluginSurface {
 
     fn report_error(&self, message: String) {
         self.context.emit("error", json!({ "message": message }));
+    }
+
+    fn release(&self) {
+        if let Some(mount) = self.mount.borrow_mut().take() {
+            mount.manager.unmount_surface(&mount.descriptor.surface);
+        }
+        if let Some(view) = self.view.borrow().as_ref() {
+            view.stop();
+        }
+        self.storage.clear();
+        *self.requested.borrow_mut() = None;
     }
 }
 
@@ -276,27 +310,14 @@ impl NativeComponent for PluginSurface {
     }
 
     fn window(&self) -> Option<nsh_platform_windows::windows::Win32::Foundation::HWND> {
-        self.sync();
         self.view.borrow().as_ref().map(|view| view.hwnd())
     }
 
     fn set_prop(&mut self, name: &str, value: Option<&JsonValue>) {
         let mut props = self.props.borrow_mut();
         match name {
-            "instance" => {
-                props.instance = value.and_then(JsonValue::as_str).unwrap_or_default().into();
-            }
-            "contribution" => {
-                props.contribution = value.and_then(JsonValue::as_str).unwrap_or_default().into();
-            }
-            "revision" => {
-                props.revision = value.and_then(JsonValue::as_u64).unwrap_or_default();
-            }
-            "packageRoot" => {
-                props.package_root = value
-                    .and_then(JsonValue::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from);
+            "surface" => {
+                props.surface = value.and_then(JsonValue::as_str).unwrap_or_default().into();
             }
             "theme" => {
                 props.theme = value.and_then(JsonValue::as_str).map(str::to_owned);
@@ -333,17 +354,15 @@ impl NativeComponent for PluginSurface {
 
 impl Drop for PluginSurface {
     fn drop(&mut self) {
+        self.release();
         if let Some(view) = self.view.borrow_mut().take() {
             view.stop();
         }
     }
 }
 
-fn package_data_dir(props: &SurfaceProps) -> Option<PathBuf> {
-    props
-        .package_root
-        .as_deref()
-        .and_then(Path::parent)
+fn package_data_dir(root: &Path) -> Option<PathBuf> {
+    root.parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
         .and_then(Path::parent)
@@ -370,11 +389,7 @@ mod tests {
     #[test]
     fn package_paths_resolve_to_the_shared_data_and_trust_roots() {
         let root = PathBuf::from("C:/data/packages/demo/digest/assets");
-        let props = SurfaceProps {
-            package_root: Some(root.clone()),
-            ..SurfaceProps::default()
-        };
-        assert_eq!(package_data_dir(&props), Some(PathBuf::from("C:/data")));
+        assert_eq!(package_data_dir(&root), Some(PathBuf::from("C:/data")));
         assert_eq!(
             package_trust_root(&root),
             PathBuf::from("C:/data/plugin-root.pub")
@@ -386,20 +401,46 @@ mod tests {
     }
 
     #[test]
-    fn revision_changes_the_surface_but_not_the_stable_data_directory() {
-        let root = PathBuf::from("C:/data/packages/demo/digest/assets");
-        let props = SurfaceProps {
+    fn surface_identity_is_bound_to_the_manager_allocated_revision() {
+        let descriptor = SurfaceDescriptor {
             instance: "demo:digest:user:default".into(),
+            surface: "surface-1".into(),
             contribution: "panel".into(),
             revision: 1,
-            package_root: Some(root.clone()),
-            ..SurfaceProps::default()
+            package_root: PathBuf::from("C:/data/packages/demo/digest/assets"),
+            storage_dir: PathBuf::from("C:/data/instances/stable/nsh"),
+            session_id: None,
         };
-        let next = SurfaceProps {
+        let next = SurfaceDescriptor {
             revision: 2,
-            ..props.clone()
+            surface: "surface-2".into(),
+            ..descriptor.clone()
         };
-        assert_ne!(props.signature(), next.signature());
-        assert_eq!(package_data_dir(&props), package_data_dir(&next));
+        assert_ne!(
+            PluginSurface::signature(&descriptor),
+            PluginSurface::signature(&next)
+        );
+        assert_eq!(
+            package_data_dir(&descriptor.package_root),
+            package_data_dir(&next.package_root)
+        );
+        assert_eq!(descriptor.storage_dir, next.storage_dir);
+        assert!(!descriptor.storage_dir.to_string_lossy().contains("digest"));
+    }
+
+    #[test]
+    fn native_storage_is_empty_until_bound_to_the_stable_data_directory() {
+        let storage = SurfaceKv::default();
+        assert!(storage.current().is_none());
+        assert!(storage.load().unwrap().is_empty());
+        let directory = PathBuf::from("C:/data/instances/stable/nsh");
+        storage.bind(&directory);
+        assert_eq!(
+            storage.current().unwrap().path(),
+            directory.join("storage.json")
+        );
+        storage.clear();
+        assert!(storage.current().is_none());
+        assert!(storage.load().unwrap().is_empty());
     }
 }

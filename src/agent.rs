@@ -302,6 +302,23 @@ default_reasoning_level = "low"
         self.plugins.set_locale(&locale);
     }
 
+    /// Allocates an isolated Surface and its versioned Host API binding.
+    pub fn mount_plugin_surface(
+        &self,
+        instance: String,
+        contribution: String,
+        context: String,
+    ) -> Result<String, String> {
+        let context: pig_protocol::PluginHostContext =
+            serde_json::from_str(&context).map_err(|error| error.to_string())?;
+        self.plugins.mount_surface(&instance, &contribution, context)
+    }
+
+    /// Disposes the Surface's requests and subscription before its view disappears.
+    pub fn unmount_plugin_surface(&self, surface: String) {
+        crate::plugin_system::host_api::detach(&surface);
+    }
+
     /// Retries a failed instance after the automatic backoff budget is exhausted.
     pub fn retry_plugin(&self, package: String, digest: String) -> Result<(), String> {
         self.plugins.retry(&package, &digest)
@@ -442,6 +459,12 @@ default_reasoning_level = "low"
             }
             listener.post(encode_batch(&batch));
         }
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        crate::plugin_system::host_api::detach_manager(&self.plugins);
     }
 }
 
