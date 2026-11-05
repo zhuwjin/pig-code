@@ -39,7 +39,7 @@ function permitted(pkg: PluginPackageInfo, contribution: PluginUiContribution): 
 }
 
 function active(pkg: PluginPackageInfo, runtime: PluginRuntimeStates): boolean {
-  const needsEngine = (pkg.contributions.ui ?? []).some((item) => item.export || item.kind === "command") ||
+  const needsEngine = (pkg.contributions.ui ?? []).some((item) => (item.export && item.kind !== "surface") || item.kind === "command") ||
     ((pkg.contributions.tools ?? []).length > 0) ||
     ((pkg.contributions.commands ?? []).length > 0);
   return !needsEngine || runtime[pluginInstance(pkg)]?.state === "active";

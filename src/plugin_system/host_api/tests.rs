@@ -78,6 +78,18 @@ fn fixture() -> Fixture {
         "target": "settings",
     }))
     .unwrap();
+    let stats_summary: PluginUiContribution = serde_json::from_value(json!({
+        "id": "stats-activity",
+        "kind": "surface",
+        "target": "status.activity",
+    }))
+    .unwrap();
+    let stats_detail: PluginUiContribution = serde_json::from_value(json!({
+        "id": "stats-activity-detail",
+        "kind": "surface",
+        "target": "plugin.overlay",
+    }))
+    .unwrap();
     let package = PluginPackageInfo {
         id: "moon".into(),
         name: "Moon".into(),
@@ -88,7 +100,7 @@ fn fixture() -> Fixture {
         source: PluginSource::User,
         enabled: true,
         contributions: PluginContributions {
-            ui: vec![ui],
+            ui: vec![ui, stats_summary, stats_detail],
             ..PluginContributions::default()
         },
         capabilities: vec![
@@ -97,12 +109,16 @@ fn fixture() -> Fixture {
                 targets: vec!["settings".into()],
             },
             PluginCapabilityRequest {
+                name: "ui.patch.structure".into(),
+                targets: vec!["status.activity".into(), "plugin.overlay".into()],
+            },
+            PluginCapabilityRequest {
                 name: "session.read".into(),
                 targets: vec!["*".into()],
             },
             PluginCapabilityRequest {
                 name: "navigation.open".into(),
-                targets: vec!["main".into()],
+                targets: vec!["main".into(), "overlay".into()],
             },
         ],
     };
@@ -139,6 +155,9 @@ fn mount_client_with_revision(
                 CONTRIBUTION,
                 PluginHostContext {
                     session_id: Some(session.into()),
+                    turn_id: None,
+                    turn_index: None,
+                    display_mode: None,
                 },
             )
             .expect("mount Surface"),
@@ -380,6 +399,16 @@ fn storage_navigation_and_stale_identity_use_the_same_surface_contract() {
             ("storage.write", json!({"owner": "surface"}), "write-value"),
             ("storage.read", json!(null), "read-after"),
             ("navigation.open", json!({"pageId": "main"}), "navigate"),
+            (
+                "navigation.open",
+                json!({
+                    "pageId": "overlay",
+                    "contribution": "stats-activity-detail",
+                    "anchor": "status.activity",
+                    "turnIndex": 0,
+                }),
+                "open-overlay",
+            ),
         ],
     );
     assert_eq!(client.next()["result"]["Ok"], JsonValue::Null);
@@ -391,6 +420,12 @@ fn storage_navigation_and_stale_identity_use_the_same_surface_contract() {
     let action: JsonValue = serde_json::from_str(&receive(&fixture.manager.events())).unwrap();
     assert_eq!(action["kind"], "host.action");
     assert_eq!(action["body"]["pageId"], "main");
+    assert_eq!(client.next()["result"]["Ok"]["pageId"], "overlay");
+    let overlay: JsonValue = serde_json::from_str(&receive(&fixture.manager.events())).unwrap();
+    assert_eq!(overlay["body"]["pageId"], "overlay");
+    assert_eq!(overlay["body"]["contribution"], "stats-activity-detail");
+    assert_eq!(overlay["body"]["anchor"], "status.activity");
+    assert_eq!(overlay["body"]["turnIndex"], 0);
 
     let stale = mount_client_with_revision(
         &fixture,

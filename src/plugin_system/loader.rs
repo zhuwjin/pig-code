@@ -46,18 +46,20 @@ pub fn load_verified(
         return Err("unsupported plugin manifest or protocol version".into());
     }
     let digest = package.receipt.sha256;
-    std::fs::write(package.assets.join(".pig-package.nshpkg"), bytes)
+    pig_core::config::write_settings_file(&package.assets.join(".pig-package.nshpkg"), &bytes)
         .map_err(|error| format!("store verified plugin package: {error}"))?;
     let stored_root = package.assets.join(".pig-root.pub");
     let same_root =
         std::fs::canonicalize(root_path).ok() == std::fs::canonicalize(&stored_root).ok();
     if !same_root {
-        std::fs::copy(root_path, &stored_root)
+        let root_bytes = std::fs::read(root_path)
+            .map_err(|error| format!("read plugin root public key: {error}"))?;
+        pig_core::config::write_settings_file(&stored_root, &root_bytes)
             .map_err(|error| format!("store plugin root public key: {error}"))?;
     }
-    std::fs::write(
-        package.assets.join(".pig-install.json"),
-        serde_json::to_vec(&InstalledPluginMetadata {
+    pig_core::config::write_settings_file(
+        &package.assets.join(".pig-install.json"),
+        &serde_json::to_vec(&InstalledPluginMetadata {
             digest: digest.clone(),
         })
         .map_err(|error| error.to_string())?,
@@ -112,6 +114,86 @@ pub fn installed_package_path(assets: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_token_stats_package_loads_without_a_backend_engine() {
+        let directory =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp/token-stats-plugin");
+        std::fs::create_dir_all(&directory).expect("create token stats fixture directory");
+        let root = nsh_engine::package::SecretKey::generate().expect("root key");
+        let release = nsh_engine::package::SecretKey::generate().expect("release key");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let certificate = nsh_engine::package::certify(
+            &root,
+            &release.public(),
+            &["com.pigcodets.plugins.*".into()],
+            now.saturating_sub(60),
+            now + 3600,
+        );
+        let plugin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../pig-code-ts-plugins/packages/token-stats-plugin");
+        let bundle = nsh_testing::compile_tsx(plugin.join("App.tsx"), &[nsh_base::registry()])
+            .expect("compile token stats plugin");
+        let (source, bytecode) = match bundle.code {
+            nsh_engine::BundleCode::Source(source) => (source, None),
+            nsh_engine::BundleCode::Bytecode(bytes) => (
+                String::new(),
+                Some((bytes, nsh_engine::BYTECODE_VERSION.to_owned())),
+            ),
+        };
+        let manifest: PluginManifest = serde_json::from_slice(
+            &std::fs::read(plugin.join(pig_protocol::PLUGIN_MANIFEST_FILE)).expect("token stats manifest"),
+        )
+        .expect("valid token stats manifest");
+        let contents = nsh_engine::package::Contents {
+            app: nsh_engine::package::App {
+                id: manifest.id.clone(),
+                name: "Token Stats".into(),
+                version: manifest.version.clone(),
+                build: manifest.build,
+            },
+            capabilities: Some(serde_json::json!({"host": ["pig.host"]})),
+            source,
+            bytecode,
+            source_map: bundle.source_map.map(|map| map.to_string()),
+            assets: vec![(
+                pig_protocol::PLUGIN_MANIFEST_FILE.into(),
+                std::fs::read(plugin.join(pig_protocol::PLUGIN_MANIFEST_FILE)).expect("manifest bytes"),
+            )],
+            min_runtime: None,
+        };
+        let bytes = nsh_engine::package::build(&contents, &release, &certificate)
+            .expect("build signed token stats package");
+        let package_path = directory.join("token-stats.nshpkg");
+        let root_path = directory.join("root.pub");
+        std::fs::write(&package_path, bytes).expect("write token stats package");
+        std::fs::write(&root_path, root.public().to_base64()).expect("write root public key");
+        let loaded = load_verified(&package_path, &root_path, &directory.join("data"))
+            .expect("load signed token stats package");
+        assert_eq!(loaded.manifest.contributions.ui.len(), 9);
+        assert!(!loaded.manifest.contributions.is_engine_backed());
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let package_path = package_path.clone();
+            let root_path = root_path.clone();
+            let data_dir = directory.join("data");
+            workers.push(std::thread::spawn(move || {
+                for _ in 0..3 {
+                    load_verified(&package_path, &root_path, &data_dir)?;
+                }
+                Ok::<(), String>(())
+            }));
+        }
+        for worker in workers {
+            worker
+                .join()
+                .expect("concurrent verifier did not panic")
+                .expect("concurrent package verification succeeds");
+        }
+    }
 
     #[test]
     fn signed_moon_package_loads_and_wrong_root_is_refused() {

@@ -27,6 +27,7 @@ register({ uiId: "message.turnStats", component: "view", schemaVersion: 1, prese
 register({ uiId: "status.activity", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
 register({ uiId: "status.usage", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
 register({ uiId: "status.context", component: "view", schemaVersion: 1, preservedBehavior: ["children"] });
+register({ uiId: "plugin.overlay", component: "panel", schemaVersion: 1, preservedBehavior: ["children"] });
 register({ uiId: "settings.navigation", component: "navigation", schemaVersion: 1, preservedBehavior: ["items", "onNavigate"] });
 register({ uiId: "settings.content", component: "panel", schemaVersion: 1, preservedBehavior: ["children"] });
 register({ uiId: "main.panelHost", component: "panel", schemaVersion: 1, preservedBehavior: ["children", "dismiss"] });

@@ -33,6 +33,8 @@ struct SurfaceProps {
     theme: Option<String>,
     locale: Option<Locale>,
     appearance: Appearance,
+    width: f32,
+    height: f32,
 }
 
 impl Default for SurfaceProps {
@@ -42,6 +44,8 @@ impl Default for SurfaceProps {
             theme: None,
             locale: None,
             appearance: Appearance::System,
+            width: 320.0,
+            height: 240.0,
         }
     }
 }
@@ -100,6 +104,7 @@ struct PluginSurface {
     loaded: RefCell<Option<LoadedSurface>>,
     results: Arc<Mutex<Vec<LoadResult>>>,
     environment: RefCell<Option<Appearance>>,
+    applied_size: RefCell<Option<(f32, f32)>>,
 }
 
 impl PluginSurface {
@@ -132,10 +137,19 @@ impl PluginSurface {
             loaded: RefCell::new(None),
             results: Arc::new(Mutex::new(Vec::new())),
             environment: RefCell::new(None),
+            applied_size: RefCell::new(None),
         }
     }
 
     fn sync(&self) {
+        let size = {
+            let props = self.props.borrow();
+            (props.width, props.height)
+        };
+        if self.applied_size.borrow().as_ref() != Some(&size) {
+            self.context.set_size(size.0, size.1);
+            *self.applied_size.borrow_mut() = Some(size);
+        }
         self.attach();
         self.sync_host_environment();
         self.start_load();
@@ -187,7 +201,6 @@ impl PluginSurface {
         match host_api::attach(&id, view.host()) {
             Ok(mount) => {
                 self.storage.bind(&mount.descriptor.storage_dir);
-                self.context.set_size(320.0, 240.0);
                 *self.mount.borrow_mut() = Some(mount);
             }
             Err(error) => self.report_error(error),
@@ -338,6 +351,16 @@ impl NativeComponent for PluginSurface {
                     _ => Appearance::System,
                 };
             }
+            "width" => {
+                if let Some(width) = value.and_then(JsonValue::as_f64) {
+                    props.width = width as f32;
+                }
+            }
+            "height" => {
+                if let Some(height) = value.and_then(JsonValue::as_f64) {
+                    props.height = height as f32;
+                }
+            }
             _ => {}
         }
         drop(props);
@@ -410,6 +433,9 @@ mod tests {
             package_root: PathBuf::from("C:/data/packages/demo/digest/assets"),
             storage_dir: PathBuf::from("C:/data/instances/stable/nsh"),
             session_id: None,
+            turn_id: None,
+            turn_index: None,
+            display_mode: None,
         };
         let next = SurfaceDescriptor {
             revision: 2,

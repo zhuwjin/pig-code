@@ -523,6 +523,12 @@ pub const PLUGIN_HOST_API_VERSION: u32 = 1;
 pub struct PluginHostContext {
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub turn_index: Option<u64>,
+    #[serde(default)]
+    pub display_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

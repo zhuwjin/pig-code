@@ -6,7 +6,7 @@
 >
 > 本架构不依赖自定义 `cargo run` 宿主，不要求修改 NSH 源码，不手工维护 `.nsh/` 中的生成文件。插件安装、启用、禁用、更新和卸载不要求重新编译 Pig Code，也不要求重启应用。
 >
-> 当前迁移状态：共享内存 Registry 与稳定私有数据 key 已完成；Windows 已完成设置页签名插件嵌套 AppView、最小 Host API 和真实窗口视觉验收。其他宿主 UI 仍使用下述远程投影链路，直到新 Surface / UiContribution / Host API 覆盖后删除。
+> 当前迁移状态：共享内存 Registry 与稳定私有数据 key 已完成；Windows 已完成设置页签名插件嵌套 AppView、最小 Host API，以及 token-stats 状态栏/回合统计与详情 Overlay 的真实窗口验收。其他宿主 UI 仍使用下述远程投影链路，直到新 Surface / UiContribution / Host API 覆盖后删除。
 
 ## 1. 设计目标与最终决策
 
@@ -411,7 +411,16 @@ Discovered
 - `plugin.appearance` 启动参数和 `pig.host.environment` 事件同步宿主的 `system/light/dark` 模式；插件通过 NSH 的 `setColorScheme` 应用它。主题 token 由 `AppView::set_theme_overrides` 更新，不能只同步 token 而遗漏模式。
 - `nsh/storage` 不经 NSH capabilities 控制，因此 Surface 必须注入独立 `StorageBackend`，使用稳定 `PluginDataKey` 下的 `nsh/storage.json`，不能回退到系统共享目录。重载先停止旧 Engine 再切换后端，Host API 与原生 KV 都不会因 digest 更新而丢失命名空间。
 
-当前 Moon 示例为兼容旧后端仍共享入口，Surface 通过独立 `pig.host` 通道执行；后续会把可选后端入口与 Surface 入口拆开。当前只迁移设置页的两个验证 Surface，token-stats、Composer、Fragment、macOS 和 Linux 尚未迁移，旧远程 UI 主链路仍未删除。
+### 6.2.2 token-stats 的真实扩展点
+
+`kind: "surface"` 的纯声明贡献不需要后端 Engine。token-stats 在 `status.activity`、`status.usage`、`status.context` 和 `message.turnStats` 挂载摘要 Surface，在 `plugin.overlay` 声明对应详情 Surface。每个 Surface 独立订阅 Session/Usage，不再使用 RemoteDocument 或 500ms 轮询。
+
+- `navigation.open` 的 `pageId: "overlay"` 只能打开当前插件已声明的详情，并携带已声明的 `status.*` 或 `message.turnStats` anchor。宿主校验插件实例、贡献和 anchor，不允许任意坐标或跨插件目标。
+- 摘要同时是 `Popover.trigger`，由宿主按真实布局定位，状态栏向上居中，回合向上左对齐。外部点击、Escape、重复点击同一 pill、会话切换、禁用和卸载都会关闭详情并执行 disposer。
+- `turnId` 是宿主 UI 的回合身份（例如 `turn-1`），`turnIndex` 对应 core 统计中的 `PluginTurnStats.index`；统计 API 的 `t<timestamp>-N` 不直接当作宿主 `turnId` 使用。详情按 `turnIndex` 取数，按 `turnId` 做 UI 隔离。
+- Surface 的宽高由槽位决定，不能用统一的 320×240 覆盖状态栏尺寸。`displayMode` 为 `compact` 时只读摘要，为 `hidden` 时不挂载。
+
+当前 Moon 示例为兼容旧后端仍共享入口，Surface 通过独立 `pig.host` 通道执行；后续会把可选后端入口与 Surface 入口拆开。Composer、Fragment、macOS 和 Linux 尚未迁移，旧远程 UI 主链路仍未删除。
 
 ### 6.3 资源限制
 
@@ -1162,3 +1171,5 @@ nsh test --filter "signed UI plugin" --target windows
 ```
 
 单独执行平台场景前必须重建签名夹具；平台目标不会先运行对应 Rust 夹具测试，不能复用修改前的旧包。默认 headless runner 不注册原生组件，Surface 必须使用真实平台宿主验证。测试驱动的 `platform.os` 不是被测应用的平台标识，真实平台分支通过 `app.screenshot()` 的能力探测；测试驱动读取不到嵌套 AppView 内部文本，因此宿主断言、HostChannel 行为测试和真实截图共同验收，不能只等待 `ready`。Windows 场景覆盖签名安装、两个 Surface、真实 KV 写入、会话统计、主题对比度、禁用恢复和卸载，截图输出到 `target/test-tmp/moon-surface-host-api.png`；其余场景覆盖月亮按钮、远程页面、宿主焦点回执、首次 `ui.ack` 和两次提交。
+
+token-stats 使用 `nsh test --filter "renders token statistics in surfaces" --target windows` 验收摘要、会话详情和回合详情，检查 Overlay 关闭和禁用清理；对应截图为 `target/test-tmp/token-stats-summary.png`、`token-stats-activity.png`、`token-stats-usage.png` 和 `token-stats-turn.png`。

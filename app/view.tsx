@@ -154,6 +154,9 @@ function App(props: UiContext) {
     store.agent.setPluginLocale(appLocale());
   });
   effect(() => {
+    if (settingsVisible()) store.pluginOverlay.set(null);
+  });
+  effect(() => {
     const target = store.pluginNavigation();
     if (!target) return;
     if (target !== "main") settingsPage.set(target as SettingsPageId);

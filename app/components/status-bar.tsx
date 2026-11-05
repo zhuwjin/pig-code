@@ -1,7 +1,7 @@
 import { View } from "nsh";
 import type { UiContext } from "../ui-context";
-import { UiNodeFactory } from "../plugins/ui-node-factory";
 import { uiContributions } from "../plugins/ui-coordinator";
+import { PluginSurfaceSlot } from "../plugins/surface";
 
 export function StatusBar(props: UiContext) {
   const { store } = props;
@@ -9,22 +9,46 @@ export function StatusBar(props: UiContext) {
     uiContributions(
       store.pluginPackages(),
       target,
-      undefined,
+      ["surface"],
       store.pluginRuntime(),
       store.pluginDynamic(),
       store.pluginOrder(),
     ).length > 0
   );
-  const context = (mode: "activity" | "usage" | "context") => () => ({
-    sessionId: store.current(),
-    mode: store.config()?.status_bar?.[mode] ?? "detailed",
-  });
+  const mode = (key: "activity" | "usage" | "context") => store.config()?.status_bar?.[key] ?? "detailed";
   return (
     <If when={mounted()}>
-      <View class="mx-auto flex min-h-8 w-full flex-row flex-wrap items-center justify-center gap-2 px-4 pt-1" style={{ maxWidth: 860 }}>
-        <UiNodeFactory uiId="status.activity" store={store} context={context("activity")} exportName={() => "SessionActivity"} render={() => <View />} />
-        <UiNodeFactory uiId="status.usage" store={store} context={context("usage")} exportName={() => "SessionUsage"} render={() => <View />} />
-        <UiNodeFactory uiId="status.context" store={store} context={context("context")} exportName={() => "SessionContext"} render={() => <View />} />
+      <View class="absolute inset-x-0 bottom-16 z-20 mx-auto flex min-h-8 w-full flex-row flex-wrap items-center justify-center gap-2 px-4 pt-1" style={{ maxWidth: 860 }}>
+        <PluginSurfaceSlot
+          {...props}
+          target="status.activity"
+          detail="stats-activity-detail"
+          sessionId={store.current()}
+          mode={mode("activity")}
+          testID="stats-summary-SessionActivity"
+          width={220}
+          height={24}
+        />
+        <PluginSurfaceSlot
+          {...props}
+          target="status.usage"
+          detail="stats-usage-detail"
+          sessionId={store.current()}
+          mode={mode("usage")}
+          testID="stats-summary-SessionUsage"
+          width={240}
+          height={24}
+        />
+        <PluginSurfaceSlot
+          {...props}
+          target="status.context"
+          detail="stats-context-detail"
+          sessionId={store.current()}
+          mode={mode("context")}
+          testID="stats-summary-SessionContext"
+          width={100}
+          height={24}
+        />
       </View>
     </If>
   );

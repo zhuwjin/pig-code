@@ -144,6 +144,14 @@ export class AgentStore {
   readonly pluginRuntime = signal<Record<string, PluginRuntimeState>>({});
   readonly pluginOrder = signal<string[]>([]);
   readonly pluginNavigation = signal<string | null>(null);
+  readonly pluginOverlay = signal<{
+    instance: string;
+    contribution: string;
+    sessionId: string | null;
+    turnId: string | null;
+    turnIndex: number | null;
+    anchor: string;
+  } | null>(null);
   readonly pluginLogs = signal<Record<string, unknown[]>>({});
   readonly pluginUiDiagnostics = signal<Record<string, string[]>>({});
   readonly pluginThemes = signal<PluginThemeDefinition[]>([]);
@@ -223,6 +231,7 @@ export class AgentStore {
             }));
           }
         } else if (message.kind === "ui.reset") {
+          if (this.pluginOverlay()?.instance === instance) this.pluginOverlay.set(null);
           this.pluginDocuments.update((documents) => {
             const next = { ...documents };
             delete next[instance];
@@ -252,7 +261,19 @@ export class AgentStore {
         } else if (message.kind === "host.action") {
           const action = message.body as Record<string, any>;
           if (action.name === "composer.submit") this.send();
-          if (action.name === "navigation.open") this.pluginNavigation.set(action.pageId);
+          if (action.name === "navigation.open") {
+            if (action.pageId === "overlay" && typeof action.contribution === "string") {
+              this.togglePluginOverlay(
+                instance,
+                action.contribution,
+                action.anchor,
+                typeof action.turnId === "string" ? action.turnId : null,
+                typeof action.turnIndex === "number" ? action.turnIndex : null,
+              );
+            } else {
+              this.pluginNavigation.set(action.pageId);
+            }
+          }
         } else if (message.kind === "log.event") {
           this.pluginLogs.update((logs) => ({
             ...logs,
@@ -1134,6 +1155,14 @@ export class AgentStore {
     }
   }
 
+  togglePluginOverlay(instance: string, contribution: string, anchor: string, turnId: string | null, turnIndex: number | null): void {
+    const sessionId = this.current();
+    const current = this.pluginOverlay();
+    const same = current?.instance === instance && current.contribution === contribution &&
+      current.sessionId === sessionId && current.turnId === turnId && current.turnIndex === turnIndex && current.anchor === anchor;
+    this.pluginOverlay.set(same ? null : { instance, contribution, sessionId, turnId, turnIndex, anchor });
+  }
+
   reportPluginUiDiagnostics(target: string, conflicts: { winner: string; suppressed: string[] }[], rejected: { contribution: string; reason: string }[]): void {
     const diagnostics = [
       ...conflicts.map((conflict) => t("store.conflict.winner", {
@@ -1273,6 +1302,7 @@ export class AgentStore {
       }
       case "SessionConfigured": {
         this.autoOpen = false;
+        if (this.pluginOverlay()?.sessionId !== sessionId) this.pluginOverlay.set(null);
         this.current.set(sessionId);
         this.cwd.set(data.cwd);
         const cold = !this.configuredSessions.has(sessionId!);

@@ -25,6 +25,9 @@ pub struct SurfaceDescriptor {
     pub package_root: PathBuf,
     pub storage_dir: PathBuf,
     pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub turn_index: Option<u64>,
+    pub display_mode: Option<String>,
 }
 
 impl SurfaceDescriptor {
@@ -36,6 +39,12 @@ impl SurfaceDescriptor {
                 "surface": self.surface,
                 "contribution": self.contribution,
                 "revision": self.revision,
+                "context": {
+                    "sessionId": self.session_id,
+                    "turnId": self.turn_id,
+                    "turnIndex": self.turn_index,
+                    "displayMode": self.display_mode,
+                },
             }
         })
         .as_object()
@@ -197,8 +206,17 @@ impl PluginSystemManager {
         contribution: &str,
         context: PluginHostContext,
     ) -> Result<String, String> {
-        if context.session_id.as_ref().is_some_and(|id| id.len() > 256) {
-            return Err("plugin surface session id is too long".into());
+        if context.session_id.as_ref().is_some_and(|id| id.len() > 256)
+            || context.turn_id.as_ref().is_some_and(|id| id.len() > 256)
+        {
+            return Err("plugin surface business id is too long".into());
+        }
+        if context
+            .display_mode
+            .as_deref()
+            .is_some_and(|mode| !matches!(mode, "compact" | "detailed" | "hidden"))
+        {
+            return Err("invalid plugin surface display mode".into());
         }
         let descriptor = {
             let mut inner = self.inner.lock().expect("plugin manager lock");
@@ -215,7 +233,9 @@ impl PluginSystemManager {
                     .chain(plugin.package.contributions.ui.iter())
                     .find(|item| item.id == contribution)
                     .ok_or_else(|| "plugin surface contribution is not registered".to_owned())?;
-                if !capability_granted(&plugin.package, "ui.add", &declared.target) {
+                if !capability_granted(&plugin.package, "ui.add", &declared.target)
+                    && !capability_granted(&plugin.package, "ui.patch.structure", &declared.target)
+                {
                     return Err("plugin surface target is not authorized".into());
                 }
                 (
@@ -237,6 +257,9 @@ impl PluginSystemManager {
                     .expect("plugin storage parent")
                     .join("nsh"),
                 session_id: context.session_id.filter(|id| !id.is_empty()),
+                turn_id: context.turn_id.filter(|id| !id.is_empty()),
+                turn_index: context.turn_index,
+                display_mode: context.display_mode,
             };
             inner.surfaces.insert(
                 descriptor.surface.clone(),

@@ -406,7 +406,7 @@ export interface ProviderConfig {
   [key: string]: unknown;
 }
 
-export type PluginUiOperationKind = "create" | "replaceChildren" | "insertAfter" | "insertBefore" | "insertFirst" | "insertLast" | "move" | "wrap" | "remove" | "patch" | "replace" | "restore" | "page" | "panel" | "route" | "settings" | "command" | "inline" | "overlay" | "decoration";
+export type PluginUiOperationKind = "create" | "replaceChildren" | "insertAfter" | "insertBefore" | "insertFirst" | "insertLast" | "move" | "wrap" | "remove" | "patch" | "replace" | "restore" | "page" | "panel" | "route" | "settings" | "command" | "inline" | "overlay" | "decoration" | "surface";
 
 export interface PluginUiContribution {
   id: string;

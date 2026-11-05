@@ -59,10 +59,14 @@ impl PluginContributions {
 
     pub fn is_engine_backed(&self) -> bool {
         self.ui.iter().any(|item| {
-            item.export.is_some() || matches!(item.kind, PluginUiContributionKind::Command)
+            (item.export.is_some() && item.kind != PluginUiContributionKind::Surface)
+                || matches!(item.kind, PluginUiContributionKind::Command)
         }) || !self.tools.is_empty()
             || !self.commands.is_empty()
-            || self.pages.iter().any(|page| page.enabled && page.entry.ends_with(".tsx"))
+            || self
+                .pages
+                .iter()
+                .any(|page| page.enabled && page.entry.ends_with(".tsx"))
     }
 }
 
@@ -539,6 +543,7 @@ pub enum PluginUiContributionKind {
     Inline,
     Overlay,
     Decoration,
+    Surface,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

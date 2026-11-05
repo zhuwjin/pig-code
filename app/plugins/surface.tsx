@@ -1,7 +1,9 @@
 import { Text, View, effect, nativeComponent, platform, signal, type JSX } from "nsh";
+import { Popover } from "nsh/base";
 import type { Agent } from "pig-code-ts/native";
-import { t } from "../i18n";
-import { errorMessage, type PluginPackageInfo, type PluginUiContribution } from "../protocol";
+import { appLocale, t } from "../i18n";
+import { errorMessage, type PluginPackageInfo, type PluginUiContribution, type StatusBarItem } from "../protocol";
+import type { UiContext } from "../ui-context";
 import { uiContributions, type PluginRuntimeStates } from "./ui-coordinator";
 
 type SurfaceAppearance = "system" | "light" | "dark";
@@ -19,6 +21,8 @@ type NativeSurfaceProps = {
   theme: string;
   locale: string;
   appearance: SurfaceAppearance;
+  width?: number;
+  height?: number;
 };
 
 type NativeSurfaceEvents = {
@@ -27,7 +31,7 @@ type NativeSurfaceEvents = {
 };
 
 const NativeSurface = nativeComponent<NativeSurfaceProps, NativeSurfaceEvents>("pig.pluginSurface", {
-  props: ["surface", "theme", "locale", "appearance"],
+  props: ["surface", "theme", "locale", "appearance", "width", "height"],
   events: ["ready", "error"],
 });
 
@@ -37,10 +41,16 @@ export function PluginSurface(props: {
   contribution: string;
   revision: number;
   sessionId: string | null;
+  turnId?: string | null;
+  turnIndex?: number | null;
+  displayMode?: StatusBarItem;
   theme: string;
   locale: string;
   appearance: SurfaceAppearance;
   testID: string;
+  showStatus?: boolean;
+  width?: number;
+  height?: number;
 }): JSX.Element {
   const registration = signal<SurfaceRegistration | null>(null);
   const ready = signal(false);
@@ -50,6 +60,9 @@ export function PluginSurface(props: {
     const contribution = props.contribution;
     props.revision;
     const sessionId = props.sessionId;
+    const turnId = props.turnId ?? null;
+    const turnIndex = props.turnIndex ?? null;
+    const displayMode = props.displayMode;
     let mounted: SurfaceRegistration | null = null;
     let disposed = false;
     registration.set(null);
@@ -59,7 +72,7 @@ export function PluginSurface(props: {
       const next = JSON.parse(props.agent.mountPluginSurface(
         instance,
         contribution,
-        JSON.stringify({ sessionId }),
+        JSON.stringify({ sessionId, turnId, turnIndex, displayMode }),
       )) as SurfaceRegistration;
       if (disposed) {
         props.agent.unmountPluginSurface(next.surface);
@@ -76,8 +89,8 @@ export function PluginSurface(props: {
     };
   });
   return (
-    <View class="min-h-0 flex-1">
-      <If when={ready()}>
+    <View testID={props.testID} class="min-h-0 flex-1">
+      <If when={props.showStatus === true && ready()}>
         <Text testID={`${props.testID}-ready`} class="text-xs text-muted-foreground">
           {t("plugins.surface.ready")}
         </Text>
@@ -88,6 +101,8 @@ export function PluginSurface(props: {
           theme={props.theme}
           locale={props.locale}
           appearance={props.appearance}
+          width={props.width}
+          height={props.height}
           class="min-h-0 flex-1"
           onReady={(event) => {
             if (event.surface !== registration()?.surface) return;
@@ -101,6 +116,114 @@ export function PluginSurface(props: {
         />
       ) : null}
     </View>
+  );
+}
+
+export function PluginSurfaceSlot(props: UiContext & {
+  target: string;
+  sessionId: string | null;
+  turnId?: string | null;
+  turnIndex?: number | null;
+  detail?: string | string[];
+  align?: "start" | "center" | "end";
+  mode?: StatusBarItem;
+  testID?: string;
+  width: number;
+  height: number;
+}): JSX.Element {
+  if (props.mode === "hidden") return <View />;
+  const { store, themeStore } = props;
+  const entries = () => uiContributions(
+    store.pluginPackages(),
+    props.target,
+    ["surface"],
+    store.pluginRuntime(),
+    store.pluginDynamic(),
+    store.pluginOrder(),
+  );
+  const details = () => Array.isArray(props.detail) ? props.detail : props.detail ? [props.detail] : [];
+  const current = () => {
+    const overlay = store.pluginOverlay();
+    return overlay && overlay.anchor === props.target && overlay.sessionId === props.sessionId &&
+      overlay.turnId === (props.turnId ?? null) && overlay.turnIndex === (props.turnIndex ?? null) &&
+      details().includes(overlay.contribution)
+      ? overlay
+      : null;
+  };
+  return (
+    <Each of={entries()} key={(entry) => `${entry.instance}:${entry.contribution.id}:${props.turnId ?? ""}`}>
+      {(entry) => {
+        const { pkg, instance, contribution } = entry();
+        const surfaceTestID = `plugin-surface-${instance}-${contribution.id}`;
+        const summary = (
+          <View
+            testID={props.testID ?? surfaceTestID}
+            role={details().length > 0 ? "button" : undefined}
+            accessibilityLabel={details().length > 0 ? pkg.name : undefined}
+            onPress={details().length > 0 ? () => store.togglePluginOverlay(
+              instance,
+              details()[0],
+              props.target,
+              props.turnId ?? null,
+              props.turnIndex ?? null,
+            ) : undefined}
+            class="min-h-0 flex-1"
+            style={{ width: props.width, height: props.height }}
+          >
+            <PluginSurface
+              agent={store.agent}
+              testID={surfaceTestID}
+              instance={instance}
+              contribution={contribution.id}
+              revision={store.pluginRuntime()[instance]?.generation ?? 1}
+              sessionId={props.sessionId}
+              turnId={props.turnId}
+              turnIndex={props.turnIndex}
+              displayMode={props.mode}
+              theme={themeStore.serialized()}
+              locale={appLocale()}
+              appearance={themeStore.mode()}
+              width={props.width}
+              height={props.height}
+            />
+          </View>
+        );
+        return (
+          <If when={current()} else={summary}>
+            <Popover
+              testID={`plugin-overlay-${contribution.id}`}
+              open={current() !== null}
+              onOpenChange={({ open }) => {
+                if (!open && current()) store.pluginOverlay.set(null);
+              }}
+              placement="top"
+              align={props.align ?? "center"}
+              popupClass="w-72 rounded-xl border border-border bg-popover p-0 shadow-xl"
+              trigger={summary}
+            >
+              <View testID="plugin-overlay" style={{ width: 288, height: 320 }}>
+                <PluginSurface
+                  agent={store.agent}
+                  testID={`plugin-detail-${current()!.contribution}`}
+                  instance={instance}
+                  contribution={current()!.contribution}
+                  revision={store.pluginRuntime()[instance]?.generation ?? 1}
+                  sessionId={props.sessionId}
+                  turnId={props.turnId}
+                  turnIndex={props.turnIndex}
+                  displayMode="detailed"
+                  theme={themeStore.serialized()}
+                  locale={appLocale()}
+                  appearance={themeStore.mode()}
+                  width={288}
+                  height={320}
+                />
+              </View>
+            </Popover>
+          </If>
+        );
+      }}
+    </Each>
   );
 }
 
@@ -146,6 +269,7 @@ export function PluginSurfacePages(props: {
               theme={props.theme}
               locale={props.locale}
               appearance={props.appearance}
+              showStatus={true}
             />
           </View>
         );
