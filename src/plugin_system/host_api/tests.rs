@@ -74,20 +74,11 @@ fn fixture() -> Fixture {
         PluginSystemManager::new(directory.clone(), ops_tx, PathBuf::from("C:/workspace"));
     let ui: PluginUiContribution = serde_json::from_value(json!({
         "id": CONTRIBUTION,
-        "kind": "settings",
-        "target": "settings",
-    }))
-    .unwrap();
-    let stats_summary: PluginUiContribution = serde_json::from_value(json!({
-        "id": "stats-activity",
-        "kind": "surface",
-        "target": "status.activity",
-    }))
-    .unwrap();
-    let stats_detail: PluginUiContribution = serde_json::from_value(json!({
-        "id": "stats-activity-detail",
-        "kind": "surface",
-        "target": "plugin.overlay",
+        "slot": "status",
+        "kind": "popover",
+        "label": {"en": "Panel"},
+        "surface": "Panel",
+        "choices": [],
     }))
     .unwrap();
     let package = PluginPackageInfo {
@@ -99,18 +90,16 @@ fn fixture() -> Fixture {
         root: directory.join("assets"),
         source: PluginSource::User,
         enabled: true,
+        ui_entry: Some("App.tsx".into()),
+        backend: None,
         contributions: PluginContributions {
-            ui: vec![ui, stats_summary, stats_detail],
+            ui: vec![ui],
             ..PluginContributions::default()
         },
         capabilities: vec![
             PluginCapabilityRequest {
                 name: "ui.add".into(),
-                targets: vec!["settings".into()],
-            },
-            PluginCapabilityRequest {
-                name: "ui.patch.structure".into(),
-                targets: vec!["status.activity".into(), "plugin.overlay".into()],
+                targets: vec!["status".into()],
             },
             PluginCapabilityRequest {
                 name: "session.read".into(),
@@ -118,7 +107,7 @@ fn fixture() -> Fixture {
             },
             PluginCapabilityRequest {
                 name: "navigation.open".into(),
-                targets: vec!["main".into(), "overlay".into()],
+                targets: vec!["main".into()],
             },
         ],
     };
@@ -156,8 +145,6 @@ fn mount_client_with_revision(
                 PluginHostContext {
                     session_id: Some(session.into()),
                     turn_id: None,
-                    turn_index: None,
-                    display_mode: None,
                 },
             )
             .expect("mount Surface"),
@@ -399,16 +386,7 @@ fn storage_navigation_and_stale_identity_use_the_same_surface_contract() {
             ("storage.write", json!({"owner": "surface"}), "write-value"),
             ("storage.read", json!(null), "read-after"),
             ("navigation.open", json!({"pageId": "main"}), "navigate"),
-            (
-                "navigation.open",
-                json!({
-                    "pageId": "overlay",
-                    "contribution": "stats-activity-detail",
-                    "anchor": "status.activity",
-                    "turnIndex": 0,
-                }),
-                "open-overlay",
-            ),
+            ("overlay.close", json!(null), "close-overlay"),
         ],
     );
     assert_eq!(client.next()["result"]["Ok"], JsonValue::Null);
@@ -420,12 +398,10 @@ fn storage_navigation_and_stale_identity_use_the_same_surface_contract() {
     let action: JsonValue = serde_json::from_str(&receive(&fixture.manager.events())).unwrap();
     assert_eq!(action["kind"], "host.action");
     assert_eq!(action["body"]["pageId"], "main");
-    assert_eq!(client.next()["result"]["Ok"]["pageId"], "overlay");
+    assert_eq!(client.next()["result"]["Ok"], JsonValue::Null);
     let overlay: JsonValue = serde_json::from_str(&receive(&fixture.manager.events())).unwrap();
-    assert_eq!(overlay["body"]["pageId"], "overlay");
-    assert_eq!(overlay["body"]["contribution"], "stats-activity-detail");
-    assert_eq!(overlay["body"]["anchor"], "status.activity");
-    assert_eq!(overlay["body"]["turnIndex"], 0);
+    assert_eq!(overlay["body"]["name"], "overlay.close");
+    assert_eq!(overlay["body"]["surface"], client.descriptor.surface);
 
     let stale = mount_client_with_revision(
         &fixture,

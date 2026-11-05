@@ -195,8 +195,6 @@ function ThemePackageRow(props: {
               <Text class="text-[10px] text-muted-foreground">
                 {t("settings.plugins.metrics.resources", {
                   epoch: runtime()?.epoch ?? 0,
-                  nodes: runtime()?.metrics?.nodes ?? 0,
-                  operations: runtime()?.metrics?.operations ?? 0,
                   requests: runtime()?.metrics?.pendingRequests ?? 0,
                   queue: runtime()?.metrics?.queueDepth ?? 0,
                 })}

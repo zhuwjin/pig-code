@@ -466,34 +466,6 @@ pub struct AppConfig {
     /// Windows-specific execution settings (see WindowsConfig)
     #[serde(default)]
     pub windows: WindowsConfig,
-    /// Composer status-bar items (see StatusBarConfig)
-    #[serde(default)]
-    pub status_bar: StatusBarConfig,
-}
-
-/// How one composer status-bar item is displayed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StatusBarItem {
-    /// Plain reading without a click dialog (dsh's compact performance view)
-    Compact,
-    /// Richer reading whose click opens the item's panel (dsh's detailed view)
-    #[default]
-    Detailed,
-    /// Not rendered
-    Hidden,
-}
-
-/// Composer status-bar preferences: the session-activity pill, the token-usage
-/// pill and the context watermark can each be compact, detailed or hidden.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusBarConfig {
-    #[serde(default)]
-    pub activity: StatusBarItem,
-    #[serde(default)]
-    pub usage: StatusBarItem,
-    #[serde(default)]
-    pub context: StatusBarItem,
 }
 
 impl AppConfig {
@@ -1005,36 +977,6 @@ mod windows_config_tests {
                 .sandbox_network,
             WindowsSandboxNetworkChoice::Allow
         );
-    }
-}
-
-#[cfg(test)]
-mod status_bar_config_tests {
-    use super::*;
-
-    fn parse(status_bar: &str) -> AppConfig {
-        let json = format!(
-            r#"{{"providers":[],"default_provider":"","default_model":"","status_bar":{{{status_bar}}}}}"#
-        );
-        serde_json::from_str(&json).expect("status bar config parses")
-    }
-
-    #[test]
-    fn defaults_are_detailed_and_legacy_configs_parse() {
-        let config: AppConfig =
-            serde_json::from_str(r#"{"providers":[],"default_provider":"","default_model":""}"#)
-                .expect("legacy config parses");
-        assert_eq!(config.status_bar.activity, StatusBarItem::Detailed);
-        assert_eq!(config.status_bar.usage, StatusBarItem::Detailed);
-        assert_eq!(config.status_bar.context, StatusBarItem::Detailed);
-    }
-
-    #[test]
-    fn items_parse_independently() {
-        let config = parse(r#""usage":"compact","context":"hidden""#);
-        assert_eq!(config.status_bar.activity, StatusBarItem::Detailed);
-        assert_eq!(config.status_bar.usage, StatusBarItem::Compact);
-        assert_eq!(config.status_bar.context, StatusBarItem::Hidden);
     }
 }
 

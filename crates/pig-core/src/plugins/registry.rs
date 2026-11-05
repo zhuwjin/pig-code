@@ -165,6 +165,11 @@ impl PluginRegistry {
                 "a disabled plugin cannot register contributions",
             ));
         }
+        if !contributions.pages.is_empty() || !contributions.ui.is_empty() {
+            return Err(manifest(
+                "pages and UI contributions must be declared in the manifest",
+            ));
+        }
         if !contributions.credentials.is_empty()
             || !contributions.http.is_empty()
             || !contributions.actions.is_empty()
@@ -208,13 +213,41 @@ impl PluginRegistry {
         let identity = package_manifest.id.clone();
         let name = package_manifest.name.fallback();
         let version = package_manifest.version;
-        let entry = package_manifest.entry;
+        let ui_entry = package_manifest.ui_entry;
+        let backend = package_manifest.backend;
         let contributions = package_manifest.contributions;
         let capabilities = package_manifest.capabilities;
         if name.trim().is_empty() || version.trim().is_empty() {
             return Err(manifest("plugin name and version must not be empty"));
         }
-        relative_file(&entry)?;
+        if let Some(entry) = &ui_entry {
+            relative_file(entry)?;
+        }
+        if let Some(entry) = &backend {
+            relative_file(entry)?;
+        }
+        if !contributions.pages.is_empty() && ui_entry.is_none()
+            || contributions.ui.iter().any(|item| item.surface.is_some()) && ui_entry.is_none()
+        {
+            return Err(manifest("Surface contributions require uiEntry"));
+        }
+        if backend.is_none()
+            && (!contributions.tools.is_empty()
+                || !contributions.commands.is_empty()
+                || contributions.ui.iter().any(|item| {
+                    matches!(
+                        item.kind,
+                        pig_protocol::PluginUiKind::Button
+                            | pig_protocol::PluginUiKind::Toggle
+                            | pig_protocol::PluginUiKind::Select
+                            | pig_protocol::PluginUiKind::Menu
+                    )
+                }))
+        {
+            return Err(manifest(
+                "interactive UI, tools and commands require a backend",
+            ));
+        }
         self.validate_source(&root, &identity, &source.source)?;
         validate_contributions(&root, &contributions)?;
         validate_ui_contributions(&contributions, &capabilities)?;
@@ -234,6 +267,8 @@ impl PluginRegistry {
             root,
             source: source.source.clone(),
             enabled: false,
+            ui_entry,
+            backend,
             contributions,
             capabilities,
         })
@@ -717,9 +752,12 @@ fn validate_contributions(
     let mut ids = BTreeSet::new();
     for page in &contributions.pages {
         validate_id(&page.id)?;
-        relative_file(&page.entry)?;
-        if !ids.insert(page.id.clone()) {
-            return Err(manifest(format!("duplicate page id `{}`", page.id)));
+        validate_component(&page.surface)?;
+        if page.title.is_empty() || !ids.insert(page.id.clone()) {
+            return Err(manifest(format!(
+                "duplicate or untitled page `{}`",
+                page.id
+            )));
         }
     }
     if !contributions.themes.is_empty()
@@ -895,75 +933,66 @@ fn validate_ui_contributions(
     contributions: &PluginContributions,
     capabilities: &[pig_protocol::PluginCapabilityRequest],
 ) -> Result<(), CoreError> {
+    use pig_protocol::{PluginUiKind, PluginUiSlot};
+
     let mut ids = BTreeSet::new();
     for contribution in &contributions.ui {
         validate_id(&contribution.id)?;
-        if !ids.insert(&contribution.id) {
+        if !ids.insert(&contribution.id) || contribution.label.is_empty() {
             return Err(manifest(format!(
-                "duplicate UI contribution `{}`",
+                "duplicate or untitled UI contribution `{}`",
                 contribution.id
             )));
         }
-        if [
-            "approval.",
-            "security.",
-            "credentials.",
-            "plugins.",
-            "plugin.manager",
-        ]
-        .iter()
-        .any(|prefix| contribution.target.starts_with(prefix))
-        {
-            return Err(permission("protected UI cannot be modified by a plugin"));
-        }
-        use pig_protocol::PluginUiContributionKind as Kind;
-        let page = matches!(
-            contribution.kind,
-            Kind::Page
-                | Kind::Panel
-                | Kind::Route
-                | Kind::Settings
-                | Kind::Command
-                | Kind::Overlay
-                | Kind::Decoration
-        );
-        let interaction = !contribution.props.is_empty()
-            && contribution
-                .props
-                .keys()
-                .any(|key| key.starts_with("on") || key == "disabled" || key == "focusable");
-        let capability = if page {
-            "ui.add"
-        } else if interaction {
-            "ui.interact"
-        } else if matches!(contribution.kind, Kind::Patch) {
-            "ui.patch.style"
-        } else {
-            "ui.patch.structure"
+        let slot = match contribution.slot {
+            PluginUiSlot::Status => "status",
+            PluginUiSlot::Composer => "composer",
+            PluginUiSlot::Message => "message",
         };
-        let granted = capabilities.iter().any(|item| {
-            item.name == capability
-                && (item.targets.iter().any(|target| target == "*")
-                    || item.targets.contains(&contribution.target))
-        });
-        if !granted {
+        if !capabilities.iter().any(|item| {
+            item.name == "ui.add"
+                && item
+                    .targets
+                    .iter()
+                    .any(|target| target == "*" || target == slot)
+        }) {
             return Err(permission(format!(
-                "UI contribution `{}` requires {capability} for `{}`",
-                contribution.id, contribution.target
+                "UI contribution `{}` requires ui.add for `{slot}`",
+                contribution.id
             )));
         }
-        if matches!(contribution.kind, Kind::Move) && contribution.move_target.is_none() {
-            return Err(manifest("a move contribution requires moveTarget"));
-        }
-        if contribution
-            .preserve
-            .iter()
-            .any(|property| property.starts_with("on") && capability != "ui.interact")
-            && !matches!(capability, "ui.patch.structure")
+        if matches!(
+            contribution.kind,
+            PluginUiKind::Popover | PluginUiKind::Dialog
+        ) && contribution.surface.as_deref().is_none_or(str::is_empty)
         {
-            return Err(permission(
-                "preserving host behavior requires structure permission",
-            ));
+            return Err(manifest(format!(
+                "overlay contribution `{}` requires a Surface",
+                contribution.id
+            )));
+        }
+        if let Some(surface) = &contribution.surface {
+            validate_component(surface)?;
+        }
+        if !matches!(
+            contribution.kind,
+            PluginUiKind::Popover | PluginUiKind::Dialog
+        ) && contribution.surface.is_some()
+        {
+            return Err(manifest(format!(
+                "UI contribution `{}` cannot attach a Surface to this control",
+                contribution.id
+            )));
+        }
+        let mut choice_ids = BTreeSet::new();
+        for choice in &contribution.choices {
+            validate_id(&choice.id)?;
+            if !choice_ids.insert(&choice.id) || choice.label.is_empty() {
+                return Err(manifest(format!(
+                    "duplicate or untitled choice `{}`",
+                    choice.id
+                )));
+            }
         }
     }
     if !contributions.commands.is_empty()
@@ -1060,6 +1089,16 @@ pub(crate) fn validate_id(id: &str) -> Result<(), CoreError> {
         })
     {
         return Err(manifest(format!("invalid plugin contribution id `{id}`")));
+    }
+    Ok(())
+}
+
+fn validate_component(component: &str) -> Result<(), CoreError> {
+    let mut bytes = component.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(manifest(format!("invalid Surface component `{component}`")));
     }
     Ok(())
 }

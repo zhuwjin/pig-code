@@ -16,3 +16,8 @@ fn native(registry: &mut Registry) {
 fn components(components: &nsh_platform_windows::Components) {
     plugin_system::surface::register(components);
 }
+
+#[native_components(macos)]
+fn components(components: &nsh_platform_macos::Components) {
+    plugin_system::surface::register(components);
+}

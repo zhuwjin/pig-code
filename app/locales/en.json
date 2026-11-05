@@ -250,7 +250,7 @@
         "disabled": "Disabled"
       },
       "metrics": {
-        "resources": "epoch {epoch} · Nodes {nodes} · Ops {operations} · Requests {requests} · Queue {queue}",
+        "resources": "epoch {epoch} · Requests {requests} · Queue {queue}",
         "network": "Network {network} B · Storage {storage} B · Timeout {timeout} · Cancelled {cancelled} · Dropped {dropped}"
       },
       "retry": "Retry",
@@ -375,15 +375,8 @@
   },
   "plugins": {
     "surface": {
-      "ready": "Loaded"
-    },
-    "no_renderable": "Plugin contribution {id} has no renderable content",
-    "remote": {
-      "cycle": "The remote UI has a circular reference",
-      "unresolved_resource": "Cannot resolve signed resource: {source}",
-      "not_ready": "Plugin output is not ready yet",
-      "missing_export": "Plugin does not provide export {name}",
-      "missing_view": "Plugin does not provide this view"
+      "loading": "Loading plugin",
+      "unsupported": "Plugin surfaces are not available on this platform"
     }
   },
   "conversation": {
@@ -433,10 +426,6 @@
       "unknown": "Unknown error",
       "stop_turn_first": "Stop the current turn before running this command.",
       "send_first": "Send a message to create a session first."
-    },
-    "conflict": {
-      "winner": "{target}: {winner} wins, suppressing {suppressed}",
-      "rejected": "{target}: {contribution} rejected ({reason})"
     },
     "current_session": "Current session",
     "compacting": "Compacting context..."

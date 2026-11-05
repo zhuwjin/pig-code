@@ -13,6 +13,8 @@ import { RightPanel } from "./components/right-panel";
 import { TerminalPanel } from "./components/terminal-panel";
 import { SearchPopup } from "./components/search-popup";
 import { SettingsPage, type SettingsPageId } from "./components/settings/settings-page";
+import { pluginPages } from "./plugins/ui-coordinator";
+import { pluginPageKey } from "./plugins/pages";
 
 Window.setTitle("Pig Code");
 Window.setTitleBar({ style: "hidden", height: 44 });
@@ -159,8 +161,29 @@ function App(props: UiContext) {
   effect(() => {
     const target = store.pluginNavigation();
     if (!target) return;
-    if (target !== "main") settingsPage.set(target as SettingsPageId);
-    settingsVisible.set(target !== "main");
+    const page = target.instance ? pluginPages(
+      store.pluginPackages(),
+      "workspace",
+      store.pluginRuntime(),
+      store.pluginOrder(),
+    ).find((entry) => entry.instance === target.instance &&
+      (entry.page.id === target.pageId || `${entry.pkg.id}/${entry.page.id}` === target.pageId)) : undefined;
+    if (page) {
+      store.activePluginPage.set({ instance: page.instance, pageId: page.page.id });
+      settingsVisible.set(false);
+    } else {
+      store.activePluginPage.set(null);
+      const pluginSettings = target.instance ? pluginPages(
+        store.pluginPackages(),
+        "settings",
+        store.pluginRuntime(),
+        store.pluginOrder(),
+      ).find((entry) => entry.instance === target.instance &&
+        (entry.page.id === target.pageId || `${entry.pkg.id}/${entry.page.id}` === target.pageId)) : undefined;
+      if (pluginSettings) settingsPage.set(pluginPageKey(pluginSettings));
+      else if (target.pageId !== "main") settingsPage.set(target.pageId);
+      settingsVisible.set(target.pageId !== "main");
+    }
     store.pluginNavigation.set(null);
   });
   effect(() => {

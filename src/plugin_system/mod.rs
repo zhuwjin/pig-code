@@ -2,9 +2,8 @@ pub(crate) mod host_api;
 mod loader;
 mod manager;
 pub mod marketplace;
-mod mount_projector;
 mod services;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod surface;
 
 pub use loader::installed_sources;

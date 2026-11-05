@@ -7,7 +7,8 @@
   },
   "version": "1.0.0",
   "build": 1,
-  "entry": "App.tsx",
+  "uiEntry": "App.tsx",
+  "backend": "backend.ts",
   "minHostVersion": "1.0.0",
   "protocols": {
     "ui": 1,
@@ -15,20 +16,8 @@
   },
   "capabilities": [
     {
-      "name": "ui.patch.structure",
-      "targets": ["composer.sendButton"]
-    },
-    {
       "name": "ui.add",
-      "targets": ["main", "settings"]
-    },
-    {
-      "name": "ui.interact",
-      "targets": ["composer.input"]
-    },
-    {
-      "name": "composer.submit",
-      "targets": ["*"]
+      "targets": ["status", "composer", "settings", "workspace"]
     },
     {
       "name": "tools.provide",
@@ -41,48 +30,69 @@
     {
       "name": "navigation.open",
       "targets": ["main"]
+    },
+    {
+      "name": "composer.submit",
+      "targets": ["*"]
     }
   ],
   "contributions": {
     "api_version": 1,
     "description": {
-      "zh-CN": "修改发送按钮并添加远程界面",
-      "en": "Customize the send button and add remote UI"
+      "zh-CN": "演示声明式槽位、页面和 Surface 弹层",
+      "en": "Demonstrates declarative slots, pages and Surface overlays"
     },
+    "pages": [
+      {
+        "id": "moon-page",
+        "surface": "MoonPage",
+        "title": { "en": "Moon", "zh-CN": "月亮" },
+        "kind": "workspace",
+        "icon": "moon",
+        "order": 10
+      },
+      {
+        "id": "moon-settings",
+        "surface": "MoonSettings",
+        "title": { "en": "Moon", "zh-CN": "月亮" },
+        "kind": "settings",
+        "icon": "moon",
+        "order": 10
+      }
+    ],
     "ui": [
       {
-        "id": "moon-send-button",
-        "kind": "replaceChildren",
-        "target": "composer.sendButton",
+        "id": "moon-metric",
+        "slot": "status",
+        "kind": "metric",
+        "label": { "en": "Moon", "zh-CN": "月亮" },
         "icon": "moon",
-        "preserve": ["onPress", "disabled", "accessibilityLabel", "testID"]
+        "order": 0
       },
       {
-        "id": "moon-panel",
-        "kind": "panel",
-        "target": "main",
-        "export": "MoonPanel",
-        "preserve": []
+        "id": "moon-popover",
+        "slot": "status",
+        "kind": "popover",
+        "label": { "en": "Moon details", "zh-CN": "月亮详情" },
+        "icon": "activity",
+        "surface": "MoonPopover",
+        "width": 320,
+        "height": 240,
+        "order": 10
       },
       {
-        "id": "moon-surface-panel",
-        "kind": "settings",
-        "target": "settings",
-        "export": "MoonPanel",
-        "preserve": []
-      },
-      {
-        "id": "moon-surface-secondary",
-        "kind": "settings",
-        "target": "settings",
-        "export": "MoonPanel",
-        "preserve": []
+        "id": "moon-action",
+        "slot": "composer",
+        "kind": "button",
+        "label": { "en": "Submit with Moon", "zh-CN": "通过月亮提交" },
+        "icon": "moon",
+        "order": 10
       }
     ],
     "tools": [
       {
         "name": "MoonEcho",
-        "description": "Returns the supplied text through the remote plugin engine",
+        "description": "Returns the supplied text through the plugin backend",
         "parameters": {
           "type": "object",
           "properties": {

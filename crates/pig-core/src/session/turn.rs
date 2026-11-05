@@ -2992,7 +2992,7 @@ mod tests {
               "name": "Demo",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
+              "backend": "backend.ts",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],

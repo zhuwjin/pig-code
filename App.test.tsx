@@ -242,63 +242,56 @@ test("runs a real shell in the terminal panel", async () => {
   await app.waitFor("id:terminal-panel", { state: "gone" });
 });
 
-test("installs a signed UI plugin and restores the host on disable", async () => {
+test("installs declarative controls and Surface pages and cleans them on disable", async () => {
   const app = await openApp();
-  await app.waitFor("id:composer-input");
   await app.type("id:composer-input", "MOON_SURFACE_SESSION");
-  await app.waitUntil(() => app.enabled("id:send-button"), { timeout: 10000 });
   await app.press("id:send-button");
-  await app.waitFor("text:/MOON_SURFACE_SESSION/", { timeout: 10000 });
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
-  await app.press("id:title-theme-settings");
-  await app.waitFor("id:settings-plugins");
-  await app.press("id:settings-plugins");
-  await app.waitFor("id:plugin-package-path");
-  await app.type("id:plugin-package-path", "target/test-tmp/moon-plugin/moon.nshpkg");
-  await app.type("id:plugin-root-path", "target/test-tmp/moon-plugin/root.pub");
-  expect(app.value("id:plugin-package-path")).toBe("target/test-tmp/moon-plugin/moon.nshpkg");
-  expect(app.value("id:plugin-root-path")).toBe("target/test-tmp/moon-plugin/root.pub");
-  expect(app.enabled("id:plugin-install")).toBe(true);
-  await app.press("id:plugin-install");
-  await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
-  await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  if (app.texts().includes("已停用")) {
-    await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  }
-  await app.waitFor("text:active", { timeout: 10000 });
+  await installMoon(app);
+  await app.waitFor("id:plugin-status-com.pigcodets.plugins.moon-moon-metric", { timeout: 10000 });
+  await app.waitFor("text:Moon 0");
+
+  await app.press("id:workspace-plugin-com.pigcodets.plugins.moon-moon-page");
+  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-page", { timeout: 10000 });
   if (await realPlatform(app)) {
-    await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-surface-panel", { timeout: 10000 });
-    await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-surface-secondary", { timeout: 10000 });
-    await app.waitUntil(() => app.count("text:已加载") === 2, { timeout: 10000 });
-    await app.waitFor("text:/存储 [1-9][0-9]* B/", { timeout: 10000 });
-    const screenshot = await app.screenshot("target/test-tmp/moon-surface-host-api.png");
-    expect(screenshot.length).toBeGreaterThan(10000);
+    await app.screenshot("target/test-tmp/moon-workspace-surface.png");
   }
-  await app.press("id:settings-back");
-  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { timeout: 10000 });
-  await app.waitFor("id:plugin-send-icon");
-  await app.waitFor("text:Moon engine is running", { timeout: 10000 });
-  await app.waitFor("text:/UI ack [1-9]/", { timeout: 10000 });
-  await app.waitFor("text:Dynamic moon note");
+
+  await app.press("id:new-task");
   await app.type("id:composer-input", "MOON_BUTTON_SUBMIT");
-  await app.waitFor("text:Host focus received", { timeout: 10000 });
-  await app.press("id:send-button");
-  await app.waitFor("text:/MOON_BUTTON_SUBMIT/", { timeout: 10000 });
-  await app.press("id:moon-submit");
-  await app.type("id:composer-input", "MOON_REMOTE_SUBMIT");
-  await app.press("id:moon-submit");
-  await app.waitFor("text:/MOON_REMOTE_SUBMIT/", { timeout: 10000 });
+  await app.press("id:plugin-composer-com.pigcodets.plugins.moon-moon-action");
+  await app.waitFor("text:/MOON_BUTTON_SUBMIT/", { timeout: 20000 });
+  await app.waitFor("text:Moon 1");
+  await app.press("id:plugin-status-com.pigcodets.plugins.moon-moon-metric");
+  await app.waitFor("text:Submissions");
+  if (await realPlatform(app)) {
+    await app.screenshot("target/test-tmp/moon-host-popover.png");
+  }
+  await app.press("id:plugin-status-com.pigcodets.plugins.moon-moon-metric");
+  await app.press("id:plugin-status-com.pigcodets.plugins.moon-moon-popover");
+  const loading = "id:plugin-surface-com.pigcodets.plugins.moon-moon-popover-loading";
+  await app.waitFor("id:plugin-surface-com.pigcodets.plugins.moon-moon-popover");
+  if (await realPlatform(app)) {
+    await app.waitFor(loading, { state: "gone", timeout: 10000 });
+    await app.wait(500);
+    await app.screenshot("target/test-tmp/moon-popover-open.png");
+    await app.keyboard.press("escape");
+  } else {
+    await app.press("id:plugin-status-com.pigcodets.plugins.moon-moon-popover");
+  }
+  await app.waitFor("text:Closed 1");
+  if (await realPlatform(app)) {
+    await app.screenshot("target/test-tmp/moon-popover-closed.png");
+  }
+
   await app.press("id:title-theme-settings");
-  expect(app.count("id:theme-option-moon")).toBe(1);
+  await app.press("id:settings-plugin-com.pigcodets.plugins.moon-moon-settings");
+  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-settings", { timeout: 10000 });
   await app.press("id:settings-plugins");
   await app.press("id:theme-package-com.pigcodets.plugins.moon");
-  if (await realPlatform(app)) {
-    await app.waitFor("text:已加载", { state: "gone" });
-    await app.waitFor("text:/存储 0 B/", { timeout: 10000 });
-  }
   await app.press("id:settings-back");
-  await app.waitFor("id:plugin-send-icon", { state: "gone" });
-  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-panel", { state: "gone" });
+  await app.waitFor("id:plugin-status-com.pigcodets.plugins.moon-moon-metric", { state: "gone" });
+  await app.waitFor("id:plugin-composer-com.pigcodets.plugins.moon-moon-action", { state: "gone" });
   await app.press("id:title-theme-settings");
   await app.press("id:settings-plugins");
   await app.press("id:plugin-uninstall-com.pigcodets.plugins.moon");

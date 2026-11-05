@@ -1,21 +1,25 @@
 import { Canvas, Clipboard, Easing, List, Text, View, createAnimatedValue, effect, platform, signal, token } from "nsh";
 import { Button, ContextMenu, Input, Menu, MenuItem, MenuSeparator } from "nsh/base";
 import { titleBar } from "nsh/desktop";
-import { appLocale, t } from "../i18n";
+import { t } from "../i18n";
 import type { SessionMeta } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
-import { Icon } from "./icon";
+import { Icon, isIconName, type IconName } from "./icon";
 import { SETTINGS_PAGES, type SettingsPageId } from "./settings/settings-page";
-import { PluginSurfacePages } from "../plugins/surface";
-import { UiView } from "../plugins/ui-node-factory";
+import { pluginPages } from "../plugins/ui-coordinator";
+import { pluginPageKey, pluginPageTitle } from "../plugins/pages";
 
 const WORKSPACE_PAGE_SIZE = 5;
 const workspaceExpanded = signal(true);
 const workspaceShown = signal(WORKSPACE_PAGE_SIZE);
 const workspacePageOpen = signal(false);
 const sidebarView = signal<"workspace" | "flat">("workspace");
+
+function pageIcon(icon: string | null | undefined, fallback: IconName): IconName {
+  return icon && isIconName(icon) ? icon : fallback;
+}
 
 export function formatSessionTime(updatedAt: number, nowSeconds = Math.floor(Date.now() / 1000)): string {
   const diff = Math.max(0, Math.floor(nowSeconds - updatedAt));
@@ -190,6 +194,8 @@ export function Sidebar(props: UiContext & {
   const renameValue = signal("");
   const workspaceMeta = () => store.workspaces().find((workspace) => workspace.path === store.cwd());
   const currentWorkspaceName = () => workspaceMeta()?.alias || workspaceName(store.cwd());
+  const workspacePages = () => pluginPages(store.pluginPackages(), "workspace", store.pluginRuntime(), store.pluginOrder());
+  const settingsPluginPages = () => pluginPages(store.pluginPackages(), "settings", store.pluginRuntime(), store.pluginOrder());
   const workspaceHidden = () => workspaceMeta()?.hidden ?? false;
   const startRename = (kind: "workspace" | "session", id: string, value: string) => {
     renaming.set({ kind, id });
@@ -492,6 +498,19 @@ export function Sidebar(props: UiContext & {
               </Text>
             </View>
           </Button>
+          <Each of={workspacePages()} key={(entry) => pluginPageKey(entry)}>
+            {(entry) => (
+              <Button
+                testID={`workspace-plugin-${entry().pkg.id}-${entry().page.id}`}
+                selected={store.activePluginPage()?.instance === entry().instance && store.activePluginPage()?.pageId === entry().page.id}
+                class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-sidebar-accent selected:bg-sidebar-accent"
+                onPress={() => store.activePluginPage.set({ instance: entry().instance, pageId: entry().page.id })}
+              >
+                <Icon name={pageIcon(entry().page.icon, "panel-left")} size={15} />
+                <Text class="text-sm text-sidebar-foreground">{pluginPageTitle(entry())}</Text>
+              </Button>
+            )}
+          </Each>
         </View>
       </If>
       <If when={props.mode === "workspace"}>
@@ -617,12 +636,7 @@ export function Sidebar(props: UiContext & {
         </List>
       </If>
       <If when={props.mode === "settings"}>
-        <UiView
-          uiId="settings.navigation"
-          store={store}
-          testID="settings-navigation"
-          class="flex-1"
-        >
+        <View testID="settings-navigation" class="flex-1">
           <View class="gap-1 p-2">
             <Text class="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">{t("sidebar.settings")}</Text>
             <Each of={SETTINGS_PAGES} key={(item) => item.id}>
@@ -639,20 +653,22 @@ export function Sidebar(props: UiContext & {
                 </Button>
               )}
             </Each>
+            <Each of={settingsPluginPages()} key={(entry) => pluginPageKey(entry)}>
+              {(entry) => (
+                <Button
+                  testID={`settings-plugin-${entry().pkg.id}-${entry().page.id}`}
+                  selected={props.settingsPage === pluginPageKey(entry())}
+                  accessibilityLabel={pluginPageTitle(entry())}
+                  class="flex-row items-center gap-2 rounded-(--radius) px-3 py-2 hover:bg-sidebar-accent selected:bg-sidebar-accent"
+                  onPress={() => props.onNavigateSettings(pluginPageKey(entry()))}
+                >
+                  <Icon name={pageIcon(entry().page.icon, "settings")} size={15} />
+                  <Text class="text-sm text-sidebar-foreground">{pluginPageTitle(entry())}</Text>
+                </Button>
+              )}
+            </Each>
           </View>
-          <PluginSurfacePages
-            target="settings"
-            packages={store.pluginPackages()}
-            runtime={store.pluginRuntime()}
-            dynamic={store.pluginDynamic()}
-            pluginOrder={store.pluginOrder()}
-            sessionId={store.current()}
-            agent={store.agent}
-            theme={themeStore.serialized()}
-            locale={appLocale()}
-            appearance={themeStore.mode()}
-          />
-        </UiView>
+        </View>
       </If>
       <View class="border-t border-sidebar-border p-2">
         <Button

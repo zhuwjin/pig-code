@@ -5,9 +5,10 @@ import type { IconName } from "../icon";
 import { ModelSettings } from "./model-settings";
 import { PluginMarketplace } from "./marketplace";
 import { ThemePicker } from "../../theme-picker";
-import { hostPatchProps, UiNodeFactory } from "../../plugins/ui-node-factory";
+import { pluginPages } from "../../plugins/ui-coordinator";
+import { PluginPageView, pluginPageKey } from "../../plugins/pages";
 
-export type SettingsPageId = "models" | "appearance" | "plugins" | "marketplace";
+export type SettingsPageId = string;
 
 export const SETTINGS_PAGES: { id: SettingsPageId; titleKey: MessageKey; icon: IconName }[] = [
   { id: "models", titleKey: "settings.nav.models", icon: "settings" },
@@ -23,7 +24,6 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     packages: () => props.store.pluginPackages(),
     fontFamilies: () => props.store.fontFamilies(),
     runtime: () => props.store.pluginRuntime(),
-    diagnostics: () => props.store.pluginUiDiagnostics(),
     logs: () => props.store.pluginLogs(),
     onRetryPackage: (plugin: Parameters<UiContext["store"]["retryPlugin"]>[0]) => props.store.retryPlugin(plugin),
     error: () => section === "plugins"
@@ -40,24 +40,25 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     onInstallPlugin: (packagePath: string, rootPath: string) => props.store.installPlugin(packagePath, rootPath),
     onUninstallPlugin: (plugin: Parameters<UiContext["store"]["uninstallPlugin"]>[0]) => props.store.uninstallPlugin(plugin),
   });
+  const pluginPage = () => pluginPages(
+    props.store.pluginPackages(),
+    "settings",
+    props.store.pluginRuntime(),
+    props.store.pluginOrder(),
+  ).find((entry) => pluginPageKey(entry) === props.page);
   return (
     <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 bg-background")}>
-      <UiNodeFactory
-        uiId="settings.content"
-        store={props.store}
-        render={(patch, children) => (
-          <View class="min-w-0 flex-1" style={patch.style} {...hostPatchProps(patch)}>
-            {children ?? (
-              <>
-                <If when={props.page === "models"}><ModelSettings {...props} /></If>
-                <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
-                <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
-                <If when={props.page === "marketplace"}><PluginMarketplace {...props} /></If>
-              </>
-            )}
-          </View>
-        )}
-      />
+      <If when={pluginPage()}>
+        {(entry) => <PluginPageView {...props} entry={entry()} />}
+      </If>
+      <If when={!pluginPage()}>
+        <View class="min-w-0 flex-1">
+          <If when={props.page === "models"}><ModelSettings {...props} /></If>
+          <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
+          <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
+          <If when={props.page === "marketplace"}><PluginMarketplace {...props} /></If>
+        </View>
+      </If>
     </View>
   );
 }

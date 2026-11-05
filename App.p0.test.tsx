@@ -6,11 +6,9 @@ import {
   parseSlashCommand,
   permissionsForMode,
 } from "./app/commands";
-import type { PluginPackageInfo, PluginUiEvent, RemoteDocument } from "./app/protocol";
-import { uiPlan } from "./app/plugins/ui-coordinator";
-import { hostPatchProps } from "./app/plugins/ui-node-factory";
-import { acceptPluginEvent, clearPluginEvents } from "./app/plugins/event-adapter";
-import { PluginSequencer, remoteDocumentRejection, safeHostStyle } from "./app/plugins/ui-protocol";
+import type { PluginPackageInfo } from "./app/protocol";
+import { pluginInstance, uiContributions } from "./app/plugins/ui-coordinator";
+import { PluginSequencer, validatePluginEnvelope } from "./app/plugins/ui-protocol";
 
 function openApp() {
   return open("./App.selftest.tsx", {
@@ -141,7 +139,6 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   await app.type("id:composer-input", "SLOW_BASH_SCENARIO");
   await app.press("id:send-button");
   await app.waitFor("id:stop-button", { timeout: 20000 });
-  expect(app.count("id:stats-summary-SessionActivity")).toBe(0);
   await app.type("id:composer-input", "Q_ONE");
   await app.keyboard.press("enter");
   await app.type("id:composer-input", "Q_TWO");
@@ -168,58 +165,25 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   await app.waitFor("id:queue-resume", { state: "gone", timeout: 20000 });
 });
 
-function remoteDocument(sequence: number, epoch = 1): RemoteDocument {
-  return {
-    instance: "moon",
-    epoch,
-    generation: 1,
-    sequence,
-    baseRevision: sequence - 1,
-    nodes: [{
-      id: "1",
-      kind: "view",
-      text: null,
-      exportName: null,
-      testId: null,
-      press: false,
-      children: [],
-      style: {},
-      events: [],
-      props: {},
-      accessibility: {},
-      source: null,
-    }],
-    roots: ["1"],
-    warnings: [],
-  };
-}
-
-test("validates host UI revisions and rejects malformed remote documents", () => {
+test("validates plugin envelopes and sequences without remote documents", () => {
   const sequences = new PluginSequencer();
   expect(sequences.accept("ui", 1)).toBe(true);
   expect(sequences.accept("services", 1)).toBe(true);
   expect(sequences.accept("ui", 2)).toBe(true);
   expect(sequences.accept("ui", 1)).toBe(false);
-
-  const document = remoteDocument(2);
-  const envelope = {
+  expect(validatePluginEnvelope({
     protocol: 1,
-    kind: "ui.commit" as const,
+    kind: "ui.publish",
     instance: "moon",
     epoch: 1,
-    stream: "ui" as const,
+    stream: "ui",
     sequence: 3,
     generation: 1,
-    body: document,
-  };
-  expect(remoteDocumentRejection(document, envelope)).toBeNull();
-  expect(remoteDocumentRejection(remoteDocument(1), envelope, document)?.code).toBe("stale_revision");
-  const missing = remoteDocument(3);
-  missing.nodes[0].children = ["missing"];
-  expect(remoteDocumentRejection(missing, envelope)?.code).toBe("invalid_operation");
+    body: [],
+  })).toBe(true);
 });
 
-test("composes generic plugin surfaces with nullable manifest revisions", () => {
+test("selects and orders declared controls without modifying host nodes", () => {
   const pkg: PluginPackageInfo = {
     id: "moon",
     name: "Moon",
@@ -228,87 +192,22 @@ test("composes generic plugin surfaces with nullable manifest revisions", () => 
     root: "/plugin",
     source: "user",
     enabled: true,
-    capabilities: [
-      { name: "ui.add", targets: ["main"] },
-      { name: "ui.patch.structure", targets: ["composer.sendButton"] },
-    ],
+    backend: "backend.ts",
+    capabilities: [{ name: "ui.add", targets: ["status", "composer"] }],
     contributions: {
       ui: [
-        { id: "panel", kind: "panel", target: "main", export: "Panel", preserve: [], baseRevision: null },
-        { id: "send", kind: "replaceChildren", target: "composer.sendButton", icon: "moon", preserve: ["onPress"], baseRevision: null },
+        { id: "second", slot: "status", kind: "metric", label: { en: "Second" }, order: 20, choices: [] },
+        { id: "first", slot: "status", kind: "metric", label: { en: "First" }, order: 10, choices: [] },
+        { id: "action", slot: "composer", kind: "button", label: { en: "Action" }, order: 0, choices: [] },
       ],
       tools: [],
       commands: [],
     },
   };
   const runtime = {
-    "moon:digest:user:default": {
-      state: "active" as const,
-      epoch: 1,
-      generation: 1,
-    },
+    [pluginInstance(pkg)]: { state: "active" as const, epoch: 1, generation: 1 },
   };
-  expect(uiPlan([pkg], "main", ["panel"], runtime).entries.map((entry) => entry.contribution.id)).toEqual(["panel"]);
-  expect(uiPlan([pkg], "composer.sendButton", undefined, runtime).entries.map((entry) => entry.contribution.id)).toEqual(["send"]);
-});
-
-test("filters unsafe host styles and restores the original target", () => {
-  expect(safeHostStyle({
-    color: "#112233",
-    width: "50%",
-    fontSize: 14,
-    opacity: 2,
-    position: "absolute",
-    transform: [{ translateX: 100 }],
-  })).toEqual({ color: "#112233", width: "50%", fontSize: 14 });
-  const pkg: PluginPackageInfo = {
-    id: "moon",
-    name: "Moon",
-    version: "1",
-    digest: "digest",
-    root: "/plugin",
-    source: "user",
-    enabled: true,
-    capabilities: [{ name: "ui.patch.structure", targets: ["composer.sendButton"] }],
-    contributions: {
-      ui: [
-        { id: "hide", kind: "remove", target: "composer.sendButton", preserve: [] },
-        { id: "restore", kind: "restore", target: "composer.sendButton", preserve: [] },
-      ],
-    },
-  };
-  expect(uiPlan([pkg], "composer.sendButton", undefined).entries).toHaveLength(0);
-});
-
-test("preserves host behavior explicitly and deduplicates events per instance", () => {
-  const calls: string[] = [];
-  const patch = {
-    style: {},
-    props: {},
-    accessibility: {},
-    preserve: new Set(["onPress"]),
-    events: { onPress: () => calls.push("plugin") },
-  };
-  const merged = hostPatchProps(patch, { onPress: () => calls.push("host") }) as { onPress: () => void };
-  merged.onPress();
-  expect(calls).toEqual(["host", "plugin"]);
-  calls.length = 0;
-  const replaced = hostPatchProps({ ...patch, preserve: new Set() }, { onPress: () => calls.push("host") }) as { onPress: () => void };
-  replaced.onPress();
-  expect(calls).toEqual(["plugin"]);
-
-  const document = remoteDocument(1);
-  const event: PluginUiEvent = {
-    contribution: "panel",
-    node: "1",
-    eventId: "moon:event-1",
-    kind: "press",
-    payload: {},
-    surfaceRevision: 1,
-  };
-  expect(acceptPluginEvent(event, 1, 1, document)).toBe(true);
-  expect(acceptPluginEvent(event, 1, 1, document)).toBe(false);
-  clearPluginEvents("moon");
-  expect(acceptPluginEvent(event, 1, 1, document)).toBe(true);
-  clearPluginEvents();
+  expect(uiContributions([pkg], "status", runtime).map((entry) => entry.contribution.id)).toEqual(["first", "second"]);
+  expect(uiContributions([pkg], "composer", runtime).map((entry) => entry.contribution.id)).toEqual(["action"]);
+  expect(uiContributions([pkg], "status").length).toBe(0);
 });

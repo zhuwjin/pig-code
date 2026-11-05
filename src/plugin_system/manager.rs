@@ -3,20 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use nsh_core::{
-    ApproxTextEngine, EventKind, EventPayload, MountBatch, PayloadValue, Point, Points, PressEvent,
-};
+use nsh_core::{ApproxTextEngine, MountBatch};
 use nsh_engine::{App, Engine, EngineConfig, HostChannel, MountSink};
 use pig_protocol::{
     CoreError, Event, PluginContributions, PluginEnvelope, PluginHello, PluginLifecycleState,
     PluginMessageKind, PluginNegotiation, PluginPackageInfo, PluginProtocolError,
     PluginRuntimeMetrics, PluginRuntimeSnapshot, PluginSequenceTracker, PluginServiceRequest,
     PluginServiceResponse, PluginSnapshot, PluginSource, PluginStream, PluginToolResult,
-    PluginToolsSelection, PluginUiContribution, PluginUiEvent, RemoteDocument,
+    PluginToolsSelection, PluginUiEvent, PluginUiEventKind, PluginUiKind, PluginUiState,
 };
 
 use super::loader::{installed_package_path, load_verified};
-use super::mount_projector::project_batch;
 use super::services::{HostServiceGateway, ServiceExecution, ServiceReply, storage_path};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,9 +75,6 @@ pub(super) struct PluginInstance {
     pub(super) outgoing: PluginSequenceTracker,
     pub(super) staged_contributions: PluginContributions,
     pub(super) active_contributions: PluginContributions,
-    pub(super) staged_document: Option<RemoteDocument>,
-    pub(super) document: Option<RemoteDocument>,
-    pub(super) pending_frame: Option<RemoteDocument>,
     pub(super) contribution_sync: Option<String>,
     pub(super) contributions_dirty: bool,
     pub(super) metrics: PluginRuntimeMetrics,
@@ -118,9 +112,6 @@ impl PluginInstance {
             outgoing: PluginSequenceTracker::default(),
             staged_contributions: PluginContributions::default(),
             active_contributions: PluginContributions::default(),
-            staged_document: None,
-            document: None,
-            pending_frame: None,
             contribution_sync: None,
             contributions_dirty: false,
             metrics: PluginRuntimeMetrics::default(),
@@ -143,7 +134,6 @@ impl PluginInstance {
             attempt: self.attempt,
             retry_after_ms: None,
             message: None,
-            features: self.negotiation.as_ref().map_or(0, |value| value.features),
             metrics,
         }
     }
@@ -282,7 +272,7 @@ impl PluginSystemManager {
             }
             (package, generation)
         };
-        if package.contributions.is_engine_backed() {
+        if package.backend.is_some() {
             self.start_with_attempt(package, generation, 0);
         } else {
             self.activate_declarative(package, generation);
@@ -291,52 +281,38 @@ impl PluginSystemManager {
     }
 
     pub fn dispatch_command(&self, key: &str, command_id: &str) -> Result<Option<String>, String> {
-        let (page_id, found) = {
+        let page_id = {
             let inner = self.inner.lock().expect("plugin manager lock");
             let instance = inner
                 .instances
                 .get(key)
                 .filter(|instance| instance.state == PluginLifecycleState::Active)
                 .ok_or_else(|| "plugin engine is not active".to_owned())?;
-            let command = instance
+            instance
                 .package
                 .contributions
                 .commands
                 .iter()
                 .chain(instance.active_contributions.commands.iter())
-                .find(|command| command.id == command_id && command.enabled);
-            let ui = instance
-                .active_contributions
-                .ui
-                .iter()
-                .chain(instance.package.contributions.ui.iter())
-                .find(|contribution| {
-                    contribution.id == command_id
-                        && matches!(
-                            contribution.kind,
-                            pig_protocol::PluginUiContributionKind::Command
-                        )
-                        && contribution
-                            .props
-                            .get("disabled")
-                            .and_then(serde_json::Value::as_bool)
-                            != Some(true)
-                });
-            let page_id = command
+                .find(|command| command.id == command_id && command.enabled)
                 .and_then(|command| command.page_id.clone())
-                .or_else(|| {
-                    ui.and_then(|contribution| {
-                        contribution
-                            .props
-                            .get("pageId")
-                            .or_else(|| contribution.props.get("page_id"))
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
-                });
-            (page_id, command.is_some() || ui.is_some())
         };
-        if !found {
+        let registered = self
+            .inner
+            .lock()
+            .expect("plugin manager lock")
+            .instances
+            .get(key)
+            .is_some_and(|instance| {
+                instance
+                    .package
+                    .contributions
+                    .commands
+                    .iter()
+                    .chain(instance.active_contributions.commands.iter())
+                    .any(|command| command.id == command_id && command.enabled)
+            });
+        if !registered {
             return Err("plugin command is not registered".into());
         }
         self.send_to_instance(
@@ -619,7 +595,7 @@ impl PluginSystemManager {
             if unchanged {
                 continue;
             }
-            if package.contributions.is_engine_backed() {
+            if package.backend.is_some() {
                 self.start_with_attempt(package, generation, 0);
             } else {
                 self.activate_declarative(package, generation);
@@ -643,8 +619,6 @@ impl PluginSystemManager {
         instance.negotiation = Some(PluginNegotiation {
             ui_protocol: 1,
             services_protocol: 1,
-            features: pig_protocol::PLUGIN_HOST_FEATURES,
-            rejected_optional_features: 0,
             locale: self.gateway.locale(),
         });
         let runtime = instance.runtime(PluginLifecycleState::Active);
@@ -658,7 +632,7 @@ impl PluginSystemManager {
             (0, generation),
             PluginMessageKind::UiActivate,
             PluginStream::Ui,
-            serde_json::json!({"package": self.package_for_key(&key), "document": null, "contributions": {}}),
+            serde_json::json!({"package": self.package_for_key(&key)}),
             false,
         );
         self.emit_runtime(&key, runtime, false);
@@ -694,7 +668,6 @@ impl PluginSystemManager {
                     "generation": generation,
                     "protocol": pig_protocol::PLUGIN_UI_PROTOCOL_VERSION,
                     "servicesProtocol": pig_protocol::PLUGIN_SERVICES_PROTOCOL_VERSION,
-                    "features": pig_protocol::PLUGIN_HOST_FEATURES,
                     "locale": self.gateway.locale(),
                     "resourcePrefix": format!("plugin://{}/{}/", package.id, package.digest),
                 }
@@ -722,28 +695,30 @@ impl PluginSystemManager {
             )
             .map_err(|error| error.to_string())
             .and_then(|verified| {
-                let sink = UiSink {
-                    manager: manager.clone(),
-                    instance: key.clone(),
-                    epoch,
-                    generation,
-                    sequence: std::sync::atomic::AtomicU64::new(0),
-                    previous: Mutex::new(None),
-                    resource_prefix: format!("plugin://{}/{}/", package.id, package.digest),
-                };
-                let mut config = EngineConfig::new(App::Js(verified.bundle));
+                let backend = verified
+                    .backend
+                    .ok_or_else(|| "the plugin has no backend entry".to_owned())?;
+                let mut config = EngineConfig::new(App::Js(backend));
                 config.host = host.clone();
                 config.ui_sets = vec![nsh_base::registry()];
                 config.data_dir = storage_path(&data_dir, &plugin_data_key(&package))
                     .parent()
                     .map(Path::to_path_buf);
                 config.limits.memory_bytes = 64 * 1024 * 1024;
-                config.limits.max_nodes = super::mount_projector::MAX_REMOTE_NODES;
                 config.limits.max_op_values = 100_000;
                 config.limits.max_canvas_ops = 0;
                 config.limits.load_budget = Duration::from_secs(3);
                 config.limits.call_budget = Duration::from_millis(750);
-                Engine::start(config, || ApproxTextEngine, sink).map_err(|error| error.to_string())
+                Engine::start(
+                    config,
+                    || ApproxTextEngine,
+                    BackendSink {
+                        manager: manager.clone(),
+                        instance: key.clone(),
+                        epoch,
+                    },
+                )
+                .map_err(|error| error.to_string())
             });
             match result {
                 Ok(engine) => {
@@ -862,10 +837,10 @@ impl PluginSystemManager {
                     .to_owned();
                 self.engine_failed(key, Some(epoch), message);
             }
-            PluginMessageKind::UiCommit => {
-                let document: RemoteDocument =
+            PluginMessageKind::UiPublish => {
+                let states: Vec<PluginUiState> =
                     serde_json::from_value(envelope.body).map_err(|error| error.to_string())?;
-                self.accept_document(key, epoch, document);
+                self.publish_ui(key, epoch, states)?;
             }
             PluginMessageKind::ContributionRegister => {
                 let delta: PluginContributions =
@@ -999,7 +974,7 @@ impl PluginSystemManager {
     }
 
     fn complete_contribution_sync(&self, request_id: &str, epoch: u64, snapshot: &PluginSnapshot) {
-        let (key, activating, package, document, contributions, runtime, dirty) =
+        let (key, activating, package, runtime, dirty) =
             {
                 let mut inner = self.inner.lock().expect("plugin manager lock");
                 let generation = inner.latest_generation;
@@ -1035,41 +1010,27 @@ impl PluginSystemManager {
                 instance.active_contributions = instance.staged_contributions.clone();
                 if activating {
                     instance.state = PluginLifecycleState::Active;
-                    instance.document = instance
-                        .staged_document
-                        .take()
-                        .or_else(|| instance.pending_frame.take());
                 }
                 (
                     key.clone(),
                     activating,
                     instance.package.clone(),
-                    instance.document.clone(),
-                    instance.active_contributions.clone(),
                     instance.runtime(PluginLifecycleState::Active),
                     instance.contributions_dirty,
                 )
             };
-        self.emit_instance_envelope(
-            &key,
-            (epoch, runtime.generation),
-            if activating {
-                PluginMessageKind::UiActivate
-            } else {
-                PluginMessageKind::UiCommit
-            },
-            PluginStream::Ui,
-            serde_json::json!({
-                "package": package,
-                "document": document,
-                "contributions": contributions,
-            }),
-            false,
-        );
-        self.emit_runtime(&key, runtime, false);
         if activating {
+            self.emit_instance_envelope(
+                &key,
+                (epoch, runtime.generation),
+                PluginMessageKind::UiActivate,
+                PluginStream::Ui,
+                serde_json::json!({"package": package}),
+                false,
+            );
             self.retire_previous_versions(&key);
         }
+        self.emit_runtime(&key, runtime, false);
         if dirty {
             self.sync_contributions(&key, epoch);
         }
@@ -1091,10 +1052,6 @@ impl PluginSystemManager {
             return Err("plugin epoch is stale".into());
         }
         let mut staged = instance.staged_contributions.clone();
-        merge_unique(&mut staged.pages, delta.pages, |page| page.id.clone());
-        merge_unique(&mut staged.ui, delta.ui, |contribution| {
-            contribution.id.clone()
-        });
         merge_unique(&mut staged.themes, delta.themes, |theme| theme.id.clone());
         merge_unique(&mut staged.skills, delta.skills, |skill| skill.path.clone());
         merge_unique(&mut staged.mcp, delta.mcp, |server| server.name.clone());
@@ -1126,14 +1083,6 @@ impl PluginSystemManager {
         }
         instance
             .staged_contributions
-            .pages
-            .retain(|item| item.id != id);
-        instance
-            .staged_contributions
-            .ui
-            .retain(|item| item.id != id);
-        instance
-            .staged_contributions
             .themes
             .retain(|item| item.id != id);
         instance
@@ -1157,119 +1106,53 @@ impl PluginSystemManager {
         Ok(())
     }
 
-    fn accept_document(&self, key: &str, epoch: u64, mut document: RemoteDocument) {
-        let mut inner = self.inner.lock().expect("plugin manager lock");
-        let Some(instance) = inner.instances.get_mut(key) else {
-            return;
-        };
-        if instance.epoch != epoch || document.instance != key {
-            return;
-        }
-        if document.epoch != epoch || document.generation != instance.engine_generation {
-            drop(inner);
-            self.engine_failed(
-                key,
-                Some(epoch),
-                "remote UI document identity is stale".into(),
-            );
-            return;
-        }
-        let resource_prefix = format!(
-            "plugin://{}/{}/",
-            instance.package.id, instance.package.digest
-        );
-        if let Err(error) = super::mount_projector::validate_document(&document, &resource_prefix) {
-            drop(inner);
-            self.engine_failed(key, Some(epoch), error);
-            return;
-        }
-        let previous = [
-            instance.document.as_ref(),
-            instance.pending_frame.as_ref(),
-            instance.staged_document.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|document| document.sequence)
-        .max()
-        .unwrap_or(0);
-        let Some(revision) = previous.checked_add(1) else {
-            drop(inner);
-            self.engine_failed(key, Some(epoch), "remote UI revision quota exceeded".into());
-            return;
-        };
-        document.base_revision = previous;
-        document.sequence = revision;
-        instance.metrics.nodes = document.nodes.len();
-        instance.metrics.operations += 1;
-        if instance.state == PluginLifecycleState::Active {
-            if instance.pending_frame.is_some() {
-                instance.metrics.coalesced_frames += 1;
-            }
-            instance.pending_frame = Some(document);
-        } else {
-            instance.staged_document = Some(document);
-        }
-    }
-
-    pub fn acknowledge_ui(
-        &self,
-        key: &str,
-        epoch: u64,
-        generation: u64,
-        ack: pig_protocol::PluginUiAck,
-    ) -> Result<(), String> {
-        let current = self
-            .inner
-            .lock()
-            .expect("plugin manager lock")
-            .instances
-            .get(key)
-            .is_some_and(|instance| {
-                instance.epoch == epoch
-                    && instance.generation == generation
-                    && instance.state == PluginLifecycleState::Active
-                    && instance
-                        .document
-                        .as_ref()
-                        .is_some_and(|document| document.sequence == ack.revision)
-            });
-        if current {
-            self.send_to_instance(
-                key,
-                PluginMessageKind::UiAck,
-                PluginStream::Ui,
-                None,
-                serde_json::to_value(ack).map_err(|error| error.to_string())?,
-            );
-        }
-        Ok(())
-    }
-
-    fn flush_frames(&self) {
-        let frames: Vec<(String, u64, u64, RemoteDocument)> = self
-            .inner
-            .lock()
-            .expect("plugin manager lock")
-            .instances
-            .iter_mut()
-            .filter_map(|(key, instance)| {
-                instance.pending_frame.take().map(|document| {
-                    instance.document = Some(document.clone());
-                    (key.clone(), instance.epoch, instance.generation, document)
+    fn publish_ui(&self, key: &str, epoch: u64, states: Vec<PluginUiState>) -> Result<(), String> {
+        let generation = {
+            let inner = self.inner.lock().expect("plugin manager lock");
+            let instance = inner
+                .instances
+                .get(key)
+                .filter(|instance| {
+                    instance.epoch == epoch
+                        && matches!(
+                            instance.state,
+                            PluginLifecycleState::Starting | PluginLifecycleState::Active
+                        )
+                        && instance.engine.is_some()
                 })
-            })
-            .collect();
-        for (key, epoch, generation, document) in frames {
-            self.emit_instance_envelope(
-                &key,
-                (epoch, generation),
-                PluginMessageKind::UiCommit,
-                PluginStream::Ui,
-                serde_json::to_value(document).unwrap_or_default(),
-                false,
-            );
-        }
+                .ok_or_else(|| "plugin backend is not running".to_owned())?;
+            let mut published = BTreeSet::new();
+            for state in &states {
+                let contribution = instance
+                    .package
+                    .contributions
+                    .ui
+                    .iter()
+                    .find(|contribution| contribution.id == state.id)
+                    .ok_or_else(|| format!("UI contribution `{}` is not declared", state.id))?;
+                if !published.insert(&state.id) {
+                    return Err(format!("UI state `{}` is duplicated", state.id));
+                }
+                validate_ui_state(contribution, state)?;
+            }
+            if serde_json::to_vec(&states)
+                .map_err(|error| error.to_string())?
+                .len()
+                > 64 * 1024
+            {
+                return Err("UI state batch exceeds 64 KiB".into());
+            }
+            instance.engine_generation
+        };
+        self.emit_instance_envelope(
+            key,
+            (epoch, generation),
+            PluginMessageKind::UiPublish,
+            PluginStream::Ui,
+            serde_json::to_value(states).map_err(|error| error.to_string())?,
+            false,
+        );
+        Ok(())
     }
 
     fn send_service_reply(&self, reply: ServiceReply) {
@@ -1376,57 +1259,44 @@ impl PluginSystemManager {
         self.finish_pending_tool_with_id(request_id, pending, result);
     }
 
-    pub fn dispatch_host_event(&self, key: &str, event: PluginUiEvent) -> Result<(), String> {
+    pub fn dispatch_ui_event(&self, key: &str, event: PluginUiEvent) -> Result<(), String> {
         {
             let mut inner = self.inner.lock().expect("plugin manager lock");
             let instance = inner
                 .instances
                 .get_mut(key)
-                .ok_or_else(|| "plugin engine is not active".to_owned())?;
-            if instance.state != PluginLifecycleState::Active {
-                return Err("plugin engine is not active".into());
-            }
-            let property = match event.kind.as_str() {
-                "context" | "openChange" => None,
-                "press" => Some("onPress"),
-                "changeText" => Some("onChange"),
-                "focus" => Some("onFocus"),
-                "blur" => Some("onBlur"),
-                "keyPress" => Some("onKeyPress"),
-                _ => return Err("unsupported host UI event".into()),
-            };
+                .filter(|instance| {
+                    instance.state == PluginLifecycleState::Active && instance.engine.is_some()
+                })
+                .ok_or_else(|| "plugin backend is not active".to_owned())?;
             let contribution = instance
-                .active_contributions
+                .package
+                .contributions
                 .ui
                 .iter()
-                .chain(instance.package.contributions.ui.iter())
-                .find(|contribution| {
-                    contribution.id == event.contribution
-                        && (event.kind == "openChange" || contribution.target == event.node)
-                })
-                .ok_or_else(|| "host UI contribution is not registered".to_owned())?;
-            if let Some(property) = property {
-                if contribution
-                    .props
-                    .get(property)
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || !super::services::capability_granted(
-                        &instance.package,
-                        "ui.interact",
-                        &event.node,
-                    )
-                {
-                    return Err("host UI interaction is not authorized".into());
-                }
+                .find(|contribution| contribution.id == event.contribution)
+                .ok_or_else(|| "UI contribution is not registered".to_owned())?;
+            let valid = match event.kind {
+                PluginUiEventKind::Invoke => contribution.kind == PluginUiKind::Button,
+                PluginUiEventKind::Change => matches!(
+                    contribution.kind,
+                    PluginUiKind::Toggle
+                        | PluginUiKind::Select
+                        | PluginUiKind::Menu
+                        | PluginUiKind::Popover
+                        | PluginUiKind::Dialog
+                ),
+            };
+            if !valid {
+                return Err("UI event is not valid for this contribution".into());
             }
-            if !event.payload.is_object()
-                || serde_json::to_vec(&event.payload)
+            if event.event_id.is_empty()
+                || serde_json::to_vec(&event.value)
                     .map_err(|error| error.to_string())?
                     .len()
                     > 64 * 1024
             {
-                return Err("host UI event payload exceeds 64 KiB".into());
+                return Err("UI event requires an id and a value no larger than 64 KiB".into());
             }
             if !instance.event_ids.insert(event.event_id.clone()) {
                 return Ok(());
@@ -1445,68 +1315,6 @@ impl PluginSystemManager {
             None,
             serde_json::to_value(event).map_err(|error| error.to_string())?,
         );
-        Ok(())
-    }
-
-    pub fn dispatch_ui_event_full(&self, key: &str, event: PluginUiEvent) -> Result<(), String> {
-        if event.kind == "openChange" {
-            return self.dispatch_host_event(key, event);
-        }
-        let (control, id, event_kind, payload, scroll) = {
-            let mut inner = self.inner.lock().expect("plugin manager lock");
-            let instance = inner
-                .instances
-                .get_mut(key)
-                .ok_or_else(|| "plugin engine is not active".to_owned())?;
-            if instance.state != PluginLifecycleState::Active {
-                return Err("plugin engine is not active".into());
-            }
-            let document = instance
-                .pending_frame
-                .as_ref()
-                .or(instance.document.as_ref())
-                .ok_or_else(|| "plugin surface is not ready".to_owned())?;
-            let surface_revision = if event.surface_revision == 0 {
-                document.sequence
-            } else {
-                event.surface_revision
-            };
-            if surface_revision != document.sequence
-                || !document.nodes.iter().any(|node| node.id == event.node)
-            {
-                return Err("plugin UI event belongs to a stale surface".into());
-            }
-            if instance.event_ids.contains(&event.event_id) {
-                return Ok(());
-            }
-            instance.event_ids.insert(event.event_id.clone());
-            instance.event_order.push_back(event.event_id.clone());
-            if instance.event_order.len() > MAX_EVENT_IDS
-                && let Some(expired) = instance.event_order.pop_front()
-            {
-                instance.event_ids.remove(&expired);
-            }
-            let id = event
-                .node
-                .parse::<u32>()
-                .map_err(|_| "invalid remote node id")?;
-            let control = instance
-                .engine
-                .as_ref()
-                .map(|engine| engine.control())
-                .ok_or_else(|| "plugin engine is not active".to_owned())?;
-            let (kind, payload, scroll) = native_event(&event)?;
-            (control, id, kind, payload, scroll)
-        };
-        if let Some((point, end)) = scroll {
-            if end {
-                control.dispatch_event(id, event_kind, EventPayload::Scroll(point));
-            } else {
-                control.scroll(id, point, 0);
-            }
-        } else {
-            control.dispatch_event(id, event_kind, payload);
-        }
         Ok(())
     }
 
@@ -1844,7 +1652,6 @@ impl PluginSystemManager {
     }
 
     fn maintenance(&self) {
-        self.flush_frames();
         for reply in self.gateway.expire() {
             self.send_service_reply(reply);
         }
@@ -1980,17 +1787,8 @@ impl PluginSystemManager {
                 + self.gateway.pending_count(key, runtime.epoch)
                 + surface_pending
         };
-        let queue_depth = pending
-            + usize::from(
-                self.inner
-                    .lock()
-                    .expect("plugin manager lock")
-                    .instances
-                    .get(key)
-                    .is_some_and(|instance| instance.pending_frame.is_some()),
-            );
         runtime.metrics.pending_requests = pending;
-        runtime.metrics.queue_depth = queue_depth;
+        runtime.metrics.queue_depth = pending;
         runtime.metrics.network_bytes = network_bytes;
         runtime.metrics.timed_out_requests = timed_out_requests;
         runtime.metrics.cancelled_requests = cancelled_requests;
@@ -2076,45 +1874,14 @@ fn discard_engine(engine: Option<Engine>) {
     }
 }
 
-struct UiSink {
+struct BackendSink {
     manager: PluginSystemManager,
     instance: String,
     epoch: u64,
-    generation: u64,
-    sequence: std::sync::atomic::AtomicU64,
-    previous: Mutex<Option<RemoteDocument>>,
-    resource_prefix: String,
 }
 
-impl MountSink for UiSink {
-    fn submit(&self, batch: MountBatch) {
-        let sequence = self
-            .sequence
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let result = {
-            let previous = self.previous.lock().expect("remote document lock");
-            project_batch(
-                batch,
-                &self.instance,
-                self.epoch,
-                self.generation,
-                sequence,
-                previous.as_ref(),
-                &self.resource_prefix,
-            )
-        };
-        match result {
-            Ok(document) => {
-                *self.previous.lock().expect("remote document lock") = Some(document.clone());
-                self.manager
-                    .accept_document(&self.instance, self.epoch, document);
-            }
-            Err(error) => self
-                .manager
-                .engine_failed(&self.instance, Some(self.epoch), error),
-        }
-    }
+impl MountSink for BackendSink {
+    fn submit(&self, _: MountBatch) {}
 
     fn report_error(&self, message: &str) {
         self.manager
@@ -2160,6 +1927,9 @@ where
 }
 
 fn validate_delta(delta: &PluginContributions) -> Result<(), String> {
+    if !delta.pages.is_empty() || !delta.ui.is_empty() {
+        return Err("runtime page and UI registration is not supported".into());
+    }
     if !delta.credentials.is_empty()
         || !delta.http.is_empty()
         || !delta.actions.is_empty()
@@ -2169,9 +1939,7 @@ fn validate_delta(delta: &PluginContributions) -> Result<(), String> {
     {
         return Err("runtime contributions cannot alter service permissions".into());
     }
-    let count = delta.pages.len()
-        + delta.ui.len()
-        + delta.themes.len()
+    let count = delta.themes.len()
         + delta.skills.len()
         + delta.mcp.len()
         + delta.tools.len()
@@ -2179,256 +1947,64 @@ fn validate_delta(delta: &PluginContributions) -> Result<(), String> {
     if count > 256 {
         return Err("a contribution batch may contain at most 256 entries".into());
     }
-    for contribution in &delta.ui {
-        validate_ui_contribution(contribution)?;
-    }
     Ok(())
 }
 
-fn validate_ui_contribution(contribution: &PluginUiContribution) -> Result<(), String> {
-    if contribution.id.trim().is_empty()
-        || [
-            "approval.",
-            "security.",
-            "credentials.",
-            "plugin.manager",
-            "plugins.",
-        ]
-        .iter()
-        .any(|prefix| contribution.target.starts_with(prefix))
+fn validate_ui_state(
+    contribution: &pig_protocol::PluginUiContribution,
+    state: &PluginUiState,
+) -> Result<(), String> {
+    if state.details.len() > 32
+        || state.segments.len() > 16
+        || state
+            .details
+            .iter()
+            .any(|row| row.label.len() > 4096 || row.value.len() > 4096)
+        || state
+            .segments
+            .iter()
+            .any(|segment| segment.label.len() > 4096)
+        || state.label.as_ref().is_some_and(|label| label.len() > 4096)
     {
-        return Err("the UI contribution target is not allowed".into());
+        return Err("UI state contains too much text or too many rows".into());
+    }
+    if let Some(choices) = &state.choices {
+        if !matches!(contribution.kind, PluginUiKind::Select | PluginUiKind::Menu) {
+            return Err("only select and menu contributions can publish choices".into());
+        }
+        let mut ids = BTreeSet::new();
+        if choices.len() > 256
+            || choices.iter().any(|choice| {
+                choice.id.is_empty() || choice.label.is_empty() || !ids.insert(&choice.id)
+            })
+        {
+            return Err("UI choices are duplicated or invalid".into());
+        }
+    }
+    match contribution.kind {
+        PluginUiKind::Toggle if !(state.value.is_boolean() || state.value.is_null()) => {
+            return Err("a toggle value must be boolean or null".into());
+        }
+        PluginUiKind::Select | PluginUiKind::Menu
+            if !(state.value.is_string() || state.value.is_null()) =>
+        {
+            return Err("a selection value must be a string or null".into());
+        }
+        PluginUiKind::Indicator if state.value.is_object() => {
+            let valid = state.value["percent"].as_f64().is_none_or(f64::is_finite)
+                && state.value["hint"]
+                    .as_str()
+                    .is_none_or(|hint| hint.len() <= 4096);
+            if !valid {
+                return Err("indicator percent or hint is invalid".into());
+            }
+        }
+        _ if state.value.is_array() || state.value.is_object() => {
+            return Err("this UI state value must be scalar".into());
+        }
+        _ => {}
     }
     Ok(())
-}
-
-type NativeEvent = (EventKind, EventPayload, Option<(Point<Points>, bool)>);
-
-fn native_event(event: &PluginUiEvent) -> Result<NativeEvent, String> {
-    let payload = &event.payload;
-    let text = payload
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let number = |name: &str| {
-        payload
-            .get(name)
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-    };
-    let field = |value: &serde_json::Value, name: &str| {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-    };
-    let point = || {
-        let offset = payload.get("offset").unwrap_or(payload);
-        Point::new(
-            Points(field(offset, "x") as f32),
-            Points(field(offset, "y") as f32),
-        )
-    };
-    let bounds = |value: &serde_json::Value| {
-        let origin = value.get("origin").cloned().unwrap_or_default();
-        let size = value.get("size").cloned().unwrap_or_default();
-        nsh_core::Bounds::new(
-            Point::new(
-                Points(field(&origin, "x") as f32),
-                Points(field(&origin, "y") as f32),
-            ),
-            nsh_core::Size::new(
-                Points(field(&size, "width") as f32),
-                Points(field(&size, "height") as f32),
-            ),
-        )
-    };
-    let press = || {
-        let position = payload.get("position").cloned().unwrap_or_default();
-        let page_position = payload.get("pagePosition").cloned().unwrap_or_default();
-        let modifiers = payload.get("modifiers").cloned().unwrap_or_default();
-        let modifier = |name: &str| {
-            modifiers
-                .get(name)
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        };
-        PressEvent {
-            position: Point::new(
-                Points(field(&position, "x") as f32),
-                Points(field(&position, "y") as f32),
-            ),
-            page_position: Point::new(
-                Points(field(&page_position, "x") as f32),
-                Points(field(&page_position, "y") as f32),
-            ),
-            modifiers: nsh_core::keymap::Modifiers {
-                ctrl: modifier("ctrl"),
-                alt: modifier("alt"),
-                shift: modifier("shift"),
-                cmd: modifier("cmd"),
-            },
-            clicks: payload
-                .get("clickCount")
-                .or_else(|| payload.get("clicks"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                .min(u32::MAX as u64) as u32,
-        }
-    };
-    let event = match event.kind.as_str() {
-        "press" => (EventKind::Press, EventPayload::Press(press()), None),
-        "longPress" => (EventKind::LongPress, EventPayload::Press(press()), None),
-        "pressDown" => (EventKind::PressDown, EventPayload::Press(press()), None),
-        "pressUp" => (EventKind::PressUp, EventPayload::Press(press()), None),
-        "changeText" => (
-            EventKind::ChangeText,
-            EventPayload::Text {
-                text,
-                count: number("count") as u32,
-            },
-            None,
-        ),
-        "submit" => (
-            EventKind::SubmitEditing,
-            EventPayload::Text {
-                text,
-                count: number("count") as u32,
-            },
-            None,
-        ),
-        "focus" => (EventKind::Focus, EventPayload::None, None),
-        "blur" => (EventKind::Blur, EventPayload::None, None),
-        "selectionChange" => (
-            EventKind::SelectionChange,
-            EventPayload::Map(vec![
-                ("start", PayloadValue::Number(number("start"))),
-                ("end", PayloadValue::Number(number("end"))),
-            ]),
-            None,
-        ),
-        "keyPress" => (
-            EventKind::KeyPress,
-            EventPayload::Map(vec![("key", PayloadValue::Str(text_or_key(payload)))]),
-            None,
-        ),
-        "compositionChange" => (
-            EventKind::CompositionChange,
-            EventPayload::Map(vec![
-                (
-                    "composing",
-                    PayloadValue::Bool(
-                        payload
-                            .get("composing")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
-                    ),
-                ),
-                ("text", PayloadValue::Str(text)),
-            ]),
-            None,
-        ),
-        "contentSizeChange" => (
-            EventKind::ContentSizeChange,
-            EventPayload::Map(vec![
-                ("width", PayloadValue::Number(number("width"))),
-                ("height", PayloadValue::Number(number("height"))),
-            ]),
-            None,
-        ),
-        "scroll" => (
-            EventKind::Scroll,
-            EventPayload::None,
-            Some((point(), false)),
-        ),
-        "scrollEnd" => (
-            EventKind::ScrollEnd,
-            EventPayload::Scroll(point()),
-            Some((point(), true)),
-        ),
-        "scrollDragStart" => (
-            EventKind::ScrollDragStart,
-            EventPayload::Scroll(point()),
-            None,
-        ),
-        "scrollDragEnd" => (
-            EventKind::ScrollDragEnd,
-            EventPayload::Scroll(point()),
-            None,
-        ),
-        "momentumStart" => (
-            EventKind::MomentumStart,
-            EventPayload::Scroll(point()),
-            None,
-        ),
-        "momentumEnd" => (EventKind::MomentumEnd, EventPayload::Scroll(point()), None),
-        "caretMove" => (
-            EventKind::CaretMove,
-            EventPayload::caret(bounds(payload.get("bounds").unwrap_or(payload))),
-            None,
-        ),
-        "layout" => (
-            EventKind::Layout,
-            EventPayload::Layout(bounds(payload)),
-            None,
-        ),
-        "mouseMove" | "hoverMove" => (
-            EventKind::MouseMove,
-            EventPayload::Mouse(nsh_core::MouseEvent::new(
-                point(),
-                point(),
-                Default::default(),
-                None,
-            )),
-            None,
-        ),
-        "hoverIn" => (
-            EventKind::MouseEnter,
-            EventPayload::Mouse(nsh_core::MouseEvent::new(
-                point(),
-                point(),
-                Default::default(),
-                None,
-            )),
-            None,
-        ),
-        "hoverOut" => (
-            EventKind::MouseLeave,
-            EventPayload::Mouse(nsh_core::MouseEvent::new(
-                point(),
-                point(),
-                Default::default(),
-                None,
-            )),
-            None,
-        ),
-        "accessibilityAction" => (
-            EventKind::AccessibilityAction,
-            EventPayload::Map(vec![(
-                "actionName",
-                PayloadValue::Str(
-                    payload
-                        .get("actionName")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                ),
-            )]),
-            None,
-        ),
-        other => return Err(format!("unsupported plugin UI event: {other}")),
-    };
-    Ok(event)
-}
-
-fn text_or_key(payload: &serde_json::Value) -> String {
-    payload
-        .get("key")
-        .or_else(|| payload.get("text"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn sanitize_log(mut value: serde_json::Value) -> serde_json::Value {
@@ -2504,6 +2080,8 @@ mod tests {
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
+            ui_entry: None,
+            backend: None,
             contributions: PluginContributions::default(),
             capabilities: Vec::new(),
         };

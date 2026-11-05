@@ -47,26 +47,12 @@ pub struct PluginContributions {
 impl PluginContributions {
     pub fn merged(&self, runtime: &Self) -> Self {
         let mut merged = self.clone();
-        merged.pages.extend(runtime.pages.clone());
-        merged.ui.extend(runtime.ui.clone());
         merged.themes.extend(runtime.themes.clone());
         merged.skills.extend(runtime.skills.clone());
         merged.mcp.extend(runtime.mcp.clone());
         merged.tools.extend(runtime.tools.clone());
         merged.commands.extend(runtime.commands.clone());
         merged
-    }
-
-    pub fn is_engine_backed(&self) -> bool {
-        self.ui.iter().any(|item| {
-            (item.export.is_some() && item.kind != PluginUiContributionKind::Surface)
-                || matches!(item.kind, PluginUiContributionKind::Command)
-        }) || !self.tools.is_empty()
-            || !self.commands.is_empty()
-            || self
-                .pages
-                .iter()
-                .any(|page| page.enabled && page.entry.ends_with(".tsx"))
     }
 }
 
@@ -114,7 +100,7 @@ pub struct PluginConfigItem {
 #[serde(deny_unknown_fields)]
 pub struct PluginPage {
     pub id: String,
-    pub entry: String,
+    pub surface: String,
     pub title: BTreeMap<String, String>,
     #[serde(default)]
     pub kind: PluginPageKind,
@@ -131,9 +117,7 @@ pub struct PluginPage {
 pub enum PluginPageKind {
     #[default]
     Settings,
-    LeftPanel,
-    RightPanel,
-    MainPanel,
+    Workspace,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -433,12 +417,18 @@ pub struct PluginPackageInfo {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
+    pub ui_entry: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
     pub contributions: PluginContributions,
     #[serde(default)]
     pub capabilities: Vec<PluginCapabilityRequest>,
 }
 
 pub const PLUGIN_MANIFEST_FILE: &str = "pig-plugin.json";
+pub const PLUGIN_BACKEND_BUNDLE_FILE: &str = ".pig-backend.nshc";
+pub const PLUGIN_BACKEND_VERSION_FILE: &str = ".pig-backend-version";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -449,7 +439,10 @@ pub struct PluginManifest {
     pub name: PluginLocalizedText,
     pub version: String,
     pub build: u64,
-    pub entry: String,
+    #[serde(default)]
+    pub ui_entry: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
     pub min_host_version: String,
     pub protocols: PluginProtocolVersions,
     #[serde(default)]
@@ -498,52 +491,53 @@ pub struct PluginCapabilityRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginUiContribution {
     pub id: String,
-    pub kind: PluginUiContributionKind,
-    pub target: String,
-    #[serde(default)]
-    pub export: Option<String>,
+    pub slot: PluginUiSlot,
+    pub kind: PluginUiKind,
+    pub label: BTreeMap<String, String>,
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]
-    pub style: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub props: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub accessibility: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub preserve: Vec<String>,
-    #[serde(default)]
     pub order: u32,
     #[serde(default)]
-    pub move_target: Option<String>,
+    pub choices: Vec<PluginUiChoice>,
     #[serde(default)]
-    pub base_revision: Option<u64>,
+    pub surface: Option<String>,
+    #[serde(default)]
+    pub width: Option<u16>,
+    #[serde(default)]
+    pub height: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PluginUiContributionKind {
-    Create,
-    ReplaceChildren,
-    InsertAfter,
-    InsertBefore,
-    InsertFirst,
-    InsertLast,
-    Move,
-    Wrap,
-    Remove,
-    Restore,
-    Patch,
-    Replace,
-    Page,
-    Panel,
-    Route,
-    Settings,
-    Command,
-    Inline,
-    Overlay,
-    Decoration,
-    Surface,
+#[serde(rename_all = "snake_case")]
+pub enum PluginUiSlot {
+    Status,
+    Composer,
+    Message,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginUiKind {
+    Button,
+    Toggle,
+    Select,
+    Menu,
+    Metric,
+    Indicator,
+    Popover,
+    Dialog,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginUiChoice {
+    pub id: String,
+    pub label: BTreeMap<String, String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -788,7 +782,7 @@ mod tests {
                     "default": "auto"
                 }],
                 "read": ["app.theme", "plugin.example.resources.endpoint"],
-                "write": ["app.status_bar.activity"]
+                "write": ["app.default_delivery"]
             },
             "actions": ["read_config", "write_config"]
         }))
@@ -818,7 +812,7 @@ mod tests {
     fn page_keeps_localized_metadata_and_typed_slot() {
         let page: PluginPage = serde_json::from_value(serde_json::json!({
             "id": "mcp",
-            "entry": "pages/mcp.js",
+            "surface": "McpPage",
             "title": {"zh-CN": "MCP 服务器", "en": "MCP servers"},
             "kind": "settings",
             "icon": "server",

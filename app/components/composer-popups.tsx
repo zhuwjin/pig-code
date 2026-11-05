@@ -238,7 +238,7 @@ export function ModelPicker(props: UiContext) {
           class="flex-row items-center gap-2 rounded-(--radius) border-t border-border px-3 py-2 hover:bg-accent"
           onPress={() => {
             open.set(false);
-            props.store.pluginNavigation.set("models");
+            props.store.pluginNavigation.set({ pageId: "models" });
           }}
         >
           <Icon name="settings" size={14} color={token("muted-foreground")} />

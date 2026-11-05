@@ -26,8 +26,6 @@ pub struct SurfaceDescriptor {
     pub storage_dir: PathBuf,
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
-    pub turn_index: Option<u64>,
-    pub display_mode: Option<String>,
 }
 
 impl SurfaceDescriptor {
@@ -42,8 +40,6 @@ impl SurfaceDescriptor {
                 "context": {
                     "sessionId": self.session_id,
                     "turnId": self.turn_id,
-                    "turnIndex": self.turn_index,
-                    "displayMode": self.display_mode,
                 },
             }
         })
@@ -211,13 +207,6 @@ impl PluginSystemManager {
         {
             return Err("plugin surface business id is too long".into());
         }
-        if context
-            .display_mode
-            .as_deref()
-            .is_some_and(|mode| !matches!(mode, "compact" | "detailed" | "hidden"))
-        {
-            return Err("invalid plugin surface display mode".into());
-        }
         let descriptor = {
             let mut inner = self.inner.lock().expect("plugin manager lock");
             let (package_root, data_key, epoch, generation) = {
@@ -226,17 +215,43 @@ impl PluginSystemManager {
                     .get(instance)
                     .filter(|plugin| plugin.state == PluginLifecycleState::Active)
                     .ok_or_else(|| "plugin surface requires an active instance".to_owned())?;
-                let declared = plugin
-                    .active_contributions
+                if plugin.package.ui_entry.is_none() {
+                    return Err("plugin has no uiEntry".into());
+                }
+                let target = if let Some(page) = plugin
+                    .package
+                    .contributions
+                    .pages
+                    .iter()
+                    .find(|page| page.id == contribution && page.enabled)
+                {
+                    match page.kind {
+                        pig_protocol::PluginPageKind::Settings => "settings",
+                        pig_protocol::PluginPageKind::Workspace => "workspace",
+                    }
+                } else if let Some(declared) = plugin
+                    .package
+                    .contributions
                     .ui
                     .iter()
-                    .chain(plugin.package.contributions.ui.iter())
                     .find(|item| item.id == contribution)
-                    .ok_or_else(|| "plugin surface contribution is not registered".to_owned())?;
-                if !capability_granted(&plugin.package, "ui.add", &declared.target)
-                    && !capability_granted(&plugin.package, "ui.patch.structure", &declared.target)
                 {
-                    return Err("plugin surface target is not authorized".into());
+                    if !matches!(
+                        declared.kind,
+                        pig_protocol::PluginUiKind::Popover | pig_protocol::PluginUiKind::Dialog
+                    ) {
+                        return Err("only pages, popovers and dialogs can mount a Surface".into());
+                    }
+                    match declared.slot {
+                        pig_protocol::PluginUiSlot::Status => "status",
+                        pig_protocol::PluginUiSlot::Composer => "composer",
+                        pig_protocol::PluginUiSlot::Message => "message",
+                    }
+                } else {
+                    return Err("plugin Surface contribution is not registered".into());
+                };
+                if !capability_granted(&plugin.package, "ui.add", target) {
+                    return Err("plugin Surface target is not authorized".into());
                 }
                 (
                     plugin.package.root.clone(),
@@ -258,8 +273,6 @@ impl PluginSystemManager {
                     .join("nsh"),
                 session_id: context.session_id.filter(|id| !id.is_empty()),
                 turn_id: context.turn_id.filter(|id| !id.is_empty()),
-                turn_index: context.turn_index,
-                display_mode: context.display_mode,
             };
             inner.surfaces.insert(
                 descriptor.surface.clone(),
@@ -411,6 +424,35 @@ impl PluginSystemManager {
                 return;
             }
         };
+        if request.method == PluginHostMethod::OverlayClose {
+            let identity = self
+                .inner
+                .lock()
+                .expect("plugin manager lock")
+                .surfaces
+                .get(&descriptor.surface)
+                .map(|surface| (surface.epoch, surface.generation));
+            let Some(identity) = identity else {
+                respond_error(
+                    reply,
+                    &descriptor.surface,
+                    &request.request_id,
+                    descriptor.revision,
+                    error(PluginErrorCode::NotActive, "plugin Surface is not mounted"),
+                );
+                return;
+            };
+            self.emit_instance_envelope(
+                &descriptor.instance,
+                identity,
+                pig_protocol::PluginMessageKind::HostAction,
+                pig_protocol::PluginStream::Services,
+                json!({"name": "overlay.close", "surface": descriptor.surface}),
+                false,
+            );
+            respond(reply, &descriptor, &request.request_id, Ok(JsonValue::Null));
+            return;
+        }
         if request.method == PluginHostMethod::SessionUnsubscribe {
             let subscription_id = request
                 .payload
@@ -485,7 +527,7 @@ impl PluginSystemManager {
                 SurfaceOperation::Storage(PluginService::StorageWrite)
             }
             PluginHostMethod::NavigationOpen => SurfaceOperation::Navigation,
-            PluginHostMethod::SessionUnsubscribe => unreachable!(),
+            PluginHostMethod::SessionUnsubscribe | PluginHostMethod::OverlayClose => unreachable!(),
         };
         self.start_surface_operation(
             descriptor,

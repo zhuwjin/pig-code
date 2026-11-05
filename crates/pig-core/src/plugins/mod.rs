@@ -95,13 +95,14 @@ mod tests {
               "name": "Demo",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
+              "uiEntry": "App.tsx",
+              "backend": "backend.ts",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],
               "contributions": {
                 "actions":["read_settings"],
-                "pages":[{"id":"home","entry":"App.tsx","title":{"en":"Home"}}]
+                "pages":[{"id":"home","surface":"Home","title":{"en":"Home"}}]
               }
             }"#,
         );
@@ -204,7 +205,7 @@ mod tests {
               "name": "Web Search",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
+              "uiEntry": "App.tsx",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],
@@ -807,8 +808,6 @@ mod tests {
         let engine_generation = registry.snapshot.generation;
         let contributions: pig_protocol::PluginContributions = serde_json::from_value(
             serde_json::json!({
-                "pages":[{"id":"runtime","entry":"App.tsx","title":{"en":"Runtime"}}],
-                "ui":[{"id":"runtime-panel","kind":"panel","target":"main","export":"App","preserve":[]}],
                 "themes":[{"id":"runtime-theme","entry":"runtime-theme.json"}],
                 "skills":[{"path":"skills/runtime"}],
                 "mcp":[{"name":"runtime","config":{"command":"runtime-server"}}],
@@ -825,10 +824,10 @@ mod tests {
                 engine_generation,
                 contributions.clone(),
             )
-            .expect("register all dynamic contribution kinds");
+            .expect("register dynamic nonvisual contributions");
         let registered = &accepted.runtime_contributions[&format!("demo:{digest}")];
-        assert_eq!(registered.pages.len(), 1);
-        assert_eq!(registered.ui.len(), 1);
+        assert!(registered.pages.is_empty());
+        assert!(registered.ui.is_empty());
         assert_eq!(registered.themes.len(), 1);
         assert_eq!(registered.skills.len(), 1);
         assert_eq!(registered.mcp.len(), 1);

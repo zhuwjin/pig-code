@@ -180,55 +180,6 @@ impl HostServiceGateway {
                         )),
                     ));
                 }
-                let contribution = request
-                    .payload
-                    .get("contribution")
-                    .and_then(serde_json::Value::as_str);
-                let turn_id = request
-                    .payload
-                    .get("turnId")
-                    .and_then(serde_json::Value::as_str);
-                let turn_index = request
-                    .payload
-                    .get("turnIndex")
-                    .and_then(serde_json::Value::as_u64);
-                let anchor = request
-                    .payload
-                    .get("anchor")
-                    .and_then(serde_json::Value::as_str);
-                let valid_overlay = page_id != "overlay"
-                    || (contribution.is_some_and(|contribution| {
-                        package.contributions.ui.iter().any(|item| {
-                            item.id == contribution
-                                && item.target == "plugin.overlay"
-                                && item.kind == pig_protocol::PluginUiContributionKind::Surface
-                        })
-                    }) && anchor.is_some_and(|anchor| {
-                        package.contributions.ui.iter().any(|item| {
-                            item.target == anchor
-                                && item.kind == pig_protocol::PluginUiContributionKind::Surface
-                                && matches!(
-                                    anchor,
-                                    "status.activity"
-                                        | "status.usage"
-                                        | "status.context"
-                                        | "message.turnStats"
-                                )
-                        })
-                    }));
-                if !valid_overlay || turn_id.is_some_and(|id| id.len() > 256) {
-                    return ServiceExecution::Complete(self.reply(
-                        instance,
-                        epoch,
-                        generation,
-                        request_id,
-                        request.service,
-                        Err(protocol_error(
-                            PluginErrorCode::InvalidOperation,
-                            "plugin overlay contribution is not registered",
-                        )),
-                    ));
-                }
                 let reply = self.reply(
                     instance,
                     epoch,
@@ -242,10 +193,6 @@ impl HostServiceGateway {
                     serde_json::json!({
                         "name": "navigation.open",
                         "pageId": page_id,
-                        "contribution": contribution,
-                        "turnId": turn_id,
-                        "turnIndex": turn_index,
-                        "anchor": anchor,
                     }),
                 )
             }

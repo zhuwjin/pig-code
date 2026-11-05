@@ -29,7 +29,6 @@ import {
   mentionSegments,
   userMessageIsLong,
 } from "../conversation";
-import { UiView } from "../plugins/ui-node-factory";
 import { Icon } from "./icon";
 import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
@@ -365,9 +364,7 @@ function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
 function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; active: boolean; navEligible: boolean }) {
   const row = () => props.row();
   return (
-    <UiView
-      uiId="message.item"
-      store={props.store}
+    <View
       class={props.active
         ? `w-full rounded-lg bg-warning/10 ${props.navEligible ? "px-12" : ""}`
         : `w-full ${props.navEligible ? "px-12" : ""}`}
@@ -396,7 +393,7 @@ function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; acti
           />
         </If>
       </View>
-    </UiView>
+    </View>
   );
 }
 

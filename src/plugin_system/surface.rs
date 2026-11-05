@@ -10,9 +10,11 @@ use nsh_core::{
     storage::{StorageBackend, StorageChange},
 };
 use nsh_engine::{App, Bundle, FileStorage};
-use nsh_platform_windows::{
-    AppOptions, AppView, AssetBase, ComponentContext, Components, NativeComponent,
-};
+#[cfg(target_os = "macos")]
+use nsh_platform_macos as platform;
+#[cfg(windows)]
+use nsh_platform_windows as platform;
+use platform::{AppOptions, AppView, AssetBase, ComponentContext, Components, NativeComponent};
 use serde_json::{Value as JsonValue, json};
 
 use super::host_api::{self, SurfaceDescriptor, SurfaceMount};
@@ -33,8 +35,8 @@ struct SurfaceProps {
     theme: Option<String>,
     locale: Option<Locale>,
     appearance: Appearance,
-    width: f32,
-    height: f32,
+    width: Option<f32>,
+    height: Option<f32>,
 }
 
 impl Default for SurfaceProps {
@@ -44,8 +46,8 @@ impl Default for SurfaceProps {
             theme: None,
             locale: None,
             appearance: Appearance::System,
-            width: 320.0,
-            height: 240.0,
+            width: None,
+            height: None,
         }
     }
 }
@@ -101,7 +103,6 @@ struct PluginSurface {
     storage: Arc<SurfaceKv>,
     view: RefCell<Option<Rc<AppView>>>,
     requested: RefCell<Option<String>>,
-    loaded: RefCell<Option<LoadedSurface>>,
     results: Arc<Mutex<Vec<LoadResult>>>,
     environment: RefCell<Option<Appearance>>,
     applied_size: RefCell<Option<(f32, f32)>>,
@@ -116,17 +117,17 @@ impl PluginSurface {
             ..nsh_engine::Limits::default()
         };
         let storage = Arc::new(SurfaceKv::default());
-        let view = AppView::new(
-            None,
-            AppOptions {
-                app_id: "com.example.pigcodets".into(),
-                title: "Pig Code plugin".into(),
-                storage: Some(storage.clone()),
-                limits,
-                ..AppOptions::default()
-            },
-        )
-        .ok();
+        let options = AppOptions {
+            app_id: "com.example.pigcodets".into(),
+            title: "Pig Code plugin".into(),
+            storage: Some(storage.clone()),
+            limits,
+            ..AppOptions::default()
+        };
+        #[cfg(windows)]
+        let view = AppView::new(None, options).ok();
+        #[cfg(target_os = "macos")]
+        let view = platform::objc2::MainThreadMarker::new().map(|mtm| AppView::new(mtm, options));
         Self {
             context,
             props: RefCell::new(SurfaceProps::default()),
@@ -134,7 +135,6 @@ impl PluginSurface {
             storage,
             view: RefCell::new(view),
             requested: RefCell::new(None),
-            loaded: RefCell::new(None),
             results: Arc::new(Mutex::new(Vec::new())),
             environment: RefCell::new(None),
             applied_size: RefCell::new(None),
@@ -146,9 +146,11 @@ impl PluginSurface {
             let props = self.props.borrow();
             (props.width, props.height)
         };
-        if self.applied_size.borrow().as_ref() != Some(&size) {
-            self.context.set_size(size.0, size.1);
-            *self.applied_size.borrow_mut() = Some(size);
+        if let (Some(width), Some(height)) = size
+            && *self.applied_size.borrow() != Some((width, height))
+        {
+            self.context.set_size(width, height);
+            *self.applied_size.borrow_mut() = Some((width, height));
         }
         self.attach();
         self.sync_host_environment();
@@ -251,7 +253,10 @@ impl PluginSurface {
                 .lock()
                 .expect("plugin surface result lock")
                 .push(LoadResult { signature, result });
+            #[cfg(windows)]
             context.redraw();
+            #[cfg(target_os = "macos")]
+            context.emit("sync", json!({}));
         });
     }
 
@@ -272,7 +277,6 @@ impl PluginSurface {
                     view.set_locale(props.locale);
                     view.set_asset_base(Some(AssetBase::Directory(loaded.assets.clone())));
                     view.load(App::Js(loaded.bundle.clone()));
-                    *self.loaded.borrow_mut() = Some(loaded);
                     if let Some(descriptor) = self.descriptor() {
                         self.context.emit(
                             "ready",
@@ -313,17 +317,28 @@ impl PluginSurface {
 }
 
 impl NativeComponent for PluginSurface {
+    #[cfg(windows)]
     fn draw(
         &self,
-        dc: &nsh_platform_windows::windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
+        dc: &platform::windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
         size: (f32, f32),
     ) {
         let _ = (dc, size);
         self.sync();
     }
 
-    fn window(&self) -> Option<nsh_platform_windows::windows::Win32::Foundation::HWND> {
+    #[cfg(windows)]
+    fn window(&self) -> Option<platform::windows::Win32::Foundation::HWND> {
         self.view.borrow().as_ref().map(|view| view.hwnd())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn view(&self) -> platform::objc2::rc::Retained<platform::objc2_app_kit::NSView> {
+        self.view
+            .borrow()
+            .as_ref()
+            .expect("macOS plugin AppView")
+            .view()
     }
 
     fn set_prop(&mut self, name: &str, value: Option<&JsonValue>) {
@@ -352,14 +367,12 @@ impl NativeComponent for PluginSurface {
                 };
             }
             "width" => {
-                if let Some(width) = value.and_then(JsonValue::as_f64) {
-                    props.width = width as f32;
-                }
+                props.width = value.and_then(JsonValue::as_f64).map(|width| width as f32);
             }
             "height" => {
-                if let Some(height) = value.and_then(JsonValue::as_f64) {
-                    props.height = height as f32;
-                }
+                props.height = value
+                    .and_then(JsonValue::as_f64)
+                    .map(|height| height as f32);
             }
             _ => {}
         }
@@ -368,9 +381,13 @@ impl NativeComponent for PluginSurface {
     }
 
     fn command(&mut self, name: &str, _args: &JsonValue) {
-        if name == "reload" {
-            *self.requested.borrow_mut() = None;
-            self.sync();
+        match name {
+            "reload" => {
+                *self.requested.borrow_mut() = None;
+                self.sync();
+            }
+            "sync" => self.finish_loads(),
+            _ => {}
         }
     }
 }
@@ -434,8 +451,6 @@ mod tests {
             storage_dir: PathBuf::from("C:/data/instances/stable/nsh"),
             session_id: None,
             turn_id: None,
-            turn_index: None,
-            display_mode: None,
         };
         let next = SurfaceDescriptor {
             revision: 2,

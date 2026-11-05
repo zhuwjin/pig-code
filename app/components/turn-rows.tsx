@@ -5,9 +5,7 @@ import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration } from "../conversation";
 import { Icon } from "./icon";
-import { UiNodeFactory } from "../plugins/ui-node-factory";
-import { uiContributions } from "../plugins/ui-coordinator";
-import { PluginSurfaceSlot } from "../plugins/surface";
+import { PluginSlot } from "../plugins/slots";
 
 export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children: JSX.Element }) {
   const turn = () => props.turn();
@@ -94,14 +92,6 @@ export function TurnActionsRow(props: UiContext & {
   };
   const hooksOpen = () => props.store.isExpanded(`hooks-${turn().id}`);
   const copied = () => props.store.copiedItems()[`turn-copy-${turn().id}`] ?? false;
-  const surfaceStats = () => uiContributions(
-    props.store.pluginPackages(),
-    "message.turnStats",
-    ["surface"],
-    props.store.pluginRuntime(),
-    props.store.pluginDynamic(),
-    props.store.pluginOrder(),
-  ).length > 0;
   return (
     <View class="group gap-2">
       <If when={turn().finishReason === "length" || turn().finishReason === "content_filter"}>
@@ -143,32 +133,8 @@ export function TurnActionsRow(props: UiContext & {
             <Icon name="anchor" size={12} color={token("muted-foreground")} />
           </Button>
         </If>
+        <PluginSlot {...props} slot="message" context={{ sessionId: props.store.current(), turnId: turn().id }} />
         <If when={stats()}>
-          <If
-            when={surfaceStats()}
-            else={
-              <UiNodeFactory
-                uiId="message.turnStats"
-                store={props.store}
-                context={() => ({ sessionId: props.store.current() })}
-                exportName={() => `TurnStats:${props.store.currentTurns().findIndex((candidate) => candidate.id === turn().id)}`}
-                render={() => <View />}
-              />
-            }
-          >
-            <PluginSurfaceSlot
-              {...props}
-              target="message.turnStats"
-              detail={["stats-turn-speed-detail", "stats-turn-usage-detail"]}
-              align="start"
-              sessionId={props.store.current()}
-              turnId={turn().id}
-              turnIndex={props.store.currentTurns().findIndex((candidate) => candidate.id === turn().id)}
-              testID={`stats-summary-TurnStats:${props.store.currentTurns().findIndex((candidate) => candidate.id === turn().id)}`}
-              width={220}
-              height={24}
-            />
-          </If>
           <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>
         </If>
         <If when={!stats() && turn().durationMs}>

@@ -11,6 +11,10 @@ import type { IconElement } from "./icon-types";
 
 export type IconName = keyof typeof ICON_ELEMENTS | "pig";
 
+export function isIconName(name: string): name is IconName {
+  return name === "pig" || name in ICON_ELEMENTS;
+}
+
 export function iconTint(name: IconName, color?: string): string | undefined {
   return name === "pig" ? undefined : (color ?? token("foreground"));
 }
