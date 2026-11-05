@@ -28,7 +28,7 @@ pub(super) struct Manager {
     pending: PendingApprovals,
     pending_questions: PendingQuestions,
     store: std::sync::Arc<std::sync::Mutex<Store>>,
-    plugins: crate::plugins::PluginRegistry,
+    plugins: crate::plugins::SharedPluginRegistry,
     sessions: HashMap<String, SessionEntry>,
     deleted_sessions: std::collections::HashSet<String>,
     pending_terminal: Vec<(
@@ -99,9 +99,6 @@ impl Manager {
         }
         let (task_notify_tx, task_notify_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::task::TaskChange>();
-        if let Err(error) = crate::plugins::PluginRegistry::reset_runtime(&data_dir) {
-            tracing::warn!("could not clear stale runtime plugin contributions: {error}");
-        }
         Self {
             config_path,
             sessions_dir,
@@ -112,7 +109,7 @@ impl Manager {
             pending,
             pending_questions,
             store,
-            plugins: crate::plugins::PluginRegistry::new(data_dir.clone()),
+            plugins: crate::plugins::PluginRegistry::shared(data_dir.clone()),
             sessions: HashMap::new(),
             deleted_sessions: std::collections::HashSet::new(),
             pending_terminal: Vec::new(),

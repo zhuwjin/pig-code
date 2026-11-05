@@ -197,8 +197,10 @@ TSX 不决定安装、签名、授权和包更新结果。
 | Engine 实例、启动纪元、运行错误、资源使用 | `PluginSystemManager` | 只读运行快照 |
 | 基础 UI 节点与原始行为 | `BaseUiRegistry` | 不可变描述 |
 | 当前合成 UI 文档 | `UiCoordinator` | 渲染结果 |
-| 插件运行时注册 | 对应 Engine 实例 | 派生贡献，停止即删除 |
+| 插件运行时注册 | `PluginRegistry`（已提交）/ 对应 Engine（暂存） | 仅内存快照，停止即删除 |
 | Agent 会话与审批 | `pig-core` | 按权限投影的数据 |
+
+Agent runner 持有一个共享的 `PluginRegistry`；工具、Skill、MCP、HTTP 和宿主服务从同一实例读取已提交状态，而不是分别打开运行时 JSON 文件。动态贡献只保留在内存中，应用重启后由当前后端重新注册。
 
 运行时动态注册必须带 `(package, digest, instance, engine_epoch)`。Engine 停止后，这些注册不得残留。
 
@@ -805,8 +807,8 @@ requestId + sessionId + workspaceId + instance + epoch + tool + args + cancellat
 <data>/plugins/
   packages/<plugin-id>/<sha256>.nshpkg
   extracted/<plugin-id>/<sha256>/...
-  instances/<instance-id>/storage.json
-  instances/<instance-id>/cache/
+  instances/<stable-data-key-hash>/storage.json
+  instances/<stable-data-key-hash>/cache/
   trust/
   registry.json
 ```
@@ -858,9 +860,10 @@ plugin://<plugin-id>/<digest>/<normalized-path>
 
 ### 13.2 私有存储
 
-- 每个实例独立 KV 存储和缓存目录。
+- 每个稳定数据作用域独立 KV 存储和缓存目录；数据 key 由插件 ID、来源、作用域和工作区组成，不包含包 digest。
+- 插件更新后沿用同一私有 KV，但新 digest 必须重新满足对应授权，不能因为数据仍存在而自动获得权限。
 - 数据带有 schema 版本，迁移由插件自己负责。
-- 项目实例与用户实例隔离。
+- 项目与用户数据作用域隔离。
 - 缓存可删除，权威状态不能依赖缓存。
 - 禁用插件保留数据，卸载时由用户决定是否清除。
 
@@ -1112,7 +1115,7 @@ TSX UI 协调与渲染
 | 实现 | 位置 |
 |---|---|
 | 协议信封、协商、文档、确认、服务和指标 | `crates/pig-protocol/src/plugin_runtime.rs` |
-| 安装、签名、授权、原子注册快照和更新回滚 | `crates/pig-core/src/plugins/` |
+| 安装、签名、授权、共享内存贡献快照和更新回滚 | `crates/pig-core/src/plugins/` |
 | 生命周期、请求关联、健康检查、重试和命令/事件路由 | `src/plugin_system/manager.rs` |
 | 官方指纹、第三方市场信任锚和市场源持久化 | `src/plugin_system/marketplace.rs` |
 | 市场源维护、目录、安装和更新界面 | `app/components/settings/marketplace.tsx` |

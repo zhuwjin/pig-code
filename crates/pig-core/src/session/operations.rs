@@ -13,8 +13,11 @@ impl Session {
     /// Subagents narrow built-ins and inherit MCP/plugin tools by the same
     /// read-only rule. Dynamic plugin tools use the current request's selection.
     pub(crate) fn root_tools(&self) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools =
-            tool::all_root_with_summary(&self.cwd, &self.data_dir, &self.profiles_summary);
+        let mut tools = tool::all_root_with_summary(
+            &self.cwd,
+            &self.profiles_summary,
+            &self.plugin_tools.registry(),
+        );
         if let Some(mcp) = &self.mcp {
             tools.extend(mcp.tools());
         }

@@ -31,6 +31,7 @@ impl Session {
                     &self.cwd,
                     &self.data_dir,
                     &self.trust,
+                    &self.plugin_tools.registry(),
                 )
                 .await,
             ));
@@ -260,7 +261,7 @@ impl Session {
                 if self.prompt_skills_state.as_deref() != Some(&skills_state) {
                     self.skills_prompt = crate::plugins::skills_section_with_trust(
                         &self.cwd,
-                        &self.data_dir,
+                        &self.plugin_tools.registry(),
                         self.trust.admits(&self.cwd),
                     );
                 }
@@ -2177,7 +2178,6 @@ impl Session {
                 let index = next;
                 let call = cards[index].call.clone();
                 let cwd = self.cwd.clone();
-                let data_dir = self.data_dir.clone();
                 let state = self.state.clone();
                 let mcp = self.mcp.clone();
                 let plugin_tools = self.plugin_tools.clone();
@@ -2210,7 +2210,9 @@ impl Session {
                     // root-only + stateless + registry-backed, same treatment
                     if call.name == "Skill" {
                         extra.push(Box::new(tool::SkillTool::new_trusted(
-                            &cwd, &data_dir, trusted,
+                            &cwd,
+                            &plugin_tools.registry(),
+                            trusted,
                         )));
                     }
                     if call.name == "SendMessage" {
@@ -3049,6 +3051,7 @@ mod tests {
             &sessions_dir,
             data_dir.clone(),
             task_tx,
+            &registry.into_shared(),
             None,
         )
         .expect("session");

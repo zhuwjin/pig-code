@@ -95,6 +95,7 @@ impl Manager {
             &sessions_dir,
             data_dir.clone(),
             task_notify_tx.clone(),
+            &self.plugins,
             session_runtime.clone(),
         ) {
             Ok(mut session) => {
@@ -330,6 +331,7 @@ impl Manager {
             store.clone(),
             data_dir.clone(),
             task_notify_tx.clone(),
+            &self.plugins,
             session_runtime.clone(),
         ) {
             Ok((mut session, records)) => {

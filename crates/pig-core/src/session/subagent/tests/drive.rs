@@ -219,7 +219,12 @@ async fn child_skill_tool_honors_workspace_trust() {
 
     let mut drive = test_drive("a1-1");
     drive.cwd = dir.clone();
-    drive.data_dir = dir.clone();
+    drive.plugin_tools = crate::plugins::PluginToolset::new(
+        &crate::plugins::PluginRegistry::shared(dir.clone()),
+        &crate::config::WorkspaceTrust::untrusted(&dir),
+        None,
+        "s-test",
+    );
     drive.trusted = true;
     let (output, is_error) = run_child_skill(&drive).await;
     assert!(!is_error, "a trusted project skill must load: {output}");
@@ -232,7 +237,7 @@ async fn child_skill_tool_honors_workspace_trust() {
         "an untrusted project skill must stay denied: {output}"
     );
     assert!(
-        output.contains("does not exist"),
+        !output.contains("PROJECT_SKILL_BODY"),
         "the denial does not expose the body: {output}"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -316,7 +321,7 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
         .expect("enable package");
     let mut drive = test_drive("a-dynamic");
     drive.plugin_tools = crate::plugins::PluginToolset::new(
-        &data,
+        &registry.into_shared(),
         &crate::config::WorkspaceTrust::untrusted(&root),
         None,
         "s-test",

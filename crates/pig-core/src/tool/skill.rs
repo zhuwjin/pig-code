@@ -8,7 +8,7 @@ use std::pin::Pin;
 /// as ZCode: the listing lives in the system prompt and bodies load on demand, avoiding full injection blowing up the context).
 pub(crate) struct SkillTool {
     pub cwd: PathBuf,
-    pub data_dir: PathBuf,
+    pub plugins: crate::plugins::SharedPluginRegistry,
     /// Whether the workspace's project skills are admitted
     /// (`WorkspaceTrust::admits(cwd)`). The parameterless constructor keeps
     /// the fail-closed default for call sites that have no trust decision.
@@ -16,19 +16,23 @@ pub(crate) struct SkillTool {
 }
 
 impl SkillTool {
-    pub fn new(cwd: &std::path::Path, data_dir: &std::path::Path) -> Self {
+    pub fn new(cwd: &std::path::Path, plugins: &crate::plugins::SharedPluginRegistry) -> Self {
         Self {
             cwd: cwd.to_path_buf(),
-            data_dir: data_dir.to_path_buf(),
+            plugins: plugins.clone(),
             trusted: false,
         }
     }
 
     /// Skill lookup under an explicit workspace-trust decision.
-    pub fn new_trusted(cwd: &std::path::Path, data_dir: &std::path::Path, trusted: bool) -> Self {
+    pub fn new_trusted(
+        cwd: &std::path::Path,
+        plugins: &crate::plugins::SharedPluginRegistry,
+        trusted: bool,
+    ) -> Self {
         Self {
             cwd: cwd.to_path_buf(),
-            data_dir: data_dir.to_path_buf(),
+            plugins: plugins.clone(),
             trusted,
         }
     }
@@ -67,7 +71,7 @@ impl Tool for SkillTool {
         ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            let _ = ctx; // discovery paths are injected at construction time (cwd/data_dir), no session state needed
+            let _ = ctx;
             let name = args["skill"]
                 .as_str()
                 .map(str::trim)
@@ -75,7 +79,7 @@ impl Tool for SkillTool {
                 .ok_or("Missing required parameter: skill (the skill name, without a slash)")?;
             let output = crate::plugins::load_skill_output_with_trust(
                 &self.cwd,
-                &self.data_dir,
+                &self.plugins,
                 name,
                 self.trusted,
             )?;

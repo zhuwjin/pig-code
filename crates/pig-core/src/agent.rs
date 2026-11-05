@@ -1035,8 +1035,9 @@ You are a code reviewer; output only the issue list.
             snapshot.iter().any(|p| p.name == "extra"),
             "project-level profile should be in the snapshot"
         );
+        let plugins = crate::plugins::PluginRegistry::shared(tmp.0.clone());
         let schemas = |profiles: &[AgentProfile]| {
-            serde_json::to_string(&crate::tool::schemas_root(&ws, &tmp.0, profiles)).unwrap()
+            serde_json::to_string(&crate::tool::schemas_root(&ws, profiles, &plugins)).unwrap()
         };
         let frozen = schemas(&snapshot);
         // after freezing, add/remove profiles on disk: schema bytes from the same snapshot stay unchanged

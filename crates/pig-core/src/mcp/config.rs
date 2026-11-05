@@ -71,11 +71,16 @@ struct RawServer {
 /// Load the user level only (fail-closed). Project servers are repository
 /// content: until the workspace is trusted they are neither parsed nor started.
 /// Runtime call sites use [`load_with_trust`].
-pub fn load(workspace_root: &Path, data_dir: &Path) -> Vec<McpServerConfig> {
+pub fn load(
+    workspace_root: &Path,
+    data_dir: &Path,
+    plugins: &crate::plugins::SharedPluginRegistry,
+) -> Vec<McpServerConfig> {
     load_with_trust(
         workspace_root,
         data_dir,
         &WorkspaceTrust::untrusted(workspace_root),
+        plugins,
     )
 }
 
@@ -87,6 +92,7 @@ pub fn load_with_trust(
     workspace_root: &Path,
     data_dir: &Path,
     trust: &WorkspaceTrust,
+    plugins: &crate::plugins::SharedPluginRegistry,
 ) -> Vec<McpServerConfig> {
     let user = load_file(&data_dir.join("mcp.json"));
     let project_path = workspace_root.join(".pigcode").join("mcp.json");
@@ -104,7 +110,7 @@ pub fn load_with_trust(
     let configured = merged_enabled(user, project);
     merge(
         configured,
-        crate::plugins::mcp_servers(workspace_root, data_dir, trust),
+        crate::plugins::mcp_servers(workspace_root, plugins, trust),
     )
     .into_iter()
     .filter(|server| !server.disabled)
@@ -119,8 +125,9 @@ impl McpServerConfig {
         workspace_root: &Path,
         data_dir: &Path,
         trust: &WorkspaceTrust,
+        plugins: &crate::plugins::SharedPluginRegistry,
     ) -> Vec<Self> {
-        crate::mcp::config::load_with_trust(workspace_root, data_dir, trust)
+        crate::mcp::config::load_with_trust(workspace_root, data_dir, trust, plugins)
     }
 }
 
@@ -561,12 +568,14 @@ mod tests {
                 .map(|server| server.name)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(load(&ws, &data)), vec!["user"]);
+        let plugins = crate::plugins::PluginRegistry::shared(data.clone());
+        assert_eq!(names(load(&ws, &data, &plugins)), vec!["user"]);
         assert_eq!(
             names(load_with_trust(
                 &ws,
                 &data,
-                &WorkspaceTrust::new(&ws, /*trusted*/ false)
+                &WorkspaceTrust::new(&ws, /*trusted*/ false),
+                &plugins,
             )),
             vec!["user"]
         );
@@ -574,7 +583,8 @@ mod tests {
             names(load_with_trust(
                 &ws,
                 &data,
-                &WorkspaceTrust::new(&ws, /*trusted*/ true)
+                &WorkspaceTrust::new(&ws, /*trusted*/ true),
+                &plugins,
             )),
             vec!["project", "user"]
         );
@@ -582,7 +592,8 @@ mod tests {
             names(load_with_trust(
                 &ws,
                 &data,
-                &WorkspaceTrust::new(&other, /*trusted*/ true)
+                &WorkspaceTrust::new(&other, /*trusted*/ true),
+                &plugins,
             )),
             vec!["user"],
             "a token for another root must not admit this workspace"

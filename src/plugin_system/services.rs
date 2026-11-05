@@ -119,7 +119,7 @@ impl HostServiceGateway {
                 generation,
                 request_id,
                 request.service,
-                read_storage(&self.data_dir, instance),
+                read_storage(&self.data_dir, &super::manager::plugin_data_key(package)),
             )),
             PluginService::StorageWrite => ServiceExecution::Complete(self.reply(
                 instance,
@@ -127,7 +127,11 @@ impl HostServiceGateway {
                 generation,
                 request_id,
                 request.service,
-                write_storage(&self.data_dir, instance, &request.payload),
+                write_storage(
+                    &self.data_dir,
+                    &super::manager::plugin_data_key(package),
+                    &request.payload,
+                ),
             )),
             PluginService::ResourceRead => ServiceExecution::Complete(self.reply(
                 instance,
@@ -170,7 +174,10 @@ impl HostServiceGateway {
                         generation,
                         request_id,
                         request.service,
-                        Err(protocol_error(PluginErrorCode::InvalidOperation, "invalid navigation target")),
+                        Err(protocol_error(
+                            PluginErrorCode::InvalidOperation,
+                            "invalid navigation target",
+                        )),
                     ));
                 }
                 let reply = self.reply(
@@ -352,7 +359,9 @@ impl HostServiceGateway {
                 .lock()
                 .expect("plugin service pending lock")
                 .remove(&internal_id);
-            return failure(protocol_error(PluginErrorCode::Transport, send_error.to_string()).retryable());
+            return failure(
+                protocol_error(PluginErrorCode::Transport, send_error.to_string()).retryable(),
+            );
         }
         ServiceExecution::Forwarded
     }
@@ -454,7 +463,11 @@ impl HostServiceGateway {
                         .timed_out_requests += 1;
                     self.finish(
                         pending,
-                        Err(protocol_error(PluginErrorCode::Timeout, "plugin service request timed out").retryable()),
+                        Err(protocol_error(
+                            PluginErrorCode::Timeout,
+                            "plugin service request timed out",
+                        )
+                        .retryable()),
                     )
                 })
             })
@@ -484,7 +497,10 @@ impl HostServiceGateway {
                         .cancelled_requests += 1;
                     self.finish(
                         pending,
-                        Err(protocol_error(PluginErrorCode::Cancelled, "plugin service request was cancelled")),
+                        Err(protocol_error(
+                            PluginErrorCode::Cancelled,
+                            "plugin service request was cancelled",
+                        )),
                     )
                 })
             })
@@ -507,7 +523,13 @@ impl HostServiceGateway {
             .count()
     }
 
-    pub fn record_tool_completion(&self, instance: &str, epoch: u64, timed_out: bool, cancelled: bool) {
+    pub fn record_tool_completion(
+        &self,
+        instance: &str,
+        epoch: u64,
+        timed_out: bool,
+        cancelled: bool,
+    ) {
         if !timed_out && !cancelled {
             return;
         }
@@ -532,9 +554,12 @@ impl HostServiceGateway {
             .unwrap_or_default()
     }
 
-    pub fn storage_bytes(&self, instance: &str) -> u64 {
-        std::fs::metadata(storage_path(&self.data_dir, instance))
-            .map_or(0, |metadata| metadata.len())
+    pub fn storage_bytes(&self, package: &PluginPackageInfo) -> u64 {
+        std::fs::metadata(storage_path(
+            &self.data_dir,
+            &super::manager::plugin_data_key(package),
+        ))
+        .map_or(0, |metadata| metadata.len())
     }
 
     fn take(&self, internal_id: &str) -> Option<PendingService> {
@@ -629,9 +654,10 @@ fn authorize_request(
     }
     if request.service == PluginService::WorkspaceRead
         && let PluginSource::Project { workspace } = &package.source
-        && request.workspace_id.as_deref().is_some_and(|id| {
-            !id.is_empty() && Path::new(id) != workspace
-        })
+        && request
+            .workspace_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty() && Path::new(id) != workspace)
     {
         return Err(protocol_error(
             PluginErrorCode::PermissionDenied,
@@ -649,8 +675,8 @@ pub fn capability_granted(package: &PluginPackageInfo, capability: &str, target:
     })
 }
 
-fn read_storage(data_dir: &Path, instance: &str) -> Result<serde_json::Value, PluginProtocolError> {
-    match std::fs::read(storage_path(data_dir, instance)) {
+fn read_storage(data_dir: &Path, data_key: &str) -> Result<serde_json::Value, PluginProtocolError> {
+    match std::fs::read(storage_path(data_dir, data_key)) {
         Ok(bytes) if bytes.len() > MAX_STORAGE_BYTES => Err(protocol_error(
             PluginErrorCode::QuotaExceeded,
             "plugin storage exceeds 1 MiB",
@@ -658,13 +684,16 @@ fn read_storage(data_dir: &Path, instance: &str) -> Result<serde_json::Value, Pl
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|error| protocol_error(PluginErrorCode::Internal, error.to_string())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::Value::Null),
-        Err(error) => Err(protocol_error(PluginErrorCode::Transport, error.to_string())),
+        Err(error) => Err(protocol_error(
+            PluginErrorCode::Transport,
+            error.to_string(),
+        )),
     }
 }
 
 fn write_storage(
     data_dir: &Path,
-    instance: &str,
+    data_key: &str,
     value: &serde_json::Value,
 ) -> Result<serde_json::Value, PluginProtocolError> {
     let bytes = serde_json::to_vec(value)
@@ -675,7 +704,7 @@ fn write_storage(
             "plugin storage exceeds 1 MiB",
         ));
     }
-    let path = storage_path(data_dir, instance);
+    let path = storage_path(data_dir, data_key);
     let parent = path
         .parent()
         .ok_or_else(|| protocol_error(PluginErrorCode::Internal, "plugin storage has no parent"))?;
@@ -701,9 +730,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     options.open(path)?.write_all(bytes)
 }
 
-pub fn storage_path(data_dir: &Path, instance: &str) -> PathBuf {
+pub fn storage_path(data_dir: &Path, data_key: &str) -> PathBuf {
     use sha2::{Digest as _, Sha256};
-    let digest = Sha256::digest(instance.as_bytes());
+    let digest = Sha256::digest(data_key.as_bytes());
     data_dir
         .join("instances")
         .join(format!("{digest:x}"))
@@ -753,7 +782,10 @@ fn read_resource(
     let path = root.join(relative);
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| protocol_error(PluginErrorCode::NotFound, error.to_string()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() as usize > MAX_RESOURCE_BYTES {
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() as usize > MAX_RESOURCE_BYTES
+    {
         return Err(protocol_error(
             PluginErrorCode::QuotaExceeded,
             "resource must be a regular file no larger than 4 MiB",
@@ -763,11 +795,18 @@ fn read_resource(
         .canonicalize()
         .map_err(|error| protocol_error(PluginErrorCode::NotFound, error.to_string()))?;
     if !path.starts_with(&root) {
-        return Err(protocol_error(PluginErrorCode::PermissionDenied, "resource escapes the package"));
+        return Err(protocol_error(
+            PluginErrorCode::PermissionDenied,
+            "resource escapes the package",
+        ));
     }
     let bytes = std::fs::read(&path)
         .map_err(|error| protocol_error(PluginErrorCode::Transport, error.to_string()))?;
-    let mime = match path.extension().and_then(|value| value.to_str()).unwrap_or_default() {
+    let mime = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+    {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -800,7 +839,10 @@ fn normalize_locale(locale: &str) -> String {
         .replace('_', "-");
     if locale.eq_ignore_ascii_case("zh") {
         "zh-CN".to_owned()
-    } else if locale.is_empty() || locale.eq_ignore_ascii_case("c") || locale.eq_ignore_ascii_case("posix") {
+    } else if locale.is_empty()
+        || locale.eq_ignore_ascii_case("c")
+        || locale.eq_ignore_ascii_case("posix")
+    {
         "en".to_owned()
     } else {
         locale
@@ -819,7 +861,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn storage_is_atomic_and_scoped_by_the_full_instance() {
+    fn storage_is_atomic_and_scoped_by_the_stable_data_key() {
         let root = std::env::temp_dir().join(format!(
             "pig-service-storage-{}-{}",
             std::process::id(),
@@ -828,18 +870,25 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        write_storage(&root, "moon:digest:user:default", &serde_json::json!({"answer": 42})).unwrap();
+        write_storage(
+            &root,
+            "moon:user:default",
+            &serde_json::json!({"answer": 42}),
+        )
+        .unwrap();
         assert_eq!(
-            read_storage(&root, "moon:digest:user:default").unwrap()["answer"],
+            read_storage(&root, "moon:user:default").unwrap()["answer"],
             42
         );
         assert_eq!(
-            read_storage(&root, "moon:digest:project:other").unwrap(),
+            read_storage(&root, "moon:project:other").unwrap(),
             serde_json::Value::Null
         );
-        assert!(!storage_path(&root, "moon:digest:user:default")
-            .to_string_lossy()
-            .contains("moon:digest"));
+        assert!(
+            !storage_path(&root, "moon:user:default")
+                .to_string_lossy()
+                .contains("moon:user")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

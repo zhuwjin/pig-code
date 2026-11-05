@@ -545,36 +545,36 @@ fn only_the_declared_tools_opt_into_strict() {
 /// via load_profiles, so a stale list self-heals through the "profile does not exist" error
 pub fn all_root(
     cwd: &Path,
-    data_dir: &Path,
     profiles: &[crate::agent::AgentProfile],
+    plugins: &crate::plugins::SharedPluginRegistry,
 ) -> Vec<Box<dyn Tool>> {
     all_root_with_summary(
         cwd,
-        data_dir,
         &crate::agent::agent_description_list(profiles),
+        plugins,
     )
 }
 
 pub fn all_root_with_summary(
     cwd: &Path,
-    data_dir: &Path,
     profiles_summary: &str,
+    plugins: &crate::plugins::SharedPluginRegistry,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools = all();
     tools.push(Box::new(AgentTool::from_summary(profiles_summary)));
     tools.push(Box::new(AgentSwarmTool::from_summary(profiles_summary)));
     tools.push(Box::new(SendMessageTool));
-    tools.push(Box::new(SkillTool::new(cwd, data_dir)));
+    tools.push(Box::new(SkillTool::new(cwd, plugins)));
     tools
 }
 
 /// Root session tool schema set (including Agent); parameters match all_root
 pub fn schemas_root(
     cwd: &Path,
-    data_dir: &Path,
     profiles: &[crate::agent::AgentProfile],
+    plugins: &crate::plugins::SharedPluginRegistry,
 ) -> Vec<serde_json::Value> {
-    all_root(cwd, data_dir, profiles)
+    all_root(cwd, profiles, plugins)
         .iter()
         .map(|tool| schema_with_strict(tool.as_ref()))
         .collect()

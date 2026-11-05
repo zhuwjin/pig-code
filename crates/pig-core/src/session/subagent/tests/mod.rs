@@ -43,7 +43,6 @@ fn test_drive(agent_id: &str) -> SubagentDrive {
     SubagentDrive {
         agent_id: agent_id.to_string(),
         cwd: std::env::temp_dir(),
-        data_dir: std::env::temp_dir(),
         profile: crate::agent::AgentProfile {
             name: "explore".into(),
             description: "test child".into(),
@@ -64,7 +63,7 @@ fn test_drive(agent_id: &str) -> SubagentDrive {
         description: "managed child".into(),
         mcp: None,
         plugin_tools: crate::plugins::PluginToolset::new(
-            &std::env::temp_dir(),
+            &crate::plugins::PluginRegistry::shared(std::env::temp_dir()),
             &crate::config::WorkspaceTrust::untrusted(&std::env::temp_dir()),
             None,
             "s-test",
@@ -209,8 +208,9 @@ fn compaction_test_session_with_format(
         Arc::new(Mutex::new(HashMap::new())),
         store,
         &data_dir.join("sessions"),
-        data_dir,
+        data_dir.clone(),
         task_tx,
+        &crate::plugins::PluginRegistry::shared(data_dir),
         Some(runtime.clone()),
     )
     .expect("session");
@@ -592,8 +592,9 @@ fn swarm_test_session(name: &str) -> (Session, ResolvedModel, PathBuf) {
         Arc::new(Mutex::new(HashMap::new())),
         store,
         &data_dir.join("sessions"),
-        data_dir,
+        data_dir.clone(),
         task_tx,
+        &crate::plugins::PluginRegistry::shared(data_dir),
         Some(runtime.clone()),
     )
     .expect("session");

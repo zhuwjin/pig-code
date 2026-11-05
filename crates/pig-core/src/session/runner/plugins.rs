@@ -40,7 +40,11 @@ impl Manager {
         event_tx: async_channel::Sender<pig_protocol::Event>,
         sources: Vec<PluginPackageSource>,
     ) {
-        let snapshot = self.plugins.sync(sources);
+        let snapshot = self
+            .plugins
+            .lock()
+            .expect("plugin registry lock")
+            .sync(sources);
         self.emit_plugin_snapshot(event_tx, snapshot);
     }
 
@@ -57,13 +61,12 @@ impl Manager {
             generation,
             contributions,
         } = request;
-        match self.plugins.sync_runtime_contributions(
-            &package,
-            &digest,
-            epoch,
-            generation,
-            contributions,
-        ) {
+        match self
+            .plugins
+            .lock()
+            .expect("plugin registry lock")
+            .sync_runtime_contributions(&package, &digest, epoch, generation, contributions)
+        {
             Ok(snapshot) => {
                 self.emit_plugin_snapshot(event_tx.clone(), snapshot.clone());
                 emit(
@@ -75,14 +78,9 @@ impl Manager {
                     },
                 );
             }
-            Err(error) => self.plugin_action_result(
-                &event_tx,
-                request_id,
-                package,
-                digest,
-                Err(error),
-                false,
-            ),
+            Err(error) => {
+                self.plugin_action_result(&event_tx, request_id, package, digest, Err(error), false)
+            }
         }
     }
 
@@ -130,7 +128,12 @@ impl Manager {
         digest: String,
         enabled: bool,
     ) {
-        match self.plugins.set_enabled(&package, &digest, enabled) {
+        match self
+            .plugins
+            .lock()
+            .expect("plugin registry lock")
+            .set_enabled(&package, &digest, enabled)
+        {
             Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
             Err(error) => self.plugin_action_result(
                 &event_tx,
@@ -151,9 +154,15 @@ impl Manager {
         commit: bool,
     ) {
         let result = if commit {
-            self.plugins.commit_update(&package, &digest)
+            self.plugins
+                .lock()
+                .expect("plugin registry lock")
+                .commit_update(&package, &digest)
         } else {
-            self.plugins.cancel_update(&package, &digest)
+            self.plugins
+                .lock()
+                .expect("plugin registry lock")
+                .cancel_update(&package, &digest)
         };
         match result {
             Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
@@ -179,22 +188,17 @@ impl Manager {
     ) {
         let (capability, target) = match (&scope, &session_id) {
             (_, Some(session_id)) => ("session.read", session_id.clone()),
-            (PluginScope::Project { workspace }, None) => (
-                "workspace.read",
-                workspace.to_string_lossy().into_owned(),
-            ),
+            (PluginScope::Project { workspace }, None) => {
+                ("workspace.read", workspace.to_string_lossy().into_owned())
+            }
             (PluginScope::User, None) => ("workspace.read", "*".to_owned()),
         };
-        let result = self
+        let authorized = self
             .plugins
-            .authorize_named(
-                &package,
-                &digest,
-                capability,
-                &target,
-                self.config.as_ref(),
-            )
-            .and_then(|()| self.plugin_services(scope, session_id));
+            .lock()
+            .expect("plugin registry lock")
+            .authorize_named(&package, &digest, capability, &target, self.config.as_ref());
+        let result = authorized.and_then(|()| self.plugin_services(scope, session_id));
         emit(
             &event_tx,
             pig_protocol::Event::PluginServices {
@@ -216,9 +220,12 @@ impl Manager {
         session_id: Option<String>,
     ) {
         let refresh_views = matches!(action, PluginAction::WriteConfig { .. });
-        let result = self
+        let authorized = self
             .plugins
-            .authorize(&package, &digest, &action, self.config.as_ref())
+            .lock()
+            .expect("plugin registry lock")
+            .authorize(&package, &digest, &action, self.config.as_ref());
+        let result = authorized
             .and_then(|()| self.execute_plugin_action(&package, action, session_id, &event_tx));
         let refresh_views = refresh_views && result.is_ok();
         self.plugin_action_result(
@@ -271,6 +278,7 @@ impl Manager {
                 workspaces.extend(self.sessions.values().map(|entry| entry.cwd.clone()));
                 plugins::set_skill_enabled(
                     &self.data_dir,
+                    &self.plugins,
                     &path,
                     enabled,
                     &workspaces,
@@ -298,17 +306,18 @@ impl Manager {
                 .map(|session| session.statuses)
                 .ok_or(CoreError::SessionNotFound)
                 .and_then(json),
-            PluginAction::ReadConfig { path } => {
-                plugins::config::read(&self.plugins, self.config.as_ref(), package, &path)
-            }
+            PluginAction::ReadConfig { path } => plugins::config::read(
+                &self.plugins.lock().expect("plugin registry lock"),
+                self.config.as_ref(),
+                package,
+                &path,
+            ),
             PluginAction::WriteConfig { path, value } => {
-                match plugins::config::write(
-                    &self.plugins,
-                    self.config.as_ref(),
-                    package,
-                    &path,
-                    value,
-                )? {
+                let write = {
+                    let registry = self.plugins.lock().expect("plugin registry lock");
+                    plugins::config::write(&registry, self.config.as_ref(), package, &path, value)?
+                };
+                match write {
                     plugins::config::ConfigWrite::Plugin(value) => Ok(value),
                     plugins::config::ConfigWrite::App { config, value } => {
                         self.save_config_result(event_tx.clone(), *config)?;
@@ -342,7 +351,7 @@ impl Manager {
             .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.default_cwd));
         let workspaces = self.store.lock().expect("store lock").workspaces();
         Ok(plugins::snapshot(
-            &self.plugins,
+            &self.plugins.lock().expect("plugin registry lock"),
             scope,
             workspaces,
             session,
@@ -358,12 +367,12 @@ impl Manager {
         digest: String,
         request: pig_protocol::PluginHttpRequest,
     ) {
-        let data_dir = self.data_dir.clone();
+        let plugin_registry = self.plugins.clone();
         let config = self.config.clone();
         let credentials = self.credentials.clone();
         tokio::spawn(async move {
             let result = plugins::request_http(
-                &data_dir,
+                &plugin_registry,
                 config.as_ref(),
                 &package,
                 &digest,
@@ -387,9 +396,11 @@ impl Manager {
         credential: String,
         secret: pig_protocol::SecretString,
     ) {
-        if let Err(error) =
-            self.plugins
-                .owned_credential(&package, &digest, &credential, self.config.as_ref())
+        if let Err(error) = self
+            .plugins
+            .lock()
+            .expect("plugin registry lock")
+            .owned_credential(&package, &digest, &credential, self.config.as_ref())
         {
             emit(
                 &event_tx,
@@ -423,9 +434,11 @@ impl Manager {
         digest: String,
         credential: String,
     ) {
-        if let Err(error) =
-            self.plugins
-                .owned_credential(&package, &digest, &credential, self.config.as_ref())
+        if let Err(error) = self
+            .plugins
+            .lock()
+            .expect("plugin registry lock")
+            .owned_credential(&package, &digest, &credential, self.config.as_ref())
         {
             emit(
                 &event_tx,
@@ -459,14 +472,18 @@ impl Manager {
         origin: String,
         allowed: bool,
     ) {
-        match self.plugins.set_credential_grant(
-            &package,
-            &digest,
-            &credential,
-            &origin,
-            allowed,
-            self.config.as_ref(),
-        ) {
+        match self
+            .plugins
+            .lock()
+            .expect("plugin registry lock")
+            .set_credential_grant(
+                &package,
+                &digest,
+                &credential,
+                &origin,
+                allowed,
+                self.config.as_ref(),
+            ) {
             Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
             Err(error) => self.plugin_action_result(
                 &event_tx,

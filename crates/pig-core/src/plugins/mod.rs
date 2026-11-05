@@ -18,8 +18,8 @@ pub use contributions::{
     discover_skills_with_trust, enabled_packages, load_skill_output_with_trust, mcp_servers,
     skills_section_with_trust, skills_state,
 };
+use registry::authorized_package;
 pub use registry::package_digest;
-use registry::{PersistedPlugins, authorized_package};
 pub use services::{
     SessionServices, delete_mcp, delete_skill, save_skill, set_mcp_enabled, set_skill_enabled,
     snapshot, upsert_mcp,
@@ -28,10 +28,11 @@ pub use services::{
 use pig_protocol::{PluginSnapshot, PluginSource};
 
 pub(crate) const PLUGIN_STATE_FILE: &str = "plugins-state.json";
-pub(crate) const PLUGIN_RUNTIME_STATE_FILE: &str = "plugins-runtime.json";
 pub(crate) const REDACTED: &str = "${PIG_REDACTED}";
 const GENERATED_TYPES: &str = "gpui-kit.d.ts";
 const BUILTIN_PACKAGES: [&str; 1] = ["pig.websearch"];
+
+pub type SharedPluginRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>;
 
 pub struct PluginRegistry {
     pub(crate) data_dir: std::path::PathBuf,
@@ -227,7 +228,7 @@ mod tests {
         assert!(snapshot.packages[0].enabled);
         let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
         assert_eq!(
-            enabled_packages(&data, &trust)
+            enabled_packages(&registry, &trust)
                 .expect("enabled contributions")
                 .len(),
             1
@@ -239,7 +240,7 @@ mod tests {
             .expect("disable built-in package");
         assert!(!disabled.packages[0].enabled);
         assert!(
-            enabled_packages(&data, &trust)
+            enabled_packages(&registry, &trust)
                 .expect("disabled contributions")
                 .is_empty()
         );
@@ -309,10 +310,14 @@ mod tests {
         )
         .expect("create");
         let path = pig_utils::skills::user_root(&data).join("demo/SKILL.md");
-        set_skill_enabled(&data, &path, false, &[], None).expect("disable");
-        assert!(discover_skills_with_trust(&temp.0, &data, false).is_empty());
-        set_skill_enabled(&data, &path, true, &[], None).expect("enable");
-        assert_eq!(discover_skills_with_trust(&temp.0, &data, false).len(), 1);
+        let plugins = PluginRegistry::shared(data.clone());
+        set_skill_enabled(&data, &plugins, &path, false, &[], None).expect("disable");
+        assert!(discover_skills_with_trust(&temp.0, &plugins, false).is_empty());
+        set_skill_enabled(&data, &plugins, &path, true, &[], None).expect("enable");
+        assert_eq!(
+            discover_skills_with_trust(&temp.0, &plugins, false).len(),
+            1
+        );
         delete_skill(&data, &PluginScope::User, "demo").expect("delete");
         assert!(!path.exists());
     }
@@ -349,8 +354,9 @@ mod tests {
         registry
             .set_enabled("demo", &snapshot.packages[0].digest, true)
             .expect("enable resource package");
+        let plugins = registry.into_shared();
 
-        let skills = discover_skills_with_trust(&temp.0, &data, false);
+        let skills = discover_skills_with_trust(&temp.0, &plugins, false);
         assert_eq!(
             skills
                 .iter()
@@ -358,20 +364,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alpha", "beta"]
         );
-        let prompt = skills_section_with_trust(&temp.0, &data, false);
+        let prompt = skills_section_with_trust(&temp.0, &plugins, false);
         assert!(prompt.contains("First skill") && prompt.contains("Second skill"));
         assert!(
-            load_skill_output_with_trust(&temp.0, &data, "alpha", false)
+            load_skill_output_with_trust(&temp.0, &plugins, "alpha", false)
                 .expect("load first skill")
                 .contains("Alpha instructions")
         );
         assert!(
-            load_skill_output_with_trust(&temp.0, &data, "beta", false)
+            load_skill_output_with_trust(&temp.0, &plugins, "beta", false)
                 .expect("load second skill")
                 .contains("Beta instructions")
         );
         let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
-        let servers = crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust);
+        let servers =
+            crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust, &plugins);
         assert_eq!(
             servers
                 .iter()
@@ -380,11 +387,16 @@ mod tests {
             vec!["first", "second"]
         );
 
-        registry
+        plugins
+            .lock()
+            .expect("plugin registry lock")
             .set_enabled("demo", &snapshot.packages[0].digest, false)
             .unwrap();
-        assert!(discover_skills_with_trust(&temp.0, &data, false).is_empty());
-        assert!(crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust).is_empty());
+        assert!(discover_skills_with_trust(&temp.0, &plugins, false).is_empty());
+        assert!(
+            crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust, &plugins)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -638,7 +650,10 @@ mod tests {
         let second = temp.0.join("second");
         user_plugin(&first);
         user_plugin(&second);
-        write(&second.join("App.tsx"), "export default function App() { return 'new'; }");
+        write(
+            &second.join("App.tsx"),
+            "export default function App() { return 'new'; }",
+        );
         let data = temp.0.join("data");
         let mut registry = PluginRegistry::new(data);
         let sources = || {
@@ -685,10 +700,32 @@ mod tests {
             )
             .unwrap();
         let cancelled = registry.cancel_update("demo", &new_digest).unwrap();
-        assert!(cancelled.packages.iter().find(|package| package.digest == old_digest).unwrap().enabled);
-        assert!(!cancelled.packages.iter().find(|package| package.digest == new_digest).unwrap().enabled);
-        assert!(cancelled.runtime_contributions.contains_key(&format!("demo:{old_digest}")));
-        assert!(!cancelled.runtime_contributions.contains_key(&format!("demo:{new_digest}")));
+        assert!(
+            cancelled
+                .packages
+                .iter()
+                .find(|package| package.digest == old_digest)
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !cancelled
+                .packages
+                .iter()
+                .find(|package| package.digest == new_digest)
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            cancelled
+                .runtime_contributions
+                .contains_key(&format!("demo:{old_digest}"))
+        );
+        assert!(
+            !cancelled
+                .runtime_contributions
+                .contains_key(&format!("demo:{new_digest}"))
+        );
         registry.set_enabled("demo", &new_digest, true).unwrap();
         registry
             .sync_runtime_contributions(
@@ -700,12 +737,42 @@ mod tests {
             )
             .unwrap();
         let committed = registry.commit_update("demo", &new_digest).unwrap();
-        assert!(committed.runtime_contributions.contains_key(&format!("demo:{new_digest}")));
-        assert!(!committed.runtime_contributions.contains_key(&format!("demo:{old_digest}")));
-        assert!(committed.packages.iter().find(|package| package.digest == new_digest).unwrap().enabled);
-        assert!(!committed.packages.iter().find(|package| package.digest == old_digest).unwrap().enabled);
+        assert!(
+            committed
+                .runtime_contributions
+                .contains_key(&format!("demo:{new_digest}"))
+        );
+        assert!(
+            !committed
+                .runtime_contributions
+                .contains_key(&format!("demo:{old_digest}"))
+        );
+        assert!(
+            committed
+                .packages
+                .iter()
+                .find(|package| package.digest == new_digest)
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !committed
+                .packages
+                .iter()
+                .find(|package| package.digest == old_digest)
+                .unwrap()
+                .enabled
+        );
         let restored = PluginRegistry::new(temp.0.join("data"));
-        assert!(restored.snapshot.packages.iter().find(|package| package.digest == new_digest).unwrap().enabled);
+        assert!(
+            restored
+                .snapshot
+                .packages
+                .iter()
+                .find(|package| package.digest == new_digest)
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]
@@ -791,22 +858,59 @@ mod tests {
                 pig_protocol::PluginContributions::default(),
             )
             .expect("an old engine cleanup is ignored");
-        assert!(registry.snapshot.runtime_contributions.contains_key(&format!("demo:{digest}")));
-        let runtime_path = data.join(PLUGIN_RUNTIME_STATE_FILE);
-        assert!(runtime_path.is_file());
-        let _service_registry = PluginRegistry::new(data.clone());
-        assert!(runtime_path.is_file(), "ordinary service registries must not clear live contributions");
-        PluginRegistry::reset_runtime(&data).expect("clear ephemeral state at startup");
-        assert!(!runtime_path.exists());
-        registry
+        assert!(
+            registry
+                .snapshot
+                .runtime_contributions
+                .contains_key(&format!("demo:{digest}"))
+        );
+        assert!(!data.join("plugins-runtime.json").exists());
+
+        let plugins = registry.into_shared();
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let toolset = PluginToolset::new(&plugins, &trust, None, "s-runtime");
+        assert!(
+            toolset
+                .tools()
+                .iter()
+                .any(|tool| tool.name() == "DynamicEcho")
+        );
+        assert!(
+            discover_skills_with_trust(&temp.0, &plugins, false)
+                .iter()
+                .any(|skill| skill.name == "runtime")
+        );
+        assert!(
+            crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust, &plugins)
+                .iter()
+                .any(|server| server.name == "runtime")
+        );
+
+        let restarted = PluginRegistry::new(data.clone());
+        assert!(restarted.snapshot.runtime_contributions.is_empty());
+        let generation = plugins
+            .lock()
+            .expect("plugin registry lock")
+            .snapshot
+            .generation;
+        plugins
+            .lock()
+            .expect("plugin registry lock")
             .sync_runtime_contributions(
                 "demo",
                 &digest,
                 7,
-                registry.snapshot.generation,
+                generation,
                 pig_protocol::PluginContributions::default(),
             )
             .expect("the current engine removes its contributions");
-        assert!(registry.snapshot.runtime_contributions.is_empty());
+        assert!(
+            plugins
+                .lock()
+                .expect("plugin registry lock")
+                .snapshot
+                .runtime_contributions
+                .is_empty()
+        );
     }
 }

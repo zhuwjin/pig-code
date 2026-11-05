@@ -42,7 +42,6 @@ pub(crate) struct ChildPrepCtx<'a> {
 pub(crate) struct ChildPrep {
     pub(crate) agent_id: String,
     pub(crate) cwd: PathBuf,
-    pub(crate) data_dir: PathBuf,
     pub(crate) profile: AgentProfile,
     pub(crate) child_config: ResolvedModel,
     pub(crate) tools: Vec<Box<dyn crate::tool::Tool>>,
@@ -159,7 +158,7 @@ fn child_tools(
     // trust decision must match the listing that made a skill visible.
     tools.push(Box::new(crate::tool::SkillTool::new_trusted(
         ctx.cwd,
-        ctx.data_dir,
+        &ctx.plugin_tools.registry(),
         trusted,
     )));
     validate_child_tool_names(&tools)?;
@@ -263,7 +262,6 @@ pub(crate) fn prepare_fresh_child(
     let mut prep = ChildPrep {
         agent_id,
         cwd: ctx.cwd.to_path_buf(),
-        data_dir: ctx.data_dir.to_path_buf(),
         profile,
         child_config,
         tools: tools.tools,
@@ -317,7 +315,6 @@ pub(crate) fn prepare_resume_child(
     let mut prep = ChildPrep {
         agent_id: agent_id.to_string(),
         cwd: ctx.cwd.to_path_buf(),
-        data_dir: ctx.data_dir.to_path_buf(),
         profile,
         child_config,
         tools: tools.tools,

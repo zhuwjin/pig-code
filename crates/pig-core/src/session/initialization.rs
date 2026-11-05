@@ -20,6 +20,7 @@ impl SessionFrozen {
         session_id: &str,
         cwd: &Path,
         data_dir: &Path,
+        plugins: &crate::plugins::SharedPluginRegistry,
         runtime: Option<&crate::config::RuntimeConfig>,
     ) -> Self {
         let app_config = runtime.map(|runtime| runtime.config());
@@ -27,7 +28,7 @@ impl SessionFrozen {
             .map(|runtime| runtime.trust().clone())
             .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(cwd));
         let skills_prompt =
-            crate::plugins::skills_section_with_trust(cwd, data_dir, trust.admits(cwd));
+            crate::plugins::skills_section_with_trust(cwd, plugins, trust.admits(cwd));
         let agents_prompt = prompt::agents_md(data_dir, cwd);
         let memory_enabled = app_config.is_some_and(|config| config.memory.enabled);
         if memory_enabled {
@@ -54,7 +55,7 @@ impl SessionFrozen {
             &crate::agent::load_profiles_with_trust(cwd, data_dir, &trust),
         );
         let plugin_tools =
-            crate::plugins::PluginToolset::new(data_dir, &trust, app_config.cloned(), session_id);
+            crate::plugins::PluginToolset::new(plugins, &trust, app_config.cloned(), session_id);
         Self {
             trust,
             plugin_tools,
@@ -196,10 +197,12 @@ impl Session {
         sessions_dir: &Path,
         data_dir: PathBuf,
         task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+        plugins: &crate::plugins::SharedPluginRegistry,
         runtime: Option<Arc<crate::config::RuntimeConfig>>,
     ) -> Result<Self, CoreError> {
         let rollout = Rollout::create(sessions_dir, &meta)?;
-        let frozen = SessionFrozen::capture(&meta.id, &meta.cwd, &data_dir, runtime.as_deref());
+        let frozen =
+            SessionFrozen::capture(&meta.id, &meta.cwd, &data_dir, plugins, runtime.as_deref());
         Ok(assemble_session(
             SessionParts {
                 id: meta.id,
@@ -234,6 +237,7 @@ impl Session {
         store: Arc<Mutex<Store>>,
         data_dir: PathBuf,
         task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+        plugins: &crate::plugins::SharedPluginRegistry,
         runtime: Option<Arc<crate::config::RuntimeConfig>>,
     ) -> Result<(Self, Vec<RolloutRecord>), CoreError> {
         let mut records = Rollout::load(&sessions_dir.join(format!("{id}.jsonl")))?;
@@ -243,7 +247,7 @@ impl Session {
         let cwd = cwd.clone();
         // Freeze the same inputs as create; the canonical PromptSnapshot below
         // replaces the last-sent values (older sessions fall back to these).
-        let frozen = SessionFrozen::capture(id, &cwd, &data_dir, runtime.as_deref());
+        let frozen = SessionFrozen::capture(id, &cwd, &data_dir, plugins, runtime.as_deref());
         let session_meta = store.lock().expect("store lock").get_session(id);
         let selection = session_meta.as_ref().and_then(|meta| {
             Some(ModelSelection {

@@ -1321,6 +1321,7 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
         &sessions_dir,
         data_dir.clone(),
         task_tx,
+        &crate::plugins::PluginRegistry::shared(data_dir.clone()),
         None,
     )
     .expect("session");

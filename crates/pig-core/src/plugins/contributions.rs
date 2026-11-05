@@ -2,39 +2,24 @@ use std::path::Path;
 
 use pig_utils::skills::{self, Skill, SkillSource};
 
-use super::{PersistedPlugins, authorized_package};
+use super::{PluginRegistry, authorized_package};
 
 pub fn enabled_packages(
-    data_dir: &Path,
+    registry: &PluginRegistry,
     trust: &crate::config::WorkspaceTrust,
 ) -> Result<Vec<pig_protocol::PluginPackageInfo>, pig_protocol::CoreError> {
-    let path = data_dir.join(super::PLUGIN_STATE_FILE);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(pig_protocol::CoreError::PluginManifest {
-                detail: error.to_string(),
-            });
-        }
-    };
-    let state: PersistedPlugins = serde_json::from_slice(&bytes).map_err(|error| {
-        pig_protocol::CoreError::PluginManifest {
-            detail: format!("{}: {error}", path.display()),
-        }
-    })?;
-    let runtime = std::fs::read(data_dir.join(super::PLUGIN_RUNTIME_STATE_FILE))
-        .ok()
-        .and_then(|bytes| {
-            serde_json::from_slice::<std::collections::BTreeMap<String, pig_protocol::PluginContributions>>(&bytes).ok()
-        })
-        .unwrap_or_default();
-    let mut packages: Vec<_> = state
+    let mut packages: Vec<_> = registry
+        .snapshot
         .packages
-        .into_iter()
-        .filter(|package| authorized_package(data_dir, package, Some(trust)))
+        .iter()
+        .filter(|package| authorized_package(&registry.data_dir, package, Some(trust)))
+        .cloned()
         .map(|mut package| {
-            if let Some(contributions) = runtime.get(&format!("{}:{}", package.id, package.digest)) {
+            if let Some(contributions) = registry
+                .snapshot
+                .runtime_contributions
+                .get(&format!("{}:{}", package.id, package.digest))
+            {
                 package.contributions = package.contributions.merged(contributions);
             }
             package
@@ -44,14 +29,19 @@ pub fn enabled_packages(
     Ok(packages)
 }
 
-pub fn discover_skills_with_trust(cwd: &Path, data_dir: &Path, trusted: bool) -> Vec<Skill> {
+pub fn discover_skills_with_trust(
+    cwd: &Path,
+    plugins: &super::SharedPluginRegistry,
+    trusted: bool,
+) -> Vec<Skill> {
+    let registry = plugins.lock().expect("plugin registry lock");
     let trust = crate::config::WorkspaceTrust::new(cwd, trusted);
     let mut by_name: std::collections::BTreeMap<String, Skill> =
-        skills::discover_with_trust(cwd, data_dir, trusted)
+        skills::discover_with_trust(cwd, &registry.data_dir, trusted)
             .into_iter()
             .map(|skill| (skill.name.clone(), skill))
             .collect();
-    if let Ok(packages) = enabled_packages(data_dir, &trust) {
+    if let Ok(packages) = enabled_packages(&registry, &trust) {
         for package in packages {
             for contribution in package.contributions.skills {
                 for skill in
@@ -62,28 +52,32 @@ pub fn discover_skills_with_trust(cwd: &Path, data_dir: &Path, trusted: bool) ->
             }
         }
     }
-    let disabled = skills::load_disabled_map(data_dir);
+    let disabled = skills::load_disabled_map(&registry.data_dir);
     by_name
         .into_values()
         .filter(|skill| !disabled.contains(&skill.path.to_string_lossy().replace('\\', "/")))
         .collect()
 }
 
-pub fn skills_section_with_trust(cwd: &Path, data_dir: &Path, trusted: bool) -> String {
-    skills::skills_section(discover_skills_with_trust(cwd, data_dir, trusted))
+pub fn skills_section_with_trust(
+    cwd: &Path,
+    plugins: &super::SharedPluginRegistry,
+    trusted: bool,
+) -> String {
+    skills::skills_section(discover_skills_with_trust(cwd, plugins, trusted))
 }
 
 pub fn load_skill_output_with_trust(
     cwd: &Path,
-    data_dir: &Path,
+    plugins: &super::SharedPluginRegistry,
     name: &str,
     trusted: bool,
 ) -> Result<String, String> {
-    let skills = discover_skills_with_trust(cwd, data_dir, trusted);
+    let skills = discover_skills_with_trust(cwd, plugins, trusted);
     let skill = skills::find_skill(&skills, name).ok_or_else(|| {
-        let available: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        let available: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
         if available.is_empty() {
-            format!("Skill \"{name}\" does not exist; no skills are currently available")
+            "No skills are currently available".to_owned()
         } else {
             format!(
                 "Skill \"{name}\" does not exist. Available skills: {}",
@@ -96,11 +90,12 @@ pub fn load_skill_output_with_trust(
 
 pub fn mcp_servers(
     _cwd: &Path,
-    data_dir: &Path,
+    plugins: &super::SharedPluginRegistry,
     trust: &crate::config::WorkspaceTrust,
 ) -> Vec<crate::mcp::McpServerConfig> {
+    let registry = plugins.lock().expect("plugin registry lock");
     let mut servers = Vec::new();
-    if let Ok(packages) = enabled_packages(data_dir, trust) {
+    if let Ok(packages) = enabled_packages(&registry, trust) {
         for package in packages {
             for contribution in package.contributions.mcp {
                 match crate::mcp::validate_server(&contribution.config) {

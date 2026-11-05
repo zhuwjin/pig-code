@@ -18,7 +18,6 @@ async fn child_compaction_skips_when_the_paused_pin_cannot_fit() {
     let mut drive = SubagentDrive {
         agent_id: "a9-6".into(),
         cwd: root.join("ws"),
-        data_dir: data_dir.clone(),
         profile: crate::agent::AgentProfile {
             name: "explore".into(),
             description: "pin skip".into(),
@@ -101,7 +100,6 @@ async fn child_compaction_preserves_an_omitted_active_task_by_index() {
     let mut drive = SubagentDrive {
         agent_id: "a9-9".into(),
         cwd: root.join("ws"),
-        data_dir: data_dir.clone(),
         profile: crate::agent::AgentProfile {
             name: "explore".into(),
             description: "preserved user".into(),
@@ -202,7 +200,6 @@ async fn child_compaction_preserves_the_task_with_a_zero_length_tail() {
     let mut drive = SubagentDrive {
         agent_id: "a9-10".into(),
         cwd: root.join("ws"),
-        data_dir: data_dir.clone(),
         profile: crate::agent::AgentProfile {
             name: "explore".into(),
             description: "zero tail".into(),
@@ -312,7 +309,6 @@ async fn child_compaction_summary_sidecar_supports_all_api_formats() {
         let mut drive = SubagentDrive {
             agent_id: agent_id.clone(),
             cwd: root.join("ws"),
-            data_dir: data_dir.clone(),
             profile: crate::agent::AgentProfile {
                 name: "explore".into(),
                 description: "formats".into(),
@@ -411,7 +407,6 @@ async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
     let mut drive = SubagentDrive {
         agent_id: "a9-8".into(),
         cwd: root.join("ws"),
-        data_dir: data_dir.clone(),
         profile: crate::agent::AgentProfile {
             name: "explore".into(),
             description: "pin fit".into(),
@@ -523,7 +518,6 @@ async fn cancelled_child_compaction_does_not_install_a_late_summary() {
     let mut drive = SubagentDrive {
         agent_id: "a9-7".into(),
         cwd: root.join("ws"),
-        data_dir: data_dir.clone(),
         profile: crate::agent::AgentProfile {
             name: "explore".into(),
             description: "cancel summary".into(),

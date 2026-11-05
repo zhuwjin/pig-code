@@ -19,7 +19,7 @@ impl Session {
         let trusted = self.trust.admits(&self.cwd);
         extra.push(Box::new(tool::SkillTool::new_trusted(
             &self.cwd,
-            &self.data_dir,
+            &self.plugin_tools.registry(),
             trusted,
         )));
         // Root-only stateless tools reach the generic executor through the
@@ -81,11 +81,13 @@ impl Session {
         self.permission_rules =
             super::initialization::load_permissions(&self.cwd, &self.data_dir, &trust);
         self.hooks = crate::hooks::HookSet::load(&self.cwd, config);
-        self.plugin_tools
-            .reload(&self.data_dir, &trust, config.cloned());
+        self.plugin_tools.reload(&trust, config.cloned());
         self.trust = trust;
-        self.skills_prompt =
-            crate::plugins::skills_section_with_trust(&self.cwd, &self.data_dir, trusted);
+        self.skills_prompt = crate::plugins::skills_section_with_trust(
+            &self.cwd,
+            &self.plugin_tools.registry(),
+            trusted,
+        );
         self.profiles_summary = crate::agent::agent_description_list(
             &crate::agent::load_profiles_with_trust(&self.cwd, &self.data_dir, &self.trust),
         );

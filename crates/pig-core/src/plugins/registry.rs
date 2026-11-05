@@ -49,11 +49,12 @@ impl PluginRegistry {
         registry
     }
 
-    pub fn reset_runtime(data_dir: &Path) -> std::io::Result<()> {
-        match std::fs::remove_file(data_dir.join(super::PLUGIN_RUNTIME_STATE_FILE)) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            result => result,
-        }
+    pub fn shared(data_dir: PathBuf) -> super::SharedPluginRegistry {
+        Self::new(data_dir).into_shared()
+    }
+
+    pub fn into_shared(self) -> super::SharedPluginRegistry {
+        std::sync::Arc::new(std::sync::Mutex::new(self))
     }
 
     pub fn sync(&mut self, sources: Vec<PluginPackageSource>) -> PluginSnapshot {
@@ -105,7 +106,6 @@ impl PluginRegistry {
         self.runtime_epochs.retain(|key, _| current.contains(key));
         self.apply_enabled();
         self.persist();
-        self.persist_runtime();
         self.snapshot.clone()
     }
 
@@ -145,7 +145,9 @@ impl PluginRegistry {
             } else {
                 let package = self.package(id, digest)?;
                 if !package.enabled {
-                    return Err(permission("a disabled plugin cannot register contributions"));
+                    return Err(permission(
+                        "a disabled plugin cannot register contributions",
+                    ));
                 }
                 self.snapshot
                     .runtime_contributions
@@ -155,12 +157,13 @@ impl PluginRegistry {
             self.generation += 1;
             self.snapshot.generation = self.generation;
             self.persist();
-            self.persist_runtime();
             return Ok(self.snapshot.clone());
         }
         let package = self.package(id, digest)?.clone();
         if !package.enabled {
-            return Err(permission("a disabled plugin cannot register contributions"));
+            return Err(permission(
+                "a disabled plugin cannot register contributions",
+            ));
         }
         if !contributions.credentials.is_empty()
             || !contributions.http.is_empty()
@@ -177,29 +180,14 @@ impl PluginRegistry {
         validated.actions = package.contributions.actions.clone();
         validate_contributions(&package.root, &validated)?;
         validate_ui_contributions(&validated, &package.capabilities)?;
-        self.snapshot.runtime_contributions.insert(key.clone(), contributions);
+        self.snapshot
+            .runtime_contributions
+            .insert(key.clone(), contributions);
         self.runtime_epochs.insert(key, epoch);
         self.generation += 1;
         self.snapshot.generation = self.generation;
         self.persist();
-        self.persist_runtime();
         Ok(self.snapshot.clone())
-    }
-
-    fn persist_runtime(&self) {
-        let path = self.data_dir.join(super::PLUGIN_RUNTIME_STATE_FILE);
-        if self.snapshot.runtime_contributions.is_empty() {
-            let _ = std::fs::remove_file(path);
-            return;
-        }
-        match serde_json::to_vec(&self.snapshot.runtime_contributions) {
-            Ok(bytes) => {
-                if let Err(error) = crate::config::write_private_file(&path, &bytes) {
-                    tracing::warn!("could not save runtime plugin contributions: {error:?}");
-                }
-            }
-            Err(error) => tracing::warn!("could not serialize runtime contributions: {error}"),
-        }
     }
 
     pub(crate) fn inspect(
@@ -326,7 +314,8 @@ impl PluginRegistry {
                 .find(|package| package.id == id && package.enabled && package.digest != digest)
                 .map(|package| package.digest.clone());
             if previous.is_some() {
-                self.pending_updates.insert(id.to_owned(), digest.to_owned());
+                self.pending_updates
+                    .insert(id.to_owned(), digest.to_owned());
             } else if builtin {
                 self.disabled_builtin.remove(id);
             } else {
@@ -368,7 +357,6 @@ impl PluginRegistry {
         self.snapshot.generation = self.generation;
         self.apply_enabled();
         self.persist();
-        self.persist_runtime();
         Ok(self.snapshot.clone())
     }
 
@@ -385,7 +373,6 @@ impl PluginRegistry {
         self.snapshot.generation = self.generation;
         self.apply_enabled();
         self.persist();
-        self.persist_runtime();
         Ok(self.snapshot.clone())
     }
 
@@ -917,9 +904,15 @@ fn validate_ui_contributions(
                 contribution.id
             )));
         }
-        if ["approval.", "security.", "credentials.", "plugins.", "plugin.manager"]
-            .iter()
-            .any(|prefix| contribution.target.starts_with(prefix))
+        if [
+            "approval.",
+            "security.",
+            "credentials.",
+            "plugins.",
+            "plugin.manager",
+        ]
+        .iter()
+        .any(|prefix| contribution.target.starts_with(prefix))
         {
             return Err(permission("protected UI cannot be modified by a plugin"));
         }
@@ -968,7 +961,9 @@ fn validate_ui_contributions(
             .any(|property| property.starts_with("on") && capability != "ui.interact")
             && !matches!(capability, "ui.patch.structure")
         {
-            return Err(permission("preserving host behavior requires structure permission"));
+            return Err(permission(
+                "preserving host behavior requires structure permission",
+            ));
         }
     }
     if !contributions.commands.is_empty()
@@ -980,7 +975,9 @@ fn validate_ui_contributions(
                     .any(|target| target == "*" || target == "commands")
         })
     {
-        return Err(permission("commands require ui.add for the commands surface"));
+        return Err(permission(
+            "commands require ui.add for the commands surface",
+        ));
     }
     Ok(())
 }

@@ -1,16 +1,15 @@
-use std::path::Path;
-
 use futures_util::StreamExt as _;
 use pig_protocol::{
     AppConfig, CoreError, PluginHttpCredential, PluginHttpRequest, PluginHttpResponse,
 };
 
+#[cfg(test)]
 use super::PluginRegistry;
 
 const MAX_BODY: usize = 1024 * 1024;
 
 pub async fn request_http(
-    data_dir: &Path,
+    plugins: &super::SharedPluginRegistry,
     config: Option<&AppConfig>,
     package: &str,
     digest: &str,
@@ -25,8 +24,26 @@ pub async fn request_http(
         mut body,
         credential,
     } = request;
-    let registry = PluginRegistry::new(data_dir.to_path_buf());
-    let origin = registry.http_origin(package, digest, &origin_id, &method, config)?;
+    let (origin, credential_declaration) = {
+        let registry = plugins.lock().expect("plugin registry lock");
+        let origin = registry
+            .http_origin(package, digest, &origin_id, &method, config)?
+            .clone();
+        let declaration = credential
+            .as_ref()
+            .map(|credential| {
+                registry.credential_for_origin(
+                    package,
+                    digest,
+                    &origin_id,
+                    &method,
+                    &credential.credential,
+                    config,
+                )
+            })
+            .transpose()?;
+        (origin, declaration)
+    };
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
@@ -57,14 +74,7 @@ pub async fn request_http(
     }
     let mut used_secret = None;
     if let Some(credential) = credential {
-        let declaration = registry.credential_for_origin(
-            package,
-            digest,
-            &origin_id,
-            method.as_str(),
-            &credential.credential,
-            config,
-        )?;
+        let declaration = credential_declaration.expect("declared HTTP credential");
         let id = match declaration {
             pig_protocol::PluginCredentialDeclaration::Owned { .. } => {
                 crate::credentials::CredentialId::plugin(package, declaration.id())
@@ -292,6 +302,7 @@ mod tests {
         assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
         let package = &snapshot.packages[0];
         registry.set_enabled("demo", &package.digest, true).unwrap();
+        let plugins = registry.into_shared();
         let credentials = crate::credentials::CredentialManager::empty_memory();
         credentials
             .set(
@@ -301,7 +312,7 @@ mod tests {
             .await
             .expect("store credential");
         let response = request_http(
-            &data,
+            &plugins,
             None,
             "demo",
             &package.digest,

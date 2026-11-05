@@ -424,6 +424,7 @@ impl TrustFixture {
             &self.sessions_dir,
             self.data_dir.clone(),
             task_tx,
+            &crate::plugins::PluginRegistry::shared(self.data_dir.clone()),
             runtime,
         )
         .expect("create session")
@@ -439,6 +440,7 @@ impl TrustFixture {
             self.store(),
             self.data_dir.clone(),
             task_tx,
+            &crate::plugins::PluginRegistry::shared(self.data_dir.clone()),
             runtime,
         )
         .expect("load session")

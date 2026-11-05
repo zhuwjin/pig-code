@@ -300,7 +300,7 @@ mod tests {
             state,
             mcp: None,
             plugin_tools: crate::plugins::PluginToolset::new(
-                &tmp.0,
+                &crate::plugins::PluginRegistry::shared(tmp.0.clone()),
                 &WorkspaceTrust::untrusted(&tmp.0),
                 None,
                 "s-test",

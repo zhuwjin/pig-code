@@ -118,8 +118,9 @@ async fn foreground_resume_compacts_a_long_child_and_restart_replays_it() {
         test_pending(),
         Arc::new(Mutex::new(HashMap::new())),
         store,
-        data_dir,
+        data_dir.clone(),
         task_tx,
+        &crate::plugins::PluginRegistry::shared(data_dir),
         Some(runtime),
     )
     .expect("load session");

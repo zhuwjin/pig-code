@@ -55,11 +55,16 @@ pub struct McpManager {
 impl McpManager {
     /// Load the user-level config only (fail-closed) and connect: project
     /// servers are repository content and need a trust decision.
-    pub async fn connect_all(workspace_root: &Path, data_dir: &Path) -> Self {
+    pub async fn connect_all(
+        workspace_root: &Path,
+        data_dir: &Path,
+        plugins: &crate::plugins::SharedPluginRegistry,
+    ) -> Self {
         Self::connect_all_with_trust(
             workspace_root,
             data_dir,
             &WorkspaceTrust::untrusted(workspace_root),
+            plugins,
         )
         .await
     }
@@ -73,14 +78,15 @@ impl McpManager {
         workspace_root: &Path,
         data_dir: &Path,
         trust: &WorkspaceTrust,
+        plugins: &crate::plugins::SharedPluginRegistry,
     ) -> Self {
         let configs = if trust.admits(workspace_root) {
-            McpServerConfig::load_with_trust(workspace_root, data_dir, trust)
+            McpServerConfig::load_with_trust(workspace_root, data_dir, trust, plugins)
         } else {
             // Fail-closed path: the user level only (project servers are
             // repository content and never parsed without a matching trust
             // decision).
-            config::load(workspace_root, data_dir)
+            config::load(workspace_root, data_dir, plugins)
         };
         let results = futures_util::future::join_all(configs.into_iter().map(|config| {
             let workspace_root = workspace_root.to_path_buf();

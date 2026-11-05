@@ -49,19 +49,20 @@ pub fn snapshot(
         _ => false,
     };
     let session = session.filter(|_| status_applicable);
-    let session_projection = session
-        .as_ref()
-        .map(|session| pig_protocol::PluginSessionProjection {
-            id: session.id.clone(),
-            cwd: session.cwd.clone(),
-            stats: session.stats.clone(),
-            turns: session.turns.clone(),
-        });
+    let session_projection =
+        session
+            .as_ref()
+            .map(|session| pig_protocol::PluginSessionProjection {
+                id: session.id.clone(),
+                cwd: session.cwd.clone(),
+                stats: session.stats.clone(),
+                turns: session.turns.clone(),
+            });
     PluginServiceSnapshot {
         generation: registry.snapshot.generation,
         locale: String::new(),
-        skills: skills_snapshot(&registry.data_dir, workspace.as_deref(), trust),
-        mcp: mcp_snapshot(&registry.data_dir, workspace.as_deref(), session, trust),
+        skills: skills_snapshot(registry, workspace.as_deref(), trust),
+        mcp: mcp_snapshot(registry, workspace.as_deref(), session, trust),
         scope,
         workspaces,
         session: session_projection,
@@ -69,10 +70,11 @@ pub fn snapshot(
 }
 
 fn skills_snapshot(
-    data_dir: &Path,
+    registry: &PluginRegistry,
     workspace: Option<&Path>,
     trust: &crate::config::WorkspaceTrust,
 ) -> PluginSkillsSnapshot {
+    let data_dir = &registry.data_dir;
     let user_path = skills::user_root(data_dir);
     let project_path = workspace.map(skills::project_root);
     let disabled = skills::load_disabled_map(data_dir);
@@ -86,7 +88,7 @@ fn skills_snapshot(
             &disabled,
         ));
     }
-    if let Ok(packages) = enabled_packages(data_dir, trust) {
+    if let Ok(packages) = enabled_packages(registry, trust) {
         for package in packages {
             for contribution in package.contributions.skills {
                 rows.extend(
@@ -158,11 +160,12 @@ fn discover(
 }
 
 fn mcp_snapshot(
-    data_dir: &Path,
+    registry: &PluginRegistry,
     workspace: Option<&Path>,
     session: Option<SessionServices>,
     trust: &crate::config::WorkspaceTrust,
 ) -> PluginMcpSnapshot {
+    let data_dir = &registry.data_dir;
     let user_path = data_dir.join("mcp.json");
     let project_path = workspace.map(|workspace| workspace.join(".pigcode/mcp.json"));
     let mut rows = read_mcp(&user_path, PluginScope::User);
@@ -174,7 +177,7 @@ fn mcp_snapshot(
             },
         ));
     }
-    if let Ok(packages) = enabled_packages(data_dir, trust) {
+    if let Ok(packages) = enabled_packages(registry, trust) {
         for package in packages {
             for contribution in package.contributions.mcp {
                 rows.push(mcp_info(
@@ -486,6 +489,7 @@ pub fn delete_skill(data_dir: &Path, scope: &PluginScope, dir_name: &str) -> Res
 
 pub fn set_skill_enabled(
     data_dir: &Path,
+    plugins: &super::SharedPluginRegistry,
     path: &Path,
     enabled: bool,
     workspaces: &[PathBuf],
@@ -497,27 +501,30 @@ pub fn set_skill_enabled(
             .iter()
             .map(|workspace| skills::project_root(workspace)),
     );
-    if let Ok(packages) = enabled_packages(
-        data_dir,
-        &crate::config::WorkspaceTrust::untrusted(Path::new(".")),
-    ) {
-        for package in packages
-            .into_iter()
-            .filter(|package| !matches!(package.source, pig_protocol::PluginSource::Project { .. }))
-        {
-            roots.extend(
-                package
-                    .contributions
-                    .skills
-                    .into_iter()
-                    .map(|skill| package.root.join(skill.path)),
-            );
+    {
+        let registry = plugins.lock().expect("plugin registry lock");
+        if let Ok(packages) = enabled_packages(
+            &registry,
+            &crate::config::WorkspaceTrust::untrusted(Path::new(".")),
+        ) {
+            for package in packages.into_iter().filter(|package| {
+                !matches!(package.source, pig_protocol::PluginSource::Project { .. })
+            }) {
+                roots.extend(
+                    package
+                        .contributions
+                        .skills
+                        .into_iter()
+                        .map(|skill| package.root.join(skill.path)),
+                );
+            }
         }
     }
     if let Some(config) = config {
         for workspace in workspaces {
             let trust = crate::config::WorkspaceTrust::for_config(Some(config), workspace);
-            if let Ok(packages) = enabled_packages(data_dir, &trust) {
+            let registry = plugins.lock().expect("plugin registry lock");
+            if let Ok(packages) = enabled_packages(&registry, &trust) {
                 for package in packages {
                     roots.extend(
                         package

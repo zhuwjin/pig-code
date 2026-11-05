@@ -10,7 +10,6 @@ use crate::task::AgentWriterGuard;
 pub(super) struct SubagentDrive {
     pub(super) agent_id: String,
     pub(super) cwd: PathBuf,
-    pub(super) data_dir: PathBuf,
     pub(super) profile: crate::agent::AgentProfile,
     pub(super) child_config: ResolvedModel,
     pub(super) tools: Vec<Box<dyn tool::Tool>>,
@@ -75,7 +74,7 @@ impl SubagentDrive {
             .unwrap_or_default();
         extra.push(Box::new(tool::SkillTool::new_trusted(
             &self.cwd,
-            &self.data_dir,
+            &self.plugin_tools.registry(),
             self.trusted,
         )));
         extra.extend(
@@ -109,7 +108,6 @@ impl From<crate::agent::ChildPrep> for SubagentDrive {
         Self {
             agent_id: prep.agent_id,
             cwd: prep.cwd,
-            data_dir: prep.data_dir,
             profile: prep.profile,
             child_config: prep.child_config,
             tools: prep.tools,

@@ -952,7 +952,7 @@ mod tests {
         let entry = SessionEntry {
             session: None,
             plugin_dispatcher: crate::plugins::PluginToolset::new(
-                &std::env::temp_dir(),
+                &crate::plugins::PluginRegistry::shared(std::env::temp_dir()),
                 &crate::config::WorkspaceTrust::untrusted(&std::env::temp_dir()),
                 None,
                 "s-test",

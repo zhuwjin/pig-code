@@ -1,5 +1,7 @@
+#[cfg(test)]
+use std::path::PathBuf;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -21,22 +23,31 @@ pub struct PluginToolFilter {
 pub struct PluginToolset {
     tools: Arc<Vec<PluginToolExecutor>>,
     dispatcher: PluginToolDispatcher,
+    plugins: super::SharedPluginRegistry,
 }
 
 impl PluginToolset {
     pub fn new(
-        data_dir: &Path,
+        plugins: &super::SharedPluginRegistry,
         trust: &WorkspaceTrust,
         config: Option<AppConfig>,
         session_id: &str,
     ) -> Self {
         let dispatcher = PluginToolDispatcher::new(session_id.to_owned());
-        let tools = collect_tools(data_dir, trust, config, &dispatcher);
-        Self { tools, dispatcher }
+        let tools = collect_tools(plugins, trust, config, &dispatcher);
+        Self {
+            tools,
+            dispatcher,
+            plugins: plugins.clone(),
+        }
     }
 
-    pub fn reload(&mut self, data_dir: &Path, trust: &WorkspaceTrust, config: Option<AppConfig>) {
-        self.tools = collect_tools(data_dir, trust, config, &self.dispatcher);
+    pub fn reload(&mut self, trust: &WorkspaceTrust, config: Option<AppConfig>) {
+        self.tools = collect_tools(&self.plugins, trust, config, &self.dispatcher);
+    }
+
+    pub fn registry(&self) -> super::SharedPluginRegistry {
+        self.plugins.clone()
     }
 
     pub fn tools(&self) -> Vec<Box<dyn Tool>> {
@@ -160,7 +171,7 @@ fn validate_selection(
 }
 
 fn collect_tools(
-    data_dir: &Path,
+    plugins: &super::SharedPluginRegistry,
     trust: &WorkspaceTrust,
     config: Option<AppConfig>,
     dispatcher: &PluginToolDispatcher,
@@ -175,16 +186,20 @@ fn collect_tools(
         )
         .collect();
     let mut names = reserved;
-    let tools = super::enabled_packages(data_dir, trust)
+    let packages = {
+        let registry = plugins.lock().expect("plugin registry lock");
+        super::enabled_packages(&registry, trust)
+    };
+    let tools = packages
         .unwrap_or_else(|error| {
             tracing::warn!("could not resolve plugin tools: {error:?}");
             Vec::new()
         })
         .into_iter()
         .flat_map(|package| {
-            let data_dir = data_dir.to_path_buf();
             let config = config.clone();
             let dispatcher = dispatcher.clone();
+            let plugins = plugins.clone();
             package
                 .contributions
                 .tools
@@ -197,7 +212,7 @@ fn collect_tools(
                     availability: declaration.availability,
                     package: package.id.clone(),
                     digest: package.digest.clone(),
-                    data_dir: data_dir.clone(),
+                    plugins: plugins.clone(),
                     config: config.clone(),
                     dispatcher: dispatcher.clone(),
                 })
@@ -227,7 +242,7 @@ struct PluginToolExecutor {
     availability: PluginToolAvailability,
     package: String,
     digest: String,
-    data_dir: PathBuf,
+    plugins: super::SharedPluginRegistry,
     config: Option<AppConfig>,
     dispatcher: PluginToolDispatcher,
 }
@@ -262,7 +277,9 @@ impl Tool for PluginToolExecutor {
         _ctx: ToolContext<'a>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
-            super::PluginRegistry::new(self.data_dir.clone())
+            self.plugins
+                .lock()
+                .expect("plugin registry lock")
                 .tool(
                     &self.package,
                     &self.digest,
@@ -608,8 +625,13 @@ mod tests {
         assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
         let package = &snapshot.packages[0];
         registry.set_enabled("demo", &package.digest, true).unwrap();
-        let toolset =
-            PluginToolset::new(&data, &WorkspaceTrust::untrusted(&temp.0), None, "s-plugin");
+        let plugins = registry.into_shared();
+        let toolset = PluginToolset::new(
+            &plugins,
+            &WorkspaceTrust::untrusted(&temp.0),
+            None,
+            "s-plugin",
+        );
         (temp, toolset)
     }
 
