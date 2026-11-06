@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use common::{recv_until, setup};
 use pig_protocol::{
-    CoreError, Event, ExecMode, MessageDelivery, Op, PluginPackageSource, PluginSessionAction,
-    PluginSource,
+    CoreError, Event, ExecMode, MessageDelivery, Op, PluginGitReadRequest, PluginPackageSource,
+    PluginSessionAction, PluginSource, PluginWorkspaceFileReadRequest,
 };
 
 const PACKAGE_ID: &str = "test.sessions";
@@ -33,7 +33,9 @@ fn write_package(root: &Path) {
             {"name": "session.create", "targets": ["*"]},
             {"name": "session.control", "targets": ["*"]},
             {"name": "model.request", "targets": ["review"]},
-            {"name": "agent.delegate", "targets": ["*"]}
+            {"name": "agent.delegate", "targets": ["*"]},
+            {"name": "git.read", "targets": ["*"]},
+            {"name": "files.read", "targets": ["*"]}
           ],
           "contributions": {
             "actions": ["provide_agents"],
@@ -142,6 +144,30 @@ async fn result(
             _ => None,
         })
         .expect("session result")
+}
+
+async fn service_value(
+    agent: &pig_core::AgentHandle,
+    request_id: &str,
+) -> Result<serde_json::Value, CoreError> {
+    let events = recv_until(&agent.events, Duration::from_secs(30), |event| {
+        matches!(
+            event,
+            Event::PluginServiceValue { request_id: current, .. } if current == request_id
+        )
+    })
+    .await;
+    events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::PluginServiceValue {
+                request_id: current,
+                result,
+                ..
+            } if current == request_id => Some(result),
+            _ => None,
+        })
+        .expect("plugin service value")
 }
 
 #[tokio::test]
@@ -397,4 +423,180 @@ async fn a_plugin_lists_starts_waits_reads_and_stops_contributed_agents() {
             .is_some_and(|items| !items.is_empty()),
         "{read}"
     );
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Pig Test")
+        .env("GIT_AUTHOR_EMAIL", "pig@example.test")
+        .env("GIT_COMMITTER_NAME", "Pig Test")
+        .env("GIT_COMMITTER_EMAIL", "pig@example.test")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn a_plugin_reads_git_and_workspace_files_inside_its_session() {
+    let (config_path, dir, data_dir) = setup("plugin-workspace-read");
+    std::fs::create_dir_all(dir.join("src")).expect("source directory");
+    std::fs::write(dir.join("src/lib.rs"), "one\ntwo\nthree\n").expect("source file");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "src/lib.rs"]);
+    git(&dir, &["commit", "-q", "-m", "initial commit"]);
+    std::fs::write(dir.join("src/lib.rs"), "one\nTWO\nthree\n").expect("modify source");
+
+    let package_root = dir.join("pkg");
+    write_package(&package_root);
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
+    let (package, digest) = install(&agent, &package_root).await;
+
+    action(
+        &agent,
+        "create-read-session",
+        (&package, &digest),
+        PluginSessionAction::Create {
+            cwd: dir.clone(),
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: Some(ExecMode::Auto.permissions()),
+        },
+    )
+    .await;
+    let session_id = result(&agent, "create-read-session")
+        .await
+        .expect("session")["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let git_read = |request_id: &str, request: PluginGitReadRequest| Op::PluginGitRead {
+        request_id: request_id.to_owned(),
+        package: package.clone(),
+        digest: digest.clone(),
+        session_id: session_id.clone(),
+        request,
+    };
+    agent
+        .ops
+        .send(git_read("status-1", PluginGitReadRequest::Status))
+        .await
+        .expect("git status");
+    let status = service_value(&agent, "status-1").await.expect("status");
+    assert!(
+        status["unstaged"]
+            .as_array()
+            .is_some_and(|changes| changes.iter().any(|change| change["path"] == "src/lib.rs")),
+        "{status}"
+    );
+
+    agent
+        .ops
+        .send(git_read(
+            "diff-1",
+            PluginGitReadRequest::Diff {
+                path: "src/lib.rs".into(),
+                staged: false,
+            },
+        ))
+        .await
+        .expect("git diff");
+    let diff = service_value(&agent, "diff-1").await.expect("diff");
+    assert!(
+        diff["diff"]
+            .as_str()
+            .is_some_and(|text| text.contains("TWO")),
+        "{diff}"
+    );
+
+    agent
+        .ops
+        .send(git_read(
+            "log-1",
+            PluginGitReadRequest::Log {
+                limit: Some(5),
+                path: None,
+            },
+        ))
+        .await
+        .expect("git log");
+    let log = service_value(&agent, "log-1").await.expect("log");
+    assert_eq!(log["commits"][0]["subject"], "initial commit", "{log}");
+
+    agent
+        .ops
+        .send(git_read(
+            "show-1",
+            PluginGitReadRequest::Show {
+                rev: "HEAD".into(),
+                path: None,
+            },
+        ))
+        .await
+        .expect("git show");
+    let show = service_value(&agent, "show-1").await.expect("show");
+    assert!(
+        show["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("initial commit")),
+        "{show}"
+    );
+
+    agent
+        .ops
+        .send(git_read("branches-1", PluginGitReadRequest::Branches))
+        .await
+        .expect("git branches");
+    let branches = service_value(&agent, "branches-1").await.expect("branches");
+    assert!(branches["current"].is_string(), "{branches}");
+
+    agent
+        .ops
+        .send(Op::PluginWorkspaceFileRead {
+            request_id: "file-1".into(),
+            package: package.clone(),
+            digest: digest.clone(),
+            session_id: session_id.clone(),
+            request: PluginWorkspaceFileReadRequest {
+                path: "src/lib.rs".into(),
+                start_line: Some(2),
+                end_line: Some(3),
+                max_bytes: None,
+            },
+        })
+        .await
+        .expect("file read");
+    let file = service_value(&agent, "file-1").await.expect("file");
+    assert_eq!(file["content"], "TWO\nthree", "{file}");
+
+    agent
+        .ops
+        .send(Op::PluginWorkspaceFileRead {
+            request_id: "file-escape".into(),
+            package,
+            digest,
+            session_id,
+            request: PluginWorkspaceFileReadRequest {
+                path: "../outside.txt".into(),
+                start_line: None,
+                end_line: None,
+                max_bytes: None,
+            },
+        })
+        .await
+        .expect("file escape");
+    let error = service_value(&agent, "file-escape")
+        .await
+        .expect_err("traversal must fail");
+    assert!(matches!(
+        error,
+        CoreError::PluginInvalidInput { .. } | CoreError::PluginPermission { .. }
+    ));
 }

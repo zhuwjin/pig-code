@@ -234,7 +234,13 @@ export type PluginService =
   | "agent_send"
   | "agent_wait"
   | "agent_stop"
-  | "agent_read";
+  | "agent_read"
+  | "git_status"
+  | "git_diff"
+  | "git_log"
+  | "git_show"
+  | "git_branches"
+  | "workspace_file_read";
 
 export interface ServiceRequestOptions {
   sessionId?: string;
@@ -258,6 +264,76 @@ export interface PluginHttpRequest {
 export interface PluginHttpResponse {
   status: number;
   body: string;
+}
+
+export interface GitChangedFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  status: string;
+}
+
+export interface GitStatusResult {
+  unstaged: GitChangedFile[];
+  staged: GitChangedFile[];
+}
+
+export interface GitDiffResult {
+  diff: string;
+  note: "truncated" | "too_large" | "binary" | null;
+}
+
+export interface GitCommitInfo {
+  sha: string;
+  subject: string;
+  timestamp: number;
+}
+
+export interface GitLogResult {
+  commits: GitCommitInfo[];
+}
+
+export interface GitShowResult {
+  text: string;
+  truncated: boolean;
+}
+
+export interface GitBranchesResult {
+  current: string | null;
+  branches: string[];
+}
+
+export interface WorkspaceFileReadResult {
+  path: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  size: number;
+  truncated: boolean;
+}
+
+export interface PluginGitApi {
+  status(sessionId: string): Promise<GitStatusResult>;
+  diff(
+    sessionId: string,
+    path: string,
+    options?: { staged?: boolean },
+  ): Promise<GitDiffResult>;
+  log(
+    sessionId: string,
+    options?: { limit?: number; path?: string },
+  ): Promise<GitLogResult>;
+  show(sessionId: string, rev: string, path?: string): Promise<GitShowResult>;
+  branches(sessionId: string): Promise<GitBranchesResult>;
+}
+
+export interface PluginFilesApi {
+  read(
+    sessionId: string,
+    path: string,
+    options?: { startLine?: number; endLine?: number; maxBytes?: number },
+  ): Promise<WorkspaceFileReadResult>;
 }
 
 /** What each service expects as its payload. */
@@ -302,6 +378,17 @@ export interface ServicePayloads {
   agent_wait: { agentId: string; timeoutMs?: number };
   agent_stop: { agentId: string };
   agent_read: { agentId: string };
+  git_status: { op: "status" };
+  git_diff: { op: "diff"; path: string; staged?: boolean };
+  git_log: { op: "log"; limit?: number; path?: string };
+  git_show: { op: "show"; rev: string; path?: string };
+  git_branches: { op: "branches" };
+  workspace_file_read: {
+    path: string;
+    startLine?: number;
+    endLine?: number;
+    maxBytes?: number;
+  };
 }
 
 /** What each service answers with. */
@@ -340,6 +427,12 @@ export interface ServiceResults {
   agent_wait: PluginAgentOutcome;
   agent_stop: null;
   agent_read: PluginAgentConversation;
+  git_status: GitStatusResult;
+  git_diff: GitDiffResult;
+  git_log: GitLogResult;
+  git_show: GitShowResult;
+  git_branches: GitBranchesResult;
+  workspace_file_read: WorkspaceFileReadResult;
 }
 
 export interface ContextUsage {
@@ -581,6 +674,8 @@ export interface PluginServices {
   readonly session: PluginSessionApi;
   readonly model: PluginModelApi;
   readonly agents: PluginAgentsApi;
+  readonly git: PluginGitApi;
+  readonly files: PluginFilesApi;
 }
 
 // --- Context -----------------------------------------------------------------
@@ -910,6 +1005,39 @@ class PluginRuntime {
         },
         read: (sessionId, agentId) =>
           runtime.requestService("agent_read", { agentId }, { sessionId }),
+      },
+      git: {
+        status: (sessionId) =>
+          runtime.requestService("git_status", { op: "status" }, { sessionId }),
+        diff: (sessionId, path, options) =>
+          runtime.requestService(
+            "git_diff",
+            { op: "diff", path, staged: options?.staged ?? false },
+            { sessionId },
+          ),
+        log: (sessionId, options) =>
+          runtime.requestService(
+            "git_log",
+            { op: "log", limit: options?.limit, path: options?.path },
+            { sessionId },
+          ),
+        show: (sessionId, rev, path) =>
+          runtime.requestService("git_show", { op: "show", rev, path }, { sessionId }),
+        branches: (sessionId) =>
+          runtime.requestService("git_branches", { op: "branches" }, { sessionId }),
+      },
+      files: {
+        read: (sessionId, path, options) =>
+          runtime.requestService(
+            "workspace_file_read",
+            {
+              path,
+              startLine: options?.startLine,
+              endLine: options?.endLine,
+              maxBytes: options?.maxBytes,
+            },
+            { sessionId },
+          ),
       },
     };
     const context: PluginContext = {

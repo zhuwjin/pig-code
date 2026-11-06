@@ -268,12 +268,14 @@ impl PluginProtocolError {
         let code = match error {
             crate::CoreError::PluginPermission { .. } => PluginErrorCode::PermissionDenied,
             crate::CoreError::PluginManifest { .. } => PluginErrorCode::InvalidContribution,
+            crate::CoreError::PluginInvalidInput { .. } => PluginErrorCode::InvalidInput,
             crate::CoreError::PluginTransport { .. } => PluginErrorCode::Transport,
             _ => PluginErrorCode::Internal,
         };
         let message = match error {
             crate::CoreError::PluginPermission { detail }
             | crate::CoreError::PluginManifest { detail }
+            | crate::CoreError::PluginInvalidInput { detail }
             | crate::CoreError::PluginTransport { detail }
             | crate::CoreError::PluginWrite { detail }
             | crate::CoreError::CredentialStore { detail, .. } => detail.clone(),
@@ -350,6 +352,47 @@ pub struct PluginServiceRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// A read-only Git operation. The host derives the repository from the
+/// session's workspace; callers never supply a working directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PluginGitReadRequest {
+    Status,
+    Diff {
+        path: String,
+        #[serde(default)]
+        staged: bool,
+    },
+    Log {
+        /// 1..=100; the host default is 20.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Show {
+        /// A revision or ref accepted by `git show`; leading `-` is rejected.
+        rev: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Branches,
+}
+
+/// One bounded workspace-relative text read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginWorkspaceFileReadRequest {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u64>,
+    /// Returned content budget (default 256 KiB, max 1 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+}
+
 impl PluginService {
     /// Stable wire name (the same string serde writes).
     pub const fn as_str(self) -> &'static str {
@@ -384,6 +427,12 @@ impl PluginService {
             Self::AgentWait => "agent_wait",
             Self::AgentStop => "agent_stop",
             Self::AgentRead => "agent_read",
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitLog => "git_log",
+            Self::GitShow => "git_show",
+            Self::GitBranches => "git_branches",
+            Self::WorkspaceFileRead => "workspace_file_read",
         }
     }
 }
@@ -425,6 +474,13 @@ pub enum PluginService {
     AgentWait,
     AgentStop,
     AgentRead,
+    // Read-only workspace inspection.
+    GitStatus,
+    GitDiff,
+    GitLog,
+    GitShow,
+    GitBranches,
+    WorkspaceFileRead,
 }
 
 pub const PLUGIN_HOST_NAVIGATION_TARGETS: &[&str] =
@@ -573,6 +629,33 @@ mod tests {
             .negotiate("zh-CN")
             .is_err()
         );
+    }
+
+    #[test]
+    fn workspace_read_requests_parse_the_sdk_shapes() {
+        let git: PluginGitReadRequest = serde_json::from_value(serde_json::json!({
+            "op": "diff",
+            "path": "src/lib.rs",
+            "staged": true
+        }))
+        .expect("git diff request");
+        assert_eq!(
+            git,
+            PluginGitReadRequest::Diff {
+                path: "src/lib.rs".into(),
+                staged: true
+            }
+        );
+        let file: PluginWorkspaceFileReadRequest = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "startLine": 2,
+            "endLine": 3,
+            "maxBytes": 1024
+        }))
+        .expect("file read request");
+        assert_eq!(file.start_line, Some(2));
+        assert_eq!(file.end_line, Some(3));
+        assert_eq!(file.max_bytes, Some(1024));
     }
 
     #[test]

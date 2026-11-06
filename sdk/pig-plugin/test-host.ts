@@ -593,6 +593,28 @@ class TestHostImpl implements TestHost {
       });
     } else if (service === "agent_send" || service === "agent_stop") {
       this.answerService(requestId, null);
+    } else if (service === "git_status") {
+      this.answerService(requestId, { unstaged: [], staged: [] });
+    } else if (service === "git_diff") {
+      this.answerService(requestId, { diff: "", note: null });
+    } else if (service === "git_log") {
+      this.answerService(requestId, { commits: [] });
+    } else if (service === "git_show") {
+      this.answerService(requestId, { text: "", truncated: false });
+    } else if (service === "git_branches") {
+      this.answerService(requestId, { current: null, branches: [] });
+    } else if (service === "workspace_file_read") {
+      const payload = (body.payload ?? {}) as Record<string, unknown>;
+      const path = String(payload.path ?? "");
+      this.answerService(requestId, {
+        path,
+        content: "",
+        startLine: payload.startLine ?? 1,
+        endLine: payload.endLine ?? 1,
+        totalLines: 1,
+        size: 0,
+        truncated: false,
+      });
     }
   }
 

@@ -339,3 +339,51 @@ test("providers are declared with a host adapter and an owned credential", async
   expect(provider.models[0].default_reasoning_level).toBe("high");
   host.stop();
 });
+
+test("Git reads and workspace file reads are typed and session scoped", async () => {
+  const captured: Record<string, any> = {};
+  const host = await createTestHost({
+    applier: (ctx) => {
+      ctx.onReady(() => {
+        void (async () => {
+          captured.status = await ctx.services.git.status("s1");
+          captured.diff = await ctx.services.git.diff("s1", "src/lib.rs", { staged: true });
+          captured.log = await ctx.services.git.log("s1", { limit: 5, path: "src" });
+          captured.show = await ctx.services.git.show("s1", "HEAD", "src/lib.rs");
+          captured.branches = await ctx.services.git.branches("s1");
+          captured.file = await ctx.services.files.read("s1", "src/lib.rs", {
+            startLine: 2,
+            endLine: 3,
+            maxBytes: 1024,
+          });
+        })();
+      });
+    },
+  }).start();
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const request = (service: string) =>
+    host.serviceRequests.find((entry) => entry.service === service);
+  expect(request("git_status")?.sessionId).toBe("s1");
+  expect(request("git_diff")?.payload).toEqual({
+    op: "diff",
+    path: "src/lib.rs",
+    staged: true,
+  });
+  expect(request("git_log")?.payload).toEqual({ op: "log", limit: 5, path: "src" });
+  expect(request("git_show")?.payload).toEqual({
+    op: "show",
+    rev: "HEAD",
+    path: "src/lib.rs",
+  });
+  expect(request("workspace_file_read")?.payload).toEqual({
+    path: "src/lib.rs",
+    startLine: 2,
+    endLine: 3,
+    maxBytes: 1024,
+  });
+  expect(captured.status).toEqual({ unstaged: [], staged: [] });
+  expect(captured.diff?.note).toBe(null);
+  expect(captured.file?.path).toBe("src/lib.rs");
+  host.stop();
+});

@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use pig_protocol::{
     CoreError, Event, MessageDelivery, PermissionSettings, PluginAction, PluginErrorCode,
-    PluginPackageInfo, PluginProtocolError, PluginResource, PluginScope, PluginService,
-    PluginServiceRequest, PluginSessionAction, PluginSource, SecretString,
+    PluginGitReadRequest, PluginPackageInfo, PluginProtocolError, PluginResource, PluginScope,
+    PluginService, PluginServiceRequest, PluginSessionAction, PluginSource,
+    PluginWorkspaceFileReadRequest, SecretString,
 };
 
 const MAX_PENDING_SERVICES: usize = 32;
@@ -712,6 +713,60 @@ impl HostServiceGateway {
                     },
                 }
             }
+            PluginService::GitStatus
+            | PluginService::GitDiff
+            | PluginService::GitLog
+            | PluginService::GitShow
+            | PluginService::GitBranches => {
+                let Some(session_id) = session_target(&request) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "Git reads need a sessionId",
+                    ));
+                };
+                let parsed =
+                    serde_json::from_value::<PluginGitReadRequest>(request.payload.clone());
+                match parsed {
+                    Ok(request) => pig_protocol::Op::PluginGitRead {
+                        request_id: internal_id.clone(),
+                        package: package.id.clone(),
+                        digest: package.digest.clone(),
+                        session_id: session_id.to_owned(),
+                        request,
+                    },
+                    Err(error) => {
+                        return failure(protocol_error(
+                            PluginErrorCode::InvalidOperation,
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
+            PluginService::WorkspaceFileRead => {
+                let Some(session_id) = session_target(&request) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "workspace.file.read needs a sessionId",
+                    ));
+                };
+                match serde_json::from_value::<PluginWorkspaceFileReadRequest>(
+                    request.payload.clone(),
+                ) {
+                    Ok(request) => pig_protocol::Op::PluginWorkspaceFileRead {
+                        request_id: internal_id.clone(),
+                        package: package.id.clone(),
+                        digest: package.digest.clone(),
+                        session_id: session_id.to_owned(),
+                        request,
+                    },
+                    Err(error) => {
+                        return failure(protocol_error(
+                            PluginErrorCode::InvalidOperation,
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
             _ => {
                 return failure(protocol_error(
                     PluginErrorCode::UnsupportedCapability,
@@ -775,6 +830,15 @@ impl HostServiceGateway {
                 result: Err(core_error),
                 ..
             } => (request_id, Err(PluginProtocolError::from_core(core_error))),
+            Event::PluginServiceValue {
+                request_id, result, ..
+            } => (
+                request_id,
+                result
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(PluginProtocolError::from_core),
+            ),
             Event::PluginActionResult { result } => (
                 &result.request_id,
                 result
@@ -1379,7 +1443,15 @@ pub(super) fn authorize_service(
         | PluginService::AgentSend
         | PluginService::AgentWait
         | PluginService::AgentStop
-        | PluginService::AgentRead => session_target(request).unwrap_or_default().to_owned(),
+        | PluginService::AgentRead
+        | PluginService::GitStatus
+        | PluginService::GitDiff
+        | PluginService::GitLog
+        | PluginService::GitShow
+        | PluginService::GitBranches
+        | PluginService::WorkspaceFileRead => {
+            session_target(request).unwrap_or_default().to_owned()
+        }
         PluginService::AgentList => "*".to_owned(),
         PluginService::SessionCreate => payload_str(&request.payload, &["cwd", "workspaceId"])
             .map(str::to_owned)
@@ -1413,6 +1485,12 @@ pub(super) fn authorize_service(
         | PluginService::AgentWait
         | PluginService::AgentStop
         | PluginService::AgentRead => Some("agent.delegate"),
+        PluginService::GitStatus
+        | PluginService::GitDiff
+        | PluginService::GitLog
+        | PluginService::GitShow
+        | PluginService::GitBranches => Some("git.read"),
+        PluginService::WorkspaceFileRead => Some("files.read"),
         _ => None,
     };
     if let Some(capability) = capability
@@ -1801,6 +1879,163 @@ mod tests {
             "a replayed side effect must not run again"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_and_file_reads_require_their_own_capabilities() {
+        let mut package = PluginPackageInfo {
+            id: "moon".into(),
+            name: "Moon".into(),
+            version: "1".into(),
+            digest: "sha256:test".into(),
+            content_digest: "sha256:content".into(),
+            root: PathBuf::new(),
+            source: PluginSource::User,
+            enabled: true,
+            incompatible: None,
+            backend: None,
+            contributions: Default::default(),
+            capabilities: vec![pig_protocol::PluginCapabilityRequest {
+                name: "git.read".into(),
+                targets: vec!["*".into()],
+            }],
+        };
+        let git = PluginServiceRequest {
+            service: PluginService::GitStatus,
+            payload: serde_json::json!({"op": "status"}),
+            session_id: Some("s1".into()),
+            workspace_id: None,
+            idempotency_key: None,
+        };
+        authorize_service(&package, &git).expect("git.read grants Git status");
+        let file = PluginServiceRequest {
+            service: PluginService::WorkspaceFileRead,
+            payload: serde_json::json!({"path": "src/lib.rs"}),
+            session_id: Some("s1".into()),
+            workspace_id: None,
+            idempotency_key: None,
+        };
+        assert!(authorize_service(&package, &file).is_err());
+        package
+            .capabilities
+            .push(pig_protocol::PluginCapabilityRequest {
+                name: "files.read".into(),
+                targets: vec!["*".into()],
+            });
+        authorize_service(&package, &file).expect("files.read grants file reads");
+    }
+
+    #[tokio::test]
+    async fn workspace_read_services_forward_and_settle_typed_ops() {
+        let (agent, agent_rx) = async_channel::unbounded();
+        let gateway = HostServiceGateway::new(PathBuf::new(), agent);
+        let package = PluginPackageInfo {
+            id: "moon".into(),
+            name: "Moon".into(),
+            version: "1".into(),
+            digest: "sha256:test".into(),
+            content_digest: "sha256:content".into(),
+            root: PathBuf::new(),
+            source: PluginSource::User,
+            enabled: true,
+            incompatible: None,
+            backend: None,
+            contributions: Default::default(),
+            capabilities: vec![
+                pig_protocol::PluginCapabilityRequest {
+                    name: "git.read".into(),
+                    targets: vec!["*".into()],
+                },
+                pig_protocol::PluginCapabilityRequest {
+                    name: "files.read".into(),
+                    targets: vec!["*".into()],
+                },
+            ],
+        };
+        let execute = |service, payload, request_id: &str| {
+            gateway.execute(
+                &package,
+                "moon:user:default",
+                1,
+                1,
+                request_id,
+                PluginServiceRequest {
+                    service,
+                    payload,
+                    session_id: Some("s1".into()),
+                    workspace_id: None,
+                    idempotency_key: None,
+                },
+            )
+        };
+        assert!(matches!(
+            execute(
+                PluginService::GitDiff,
+                serde_json::json!({"op": "diff", "path": "src/lib.rs", "staged": true}),
+                "git-1"
+            ),
+            ServiceExecution::Forwarded
+        ));
+        let pig_protocol::Op::PluginGitRead {
+            request_id,
+            session_id,
+            request,
+            ..
+        } = agent_rx.recv().await.expect("git op")
+        else {
+            panic!("expected a Git read op");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(
+            request,
+            pig_protocol::PluginGitReadRequest::Diff {
+                path: "src/lib.rs".into(),
+                staged: true
+            }
+        );
+        let replies = gateway.handle_core_event(&Event::PluginServiceValue {
+            request_id,
+            package: "moon".into(),
+            digest: "sha256:test".into(),
+            result: Ok(serde_json::json!({"diff": "+two", "note": null})),
+        });
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].request_id, "git-1");
+        assert_eq!(replies[0].service, PluginService::GitDiff);
+        assert_eq!(replies[0].result.as_ref().unwrap()["diff"], "+two");
+
+        assert!(matches!(
+            execute(
+                PluginService::WorkspaceFileRead,
+                serde_json::json!({
+                    "path": "src/lib.rs",
+                    "startLine": 2,
+                    "endLine": 3
+                }),
+                "file-1"
+            ),
+            ServiceExecution::Forwarded
+        ));
+        let pig_protocol::Op::PluginWorkspaceFileRead {
+            request_id,
+            request,
+            ..
+        } = agent_rx.recv().await.expect("file op")
+        else {
+            panic!("expected a file read op");
+        };
+        assert_eq!(request.path, "src/lib.rs");
+        assert_eq!(request.start_line, Some(2));
+        assert_eq!(request.end_line, Some(3));
+        let replies = gateway.handle_core_event(&Event::PluginServiceValue {
+            request_id,
+            package: "moon".into(),
+            digest: "sha256:test".into(),
+            result: Ok(serde_json::json!({"content": "two"})),
+        });
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].request_id, "file-1");
+        assert_eq!(replies[0].result.as_ref().unwrap()["content"], "two");
     }
 
     #[test]

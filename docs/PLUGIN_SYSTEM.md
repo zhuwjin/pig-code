@@ -212,6 +212,7 @@ The backend can request only declared and authorized services:
 - allowed HTTP requests with explicit credential injection;
 - owned credential set/clear and separately authorized provider credentials;
 - session and workspace projections;
+- read-only Git inspection (`git.read`) and bounded workspace text reads (`files.read`);
 - navigation to built-in host pages;
 - Composer submission;
 - package resource reads;
@@ -220,6 +221,38 @@ The backend can request only declared and authorized services:
 Navigation targets are limited to `main`, `models`, `appearance`, `plugins` and `marketplace`. There is no plugin-page navigation API and no Surface-specific `pig.host` channel.
 
 Requests have timeouts and concurrency limits. Disabling, updating or uninstalling a package stops its backend, cancels pending tools and services, removes runtime contributions and drops late replies.
+
+## Workspace inspection: Git and files
+
+A plugin can inspect a session's workspace without host stores or an arbitrary
+working directory. Every request names a session; the host resolves the cwd,
+checks the package's `git.read`/`files.read` capability against that session,
+and enforces the project workspace boundary.
+
+`git_status`, `git_diff`, `git_log`, `git_show` and `git_branches` (capability
+`git.read`) are read-only:
+
+- status and diff return the same bounded shapes as the UI;
+- log is capped at 100 commits (default 20) and show at 1 MiB;
+- revisions and paths are validated; paths are workspace-relative and may not
+  contain `.git`;
+- Git runs with fixed argv, no shell, hooks/fsmonitor/external diff disabled,
+  optional locks and terminal prompts off, and no fetch/push;
+- a non-repository workspace returns a structured `invalid_input` error.
+
+`workspace_file_read` (capability `files.read`) returns one UTF-8 text file:
+
+- the path is confined to the session workspace lexically and through
+  canonicalization; absolute paths, `..`, `.git` components and symlinks are
+  refused;
+- output is line-rangeable and bounded (256 KiB default, 1 MiB max response,
+  5,000 lines max); the file is read up to 4 MiB and marked `truncated` when
+  larger;
+- binary files and invalid UTF-8 return structured errors. The host never
+  returns directory listings or arbitrary filesystem paths.
+
+There is deliberately no Git write, worktree or code-index service yet; those
+remain separate capabilities with their own approval and lifecycle design.
 
 ## Session observation, control and model calls
 

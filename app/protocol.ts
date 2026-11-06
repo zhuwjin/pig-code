@@ -539,7 +539,7 @@ export interface PluginCommand {
 
 export type PluginMessageKind = "lifecycle.hello" | "lifecycle.start" | "lifecycle.ready" | "lifecycle.health" | "lifecycle.stop" | "lifecycle.failed" | "contribution.register" | "contribution.remove" | "service.request" | "service.response" | "service.event" | "tools.call" | "tools.select" | "tools.result" | "log.event" | "host.action" | "runtime";
 export type PluginStream = "lifecycle" | "events" | "contributions" | "tools" | "services" | "logs";
-export type PluginService = "storage_read" | "storage_write" | "config_read" | "config_write" | "http_request" | "credential_set" | "credential_clear" | "session_read" | "workspace_read" | "navigation_open" | "composer_submit" | "resource_read" | "locale_read";
+export type PluginService = "storage_read" | "storage_write" | "config_read" | "config_write" | "http_request" | "credential_set" | "credential_clear" | "session_read" | "workspace_read" | "navigation_open" | "composer_submit" | "resource_read" | "locale_read" | "git_status" | "git_diff" | "git_log" | "git_show" | "git_branches" | "workspace_file_read";
 export type PluginLifecycleState = "discovered" | "verified" | "installed" | "enabled" | "preparing" | "starting" | "retrying" | "active" | "stopping" | "stopped" | "failed";
 
 export interface PluginProtocolError {

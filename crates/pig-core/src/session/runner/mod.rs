@@ -354,13 +354,22 @@ impl Manager {
                 package,
                 digest,
                 action,
-            } => self.plugin_session_action(
-                event_tx,
+            } => self.plugin_session_action(event_tx, request_id, package, digest, action, turns),
+            Op::PluginGitRead {
                 request_id,
                 package,
                 digest,
-                action,
-                turns,
+                session_id,
+                request,
+            } => self.plugin_git_read(event_tx, request_id, package, digest, session_id, request),
+            Op::PluginWorkspaceFileRead {
+                request_id,
+                package,
+                digest,
+                session_id,
+                request,
+            } => self.plugin_workspace_file_read(
+                event_tx, request_id, package, digest, session_id, request,
             ),
             Op::PluginHttpRequest {
                 request_id,

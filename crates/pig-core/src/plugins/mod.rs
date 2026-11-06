@@ -7,6 +7,7 @@ mod schema;
 mod services;
 mod themes;
 mod tools;
+pub(crate) mod workspace;
 
 pub use http::request_http;
 pub use marketplace::{

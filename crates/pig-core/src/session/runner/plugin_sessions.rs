@@ -306,7 +306,11 @@ impl Manager {
 
     /// The package's registry entry, with the trust/incompatibility checks a
     /// session action needs.
-    fn plugin_scope(&self, package: &str, digest: &str) -> Result<PluginPackageInfo, CoreError> {
+    pub(super) fn plugin_scope(
+        &self,
+        package: &str,
+        digest: &str,
+    ) -> Result<PluginPackageInfo, CoreError> {
         let registry = self.plugins.lock().expect("plugin registry lock");
         let package = registry.package(package, digest)?.clone();
         if !package.enabled || package.incompatible.is_some() {
@@ -864,7 +868,10 @@ fn ensure_workspace_in_package(package: &PluginPackageInfo, cwd: &Path) -> Resul
     Ok(())
 }
 
-fn ensure_cwd_in_package(package: &PluginPackageInfo, cwd: &Path) -> Result<(), CoreError> {
+pub(super) fn ensure_cwd_in_package(
+    package: &PluginPackageInfo,
+    cwd: &Path,
+) -> Result<(), CoreError> {
     ensure_workspace_in_package(package, cwd)
 }
 

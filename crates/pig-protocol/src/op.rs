@@ -383,6 +383,20 @@ pub enum Op {
         digest: String,
         action: PluginSessionAction,
     },
+    PluginGitRead {
+        request_id: String,
+        package: String,
+        digest: String,
+        session_id: String,
+        request: PluginGitReadRequest,
+    },
+    PluginWorkspaceFileRead {
+        request_id: String,
+        package: String,
+        digest: String,
+        session_id: String,
+        request: PluginWorkspaceFileReadRequest,
+    },
     PluginHttpRequest {
         request_id: String,
         package: String,

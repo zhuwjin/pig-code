@@ -76,6 +76,8 @@ and only records the applier otherwise, so tests can import the module.
 | `ctx.services.session.create/send/interrupt/wait` | Narrow session control (the session's own permissions apply). |
 | `ctx.services.model.request({purpose, prompt, …})` | One bounded non-streaming model call. |
 | `ctx.services.agents.list/start/send/wait/stop/read` | Delegate to a contributed or built-in subagent profile. |
+| `ctx.services.git.status/diff/log/show/branches` | Read-only Git inspection of the session workspace; requires `git.read`. |
+| `ctx.services.files.read` | Bounded workspace text read with line ranges; requires `files.read`. |
 | `ctx.log.debug/info/warn/error` | Size-limited, redacted log events. |
 | `ctx.onReady(listener)` | Runs once the host accepted the instance. Requests made before that are queued. |
 | `ctx.dispose(fn)` | Teardown, run in reverse order on stop. |
@@ -131,12 +133,18 @@ New services are granted through the manifest's `capabilities` (not `actions`):
   {"name": "session.create", "targets": ["/path/to/workspace"]},
   {"name": "session.control", "targets": ["*"]},
   {"name": "model.request", "targets": ["review", "commit_message"]},
-  {"name": "agent.delegate", "targets": ["*"]}
+  {"name": "agent.delegate", "targets": ["*"]},
+  {"name": "git.read", "targets": ["*"]},
+  {"name": "files.read", "targets": ["*"]}
 ]
 ```
 
 A project package can only touch sessions inside its trusted workspace. Tool results, session
 events and agent reads are projections: the SDK never sees host stores or credentials.
+
+Git and file reads are also session-scoped. Paths are workspace-relative, `.git` and symlinks are
+refused, Git runs with fixed argv and hooks/filters disabled, and file output is line-rangeable and
+bounded. Both are read-only; Git writes and worktrees are separate capabilities.
 
 ## Side-effect recovery
 

@@ -1,4 +1,7 @@
-use pig_protocol::{CoreError, PluginAction, PluginActionResult, PluginPackageSource, PluginScope};
+use pig_protocol::{
+    CoreError, PluginAction, PluginActionResult, PluginGitReadRequest, PluginPackageSource,
+    PluginScope, PluginWorkspaceFileReadRequest,
+};
 
 use super::{Manager, emit};
 use crate::plugins::{self, SessionServices};
@@ -259,6 +262,122 @@ impl Manager {
                 result,
             },
         );
+    }
+
+    pub(super) fn plugin_git_read(
+        &mut self,
+        event_tx: async_channel::Sender<pig_protocol::Event>,
+        request_id: String,
+        package: String,
+        digest: String,
+        session_id: String,
+        request: PluginGitReadRequest,
+    ) {
+        match self.plugin_read_workspace(&package, &digest, &session_id, "git.read") {
+            Ok(cwd) => {
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || git_read(&cwd, request))
+                        .await
+                        .map_err(|error| CoreError::Internal {
+                            detail: error.to_string(),
+                        })
+                        .and_then(|result| result);
+                    emit(
+                        &event_tx,
+                        pig_protocol::Event::PluginServiceValue {
+                            request_id,
+                            package,
+                            digest,
+                            result,
+                        },
+                    );
+                });
+            }
+            Err(error) => emit(
+                &event_tx,
+                pig_protocol::Event::PluginServiceValue {
+                    request_id,
+                    package,
+                    digest,
+                    result: Err(error),
+                },
+            ),
+        }
+    }
+
+    pub(super) fn plugin_workspace_file_read(
+        &mut self,
+        event_tx: async_channel::Sender<pig_protocol::Event>,
+        request_id: String,
+        package: String,
+        digest: String,
+        session_id: String,
+        request: PluginWorkspaceFileReadRequest,
+    ) {
+        match self.plugin_read_workspace(&package, &digest, &session_id, "files.read") {
+            Ok(cwd) => {
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::plugins::workspace::read_workspace_file(&cwd, &request)
+                    })
+                    .await
+                    .map_err(|error| CoreError::Internal {
+                        detail: error.to_string(),
+                    })
+                    .and_then(|result| result);
+                    emit(
+                        &event_tx,
+                        pig_protocol::Event::PluginServiceValue {
+                            request_id,
+                            package,
+                            digest,
+                            result,
+                        },
+                    );
+                });
+            }
+            Err(error) => emit(
+                &event_tx,
+                pig_protocol::Event::PluginServiceValue {
+                    request_id,
+                    package,
+                    digest,
+                    result: Err(error),
+                },
+            ),
+        }
+    }
+
+    /// Authorize a read-only workspace service and return the session's cwd.
+    /// The session id is the capability target; a project package may only read
+    /// sessions inside its own workspace.
+    fn plugin_read_workspace(
+        &self,
+        package: &str,
+        digest: &str,
+        session_id: &str,
+        capability: &str,
+    ) -> Result<std::path::PathBuf, CoreError> {
+        let package_info = self.plugin_scope(package, digest)?;
+        let cwd = self
+            .sessions
+            .get(session_id)
+            .map(|entry| entry.cwd.clone())
+            .ok_or(CoreError::SessionNotFound)?;
+        super::plugin_sessions::ensure_cwd_in_package(&package_info, &cwd)?;
+        self.plugins
+            .lock()
+            .expect("plugin registry lock")
+            .authorize_named(
+                package,
+                digest,
+                capability,
+                session_id,
+                self.config.as_ref(),
+            )?;
+        Ok(cwd)
     }
 
     pub(super) fn plugin_action(
@@ -627,6 +746,34 @@ impl Manager {
                 },
             },
         );
+    }
+}
+
+fn git_read(
+    cwd: &std::path::Path,
+    request: PluginGitReadRequest,
+) -> Result<serde_json::Value, CoreError> {
+    match request {
+        PluginGitReadRequest::Status => {
+            let (unstaged, staged) = crate::git::git_status_read(cwd)?;
+            Ok(serde_json::json!({ "unstaged": unstaged, "staged": staged }))
+        }
+        PluginGitReadRequest::Diff { path, staged } => {
+            let (diff, note) = crate::git::git_diff_read(cwd, &path, staged)?;
+            Ok(serde_json::json!({ "diff": diff, "note": note }))
+        }
+        PluginGitReadRequest::Log { limit, path } => {
+            let commits = crate::git::git_log_read(cwd, limit, path.as_deref())?;
+            Ok(serde_json::json!({ "commits": commits }))
+        }
+        PluginGitReadRequest::Show { rev, path } => {
+            let (text, truncated) = crate::git::git_show_read(cwd, &rev, path.as_deref())?;
+            Ok(serde_json::json!({ "text": text, "truncated": truncated }))
+        }
+        PluginGitReadRequest::Branches => {
+            let (current, branches) = crate::git::git_branches_read(cwd)?;
+            Ok(serde_json::json!({ "current": current, "branches": branches }))
+        }
     }
 }
 
