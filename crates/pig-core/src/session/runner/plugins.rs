@@ -54,9 +54,25 @@ impl Manager {
     /// wrap-up (dropping a live MCP manager mid-turn would break the running
     /// child's tool calls).
     fn refresh_session_plugin_surfaces(&mut self) {
+        let config = self.config.clone();
+        let config_path = self.config_path.clone();
+        let credentials = self.credentials.clone();
+        let plugins = self.plugins.clone();
         for entry in self.sessions.values_mut() {
+            // Provider contributions are resolved into the runtime, not into
+            // the persisted config: rebuilding keeps a plugin that was just
+            // enabled/updated selectable by the next turn.
+            let runtime = super::runtime::layered_runtime(
+                config.as_ref(),
+                &config_path,
+                &entry.cwd,
+                credentials.clone(),
+                &plugins,
+            );
+            entry.runtime = runtime.clone();
             if entry.session.is_some() {
                 if let Some(session) = entry.session.as_mut() {
+                    session.set_runtime(runtime);
                     session.refresh_plugin_surfaces();
                 }
                 entry.mcp_status = None;

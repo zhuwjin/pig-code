@@ -142,7 +142,8 @@ impl PluginRegistry {
             && contributions.skills.is_empty()
             && contributions.mcp.is_empty()
             && contributions.tools.is_empty()
-            && contributions.commands.is_empty();
+            && contributions.commands.is_empty()
+            && contributions.providers.is_empty();
         if empty {
             if self.runtime_epochs.get(&key) == Some(&epoch) {
                 self.snapshot.runtime_contributions.remove(&key);
@@ -183,6 +184,10 @@ impl PluginRegistry {
         }
         let mut validated = contributions.clone();
         validated.actions = package.contributions.actions.clone();
+        // Runtime deltas cannot add credentials, but a runtime provider may
+        // reference a credential the manifest declared; validate against that
+        // declaration set.
+        validated.credentials = package.contributions.credentials.clone();
         validate_contributions(&package.root, &validated)?;
         self.snapshot
             .runtime_contributions
@@ -527,6 +532,9 @@ impl PluginRegistry {
             }
             for server in &package.contributions.mcp {
                 record("mcp", server.name.clone(), &package.id);
+            }
+            for provider in &package.contributions.providers {
+                record("provider", provider.id.clone(), &package.id);
             }
             for theme in &package.contributions.themes {
                 record("theme", theme.id.clone(), &package.id);
@@ -953,6 +961,132 @@ fn validate_contributions(
                 "agent profile `{}` tool names must not be empty",
                 agent.name
             )));
+        }
+    }
+    if !contributions.providers.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideProviders)
+    {
+        return Err(permission(
+            "provider contributions require the provide_providers capability",
+        ));
+    }
+    let mut provider_ids = BTreeSet::new();
+    for provider in &contributions.providers {
+        validate_id(&provider.id)?;
+        if !provider_ids.insert(&provider.id) {
+            return Err(manifest(format!(
+                "duplicate provider contribution `{}`",
+                provider.id
+            )));
+        }
+        if provider.name.trim().is_empty() {
+            return Err(manifest(format!("provider `{}` needs a name", provider.id)));
+        }
+        let url = reqwest::Url::parse(provider.base_url.trim()).map_err(|error| {
+            manifest(format!(
+                "provider `{}` base URL is invalid: {error}",
+                provider.id
+            ))
+        })?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback)) {
+            return Err(manifest(format!(
+                "provider `{}` must use https (http is allowed only for loopback)",
+                provider.id
+            )));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(manifest(format!(
+                "provider `{}` base URL must not embed credentials",
+                provider.id
+            )));
+        }
+        if provider.models.is_empty() {
+            return Err(manifest(format!(
+                "provider `{}` needs at least one model",
+                provider.id
+            )));
+        }
+        let mut model_ids = BTreeSet::new();
+        for model in &provider.models {
+            if model.id.trim().is_empty() || model.id.len() > 256 {
+                return Err(manifest(format!(
+                    "provider `{}` has an empty or overlong model id",
+                    provider.id
+                )));
+            }
+            if !model_ids.insert(&model.id) {
+                return Err(manifest(format!(
+                    "duplicate model `{}` in provider `{}`",
+                    model.id, provider.id
+                )));
+            }
+            if model.context_window == 0
+                || model.max_output_tokens == 0
+                || model.max_output_tokens > model.context_window
+            {
+                return Err(manifest(format!(
+                    "model `{}` in provider `{}` needs 0 < maxOutputTokens <= contextWindow",
+                    model.id, provider.id
+                )));
+            }
+            if let Some(level) = &model.default_reasoning_level
+                && !model.reasoning_levels.contains(level)
+            {
+                return Err(manifest(format!(
+                    "model `{}` default reasoning level `{level}` is not declared",
+                    model.id
+                )));
+            }
+            for level in model
+                .reasoning_labels
+                .keys()
+                .chain(model.reasoning_params.keys())
+            {
+                if !model.reasoning_levels.contains(level) {
+                    return Err(manifest(format!(
+                        "model `{}` reasoning level `{level}` is not declared",
+                        model.id
+                    )));
+                }
+            }
+        }
+        if let Some(credential) = &provider.credential {
+            if !contributions
+                .actions
+                .contains(&PluginCapability::ManageOwnSecrets)
+            {
+                return Err(permission(format!(
+                    "provider `{}` with a credential requires the manage_own_secrets capability",
+                    provider.id
+                )));
+            }
+            match contributions
+                .credentials
+                .iter()
+                .find(|declaration| declaration.id() == credential)
+            {
+                Some(pig_protocol::PluginCredentialDeclaration::Owned { .. }) => {}
+                Some(pig_protocol::PluginCredentialDeclaration::Provider { .. }) => {
+                    return Err(manifest(format!(
+                        "provider `{}` must use an owned credential, not another provider's",
+                        provider.id
+                    )));
+                }
+                None => {
+                    return Err(manifest(format!(
+                        "provider `{}` references undeclared credential `{credential}`",
+                        provider.id
+                    )));
+                }
+            }
         }
     }
     let mut hooks = BTreeSet::new();

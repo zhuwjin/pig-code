@@ -63,6 +63,7 @@ impl Manager {
             &config_path,
             &meta.cwd,
             self.credentials.clone(),
+            &self.plugins,
         );
         if meta.reasoning_level.is_none()
             && let Some(cfg) = session_runtime.as_ref().map(|runtime| runtime.config())
@@ -323,6 +324,7 @@ impl Manager {
             &config_path,
             &resume_cwd,
             self.credentials.clone(),
+            &self.plugins,
         );
         match Session::load(
             &session_id,

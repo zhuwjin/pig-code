@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use pig_protocol::{ModelConfig, ProviderConfig};
 use pig_utils::skills::{self, Skill, SkillSource};
 
 use super::{PluginRegistry, authorized_package, package_digest};
@@ -50,6 +51,94 @@ pub fn enabled_packages(
         .collect();
     packages.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(packages)
+}
+
+/// One provider a session can select: the host-facing [`ProviderConfig`] plus
+/// the credential scope the plugin declared. Provider ids are namespaced with
+/// `plugin:<package>:<id>` so a package can never shadow a user-configured
+/// provider.
+pub struct PluginProviderRuntime {
+    pub provider: ProviderConfig,
+    pub credential: Option<crate::credentials::CredentialId>,
+}
+
+impl PluginProviderRuntime {
+    pub fn provider_id(package: &str, id: &str) -> String {
+        format!("plugin:{package}:{id}")
+    }
+}
+
+/// Effective provider contributions of enabled, compatible, authorized
+/// packages, in package-id order. The first package contributing a given raw
+/// provider id wins; the conflict is reported by the registry snapshot.
+pub fn providers(
+    registry: &PluginRegistry,
+    trust: &crate::config::WorkspaceTrust,
+) -> Vec<PluginProviderRuntime> {
+    let Ok(packages) = enabled_packages(registry, trust) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut providers = Vec::new();
+    for package in packages {
+        for contribution in package.contributions.providers {
+            if !seen.insert(contribution.id.clone()) {
+                continue;
+            }
+            let credential = contribution.credential.as_ref().and_then(|id| {
+                package
+                    .contributions
+                    .credentials
+                    .iter()
+                    .find(|declaration| declaration.id() == id)
+                    .and_then(|declaration| match declaration {
+                        pig_protocol::PluginCredentialDeclaration::Owned { id, .. } => {
+                            Some(crate::credentials::CredentialId::plugin(&package.id, id))
+                        }
+                        // Validation rejects this for provider contributions.
+                        pig_protocol::PluginCredentialDeclaration::Provider { .. } => None,
+                    })
+            });
+            let provider = ProviderConfig {
+                id: PluginProviderRuntime::provider_id(&package.id, &contribution.id),
+                name: contribution.name,
+                base_url: contribution.base_url,
+                requires_api_key: contribution.credential.is_some(),
+                api_format: contribution.api_format,
+                enabled: true,
+                models: contribution
+                    .models
+                    .into_iter()
+                    .map(|model| ModelConfig {
+                        id: model.id,
+                        name: model.name,
+                        icon: None,
+                        enabled: true,
+                        context_window: model.context_window,
+                        max_output_tokens: model.max_output_tokens,
+                        input_image: model.input_image,
+                        input_pdf: model.input_pdf,
+                        cap_structured: model.cap_structured,
+                        cap_strict_tools: model.cap_strict_tools,
+                        cap_web_search: model.cap_web_search,
+                        web_search_tool: None,
+                        reasoning_levels: model.reasoning_levels,
+                        default_reasoning_level: model.default_reasoning_level,
+                        reasoning_labels: model.reasoning_labels.into_iter().collect(),
+                        reasoning_params: model.reasoning_params.into_iter().collect(),
+                        parallel_tool_calls: model.parallel_tool_calls,
+                    })
+                    .collect(),
+                icon: contribution.icon,
+                key_url: None,
+            };
+            providers.push(PluginProviderRuntime {
+                provider,
+                credential,
+            });
+        }
+    }
+    providers
 }
 
 pub fn discover_skills_with_trust(

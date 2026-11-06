@@ -369,6 +369,7 @@ impl Manager {
                     &self.config_path,
                     &self.default_cwd,
                     self.credentials.clone(),
+                    &self.plugins,
                 );
                 let runtime = runtime.ok_or(CoreError::NoModelConfigured)?;
                 runtime

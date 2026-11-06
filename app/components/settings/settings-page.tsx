@@ -50,6 +50,15 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
       sessionId?: string | null,
     ) => props.store.writePluginConfig(plugin, key, value, sessionId),
     currentSessionId: () => props.store.current(),
+    setPluginSecret: (
+      plugin: Parameters<UiContext["store"]["setPluginSecret"]>[0],
+      credential: string,
+      secret: string,
+    ) => props.store.setPluginSecret(plugin, credential, secret),
+    clearPluginSecret: (
+      plugin: Parameters<UiContext["store"]["clearPluginSecret"]>[0],
+      credential: string,
+    ) => props.store.clearPluginSecret(plugin, credential),
   });
   return (
     <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 bg-background")}>

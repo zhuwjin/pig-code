@@ -18,6 +18,7 @@ test("the SDK serves a real backend's tools, commands and events", async () => {
   expect(host.envelopes[0].kind).toBe("lifecycle.hello");
   expect(host.tools()).toContain("MoonEcho");
   expect(host.commands()).toContain("moon-workspace");
+  expect(host.providers()).toContain("moon-local");
 
   const echoed = await host.tool<{ echo: string; engine: string }>("MoonEcho", { text: "hi" });
   expect(echoed).toEqual({ echo: "hi", engine: "moon" });
@@ -299,5 +300,42 @@ test("keyed storage lists, reads, writes, deletes and rejects stale revisions", 
   expect(captured.deleted?.deleted).toBe(true);
   const write = host.serviceRequests.find((request) => request.service === "storage_key_write");
   expect(write?.idempotencyKey).toBe("write-alpha-1");
+  host.stop();
+});
+
+test("providers are declared with a host adapter and an owned credential", async () => {
+  const host = await createTestHost({
+    applier: (ctx) => {
+      ctx.providers.register({
+        id: "acme",
+        name: "Acme",
+        baseUrl: "https://acme.example/v1",
+        apiFormat: "OpenAiChat",
+        credential: "acme-key",
+        models: [
+          {
+            id: "acme-large",
+            name: "Acme Large",
+            contextWindow: 128_000,
+            maxOutputTokens: 8_192,
+            reasoningLevels: ["low", "high"],
+            defaultReasoningLevel: "high",
+            structuredOutput: true,
+          },
+        ],
+      });
+    },
+  }).start();
+
+  expect(host.providers()).toEqual(["acme"]);
+  const provider = host.contributions().providers[0] as Record<string, any>;
+  expect(provider.base_url).toBe("https://acme.example/v1");
+  expect(provider.api_format).toBe("OpenAiChat");
+  expect(provider.credential).toBe("acme-key");
+  expect(provider.models[0].id).toBe("acme-large");
+  expect(provider.models[0].context_window).toBe(128_000);
+  expect(provider.models[0].cap_structured).toBe(true);
+  expect(provider.models[0].reasoning_levels).toEqual(["low", "high"]);
+  expect(provider.models[0].default_reasoning_level).toBe("high");
   host.stop();
 });

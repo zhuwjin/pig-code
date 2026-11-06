@@ -4,6 +4,7 @@ import { appLocale, t } from "../i18n";
 import {
   errorMessage,
   type PluginConfigItem,
+  type PluginCredentialDeclaration,
   type PluginPackageInfo,
 } from "../protocol";
 
@@ -211,5 +212,106 @@ export function PluginConfigEditor(props: {
         </View>
       </If>
     </View>
+  );
+}
+
+/**
+ * Host-generated entry for a package's `owned` credentials. The secret goes to
+ * the OS credential store under the package's digest-scoped key; the plugin
+ * can use it through provider/HTTP declarations but never reads it back.
+ */
+export function PluginCredentialEditor(props: {
+  plugin: () => PluginPackageInfo;
+  write?: (plugin: PluginPackageInfo, credential: string, secret: string) => Promise<unknown>;
+  clear?: (plugin: PluginPackageInfo, credential: string) => Promise<unknown>;
+}) {
+  const values = signal<Record<string, string>>({});
+  const status = signal("");
+  const busy = signal("");
+  const owned = (): PluginCredentialDeclaration[] =>
+    (props.plugin().contributions.credentials ?? []).filter((item) => item.kind === "owned");
+  const save = async (credential: PluginCredentialDeclaration) => {
+    const secret = (values()[credential.id] ?? "").trim();
+    if (!secret) return;
+    busy.set(credential.id);
+    status.set("");
+    try {
+      await props.write?.(props.plugin(), credential.id, secret);
+      values.update((all) => ({ ...all, [credential.id]: "" }));
+      status.set(t("settings.plugins.credentials.saved", { name: credential.label ?? credential.id }));
+    } catch (error) {
+      status.set(t("settings.plugins.credentials.failed", { detail: errorMessage(error) }));
+    } finally {
+      busy.set("");
+    }
+  };
+  const clear = async (credential: PluginCredentialDeclaration) => {
+    busy.set(credential.id);
+    status.set("");
+    try {
+      await props.clear?.(props.plugin(), credential.id);
+      values.update((all) => ({ ...all, [credential.id]: "" }));
+      status.set(t("settings.plugins.credentials.cleared", { name: credential.label ?? credential.id }));
+    } catch (error) {
+      status.set(t("settings.plugins.credentials.failed", { detail: errorMessage(error) }));
+    } finally {
+      busy.set("");
+    }
+  };
+  return (
+    <If when={owned().length > 0}>
+      <View class="gap-2 rounded-(--radius) border border-border bg-accent/20 p-3">
+        <Text class="text-xs font-medium text-foreground">
+          {t("settings.plugins.credentials.title")}
+        </Text>
+        <Each of={owned()} key={(credential) => credential.id}>
+          {(credential) => (
+            <View class="gap-1">
+              <Text class="text-xs text-foreground">
+                {credential().label ?? credential().id}
+              </Text>
+              <If when={credential().description}>
+                <Text class="text-[10px] text-muted-foreground">{credential().description}</Text>
+              </If>
+              <View class="flex-row items-center gap-2">
+                <Input
+                  testID={`plugin-credential-input-${props.plugin().id}-${credential().id}`}
+                  value={values()[credential().id] ?? ""}
+                  masked={true}
+                  placeholder={t("settings.plugins.credentials.placeholder")}
+                  onChange={({ value: text }) =>
+                    values.update((all) => ({ ...all, [credential().id]: text }))
+                  }
+                  class="min-w-0 flex-1 rounded-(--radius) border border-border bg-background px-3 py-2 text-xs text-foreground"
+                />
+                <Button
+                  testID={`plugin-credential-save-${props.plugin().id}-${credential().id}`}
+                  disabled={busy() === credential().id || !(values()[credential().id] ?? "").trim()}
+                  class="rounded-(--radius) bg-primary px-3 py-1 disabled:opacity-40"
+                  onPress={() => void save(credential())}
+                >
+                  <Text class="text-[10px] text-primary-foreground">
+                    {t("settings.plugins.credentials.save")}
+                  </Text>
+                </Button>
+                <Button
+                  testID={`plugin-credential-clear-${props.plugin().id}-${credential().id}`}
+                  disabled={busy() === credential().id}
+                  class="rounded-(--radius) px-2 py-1 hover:bg-destructive/10 disabled:opacity-40"
+                  onPress={() => void clear(credential())}
+                >
+                  <Text class="text-[10px] text-destructive">
+                    {t("settings.plugins.credentials.clear")}
+                  </Text>
+                </Button>
+              </View>
+            </View>
+          )}
+        </Each>
+        <If when={status()}>
+          <Text class="text-[10px] text-muted-foreground">{status()}</Text>
+        </If>
+      </View>
+    </If>
   );
 }

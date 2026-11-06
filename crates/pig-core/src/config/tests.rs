@@ -1080,4 +1080,76 @@ mod secret_tests {
         assert_eq!(mode, 0o644, "the link target is never chmodded");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn a_plugin_provider_resolves_through_its_package_credential() {
+        let credentials =
+            std::sync::Arc::new(crate::credentials::CredentialManager::empty_memory());
+        credentials
+            .set(
+                crate::credentials::CredentialId::plugin("demo", "acme-key"),
+                "plug-secret".into(),
+            )
+            .await
+            .expect("store plugin key");
+        let mut model = ModelConfig::new("acme-large", 128_000, 8_192);
+        model.reasoning_levels = vec!["high".into()];
+        model
+            .reasoning_params
+            .insert("high".into(), serde_json::json!({ "effort": "high" }));
+        let contributed = ProviderConfig {
+            id: "plugin:demo:acme".into(),
+            name: "Acme".into(),
+            base_url: "https://acme.example/v1/".into(),
+            requires_api_key: true,
+            api_format: ApiFormat::OpenAiChat,
+            enabled: true,
+            models: vec![model],
+            icon: None,
+            key_url: None,
+        };
+        let mut scopes = std::collections::BTreeMap::new();
+        scopes.insert(
+            "plugin:demo:acme".to_string(),
+            crate::credentials::CredentialId::plugin("demo", "acme-key"),
+        );
+        let runtime = RuntimeConfig::from_snapshot(
+            config_with(provider("unused", "https://api.example.com")),
+            std::env::temp_dir().as_path(),
+            credentials,
+        )
+        .with_provider_contributions(vec![contributed], scopes);
+        let resolved = runtime
+            .resolve_model(
+                Some(&ModelRequest {
+                    provider_id: Some("plugin:demo:acme".into()),
+                    model_id: Some("acme-large".into()),
+                    reasoning_level: Some("high".into()),
+                }),
+                None,
+            )
+            .expect("plugin provider resolves");
+        assert_eq!(resolved.api_key, "plug-secret");
+        assert_eq!(resolved.base_url, "https://acme.example/v1");
+        assert_eq!(resolved.provider_name, "Acme");
+        assert_eq!(
+            resolved.reasoning_params,
+            Some(serde_json::json!({ "effort": "high" }))
+        );
+    }
+
+    #[test]
+    fn a_plugin_provider_never_replaces_a_user_provider_id() {
+        let mut contributed = provider("unused", "https://plugin.example");
+        contributed.id = "p".into();
+        contributed.name = "Plugin".into();
+        let runtime = RuntimeConfig::from_snapshot(
+            config_with(provider("unused", "https://user.example")),
+            std::env::temp_dir().as_path(),
+            mock_credentials(),
+        )
+        .with_provider_contributions(vec![contributed], std::collections::BTreeMap::new());
+        assert_eq!(runtime.config().providers.len(), 1);
+        assert_eq!(runtime.config().providers[0].name, "Provider");
+    }
 }

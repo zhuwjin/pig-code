@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::HookEntry;
+use crate::{ApiFormat, HookEntry};
 
 pub const PLUGIN_API_VERSION: u32 = 1;
 
@@ -18,6 +18,10 @@ const fn api_version() -> u32 {
 }
 
 const fn default_enabled() -> bool {
+    true
+}
+
+const fn default_true() -> bool {
     true
 }
 
@@ -42,6 +46,11 @@ pub struct PluginContributions {
     pub hooks: Vec<PluginHook>,
     #[serde(default)]
     pub agents: Vec<PluginAgentProfile>,
+    /// Model-provider presets. A preset selects one of the host's protocol
+    /// adapters (`api_format`); the plugin never executes its own transport
+    /// code inside the agent loop.
+    #[serde(default)]
+    pub providers: Vec<PluginProvider>,
     #[serde(default)]
     pub credentials: Vec<PluginCredentialDeclaration>,
     #[serde(default)]
@@ -78,6 +87,9 @@ impl PluginContributions {
         merge_replacing(&mut merged.agents, &runtime.agents, |agent| {
             agent.name.clone()
         });
+        merge_replacing(&mut merged.providers, &runtime.providers, |provider| {
+            provider.id.clone()
+        });
         merged
     }
 }
@@ -106,6 +118,7 @@ impl Default for PluginContributions {
             commands: Vec::new(),
             hooks: Vec::new(),
             agents: Vec::new(),
+            providers: Vec::new(),
             credentials: Vec::new(),
             http: Vec::new(),
             config: PluginConfigDeclaration::default(),
@@ -536,6 +549,58 @@ pub struct PluginCommand {
     pub enabled: bool,
 }
 
+/// A model provider contributed by a package. The host exposes it as a
+/// namespaced provider (`plugin:<package>:<id>`) in the model picker and runs
+/// it through the selected host protocol adapter; the plugin contributes
+/// declarations, not request code. `credential` names an `owned` credential
+/// declaration whose secret the user stores through the host (the plugin never
+/// reads it back).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginProvider {
+    /// Contribution-local id, namespaced by the host.
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub base_url: String,
+    /// One of the host's protocol adapters.
+    pub api_format: ApiFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    pub models: Vec<PluginModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub context_window: u64,
+    pub max_output_tokens: u64,
+    #[serde(default)]
+    pub input_image: bool,
+    #[serde(default)]
+    pub input_pdf: bool,
+    #[serde(default)]
+    pub cap_structured: bool,
+    #[serde(default)]
+    pub cap_strict_tools: bool,
+    #[serde(default)]
+    pub cap_web_search: bool,
+    #[serde(default)]
+    pub reasoning_levels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_level: Option<String>,
+    #[serde(default)]
+    pub reasoning_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub reasoning_params: BTreeMap<String, serde_json::Value>,
+    #[serde(default = "default_true")]
+    pub parallel_tool_calls: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginCredentialDeclaration {
@@ -681,6 +746,7 @@ pub enum PluginCapability {
     ProvideThemes,
     ProvideHooks,
     ProvideAgents,
+    ProvideProviders,
     Http,
     ManageOwnSecrets,
     ReadConfig,

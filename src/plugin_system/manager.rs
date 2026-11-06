@@ -1347,6 +1347,9 @@ impl PluginSystemManager {
         merge_unique(&mut staged.commands, delta.commands, |command| {
             command.id.clone()
         });
+        merge_unique(&mut staged.providers, delta.providers, |provider| {
+            provider.id.clone()
+        });
         merge_unique(&mut staged.hooks, delta.hooks, |hook| {
             hook.id
                 .clone()
@@ -1393,6 +1396,10 @@ impl PluginSystemManager {
         instance
             .staged_contributions
             .commands
+            .retain(|item| item.id != id);
+        instance
+            .staged_contributions
+            .providers
             .retain(|item| item.id != id);
         instance
             .staged_contributions
@@ -2248,6 +2255,7 @@ fn validate_delta(delta: &PluginContributions) -> Result<(), String> {
         + delta.mcp.len()
         + delta.tools.len()
         + delta.commands.len()
+        + delta.providers.len()
         + delta.hooks.len();
     if count > 256 {
         return Err("a contribution batch may contain at most 256 entries".into());

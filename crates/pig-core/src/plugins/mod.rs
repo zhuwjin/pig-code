@@ -19,6 +19,7 @@ pub use contributions::{
     discover_skills_with_trust, enabled_packages, load_skill_output_with_trust, mcp_servers,
     skills_section_with_trust, skills_state,
 };
+pub(crate) use contributions::providers as plugin_providers;
 use registry::authorized_package;
 pub use registry::package_digest;
 pub use services::{
@@ -399,6 +400,179 @@ mod tests {
         assert!(
             crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust, &plugins)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_contributions_are_namespaced_and_use_owned_credentials() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": ["provide_providers", "manage_own_secrets"],
+              "credentials": [{
+                "kind": "owned",
+                "id": "acme-key",
+                "label": "Acme key"
+              }],
+              "providers": [{
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "credential": "acme-key",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let providers = crate::plugins::plugin_providers(&registry, &trust);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider.id, "plugin:demo:acme");
+        assert_eq!(providers[0].provider.name, "Acme");
+        assert!(providers[0].provider.requires_api_key);
+        assert_eq!(providers[0].provider.models[0].id, "acme-large");
+        assert_eq!(
+            providers[0].credential,
+            Some(crate::credentials::CredentialId::plugin("demo", "acme-key"))
+        );
+        registry.set_enabled("demo", &digest, false).unwrap();
+        assert!(crate::plugins::plugin_providers(&registry, &trust).is_empty());
+    }
+
+    #[test]
+    fn runtime_provider_contributions_use_the_manifest_credential() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": ["provide_providers", "manage_own_secrets"],
+              "credentials": [{
+                "kind": "owned",
+                "id": "acme-key",
+                "label": "Acme key"
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let contributions: pig_protocol::PluginContributions = serde_json::from_value(
+            serde_json::json!({
+              "providers": [{
+                "id": "runtime-acme",
+                "name": "Runtime Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "credential": "acme-key",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }),
+        )
+        .expect("runtime contributions");
+        registry
+            .sync_runtime_contributions("demo", &digest, 1, snapshot.generation, contributions)
+            .expect("a runtime provider may use a manifest credential");
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let providers = crate::plugins::plugin_providers(&registry, &trust);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider.id, "plugin:demo:runtime-acme");
+        assert_eq!(
+            providers[0].credential,
+            Some(crate::credentials::CredentialId::plugin("demo", "acme-key"))
+        );
+    }
+
+    #[test]
+    fn provider_contributions_require_the_provide_providers_capability() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": [],
+              "providers": [{
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            format!("{:?}", snapshot.errors[0].error).contains("provide_providers"),
+            "{:?}",
+            snapshot.errors
+        );
+    }
+
+    #[test]
+    fn provider_contributions_reject_another_providers_credential() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": ["provide_providers", "manage_own_secrets"],
+              "credentials": [{
+                "kind": "provider",
+                "id": "shared",
+                "provider_id": "openai"
+              }],
+              "providers": [{
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "credential": "shared",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            format!("{:?}", snapshot.errors[0].error).contains("owned credential"),
+            "{:?}",
+            snapshot.errors
         );
     }
 

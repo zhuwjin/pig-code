@@ -2,7 +2,7 @@ import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
 import { Button, Input, Popover } from "nsh/base";
 import { PluginConfigItem, PluginContributionConflict, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
-import { PluginConfigEditor } from "./components/plugin-config-editor";
+import { PluginConfigEditor, PluginCredentialEditor } from "./components/plugin-config-editor";
 import { languagePreference, setLanguagePreference, t } from "./i18n";
 import type { LanguagePreference, MessageKey } from "./i18n";
 import { ThemeStore } from "./theme";
@@ -185,6 +185,15 @@ function ThemePackageRow(props: {
     sessionId?: string | null,
   ) => Promise<unknown>;
   currentSessionId?: () => string | null;
+  onSetSecret?: (
+    plugin: PluginPackageInfo,
+    credential: string,
+    secret: string,
+  ) => Promise<unknown>;
+  onClearSecret?: (
+    plugin: PluginPackageInfo,
+    credential: string,
+  ) => Promise<unknown>;
 }) {
   const plugin = () => props.item();
   const runtime = () => props.runtime;
@@ -258,6 +267,11 @@ function ThemePackageRow(props: {
           sessionId={props.currentSessionId}
         />
       </If>
+      <PluginCredentialEditor
+        plugin={props.item}
+        write={props.onSetSecret}
+        clear={props.onClearSecret}
+      />
     </View>
   );
 }
@@ -291,6 +305,15 @@ interface ThemePickerProps {
     sessionId?: string | null,
   ) => Promise<unknown>;
   currentSessionId?: () => string | null;
+  setPluginSecret?: (
+    plugin: PluginPackageInfo,
+    credential: string,
+    secret: string,
+  ) => Promise<unknown>;
+  clearPluginSecret?: (
+    plugin: PluginPackageInfo,
+    credential: string,
+  ) => Promise<unknown>;
 }
 
 export function ThemePicker(props: ThemePickerProps) {
@@ -580,6 +603,8 @@ export function ThemePicker(props: ThemePickerProps) {
                       onReadConfig={props.readPluginConfig}
                       onWriteConfig={props.writePluginConfig}
                       currentSessionId={props.currentSessionId}
+                      onSetSecret={props.setPluginSecret}
+                      onClearSecret={props.clearPluginSecret}
                     />
                   )}
                 </Each>

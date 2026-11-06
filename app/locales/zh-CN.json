@@ -290,6 +290,15 @@
         },
         "workspace_unavailable": "请先打开工作区"
       },
+      "credentials": {
+        "title": "凭证",
+        "placeholder": "粘贴密钥，将安全保存",
+        "save": "保存密钥",
+        "clear": "清除",
+        "saved": "已保存 {name}",
+        "cleared": "已清除 {name}",
+        "failed": "凭证更新失败：{detail}"
+      },
       "conflicts": {
         "title": "贡献冲突",
         "conflict": "冲突：{kind} `{name}` 来自 {winner}，已忽略 {losers}"

@@ -93,10 +93,12 @@ export interface TestHost {
   contributions(): {
     tools: ToolDefinition[];
     commands: Record<string, unknown>[];
+    providers: Record<string, unknown>[];
     hooks: Record<string, unknown>[];
   };
   tools(): string[];
   commands(): string[];
+  providers(): string[];
   hooks(): Record<string, unknown>[];
   disposed(): boolean;
 }
@@ -131,6 +133,7 @@ class TestHostImpl implements TestHost {
   private readonly requests: ServiceRequestRecord[] = [];
   private readonly registeredTools = new Map<string, ToolDefinition<any, any>>();
   private readonly registeredCommands = new Map<string, Record<string, unknown>>();
+  private readonly registeredProviders = new Map<string, Record<string, unknown>>();
   private readonly registeredHooks = new Map<string, Record<string, unknown>>();
   private readonly pendingCalls = new Map<
     string,
@@ -352,11 +355,13 @@ class TestHostImpl implements TestHost {
   contributions(): {
     tools: ToolDefinition[];
     commands: Record<string, unknown>[];
+    providers: Record<string, unknown>[];
     hooks: Record<string, unknown>[];
   } {
     return {
       tools: [...this.registeredTools.values()],
       commands: [...this.registeredCommands.values()],
+      providers: [...this.registeredProviders.values()],
       hooks: [...this.registeredHooks.values()],
     };
   }
@@ -367,6 +372,10 @@ class TestHostImpl implements TestHost {
 
   commands(): string[] {
     return [...this.registeredCommands.values()].map((command) => String(command.id));
+  }
+
+  providers(): string[] {
+    return [...this.registeredProviders.values()].map((provider) => String(provider.id));
   }
 
   hooks(): Record<string, unknown>[] {
@@ -594,6 +603,9 @@ class TestHostImpl implements TestHost {
     for (const command of (body.commands ?? []) as Record<string, unknown>[]) {
       if (command && typeof command.id === "string") this.registeredCommands.set(command.id, command);
     }
+    for (const provider of (body.providers ?? []) as Record<string, unknown>[]) {
+      if (provider && typeof provider.id === "string") this.registeredProviders.set(provider.id, provider);
+    }
     for (const hook of (body.hooks ?? []) as Record<string, unknown>[]) {
       const id = typeof hook.id === "string" ? hook.id : String(hook.command ?? "");
       this.registeredHooks.set(id, hook);
@@ -603,6 +615,7 @@ class TestHostImpl implements TestHost {
   private removeContribution(id: string): void {
     this.registeredTools.delete(id);
     this.registeredCommands.delete(id);
+    this.registeredProviders.delete(id);
     this.registeredHooks.delete(id);
     for (const [key, hook] of this.registeredHooks) {
       if (hook.command === id) this.registeredHooks.delete(key);

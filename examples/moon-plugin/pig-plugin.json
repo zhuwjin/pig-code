@@ -98,6 +98,7 @@
     "actions": [
       "provide_themes",
       "provide_tools",
+      "provide_providers",
       "read_config",
       "write_config"
     ]

@@ -136,6 +136,44 @@ export interface CommandDefinition {
 
 export type CommandHandler = (call: { commandId: string }) => unknown | Promise<unknown>;
 
+// --- Providers ---------------------------------------------------------------
+
+/** One of the host's protocol adapters. A plugin contributes a provider
+ * declaration (endpoint, models, credential) and the host runs the transport;
+ * a backend never executes request code inside the agent loop. */
+export type ProviderApiFormat = "OpenAiChat" | "AnthropicMessages" | "OpenAiResponses";
+
+export interface ProviderModelDefinition {
+  id: string;
+  name?: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+  inputImage?: boolean;
+  inputPdf?: boolean;
+  structuredOutput?: boolean;
+  strictTools?: boolean;
+  webSearch?: boolean;
+  reasoningLevels?: string[];
+  defaultReasoningLevel?: string;
+  reasoningLabels?: Record<string, string>;
+  reasoningParams?: Record<string, unknown>;
+  parallelToolCalls?: boolean;
+}
+
+export interface ProviderDefinition {
+  /** Contribution-local id; the host namespaces it as
+   * `plugin:<package>:<id>`. */
+  id: string;
+  name: string;
+  icon?: string;
+  baseUrl: string;
+  apiFormat: ProviderApiFormat;
+  /** An `owned` credential declaration id. The host stores the secret and
+   * injects it into requests; the plugin never reads it back. */
+  credential?: string;
+  models: ProviderModelDefinition[];
+}
+
 // --- Hooks -------------------------------------------------------------------
 
 export type HookEvent =
@@ -566,6 +604,9 @@ export interface PluginContext {
   readonly commands: {
     register(definition: CommandDefinition, handler: CommandHandler): Disposer;
   };
+  readonly providers: {
+    register(definition: ProviderDefinition): Disposer;
+  };
   readonly hooks: {
     register(definition: HookDefinition): Disposer;
   };
@@ -707,6 +748,7 @@ class PluginRuntime {
   private readonly tools = new Map<string, ToolDefinition<any, any>>();
   private readonly selectors: ToolSelector[] = [];
   private readonly commands = new Map<string, { definition: CommandDefinition; handler: CommandHandler }>();
+  private readonly providers = new Map<string, ProviderDefinition>();
   private readonly hooks = new Map<string, HookDefinition>();
   private readonly eventListeners = new Map<string, Set<(payload: Record<string, unknown>) => void>>();
   private readonly readyListeners = new Set<() => void>();
@@ -887,6 +929,9 @@ class PluginRuntime {
       commands: {
         register: (definition, handler) => runtime.registerCommand(definition, handler),
       },
+      providers: {
+        register: (definition) => runtime.registerProvider(definition),
+      },
       hooks: {
         register: (definition) => runtime.registerHook(definition),
       },
@@ -1003,6 +1048,15 @@ class PluginRuntime {
     };
   }
 
+  private registerProvider(definition: ProviderDefinition): Disposer {
+    this.providers.set(definition.id, definition);
+    if (this.initialized) this.flushContributions();
+    return () => {
+      this.providers.delete(definition.id);
+      if (this.initialized) this.removeContribution(definition.id);
+    };
+  }
+
   private registerHook(definition: HookDefinition): Disposer {
     const id = `sdk-hook-${++this.hookCounter}`;
     this.hooks.set(id, definition);
@@ -1016,11 +1070,13 @@ class PluginRuntime {
   private flushContributions(): void {
     const tools = [...this.tools.values()].map(toolContribution);
     const commands = [...this.commands.values()].map(({ definition }) => commandContribution(definition));
+    const providers = [...this.providers.values()].map(providerContribution);
     const hooks = [...this.hooks.entries()].map(([id, definition]) => hookContribution(id, definition));
-    if (tools.length === 0 && commands.length === 0 && hooks.length === 0) return;
+    if (tools.length === 0 && commands.length === 0 && providers.length === 0 && hooks.length === 0) return;
     const contributions: Record<string, unknown> = {};
     if (tools.length > 0) contributions.tools = tools;
     if (commands.length > 0) contributions.commands = commands;
+    if (providers.length > 0) contributions.providers = providers;
     if (hooks.length > 0) contributions.hooks = hooks;
     this.send("contribution.register", "contributions", contributions);
   }
@@ -1310,6 +1366,37 @@ function commandContribution(definition: CommandDefinition): Record<string, unkn
     order: definition.order ?? 0,
     enabled: true,
   };
+}
+
+function providerContribution(definition: ProviderDefinition): Record<string, unknown> {
+  const contribution: Record<string, unknown> = {
+    id: definition.id,
+    name: definition.name,
+    base_url: definition.baseUrl,
+    api_format: definition.apiFormat,
+    models: definition.models.map((model) => {
+      const entry: Record<string, unknown> = {
+        id: model.id,
+        context_window: model.contextWindow,
+        max_output_tokens: model.maxOutputTokens,
+      };
+      if (model.name) entry.name = model.name;
+      if (model.inputImage) entry.input_image = true;
+      if (model.inputPdf) entry.input_pdf = true;
+      if (model.structuredOutput) entry.cap_structured = true;
+      if (model.strictTools) entry.cap_strict_tools = true;
+      if (model.webSearch) entry.cap_web_search = true;
+      if (model.reasoningLevels?.length) entry.reasoning_levels = model.reasoningLevels;
+      if (model.defaultReasoningLevel) entry.default_reasoning_level = model.defaultReasoningLevel;
+      if (model.reasoningLabels) entry.reasoning_labels = model.reasoningLabels;
+      if (model.reasoningParams) entry.reasoning_params = model.reasoningParams;
+      if (model.parallelToolCalls === false) entry.parallel_tool_calls = false;
+      return entry;
+    }),
+  };
+  if (definition.icon) contribution.icon = definition.icon;
+  if (definition.credential) contribution.credential = definition.credential;
+  return contribution;
 }
 
 function hookContribution(id: string, definition: HookDefinition): Record<string, unknown> {

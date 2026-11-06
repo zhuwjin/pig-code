@@ -15,23 +15,43 @@ pub(super) fn layered_runtime(
     config_path: &std::path::Path,
     cwd: &std::path::Path,
     credentials: Arc<crate::credentials::CredentialManager>,
+    plugins: &crate::plugins::SharedPluginRegistry,
 ) -> Option<Arc<crate::config::RuntimeConfig>> {
-    match crate::config::RuntimeConfig::load(config_path, cwd, credentials.clone()) {
-        Ok(runtime) => Some(Arc::new(runtime)),
+    let runtime = match crate::config::RuntimeConfig::load(config_path, cwd, credentials.clone()) {
+        Ok(runtime) => runtime,
         Err(error) => {
             tracing::warn!(
                 "failed to load the layered config for {}: {error:?}",
                 cwd.display()
             );
-            config.cloned().map(|config| {
-                Arc::new(crate::config::RuntimeConfig::from_snapshot(
-                    config,
-                    cwd,
-                    credentials,
-                ))
-            })
+            crate::config::RuntimeConfig::from_snapshot(config.cloned()?, cwd, credentials)
+        }
+    };
+    Some(Arc::new(with_plugin_providers(runtime, plugins)))
+}
+
+/// Append the effective provider contributions of enabled packages to one
+/// workspace's runtime config. Provider ids are namespaced by the registry;
+/// the credential map points each contribution at its package's owned
+/// credential, so the plugin never sees the key and a user provider can never
+/// be shadowed.
+fn with_plugin_providers(
+    runtime: crate::config::RuntimeConfig,
+    plugins: &crate::plugins::SharedPluginRegistry,
+) -> crate::config::RuntimeConfig {
+    let mut providers = Vec::new();
+    let mut credentials = std::collections::BTreeMap::new();
+    {
+        let registry = plugins.lock().expect("plugin registry lock");
+        for contribution in crate::plugins::plugin_providers(&registry, runtime.trust()) {
+            let id = contribution.provider.id.clone();
+            providers.push(contribution.provider);
+            if let Some(credential) = contribution.credential {
+                credentials.insert(id, credential);
+            }
         }
     }
+    runtime.with_provider_contributions(providers, credentials)
 }
 
 /// Install the user-level sandbox settings (startup and after a config save).

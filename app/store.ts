@@ -26,6 +26,7 @@ import {
   PluginContributionConflict,
   PluginPackageInfo,
   PluginCommand,
+  PluginRuntimeContributions,
   PluginMarketplacePackage,
   PluginMarketplaceCatalog,
   PluginMarketplacePreview,
@@ -54,6 +55,7 @@ import { oppositeDelivery, parseSlashCommand, permissionsForMode } from "./comma
 import { composerImage } from "./media";
 import { PluginThemeDefinition } from "./themes";
 import { PluginSequencer, pluginInstance, validatePluginEnvelope } from "./plugins/runtime";
+import { pluginProviderConfigs } from "./plugins/providers";
 
 let generatedId = 0;
 
@@ -136,10 +138,12 @@ export class AgentStore {
     reject: (error: unknown) => void;
   }>();
   private pluginConfigSeq = 0;
-  readonly pluginRuntimeContributions = signal<Record<string, {
-    themes?: { id: string; entry: string }[];
-    commands?: PluginCommand[];
-  }>>({});
+  private readonly pluginSecretPending = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
+  }>();
+  private pluginSecretSeq = 0;
+  readonly pluginRuntimeContributions = signal<PluginRuntimeContributions>({});
   readonly pluginRuntime = signal<Record<string, PluginRuntimeState>>({});
   readonly pluginOrder = signal<string[]>([]);
   readonly pluginNavigation = signal<string | null>(null);
@@ -342,8 +346,16 @@ export class AgentStore {
     return (sessionId && this.queues()[sessionId]) || EMPTY_QUEUE;
   }
 
+  /** Providers contributed by enabled packages. They are runtime-only: the
+   * persisted config never contains them, and their ids are namespaced so a
+   * plugin cannot shadow a user provider. The backend applies the same rules
+   * when it resolves a session model. */
+  pluginProviders(): ProviderConfig[] {
+    return pluginProviderConfigs(this.pluginPackages(), this.pluginRuntimeContributions());
+  }
+
   modelOptions() {
-    return (this.config()?.providers ?? []).flatMap((provider) =>
+    return [...(this.config()?.providers ?? []), ...this.pluginProviders()].flatMap((provider) =>
       provider.enabled
         ? provider.models.filter((model) => model.enabled).map((model) => ({ provider, model }))
         : [],
@@ -1106,6 +1118,51 @@ export class AgentStore {
     });
   }
 
+  /** Store a package's owned credential (a provider key) in the host
+   * credential store. The plugin can use it but never reads it back. */
+  setPluginSecret(plugin: PluginPackageInfo, credential: string, secret: string): Promise<unknown> {
+    return this.pluginSecretRequest(plugin, credential, secret);
+  }
+
+  clearPluginSecret(plugin: PluginPackageInfo, credential: string): Promise<unknown> {
+    return this.pluginSecretRequest(plugin, credential, null);
+  }
+
+  private pluginSecretRequest(
+    plugin: PluginPackageInfo,
+    credential: string,
+    secret: string | null,
+  ): Promise<unknown> {
+    const requestId = `plugin-secret-${++this.pluginSecretSeq}`;
+    return new Promise((resolve, reject) => {
+      this.pluginSecretPending.set(requestId, { resolve, reject });
+      const sent = this.command(
+        secret === null
+          ? {
+            ClearPluginSecret: {
+              request_id: requestId,
+              package: plugin.id,
+              digest: plugin.digest,
+              credential,
+            },
+          }
+          : {
+            SetPluginSecret: {
+              request_id: requestId,
+              package: plugin.id,
+              digest: plugin.digest,
+              credential,
+              secret,
+            },
+          },
+      );
+      if (!sent) {
+        this.pluginSecretPending.delete(requestId);
+        reject(new Error(t("store.agent_unavailable")));
+      }
+    });
+  }
+
   setPluginOrder(order: string[]): void {
     this.pluginOrder.set([...new Set(order)]);
   }
@@ -1299,6 +1356,20 @@ export class AgentStore {
             pending.reject(new Error(outcome.Err.detail ?? "plugin configuration failed"));
           } else {
             pending.resolve(outcome && typeof outcome === "object" && "Ok" in outcome ? outcome.Ok : null);
+          }
+        }
+        break;
+      }
+      case "PluginSecretResult": {
+        const result = data.result as { request_id: string; result: { Ok?: unknown; Err?: { detail?: string } } };
+        const pending = this.pluginSecretPending.get(result.request_id);
+        if (pending) {
+          this.pluginSecretPending.delete(result.request_id);
+          const outcome = result.result;
+          if (outcome && typeof outcome === "object" && "Err" in outcome && outcome.Err) {
+            pending.reject(new Error(outcome.Err.detail ?? "plugin credential update failed"));
+          } else {
+            pending.resolve(null);
           }
         }
         break;

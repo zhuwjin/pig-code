@@ -710,12 +710,14 @@ impl Manager {
         // every project surface through `apply_trust` and drops
         // the stale MCP status cache.
         let mut trust_banners = Vec::new();
+        let plugins = self.plugins.clone();
         for (session_id, entry) in sessions.iter_mut() {
             let runtime = layered_runtime(
                 config.as_ref(),
                 &config_path,
                 &entry.cwd,
                 self.credentials.clone(),
+                &plugins,
             );
             let was_trusted = entry
                 .runtime

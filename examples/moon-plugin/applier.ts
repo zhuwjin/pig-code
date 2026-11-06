@@ -45,6 +45,23 @@ export const moonPlugin = (ctx: PluginContext) => {
     },
   });
 
+  // A provider is a declaration: the host runs the OpenAI-compatible adapter
+  // and injects nothing here (the local endpoint needs no credential).
+  ctx.providers.register({
+    id: "moon-local",
+    name: "Moon Local (Ollama)",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    apiFormat: "OpenAiChat",
+    models: [
+      {
+        id: "llama3.2",
+        name: "Llama 3.2",
+        contextWindow: 131_072,
+        maxOutputTokens: 8_192,
+      },
+    ],
+  });
+
   ctx.commands.register(
     {
       id: "moon-workspace",

@@ -290,6 +290,15 @@
         },
         "workspace_unavailable": "Open a workspace first"
       },
+      "credentials": {
+        "title": "Credentials",
+        "placeholder": "Paste the key to store it securely",
+        "save": "Save key",
+        "clear": "Clear",
+        "saved": "Saved {name}",
+        "cleared": "Cleared {name}",
+        "failed": "Credential update failed: {detail}"
+      },
       "conflicts": {
         "title": "Contribution conflicts",
         "conflict": "Conflict: {kind} `{name}` from {winner}; ignored from {losers}"

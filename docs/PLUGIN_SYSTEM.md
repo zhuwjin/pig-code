@@ -69,10 +69,11 @@ Pure theme, Skill or other resource packages need no Engine. A package with a ba
 - `themes`: validated theme definitions and package-local background assets;
 - `skills`: package directories containing `SKILL.md`;
 - `mcp`: validated MCP server configurations;
+- `providers`: model-provider presets (endpoint, host adapter, models and an optional owned credential), behind `provide_providers`;
 - `credentials`: plugin-owned or provider credential declarations;
 - `http`: explicit HTTP(S) origins, GET/POST methods and allowed credentials;
 - `config`: plugin defaults and allowed host configuration reads/writes;
-- `actions`: nonvisual service permissions such as `provide_tools`, `provide_themes`, `provide_mcp`, `http`, `read_config` and `write_config`.
+- `actions`: nonvisual service permissions such as `provide_tools`, `provide_themes`, `provide_mcp`, `provide_providers`, `http`, `read_config` and `write_config`.
 
 Manifest tools, commands, hooks, themes, Skills and MCP servers can be supplemented at runtime through `contribution.register` and `contribution.remove`. Runtime registration cannot change credentials, HTTP origins, configuration schemas or permissions; a runtime hook still needs the manifest's static `provide_hooks` action, and a runtime tool is validated against the same contract as a manifest one. Duplicate IDs are rejected or replaced deterministically, and committed contributions are removed when their backend stops.
 
@@ -136,6 +137,52 @@ Every plugin tool declares its contract in the manifest or at runtime:
 - `max_output_bytes` (default 32 KiB): a larger result is written to `{data_dir}/sessions/{session}/tool-results/` and only a head/tail preview reaches the model.
 
 The accepted JSON Schema subset is closed: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `minItems`/`maxItems`, `minLength`/`maxLength`, `pattern`, `minimum`/`maximum`, `exclusiveMinimum`/`exclusiveMaximum`, `anyOf`/`oneOf`/`allOf`. Another keyword (including `$ref`) fails installation instead of silently not being enforced. Invalid input never reaches the backend; invalid output never reaches the model. Both arrive as structured failures with `invalid_input` / `invalid_output` codes.
+
+## Model provider presets
+
+A package can contribute model providers. It supplies declarations only: the host runs every
+request through one of its existing protocol adapters (`OpenAiChat`, `AnthropicMessages`,
+`OpenAiResponses`). Plugins cannot replace the agent loop or execute request code inside the host.
+
+```json
+{
+  "actions": ["provide_providers", "manage_own_secrets"],
+  "credentials": [{"kind": "owned", "id": "acme-key", "label": "Acme API key"}],
+  "providers": [{
+    "id": "acme",
+    "name": "Acme",
+    "base_url": "https://acme.example/v1",
+    "api_format": "OpenAiChat",
+    "credential": "acme-key",
+    "models": [{
+      "id": "acme-large",
+      "context_window": 128000,
+      "max_output_tokens": 8192,
+      "input_image": true,
+      "cap_structured": true,
+      "reasoning_levels": ["low", "high"],
+      "reasoning_params": {"high": {"effort": "high"}}
+    }]
+  }]
+}
+```
+
+- The effective provider id is namespaced as `plugin:<package>:<id>`, so a package can never
+  shadow a user-configured provider. Two packages contributing the same raw id resolve
+  deterministically: the first package by id wins and the snapshot records a `provider` conflict.
+- `credential` must name an `owned` credential declaration. The user enters the secret in the
+  plugin's settings form; it is stored in the OS credential store under the digest-scoped plugin
+  scope and injected by the host. The plugin never reads it back. Reusing another provider's
+  credential (`kind: "provider"`) is rejected for provider contributions.
+- `base_url` must be HTTPS (HTTP only for loopback) and must not embed credentials. Model ids are
+  unique per provider; `0 < max_output_tokens <= context_window`.
+- Enabling, updating or disabling a package rebuilds each session's runtime view, so the model
+  picker and the next turn see the change. A removed provider falls back through the existing
+  model-resolution path with a warning; it never restores a stale endpoint.
+- This item deliberately has no generic OAuth engine. A provider that only offers OAuth is either
+  native host support (with the host owning tokens and refresh) or exposes an API-key/token path.
+  A plugin-owned credential can be filled by the plugin itself after a device-code flow, but the
+  host does not implement authorization flows or refresh scheduling for plugins.
 
 ## Host version
 

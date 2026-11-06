@@ -32,6 +32,10 @@ pub struct RuntimeConfig {
     trust: WorkspaceTrust,
     project_sandbox: ProjectSandboxLayer,
     credentials: Arc<CredentialManager>,
+    /// Provider id → credential scope for contributions that do not use the
+    /// conventional `provider:<id>` key (plugin providers use their package's
+    /// owned credential).
+    provider_credentials: std::collections::BTreeMap<String, crate::credentials::CredentialId>,
 }
 
 impl RuntimeConfig {
@@ -47,6 +51,7 @@ impl RuntimeConfig {
             trust: parts.trust,
             project_sandbox: parts.project_sandbox,
             credentials,
+            provider_credentials: std::collections::BTreeMap::new(),
         })
     }
 
@@ -67,7 +72,31 @@ impl RuntimeConfig {
             trust,
             project_sandbox,
             credentials,
+            provider_credentials: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Append plugin-contributed providers and their credential scopes. The
+    /// contributions are already namespaced and conflict-checked by the plugin
+    /// registry; user providers keep their ids and win on a collision.
+    pub fn with_provider_contributions(
+        mut self,
+        providers: Vec<ProviderConfig>,
+        credentials: std::collections::BTreeMap<String, crate::credentials::CredentialId>,
+    ) -> Self {
+        for provider in providers {
+            if self
+                .config
+                .providers
+                .iter()
+                .any(|existing| existing.id == provider.id)
+            {
+                continue;
+            }
+            self.config.providers.push(provider);
+        }
+        self.provider_credentials.extend(credentials);
+        self
     }
 
     pub fn config(&self) -> &AppConfig {
@@ -158,7 +187,16 @@ impl RuntimeConfig {
                     provider.id
                 ))
             })?;
-        build_resolved_model(provider, model, level, false, "", &self.credentials)
+        let credential = self.provider_credentials.get(&provider.id);
+        build_resolved_model(
+            provider,
+            model,
+            level,
+            false,
+            "",
+            &self.credentials,
+            credential,
+        )
     }
 
     /// Strictly resolve a subagent profile's model (`providerId/modelId` or a
@@ -231,6 +269,7 @@ impl RuntimeConfig {
                     available_model_list(&self.config)
                 ))
             })?;
+        let credential = self.provider_credentials.get(&provider.id);
         build_resolved_model(
             provider,
             model,
@@ -238,6 +277,7 @@ impl RuntimeConfig {
             true,
             &format!(" (subagent {profile_name})"),
             &self.credentials,
+            credential,
         )
     }
 }
@@ -356,13 +396,30 @@ pub fn resolve_provider_config(
     provider: &ProviderConfig,
     credentials: &CredentialManager,
 ) -> Result<ResolvedProvider, RuntimeConfigError> {
-    let api_key = credentials.cached_provider(provider).map_err(|error| {
-        RuntimeConfigError::new(format!(
-            "Provider \"{}\" credential error: {}",
-            provider.id,
-            error.detail()
-        ))
-    })?;
+    resolve_provider_config_with(provider, credentials, None)
+}
+
+/// [`resolve_provider_config`] with an explicit credential scope (a plugin
+/// provider reads its package's owned credential instead of `provider:<id>`).
+pub fn resolve_provider_config_with(
+    provider: &ProviderConfig,
+    credentials: &CredentialManager,
+    credential: Option<&crate::credentials::CredentialId>,
+) -> Result<ResolvedProvider, RuntimeConfigError> {
+    let api_key = if !provider.requires_api_key {
+        String::new()
+    } else {
+        let id = credential
+            .cloned()
+            .unwrap_or_else(|| crate::credentials::CredentialId::provider(&provider.id));
+        credentials.cached_credential(&id).map_err(|error| {
+            RuntimeConfigError::new(format!(
+                "Provider \"{}\" credential error: {}",
+                provider.id,
+                error.detail()
+            ))
+        })?
+    };
     Ok(ResolvedProvider {
         id: provider.id.clone(),
         name: provider.name.clone(),
@@ -380,8 +437,9 @@ fn build_resolved_model(
     strict_level: bool,
     context: &str,
     credentials: &CredentialManager,
+    credential: Option<&crate::credentials::CredentialId>,
 ) -> Result<ResolvedModel, RuntimeConfigError> {
-    let provider = resolve_provider_config(provider, credentials)?;
+    let provider = resolve_provider_config_with(provider, credentials, credential)?;
     let reasoning_params = match level.as_deref() {
         Some(level) => match model.reasoning_params.get(level) {
             Some(params) => Some(params.clone()),
