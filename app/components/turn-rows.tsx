@@ -5,7 +5,6 @@ import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration } from "../conversation";
 import { Icon } from "./icon";
-import { UiNodeFactory } from "../plugins/ui-node-factory";
 
 export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children: JSX.Element }) {
   const turn = () => props.turn();
@@ -134,13 +133,6 @@ export function TurnActionsRow(props: UiContext & {
           </Button>
         </If>
         <If when={stats()}>
-          <UiNodeFactory
-            uiId="message.turnStats"
-            store={props.store}
-            context={() => ({ sessionId: props.store.current() })}
-            exportName={() => `TurnStats:${props.store.currentTurns().findIndex((candidate) => candidate.id === turn().id)}`}
-            render={() => <View />}
-          />
           <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>
         </If>
         <If when={!stats() && turn().durationMs}>

@@ -2992,7 +2992,7 @@ mod tests {
               "name": "Demo",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
+              "backend": "backend.ts",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],
@@ -3008,11 +3008,7 @@ mod tests {
             }"#,
         )
         .expect("plugin manifest");
-        std::fs::write(
-            package_root.join("App.tsx"),
-            "export default function App() { return null; }\n",
-        )
-        .expect("plugin entry");
+        std::fs::write(package_root.join("backend.ts"), "export {};\n").expect("backend entry");
         let mut registry = crate::plugins::PluginRegistry::new(data_dir.clone());
         let snapshot = registry.sync(vec![pig_protocol::PluginPackageSource {
             root: package_root,

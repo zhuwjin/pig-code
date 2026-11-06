@@ -590,7 +590,7 @@ mod tests {
               "name": "Demo",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
+              "backend": "backend.ts",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],
@@ -612,11 +612,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        std::fs::write(
-            package.join("App.tsx"),
-            "export default function App() { return null; }",
-        )
-        .unwrap();
+        std::fs::write(package.join("backend.ts"), "export {};").unwrap();
         let mut registry = super::super::PluginRegistry::new(data.clone());
         let snapshot = registry.sync(vec![pig_protocol::PluginPackageSource {
             root: package,

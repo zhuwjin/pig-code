@@ -2,12 +2,12 @@
   "apiVersion": 1,
   "id": "com.pigcodets.plugins.moon",
   "name": {
-    "zh-CN": "月亮界面",
-    "en": "Moon UI"
+    "zh-CN": "月亮 Agent",
+    "en": "Moon Agent"
   },
-  "version": "1.0.0",
-  "build": 1,
-  "entry": "App.tsx",
+  "version": "2.0.0",
+  "build": 3,
+  "backend": "backend.ts",
   "minHostVersion": "1.0.0",
   "protocols": {
     "ui": 1,
@@ -15,28 +15,8 @@
   },
   "capabilities": [
     {
-      "name": "ui.patch.structure",
-      "targets": ["composer.sendButton"]
-    },
-    {
-      "name": "ui.add",
-      "targets": ["main", "settings"]
-    },
-    {
-      "name": "ui.interact",
-      "targets": ["composer.input"]
-    },
-    {
-      "name": "composer.submit",
-      "targets": ["*"]
-    },
-    {
       "name": "tools.provide",
       "targets": ["MoonEcho"]
-    },
-    {
-      "name": "session.read",
-      "targets": ["*"]
     },
     {
       "name": "navigation.open",
@@ -46,43 +26,13 @@
   "contributions": {
     "api_version": 1,
     "description": {
-      "zh-CN": "修改发送按钮并添加远程界面",
-      "en": "Customize the send button and add remote UI"
+      "zh-CN": "演示 Agent 工具、命令、主题和 Skill",
+      "en": "Demonstrates an Agent tool, command, themes and a Skill"
     },
-    "ui": [
-      {
-        "id": "moon-send-button",
-        "kind": "replaceChildren",
-        "target": "composer.sendButton",
-        "icon": "moon",
-        "preserve": ["onPress", "disabled", "accessibilityLabel", "testID"]
-      },
-      {
-        "id": "moon-panel",
-        "kind": "panel",
-        "target": "main",
-        "export": "MoonPanel",
-        "preserve": []
-      },
-      {
-        "id": "moon-surface-panel",
-        "kind": "settings",
-        "target": "settings",
-        "export": "MoonPanel",
-        "preserve": []
-      },
-      {
-        "id": "moon-surface-secondary",
-        "kind": "settings",
-        "target": "settings",
-        "export": "MoonPanel",
-        "preserve": []
-      }
-    ],
     "tools": [
       {
         "name": "MoonEcho",
-        "description": "Returns the supplied text through the remote plugin engine",
+        "description": "Returns the supplied text through the plugin backend",
         "parameters": {
           "type": "object",
           "properties": {
@@ -92,6 +42,14 @@
         },
         "read_only": true,
         "availability": "static"
+      }
+    ],
+    "commands": [
+      {
+        "id": "moon-workspace",
+        "title": { "en": "Open workspace with Moon", "zh-CN": "通过月亮打开工作区" },
+        "export": "openWorkspace",
+        "order": 10
       }
     ],
     "themes": [

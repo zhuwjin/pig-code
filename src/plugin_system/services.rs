@@ -167,7 +167,7 @@ impl HostServiceGateway {
                     .or_else(|| request.payload.get("page_id"))
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
-                if page_id.is_empty() || page_id.starts_with("plugins.") {
+                if !pig_protocol::PLUGIN_HOST_NAVIGATION_TARGETS.contains(&page_id) {
                     return ServiceExecution::Complete(self.reply(
                         instance,
                         epoch,
@@ -190,7 +190,10 @@ impl HostServiceGateway {
                 );
                 ServiceExecution::Action(
                     reply,
-                    serde_json::json!({"name": "navigation.open", "pageId": page_id}),
+                    serde_json::json!({
+                        "name": "navigation.open",
+                        "pageId": page_id,
+                    }),
                 )
             }
             _ => self.forward(package, instance, epoch, generation, request_id, request),
@@ -512,36 +515,6 @@ impl HostServiceGateway {
                 .retain(|(candidate, current), _| candidate != instance || *current >= epoch);
         }
         replies
-    }
-
-    pub fn cancel_requests(&self, request_ids: &[String]) -> Vec<ServiceReply> {
-        let ids: Vec<String> = self
-            .pending
-            .lock()
-            .expect("plugin service pending lock")
-            .iter()
-            .filter(|(_, pending)| request_ids.contains(&pending.external_id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        ids.into_iter()
-            .filter_map(|id| {
-                self.take(&id).map(|pending| {
-                    self.usage
-                        .lock()
-                        .expect("plugin service usage lock")
-                        .entry((pending.instance.clone(), pending.epoch))
-                        .or_default()
-                        .cancelled_requests += 1;
-                    self.finish(
-                        pending,
-                        Err(protocol_error(
-                            PluginErrorCode::Cancelled,
-                            "plugin service request was cancelled",
-                        )),
-                    )
-                })
-            })
-            .collect()
     }
 
     pub fn pending_count(&self, instance: &str, epoch: u64) -> usize {
@@ -927,5 +900,50 @@ mod tests {
         assert_eq!(normalize_locale("zh_CN.UTF-8"), "zh-CN");
         assert_eq!(normalize_locale("C"), "en");
         assert_eq!(normalize_locale("en_US"), "en-US");
+    }
+
+    #[test]
+    fn navigation_rejects_plugin_pages_and_allows_builtin_targets() {
+        let (agent, _) = async_channel::bounded(1);
+        let gateway = HostServiceGateway::new(PathBuf::new(), agent);
+        let package = PluginPackageInfo {
+            id: "moon".into(),
+            name: "Moon".into(),
+            version: "1".into(),
+            digest: "sha256:test".into(),
+            content_digest: "sha256:content".into(),
+            root: PathBuf::new(),
+            source: PluginSource::User,
+            enabled: true,
+            backend: Some("backend.ts".into()),
+            contributions: Default::default(),
+            capabilities: vec![pig_protocol::PluginCapabilityRequest {
+                name: "navigation.open".into(),
+                targets: vec!["*".into()],
+            }],
+        };
+        let navigate = |page_id: &str| {
+            gateway.execute(
+                &package,
+                "moon:user:default",
+                1,
+                1,
+                "request-1",
+                PluginServiceRequest {
+                    service: PluginService::NavigationOpen,
+                    payload: serde_json::json!({"pageId": page_id}),
+                    session_id: None,
+                    workspace_id: None,
+                },
+            )
+        };
+        assert!(matches!(navigate("main"), ServiceExecution::Action(..)));
+        let ServiceExecution::Complete(reply) = navigate("com.example.plugin/page") else {
+            panic!("plugin page navigation must be rejected");
+        };
+        let Err(error) = reply.result else {
+            panic!("plugin page navigation must fail");
+        };
+        assert_eq!(error.code, PluginErrorCode::InvalidOperation);
     }
 }

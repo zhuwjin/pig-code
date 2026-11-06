@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use nsh_engine::package::{Certificate, Contents, SecretKey};
-use pig_protocol::{PluginManifest, PLUGIN_MANIFEST_FILE};
+use pig_protocol::{PLUGIN_MANIFEST_FILE, PluginManifest};
 use serde::de::DeserializeOwned;
 
 struct Args {
@@ -45,14 +45,23 @@ fn parse_args() -> Result<Args, String> {
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("invalid JSON {}: {error}", path.display()))
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid JSON {}: {error}", path.display()))
 }
 
 fn relative_path(path: &Path) -> Result<String, String> {
-    if path.is_absolute() || path.components().any(|part| {
-        matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
-    }) {
-        return Err(format!("asset path must stay inside the plugin: {}", path.display()));
+    if path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "asset path must stay inside the plugin: {}",
+            path.display()
+        ));
     }
     let value = path.to_string_lossy().replace('\\', "/");
     if value.is_empty() {
@@ -61,7 +70,11 @@ fn relative_path(path: &Path) -> Result<String, String> {
     Ok(value)
 }
 
-fn add_file(assets: &mut Vec<(String, Vec<u8>)>, root: &Path, relative: &Path) -> Result<(), String> {
+fn add_file(
+    assets: &mut Vec<(String, Vec<u8>)>,
+    root: &Path,
+    relative: &Path,
+) -> Result<(), String> {
     let name = relative_path(relative)?;
     let path = root.join(relative);
     let metadata = std::fs::symlink_metadata(&path)
@@ -69,12 +82,17 @@ fn add_file(assets: &mut Vec<(String, Vec<u8>)>, root: &Path, relative: &Path) -
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(format!("asset is not a regular file: {}", path.display()));
     }
-    let bytes = std::fs::read(&path).map_err(|error| format!("read asset {}: {error}", path.display()))?;
+    let bytes =
+        std::fs::read(&path).map_err(|error| format!("read asset {}: {error}", path.display()))?;
     assets.push((name, bytes));
     Ok(())
 }
 
-fn add_directory(assets: &mut Vec<(String, Vec<u8>)>, root: &Path, relative: &Path) -> Result<(), String> {
+fn add_directory(
+    assets: &mut Vec<(String, Vec<u8>)>,
+    root: &Path,
+    relative: &Path,
+) -> Result<(), String> {
     let directory = root.join(relative);
     let mut entries = std::fs::read_dir(&directory)
         .map_err(|error| format!("read asset directory {}: {error}", directory.display()))?
@@ -98,7 +116,10 @@ fn add_directory(assets: &mut Vec<(String, Vec<u8>)>, root: &Path, relative: &Pa
     Ok(())
 }
 
-fn collect_assets(root: &Path, manifest: &serde_json::Value) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn collect_assets(
+    root: &Path,
+    manifest: &serde_json::Value,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut assets = Vec::new();
     add_file(&mut assets, root, Path::new(PLUGIN_MANIFEST_FILE))?;
     if let Some(themes) = manifest["contributions"]["themes"].as_array() {
@@ -145,25 +166,40 @@ fn run() -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("nsh.json needs a display name".into());
     }
-    let bundle = nsh_testing::compile_tsx(root.join(&manifest.entry), &[nsh_base::registry()])?;
+    let bundle = nsh_engine::Bundle::default();
     let (source, bytecode) = match bundle.code {
         nsh_engine::BundleCode::Source(source) => (source, None),
-        nsh_engine::BundleCode::Bytecode(bytes) => {
-            (String::new(), Some((bytes, nsh_engine::BYTECODE_VERSION.to_owned())))
-        }
+        nsh_engine::BundleCode::Bytecode(bytes) => (
+            String::new(),
+            Some((bytes, nsh_engine::BYTECODE_VERSION.to_owned())),
+        ),
     };
     let source_map = bundle.source_map.map(|map| map.to_string());
-    let assets = collect_assets(&root, &manifest_value)?;
+    let mut assets = collect_assets(&root, &manifest_value)?;
+    if let Some(backend) = &manifest.backend {
+        let bundle = nsh_testing::compile_tsx(root.join(backend), &[nsh_base::registry()])?;
+        let bytecode = match bundle.code {
+            nsh_engine::BundleCode::Bytecode(bytes) => bytes,
+            nsh_engine::BundleCode::Source(_) => {
+                return Err("backend compilation did not produce QuickJS bytecode".into());
+            }
+        };
+        assets.push((pig_protocol::PLUGIN_BACKEND_BUNDLE_FILE.into(), bytecode));
+        assets.push((
+            pig_protocol::PLUGIN_BACKEND_VERSION_FILE.into(),
+            nsh_engine::BYTECODE_VERSION.as_bytes().to_vec(),
+        ));
+    }
     let key = SecretKey::from_base64(
         &std::fs::read_to_string(&args.key)
             .map_err(|error| format!("read release key {}: {error}", args.key.display()))?,
     )
     .map_err(|error| error.to_string())?;
-    let cert = Certificate::from_json(
-        &std::fs::read_to_string(&args.cert)
-            .map_err(|error| format!("read release certificate {}: {error}", args.cert.display()))?,
-    )
-    .map_err(|error| error.to_string())?;
+    let cert =
+        Certificate::from_json(&std::fs::read_to_string(&args.cert).map_err(|error| {
+            format!("read release certificate {}: {error}", args.cert.display())
+        })?)
+        .map_err(|error| error.to_string())?;
     let contents = Contents {
         app: nsh_engine::package::App {
             id: manifest.id.clone(),
@@ -171,14 +207,17 @@ fn run() -> Result<(), String> {
             version: manifest.version.clone(),
             build: manifest.build,
         },
-        capabilities: app["capabilities"].as_object().map(|_| app["capabilities"].clone()),
+        capabilities: app["capabilities"]
+            .as_object()
+            .map(|_| app["capabilities"].clone()),
         source,
         bytecode,
         source_map,
         assets: assets.clone(),
         min_runtime: app["minRuntime"].as_str().map(str::to_owned),
     };
-    let bytes = nsh_engine::package::build(&contents, &key, &cert).map_err(|error| error.to_string())?;
+    let bytes =
+        nsh_engine::package::build(&contents, &key, &cert).map_err(|error| error.to_string())?;
     pig_core::config::write_settings_file(&args.out, &bytes)
         .map_err(|error| format!("write package {}: {error}", args.out.display()))?;
     println!(

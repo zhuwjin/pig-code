@@ -131,9 +131,7 @@ impl PluginRegistry {
         {
             return Ok(self.snapshot.clone());
         }
-        let empty = contributions.pages.is_empty()
-            && contributions.ui.is_empty()
-            && contributions.themes.is_empty()
+        let empty = contributions.themes.is_empty()
             && contributions.skills.is_empty()
             && contributions.mcp.is_empty()
             && contributions.tools.is_empty()
@@ -179,7 +177,6 @@ impl PluginRegistry {
         let mut validated = contributions.clone();
         validated.actions = package.contributions.actions.clone();
         validate_contributions(&package.root, &validated)?;
-        validate_ui_contributions(&validated, &package.capabilities)?;
         self.snapshot
             .runtime_contributions
             .insert(key.clone(), contributions);
@@ -208,16 +205,22 @@ impl PluginRegistry {
         let identity = package_manifest.id.clone();
         let name = package_manifest.name.fallback();
         let version = package_manifest.version;
-        let entry = package_manifest.entry;
+        let backend = package_manifest.backend;
         let contributions = package_manifest.contributions;
         let capabilities = package_manifest.capabilities;
         if name.trim().is_empty() || version.trim().is_empty() {
             return Err(manifest("plugin name and version must not be empty"));
         }
-        relative_file(&entry)?;
+        if let Some(entry) = &backend {
+            relative_file(entry)?;
+        }
+        if backend.is_none()
+            && (!contributions.tools.is_empty() || !contributions.commands.is_empty())
+        {
+            return Err(manifest("tools and commands require a backend"));
+        }
         self.validate_source(&root, &identity, &source.source)?;
         validate_contributions(&root, &contributions)?;
-        validate_ui_contributions(&contributions, &capabilities)?;
         let installed = root.join(".pig-install.json");
         let content_digest = package_digest(&root)?;
         let digest = if installed.is_file() {
@@ -234,6 +237,7 @@ impl PluginRegistry {
             root,
             source: source.source.clone(),
             enabled: false,
+            backend,
             contributions,
             capabilities,
         })
@@ -473,18 +477,8 @@ impl PluginRegistry {
     ) -> Result<(), CoreError> {
         let capability = match action {
             PluginAction::OpenPage { page_id } => {
-                if !self
-                    .package(id, digest)?
-                    .contributions
-                    .pages
-                    .iter()
-                    .any(|page| {
-                        page.enabled
-                            && page.kind == pig_protocol::PluginPageKind::Settings
-                            && format!("{}/{}", id, page.id) == *page_id
-                    })
-                {
-                    return Err(permission("the plugin does not contribute this page"));
+                if !pig_protocol::PLUGIN_HOST_NAVIGATION_TARGETS.contains(&page_id.as_str()) {
+                    return Err(permission("unknown host navigation target"));
                 }
                 PluginCapability::Navigate
             }
@@ -714,14 +708,6 @@ fn validate_contributions(
             contributions.api_version
         )));
     }
-    let mut ids = BTreeSet::new();
-    for page in &contributions.pages {
-        validate_id(&page.id)?;
-        relative_file(&page.entry)?;
-        if !ids.insert(page.id.clone()) {
-            return Err(manifest(format!("duplicate page id `{}`", page.id)));
-        }
-    }
     if !contributions.themes.is_empty()
         && !contributions
             .actions
@@ -888,97 +874,6 @@ fn validate_contributions(
         }
     }
     super::config::validate_declaration(contributions)?;
-    Ok(())
-}
-
-fn validate_ui_contributions(
-    contributions: &PluginContributions,
-    capabilities: &[pig_protocol::PluginCapabilityRequest],
-) -> Result<(), CoreError> {
-    let mut ids = BTreeSet::new();
-    for contribution in &contributions.ui {
-        validate_id(&contribution.id)?;
-        if !ids.insert(&contribution.id) {
-            return Err(manifest(format!(
-                "duplicate UI contribution `{}`",
-                contribution.id
-            )));
-        }
-        if [
-            "approval.",
-            "security.",
-            "credentials.",
-            "plugins.",
-            "plugin.manager",
-        ]
-        .iter()
-        .any(|prefix| contribution.target.starts_with(prefix))
-        {
-            return Err(permission("protected UI cannot be modified by a plugin"));
-        }
-        use pig_protocol::PluginUiContributionKind as Kind;
-        let page = matches!(
-            contribution.kind,
-            Kind::Page
-                | Kind::Panel
-                | Kind::Route
-                | Kind::Settings
-                | Kind::Command
-                | Kind::Overlay
-                | Kind::Decoration
-        );
-        let interaction = !contribution.props.is_empty()
-            && contribution
-                .props
-                .keys()
-                .any(|key| key.starts_with("on") || key == "disabled" || key == "focusable");
-        let capability = if page {
-            "ui.add"
-        } else if interaction {
-            "ui.interact"
-        } else if matches!(contribution.kind, Kind::Patch) {
-            "ui.patch.style"
-        } else {
-            "ui.patch.structure"
-        };
-        let granted = capabilities.iter().any(|item| {
-            item.name == capability
-                && (item.targets.iter().any(|target| target == "*")
-                    || item.targets.contains(&contribution.target))
-        });
-        if !granted {
-            return Err(permission(format!(
-                "UI contribution `{}` requires {capability} for `{}`",
-                contribution.id, contribution.target
-            )));
-        }
-        if matches!(contribution.kind, Kind::Move) && contribution.move_target.is_none() {
-            return Err(manifest("a move contribution requires moveTarget"));
-        }
-        if contribution
-            .preserve
-            .iter()
-            .any(|property| property.starts_with("on") && capability != "ui.interact")
-            && !matches!(capability, "ui.patch.structure")
-        {
-            return Err(permission(
-                "preserving host behavior requires structure permission",
-            ));
-        }
-    }
-    if !contributions.commands.is_empty()
-        && !capabilities.iter().any(|item| {
-            item.name == "ui.add"
-                && item
-                    .targets
-                    .iter()
-                    .any(|target| target == "*" || target == "commands")
-        })
-    {
-        return Err(permission(
-            "commands require ui.add for the commands surface",
-        ));
-    }
     Ok(())
 }
 

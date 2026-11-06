@@ -65,6 +65,7 @@ mod tests {
             root: package_root,
             source: PluginSource::User,
             enabled: true,
+            backend: manifest.backend,
             contributions: manifest.contributions,
             capabilities: manifest.capabilities,
         };

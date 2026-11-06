@@ -21,10 +21,6 @@ pub struct PluginContributions {
     #[serde(default)]
     pub description: BTreeMap<String, String>,
     #[serde(default)]
-    pub pages: Vec<PluginPage>,
-    #[serde(default)]
-    pub ui: Vec<PluginUiContribution>,
-    #[serde(default)]
     pub themes: Vec<PluginThemeContribution>,
     #[serde(default)]
     pub skills: Vec<PluginSkill>,
@@ -47,22 +43,12 @@ pub struct PluginContributions {
 impl PluginContributions {
     pub fn merged(&self, runtime: &Self) -> Self {
         let mut merged = self.clone();
-        merged.pages.extend(runtime.pages.clone());
-        merged.ui.extend(runtime.ui.clone());
         merged.themes.extend(runtime.themes.clone());
         merged.skills.extend(runtime.skills.clone());
         merged.mcp.extend(runtime.mcp.clone());
         merged.tools.extend(runtime.tools.clone());
         merged.commands.extend(runtime.commands.clone());
         merged
-    }
-
-    pub fn is_engine_backed(&self) -> bool {
-        self.ui.iter().any(|item| {
-            item.export.is_some() || matches!(item.kind, PluginUiContributionKind::Command)
-        }) || !self.tools.is_empty()
-            || !self.commands.is_empty()
-            || self.pages.iter().any(|page| page.enabled && page.entry.ends_with(".tsx"))
     }
 }
 
@@ -71,8 +57,6 @@ impl Default for PluginContributions {
         Self {
             api_version: PLUGIN_API_VERSION,
             description: BTreeMap::new(),
-            pages: Vec::new(),
-            ui: Vec::new(),
             themes: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -104,32 +88,6 @@ pub struct PluginConfigItem {
     #[serde(default)]
     pub description: BTreeMap<String, String>,
     pub default: serde_json::Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginPage {
-    pub id: String,
-    pub entry: String,
-    pub title: BTreeMap<String, String>,
-    #[serde(default)]
-    pub kind: PluginPageKind,
-    #[serde(default)]
-    pub icon: Option<String>,
-    #[serde(default)]
-    pub order: u32,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginPageKind {
-    #[default]
-    Settings,
-    LeftPanel,
-    RightPanel,
-    MainPanel,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,8 +215,6 @@ pub struct PluginTool {
 pub struct PluginCommand {
     pub id: String,
     pub title: BTreeMap<String, String>,
-    #[serde(default)]
-    pub page_id: Option<String>,
     #[serde(default)]
     pub export: Option<String>,
     #[serde(default)]
@@ -429,12 +385,16 @@ pub struct PluginPackageInfo {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
     pub contributions: PluginContributions,
     #[serde(default)]
     pub capabilities: Vec<PluginCapabilityRequest>,
 }
 
 pub const PLUGIN_MANIFEST_FILE: &str = "pig-plugin.json";
+pub const PLUGIN_BACKEND_BUNDLE_FILE: &str = ".pig-backend.nshc";
+pub const PLUGIN_BACKEND_VERSION_FILE: &str = ".pig-backend-version";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -445,7 +405,8 @@ pub struct PluginManifest {
     pub name: PluginLocalizedText,
     pub version: String,
     pub build: u64,
-    pub entry: String,
+    #[serde(default)]
+    pub backend: Option<String>,
     pub min_host_version: String,
     pub protocols: PluginProtocolVersions,
     #[serde(default)]
@@ -488,57 +449,6 @@ pub struct PluginCapabilityRequest {
     pub name: String,
     #[serde(default)]
     pub targets: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginUiContribution {
-    pub id: String,
-    pub kind: PluginUiContributionKind,
-    pub target: String,
-    #[serde(default)]
-    pub export: Option<String>,
-    #[serde(default)]
-    pub icon: Option<String>,
-    #[serde(default)]
-    pub style: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub props: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub accessibility: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub preserve: Vec<String>,
-    #[serde(default)]
-    pub order: u32,
-    #[serde(default)]
-    pub move_target: Option<String>,
-    #[serde(default)]
-    pub base_revision: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PluginUiContributionKind {
-    Create,
-    ReplaceChildren,
-    InsertAfter,
-    InsertBefore,
-    InsertFirst,
-    InsertLast,
-    Move,
-    Wrap,
-    Remove,
-    Restore,
-    Patch,
-    Replace,
-    Page,
-    Panel,
-    Route,
-    Settings,
-    Command,
-    Inline,
-    Overlay,
-    Decoration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -766,7 +676,7 @@ mod tests {
     fn contribution_defaults_keep_optional_sections_empty() {
         let contribution: PluginContributions = serde_json::from_str("{}").unwrap();
         assert_eq!(contribution.api_version, PLUGIN_API_VERSION);
-        assert!(contribution.pages.is_empty());
+        assert!(contribution.themes.is_empty());
         assert!(contribution.skills.is_empty());
         assert!(contribution.mcp.is_empty());
         assert!(contribution.actions.is_empty());
@@ -783,7 +693,7 @@ mod tests {
                     "default": "auto"
                 }],
                 "read": ["app.theme", "plugin.example.resources.endpoint"],
-                "write": ["app.status_bar.activity"]
+                "write": ["app.default_delivery"]
             },
             "actions": ["read_config", "write_config"]
         }))
@@ -807,22 +717,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(tool.availability, PluginToolAvailability::Static);
-    }
-
-    #[test]
-    fn page_keeps_localized_metadata_and_typed_slot() {
-        let page: PluginPage = serde_json::from_value(serde_json::json!({
-            "id": "mcp",
-            "entry": "pages/mcp.js",
-            "title": {"zh-CN": "MCP 服务器", "en": "MCP servers"},
-            "kind": "settings",
-            "icon": "server",
-            "order": 400
-        }))
-        .unwrap();
-        assert_eq!(page.kind, PluginPageKind::Settings);
-        assert_eq!(page.title.get("en").unwrap(), "MCP servers");
-        assert!(page.enabled);
     }
 
     #[test]

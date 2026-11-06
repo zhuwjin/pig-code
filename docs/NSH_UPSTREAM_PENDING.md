@@ -79,7 +79,7 @@ NSH main 的 `crates/nsh-js/src/list.rs` 调整了消息行与索引的同步方
 
 **参考**
 
-`docs/PLUGIN_SYSTEM.md` 的“资源预算、限制和隔离”部分（第 411 行附近）。
+`docs/PLUGIN_SYSTEM.md` 的 “Resource budgets and isolation” 部分。
 
 ## 非阻塞的声明完善
 

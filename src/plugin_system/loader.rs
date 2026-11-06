@@ -4,7 +4,7 @@ use nsh_engine::package::PublicKey;
 use pig_protocol::{InstalledPluginMetadata, PluginManifest, PluginPackageSource, PluginSource};
 
 pub struct VerifiedPlugin {
-    pub bundle: nsh_engine::Bundle,
+    pub backend: Option<nsh_engine::Bundle>,
     pub assets: PathBuf,
     pub manifest: PluginManifest,
     pub digest: String,
@@ -46,25 +46,56 @@ pub fn load_verified(
         return Err("unsupported plugin manifest or protocol version".into());
     }
     let digest = package.receipt.sha256;
-    std::fs::write(package.assets.join(".pig-package.nshpkg"), bytes)
+    pig_core::config::write_settings_file(&package.assets.join(".pig-package.nshpkg"), &bytes)
         .map_err(|error| format!("store verified plugin package: {error}"))?;
     let stored_root = package.assets.join(".pig-root.pub");
     let same_root =
         std::fs::canonicalize(root_path).ok() == std::fs::canonicalize(&stored_root).ok();
     if !same_root {
-        std::fs::copy(root_path, &stored_root)
+        let root_bytes = std::fs::read(root_path)
+            .map_err(|error| format!("read plugin root public key: {error}"))?;
+        pig_core::config::write_settings_file(&stored_root, &root_bytes)
             .map_err(|error| format!("store plugin root public key: {error}"))?;
     }
-    std::fs::write(
-        package.assets.join(".pig-install.json"),
-        serde_json::to_vec(&InstalledPluginMetadata {
+    pig_core::config::write_settings_file(
+        &package.assets.join(".pig-install.json"),
+        &serde_json::to_vec(&InstalledPluginMetadata {
             digest: digest.clone(),
         })
         .map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("store plugin metadata: {error}"))?;
+    let backend = manifest
+        .backend
+        .as_ref()
+        .map(|_| {
+            let version = std::fs::read_to_string(
+                package
+                    .assets
+                    .join(pig_protocol::PLUGIN_BACKEND_VERSION_FILE),
+            )
+            .map_err(|error| format!("read plugin backend bytecode version: {error}"))?;
+            if version.trim() != nsh_engine::BYTECODE_VERSION {
+                return Err("plugin backend requires a different NSH bytecode version".into());
+            }
+            let bytecode = std::fs::read(
+                package
+                    .assets
+                    .join(pig_protocol::PLUGIN_BACKEND_BUNDLE_FILE),
+            )
+            .map_err(|error| format!("read signed plugin backend: {error}"))?;
+            // SAFETY: this bytecode came from the verified signed package and matches
+            // the compiler used by the currently linked NSH runtime.
+            let mut bundle = unsafe { nsh_engine::Bundle::bytecode(bytecode) }
+                .with_policy(package.bundle.policy.clone())
+                .with_app_id(package.bundle.app_id.as_deref());
+            bundle.package = package.bundle.package.clone();
+            bundle.system_paths = package.bundle.system_paths.clone();
+            Ok::<nsh_engine::Bundle, String>(bundle)
+        })
+        .transpose()?;
     Ok(VerifiedPlugin {
-        bundle: package.bundle,
+        backend,
         assets: package.assets,
         manifest,
         digest,
@@ -131,17 +162,13 @@ mod tests {
             now.saturating_sub(60),
             now + 3600,
         );
-        let bundle =
-            nsh_testing::compile_tsx("examples/moon-plugin/App.tsx", &[nsh_base::registry()])
-                .expect("compile moon plugin");
-        let (source, bytecode) = match bundle.code {
-            nsh_engine::BundleCode::Source(source) => (source, None),
-            nsh_engine::BundleCode::Bytecode(bytes) => (
-                String::new(),
-                Some((bytes, nsh_engine::BYTECODE_VERSION.to_owned())),
-            ),
+        let backend =
+            nsh_testing::compile_tsx("examples/moon-plugin/backend.ts", &[nsh_base::registry()])
+                .expect("compile moon backend");
+        let backend_bytecode = match backend.code {
+            nsh_engine::BundleCode::Bytecode(bytes) => bytes,
+            nsh_engine::BundleCode::Source(_) => panic!("backend bytecode is required"),
         };
-        let source_map = bundle.source_map.map(|map| map.to_string());
         let manifest_source = std::fs::read_to_string("examples/moon-plugin/pig-plugin.json")
             .expect("read moon manifest");
         let manifest: PluginManifest =
@@ -149,17 +176,25 @@ mod tests {
         let contents = nsh_engine::package::Contents {
             app: nsh_engine::package::App {
                 id: manifest.id.clone(),
-                name: "Moon UI".into(),
+                name: "Moon Agent".into(),
                 version: manifest.version.clone(),
                 build: manifest.build,
             },
             capabilities: Some(serde_json::json!({
-                "host": ["plugin.protocol", "pig.host"]
+                "host": ["plugin.protocol"]
             })),
-            source,
-            bytecode,
-            source_map,
+            source: String::new(),
+            bytecode: None,
+            source_map: None,
             assets: vec![
+                (
+                    pig_protocol::PLUGIN_BACKEND_BUNDLE_FILE.into(),
+                    backend_bytecode,
+                ),
+                (
+                    pig_protocol::PLUGIN_BACKEND_VERSION_FILE.into(),
+                    nsh_engine::BYTECODE_VERSION.as_bytes().to_vec(),
+                ),
                 (
                     pig_protocol::PLUGIN_MANIFEST_FILE.into(),
                     std::fs::read("examples/moon-plugin/pig-plugin.json").expect("manifest bytes"),
@@ -193,7 +228,15 @@ mod tests {
         let loaded = load_verified(&package_path, &root_path, &directory.join("data"))
             .expect("load signed moon package");
         assert_eq!(loaded.manifest.id, "com.pigcodets.plugins.moon");
-        assert_eq!(loaded.manifest.contributions.ui.len(), 4);
+        assert_eq!(loaded.manifest.contributions.tools.len(), 1);
+        assert!(loaded.backend.is_some());
+        let mut registry = pig_core::plugins::PluginRegistry::new(directory.join("registry"));
+        let inspected = registry.sync(vec![PluginPackageSource {
+            root: loaded.assets.clone(),
+            source: PluginSource::User,
+        }]);
+        assert!(inspected.errors.is_empty(), "{:?}", inspected.errors);
+        assert_eq!(inspected.packages.len(), 1);
         let first_digest =
             pig_core::plugins::package_digest(&loaded.assets).expect("first content digest");
         load_verified(
@@ -205,6 +248,24 @@ mod tests {
         let second_digest =
             pig_core::plugins::package_digest(&loaded.assets).expect("second content digest");
         assert_eq!(first_digest, second_digest);
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let package = installed_package_path(&loaded.assets);
+            let root = root_path.clone();
+            let data = directory.join("data");
+            workers.push(std::thread::spawn(move || {
+                for _ in 0..3 {
+                    load_verified(&package, &root, &data)?;
+                }
+                Ok::<(), String>(())
+            }));
+        }
+        for worker in workers {
+            worker
+                .join()
+                .expect("verifier thread")
+                .expect("verified package");
+        }
         let wrong = nsh_engine::package::SecretKey::generate().expect("wrong root");
         let wrong_path = directory.join("wrong.pub");
         std::fs::write(&wrong_path, wrong.public().to_base64()).expect("write wrong public key");

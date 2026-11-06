@@ -274,7 +274,6 @@
         "empty": "尚未安装插件，可从市场或签名包开始。"
       },
       "diagnostics": {
-        "ui": "UI 合成诊断",
         "logs": "最近插件日志（已脱敏）"
       }
     },
@@ -373,19 +372,6 @@
       "close": "关闭"
     }
   },
-  "plugins": {
-    "surface": {
-      "ready": "已加载"
-    },
-    "no_renderable": "插件贡献 {id} 没有可渲染内容",
-    "remote": {
-      "cycle": "远程 UI 存在循环引用",
-      "unresolved_resource": "无法解析签名资源：{source}",
-      "not_ready": "插件输出尚未就绪",
-      "missing_export": "插件未提供导出 {name}",
-      "missing_view": "插件没有提供此界面"
-    }
-  },
   "conversation": {
     "duration": {
       "minutes_seconds": "{minutes} 分 {seconds} 秒",
@@ -433,10 +419,6 @@
       "unknown": "未知错误",
       "stop_turn_first": "请先停止当前回合，再执行这个命令。",
       "send_first": "请先发送一条消息创建会话。"
-    },
-    "conflict": {
-      "winner": "{target}: {winner} 生效，抑制 {suppressed}",
-      "rejected": "{target}: {contribution} 被拒绝（{reason}）"
     },
     "current_session": "当前会话",
     "compacting": "正在压缩上下文…"

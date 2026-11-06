@@ -229,11 +229,7 @@ mod tests {
         let package = root.join("package");
         let data = root.join("data");
         std::fs::create_dir_all(&package).expect("package directory");
-        std::fs::write(
-            package.join("App.tsx"),
-            "export default function App() { return null; }",
-        )
-        .unwrap();
+        std::fs::write(package.join("backend.ts"), "export {};").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind HTTP mock");
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -272,7 +268,6 @@ mod tests {
                   "name": "Demo",
                   "version": "1.0.0",
                   "build": 1,
-                  "entry": "App.tsx",
                   "minHostVersion": "1.0.0",
                   "protocols": {{"ui": 1, "services": 1}},
                   "capabilities": [],

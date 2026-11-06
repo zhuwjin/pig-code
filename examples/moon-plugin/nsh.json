@@ -1,8 +1,8 @@
 {
-  "name": "Moon UI",
+  "name": "Moon Agent",
   "id": "com.pigcodets.plugins.moon",
-  "version": "1.0.0",
-  "build": 1,
+  "version": "2.0.0",
+  "build": 3,
   "appearance": "system",
   "capabilities": {
     "host": ["plugin.protocol"]

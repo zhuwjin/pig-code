@@ -1,34 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const PLUGIN_UI_PROTOCOL_VERSION: u32 = 1;
+pub const PLUGIN_PROTOCOL_VERSION: u32 = 1;
 pub const PLUGIN_SERVICES_PROTOCOL_VERSION: u32 = 1;
-
-pub const PLUGIN_FEATURE_UI_ATOMIC: u64 = 1 << 0;
-pub const PLUGIN_FEATURE_UI_HOST_PATCH: u64 = 1 << 1;
-pub const PLUGIN_FEATURE_UI_INPUT: u64 = 1 << 2;
-pub const PLUGIN_FEATURE_UI_IME: u64 = 1 << 3;
-pub const PLUGIN_FEATURE_UI_SCROLL: u64 = 1 << 4;
-pub const PLUGIN_FEATURE_UI_ACCESSIBILITY: u64 = 1 << 5;
-pub const PLUGIN_FEATURE_DYNAMIC_CONTRIBUTIONS: u64 = 1 << 6;
-pub const PLUGIN_FEATURE_SERVICE_CONFIG: u64 = 1 << 7;
-pub const PLUGIN_FEATURE_SERVICE_HTTP: u64 = 1 << 8;
-pub const PLUGIN_FEATURE_SERVICE_CREDENTIALS: u64 = 1 << 9;
-pub const PLUGIN_FEATURE_SERVICE_SESSION: u64 = 1 << 10;
-pub const PLUGIN_FEATURE_SERVICE_WORKSPACE: u64 = 1 << 11;
-pub const PLUGIN_FEATURE_SERVICE_NAVIGATION: u64 = 1 << 12;
-pub const PLUGIN_FEATURE_RESOURCES: u64 = 1 << 13;
-pub const PLUGIN_FEATURE_I18N: u64 = 1 << 14;
-pub const PLUGIN_FEATURE_LIFECYCLE_HEALTH: u64 = 1 << 15;
-pub const PLUGIN_FEATURE_BACKPRESSURE: u64 = 1 << 16;
-pub const PLUGIN_HOST_FEATURES: u64 = (1 << 17) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginStream {
     Lifecycle,
-    Ui,
     Events,
     Contributions,
     Tools,
@@ -40,7 +20,6 @@ impl PluginStream {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Lifecycle => "lifecycle",
-            Self::Ui => "ui",
             Self::Events => "events",
             Self::Contributions => "contributions",
             Self::Tools => "tools",
@@ -64,16 +43,6 @@ pub enum PluginMessageKind {
     LifecycleStop,
     #[serde(rename = "lifecycle.failed")]
     LifecycleFailed,
-    #[serde(rename = "ui.commit")]
-    UiCommit,
-    #[serde(rename = "ui.ack")]
-    UiAck,
-    #[serde(rename = "ui.event")]
-    UiEvent,
-    #[serde(rename = "ui.activate")]
-    UiActivate,
-    #[serde(rename = "ui.reset")]
-    UiReset,
     #[serde(rename = "contribution.register")]
     ContributionRegister,
     #[serde(rename = "contribution.remove")]
@@ -124,7 +93,7 @@ impl PluginEnvelope {
         body: serde_json::Value,
     ) -> Self {
         Self {
-            protocol: PLUGIN_UI_PROTOCOL_VERSION,
+            protocol: PLUGIN_PROTOCOL_VERSION,
             kind,
             instance: instance.into(),
             epoch,
@@ -142,7 +111,7 @@ impl PluginEnvelope {
     }
 
     pub fn validate(&self) -> Result<(), PluginProtocolError> {
-        if self.protocol != PLUGIN_UI_PROTOCOL_VERSION {
+        if self.protocol != PLUGIN_PROTOCOL_VERSION {
             return Err(PluginProtocolError::new(
                 PluginErrorCode::UnsupportedProtocol,
                 format!("unsupported plugin protocol {}", self.protocol),
@@ -278,10 +247,6 @@ impl std::fmt::Display for PluginProtocolError {
 pub struct PluginHello {
     pub ui_protocol: u32,
     pub services_protocol: u32,
-    #[serde(default)]
-    pub required_features: u64,
-    #[serde(default)]
-    pub optional_features: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,14 +254,12 @@ pub struct PluginHello {
 pub struct PluginNegotiation {
     pub ui_protocol: u32,
     pub services_protocol: u32,
-    pub features: u64,
-    pub rejected_optional_features: u64,
     pub locale: String,
 }
 
 impl PluginHello {
     pub fn negotiate(&self, locale: &str) -> Result<PluginNegotiation, PluginProtocolError> {
-        if self.ui_protocol != PLUGIN_UI_PROTOCOL_VERSION
+        if self.ui_protocol != PLUGIN_PROTOCOL_VERSION
             || self.services_protocol != PLUGIN_SERVICES_PROTOCOL_VERSION
         {
             return Err(PluginProtocolError::new(
@@ -304,122 +267,12 @@ impl PluginHello {
                 "the plugin requires an incompatible UI or service protocol",
             ));
         }
-        let missing = self.required_features & !PLUGIN_HOST_FEATURES;
-        if missing != 0 {
-            return Err(PluginProtocolError::new(
-                PluginErrorCode::UnsupportedCapability,
-                format!("required host features are unavailable: 0x{missing:x}"),
-            ));
-        }
-        let requested = self.required_features | self.optional_features;
         Ok(PluginNegotiation {
-            ui_protocol: PLUGIN_UI_PROTOCOL_VERSION,
+            ui_protocol: PLUGIN_PROTOCOL_VERSION,
             services_protocol: PLUGIN_SERVICES_PROTOCOL_VERSION,
-            features: requested & PLUGIN_HOST_FEATURES,
-            rejected_optional_features: self.optional_features & !PLUGIN_HOST_FEATURES,
             locale: locale.to_owned(),
         })
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RemoteDocument {
-    pub instance: String,
-    pub epoch: u64,
-    pub generation: u64,
-    pub sequence: u64,
-    #[serde(default)]
-    pub base_revision: u64,
-    pub nodes: Vec<RemoteNode>,
-    pub roots: Vec<String>,
-    #[serde(default)]
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RemoteNode {
-    pub id: String,
-    pub kind: String,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub export_name: Option<String>,
-    #[serde(default)]
-    pub test_id: Option<String>,
-    #[serde(default)]
-    pub press: bool,
-    #[serde(default)]
-    pub children: Vec<String>,
-    #[serde(default)]
-    pub style: serde_json::Value,
-    #[serde(default)]
-    pub events: BTreeSet<String>,
-    #[serde(default)]
-    pub props: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    pub accessibility: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    pub source: Option<String>,
-}
-
-impl RemoteNode {
-    pub fn new(id: impl Into<String>, kind: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            kind: kind.into(),
-            text: None,
-            export_name: None,
-            test_id: None,
-            press: false,
-            children: Vec::new(),
-            style: serde_json::json!({}),
-            events: BTreeSet::new(),
-            props: BTreeMap::new(),
-            accessibility: BTreeMap::new(),
-            source: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginUiEvent {
-    pub contribution: String,
-    pub node: String,
-    pub event_id: String,
-    pub kind: String,
-    #[serde(default)]
-    pub payload: serde_json::Value,
-    pub surface_revision: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginUiRejection {
-    pub code: PluginErrorCode,
-    pub target: String,
-    pub contribution: Option<String>,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginUiAck {
-    pub accepted: bool,
-    pub revision: u64,
-    #[serde(default)]
-    pub rejected: Vec<PluginUiRejection>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginUiConflict {
-    pub target: String,
-    pub winner: String,
-    pub suppressed: Vec<String>,
-    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -462,6 +315,9 @@ pub enum PluginService {
     ResourceRead,
     LocaleRead,
 }
+
+pub const PLUGIN_HOST_NAVIGATION_TARGETS: &[&str] =
+    &["main", "models", "appearance", "plugins", "marketplace"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -516,55 +372,6 @@ pub struct PluginSessionProjection {
     pub turns: Vec<PluginTurnStats>,
 }
 
-pub const PLUGIN_HOST_API_VERSION: u32 = 1;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginHostContext {
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginHostRequest {
-    pub api_version: u32,
-    pub instance: String,
-    pub surface: String,
-    pub contribution: String,
-    pub revision: u64,
-    pub request_id: String,
-    pub method: PluginHostMethod,
-    #[serde(default)]
-    pub payload: serde_json::Value,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PluginHostMethod {
-    #[serde(rename = "session.snapshot")]
-    SessionSnapshot,
-    #[serde(rename = "session.subscribe")]
-    SessionSubscribe,
-    #[serde(rename = "session.unsubscribe")]
-    SessionUnsubscribe,
-    #[serde(rename = "storage.read")]
-    StorageRead,
-    #[serde(rename = "storage.write")]
-    StorageWrite,
-    #[serde(rename = "navigation.open")]
-    NavigationOpen,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginHostResponse {
-    pub api_version: u32,
-    pub surface: String,
-    pub revision: u64,
-    pub request_id: String,
-    pub result: Result<serde_json::Value, PluginProtocolError>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginResource {
@@ -593,12 +400,6 @@ pub enum PluginLifecycleState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginRuntimeMetrics {
     #[serde(default)]
-    pub nodes: usize,
-    #[serde(default)]
-    pub operations: u64,
-    #[serde(default)]
-    pub rejected_operations: u64,
-    #[serde(default)]
     pub pending_requests: usize,
     #[serde(default)]
     pub timed_out_requests: u64,
@@ -607,15 +408,11 @@ pub struct PluginRuntimeMetrics {
     #[serde(default)]
     pub queue_depth: usize,
     #[serde(default)]
-    pub coalesced_frames: u64,
-    #[serde(default)]
     pub dropped_events: u64,
     #[serde(default)]
     pub network_bytes: u64,
     #[serde(default)]
     pub storage_bytes: u64,
-    #[serde(default)]
-    pub conflicts: Vec<PluginUiConflict>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -632,8 +429,6 @@ pub struct PluginRuntimeSnapshot {
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
-    pub features: u64,
-    #[serde(default)]
     pub metrics: PluginRuntimeMetrics,
 }
 
@@ -644,27 +439,24 @@ mod tests {
     #[test]
     fn envelopes_replay_and_sequence_validation_is_per_stream() {
         let mut tracker = PluginSequenceTracker::default();
-        tracker.accept(PluginStream::Ui, 1).unwrap();
+        tracker.accept(PluginStream::Tools, 1).unwrap();
         tracker.accept(PluginStream::Services, 1).unwrap();
-        assert!(tracker.accept(PluginStream::Ui, 1).is_err());
-        assert!(tracker.accept(PluginStream::Ui, 2).is_ok());
-        assert_eq!(tracker.next(PluginStream::Ui), 3);
+        assert!(tracker.accept(PluginStream::Tools, 1).is_err());
+        assert!(tracker.accept(PluginStream::Tools, 2).is_ok());
+        assert_eq!(tracker.next(PluginStream::Tools), 3);
     }
 
     #[test]
-    fn negotiation_rejects_missing_required_features_and_reports_optional_ones() {
+    fn negotiation_checks_protocol_versions() {
         let hello = PluginHello {
             ui_protocol: 1,
             services_protocol: 1,
-            required_features: PLUGIN_FEATURE_UI_ATOMIC,
-            optional_features: 1 << 63,
         };
         let accepted = hello.negotiate("zh-CN").unwrap();
-        assert_eq!(accepted.features, PLUGIN_FEATURE_UI_ATOMIC);
-        assert_eq!(accepted.rejected_optional_features, 1 << 63);
+        assert_eq!(accepted.locale, "zh-CN");
         assert!(
             PluginHello {
-                required_features: 1 << 63,
+                ui_protocol: 2,
                 ..hello
             }
             .negotiate("zh-CN")
@@ -675,19 +467,19 @@ mod tests {
     #[test]
     fn envelope_json_has_the_stable_protocol_shape() {
         let envelope = PluginEnvelope::new(
-            PluginMessageKind::UiCommit,
+            PluginMessageKind::ToolsCall,
             "moon:sha256:test:user:default",
             3,
-            PluginStream::Ui,
+            PluginStream::Tools,
             42,
             18,
-            serde_json::json!({"operations": []}),
+            serde_json::json!({"tool": "MoonEcho", "args": {"text": "hello"}}),
         )
         .with_request_id("request-1");
         let json = serde_json::to_value(&envelope).unwrap();
         assert_eq!(json["protocol"], 1);
-        assert_eq!(json["kind"], "ui.commit");
-        assert_eq!(json["stream"], "ui");
+        assert_eq!(json["kind"], "tools.call");
+        assert_eq!(json["stream"], "tools");
         assert_eq!(json["requestId"], "request-1");
         assert_eq!(json["generation"], 18);
         envelope.validate().unwrap();

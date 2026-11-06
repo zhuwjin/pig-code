@@ -5,7 +5,6 @@ import type { IconName } from "../icon";
 import { ModelSettings } from "./model-settings";
 import { PluginMarketplace } from "./marketplace";
 import { ThemePicker } from "../../theme-picker";
-import { hostPatchProps, UiNodeFactory } from "../../plugins/ui-node-factory";
 
 export type SettingsPageId = "models" | "appearance" | "plugins" | "marketplace";
 
@@ -23,7 +22,6 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     packages: () => props.store.pluginPackages(),
     fontFamilies: () => props.store.fontFamilies(),
     runtime: () => props.store.pluginRuntime(),
-    diagnostics: () => props.store.pluginUiDiagnostics(),
     logs: () => props.store.pluginLogs(),
     onRetryPackage: (plugin: Parameters<UiContext["store"]["retryPlugin"]>[0]) => props.store.retryPlugin(plugin),
     error: () => section === "plugins"
@@ -42,22 +40,12 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
   });
   return (
     <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 bg-background")}>
-      <UiNodeFactory
-        uiId="settings.content"
-        store={props.store}
-        render={(patch, children) => (
-          <View class="min-w-0 flex-1" style={patch.style} {...hostPatchProps(patch)}>
-            {children ?? (
-              <>
-                <If when={props.page === "models"}><ModelSettings {...props} /></If>
-                <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
-                <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
-                <If when={props.page === "marketplace"}><PluginMarketplace {...props} /></If>
-              </>
-            )}
-          </View>
-        )}
-      />
+      <View class="min-w-0 flex-1">
+        <If when={props.page === "models"}><ModelSettings {...props} /></If>
+        <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
+        <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
+        <If when={props.page === "marketplace"}><PluginMarketplace {...props} /></If>
+      </View>
     </View>
   );
 }

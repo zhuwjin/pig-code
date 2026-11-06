@@ -1,6 +1,9 @@
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 use std::time::UNIX_EPOCH;
 
 use pig_protocol::{AppConfig, CoreError};
@@ -159,7 +162,11 @@ fn atomic_write_inner(path: &Path, contents: &[u8], preserve_mode: bool) -> std:
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let temp = directory.join(format!(".{name}.tmp-{}-{nanos}", std::process::id()));
+    let unique = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let temp = directory.join(format!(
+        ".{name}.tmp-{}-{nanos}-{unique}",
+        std::process::id()
+    ));
     let result = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);

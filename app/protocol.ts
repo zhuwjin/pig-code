@@ -406,23 +406,6 @@ export interface ProviderConfig {
   [key: string]: unknown;
 }
 
-export type PluginUiOperationKind = "create" | "replaceChildren" | "insertAfter" | "insertBefore" | "insertFirst" | "insertLast" | "move" | "wrap" | "remove" | "patch" | "replace" | "restore" | "page" | "panel" | "route" | "settings" | "command" | "inline" | "overlay" | "decoration";
-
-export interface PluginUiContribution {
-  id: string;
-  kind: PluginUiOperationKind;
-  target: string;
-  export?: string | null;
-  icon?: string | null;
-  style?: Record<string, any>;
-  props?: Record<string, unknown>;
-  accessibility?: Record<string, unknown>;
-  preserve: string[];
-  order?: number;
-  moveTarget?: string | null;
-  baseRevision?: number | null;
-}
-
 export interface PluginCapabilityRequest {
   name: string;
   targets: string[];
@@ -469,10 +452,10 @@ export interface PluginPackageInfo {
   root: string;
   source: "built_in" | "user" | { project: { workspace: string } };
   enabled: boolean;
+  backend?: string | null;
   capabilities: PluginCapabilityRequest[];
   contributions: {
     themes?: { id: string; entry: string }[];
-    ui?: PluginUiContribution[];
     tools?: unknown[];
     commands?: PluginCommand[];
     [key: string]: unknown;
@@ -482,14 +465,13 @@ export interface PluginPackageInfo {
 export interface PluginCommand {
   id: string;
   title: Record<string, string>;
-  page_id?: string | null;
   export?: string | null;
   order: number;
   enabled: boolean;
 }
 
-export type PluginMessageKind = "lifecycle.hello" | "lifecycle.start" | "lifecycle.ready" | "lifecycle.health" | "lifecycle.stop" | "lifecycle.failed" | "ui.commit" | "ui.ack" | "ui.event" | "ui.activate" | "ui.reset" | "contribution.register" | "contribution.remove" | "service.request" | "service.response" | "service.event" | "tools.call" | "tools.select" | "tools.result" | "log.event" | "host.action" | "runtime";
-export type PluginStream = "lifecycle" | "ui" | "events" | "contributions" | "tools" | "services" | "logs";
+export type PluginMessageKind = "lifecycle.hello" | "lifecycle.start" | "lifecycle.ready" | "lifecycle.health" | "lifecycle.stop" | "lifecycle.failed" | "contribution.register" | "contribution.remove" | "service.request" | "service.response" | "service.event" | "tools.call" | "tools.select" | "tools.result" | "log.event" | "host.action" | "runtime";
+export type PluginStream = "lifecycle" | "events" | "contributions" | "tools" | "services" | "logs";
 export type PluginService = "storage_read" | "storage_write" | "config_read" | "config_write" | "http_request" | "credential_set" | "credential_clear" | "session_read" | "workspace_read" | "navigation_open" | "composer_submit" | "resource_read" | "locale_read";
 export type PluginLifecycleState = "discovered" | "verified" | "installed" | "enabled" | "preparing" | "starting" | "retrying" | "active" | "stopping" | "stopped" | "failed";
 
@@ -499,48 +481,14 @@ export interface PluginProtocolError {
   retryable: boolean;
 }
 
-export interface PluginUiEvent {
-  contribution: string;
-  node: string;
-  eventId: string;
-  kind: string;
-  payload: Record<string, unknown>;
-  surfaceRevision: number;
-}
-
-export interface PluginUiConflict {
-  target: string;
-  winner: string;
-  suppressed: string[];
-  reason: string;
-}
-
-export interface PluginUiRejection {
-  code: string;
-  target: string;
-  contribution?: string | null;
-  message: string;
-}
-
-export interface PluginUiAck {
-  accepted: boolean;
-  revision: number;
-  rejected: PluginUiRejection[];
-}
-
 export interface PluginRuntimeMetrics {
-  nodes: number;
-  operations: number;
-  rejectedOperations: number;
   pendingRequests: number;
   timedOutRequests: number;
   cancelledRequests: number;
   queueDepth: number;
-  coalescedFrames: number;
   droppedEvents: number;
   networkBytes: number;
   storageBytes: number;
-  conflicts: PluginUiConflict[];
 }
 
 export interface PluginRuntimeState {
@@ -550,41 +498,7 @@ export interface PluginRuntimeState {
   attempt?: number;
   retryAfterMs?: number | null;
   message?: string | null;
-  features?: number;
   metrics?: PluginRuntimeMetrics;
-}
-
-export interface RemoteNode {
-  id: string;
-  kind: string;
-  text: string | null;
-  exportName: string | null;
-  testId: string | null;
-  press: boolean;
-  children: string[];
-  style: Record<string, any>;
-  events: string[];
-  props: Record<string, any>;
-  accessibility: Record<string, any>;
-  source: string | null;
-}
-
-export interface RemoteDocument {
-  instance: string;
-  epoch: number;
-  generation: number;
-  sequence: number;
-  baseRevision: number;
-  nodes: RemoteNode[];
-  roots: string[];
-  warnings: string[];
-}
-
-export type StatusBarItem = "compact" | "detailed" | "hidden";
-export interface StatusBarConfig {
-  activity: StatusBarItem;
-  usage: StatusBarItem;
-  context: StatusBarItem;
 }
 
 export interface AppConfig {
@@ -597,7 +511,6 @@ export interface AppConfig {
   language?: "system" | "zh-CN" | "en" | null;
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;
-  status_bar?: StatusBarConfig;
   [key: string]: unknown;
 }
 

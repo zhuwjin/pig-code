@@ -95,19 +95,14 @@ mod tests {
               "name": "Demo",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
+              "backend": "backend.ts",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],
               "contributions": {
-                "actions":["read_settings"],
-                "pages":[{"id":"home","entry":"App.tsx","title":{"en":"Home"}}]
+                "actions":["read_settings"]
               }
             }"#,
-        );
-        write(
-            &root.join("App.tsx"),
-            "export default function App() { return null; }",
         );
     }
 
@@ -204,16 +199,11 @@ mod tests {
               "name": "Web Search",
               "version": "1.0.0",
               "build": 1,
-              "entry": "App.tsx",
               "minHostVersion": "1.0.0",
               "protocols": {"ui": 1, "services": 1},
               "capabilities": [],
               "contributions": {}
             }"#,
-        );
-        write(
-            &root.join("App.tsx"),
-            "export default function App() { return null; }",
         );
         extend_user_plugin(&root, r#"{"actions":[]}"#);
         let sources = || {
@@ -650,10 +640,7 @@ mod tests {
         let second = temp.0.join("second");
         user_plugin(&first);
         user_plugin(&second);
-        write(
-            &second.join("App.tsx"),
-            "export default function App() { return 'new'; }",
-        );
+        write(&second.join("backend.ts"), "export const version = 'new';");
         let data = temp.0.join("data");
         let mut registry = PluginRegistry::new(data);
         let sources = || {
@@ -784,13 +771,6 @@ mod tests {
             &root,
             r#"{"actions":["provide_tools","provide_themes","provide_mcp"]}"#,
         );
-        let manifest_path = root.join("pig-plugin.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest")).unwrap();
-        manifest["capabilities"] = serde_json::json!([
-            {"name":"ui.add","targets":["main","commands"]}
-        ]);
-        write(&manifest_path, &serde_json::to_string(&manifest).unwrap());
         write(
             &root.join("runtime-theme.json"),
             r#"{"id":"runtime-theme","name":"Runtime","cssVars":{"dark":{}}}"#,
@@ -807,8 +787,6 @@ mod tests {
         let engine_generation = registry.snapshot.generation;
         let contributions: pig_protocol::PluginContributions = serde_json::from_value(
             serde_json::json!({
-                "pages":[{"id":"runtime","entry":"App.tsx","title":{"en":"Runtime"}}],
-                "ui":[{"id":"runtime-panel","kind":"panel","target":"main","export":"App","preserve":[]}],
                 "themes":[{"id":"runtime-theme","entry":"runtime-theme.json"}],
                 "skills":[{"path":"skills/runtime"}],
                 "mcp":[{"name":"runtime","config":{"command":"runtime-server"}}],
@@ -825,10 +803,8 @@ mod tests {
                 engine_generation,
                 contributions.clone(),
             )
-            .expect("register all dynamic contribution kinds");
+            .expect("register dynamic nonvisual contributions");
         let registered = &accepted.runtime_contributions[&format!("demo:{digest}")];
-        assert_eq!(registered.pages.len(), 1);
-        assert_eq!(registered.ui.len(), 1);
         assert_eq!(registered.themes.len(), 1);
         assert_eq!(registered.skills.len(), 1);
         assert_eq!(registered.mcp.len(), 1);

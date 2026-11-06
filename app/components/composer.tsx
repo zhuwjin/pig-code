@@ -10,7 +10,6 @@ import { ApprovalCard } from "./approval-card";
 import { ComposerAux } from "./composer-aux";
 import { ModelPicker, PermissionPicker, SlashCandidates } from "./composer-popups";
 import { Icon } from "./icon";
-import { hostPatchProps, UiNodeFactory, UiView } from "../plugins/ui-node-factory";
 import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
@@ -270,33 +269,22 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const showQueue = () => !props.hero && !approval() && !question() && (
     queue().pending.length > 0 || queue().steer.length > 0 || queue().paused || queue().held
   );
-  const sendWithContributions = () => (
-    <UiNodeFactory
-      uiId="composer.sendButton"
-      store={store}
-      render={(patch, children) => (
-        <Button
-          testID="send-button"
-          accessibilityLabel={(patch.accessibility.accessibilityLabel as string | undefined) ?? t("composer.send")}
-          disabled={patch.props.disabled === undefined
-            ? !store.draft().trim() && store.draftImages().length === 0
-            : Boolean(patch.props.disabled)}
-          class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
-          style={patch.style}
-          {...hostPatchProps(patch, { onPress: () => store.send() })}
-        >
-          {children ?? <Icon name="arrow-up" size={14} color={token("primary-foreground")} />}
-        </Button>
-      )}
-    />
+  const sendButton = () => (
+    <Button
+      testID="send-button"
+      accessibilityLabel={t("composer.send")}
+      disabled={!store.draft().trim() && store.draftImages().length === 0}
+      class="h-6 w-6 items-center justify-center rounded-full bg-primary active:bg-primary/90 disabled:opacity-30"
+      onPress={() => store.send()}
+    >
+      <Icon name="arrow-up" size={14} color={token("primary-foreground")} />
+    </Button>
   );
   return (
     <View class={props.hero ? "p-3 pb-1" : "px-4 pb-1 pt-2"}>
       <View class="mx-auto w-full" style={{ maxWidth: 860 }}>
         <If when={showQueue()}><QueuePanel {...props} /></If>
-        <UiView
-          uiId="composer.root"
-          store={store}
+        <View
           class={themeStore.classes(
             "composer.root",
             inputFocused()
@@ -323,61 +311,49 @@ export function Composer(props: UiContext & { hero?: boolean }) {
               <If when={mention()}>
                 <MentionCandidates paths={mentionPaths()} selected={mentionIndex()} onSelect={chooseMention} />
               </If>
-              <UiNodeFactory
-                uiId="composer.input"
-                store={store}
-                captureFocus={() => inputFocused()}
-                restoreFocus={() => setTimeout(() => inputNode?.focus(), 0)}
-                render={(patch) => (
-                  <Input
-                    ref={(node) => inputNode = node}
-                    testID="composer-input"
-                    value={store.draft()}
-                    {...hostPatchProps(patch, {
-                      onChange: ({ value }: { value: string }) => store.draft.set(value),
-                      onSubmit: () => submit(),
-                      onFocus: () => inputFocused.set(true),
-                      onBlur: () => inputFocused.set(false),
-                      onSelectionChange: (selection: { start: number }) => caret.set(selection.start),
-                      onPaste: (event: { text: string; files: File[]; uris: string[] }) => {
-                        void (async () => {
-                          insertDraft(event.text);
-                          const remaining = Math.max(0, 8 - store.draftImages().length);
-                          const images = event.files.filter((file) => file.type.startsWith("image/")).slice(0, remaining);
-                          const converted = await Promise.all(images.map(fileComposerImage));
-                          store.addDraftImages(converted);
-                          if (images.length < event.files.filter((file) => file.type.startsWith("image/")).length) {
-                            store.globalError.set(t("composer.image_limit"));
-                          }
-                          for (const uri of event.uris) {
-                            const path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/^\/(?=[A-Za-z]:)/, ""));
-                            if (path) store.addDraftFile(path);
-                          }
-                        })();
-                      },
-                    })}
-                    multiline={patch.props.multiline === undefined ? true : Boolean(patch.props.multiline)}
-                    disabled={patch.props.disabled as boolean | undefined}
-                    pasteBehavior="report"
-                    submitBehavior="submit"
-                    placeholder={(patch.props.placeholder as string | undefined) ?? t(running()
-                      ? store.config()?.default_delivery === "steer"
-                        ? "composer.steer_hint"
-                        : "composer.queue_hint"
-                      : store.config()?.default_delivery === "steer"
-                        ? "composer.steer_keys"
-                        : "composer.queue_keys")}
-                    class={themeStore.classes(
-                      "composer.input",
-                      "max-h-40 min-h-10 px-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
-                    )}
-                    style={[{ fontSize: 14 }, patch.style]}
-                    {...patch.accessibility}
-                  />
+              <Input
+                ref={(node) => inputNode = node}
+                testID="composer-input"
+                value={store.draft()}
+                onChange={({ value }: { value: string }) => store.draft.set(value)}
+                onSubmit={() => submit()}
+                onFocus={() => inputFocused.set(true)}
+                onBlur={() => inputFocused.set(false)}
+                onSelectionChange={(selection: { start: number }) => caret.set(selection.start)}
+                onPaste={(event: { text: string; files: File[]; uris: string[] }) => {
+                  void (async () => {
+                    insertDraft(event.text);
+                    const remaining = Math.max(0, 8 - store.draftImages().length);
+                    const images = event.files.filter((file) => file.type.startsWith("image/")).slice(0, remaining);
+                    const converted = await Promise.all(images.map(fileComposerImage));
+                    store.addDraftImages(converted);
+                    if (images.length < event.files.filter((file) => file.type.startsWith("image/")).length) {
+                      store.globalError.set(t("composer.image_limit"));
+                    }
+                    for (const uri of event.uris) {
+                      const path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/^\/(?=[A-Za-z]:)/, ""));
+                      if (path) store.addDraftFile(path);
+                    }
+                  })();
+                }}
+                multiline
+                pasteBehavior="report"
+                submitBehavior="submit"
+                placeholder={t(running()
+                  ? store.config()?.default_delivery === "steer"
+                    ? "composer.steer_hint"
+                    : "composer.queue_hint"
+                  : store.config()?.default_delivery === "steer"
+                    ? "composer.steer_keys"
+                    : "composer.queue_keys")}
+                class={themeStore.classes(
+                  "composer.input",
+                  "max-h-40 min-h-10 px-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
                 )}
+                style={{ fontSize: 14 }}
               />
             </View>
-            <UiView uiId="composer.actions" store={store} class="flex-row items-center gap-2">
+            <View class="flex-row items-center gap-2">
               <PermissionPicker {...props} />
               <View class="flex-1" />
               <ModelPicker {...props} />
@@ -391,10 +367,10 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                   <Icon name="square" size={10} color="#ffffff" />
                 </Button>
               </If>
-              {sendWithContributions()}
-            </UiView>
+              {sendButton()}
+            </View>
           </If>
-        </UiView>
+        </View>
       </View>
       <Dialog
         open={Boolean(preview())}

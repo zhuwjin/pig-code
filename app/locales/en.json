@@ -274,7 +274,6 @@
         "empty": "No plugins installed yet. Start from the marketplace or a signed package."
       },
       "diagnostics": {
-        "ui": "UI composition diagnostics",
         "logs": "Recent plugin logs (redacted)"
       }
     },
@@ -373,19 +372,6 @@
       "close": "close"
     }
   },
-  "plugins": {
-    "surface": {
-      "ready": "Loaded"
-    },
-    "no_renderable": "Plugin contribution {id} has no renderable content",
-    "remote": {
-      "cycle": "The remote UI has a circular reference",
-      "unresolved_resource": "Cannot resolve signed resource: {source}",
-      "not_ready": "Plugin output is not ready yet",
-      "missing_export": "Plugin does not provide export {name}",
-      "missing_view": "Plugin does not provide this view"
-    }
-  },
   "conversation": {
     "duration": {
       "minutes_seconds": "{minutes}m {seconds}s",
@@ -433,10 +419,6 @@
       "unknown": "Unknown error",
       "stop_turn_first": "Stop the current turn before running this command.",
       "send_first": "Send a message to create a session first."
-    },
-    "conflict": {
-      "winner": "{target}: {winner} wins, suppressing {suppressed}",
-      "rejected": "{target}: {contribution} rejected ({reason})"
     },
     "current_session": "Current session",
     "compacting": "Compacting context..."

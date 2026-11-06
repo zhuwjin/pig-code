@@ -288,7 +288,7 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
           "name": "Demo",
           "version": "1.0.0",
           "build": 1,
-          "entry": "App.tsx",
+          "backend": "backend.ts",
           "minHostVersion": "1.0.0",
           "protocols": {"ui": 1, "services": 1},
           "capabilities": [],
@@ -305,11 +305,7 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
         }"#,
     )
     .expect("manifest");
-    std::fs::write(
-        package.join("App.tsx"),
-        "export default function App() { return null; }",
-    )
-    .expect("entry");
+    std::fs::write(package.join("backend.ts"), "export {};").expect("backend entry");
     let mut registry = crate::plugins::PluginRegistry::new(data.clone());
     let snapshot = registry.sync(vec![pig_protocol::PluginPackageSource {
         root: package,

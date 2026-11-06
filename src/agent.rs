@@ -45,8 +45,8 @@ impl Agent {
                 pig_provider::mock::MOCK_FILE_CONTENT,
             )
             .expect("write selftest fixture");
-            let image_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("target/test-tmp/conversation");
+            let image_fixture =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp/conversation");
             std::fs::create_dir_all(&image_fixture).expect("create image fixture directory");
             std::fs::write(
                 image_fixture.join("pixel.png"),
@@ -246,15 +246,13 @@ default_reasoning_level = "low"
                 .await
                 .map_err(|error| format!("{error:?}"))?;
         let plugins = this.with(|agent| agent.plugins.clone());
-        tokio::task::spawn_blocking(move || {
-            plugins.install(&downloaded.package_path, &root)
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        .map(|value| value.to_string())
+        tokio::task::spawn_blocking(move || plugins.install(&downloaded.package_path, &root))
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|value| value.to_string())
     }
 
-    /// Streams remote UI documents and plugin runtime events.
+    /// Streams plugin lifecycle, service, command and contribution events.
     pub async fn listen_plugins(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
         let events = this.with(|agent| agent.plugins.events());
         while let Ok(event) = events.recv().await {
@@ -262,61 +260,9 @@ default_reasoning_level = "low"
         }
     }
 
-    /// Routes a standardized remote UI event without losing its payload or revision.
-    pub fn dispatch_plugin_event_json(
-        &self,
-        instance: String,
-        event: String,
-    ) -> Result<(), String> {
-        let event: pig_protocol::PluginUiEvent =
-            serde_json::from_str(&event).map_err(|error| error.to_string())?;
-        self.plugins.dispatch_ui_event_full(&instance, event)
-    }
-
-    /// Routes an explicitly authorized host control event to its plugin engine.
-    pub fn dispatch_plugin_host_event(
-        &self,
-        instance: String,
-        event: String,
-    ) -> Result<(), String> {
-        let event: pig_protocol::PluginUiEvent =
-            serde_json::from_str(&event).map_err(|error| error.to_string())?;
-        self.plugins.dispatch_host_event(&instance, event)
-    }
-
-    /// Acknowledges an accepted or rejected host UI revision to its plugin engine.
-    pub fn ack_plugin_ui(
-        &self,
-        instance: String,
-        epoch: u64,
-        generation: u64,
-        ack: String,
-    ) -> Result<(), String> {
-        let ack: pig_protocol::PluginUiAck =
-            serde_json::from_str(&ack).map_err(|error| error.to_string())?;
-        self.plugins.acknowledge_ui(&instance, epoch, generation, ack)
-    }
-
-    /// Propagates the host locale to every independent plugin engine.
+    /// Propagates the host locale to every independent plugin backend.
     pub fn set_plugin_locale(&self, locale: String) {
         self.plugins.set_locale(&locale);
-    }
-
-    /// Allocates an isolated Surface and its versioned Host API binding.
-    pub fn mount_plugin_surface(
-        &self,
-        instance: String,
-        contribution: String,
-        context: String,
-    ) -> Result<String, String> {
-        let context: pig_protocol::PluginHostContext =
-            serde_json::from_str(&context).map_err(|error| error.to_string())?;
-        self.plugins.mount_surface(&instance, &contribution, context)
-    }
-
-    /// Disposes the Surface's requests and subscription before its view disappears.
-    pub fn unmount_plugin_surface(&self, surface: String) {
-        crate::plugin_system::host_api::detach(&surface);
     }
 
     /// Retries a failed instance after the automatic backoff budget is exhausted.
@@ -324,12 +270,8 @@ default_reasoning_level = "low"
         self.plugins.retry(&package, &digest)
     }
 
-    /// Invokes a registered command on its owning independent engine.
-    pub fn dispatch_plugin_command(
-        &self,
-        instance: String,
-        command: String,
-    ) -> Result<Option<String>, String> {
+    /// Invokes a registered command on its owning independent backend.
+    pub fn dispatch_plugin_command(&self, instance: String, command: String) -> Result<(), String> {
         self.plugins.dispatch_command(&instance, &command)
     }
 
@@ -427,7 +369,11 @@ default_reasoning_level = "low"
     }
 
     /// Returns one persisted session attachment as an image data URL.
-    pub fn session_image_source(&self, session_id: String, image_number: u32) -> Result<String, String> {
+    pub fn session_image_source(
+        &self,
+        session_id: String,
+        image_number: u32,
+    ) -> Result<String, String> {
         let (bytes, mime) = self.load_session_image(&session_id, image_number)?;
         Ok(format!(
             "data:{mime};base64,{}",
@@ -462,12 +408,6 @@ default_reasoning_level = "low"
     }
 }
 
-impl Drop for Agent {
-    fn drop(&mut self) {
-        crate::plugin_system::host_api::detach_manager(&self.plugins);
-    }
-}
-
 impl Agent {
     fn send_op(&self, op: Op) -> Result<(), String> {
         self.handle
@@ -476,7 +416,11 @@ impl Agent {
             .map_err(|error| error.to_string())
     }
 
-    fn load_session_image(&self, session_id: &str, image_number: u32) -> Result<(Vec<u8>, String), String> {
+    fn load_session_image(
+        &self,
+        session_id: &str,
+        image_number: u32,
+    ) -> Result<(Vec<u8>, String), String> {
         let directory = self
             .data_dir
             .join("sessions")
@@ -486,9 +430,16 @@ impl Agent {
             .map_err(|error| format!("{}: {error}", directory.display()))?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .find(|path| path.file_stem().is_some_and(|stem| stem == expected.as_str()))
+            .find(|path| {
+                path.file_stem()
+                    .is_some_and(|stem| stem == expected.as_str())
+            })
             .ok_or_else(|| format!("image {image_number} not found"))?;
-        let mime = match path.extension().and_then(|value| value.to_str()).unwrap_or("png") {
+        let mime = match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("png")
+        {
             "jpg" | "jpeg" => "image/jpeg",
             "gif" => "image/gif",
             "webp" => "image/webp",

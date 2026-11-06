@@ -419,6 +419,7 @@ mod tests {
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
+            backend: None,
             contributions: PluginContributions {
                 config: PluginConfigDeclaration {
                     items,
@@ -507,7 +508,7 @@ mod tests {
             "caller",
             vec![],
             &["app.theme"],
-            &["app.status_bar.activity"],
+            &["app.default_delivery"],
         )];
         let app = AppConfig::default();
 
@@ -516,31 +517,31 @@ mod tests {
             serde_json::Value::Null
         );
         assert!(
-            read(&registry, Some(&app), "caller", "app.status_bar.activity").is_err(),
+            read(&registry, Some(&app), "caller", "app.default_delivery").is_err(),
             "write permission does not imply read permission"
         );
         let ConfigWrite::App { config, value } = write(
             &registry,
             Some(&app),
             "caller",
-            "app.status_bar.activity",
-            "compact".into(),
+            "app.default_delivery",
+            "steer".into(),
         )
         .expect("write app value") else {
             panic!("plugin write returned the wrong namespace");
         };
         assert_eq!(
-            config.status_bar.activity,
-            pig_protocol::StatusBarItem::Compact
+            config.default_delivery,
+            pig_protocol::MessageDelivery::Steer
         );
-        assert_eq!(value, "compact");
+        assert_eq!(value, "steer");
         assert!(
             write(
                 &registry,
                 Some(&app),
                 "caller",
-                "app.status_bar.activity",
-                "not-a-status".into(),
+                "app.default_delivery",
+                "not-a-delivery".into(),
             )
             .is_err(),
             "AppConfig must reject invalid enum values"

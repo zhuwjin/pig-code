@@ -6,7 +6,7 @@ import { languagePreference, setLanguagePreference, t } from "./i18n";
 import type { LanguagePreference, MessageKey } from "./i18n";
 import { ThemeStore } from "./theme";
 import { DEFAULT_THEME_ID, ThemeDefinition, ThemeMode, themePreviewColor } from "./themes";
-import { pluginInstance } from "./plugins/ui-coordinator";
+import { pluginInstance } from "./plugins/runtime";
 
 const MODE_OPTIONS: { value: ThemeMode; label: MessageKey }[] = [
   { value: "light", label: "settings.appearance.mode.light" },
@@ -195,8 +195,6 @@ function ThemePackageRow(props: {
               <Text class="text-[10px] text-muted-foreground">
                 {t("settings.plugins.metrics.resources", {
                   epoch: runtime()?.epoch ?? 0,
-                  nodes: runtime()?.metrics?.nodes ?? 0,
-                  operations: runtime()?.metrics?.operations ?? 0,
                   requests: runtime()?.metrics?.pendingRequests ?? 0,
                   queue: runtime()?.metrics?.queueDepth ?? 0,
                 })}
@@ -235,7 +233,6 @@ interface ThemePickerProps {
   packages: () => PluginPackageInfo[];
   fontFamilies: () => string[];
   runtime?: () => Record<string, PluginRuntimeState>;
-  diagnostics?: () => Record<string, string[]>;
   logs?: () => Record<string, unknown[]>;
   onRetryPackage?: (plugin: PluginPackageInfo) => void;
   error?: () => string | undefined;
@@ -557,14 +554,6 @@ export function ThemePicker(props: ThemePickerProps) {
                     </View>
                   </View>
                 )}
-              </If>
-              <If when={Object.values(props.diagnostics?.() ?? {}).flat().length > 0}>
-                <View testID="plugin-ui-diagnostics" class="gap-1 rounded-(--radius) border border-border p-3">
-                  <Text class="text-xs font-medium text-foreground">{t("settings.plugins.diagnostics.ui")}</Text>
-                  <Each of={Object.values(props.diagnostics?.() ?? {}).flat().slice(0, 20)} key={(item) => item}>
-                    {(item) => <Text style={{ userSelect: "text" }} class="text-xs leading-4 text-muted-foreground">{item()}</Text>}
-                  </Each>
-                </View>
               </If>
               <If when={Object.values(props.logs?.() ?? {}).some((logs) => logs.length > 0)}>
                 <View class="gap-1 rounded-(--radius) border border-border p-3">

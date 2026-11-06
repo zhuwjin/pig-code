@@ -1,15 +1,13 @@
 import { Canvas, Clipboard, Easing, List, Text, View, createAnimatedValue, effect, platform, signal, token } from "nsh";
 import { Button, ContextMenu, Input, Menu, MenuItem, MenuSeparator } from "nsh/base";
 import { titleBar } from "nsh/desktop";
-import { appLocale, t } from "../i18n";
+import { t } from "../i18n";
 import type { SessionMeta } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
 import { Icon } from "./icon";
 import { SETTINGS_PAGES, type SettingsPageId } from "./settings/settings-page";
-import { PluginSurfacePages } from "../plugins/surface";
-import { UiView } from "../plugins/ui-node-factory";
 
 const WORKSPACE_PAGE_SIZE = 5;
 const workspaceExpanded = signal(true);
@@ -617,12 +615,7 @@ export function Sidebar(props: UiContext & {
         </List>
       </If>
       <If when={props.mode === "settings"}>
-        <UiView
-          uiId="settings.navigation"
-          store={store}
-          testID="settings-navigation"
-          class="flex-1"
-        >
+        <View testID="settings-navigation" class="flex-1">
           <View class="gap-1 p-2">
             <Text class="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">{t("sidebar.settings")}</Text>
             <Each of={SETTINGS_PAGES} key={(item) => item.id}>
@@ -640,19 +633,7 @@ export function Sidebar(props: UiContext & {
               )}
             </Each>
           </View>
-          <PluginSurfacePages
-            target="settings"
-            packages={store.pluginPackages()}
-            runtime={store.pluginRuntime()}
-            dynamic={store.pluginDynamic()}
-            pluginOrder={store.pluginOrder()}
-            sessionId={store.current()}
-            agent={store.agent}
-            theme={themeStore.serialized()}
-            locale={appLocale()}
-            appearance={themeStore.mode()}
-          />
-        </UiView>
+        </View>
       </If>
       <View class="border-t border-sidebar-border p-2">
         <Button

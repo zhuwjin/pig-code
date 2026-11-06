@@ -3,9 +3,6 @@ import type { UiContext } from "../ui-context";
 import { Composer } from "./composer";
 import { EmptyWorkspace } from "./hero";
 import { MessageList } from "./messages";
-import { PluginPages } from "../plugins/remote-renderer";
-import { StatusBar } from "./status-bar";
-import { UiView } from "../plugins/ui-node-factory";
 
 export function Workspace(props: UiContext) {
   const { store } = props;
@@ -31,19 +28,8 @@ export function Workspace(props: UiContext) {
       <If when={!hero()}>
         <MessageList {...props} items={items()} />
         <Composer {...props} />
-        <StatusBar {...props} />
       </If>
       <If when={hero()}><EmptyWorkspace {...props} /></If>
-      <UiView uiId="main.panelHost" store={store} class="absolute bottom-24 right-4 z-30 w-80 gap-2">
-        <PluginPages
-          target="main"
-          packages={store.pluginPackages()}
-          documents={store.pluginDocuments()}
-          runtime={store.pluginRuntime()}
-          dynamic={store.pluginDynamic()}
-          onEvent={(instance, event) => store.dispatchPluginUiEvent(instance, event)}
-        />
-      </UiView>
     </View>
   );
 }
