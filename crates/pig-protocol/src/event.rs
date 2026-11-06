@@ -641,6 +641,12 @@ pub enum Event {
     PluginToolCall {
         call: PluginToolCall,
     },
+    /// The session dropped a pending plugin call (turn cancellation or a
+    /// dispatcher timeout): the host asks the backend to stop working on it.
+    PluginToolCancel {
+        session_id: String,
+        request_id: String,
+    },
     PluginToolsQuery {
         query: PluginToolsQuery,
     },

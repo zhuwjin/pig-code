@@ -3,6 +3,7 @@ mod contributions;
 mod http;
 mod marketplace;
 mod registry;
+mod schema;
 mod services;
 mod themes;
 mod tools;
@@ -37,6 +38,8 @@ pub type SharedPluginRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>
 pub struct PluginRegistry {
     pub(crate) data_dir: std::path::PathBuf,
     pub(crate) generation: u64,
+    /// The host's plugin-capability version, checked against `minHostVersion`.
+    pub(crate) host_version: String,
     pub(crate) snapshot: PluginSnapshot,
     enabled: std::collections::BTreeMap<String, String>,
     disabled_builtin: std::collections::BTreeMap<String, String>,
@@ -47,6 +50,16 @@ pub struct PluginRegistry {
 
 pub fn is_builtin(id: &str, source: &PluginSource) -> bool {
     matches!(source, PluginSource::BuiltIn) && BUILTIN_PACKAGES.contains(&id)
+}
+
+/// The diagnostic for a manifest that needs a newer host, or `None` when this
+/// host satisfies it. A malformed `minHostVersion` is a manifest error.
+pub(crate) fn host_version_mismatch(
+    host: &str,
+    min: &str,
+) -> Result<Option<String>, pig_protocol::CoreError> {
+    pig_protocol::host_version_check(host, min)
+        .map_err(|detail| pig_protocol::CoreError::PluginManifest { detail })
 }
 
 #[cfg(test)]
@@ -760,6 +773,121 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+    }
+
+    #[test]
+    fn hook_contributions_need_the_capability_and_a_valid_entry() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": [],
+              "hooks": [{"event": "pre_tool_use", "command": "guard.sh", "matcher": "Write"}]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            format!("{:?}", snapshot.errors[0].error).contains("provide_hooks"),
+            "{:?}",
+            snapshot.errors
+        );
+
+        extend_user_plugin(&root, r#"{"actions": ["provide_hooks"]}"#);
+        let accepted = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert!(accepted.errors.is_empty(), "{:?}", accepted.errors);
+        assert_eq!(accepted.packages[0].contributions.hooks.len(), 1);
+
+        extend_user_plugin(
+            &root,
+            r#"{"hooks": [{"event": "pre_tool_use", "type": "process", "command": "guard", "shell": "bash"}]}"#,
+        );
+        let rejected = registry.sync(vec![PluginPackageSource {
+            root,
+            source: PluginSource::User,
+        }]);
+        assert_eq!(rejected.errors.len(), 1);
+        assert!(
+            format!("{:?}", rejected.errors[0].error).contains("shell"),
+            "{:?}",
+            rejected.errors
+        );
+    }
+
+    #[test]
+    fn an_incompatible_host_requirement_keeps_files_and_choice_but_activates_nothing() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        write(
+            &root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "2.0.0",
+              "build": 1,
+              "backend": "backend.ts",
+              "minHostVersion": "2.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "actions": ["provide_tools"],
+                "tools": [{
+                  "name": "DemoRead",
+                  "description": "Read demo data",
+                  "read_only": true,
+                  "parameters": {"type": "object"}
+                }]
+              }
+            }"#,
+        );
+        write(&root.join("backend.ts"), "export {};");
+        let data = temp.0.join("data");
+        let sources = || {
+            vec![PluginPackageSource {
+                root: root.clone(),
+                source: PluginSource::User,
+            }]
+        };
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let mut registry = PluginRegistry::with_host_version(data.clone(), "1.0.0");
+        let snapshot = registry.sync(sources());
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        let package = &snapshot.packages[0];
+        let digest = package.digest.clone();
+        let diagnostic = package.incompatible.clone().expect("incompatible diagnostic");
+        assert!(diagnostic.contains("2.0.0") && diagnostic.contains("1.0.0"));
+
+        // The user's enable choice is recorded, but nothing activates.
+        let enabled = registry.set_enabled("demo", &digest, true).unwrap();
+        assert!(enabled.packages[0].enabled);
+        assert!(enabled.packages[0].incompatible.is_some());
+        assert!(enabled_packages(&registry, &trust).unwrap().is_empty());
+        assert!(registry.tool("demo", &digest, "DemoRead", None).is_err());
+
+        // Restarting keeps the package, its files and the enable choice.
+        let mut restored = PluginRegistry::with_host_version(data.clone(), "1.0.0");
+        let restored_snapshot = restored.sync(sources());
+        assert!(restored_snapshot.packages[0].enabled);
+        assert!(restored_snapshot.packages[0].incompatible.is_some());
+        assert!(root.join("backend.ts").is_file());
+
+        // A host that satisfies the requirement activates the same choice.
+        let mut newer = PluginRegistry::with_host_version(data, "2.1.0");
+        let activated = newer.sync(sources());
+        assert!(activated.packages[0].enabled);
+        assert!(activated.packages[0].incompatible.is_none());
+        assert_eq!(enabled_packages(&newer, &trust).unwrap().len(), 1);
+        newer.tool("demo", &digest, "DemoRead", None).unwrap();
     }
 
     #[test]

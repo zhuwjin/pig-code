@@ -12,6 +12,7 @@ A package can contribute:
 - Skills;
 - MCP servers;
 - configuration declarations;
+- lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `Stop`);
 - HTTP origins and credential declarations;
 - versioned host-service requests permitted by the package.
 
@@ -62,8 +63,9 @@ Pure theme, Skill or other resource packages need no Engine. A package with a ba
 
 `PluginContributions` supports these fields:
 
-- `tools`: name, description, object JSON Schema, read-only marker and `static` or `plugin` availability;
+- `tools`: name, description, input and optional output JSON Schema, read-only marker, `static` or `plugin` availability, approval stance, timeout, concurrency, output budget and idempotency (see [Tool contract](#tool-contract));
 - `commands`: stable ID, localized title, optional export, order and enabled state;
+- `hooks`: one of the seven hook events plus a `HookEntry` (command or process, matcher, timeout, async, label), behind `provide_hooks`;
 - `themes`: validated theme definitions and package-local background assets;
 - `skills`: package directories containing `SKILL.md`;
 - `mcp`: validated MCP server configurations;
@@ -72,7 +74,7 @@ Pure theme, Skill or other resource packages need no Engine. A package with a ba
 - `config`: plugin defaults and allowed host configuration reads/writes;
 - `actions`: nonvisual service permissions such as `provide_tools`, `provide_themes`, `provide_mcp`, `http`, `read_config` and `write_config`.
 
-Manifest tools, commands, themes, Skills and MCP servers can be supplemented at runtime through `contribution.register` and `contribution.remove`. Runtime registration cannot change credentials, HTTP origins, configuration schemas or permissions. Duplicate IDs are rejected or replaced deterministically, and committed contributions are removed when their backend stops.
+Manifest tools, commands, hooks, themes, Skills and MCP servers can be supplemented at runtime through `contribution.register` and `contribution.remove`. Runtime registration cannot change credentials, HTTP origins, configuration schemas or permissions; a runtime hook still needs the manifest's static `provide_hooks` action, and a runtime tool is validated against the same contract as a manifest one. Duplicate IDs are rejected or replaced deterministically, and committed contributions are removed when their backend stops.
 
 ## Backend protocol
 
@@ -88,6 +90,65 @@ Supported streams are `lifecycle`, `events`, `contributions`, `tools`, `services
 Lifecycle includes hello/start/ready, health checks, stop/failure, retry with bounded backoff, and exact-digest updates. Tool traffic includes selection, calls, results, timeouts and cancellation. Logs are size-limited and recursively redacted before reaching the host.
 
 Commands are resolved against manifest and committed runtime contributions. Invoking one sends `command.invoke` to the active backend; commands do not open plugin pages.
+
+`tools.cancel` tells a backend that a call was settled elsewhere (cancel, timeout, disable): the SDK aborts the handler's signal and does not answer the call. Late `tools.result` messages for settled calls are dropped, so a cancelled or disabled tool can never come back.
+
+## Plugin SDK (`pig/plugin`)
+
+Plugin backends do not hand-roll the envelope. `sdk/pig-plugin` (imported as `pig/plugin`, mapped in `nsh.json`'s `resolve.alias`) owns:
+
+- `apply(context)` plus disposers for every registration;
+- tools, commands and hooks registration, including runtime contributions;
+- typed service requests (`ctx.services.request("navigation_open", …)`) and host event subscriptions;
+- structured `PluginError { code, message, retryable }`;
+- instance/epoch/generation, per-stream sequences and stale-envelope filtering;
+- a plugin test host (`createTestHost`) that drives the real protocol: `tool`, `select`, `command`, `emitEvent`, `health`, `stop`, `sendRaw` for stale messages, captured service requests and hook contributions.
+
+```ts
+import { apply, PluginError } from "pig/plugin";
+
+apply((ctx) => {
+  ctx.tools.register({
+    name: "DocSearch",
+    description: "Search the documentation",
+    parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    readOnly: true,
+    handler: async ({ query }) => ({ hits: await search(query) }),
+  });
+});
+```
+
+`nsh.json` of an app or plugin points at the SDK source:
+
+```json
+{"resolve": {"alias": {"pig/plugin": "../../sdk/pig-plugin/mod.ts"}}}
+```
+
+The app's `tsconfig.json` maps the same specifier to the SDK for type checking. `sdk/pig-plugin/README.md` documents the full surface.
+
+## Tool contract
+
+Every plugin tool declares its contract in the manifest or at runtime:
+
+- `parameters` and `output_schema` (JSON Schema, validated before the call and after it);
+- `read_only`, `idempotent`, and `approval` (`on_request`, `always`, `never` — the last only for read-only tools);
+- `timeout_ms` (default 60 s, hard cap 10 min) and `max_concurrency` (default 8, max 32);
+- `max_output_bytes` (default 32 KiB): a larger result is written to `{data_dir}/sessions/{session}/tool-results/` and only a head/tail preview reaches the model.
+
+The accepted JSON Schema subset is closed: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `minItems`/`maxItems`, `minLength`/`maxLength`, `pattern`, `minimum`/`maximum`, `exclusiveMinimum`/`exclusiveMaximum`, `anyOf`/`oneOf`/`allOf`. Another keyword (including `$ref`) fails installation instead of silently not being enforced. Invalid input never reaches the backend; invalid output never reaches the model. Both arrive as structured failures with `invalid_input` / `invalid_output` codes.
+
+## Host version
+
+`minHostVersion` is parsed as SemVer and compared with the host's plugin-capability version (`PLUGIN_HOST_VERSION`, currently `1.0.0`). A package that needs a newer host stays visible with an `incompatible` diagnostic: its files, configuration and the user's enable choice are kept, but its backend never starts and none of its contributions activate. A malformed version string is a manifest error. Raising the host version activates the same package without touching the choice.
+
+## Hooks
+
+Package hooks reuse the existing `HookSet`/`HookRunner` and `HooksConfig`:
+
+- only the seven event names are accepted, and the package must declare `provide_hooks`;
+- the user's master switch gates them, and project packages need a trusted workspace;
+- they run through the same shell/process resolution, payload, matcher, timeout, cancellation, output cap and status rows as user and project hooks;
+- each run re-checks the declaring package (enabled, same digest, still declaring that hook), so disabling, updating or uninstalling the package revokes it immediately — no old callback survives.
 
 ## Resource budgets and isolation
 
@@ -129,7 +190,7 @@ Backend-provided themes become visible only while that backend is active. Resour
 
 `examples/moon-plugin` contains:
 
-- the `MoonEcho` backend tool and tool-selection response;
+- the `MoonEcho` backend tool (registered through the SDK with an input/output contract) and tool-selection response;
 - a command that requests navigation to the built-in workspace;
 - two themes;
 - a Skill;
@@ -144,9 +205,13 @@ Use focused, serial checks while changing the runtime:
 ```sh
 cargo check -p pig-protocol
 cargo test -p nsh-app-pig-code-ts signed_moon_package_loads_and_wrong_root_is_refused -- --test-threads=1
+cargo test -p nsh-app-pig-code-ts a_signed_sdk_package_activates_and_answers_tool_calls -- --test-threads=1
+cargo test -p pig-core --lib plugins:: -- --test-threads=1
 nsh check
-nsh test --filter "validates backend envelopes" --target windows
+nsh test --filter "the SDK serves a real backend" --target windows
 nsh test --filter "loads, applies, disables and restores plugin themes" --target windows
 ```
+
+`a_signed_sdk_package_activates_and_answers_tool_calls` builds a real signed package from `examples/moon-plugin` (whose backend uses `pig/plugin`), starts its Engine through the plugin manager, commits the SDK's runtime contributions and asserts the `MoonEcho` answer. `App.plugin-sdk.test.tsx` runs the same applier through the SDK's test host (tools, commands, events, health, structured errors, stale envelopes, hook contributions).
 
 Run the broader project suites for a later, separate verification pass rather than starting overlapping Cargo builds.

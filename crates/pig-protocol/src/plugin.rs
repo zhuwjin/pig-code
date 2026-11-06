@@ -1,9 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::HookEntry;
+
 pub const PLUGIN_API_VERSION: u32 = 1;
+
+/// The host's plugin-capability version, checked against a manifest's
+/// `minHostVersion`. It tracks the app version in `nsh.json`: bump it when the
+/// host contract changes in a way a plugin must opt into.
+pub const PLUGIN_HOST_VERSION: &str = "1.0.0";
 
 const fn api_version() -> u32 {
     PLUGIN_API_VERSION
@@ -31,6 +39,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub commands: Vec<PluginCommand>,
     #[serde(default)]
+    pub hooks: Vec<PluginHook>,
+    #[serde(default)]
     pub credentials: Vec<PluginCredentialDeclaration>,
     #[serde(default)]
     pub http: Vec<PluginHttpOrigin>,
@@ -41,14 +51,41 @@ pub struct PluginContributions {
 }
 
 impl PluginContributions {
+    /// The manifest's declarations with the backend's runtime ones on top:
+    /// a runtime entry replaces the manifest entry of the same identity, so a
+    /// backend that refines its declared tool/command/hook does not appear
+    /// twice to the host.
     pub fn merged(&self, runtime: &Self) -> Self {
         let mut merged = self.clone();
-        merged.themes.extend(runtime.themes.clone());
-        merged.skills.extend(runtime.skills.clone());
-        merged.mcp.extend(runtime.mcp.clone());
-        merged.tools.extend(runtime.tools.clone());
-        merged.commands.extend(runtime.commands.clone());
+        merge_replacing(&mut merged.themes, &runtime.themes, |theme| {
+            theme.id.clone()
+        });
+        merge_replacing(&mut merged.skills, &runtime.skills, |skill| {
+            skill.path.clone()
+        });
+        merge_replacing(&mut merged.mcp, &runtime.mcp, |server| server.name.clone());
+        merge_replacing(&mut merged.tools, &runtime.tools, |tool| tool.name.clone());
+        merge_replacing(&mut merged.commands, &runtime.commands, |command| {
+            command.id.clone()
+        });
+        merge_replacing(&mut merged.hooks, &runtime.hooks, |hook| {
+            hook.id
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", hook.event.name(), hook.entry.command))
+        });
         merged
+    }
+}
+
+fn merge_replacing<T, F>(items: &mut Vec<T>, additions: &[T], key: F)
+where
+    T: Clone,
+    F: Fn(&T) -> String,
+{
+    for addition in additions {
+        let id = key(addition);
+        items.retain(|existing| key(existing) != id);
+        items.push(addition.clone());
     }
 }
 
@@ -62,6 +99,7 @@ impl Default for PluginContributions {
             mcp: Vec::new(),
             tools: Vec::new(),
             commands: Vec::new(),
+            hooks: Vec::new(),
             credentials: Vec::new(),
             http: Vec::new(),
             config: PluginConfigDeclaration::default(),
@@ -198,16 +236,121 @@ pub enum PluginToolAvailability {
     Plugin,
 }
 
+/// Whether a plugin tool asks the user before it runs. `on_request` keeps the
+/// host's ordinary rules (read-only tools never ask; otherwise the current
+/// approval mode decides). `always` asks even where the mode would not, and
+/// `never` is accepted for read-only tools only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginToolApproval {
+    #[default]
+    OnRequest,
+    Always,
+    Never,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginTool {
     pub name: String,
     pub description: String,
+    /// JSON Schema of the arguments, validated by the host before the call.
     pub parameters: serde_json::Value,
+    /// JSON Schema of the result value, validated by the host after the call.
+    /// `None` accepts any JSON value within the size limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
     pub availability: PluginToolAvailability,
+    /// Whether repeating the same call is safe (the host may retry it).
+    #[serde(default)]
+    pub idempotent: bool,
+    #[serde(default)]
+    pub approval: PluginToolApproval,
+    /// Wall-clock budget of one call; clamped by the host (default 60000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Calls of this tool allowed in flight at once; clamped by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<u32>,
+    /// Inline result budget. Beyond it the full result is written to the
+    /// session's tool-results directory and only a preview reaches the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+}
+
+impl PluginTool {
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(
+            self.timeout_ms
+                .unwrap_or(PLUGIN_TOOL_DEFAULT_TIMEOUT_MS)
+                .clamp(1, PLUGIN_TOOL_MAX_TIMEOUT_MS),
+        )
+    }
+
+    pub fn concurrency(&self) -> usize {
+        self.max_concurrency
+            .unwrap_or(PLUGIN_TOOL_DEFAULT_CONCURRENCY as u32)
+            .clamp(1, PLUGIN_TOOL_MAX_CONCURRENCY as u32) as usize
+    }
+
+    pub fn output_budget(&self) -> usize {
+        self.max_output_bytes
+            .unwrap_or(PLUGIN_TOOL_DEFAULT_OUTPUT_BYTES)
+            .clamp(PLUGIN_TOOL_MIN_OUTPUT_BYTES, PLUGIN_TOOL_MAX_OUTPUT_BYTES) as usize
+    }
+}
+
+pub const PLUGIN_TOOL_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+pub const PLUGIN_TOOL_MAX_TIMEOUT_MS: u64 = 600_000;
+pub const PLUGIN_TOOL_DEFAULT_CONCURRENCY: usize = 8;
+pub const PLUGIN_TOOL_MAX_CONCURRENCY: usize = 32;
+pub const PLUGIN_TOOL_DEFAULT_OUTPUT_BYTES: u64 = 32 * 1024;
+pub const PLUGIN_TOOL_MIN_OUTPUT_BYTES: u64 = 1024;
+pub const PLUGIN_TOOL_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+
+/// The closed set of host hook events a package may contribute to. It mirrors
+/// the user/project hook contract; a name outside it is rejected at install.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginHookEvent {
+    SessionStart,
+    UserPromptSubmit,
+    PreToolUse,
+    PermissionRequest,
+    PostToolUse,
+    PostToolUseFailure,
+    Stop,
+}
+
+impl PluginHookEvent {
+    /// Claude-form event name (the runner's `HookEvent::name`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::UserPromptSubmit => "UserPromptSubmit",
+            Self::PreToolUse => "PreToolUse",
+            Self::PermissionRequest => "PermissionRequest",
+            Self::PostToolUse => "PostToolUse",
+            Self::PostToolUseFailure => "PostToolUseFailure",
+            Self::Stop => "Stop",
+        }
+    }
+}
+
+/// One hook entry a package contributes. `entry.source` is annotation-only and
+/// always overwritten by the runtime with the package identity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PluginHook {
+    /// Stable id for a runtime-registered hook (a disposer removes it by this
+    /// id). Manifest hooks may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub event: PluginHookEvent,
+    #[serde(flatten)]
+    pub entry: HookEntry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,7 +477,7 @@ pub struct PluginToolsSelection {
     pub session_id: String,
     pub package: String,
     pub digest: String,
-    pub result: Result<Vec<String>, crate::CoreError>,
+    pub result: Result<Vec<String>, crate::PluginProtocolError>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -353,7 +496,7 @@ pub struct PluginToolResult {
     pub session_id: String,
     pub package: String,
     pub digest: String,
-    pub result: Result<serde_json::Value, crate::CoreError>,
+    pub result: Result<serde_json::Value, crate::PluginProtocolError>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +509,7 @@ pub enum PluginCapability {
     ProvideMcp,
     ProvideTools,
     ProvideThemes,
+    ProvideHooks,
     Http,
     ManageOwnSecrets,
     ReadConfig,
@@ -384,6 +528,11 @@ pub struct PluginPackageInfo {
     pub source: PluginSource,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Set when the manifest's `minHostVersion` is newer than this host. The
+    /// package, its files, its configuration and the user's enable choice are
+    /// kept; its backend and contributions are not activated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incompatible: Option<String>,
     #[serde(default)]
     pub backend: Option<String>,
     #[serde(default)]
@@ -413,6 +562,25 @@ pub struct PluginManifest {
     pub capabilities: Vec<PluginCapabilityRequest>,
     #[serde(default)]
     pub contributions: PluginContributions,
+}
+
+/// The host-version check of a manifest's `minHostVersion`.
+///
+/// `Err` means a version string is not valid SemVer (a manifest error);
+/// `Ok(None)` means the host satisfies the requirement; `Ok(Some(message))`
+/// carries the diagnostic for a package that needs a newer host.
+pub fn host_version_check(host: &str, min: &str) -> Result<Option<String>, String> {
+    let host_version = semver::Version::parse(host)
+        .map_err(|error| format!("invalid host version `{host}`: {error}"))?;
+    let required = semver::Version::parse(min)
+        .map_err(|error| format!("minHostVersion `{min}` is not a SemVer version: {error}"))?;
+    if host_version >= required {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "requires host {min} or newer; this host is {host}"
+        )))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +839,7 @@ pub struct PluginActionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HookKind;
 
     #[test]
     fn contribution_defaults_keep_optional_sections_empty() {
@@ -717,6 +886,109 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(tool.availability, PluginToolAvailability::Static);
+    }
+
+    #[test]
+    fn runtime_contributions_replace_the_manifest_entry_of_the_same_identity() {
+        let manifest: PluginContributions = serde_json::from_value(serde_json::json!({
+            "tools": [{"name": "Echo", "description": "Manifest", "parameters": {"type": "object"}}],
+            "commands": [{"id": "open", "title": {"en": "Open"}}]
+        }))
+        .unwrap();
+        let runtime: PluginContributions = serde_json::from_value(serde_json::json!({
+            "tools": [
+                {"name": "Echo", "description": "Runtime", "parameters": {"type": "object"}},
+                {"name": "Extra", "description": "Extra", "parameters": {"type": "object"}}
+            ],
+            "commands": [{"id": "open", "title": {"en": "Open"}, "order": 3}]
+        }))
+        .unwrap();
+        let merged = manifest.merged(&runtime);
+        assert_eq!(merged.tools.len(), 2);
+        assert_eq!(
+            merged
+                .tools
+                .iter()
+                .find(|tool| tool.name == "Echo")
+                .map(|tool| tool.description.as_str()),
+            Some("Runtime")
+        );
+        assert_eq!(merged.commands.len(), 1);
+        assert_eq!(merged.commands[0].order, 3);
+    }
+
+    #[test]
+    fn host_version_check_compares_semver_and_reports_newer_requirements() {
+        assert_eq!(
+            host_version_check("1.4.0", "1.0.0").expect("valid versions"),
+            None
+        );
+        assert_eq!(host_version_check("1.0.0", "1.0.0").unwrap(), None);
+        let newer = host_version_check("1.0.0", "2.0.0")
+            .unwrap()
+            .expect("newer requirement");
+        assert!(newer.contains("2.0.0") && newer.contains("1.0.0"));
+        assert_eq!(
+            host_version_check("1.0.0", "1.0.0-beta.1").unwrap(),
+            None,
+            "a prerelease is older than its release"
+        );
+        assert!(host_version_check("1.0.0", "1.0").is_err());
+        assert!(host_version_check("not-a-version", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn tool_contract_defaults_and_clamps_are_explicit() {
+        let tool: PluginTool = serde_json::from_value(serde_json::json!({
+            "name": "DocSearch",
+            "description": "Search documentation",
+            "parameters": {"type": "object"}
+        }))
+        .unwrap();
+        assert_eq!(tool.approval, PluginToolApproval::OnRequest);
+        assert!(!tool.idempotent);
+        assert_eq!(tool.timeout_ms, None);
+        assert_eq!(tool.concurrency(), PLUGIN_TOOL_DEFAULT_CONCURRENCY);
+        assert_eq!(tool.output_budget(), 32 * 1024);
+        let clamped: PluginTool = serde_json::from_value(serde_json::json!({
+            "name": "DocSearch",
+            "description": "Search documentation",
+            "parameters": {"type": "object"},
+            "timeout_ms": 90_000_000,
+            "max_concurrency": 900,
+            "max_output_bytes": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            clamped.timeout().as_millis() as u64,
+            PLUGIN_TOOL_MAX_TIMEOUT_MS
+        );
+        assert_eq!(clamped.concurrency(), PLUGIN_TOOL_MAX_CONCURRENCY);
+        assert_eq!(
+            clamped.output_budget(),
+            PLUGIN_TOOL_MIN_OUTPUT_BYTES as usize
+        );
+    }
+
+    #[test]
+    fn plugin_hooks_reuse_the_hook_entry_contract() {
+        let contributions: PluginContributions = serde_json::from_value(serde_json::json!({
+            "actions": ["provide_hooks"],
+            "hooks": [{
+                "event": "pre_tool_use",
+                "type": "process",
+                "command": "check",
+                "args": ["--strict"],
+                "matcher": "Write|Edit",
+                "timeout_ms": 5000
+            }]
+        }))
+        .unwrap();
+        let hook = &contributions.hooks[0];
+        assert_eq!(hook.event, PluginHookEvent::PreToolUse);
+        assert_eq!(hook.entry.kind, HookKind::Process);
+        assert_eq!(hook.entry.args, ["--strict"]);
+        assert_eq!(hook.event.name(), "PreToolUse");
     }
 
     #[test]

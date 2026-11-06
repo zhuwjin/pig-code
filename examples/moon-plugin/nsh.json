@@ -5,6 +5,13 @@
   "build": 3,
   "appearance": "system",
   "capabilities": {
-    "host": ["plugin.protocol"]
+    "host": [
+      "plugin.protocol"
+    ]
+  },
+  "resolve": {
+    "alias": {
+      "pig/plugin": "../../sdk/pig-plugin/mod.ts"
+    }
   }
 }

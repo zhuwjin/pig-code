@@ -915,6 +915,7 @@ mod tests {
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
+            incompatible: None,
             backend: Some("backend.ts".into()),
             contributions: Default::default(),
             capabilities: vec![pig_protocol::PluginCapabilityRequest {

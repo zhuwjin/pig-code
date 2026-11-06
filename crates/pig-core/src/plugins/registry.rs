@@ -27,12 +27,19 @@ pub(crate) struct PersistedPlugins {
 
 impl PluginRegistry {
     pub fn new(data_dir: PathBuf) -> Self {
+        Self::with_host_version(data_dir, pig_protocol::PLUGIN_HOST_VERSION)
+    }
+
+    /// A registry that checks manifests against `host_version` (tests and
+    /// hosts that version their plugin API separately from the crate).
+    pub fn with_host_version(data_dir: PathBuf, host_version: impl Into<String>) -> Self {
         let state = std::fs::read(data_dir.join(PLUGIN_STATE_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PersistedPlugins>(&bytes).ok())
             .unwrap_or_default();
         let mut registry = Self {
             data_dir,
+            host_version: host_version.into(),
             generation: 0,
             snapshot: PluginSnapshot {
                 packages: state.packages,
@@ -205,6 +212,8 @@ impl PluginRegistry {
         let identity = package_manifest.id.clone();
         let name = package_manifest.name.fallback();
         let version = package_manifest.version;
+        let incompatible =
+            super::host_version_mismatch(&self.host_version, &package_manifest.min_host_version)?;
         let backend = package_manifest.backend;
         let contributions = package_manifest.contributions;
         let capabilities = package_manifest.capabilities;
@@ -237,6 +246,7 @@ impl PluginRegistry {
             root,
             source: source.source.clone(),
             enabled: false,
+            incompatible,
             backend,
             contributions,
             capabilities,
@@ -283,8 +293,14 @@ impl PluginRegistry {
     }
 
     fn persist(&self) {
+        // `incompatible` is derived from the manifest and this host's version:
+        // persisting it would keep a stale diagnostic after a host upgrade.
+        let mut packages = self.snapshot.packages.clone();
+        for package in &mut packages {
+            package.incompatible = None;
+        }
         let state = PersistedPlugins {
-            packages: self.snapshot.packages.clone(),
+            packages,
             enabled: self.enabled.clone(),
             disabled_builtin: self.disabled_builtin.clone(),
             pending_updates: self.pending_updates.clone(),
@@ -425,6 +441,36 @@ impl PluginRegistry {
         Ok(self.snapshot.clone())
     }
 
+    /// Whether a package still declares `entry` and may run it now. Used on
+    /// every hook run so disabling, updating or uninstalling the package (or
+    /// removing the hook through runtime contributions) revokes it at once.
+    pub fn plugin_hook_active(
+        &self,
+        id: &str,
+        digest: &str,
+        entry: &pig_protocol::HookEntry,
+    ) -> bool {
+        let Ok(package) = self.package(id, digest) else {
+            return false;
+        };
+        if !package.enabled || package.incompatible.is_some() {
+            return false;
+        }
+        if package_digest(&package.root).ok().as_deref() != Some(&package.content_digest) {
+            return false;
+        }
+        let runtime = self
+            .snapshot
+            .runtime_contributions
+            .get(&format!("{id}:{digest}"));
+        package
+            .contributions
+            .hooks
+            .iter()
+            .chain(runtime.into_iter().flat_map(|runtime| runtime.hooks.iter()))
+            .any(|hook| hook.entry == *entry)
+    }
+
     pub fn package(&self, id: &str, digest: &str) -> Result<&PluginPackageInfo, CoreError> {
         self.snapshot
             .packages
@@ -448,6 +494,7 @@ impl PluginRegistry {
         if !package.enabled {
             return Err(permission("the plugin is disabled"));
         }
+        ensure_compatible(package)?;
         if let PluginSource::Project { workspace } = &package.source {
             let trust = crate::config::WorkspaceTrust::for_config(config, workspace);
             if !trust.admits(workspace) {
@@ -657,6 +704,7 @@ impl PluginRegistry {
         if !package.enabled {
             return Err(permission("the plugin is disabled"));
         }
+        ensure_compatible(package)?;
         if let PluginSource::Project { workspace } = &package.source {
             let trust = crate::config::WorkspaceTrust::for_config(config, workspace);
             if !trust.admits(workspace) {
@@ -674,12 +722,23 @@ impl PluginRegistry {
     }
 }
 
+fn ensure_compatible(package: &PluginPackageInfo) -> Result<(), CoreError> {
+    match &package.incompatible {
+        Some(detail) => Err(permission(format!(
+            "plugin `{}` is not active: {detail}",
+            package.id
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn authorized_package(
     data_dir: &Path,
     package: &PluginPackageInfo,
     trusted_workspace: Option<&crate::config::WorkspaceTrust>,
 ) -> bool {
     if !package.enabled
+        || package.incompatible.is_some()
         || package_digest(&package.root).ok().as_deref() != Some(&package.content_digest)
     {
         return false;
@@ -751,6 +810,58 @@ fn validate_contributions(
             "tool contributions require the provide_tools capability",
         ));
     }
+    if !contributions.hooks.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideHooks)
+    {
+        return Err(permission(
+            "hook contributions require the provide_hooks capability",
+        ));
+    }
+    let mut hooks = BTreeSet::new();
+    for hook in &contributions.hooks {
+        if !crate::hooks::valid_hook_entry(&hook.entry) {
+            return Err(manifest(format!(
+                "plugin hook for {} must not select a shell for a process entry",
+                hook.event.name()
+            )));
+        }
+        if hook.entry.command.trim().is_empty() {
+            return Err(manifest("plugin hooks need a command"));
+        }
+        if hook.entry.timeout_ms.is_some_and(|timeout| timeout == 0) {
+            return Err(manifest("plugin hook timeouts must be positive"));
+        }
+        if let Some(matcher) = hook
+            .entry
+            .matcher
+            .as_deref()
+            .map(str::trim)
+            .filter(|matcher| !matcher.is_empty() && *matcher != "*")
+        {
+            let plain = matcher
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|');
+            if !plain && regex::Regex::new(matcher).is_err() {
+                return Err(manifest(format!(
+                    "plugin hook matcher `{matcher}` is not a valid regex"
+                )));
+            }
+        }
+        let key = (
+            hook.event,
+            hook.entry.command.clone(),
+            hook.entry.args.join("\u{0}"),
+            hook.entry.matcher.clone().unwrap_or_default(),
+        );
+        if !hooks.insert(key) {
+            return Err(manifest(format!(
+                "duplicate plugin hook for {}",
+                hook.event.name()
+            )));
+        }
+    }
     if !contributions.http.is_empty() && !contributions.actions.contains(&PluginCapability::Http) {
         return Err(permission("HTTP contributions require the http capability"));
     }
@@ -784,6 +895,58 @@ fn validate_contributions(
             return Err(manifest(format!(
                 "tool `{}` needs a description and an object JSON Schema",
                 tool.name
+            )));
+        }
+        if tool
+            .output_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.is_object())
+        {
+            return Err(manifest(format!(
+                "tool `{}` output schema must be an object JSON Schema",
+                tool.name
+            )));
+        }
+        super::schema::check_supported(&tool.parameters)
+            .map_err(|error| manifest(format!("tool `{}` parameters: {error}", tool.name)))?;
+        if let Some(output) = &tool.output_schema {
+            super::schema::check_supported(output).map_err(|error| {
+                manifest(format!("tool `{}` output schema: {error}", tool.name))
+            })?;
+        }
+        if tool.approval == pig_protocol::PluginToolApproval::Never && !tool.read_only {
+            return Err(manifest(format!(
+                "tool `{}` may waive approval only when it is read-only",
+                tool.name
+            )));
+        }
+        if tool.timeout_ms.is_some_and(|timeout| {
+            timeout == 0 || timeout > pig_protocol::PLUGIN_TOOL_MAX_TIMEOUT_MS
+        }) {
+            return Err(manifest(format!(
+                "tool `{}` timeout must be between 1 and {} ms",
+                tool.name,
+                pig_protocol::PLUGIN_TOOL_MAX_TIMEOUT_MS
+            )));
+        }
+        if tool.max_concurrency.is_some_and(|limit| {
+            limit == 0 || limit as usize > pig_protocol::PLUGIN_TOOL_MAX_CONCURRENCY
+        }) {
+            return Err(manifest(format!(
+                "tool `{}` concurrency must be between 1 and {}",
+                tool.name,
+                pig_protocol::PLUGIN_TOOL_MAX_CONCURRENCY
+            )));
+        }
+        if tool.max_output_bytes.is_some_and(|bytes| {
+            bytes < pig_protocol::PLUGIN_TOOL_MIN_OUTPUT_BYTES
+                || bytes > pig_protocol::PLUGIN_TOOL_MAX_OUTPUT_BYTES
+        }) {
+            return Err(manifest(format!(
+                "tool `{}` output budget must be between {} and {} bytes",
+                tool.name,
+                pig_protocol::PLUGIN_TOOL_MIN_OUTPUT_BYTES,
+                pig_protocol::PLUGIN_TOOL_MAX_OUTPUT_BYTES
             )));
         }
     }

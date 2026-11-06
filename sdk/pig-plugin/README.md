@@ -1,0 +1,105 @@
+# `pig/plugin`
+
+The TypeScript SDK for Pig Code plugin backends. It owns the envelope protocol — instance, epoch,
+generation, per-stream sequences, request ids, stale messages and the lifecycle handshake — so a
+backend only declares what it offers and what it does.
+
+```
+sdk/pig-plugin/
+  mod.ts        public entry (`pig/plugin`)
+  index.ts      apply(), context, runtime, contributions
+  protocol.ts   envelopes, sequences, identity, PluginError
+  test-host.ts  createTestHost(): drive a backend without the app
+```
+
+## Wiring it up
+
+Map the specifier where the source is bundled. An app's or plugin's `nsh.json`:
+
+```json
+{ "resolve": { "alias": { "pig/plugin": "../../sdk/pig-plugin/mod.ts" } } }
+```
+
+TypeScript needs the same specifier in its `paths` (the repository's `tsconfig.json` does this for
+the host app). Vendor `sdk/pig-plugin/` next to a third-party plugin, or point the alias at its
+absolute path.
+
+## Applying
+
+```ts
+import { apply, PluginError } from "pig/plugin";
+
+export const myPlugin = (ctx) => {
+  ctx.tools.register({
+    name: "DocSearch",
+    description: "Search the documentation",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: { hits: { type: "array", items: { type: "string" } } },
+      required: ["hits"],
+    },
+    readOnly: true,
+    idempotent: true,
+    timeoutMs: 30_000,
+    handler: async ({ query }, call) => {
+      if (call.signal.cancelled) throw new PluginError("cancelled", "the call was cancelled");
+      return { hits: await search(query) };
+    },
+  });
+};
+
+apply(myPlugin);
+```
+
+`apply` starts the backend when it runs inside the host (the launch parameters name this instance)
+and only records the applier otherwise, so tests can import the module.
+
+## Context
+
+| Member | What it does |
+| --- | --- |
+| `ctx.tools.register(definition)` | Registers a tool and its contract; returns a disposer. |
+| `ctx.tools.select(selector)` | Replaces the default "every `availability: "plugin"` tool" selection. |
+| `ctx.commands.register(definition, handler)` | Registers a command from the host's command search. |
+| `ctx.hooks.register(definition)` | Contributes a hook (`session_start`, `pre_tool_use`, …); the host runner executes it. Requires the manifest's `provide_hooks`. |
+| `ctx.services.request(service, payload?, options?)` | Typed host service (`config_read`, `storage_write`, `session_read`, `navigation_open`, …). |
+| `ctx.services.config/storage/session` | Convenience wrappers over the services above. |
+| `ctx.services.on(name, listener)` / `ctx.events.on` | Host events (`locale.changed`, …). |
+| `ctx.log.debug/info/warn/error` | Size-limited, redacted log events. |
+| `ctx.onReady(listener)` | Runs once the host accepted the instance. Requests made before that are queued. |
+| `ctx.dispose(fn)` | Teardown, run in reverse order on stop. |
+
+Tool definitions take `readOnly`, `idempotent`, `approval` (`on_request` | `always` | `never`),
+`timeoutMs`, `maxConcurrency`, `maxOutputBytes` and `availability` (`static` | `plugin`). The host
+validates arguments and results against the declared schemas and enforces those limits; the SDK
+only forwards them.
+
+## Testing
+
+```ts
+import { createTestHost } from "../sdk/pig-plugin/mod";
+import { myPlugin } from "../my-plugin/applier";
+
+const host = await createTestHost({ applier: myPlugin }).start();
+await host.tool("DocSearch", { query: "hooks" });      // a tool call through the real protocol
+await host.select();                                    // a tool selection
+await host.command("my-command");                       // command.invoke
+host.serviceRequests;                                   // what the plugin asked the host
+host.answerService(requestId, value);                   // answer one
+host.setSession(projection);                            // answer session_read
+await host.emitEvent("locale.changed", { locale: "en" });
+await host.health();
+host.hooks();                                           // hook contributions, as the host sees them
+host.sendRaw(staleEnvelope);                            // stale/foreign envelopes are ignored
+host.stop();
+```
+
+The test host checks every outgoing envelope (protocol, identity, per-stream sequence) and fails a
+`tool()`/`select()`/`health()` call that does not answer in time. `host.errors` collects what went
+wrong on the host side.

@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 use nsh_core::{ApproxTextEngine, MountBatch};
 use nsh_engine::{App, Engine, EngineConfig, HostChannel, MountSink};
 use pig_protocol::{
-    CoreError, Event, PluginContributions, PluginEnvelope, PluginHello, PluginLifecycleState,
+    Event, PluginContributions, PluginEnvelope, PluginErrorCode, PluginHello, PluginLifecycleState,
     PluginMessageKind, PluginNegotiation, PluginPackageInfo, PluginProtocolError,
     PluginRuntimeMetrics, PluginRuntimeSnapshot, PluginSequenceTracker, PluginServiceRequest,
-    PluginServiceResponse, PluginSnapshot, PluginSource, PluginStream, PluginToolResult,
-    PluginToolsSelection,
+    PluginServiceResponse, PluginSnapshot, PluginSource, PluginStream, PluginTool,
+    PluginToolResult, PluginToolsSelection,
 };
 
 use super::loader::{installed_package_path, load_verified};
@@ -136,6 +136,7 @@ struct PendingCall {
     digest: String,
     instance: String,
     epoch: u64,
+    tool: String,
     selection: bool,
     deadline: Instant,
 }
@@ -240,6 +241,9 @@ impl PluginSystemManager {
                 })
                 .map(|(_, (package, generation))| (package.clone(), *generation))
                 .ok_or_else(|| "the enabled plugin instance was not found".to_owned())?;
+            if let Some(detail) = &package.incompatible {
+                return Err(format!("the plugin cannot activate: {detail}"));
+            }
             let blocked: Vec<String> = inner
                 .failed
                 .iter()
@@ -350,6 +354,38 @@ impl PluginSystemManager {
                 self.complete_contribution_sync(request_id, *epoch, snapshot);
             }
             Event::PluginToolCall { call } => self.start_tool_call(call.clone(), false),
+            Event::PluginToolCancel {
+                session_id,
+                request_id,
+            } => {
+                let settled = {
+                    let mut inner = self.inner.lock().expect("plugin manager lock");
+                    if inner
+                        .pending
+                        .get(request_id)
+                        .is_some_and(|pending| pending.session_id == *session_id)
+                    {
+                        inner.pending.remove(request_id)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(settled) = settled {
+                    self.gateway.record_tool_completion(
+                        &settled.instance,
+                        settled.epoch,
+                        false,
+                        true,
+                    );
+                    self.send_to_instance(
+                        &settled.instance,
+                        PluginMessageKind::ToolsCancel,
+                        PluginStream::Tools,
+                        Some(request_id.clone()),
+                        serde_json::json!({ "request_id": request_id }),
+                    );
+                }
+            }
             Event::PluginToolsQuery { query } => {
                 let call = pig_protocol::PluginToolCall {
                     request_id: query.request_id.clone(),
@@ -401,37 +437,76 @@ impl PluginSystemManager {
                 .is_some_and(|instance| instance.state == PluginLifecycleState::Active)
         });
         if !active {
-            self.finish_tool_without_engine(call, selection, "the plugin engine is not active");
+            self.finish_tool_without_engine(
+                call,
+                selection,
+                PluginProtocolError::new(
+                    PluginErrorCode::NotActive,
+                    "the plugin engine is not active",
+                ),
+            );
             return;
         }
         if serde_json::to_vec(&call.args).map_or(0, |bytes| bytes.len()) > 1024 * 1024 {
-            self.finish_tool_without_engine(call, selection, "plugin tool arguments exceed 1 MiB");
+            self.finish_tool_without_engine(
+                call,
+                selection,
+                PluginProtocolError::new(
+                    PluginErrorCode::QuotaExceeded,
+                    "plugin tool arguments exceed 1 MiB",
+                ),
+            );
             return;
         }
         let key = key.expect("active key");
-        let (epoch, overloaded) = {
+        let (epoch, overloaded, timeout) = {
             let inner = self.inner.lock().expect("plugin manager lock");
+            let instance = inner.instances.get(&key).expect("active instance");
+            let declaration = instance
+                .package
+                .contributions
+                .tools
+                .iter()
+                .chain(instance.active_contributions.tools.iter())
+                .find(|tool| tool.name == call.tool);
+            let limit = declaration
+                .map(PluginTool::concurrency)
+                .unwrap_or(pig_protocol::PLUGIN_TOOL_DEFAULT_CONCURRENCY)
+                .min(MAX_PENDING_TOOLS);
+            let inflight = inner
+                .pending
+                .values()
+                .filter(|pending| pending.instance == key)
+                .count();
+            let same_tool = inner
+                .pending
+                .values()
+                .filter(|pending| pending.instance == key && pending.tool == call.tool)
+                .count();
             let overloaded = inner.pending.contains_key(&call.request_id)
-                || inner
-                    .pending
-                    .values()
-                    .filter(|pending| pending.instance == key)
-                    .count()
-                    >= MAX_PENDING_TOOLS;
+                || inflight >= MAX_PENDING_TOOLS
+                || same_tool >= limit;
             (
-                inner
-                    .instances
-                    .get(&key)
-                    .map(|instance| instance.epoch)
-                    .unwrap_or_default(),
+                instance.epoch,
                 overloaded,
+                if selection {
+                    Duration::from_secs(2)
+                } else {
+                    declaration.map(PluginTool::timeout).unwrap_or_else(|| {
+                        Duration::from_millis(pig_protocol::PLUGIN_TOOL_DEFAULT_TIMEOUT_MS)
+                    })
+                },
             )
         };
         if overloaded {
             self.finish_tool_without_engine(
                 call,
                 selection,
-                "too many concurrent or duplicate plugin tool calls",
+                PluginProtocolError::new(
+                    PluginErrorCode::Busy,
+                    "too many concurrent or duplicate plugin tool calls",
+                )
+                .retryable(),
             );
             return;
         }
@@ -441,13 +516,9 @@ impl PluginSystemManager {
             digest: call.digest.clone(),
             instance: key.clone(),
             epoch,
+            tool: call.tool.clone(),
             selection,
-            deadline: Instant::now()
-                + if selection {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::from_secs(60)
-                },
+            deadline: Instant::now() + timeout,
         };
         self.inner
             .lock()
@@ -471,7 +542,7 @@ impl PluginSystemManager {
         &self,
         call: pig_protocol::PluginToolCall,
         selection: bool,
-        message: &str,
+        error: PluginProtocolError,
     ) {
         let agent = self
             .inner
@@ -479,9 +550,6 @@ impl PluginSystemManager {
             .expect("plugin manager lock")
             .agent
             .clone();
-        let error = Err(CoreError::PluginTransport {
-            detail: message.to_owned(),
-        });
         if selection {
             let _ = agent.try_send(pig_protocol::Op::PluginToolsSelection {
                 selection: PluginToolsSelection {
@@ -489,7 +557,7 @@ impl PluginSystemManager {
                     session_id: call.session_id,
                     package: call.package,
                     digest: call.digest,
-                    result: error.map(|_| Vec::new()),
+                    result: Err(error),
                 },
             });
         } else {
@@ -499,7 +567,7 @@ impl PluginSystemManager {
                     session_id: call.session_id,
                     package: call.package,
                     digest: call.digest,
-                    result: error,
+                    result: Err(error),
                 },
             });
         }
@@ -534,13 +602,13 @@ impl PluginSystemManager {
         for key in existing {
             let keep = desired
                 .get(&key)
-                .is_some_and(|(package, _)| package.enabled);
+                .is_some_and(|(package, _)| package.enabled && package.incompatible.is_none());
             if !keep {
                 self.stop(&key);
             }
         }
         for (key, (package, generation)) in desired {
-            if !package.enabled {
+            if !package.enabled || package.incompatible.is_some() {
                 continue;
             }
             let blocked = {
@@ -630,6 +698,10 @@ impl PluginSystemManager {
                     "protocol": pig_protocol::PLUGIN_PROTOCOL_VERSION,
                     "servicesProtocol": pig_protocol::PLUGIN_SERVICES_PROTOCOL_VERSION,
                     "locale": self.gateway.locale(),
+                    "package": {
+                        "id": package.id,
+                        "digest": package.digest,
+                    },
                     "resourcePrefix": format!("plugin://{}/{}/", package.id, package.digest),
                 }
             })
@@ -1007,6 +1079,11 @@ impl PluginSystemManager {
         merge_unique(&mut staged.commands, delta.commands, |command| {
             command.id.clone()
         });
+        merge_unique(&mut staged.hooks, delta.hooks, |hook| {
+            hook.id
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", hook.event.name(), hook.entry.command))
+        });
         if serde_json::to_vec(&staged)
             .map_err(|error| error.to_string())?
             .len()
@@ -1049,6 +1126,10 @@ impl PluginSystemManager {
             .staged_contributions
             .commands
             .retain(|item| item.id != id);
+        instance
+            .staged_contributions
+            .hooks
+            .retain(|item| item.id.as_deref() != Some(id) && item.entry.command != id);
         drop(inner);
         self.sync_contributions(key, epoch);
         Ok(())
@@ -1133,8 +1214,25 @@ impl PluginSystemManager {
             }
         };
         let Some((request_id, pending)) = pending else {
+            // A late result for a cancelled, timed-out or retired call: it has
+            // already been settled and must not revive anything.
             return;
         };
+        let error = data.get("error").map(|error| {
+            serde_json::from_value::<PluginProtocolError>(error.clone()).unwrap_or_else(|_| {
+                PluginProtocolError::new(
+                    PluginErrorCode::Internal,
+                    error
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| error.to_string()),
+                )
+            })
+        });
+        if let Some(error) = error {
+            self.finish_pending_tool_with_id(request_id, pending, Err(error));
+            return;
+        }
         let result = data
             .get("result")
             .cloned()
@@ -1143,15 +1241,14 @@ impl PluginSystemManager {
             self.finish_pending_tool_with_id(
                 request_id,
                 pending,
-                Err("plugin tool result exceeds 1 MiB".into()),
+                Err(PluginProtocolError::new(
+                    PluginErrorCode::QuotaExceeded,
+                    "plugin tool result exceeds 1 MiB",
+                )),
             );
             return;
         }
-        let result = match data.get("error").and_then(|value| value.as_str()) {
-            Some(error) => Err(error.to_owned()),
-            None => Ok(result),
-        };
-        self.finish_pending_tool_with_id(request_id, pending, result);
+        self.finish_pending_tool_with_id(request_id, pending, Ok(result));
     }
 
     fn record_log(&self, key: &str, epoch: u64, body: serde_json::Value) {
@@ -1262,7 +1359,14 @@ impl PluginSystemManager {
             if let Some(pending) = pending {
                 self.gateway
                     .record_tool_completion(key, pending.epoch, false, true);
-                self.finish_pending_tool_with_id(id, pending, Err(message.to_owned()));
+                self.finish_pending_tool_with_id(
+                    id,
+                    pending,
+                    Err(PluginProtocolError::new(
+                        PluginErrorCode::Cancelled,
+                        message.to_owned(),
+                    )),
+                );
             }
         }
     }
@@ -1271,7 +1375,7 @@ impl PluginSystemManager {
         &self,
         request_id: String,
         pending: PendingCall,
-        result: Result<serde_json::Value, String>,
+        result: Result<serde_json::Value, PluginProtocolError>,
     ) {
         let agent = self
             .inner
@@ -1279,28 +1383,23 @@ impl PluginSystemManager {
             .expect("plugin manager lock")
             .agent
             .clone();
-        let error = result
-            .as_ref()
-            .err()
-            .map(|detail| CoreError::PluginTransport {
-                detail: detail.clone(),
-            });
-        let value = result.unwrap_or(serde_json::Value::Null);
         if pending.selection {
+            let selection = match result {
+                Err(error) => Err(error),
+                Ok(value) => serde_json::from_value(value).map_err(|error| {
+                    PluginProtocolError::new(
+                        PluginErrorCode::InvalidContribution,
+                        format!("the plugin tool selection is not a list of names: {error}"),
+                    )
+                }),
+            };
             let _ = agent.try_send(pig_protocol::Op::PluginToolsSelection {
                 selection: PluginToolsSelection {
                     request_id,
                     session_id: pending.session_id,
                     package: pending.package,
                     digest: pending.digest,
-                    result: match error {
-                        Some(error) => Err(error),
-                        None => serde_json::from_value(value).map_err(|error| {
-                            CoreError::PluginTransport {
-                                detail: error.to_string(),
-                            }
-                        }),
-                    },
+                    result: selection,
                 },
             });
         } else {
@@ -1310,7 +1409,7 @@ impl PluginSystemManager {
                     session_id: pending.session_id,
                     package: pending.package,
                     digest: pending.digest,
-                    result: error.map_or(Ok(value), Err),
+                    result,
                 },
             });
         }
@@ -1581,7 +1680,11 @@ impl PluginSystemManager {
                 self.finish_pending_tool_with_id(
                     id,
                     pending,
-                    Err("plugin tool call timed out".into()),
+                    Err(PluginProtocolError::new(
+                        PluginErrorCode::Timeout,
+                        "plugin tool call timed out",
+                    )
+                    .retryable()),
                 );
             }
         }
@@ -1753,7 +1856,8 @@ fn validate_delta(delta: &PluginContributions) -> Result<(), String> {
         + delta.skills.len()
         + delta.mcp.len()
         + delta.tools.len()
-        + delta.commands.len();
+        + delta.commands.len()
+        + delta.hooks.len();
     if count > 256 {
         return Err("a contribution batch may contain at most 256 entries".into());
     }
@@ -1833,6 +1937,7 @@ mod tests {
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
+            incompatible: None,
             backend: None,
             contributions: PluginContributions::default(),
             capabilities: Vec::new(),
@@ -1876,5 +1981,217 @@ mod tests {
         }));
         assert!(!value.to_string().contains("private"));
         assert_eq!(value["message"], "visible");
+    }
+
+    fn recv_before<T>(receiver: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
+        loop {
+            if let Ok(value) = receiver.try_recv() {
+                return Some(value);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// End to end with a real signed package: the bundled `pig/plugin` SDK
+    /// boots the Engine, registers its runtime contributions, becomes active and
+    /// answers a tool call with a validated result.
+    #[test]
+    fn a_signed_sdk_package_activates_and_answers_tool_calls() {
+        use nsh_engine::package::{Contents, SecretKey, certify};
+        use pig_protocol::{
+            PluginEnvelope, PluginLifecycleState, PluginManifest, PluginMessageKind,
+            PluginPackageSource, PluginRuntimeSnapshot, PluginToolCall,
+        };
+
+        let directory =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp/plugin-sdk-end-to-end");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create fixture directory");
+        let root = SecretKey::generate().expect("root key");
+        let release = SecretKey::generate().expect("release key");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let certificate = certify(
+            &root,
+            &release.public(),
+            &["com.pigcodets.plugins.*".into()],
+            now.saturating_sub(60),
+            now + 3600,
+        );
+        let backend =
+            nsh_testing::compile_tsx("examples/moon-plugin/backend.ts", &[nsh_base::registry()])
+                .expect("compile the SDK backend");
+        let backend_bytecode = match backend.code {
+            nsh_engine::BundleCode::Bytecode(bytes) => bytes,
+            nsh_engine::BundleCode::Source(_) => panic!("backend bytecode is required"),
+        };
+        let manifest: PluginManifest = serde_json::from_slice(
+            &std::fs::read("examples/moon-plugin/pig-plugin.json").expect("read moon manifest"),
+        )
+        .expect("valid moon manifest");
+        let contents = Contents {
+            app: nsh_engine::package::App {
+                id: manifest.id.clone(),
+                name: "Moon Agent".into(),
+                version: manifest.version.clone(),
+                build: manifest.build,
+            },
+            capabilities: Some(serde_json::json!({
+                "host": ["plugin.protocol"]
+            })),
+            source: String::new(),
+            bytecode: None,
+            source_map: None,
+            assets: vec![
+                (
+                    pig_protocol::PLUGIN_BACKEND_BUNDLE_FILE.into(),
+                    backend_bytecode,
+                ),
+                (
+                    pig_protocol::PLUGIN_BACKEND_VERSION_FILE.into(),
+                    nsh_engine::BYTECODE_VERSION.as_bytes().to_vec(),
+                ),
+                (
+                    pig_protocol::PLUGIN_MANIFEST_FILE.into(),
+                    std::fs::read("examples/moon-plugin/pig-plugin.json").expect("manifest bytes"),
+                ),
+                (
+                    "moon-theme.json".into(),
+                    std::fs::read("examples/moon-plugin/moon-theme.json").expect("theme bytes"),
+                ),
+                (
+                    "moon-glass.json".into(),
+                    std::fs::read("examples/moon-plugin/moon-glass.json").expect("style bytes"),
+                ),
+                (
+                    "background.svg".into(),
+                    std::fs::read("examples/moon-plugin/background.svg").expect("background bytes"),
+                ),
+                (
+                    "skills/moon/SKILL.md".into(),
+                    std::fs::read("examples/moon-plugin/skills/moon/SKILL.md")
+                        .expect("skill bytes"),
+                ),
+            ],
+            min_runtime: None,
+        };
+        let package_path = directory.join("moon.nshpkg");
+        let root_path = directory.join("root.pub");
+        std::fs::write(
+            &package_path,
+            nsh_engine::package::build(&contents, &release, &certificate)
+                .expect("build signed moon package"),
+        )
+        .expect("write package");
+        std::fs::write(&root_path, root.public().to_base64()).expect("write root key");
+
+        let data_dir = directory.join("data");
+        let installed = load_verified(&package_path, &root_path, &data_dir)
+            .expect("install the signed package");
+        let mut registry = pig_core::plugins::PluginRegistry::new(data_dir.join("registry"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: installed.assets.clone(),
+            source: PluginSource::User,
+        }]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        let digest = snapshot.packages[0].digest.clone();
+        let snapshot = registry
+            .set_enabled(&snapshot.packages[0].id, &digest, true)
+            .expect("enable the package");
+
+        let (agent_tx, agent_rx) = async_channel::unbounded();
+        let manager = PluginSystemManager::new(data_dir.clone(), agent_tx, directory.clone());
+        let events = manager.events();
+        manager.handle_core_event(&Event::PluginSnapshot { snapshot });
+
+        // The SDK's runtime contributions reach the core as one batch; commit
+        // it back as the runner would.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (request_id, epoch, contributions) = loop {
+            let op = recv_before(&agent_rx, deadline).expect("plugin start timed out");
+            if let pig_protocol::Op::SyncPluginRuntimeContributions {
+                request_id,
+                package,
+                digest,
+                epoch,
+                generation,
+                contributions,
+            } = op
+            {
+                let snapshot = registry
+                    .sync_runtime_contributions(
+                        &package,
+                        &digest,
+                        epoch,
+                        generation,
+                        contributions.clone(),
+                    )
+                    .expect("commit runtime contributions");
+                break (request_id, epoch, (snapshot, contributions));
+            }
+        };
+        let (snapshot, contributions) = contributions;
+        assert!(
+            contributions
+                .tools
+                .iter()
+                .any(|tool| tool.name == "MoonEcho"),
+            "the SDK registered its tool: {contributions:?}"
+        );
+        assert!(
+            contributions
+                .commands
+                .iter()
+                .any(|command| command.id == "moon-workspace"),
+            "the SDK registered its command"
+        );
+        manager.handle_core_event(&Event::PluginRuntimeContributionCommitted {
+            request_id,
+            epoch,
+            snapshot,
+        });
+
+        // The manager reports the instance active once the batch is committed.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let raw = recv_before(&events, deadline).expect("activation timed out");
+            let envelope: PluginEnvelope = serde_json::from_str(&raw).expect("runtime envelope");
+            if envelope.kind != PluginMessageKind::Runtime {
+                continue;
+            }
+            let runtime: PluginRuntimeSnapshot =
+                serde_json::from_value(envelope.body).expect("runtime snapshot");
+            if runtime.state == PluginLifecycleState::Active {
+                break;
+            }
+        }
+
+        manager.handle_core_event(&Event::PluginToolCall {
+            call: PluginToolCall {
+                request_id: "e2e-tool-1".into(),
+                session_id: "s-e2e".into(),
+                package: manifest.id.clone(),
+                digest: digest.clone(),
+                tool: "MoonEcho".into(),
+                args: serde_json::json!({"text": "hello"}),
+            },
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let result = loop {
+            let op = recv_before(&agent_rx, deadline).expect("tool call timed out");
+            if let pig_protocol::Op::PluginToolResult { result } = op {
+                break result;
+            }
+        };
+        assert_eq!(result.request_id, "e2e-tool-1");
+        assert_eq!(
+            result.result.expect("tool result"),
+            serde_json::json!({"echo": "hello", "engine": "moon"})
+        );
     }
 }

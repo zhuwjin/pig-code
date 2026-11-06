@@ -190,7 +190,19 @@ function ThemePackageRow(props: {
             <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{plugin().id} · {plugin().version}</Text>
           </View>
           <View class="items-end">
-            <Text class="text-xs text-muted-foreground">{runtime()?.state ?? t(plugin().enabled ? "settings.plugins.state.enabled" : "settings.plugins.state.disabled")}</Text>
+            <Text class="text-xs text-muted-foreground">
+              {runtime()?.state ??
+                t(plugin().incompatible
+                  ? "settings.plugins.state.incompatible"
+                  : plugin().enabled
+                    ? "settings.plugins.state.enabled"
+                    : "settings.plugins.state.disabled")}
+            </Text>
+            <If when={plugin().incompatible}>
+              <Text style={{ numberOfLines: 2 }} class="max-w-36 text-[10px] text-destructive">
+                {t("settings.plugins.incompatible", { detail: plugin().incompatible ?? "" })}
+              </Text>
+            </If>
             <If when={runtime()}>
               <Text class="text-[10px] text-muted-foreground">
                 {t("settings.plugins.metrics.resources", {

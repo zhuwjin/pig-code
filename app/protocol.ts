@@ -452,6 +452,9 @@ export interface PluginPackageInfo {
   root: string;
   source: "built_in" | "user" | { project: { workspace: string } };
   enabled: boolean;
+  /** The manifest needs a newer host: files and the enable choice are kept,
+   * the backend and contributions are not activated. */
+  incompatible?: string | null;
   backend?: string | null;
   capabilities: PluginCapabilityRequest[];
   contributions: {

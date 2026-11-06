@@ -247,7 +247,8 @@
       },
       "state": {
         "enabled": "已启用",
-        "disabled": "已停用"
+        "disabled": "已停用",
+        "incompatible": "版本不兼容"
       },
       "metrics": {
         "resources": "epoch {epoch} · 节点 {nodes} · 操作 {operations} · 请求 {requests} · 队列 {queue}",
@@ -275,7 +276,8 @@
       },
       "diagnostics": {
         "logs": "最近插件日志（已脱敏）"
-      }
+      },
+      "incompatible": "需要更新版本的 Pig Code — {detail}"
     },
     "marketplace": {
       "title": "插件市场",

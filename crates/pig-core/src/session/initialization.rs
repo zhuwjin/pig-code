@@ -116,7 +116,12 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         state,
         permission_rules: load_permissions(&parts.cwd, &parts.data_dir, &trust),
         git_snapshot: prompt::git_snapshot(&parts.cwd),
-        hooks: crate::hooks::HookSet::load(&parts.cwd, app_config),
+        hooks: crate::hooks::HookSet::load_with_plugins(
+            &parts.cwd,
+            app_config,
+            &plugin_tools.registry(),
+            &trust,
+        ),
         id: parts.id,
         cwd: parts.cwd,
         history: parts.history,

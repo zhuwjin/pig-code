@@ -247,7 +247,8 @@
       },
       "state": {
         "enabled": "Enabled",
-        "disabled": "Disabled"
+        "disabled": "Disabled",
+        "incompatible": "Incompatible"
       },
       "metrics": {
         "resources": "epoch {epoch} · Nodes {nodes} · Ops {operations} · Requests {requests} · Queue {queue}",
@@ -275,7 +276,8 @@
       },
       "diagnostics": {
         "logs": "Recent plugin logs (redacted)"
-      }
+      },
+      "incompatible": "Requires a newer Pig Code — {detail}"
     },
     "marketplace": {
       "title": "Plugin marketplace",

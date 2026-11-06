@@ -1067,7 +1067,12 @@ export class AgentStore {
       .flatMap((pkg) => {
         const instance = pluginInstance(pkg);
         const dynamic = this.pluginRuntimeContributions()[`${pkg.id}:${pkg.digest}`]?.commands ?? [];
-        return [...(pkg.contributions.commands ?? []), ...dynamic]
+        // A backend may re-register a manifest command with a runtime
+        // definition; the runtime one wins instead of listing it twice.
+        const byId = new Map<string, PluginCommand>();
+        for (const command of pkg.contributions.commands ?? []) byId.set(command.id, command);
+        for (const command of dynamic) byId.set(command.id, command);
+        return [...byId.values()]
           .filter((command) => command.enabled)
           .map((command) => ({
             instance,
@@ -1110,12 +1115,16 @@ export class AgentStore {
       const projected = packages.map((pkg) => {
         const dynamic = contributions[`${pkg.id}:${pkg.digest}`] ?? {};
         const needsEngine = pkg.backend != null;
+        // A runtime theme replaces the manifest theme of the same id.
+        const themes = new Map<string, { id: string; entry: string }>();
+        for (const theme of pkg.contributions.themes ?? []) themes.set(theme.id, theme);
+        for (const theme of dynamic.themes ?? []) themes.set(theme.id, theme);
         return {
           ...pkg,
           enabled: pkg.enabled && (!needsEngine || runtime[pluginInstance(pkg)]?.state === "active"),
           contributions: {
             ...pkg.contributions,
-            themes: [...(pkg.contributions.themes ?? []), ...(dynamic.themes ?? [])],
+            themes: [...themes.values()],
           },
         };
       });

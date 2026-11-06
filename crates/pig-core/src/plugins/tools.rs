@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pig_protocol::{
-    AppConfig, Event, PluginToolAvailability, PluginToolCall, PluginToolResult,
-    PluginToolsSelection,
+    AppConfig, Event, PluginErrorCode, PluginProtocolError, PluginTool, PluginToolAvailability,
+    PluginToolCall, PluginToolResult, PluginToolsSelection,
 };
 use pig_provider::ResolvedModel;
 
@@ -61,11 +61,11 @@ impl PluginToolset {
         self.tools
             .iter()
             .filter(|tool| {
-                tool.availability == PluginToolAvailability::Static
+                tool.declaration.availability == PluginToolAvailability::Static
                     || filter
                         .enabled
                         .get(&(tool.package.clone(), tool.digest.clone()))
-                        .is_some_and(|enabled| enabled.contains(&tool.name))
+                        .is_some_and(|enabled| enabled.contains(&tool.declaration.name))
             })
             .map(|tool| Box::new(tool.clone()) as Box<dyn Tool>)
             .collect()
@@ -81,12 +81,12 @@ impl PluginToolset {
         for tool in self
             .tools
             .iter()
-            .filter(|tool| tool.availability == PluginToolAvailability::Plugin)
+            .filter(|tool| tool.declaration.availability == PluginToolAvailability::Plugin)
         {
             declared
                 .entry((tool.package.clone(), tool.digest.clone()))
                 .or_default()
-                .insert(tool.name.clone());
+                .insert(tool.declaration.name.clone());
         }
         if declared.is_empty() {
             return PluginToolFilter::default();
@@ -205,25 +205,21 @@ fn collect_tools(
                 .tools
                 .into_iter()
                 .map(move |declaration| PluginToolExecutor {
-                    name: declaration.name,
-                    description: declaration.description,
-                    parameters: declaration.parameters,
-                    read_only: declaration.read_only,
-                    availability: declaration.availability,
                     package: package.id.clone(),
                     digest: package.digest.clone(),
                     plugins: plugins.clone(),
                     config: config.clone(),
                     dispatcher: dispatcher.clone(),
+                    declaration,
                 })
         })
         .filter(|tool| {
-            if names.insert(tool.name.clone()) {
+            if names.insert(tool.declaration.name.clone()) {
                 true
             } else {
                 tracing::warn!(
                     package = tool.package,
-                    tool = tool.name,
+                    tool = tool.declaration.name,
                     "ignored a duplicate or reserved plugin tool name"
                 );
                 false
@@ -235,46 +231,46 @@ fn collect_tools(
 
 #[derive(Clone)]
 struct PluginToolExecutor {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-    read_only: bool,
-    availability: PluginToolAvailability,
     package: String,
     digest: String,
     plugins: super::SharedPluginRegistry,
     config: Option<AppConfig>,
     dispatcher: PluginToolDispatcher,
+    declaration: PluginTool,
 }
 
 impl Tool for PluginToolExecutor {
     fn name(&self) -> &str {
-        &self.name
+        &self.declaration.name
     }
 
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
+                "name": self.declaration.name,
+                "description": self.declaration.description,
+                "parameters": self.declaration.parameters,
             }
         })
     }
 
     fn read_only(&self) -> bool {
-        self.read_only
+        self.declaration.read_only
     }
 
     fn is_plugin(&self) -> bool {
         true
     }
 
+    fn plugin_tool(&self) -> Option<&PluginTool> {
+        Some(&self.declaration)
+    }
+
     fn execute<'a>(
         &'a self,
         args: serde_json::Value,
-        _ctx: ToolContext<'a>,
+        ctx: ToolContext<'a>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
             self.plugins
@@ -283,27 +279,123 @@ impl Tool for PluginToolExecutor {
                 .tool(
                     &self.package,
                     &self.digest,
-                    &self.name,
+                    &self.declaration.name,
                     self.config.as_ref(),
                 )
                 .map_err(|error| format!("{error:?}"))?;
+            if let Err(issues) = super::schema::validate(&self.declaration.parameters, &args) {
+                return Err(format!(
+                    "plugin tool `{}` rejected the arguments [invalid_input]: {}",
+                    self.declaration.name,
+                    issues.join("; ")
+                ));
+            }
             let result = self
                 .dispatcher
                 .call(
                     self.package.clone(),
                     self.digest.clone(),
-                    self.name.clone(),
+                    self.declaration.name.clone(),
                     args,
+                    self.declaration.timeout(),
                 )
-                .await?;
-            match result {
-                serde_json::Value::String(text) => Ok(ToolEffect::plain(text)),
-                other => Ok(ToolEffect::plain(
-                    serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
-                )),
+                .await
+                .map_err(|error| {
+                    format!(
+                        "plugin tool `{}` failed [{}]: {}",
+                        self.declaration.name,
+                        error.code.as_str(),
+                        error.message
+                    )
+                })?;
+            if let Some(output_schema) = &self.declaration.output_schema
+                && let Err(issues) = super::schema::validate(output_schema, &result)
+            {
+                return Err(format!(
+                    "plugin tool `{}` returned an invalid result [invalid_output]: {}",
+                    self.declaration.name,
+                    issues.join("; ")
+                ));
             }
+            let text = match result {
+                serde_json::Value::String(text) => text,
+                other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
+            };
+            Ok(ToolEffect::plain(budget_output(
+                text,
+                self.declaration.output_budget(),
+                ctx.state,
+                &self.declaration.name,
+            )))
         })
     }
+}
+
+/// Keeps a plugin result within its declared inline budget. A larger result is
+/// written to the session's `tool-results` directory (already a read root for
+/// the model) and replaced by a head/tail preview pointing at the file, so a
+/// chatty tool cannot flood the model's context.
+fn budget_output(
+    text: String,
+    budget: usize,
+    state: &crate::task::SessionToolState,
+    tool: &str,
+) -> String {
+    if text.len() <= budget {
+        return text;
+    }
+    let head_budget = budget.saturating_mul(3) / 4;
+    let tail_budget = budget.saturating_sub(head_budget);
+    let head_end = char_boundary(&text, head_budget);
+    let tail_start = char_boundary_rev(&text, text.len().saturating_sub(tail_budget));
+    let head = &text[..head_end];
+    let tail = &text[tail_start..];
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = format!(
+        "plugin-{}-{}",
+        tool.replace(['/', '\\'], "_"),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let spill = state.spill_path(&id);
+    let target = spill.as_ref().filter(|path| {
+        path.parent()
+            .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
+            // `create_new` never follows an existing file or link: a planted
+            // path makes the spill fail (and the output stay truncated) instead
+            // of writing through it.
+            && std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()))
+                .is_ok()
+    });
+    let omitted = text.len().saturating_sub(head.len() + tail.len());
+    match target {
+        Some(path) => format!(
+            "{head}\n\n…[{omitted} bytes omitted; the full result is in {}]\n\n{tail}",
+            path.display()
+        ),
+        None => format!(
+            "{head}\n\n…[{omitted} bytes omitted; the result exceeds the inline limit]\n\n{tail}"
+        ),
+    }
+}
+
+fn char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn char_boundary_rev(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 struct PendingPluginCall {
@@ -386,7 +478,7 @@ impl PluginToolDispatcher {
         digest: String,
         agent_id: Option<String>,
         model: pig_protocol::PluginModelContext,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, PluginProtocolError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let request_id = format!(
             "{}-plugin-selection-{}",
@@ -415,7 +507,12 @@ impl PluginToolDispatcher {
             .lock()
             .expect("plugin event sender lock")
             .clone()
-            .ok_or_else(|| "the plugin tool dispatcher is not attached to a session".to_owned())?;
+            .ok_or_else(|| {
+                PluginProtocolError::new(
+                    PluginErrorCode::NotActive,
+                    "the plugin tool dispatcher is not attached to a session",
+                )
+            })?;
         let query = pig_protocol::PluginToolsQuery {
             request_id: request_id.clone(),
             session_id: self.session_id.clone(),
@@ -427,13 +524,28 @@ impl PluginToolDispatcher {
         sender
             .send(Event::PluginToolsQuery { query })
             .await
-            .map_err(|_| "the plugin host is unavailable".to_owned())?;
+            .map_err(|_| {
+                PluginProtocolError::new(
+                    PluginErrorCode::Transport,
+                    "the plugin host is unavailable",
+                )
+            })?;
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
             .await
-            .map_err(|_| "the plugin tool selection timed out".to_owned())?
-            .map_err(|_| "the plugin host closed the tool selection".to_owned())?
+            .map_err(|_| {
+                PluginProtocolError::new(
+                    PluginErrorCode::Timeout,
+                    "the plugin tool selection timed out",
+                )
+            })?
+            .map_err(|_| {
+                PluginProtocolError::new(
+                    PluginErrorCode::Transport,
+                    "the plugin host closed the tool selection",
+                )
+            })?
             .result
-            .map_err(|error| format!("{error:?}"))?;
+            .map_err(|error| error)?;
         guard.armed = false;
         Ok(result)
     }
@@ -444,7 +556,8 @@ impl PluginToolDispatcher {
         digest: String,
         tool: String,
         args: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, PluginProtocolError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let request_id = format!(
             "{}-plugin-tool-{}",
@@ -470,7 +583,12 @@ impl PluginToolDispatcher {
             .lock()
             .expect("plugin event sender lock")
             .clone()
-            .ok_or_else(|| "the plugin tool dispatcher is not attached to a session".to_owned())?;
+            .ok_or_else(|| {
+                PluginProtocolError::new(
+                    PluginErrorCode::NotActive,
+                    "the plugin tool dispatcher is not attached to a session",
+                )
+            })?;
         let call = PluginToolCall {
             request_id: request_id.clone(),
             session_id: self.session_id.clone(),
@@ -482,17 +600,25 @@ impl PluginToolDispatcher {
         sender
             .send(Event::PluginToolCall { call })
             .await
-            .map_err(|_| "the plugin host is unavailable".to_owned())?;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(60), receiver.recv())
-            .await
-            .map_err(|_| "the plugin tool call timed out".to_owned())?
-            .map_err(|_| "the plugin host closed the tool call".to_owned())?
-            .result
-            .map_err(|error| match error {
-                pig_protocol::CoreError::PluginTransport { detail }
-                | pig_protocol::CoreError::PluginPermission { detail } => detail,
-                other => format!("{other:?}"),
+            .map_err(|_| {
+                PluginProtocolError::new(
+                    PluginErrorCode::Transport,
+                    "the plugin host is unavailable",
+                )
             })?;
+        let result = tokio::time::timeout(timeout, receiver.recv())
+            .await
+            .map_err(|_| {
+                PluginProtocolError::new(PluginErrorCode::Timeout, "the plugin tool call timed out")
+                    .retryable()
+            })?
+            .map_err(|_| {
+                PluginProtocolError::new(
+                    PluginErrorCode::Transport,
+                    "the plugin host closed the tool call",
+                )
+            })?
+            .result?;
         guard.armed = false;
         Ok(result)
     }
@@ -512,6 +638,21 @@ impl Drop for PendingCall<'_> {
                 .lock()
                 .expect("plugin pending lock")
                 .remove(self.request_id);
+            // The caller is gone (turn cancellation or the dispatcher's own
+            // timeout): tell the host so it can stop the backend and settle
+            // the call instead of leaving it running to its deadline.
+            if let Some(sender) = self
+                .dispatcher
+                .event_tx
+                .lock()
+                .expect("plugin event sender lock")
+                .clone()
+            {
+                let _ = sender.try_send(Event::PluginToolCancel {
+                    session_id: self.dispatcher.session_id.clone(),
+                    request_id: self.request_id.to_owned(),
+                });
+            }
         }
     }
 }
@@ -570,6 +711,23 @@ mod tests {
     }
 
     fn test_toolset() -> (TempDir, PluginToolset) {
+        test_toolset_with_tools(
+            r#"[{
+              "name": "DemoRead",
+              "description": "Read demo data",
+              "read_only": true,
+              "parameters": {"type": "object"}
+            }, {
+              "name": "DynamicRead",
+              "description": "Read dynamic demo data",
+              "read_only": true,
+              "availability": "plugin",
+              "parameters": {"type": "object"}
+            }]"#,
+        )
+    }
+
+    fn test_toolset_with_tools(tools: &str) -> (TempDir, PluginToolset) {
         let root = std::env::temp_dir().join(format!(
             "pig-plugin-tool-{}-{}",
             std::process::id(),
@@ -584,32 +742,23 @@ mod tests {
         std::fs::create_dir_all(&package).expect("package directory");
         std::fs::write(
             package.join("pig-plugin.json"),
-            r#"{
-              "apiVersion": 1,
-              "id": "demo",
-              "name": "Demo",
-              "version": "1.0.0",
-              "build": 1,
-              "backend": "backend.ts",
-              "minHostVersion": "1.0.0",
-              "protocols": {"ui": 1, "services": 1},
-              "capabilities": [],
-              "contributions": {
-                "actions": ["provide_tools"],
-                "tools": [{
-                  "name": "DemoRead",
-                  "description": "Read demo data",
-                  "read_only": true,
-                  "parameters": {"type": "object"}
-                }, {
-                  "name": "DynamicRead",
-                  "description": "Read dynamic demo data",
-                  "read_only": true,
-                  "availability": "plugin",
-                  "parameters": {"type": "object"}
-                }]
-              }
-            }"#,
+            format!(
+                r#"{{
+                  "apiVersion": 1,
+                  "id": "demo",
+                  "name": "Demo",
+                  "version": "1.0.0",
+                  "build": 1,
+                  "backend": "backend.ts",
+                  "minHostVersion": "1.0.0",
+                  "protocols": {{"ui": 1, "services": 1}},
+                  "capabilities": [],
+                  "contributions": {{
+                    "actions": ["provide_tools"],
+                    "tools": {tools}
+                  }}
+                }}"#
+            ),
         )
         .unwrap();
         std::fs::write(package.join("backend.ts"), "export {};").unwrap();
@@ -778,5 +927,321 @@ mod tests {
             validate_selection(&declared, vec!["DynamicRead".into(), "DynamicRead".into()])
                 .is_err()
         );
+    }
+
+    const CONTRACT_TOOL: &str = r#"[{
+      "name": "ContractTool",
+      "description": "A tool with a full contract",
+      "read_only": true,
+      "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string", "minLength": 1}},
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "output_schema": {"type": "object", "required": ["echo"]},
+      "max_output_bytes": 1024
+    }]"#;
+
+    async fn run_contract_tool(
+        reply: impl FnOnce(&PluginToolCall) -> Result<serde_json::Value, PluginProtocolError>,
+    ) -> Result<ToolEffect, String> {
+        let (temp, toolset) = test_toolset_with_tools(CONTRACT_TOOL);
+        let tool = toolset.tools().into_iter().next().expect("plugin tool");
+        let (events_tx, events_rx) = async_channel::unbounded();
+        toolset.dispatcher().set_event_sender(events_tx);
+        let state = crate::task::SessionToolState::for_test();
+        let cwd = temp.0.clone();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut tracker = crate::tool::ChangeTracker::default();
+            tool.execute(
+                serde_json::json!({"text": "hello"}),
+                ToolContext {
+                    cwd: &cwd,
+                    tracker: &mut tracker,
+                    state: &task_state,
+                    fs_grant: None,
+                    sandbox_override: Default::default(),
+                    sandbox_profile: Default::default(),
+                    additional_permissions: Default::default(),
+                },
+            )
+            .await
+        });
+        let call = match events_rx.recv().await.expect("plugin call") {
+            Event::PluginToolCall { call } => call,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        toolset.dispatcher().resolve(PluginToolResult {
+            request_id: call.request_id.clone(),
+            session_id: call.session_id.clone(),
+            package: call.package.clone(),
+            digest: call.digest.clone(),
+            result: reply(&call),
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("tool result timeout")
+            .expect("tool task")
+    }
+
+    #[tokio::test]
+    async fn invalid_arguments_are_rejected_before_the_backend_is_called() {
+        let (temp, toolset) = test_toolset_with_tools(CONTRACT_TOOL);
+        let tool = toolset.tools().into_iter().next().expect("plugin tool");
+        let (events_tx, events_rx) = async_channel::unbounded();
+        toolset.dispatcher().set_event_sender(events_tx);
+        let state = crate::task::SessionToolState::for_test();
+        let mut tracker = crate::tool::ChangeTracker::default();
+        let error = match tool
+            .execute(
+                serde_json::json!({"text": "", "extra": 1}),
+                ToolContext {
+                    cwd: &temp.0,
+                    tracker: &mut tracker,
+                    state: &state,
+                    fs_grant: None,
+                    sandbox_override: Default::default(),
+                    sandbox_profile: Default::default(),
+                    additional_permissions: Default::default(),
+                },
+            )
+            .await
+        {
+            Ok(effect) => panic!("expected invalid arguments, got {}", effect.output),
+            Err(error) => error,
+        };
+        assert!(error.contains("invalid_input"), "{error}");
+        assert!(error.contains("$.text"), "{error}");
+        assert!(error.contains("unexpected `extra`"), "{error}");
+        assert!(
+            events_rx.try_recv().is_err(),
+            "the backend must not see an invalid call"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_output_is_rejected_before_the_model_sees_it() {
+        let error = match run_contract_tool(|_| Ok(serde_json::json!({"wrong": true}))).await {
+            Ok(effect) => panic!("expected an invalid output, got {}", effect.output),
+            Err(error) => error,
+        };
+        assert!(error.contains("invalid_output"), "{error}");
+        assert!(error.contains("missing required `echo`"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn structured_backend_errors_keep_their_code() {
+        let error = match run_contract_tool(|_| {
+            Err(
+                PluginProtocolError::new(PluginErrorCode::Timeout, "the backend gave up")
+                    .retryable(),
+            )
+        })
+        .await
+        {
+            Ok(effect) => panic!("expected a backend error, got {}", effect.output),
+            Err(error) => error,
+        };
+        assert!(error.contains("[timeout]"), "{error}");
+        assert!(error.contains("the backend gave up"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn oversized_results_are_spilled_and_replaced_by_a_preview() {
+        let (temp, toolset) = test_toolset_with_tools(CONTRACT_TOOL);
+        let tool = toolset.tools().into_iter().next().expect("plugin tool");
+        let (events_tx, events_rx) = async_channel::unbounded();
+        toolset.dispatcher().set_event_sender(events_tx);
+        let state = crate::task::SessionToolState::for_test();
+        let data_dir = state.data_dir().expect("test data dir").to_path_buf();
+        let cwd = temp.0.clone();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut tracker = crate::tool::ChangeTracker::default();
+            tool.execute(
+                serde_json::json!({"text": "hello"}),
+                ToolContext {
+                    cwd: &cwd,
+                    tracker: &mut tracker,
+                    state: &task_state,
+                    fs_grant: None,
+                    sandbox_override: Default::default(),
+                    sandbox_profile: Default::default(),
+                    additional_permissions: Default::default(),
+                },
+            )
+            .await
+        });
+        let call = match events_rx.recv().await.expect("plugin call") {
+            Event::PluginToolCall { call } => call,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let result = serde_json::json!({"echo": "x".repeat(5000)});
+        let rendered = serde_json::to_string_pretty(&result).unwrap();
+        toolset.dispatcher().resolve(PluginToolResult {
+            request_id: call.request_id,
+            session_id: call.session_id,
+            package: call.package,
+            digest: call.digest,
+            result: Ok(result),
+        });
+        let effect = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("tool result timeout")
+            .expect("tool task")
+            .expect("tool effect");
+        assert!(effect.output.contains("bytes omitted"), "{}", effect.output);
+        assert!(effect.output.len() < 2048, "preview stays small");
+        let dir = data_dir.join("sessions/test/tool-results");
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("spill directory")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(files.len(), 1, "one spill file");
+        assert_eq!(std::fs::read_to_string(files[0].path()).unwrap(), rendered);
+    }
+
+    const TIMEOUT_TOOL: &str = r#"[{
+      "name": "SlowTool",
+      "description": "Never answers in time",
+      "read_only": true,
+      "timeout_ms": 10,
+      "parameters": {"type": "object"}
+    }]"#;
+
+    #[test]
+    fn a_declared_approval_stance_changes_the_gate() {
+        let tool = |approval: &str, read_only: bool| {
+            let (temp, toolset) = test_toolset_with_tools(&format!(
+                r#"[{{"name": "Gated", "description": "Gated", "read_only": {read_only}, "approval": "{approval}", "parameters": {{"type": "object"}}}}]"#
+            ));
+            (
+                temp,
+                toolset.tools().into_iter().next().expect("plugin tool"),
+            )
+        };
+        let (_always, always) = tool("always", true);
+        assert!(crate::tool::requires_approval(
+            always.as_ref(),
+            pig_protocol::ExecMode::Auto.permissions()
+        ));
+        assert!(!crate::tool::requires_approval(
+            always.as_ref(),
+            pig_protocol::ExecMode::Full.permissions()
+        ));
+        let (_never, never) = tool("never", true);
+        assert!(!crate::tool::requires_approval(
+            never.as_ref(),
+            pig_protocol::ExecMode::ReadOnly.permissions()
+        ));
+        let (_default, default) = tool("on_request", false);
+        assert!(crate::tool::requires_approval(
+            default.as_ref(),
+            pig_protocol::ExecMode::ReadOnly.permissions()
+        ));
+        assert!(!crate::tool::requires_approval(
+            default.as_ref(),
+            pig_protocol::ExecMode::Auto.permissions()
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_late_result_after_a_timeout_is_settled_once_and_ignored() {
+        let (temp, toolset) = test_toolset_with_tools(TIMEOUT_TOOL);
+        let tool = toolset.tools().into_iter().next().expect("plugin tool");
+        let (events_tx, events_rx) = async_channel::unbounded();
+        toolset.dispatcher().set_event_sender(events_tx);
+        let state = crate::task::SessionToolState::for_test();
+        let cwd = temp.0.clone();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut tracker = crate::tool::ChangeTracker::default();
+            tool.execute(
+                serde_json::json!({}),
+                ToolContext {
+                    cwd: &cwd,
+                    tracker: &mut tracker,
+                    state: &task_state,
+                    fs_grant: None,
+                    sandbox_override: Default::default(),
+                    sandbox_profile: Default::default(),
+                    additional_permissions: Default::default(),
+                },
+            )
+            .await
+        });
+        let call = match events_rx.recv().await.expect("plugin call") {
+            Event::PluginToolCall { call } => call,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let error = match tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("tool result timeout")
+            .expect("tool task")
+        {
+            Ok(effect) => panic!("expected a timeout, got {}", effect.output),
+            Err(error) => error,
+        };
+        assert!(error.contains("[timeout]"), "{error}");
+        assert!(
+            toolset.dispatcher.pending.lock().unwrap().is_empty(),
+            "the call was settled"
+        );
+
+        // The backend answers after the fact: the dispatcher has no waiter and
+        // must drop it instead of reviving the call.
+        toolset.dispatcher().resolve(PluginToolResult {
+            request_id: call.request_id,
+            session_id: call.session_id,
+            package: call.package,
+            digest: call.digest,
+            result: Ok(serde_json::json!({"late": true})),
+        });
+        assert!(toolset.dispatcher.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_call_tells_the_host_to_cancel_it() {
+        let (temp, toolset) = test_toolset_with_tools(TIMEOUT_TOOL);
+        let tool = toolset.tools().into_iter().next().expect("plugin tool");
+        let (events_tx, events_rx) = async_channel::unbounded();
+        toolset.dispatcher().set_event_sender(events_tx);
+        let state = crate::task::SessionToolState::for_test();
+        let cwd = temp.0.clone();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut tracker = crate::tool::ChangeTracker::default();
+            let _ = tool
+                .execute(
+                    serde_json::json!({}),
+                    ToolContext {
+                        cwd: &cwd,
+                        tracker: &mut tracker,
+                        state: &task_state,
+                        fs_grant: None,
+                        sandbox_override: Default::default(),
+                        sandbox_profile: Default::default(),
+                        additional_permissions: Default::default(),
+                    },
+                )
+                .await;
+        });
+        let call = match events_rx.recv().await.expect("plugin call") {
+            Event::PluginToolCall { call } => call,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        task.abort();
+        let _ = task.await;
+        let cancel = tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv())
+            .await
+            .expect("cancel timeout")
+            .expect("cancel event");
+        assert!(
+            matches!(&cancel, Event::PluginToolCancel { request_id, .. } if request_id == &call.request_id),
+            "unexpected event: {cancel:?}"
+        );
+        assert!(toolset.dispatcher.pending.lock().unwrap().is_empty());
     }
 }

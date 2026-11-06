@@ -419,6 +419,7 @@ mod tests {
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
+            incompatible: None,
             backend: None,
             contributions: PluginContributions {
                 config: PluginConfigDeclaration {

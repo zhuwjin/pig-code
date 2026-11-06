@@ -48,6 +48,20 @@ pub const HOOK_EVENTS: [HookEvent; 7] = [
 ];
 
 impl HookEvent {
+    /// The contract event a package contributes to (the two closed sets are
+    /// the same seven names).
+    pub fn from_plugin(event: pig_protocol::PluginHookEvent) -> Self {
+        match event {
+            pig_protocol::PluginHookEvent::SessionStart => Self::SessionStart,
+            pig_protocol::PluginHookEvent::UserPromptSubmit => Self::UserPromptSubmit,
+            pig_protocol::PluginHookEvent::PreToolUse => Self::PreToolUse,
+            pig_protocol::PluginHookEvent::PermissionRequest => Self::PermissionRequest,
+            pig_protocol::PluginHookEvent::PostToolUse => Self::PostToolUse,
+            pig_protocol::PluginHookEvent::PostToolUseFailure => Self::PostToolUseFailure,
+            pig_protocol::PluginHookEvent::Stop => Self::Stop,
+        }
+    }
+
     /// Claude-form event name (payload's hook_event_name + UI display)
     pub fn name(self) -> &'static str {
         match self {
@@ -109,6 +123,10 @@ pub struct HookSet {
     pub project_count: usize,
     /// Whether project entries may run (trusted via the first-use dialog)
     project_trusted: bool,
+    /// The registry plugin entries were resolved from. Every run re-checks the
+    /// declaring package, so disabling, updating or uninstalling it revokes
+    /// the entry without rebuilding the session's hook set.
+    plugins: Option<crate::plugins::SharedPluginRegistry>,
 }
 
 impl HookSet {
@@ -125,6 +143,7 @@ impl HookSet {
             project_root: None,
             project_count: 0,
             project_trusted: false,
+            plugins: None,
         };
         for entries in &mut set.entries {
             for entry in entries.iter_mut() {
@@ -172,20 +191,86 @@ impl HookSet {
         set
     }
 
+    /// [`HookSet::load`] plus the enabled packages' hook contributions. They
+    /// run through the same runner as user and project entries; the manifest
+    /// must declare `provide_hooks`, and a project package is admitted only in
+    /// a trusted workspace (the same rule as its other contributions).
+    pub fn load_with_plugins(
+        cwd: &Path,
+        app_config: Option<&AppConfig>,
+        plugins: &crate::plugins::SharedPluginRegistry,
+        trust: &crate::config::WorkspaceTrust,
+    ) -> Self {
+        let mut set = Self::load(cwd, app_config);
+        set.plugins = Some(plugins.clone());
+        // The master switch gates package hooks too: nothing can force them on.
+        if !set.enabled {
+            return set;
+        }
+        let packages = plugins
+            .lock()
+            .map(|registry| crate::plugins::enabled_packages(&registry, trust))
+            .unwrap_or_else(|error| {
+                tracing::warn!(detail = %error, "plugin registry lock failed; plugin hooks are off");
+                Ok(Vec::new())
+            });
+        let packages = match packages {
+            Ok(packages) => packages,
+            Err(error) => {
+                tracing::warn!(detail = ?error, "plugin hooks could not be resolved");
+                return set;
+            }
+        };
+        for package in packages {
+            for hook in package.contributions.hooks {
+                if !valid_hook_entry(&hook.entry) {
+                    continue;
+                }
+                let mut entry = hook.entry;
+                entry.source = Some(HookSource::Plugin {
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                });
+                set.entries[HookEvent::from_plugin(hook.event).index()].push(entry);
+            }
+        }
+        set
+    }
+
     /// Fast path for the seven integration sites: false = zero hook work
     pub fn is_active(&self) -> bool {
         self.enabled && self.entries.iter().any(|entries| !entries.is_empty())
     }
 
     /// Entries of one event that may actually run right now: entry-level
-    /// enabled flag + project trust admission
+    /// enabled flag, project trust admission, and — for a package entry — the
+    /// declaring package still being enabled, current and declaring this hook.
     fn runnable(&self, event: HookEvent) -> Vec<&HookEntry> {
         self.entries[event.index()]
             .iter()
             .filter(|entry| {
-                entry.enabled && (entry.source != Some(HookSource::Project) || self.project_trusted)
+                entry.enabled
+                    && match &entry.source {
+                        Some(HookSource::Project) => self.project_trusted,
+                        Some(HookSource::Plugin { package, digest }) => {
+                            self.plugin_entry_active(package, digest, entry)
+                        }
+                        _ => true,
+                    }
             })
             .collect()
+    }
+
+    fn plugin_entry_active(&self, package: &str, digest: &str, entry: &HookEntry) -> bool {
+        let Some(plugins) = &self.plugins else {
+            return true;
+        };
+        let Ok(registry) = plugins.lock() else {
+            return false;
+        };
+        let mut declared = entry.clone();
+        declared.source = None;
+        registry.plugin_hook_active(package, digest, &declared)
     }
 
     /// Untrusted project hooks exist (and would run once trusted): the runner
@@ -333,7 +418,7 @@ fn user_entries(config: &HooksConfig, event: HookEvent) -> Vec<HookEntry> {
 
 /// A process hook has no shell, so a `shell` value there is a configuration
 /// error rather than a silently ignored field.
-fn valid_hook_entry(entry: &HookEntry) -> bool {
+pub(crate) fn valid_hook_entry(entry: &HookEntry) -> bool {
     if entry.kind == HookKind::Process && entry.shell != HookShell::Auto {
         tracing::warn!(
             command = %entry.command,
@@ -449,7 +534,7 @@ pub(crate) async fn run_event(
                         .status_message
                         .clone()
                         .unwrap_or_else(|| event.name().to_string());
-                    let source = entry.source;
+                    let source = entry.source.clone();
                     let duration_ms = started.elapsed().as_millis() as u64;
                     crate::session::emit_bg(&ctx.session_id, &ctx.tx, |session_id| {
                         Event::HookRunFinished {
@@ -507,7 +592,7 @@ pub(crate) async fn run_event(
                 .status_message
                 .clone()
                 .unwrap_or_else(|| event.name().to_string());
-            let source = entry.source;
+            let source = entry.source.clone();
             let duration_ms = started.elapsed().as_millis() as u64;
             let reason = effects.blocked.clone();
             crate::session::emit_bg(&run.session_id, &run.tx, |session_id| {
@@ -774,6 +859,103 @@ enabled = false
         let set = HookSet::load(&dir, Some(&config));
         assert!(!set.is_active());
         assert!(set.pending_project().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugin_hooks_join_after_user_entries_and_are_revoked_with_the_package() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-hooks-plugin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = dir.join("plugin");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "1.0.0",
+              "build": 1,
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "actions": ["provide_hooks"],
+                "hooks": [{
+                  "event": "pre_tool_use",
+                  "command": "plugin-guard.sh",
+                  "matcher": "Write|Edit"
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+        let data = dir.join("data");
+        let plugins = crate::plugins::PluginRegistry::shared(data);
+        let snapshot = plugins
+            .lock()
+            .unwrap()
+            .sync(vec![pig_protocol::PluginPackageSource {
+                root: package,
+                source: pig_protocol::PluginSource::User,
+            }]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        let digest = snapshot.packages[0].digest.clone();
+        plugins
+            .lock()
+            .unwrap()
+            .set_enabled("demo", &digest, true)
+            .unwrap();
+
+        let mut config = AppConfig {
+            providers: vec![],
+            default_provider: "x".into(),
+            default_model: "y".into(),
+            ..Default::default()
+        };
+        config.hooks.enabled = true;
+        config.hooks.pre_tool_use = vec![entry("user-a")];
+        let trust = crate::config::WorkspaceTrust::untrusted(&dir);
+        let set = HookSet::load_with_plugins(&dir, Some(&config), &plugins, &trust);
+        let runnable = set.runnable(HookEvent::PreToolUse);
+        assert_eq!(
+            runnable
+                .iter()
+                .map(|entry| entry.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-a", "plugin-guard.sh"],
+            "package entries run after user entries"
+        );
+        assert!(matches!(
+            runnable[1].source,
+            Some(HookSource::Plugin { .. })
+        ));
+
+        // Disabling the package revokes its hook without rebuilding the set.
+        plugins
+            .lock()
+            .unwrap()
+            .set_enabled("demo", &digest, false)
+            .unwrap();
+        assert_eq!(set.runnable(HookEvent::PreToolUse).len(), 1);
+        plugins
+            .lock()
+            .unwrap()
+            .set_enabled("demo", &digest, true)
+            .unwrap();
+        assert_eq!(set.runnable(HookEvent::PreToolUse).len(), 2);
+
+        // The global switch still gates package hooks.
+        config.hooks.enabled = false;
+        let off = HookSet::load_with_plugins(&dir, Some(&config), &plugins, &trust);
+        assert!(!off.is_active());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -59,6 +59,8 @@ pub enum PluginMessageKind {
     ToolsSelect,
     #[serde(rename = "tools.result")]
     ToolsResult,
+    #[serde(rename = "tools.cancel")]
+    ToolsCancel,
     #[serde(rename = "log.event")]
     LogEvent,
     #[serde(rename = "host.action")]
@@ -184,6 +186,12 @@ pub enum PluginErrorCode {
     PermissionDenied,
     InvalidContribution,
     InvalidOperation,
+    /// Tool arguments do not satisfy the declared input JSON Schema.
+    InvalidInput,
+    /// A tool result does not satisfy the declared output JSON Schema.
+    InvalidOutput,
+    /// A tool's concurrency limit is reached or the same call is in flight.
+    Busy,
     ProtectedTarget,
     QuotaExceeded,
     Timeout,
@@ -192,6 +200,35 @@ pub enum PluginErrorCode {
     NotFound,
     Transport,
     Internal,
+}
+
+impl PluginErrorCode {
+    /// Stable wire name (the same string serde writes).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedProtocol => "unsupported_protocol",
+            Self::UnsupportedCapability => "unsupported_capability",
+            Self::InvalidEnvelope => "invalid_envelope",
+            Self::StaleSequence => "stale_sequence",
+            Self::StaleEpoch => "stale_epoch",
+            Self::StaleGeneration => "stale_generation",
+            Self::StaleRevision => "stale_revision",
+            Self::PermissionDenied => "permission_denied",
+            Self::InvalidContribution => "invalid_contribution",
+            Self::InvalidOperation => "invalid_operation",
+            Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
+            Self::Busy => "busy",
+            Self::ProtectedTarget => "protected_target",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::NotActive => "not_active",
+            Self::NotFound => "not_found",
+            Self::Transport => "transport",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

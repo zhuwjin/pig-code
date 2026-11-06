@@ -623,7 +623,7 @@ pub struct MemoryConfig {
 /// event is the TOML array key it lives under (`[[hooks.pre_tool_use]]`).
 /// Field order matters for TOML serialization: the `custom` table must stay
 /// last (values before tables).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HookEntry {
     /// Command kind: a shell command string (default), or `command` is the
     /// program name run directly as argv with `args` (no shell interpretation)
@@ -737,13 +737,16 @@ impl HookShell {
 }
 
 /// Where a hook entry was declared (runtime annotation on HookEntry)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookSource {
     /// ~/.pigcodets/config.toml
     User,
     /// .pigcode/hooks.toml (gated by the workspace trust dialog)
     Project,
+    /// An enabled package's contribution. The identity is re-checked on every
+    /// run, so disabling, updating or uninstalling the package revokes it.
+    Plugin { package: String, digest: String },
 }
 
 /// Lifecycle hooks configuration (Claude Code-compatible stdin/exit-code

@@ -80,7 +80,12 @@ impl Session {
         let config = runtime.as_deref().map(|runtime| runtime.config());
         self.permission_rules =
             super::initialization::load_permissions(&self.cwd, &self.data_dir, &trust);
-        self.hooks = crate::hooks::HookSet::load(&self.cwd, config);
+        self.hooks = crate::hooks::HookSet::load_with_plugins(
+            &self.cwd,
+            config,
+            &self.plugin_tools.registry(),
+            &trust,
+        );
         self.plugin_tools.reload(&trust, config.cloned());
         self.trust = trust;
         self.skills_prompt = crate::plugins::skills_section_with_trust(
