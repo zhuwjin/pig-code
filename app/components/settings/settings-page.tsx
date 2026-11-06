@@ -6,7 +6,7 @@ import { ModelSettings } from "./model-settings";
 import { PluginMarketplace } from "./marketplace";
 import { ThemePicker } from "../../theme-picker";
 import { pluginPages } from "../../plugins/ui-coordinator";
-import { PluginPageView, pluginPageKey } from "../../plugins/pages";
+import { PluginPageHost, pluginPageKey } from "../../plugins/pages";
 
 export type SettingsPageId = string;
 
@@ -48,9 +48,11 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
   ).find((entry) => pluginPageKey(entry) === props.page);
   return (
     <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 bg-background")}>
-      <If when={pluginPage()}>
-        {(entry) => <PluginPageView {...props} entry={entry()} />}
-      </If>
+      <PluginPageHost
+        {...props}
+        kind="settings"
+        active={pluginPage() ? pluginPageKey(pluginPage()!) : null}
+      />
       <If when={!pluginPage()}>
         <View class="min-w-0 flex-1">
           <If when={props.page === "models"}><ModelSettings {...props} /></If>

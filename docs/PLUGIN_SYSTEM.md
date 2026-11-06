@@ -1,6 +1,6 @@
 # Plugin system
 
-Pig Code installs signed NSH packages without rebuilding or restarting the app. The plugin API deliberately exposes product capabilities rather than a general host UI tree.
+Pig Code installs signed NSH packages without rebuilding or restarting the app. Declarative contributions expose product capabilities rather than a general host UI tree. An installed package can additionally export trusted TSX components for its own pages and overlays.
 
 ## Package model
 
@@ -14,6 +14,7 @@ A package manifest contains its identity, capabilities and contributions. Entry 
   "version": "1.0.0",
   "build": 1,
   "uiEntry": "App.tsx",
+  "componentEntry": "component.tsx",
   "backend": "backend.ts",
   "minHostVersion": "1.0.0",
   "protocols": {"ui": 1, "services": 1},
@@ -24,12 +25,13 @@ A package manifest contains its identity, capabilities and contributions. Entry 
 }
 ```
 
-- `uiEntry` is the signed TSX module used by pages and overlay Surfaces.
-- `backend` is an optional nonvisual module for tools, commands, subscriptions and declarative control state.
-- A package with only declarative resources needs neither entry and does not create an Engine.
+- `uiEntry` is the signed TSX module used by legacy nested-AppView Surfaces.
+- `componentEntry` is an optional TSX module exporting components for pages and overlays. Installing its signed package makes these components trusted host code; this mode does not provide a permission sandbox.
+- `backend` is an optional nonvisual module for tools, commands, subscriptions and declarative control state. It keeps its independent Engine and existing permissions when the UI uses host components.
+- A package with only declarative resources needs none of these entries and does not create an Engine.
 - Pages and overlay content do not require a backend. Interactive buttons, toggles, selects and menus, tools and commands do.
 
-`examples/publish-plugin.rs` compiles the two entries independently. The UI bundle is the package's main bundle; the backend is signed as `.pig-backend.nshc`. Loading either one uses the verified package identity, runtime bytecode version and capabilities.
+`examples/publish-plugin.rs` compiles the three entries independently. The legacy UI bundle is the package's main bundle; the backend is signed as `.pig-backend.nshc`. The component's bundled JavaScript and source map are signed as `.pig-component.js` and `.pig-component.js.map`. The loader verifies the package before importing a component chunk under its digest-derived ID. All exports of one package share that module and the host's registered native UI modules.
 
 ## UI capabilities
 
@@ -90,11 +92,13 @@ A page declaration has a stable ID, localized title, icon, order and a `kind` of
 }
 ```
 
-The host contributes navigation and mounts the selected page in the corresponding content area. A settings Surface is never inserted into the settings sidebar itself. Workspace pages replace the visible content selection, not the host's existing components.
+The host contributes navigation and mounts the selected page in the corresponding content area. A settings plugin page is never inserted into the settings sidebar itself. Workspace pages replace the visible content selection, not the host's existing components.
+
+Once visited, a page retains its selected content while the user navigates elsewhere. Only the selected page participates in layout and accessibility; hidden pages use `display: none`. Legacy pages also hide their native child view without reloading the signed package. Session changes remount the page with its new context, and disabling, updating or uninstalling its package still releases the retained page.
 
 ### Popovers and dialogs
 
-Popover and dialog contributions use the same slot state for their trigger and declare a Surface component and optional dimensions:
+Popover and dialog contributions use the same slot state for their trigger and declare a component export and optional dimensions:
 
 ```json
 {
@@ -108,15 +112,23 @@ Popover and dialog contributions use the same slot state for their trigger and d
 }
 ```
 
-The host owns the trigger, open state, positioning, outside presses, Escape and focus restoration. It mounts the Surface when the overlay opens and destroys it when the overlay closes. The Surface can call `overlay.close` through the Host API. When keyboard focus is inside the nested AppView, the Surface forwards Escape through that call; `examples/moon-plugin` demonstrates this with `keymap.bind`.
+The host owns the trigger, open state, positioning, outside presses, Escape and focus restoration. It mounts the selected content when the overlay opens and destroys it when the overlay closes. A legacy Surface can call `overlay.close` through the Host API. Host-rendered components participate in the host overlay directly and do not need to forward Escape from a child window.
 
-## Surface implementation
+## UI rendering implementations
 
-A Surface is one plugin TSX module running in one nested NSH `AppView`, with its own Engine and HostChannel. It is used only for pages and custom overlay content.
+### Trusted host components
 
-Pig's host is itself an NSH TSX app, so the platform `AppView` is attached through one generic host-owned Native Component named `pig.pluginSurface`. Plugin packages do not declare or implement native components. The application crate registers the component with `#[native_components(macos)]` and `#[native_components(windows)]`; both platforms share loading, storage, Host API and lifecycle code.
+With `componentEntry`, `pig.pluginComponent` verifies the installed package off the UI thread and delivers its JavaScript Chunk to the current Engine. The TSX bridge imports that Chunk and calls the export named by the page or overlay contribution as a normal host component. The native bridge does not create another Engine or a plugin HWND; macOS and Linux use empty native views only to satisfy their component interfaces. Host Dialog and Popover stacking, focus and styling apply to plugin content.
 
-The host synchronizes theme tokens, appearance and locale. Surface loading and signature verification happen off the UI thread. The AppView is loaded only on the platform UI path. Pages fill their allocated content area; overlays use the dimensions declared by the contribution.
+The Chunk ID includes the verified package digest. Reopening a page or rendering a second export imports the same module rather than evaluating it again. The component source is bundled at publication and compiled by the Engine under that Chunk ID, rather than being packaged as an entry module named `bundle.js`. Unmounting releases the rendered UI and its registration; evaluated ES modules remain cached for the host Engine's lifetime and are not claimed to be individually unloaded.
+
+The bridge is implemented for Windows, macOS and Linux, with the local NSH fork and per-platform verification status recorded in `docs/NSH_UPSTREAM_PENDING.md`. The component Host API is not connected yet: session/storage/navigation calls must still use the independent backend or the legacy Surface. The Moon `component.tsx` is therefore a static rendering example, not a completed migration of every Host API.
+
+### Legacy nested Surfaces
+
+A package without `componentEntry` keeps the existing nested-AppView Surface, with its own Engine and HostChannel. The generic host-owned Native Component `pig.pluginSurface` attaches that AppView; plugin packages do not declare or implement native components. Both Windows and macOS retain this fallback.
+
+For legacy Surfaces, the host synchronizes theme tokens, appearance and locale before creating the first native view. Loading and signature verification happen off the UI thread. Pages fill their allocated content area; overlays use the dimensions declared by the contribution.
 
 ## Backend protocol
 
@@ -134,7 +146,7 @@ A UI event contains the contribution ID, a unique event ID, `invoke` or `change`
 
 ## Host API
 
-Each mounted Surface receives an opaque Surface ID and a revision in `host.params.plugin`. Calls to `pig.host` carry the instance, Surface, contribution, revision and request ID. The manager checks them against the mounted descriptor before executing an operation.
+Each mounted legacy Surface receives an opaque Surface ID and a revision in `host.params.plugin`. Calls to `pig.host` carry the instance, Surface, contribution, revision and request ID. The manager checks them against the mounted descriptor before executing an operation. Host-rendered components do not receive this plugin channel yet; they must not be described as having completed the Host API migration.
 
 The current Host API provides:
 
@@ -167,7 +179,7 @@ The following are intentionally absent:
 
 ## Development and verification
 
-`examples/moon-plugin` demonstrates a backend tool, a declarative metric and Composer action, a Surface popover, workspace and settings pages, themes, a Skill and configuration.
+`examples/moon-plugin` demonstrates a backend tool, a declarative metric and Composer action, a host-component popover, workspace and settings pages, themes, a Skill and configuration. `App.tsx` retains the legacy Surface implementation; `component.tsx` contains the host-rendered counterparts.
 
 ```sh
 nsh check && nsh test

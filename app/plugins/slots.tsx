@@ -1,4 +1,4 @@
-import { computed, Text, token, View, type JSX } from "nsh";
+import { colorScheme, computed, Text, token, View, type JSX } from "nsh";
 import { Button, Dialog, Popover } from "nsh/base";
 import { appLocale } from "../i18n";
 import type {
@@ -179,10 +179,13 @@ function ControlContent(props: ControlProps): JSX.Element {
       instance={entry.instance}
       contribution={contribution.id}
       revision={revision()}
-      context={context()}
+      sessionId={context().sessionId}
+      turnId={context().turnId}
       theme={props.themeStore.serialized()}
       locale={appLocale()}
-      appearance={props.themeStore.mode()}
+      appearance={colorScheme()}
+      mode={entry.pkg.component_entry ? "component" : "surface"}
+      exportName={contribution.surface}
       testID={`plugin-surface-${entry.pkg.id}-${contribution.id}`}
       width={contribution.width ?? 320}
       height={contribution.height ?? 240}

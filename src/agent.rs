@@ -272,7 +272,22 @@ default_reasoning_level = "low"
         self.plugins.set_locale(&locale);
     }
 
-    /// Allocates an isolated Surface and its versioned Host API binding.
+    /// Sets the appearance before a nested Surface creates its first window.
+    pub fn set_plugin_appearance(&self, appearance: String) {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let appearance = match appearance.as_str() {
+                "light" => nsh_core::platform::Appearance::Light,
+                "dark" => nsh_core::platform::Appearance::Dark,
+                _ => nsh_core::platform::Appearance::System,
+            };
+            crate::plugin_system::surface::set_host_appearance(appearance);
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = appearance;
+    }
+
+    /// Allocates a plugin content registration and its versioned host descriptor.
     pub fn mount_plugin_surface(
         &self,
         instance: String,

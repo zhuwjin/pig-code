@@ -2,8 +2,28 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+static HOST_APPEARANCE: AtomicU8 = AtomicU8::new(0);
+
+pub(crate) fn set_host_appearance(appearance: Appearance) {
+    let value = match appearance {
+        Appearance::Light => 1,
+        Appearance::Dark => 2,
+        Appearance::System => 0,
+    };
+    HOST_APPEARANCE.store(value, Ordering::Release);
+}
+
+fn host_appearance() -> Appearance {
+    match HOST_APPEARANCE.load(Ordering::Acquire) {
+        1 => Appearance::Light,
+        2 => Appearance::Dark,
+        _ => Appearance::System,
+    }
+}
 
 use nsh_core::{
     platform::{Appearance, Locale},
@@ -106,6 +126,8 @@ struct PluginSurface {
     results: Arc<Mutex<Vec<LoadResult>>>,
     environment: RefCell<Option<Appearance>>,
     applied_size: RefCell<Option<(f32, f32)>>,
+    #[cfg(windows)]
+    container: Option<platform::windows::Win32::Foundation::HWND>,
 }
 
 impl PluginSurface {
@@ -120,12 +142,18 @@ impl PluginSurface {
         let options = AppOptions {
             app_id: "com.example.pigcodets".into(),
             title: "Pig Code plugin".into(),
+            appearance: host_appearance(),
             storage: Some(storage.clone()),
             limits,
             ..AppOptions::default()
         };
         #[cfg(windows)]
-        let view = AppView::new(None, options).ok();
+        let container = container::create().ok();
+        #[cfg(windows)]
+        let view = container.and_then(|parent| {
+            let view = AppView::new(Some(parent), options).ok()?;
+            container::attach(parent, view.hwnd()).then_some(view)
+        });
         #[cfg(target_os = "macos")]
         let view = platform::objc2::MainThreadMarker::new().map(|mtm| AppView::new(mtm, options));
         Self {
@@ -138,6 +166,8 @@ impl PluginSurface {
             results: Arc::new(Mutex::new(Vec::new())),
             environment: RefCell::new(None),
             applied_size: RefCell::new(None),
+            #[cfg(windows)]
+            container,
         }
     }
 
@@ -235,9 +265,6 @@ impl PluginSurface {
             return;
         }
         *self.requested.borrow_mut() = Some(signature.clone());
-        if let Some(view) = self.view.borrow().as_ref() {
-            view.stop();
-        }
         let root = descriptor.package_root;
         let package = installed_package_path(&root);
         let trust = package_trust_root(&root);
@@ -305,6 +332,10 @@ impl PluginSurface {
     }
 
     fn release(&self) {
+        #[cfg(windows)]
+        if let Some(container) = self.container {
+            container::reset(container);
+        }
         if let Some(mount) = self.mount.borrow_mut().take() {
             mount.manager.unmount_surface(&mount.descriptor.surface);
         }
@@ -329,7 +360,7 @@ impl NativeComponent for PluginSurface {
 
     #[cfg(windows)]
     fn window(&self) -> Option<platform::windows::Win32::Foundation::HWND> {
-        self.view.borrow().as_ref().map(|view| view.hwnd())
+        self.container
     }
 
     #[cfg(target_os = "macos")]
@@ -398,28 +429,133 @@ impl Drop for PluginSurface {
         if let Some(view) = self.view.borrow_mut().take() {
             view.stop();
         }
+        #[cfg(windows)]
+        if let Some(container) = self.container {
+            unsafe { container::destroy(container) };
+        }
     }
 }
 
-fn package_data_dir(root: &Path) -> Option<PathBuf> {
-    root.parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-}
+pub(super) use super::loader::{package_data_dir, package_trust_root};
 
-fn package_trust_root(root: &Path) -> PathBuf {
-    let packaged = root.join(".pig-root.pub");
-    if packaged.is_file() {
-        return packaged;
+#[cfg(windows)]
+mod container {
+    use super::platform;
+    use platform::windows::{
+        Win32::{
+            Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+            UI::{
+                Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+                WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, MoveWindow,
+                    SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW, ShowWindow, WM_APP,
+                    WM_NCDESTROY, WM_PAINT, WM_SIZE, WM_WINDOWPOSCHANGED, WS_CLIPSIBLINGS,
+                    WS_POPUP,
+                },
+            },
+        },
+        core::w,
+    };
+
+    const NSH_WAKE: u32 = WM_APP + 1;
+    const READY: isize = 2;
+
+    pub fn create() -> platform::windows::core::Result<HWND> {
+        unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_CLIPSIBLINGS,
+                -10000,
+                -10000,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
     }
-    root.parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .map(|path| path.join("plugin-root.pub"))
-        .unwrap_or(packaged)
+
+    pub fn attach(parent: HWND, child: HWND) -> bool {
+        unsafe {
+            SetWindowSubclass(parent, Some(resize), parent.0 as usize, child.0 as usize).as_bool()
+                && SetWindowSubclass(child, Some(content), child.0 as usize, parent.0 as usize)
+                    .as_bool()
+        }
+    }
+
+    pub fn reset(parent: HWND) {
+        unsafe {
+            SetWindowLongPtrW(parent, GWLP_USERDATA, 0);
+            let _ = ShowWindow(parent, SW_HIDE);
+        }
+    }
+
+    pub unsafe fn destroy(parent: HWND) {
+        unsafe {
+            let _ = DestroyWindow(parent);
+        }
+    }
+
+    fn state(parent: HWND) -> isize {
+        unsafe { GetWindowLongPtrW(parent, GWLP_USERDATA) }
+    }
+
+    unsafe extern "system" fn resize(
+        parent: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        id: usize,
+        child: usize,
+    ) -> LRESULT {
+        unsafe {
+            if message == WM_WINDOWPOSCHANGED && state(parent) != READY {
+                let _ = ShowWindow(parent, SW_HIDE);
+            } else if message == WM_SIZE {
+                let width = lparam.0 as u32 & 0xffff;
+                let height = (lparam.0 as u32 >> 16) & 0xffff;
+                let _ = MoveWindow(
+                    HWND(child as *mut std::ffi::c_void),
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    true,
+                );
+            } else if message == WM_NCDESTROY {
+                let _ = RemoveWindowSubclass(parent, Some(resize), id);
+            }
+            DefSubclassProc(parent, message, wparam, lparam)
+        }
+    }
+
+    unsafe extern "system" fn content(
+        child: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        id: usize,
+        parent: usize,
+    ) -> LRESULT {
+        let parent = HWND(parent as *mut std::ffi::c_void);
+        let result = unsafe { DefSubclassProc(child, message, wparam, lparam) };
+        unsafe {
+            if message == NSH_WAKE && state(parent) == 0 {
+                SetWindowLongPtrW(parent, GWLP_USERDATA, 1);
+                let _ = SendMessageW(child, WM_PAINT, Some(WPARAM(0)), Some(LPARAM(0)));
+            } else if message == WM_PAINT && state(parent) == 1 {
+                SetWindowLongPtrW(parent, GWLP_USERDATA, READY);
+                let _ = ShowWindow(parent, SW_SHOW);
+            } else if message == WM_NCDESTROY {
+                let _ = RemoveWindowSubclass(child, Some(content), id);
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]

@@ -214,6 +214,7 @@ impl PluginRegistry {
         let name = package_manifest.name.fallback();
         let version = package_manifest.version;
         let ui_entry = package_manifest.ui_entry;
+        let component_entry = package_manifest.component_entry;
         let backend = package_manifest.backend;
         let contributions = package_manifest.contributions;
         let capabilities = package_manifest.capabilities;
@@ -268,6 +269,7 @@ impl PluginRegistry {
             source: source.source.clone(),
             enabled: false,
             ui_entry,
+            component_entry,
             backend,
             contributions,
             capabilities,

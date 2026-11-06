@@ -1,4 +1,4 @@
-import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, reduceMotion, signal, untracked } from "nsh";
+import { Animated, Easing, Image, LayoutAnimation, View, colorScheme, createAnimatedValue, effect, keymap, mount, reduceMotion, signal, untracked } from "nsh";
 import type { JSX, Signal } from "nsh";
 import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { Window } from "nsh/desktop";
@@ -131,6 +131,7 @@ function App(props: UiContext) {
   const terminalAnimating = signal(false);
   const terminalStarted = signal(false);
   const settingsVisible = signal(false);
+  const settingsStarted = signal(false);
   const settingsPage = signal<SettingsPageId>("models");
   const searchVisible = signal(false);
   const panelsAnimating = () => sidebarAnimating() || rightAnimating();
@@ -156,7 +157,12 @@ function App(props: UiContext) {
     store.agent.setPluginLocale(appLocale());
   });
   effect(() => {
-    if (settingsVisible()) store.pluginOverlay.set(null);
+    store.agent.setPluginAppearance(colorScheme());
+  });
+  effect(() => {
+    if (!settingsVisible()) return;
+    settingsStarted.set(true);
+    store.pluginOverlay.set(null);
   });
   effect(() => {
     const target = store.pluginNavigation();
@@ -271,12 +277,22 @@ function App(props: UiContext) {
               >
                 <ResizablePanel minSize={160}>
                   <View class="min-h-0 flex-1">
-                    <If when={!settingsVisible()}><Workspace {...props} /></If>
-                    <If when={settingsVisible()}>
-                      <SettingsPage
-                        {...props}
-                        page={settingsPage()}
-                      />
+                    <View
+                      class={settingsVisible() ? "hidden" : "min-h-0 min-w-0 flex-1"}
+                      importantForAccessibility={settingsVisible() ? "no-hide-descendants" : "yes"}
+                    >
+                      <Workspace {...props} />
+                    </View>
+                    <If when={settingsStarted()}>
+                      <View
+                        class={settingsVisible() ? "min-h-0 min-w-0 flex-1" : "hidden"}
+                        importantForAccessibility={settingsVisible() ? "yes" : "no-hide-descendants"}
+                      >
+                        <SettingsPage
+                          {...props}
+                          page={settingsPage()}
+                        />
+                      </View>
                     </If>
                   </View>
                 </ResizablePanel>

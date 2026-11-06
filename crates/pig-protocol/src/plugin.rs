@@ -419,6 +419,8 @@ pub struct PluginPackageInfo {
     #[serde(default)]
     pub ui_entry: Option<String>,
     #[serde(default)]
+    pub component_entry: Option<String>,
+    #[serde(default)]
     pub backend: Option<String>,
     #[serde(default)]
     pub contributions: PluginContributions,
@@ -429,6 +431,8 @@ pub struct PluginPackageInfo {
 pub const PLUGIN_MANIFEST_FILE: &str = "pig-plugin.json";
 pub const PLUGIN_BACKEND_BUNDLE_FILE: &str = ".pig-backend.nshc";
 pub const PLUGIN_BACKEND_VERSION_FILE: &str = ".pig-backend-version";
+pub const PLUGIN_COMPONENT_BUNDLE_FILE: &str = ".pig-component.js";
+pub const PLUGIN_COMPONENT_SOURCE_MAP_FILE: &str = ".pig-component.js.map";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -441,6 +445,8 @@ pub struct PluginManifest {
     pub build: u64,
     #[serde(default)]
     pub ui_entry: Option<String>,
+    #[serde(default)]
+    pub component_entry: Option<String>,
     #[serde(default)]
     pub backend: Option<String>,
     pub min_host_version: String,

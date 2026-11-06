@@ -9,9 +9,9 @@ members = ["crates/*"]
 resolver = "2"
 
 [dependencies]
-nsh-core = "0.4.0"
-nsh-base = "0.4.0"
-nsh-engine = "0.4.0"
+nsh-core = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042" }
+nsh-base = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042" }
+nsh-engine = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042" }
 pig-core = { path = "crates/pig-core" }
 pig-protocol = { path = "crates/pig-protocol" }
 pig-provider = { path = "crates/pig-provider" }
@@ -25,10 +25,14 @@ async-channel = "2"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
-nsh-platform-windows = { version = "0.4.0", default-features = false }
+nsh-platform-windows = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nsh-platform-macos = { version = "0.4.0", default-features = false }
+nsh-platform-macos = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042", default-features = false }
 
 [dev-dependencies]
-nsh-testing = { version = "0.4.0", features = ["bundle"] }
+nsh-testing = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042", features = ["bundle"] }
+nsh-bundler = { git = "https://github.com/zhuwjin/nsh", rev = "c4bce5bc29d2e79e70428e33c13cc1409bb58042" }

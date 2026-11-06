@@ -5,6 +5,7 @@ use pig_protocol::{InstalledPluginMetadata, PluginManifest, PluginPackageSource,
 
 pub struct VerifiedPlugin {
     pub bundle: nsh_engine::Bundle,
+    pub component: Option<nsh_engine::Chunk>,
     pub backend: Option<nsh_engine::Bundle>,
     pub assets: PathBuf,
     pub manifest: PluginManifest,
@@ -95,8 +96,31 @@ pub fn load_verified(
             Ok::<nsh_engine::Bundle, String>(bundle)
         })
         .transpose()?;
+    let component = manifest
+        .component_entry
+        .as_ref()
+        .map(|_| {
+            let code = std::fs::read_to_string(
+                package
+                    .assets
+                    .join(pig_protocol::PLUGIN_COMPONENT_BUNDLE_FILE),
+            )
+            .map_err(|error| format!("read signed plugin component: {error}"))?;
+            let source_map = std::fs::read_to_string(
+                package
+                    .assets
+                    .join(pig_protocol::PLUGIN_COMPONENT_SOURCE_MAP_FILE),
+            )
+            .map_err(|error| format!("read signed plugin component source map: {error}"))?;
+            Ok::<nsh_engine::Chunk, String>(
+                nsh_engine::Chunk::source(format!("pig-component-{digest}.js"), code)
+                    .with_source_map(source_map),
+            )
+        })
+        .transpose()?;
     Ok(VerifiedPlugin {
         bundle: package.bundle,
+        component,
         backend,
         assets: package.assets,
         manifest,
@@ -142,6 +166,27 @@ pub fn installed_package_path(assets: &Path) -> PathBuf {
     assets.join(".pig-package.nshpkg")
 }
 
+pub(super) fn package_data_dir(root: &Path) -> Option<PathBuf> {
+    root.parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+pub(super) fn package_trust_root(root: &Path) -> PathBuf {
+    let packaged = root.join(".pig-root.pub");
+    if packaged.is_file() {
+        return packaged;
+    }
+    root.parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|path| path.join("plugin-root.pub"))
+        .unwrap_or(packaged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +227,17 @@ mod tests {
             nsh_engine::BundleCode::Bytecode(bytes) => bytes,
             nsh_engine::BundleCode::Source(_) => panic!("backend bytecode is required"),
         };
+        let component = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
+            entry: "examples/moon-plugin/component.tsx".into(),
+            minify: false,
+            split: false,
+            ui_sets: nsh_base::registry()
+                .sets()
+                .into_iter()
+                .map(nsh_core::element::description::SetDescription::from)
+                .collect(),
+        })
+        .expect("compile moon component");
         let manifest_source = std::fs::read_to_string("examples/moon-plugin/pig-plugin.json")
             .expect("read moon manifest");
         let manifest: PluginManifest =
@@ -207,6 +263,17 @@ mod tests {
                 (
                     pig_protocol::PLUGIN_BACKEND_VERSION_FILE.into(),
                     nsh_engine::BYTECODE_VERSION.as_bytes().to_vec(),
+                ),
+                (
+                    pig_protocol::PLUGIN_COMPONENT_BUNDLE_FILE.into(),
+                    component.code.into_bytes(),
+                ),
+                (
+                    pig_protocol::PLUGIN_COMPONENT_SOURCE_MAP_FILE.into(),
+                    component
+                        .source_map
+                        .expect("component source map")
+                        .into_bytes(),
                 ),
                 (
                     pig_protocol::PLUGIN_MANIFEST_FILE.into(),
@@ -244,6 +311,7 @@ mod tests {
         assert_eq!(loaded.manifest.contributions.ui.len(), 3);
         assert_eq!(loaded.manifest.contributions.pages.len(), 2);
         assert!(loaded.backend.is_some());
+        assert!(loaded.component.is_some());
         let mut registry = pig_core::plugins::PluginRegistry::new(directory.join("registry"));
         let inspected = registry.sync(vec![PluginPackageSource {
             root: loaded.assets.clone(),

@@ -91,6 +91,7 @@ fn fixture() -> Fixture {
         source: PluginSource::User,
         enabled: true,
         ui_entry: Some("App.tsx".into()),
+        component_entry: None,
         backend: None,
         contributions: PluginContributions {
             ui: vec![ui],

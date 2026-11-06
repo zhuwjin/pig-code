@@ -5,7 +5,7 @@ import { EmptyWorkspace } from "./hero";
 import { MessageList } from "./messages";
 import { StatusBar } from "./status-bar";
 import { pluginPages } from "../plugins/ui-coordinator";
-import { PluginPageView } from "../plugins/pages";
+import { PluginPageHost, pluginPageKey } from "../plugins/pages";
 
 export function Workspace(props: UiContext) {
   const { store } = props;
@@ -32,9 +32,11 @@ export function Workspace(props: UiContext) {
   });
   return (
     <View class="relative min-h-0 min-w-0 flex-1 bg-background">
-      <If when={pluginPage()}>
-        {(entry) => <PluginPageView {...props} entry={entry()} />}
-      </If>
+      <PluginPageHost
+        {...props}
+        kind="workspace"
+        active={pluginPage() ? pluginPageKey(pluginPage()!) : null}
+      />
       <If when={!pluginPage()}>
         <If when={error()}>
           <View class="mx-auto mt-3 max-w-3xl rounded-(--radius) bg-destructive/10 px-3 py-2">

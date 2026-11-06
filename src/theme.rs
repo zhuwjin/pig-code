@@ -66,6 +66,7 @@ mod tests {
             source: PluginSource::User,
             enabled: true,
             ui_entry: manifest.ui_entry,
+            component_entry: manifest.component_entry,
             backend: manifest.backend,
             contributions: manifest.contributions,
             capabilities: manifest.capabilities,

@@ -2081,6 +2081,7 @@ mod tests {
             source: PluginSource::User,
             enabled: true,
             ui_entry: None,
+            component_entry: None,
             backend: None,
             contributions: PluginContributions::default(),
             capabilities: Vec::new(),

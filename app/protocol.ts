@@ -522,7 +522,8 @@ export interface PluginPackageInfo {
   root: string;
   source: "built_in" | "user" | { project: { workspace: string } };
   enabled: boolean;
-  uiEntry?: string | null;
+  ui_entry?: string | null;
+  component_entry?: string | null;
   backend?: string | null;
   capabilities: PluginCapabilityRequest[];
   contributions: {

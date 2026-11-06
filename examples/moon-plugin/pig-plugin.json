@@ -5,9 +5,10 @@
     "zh-CN": "月亮界面",
     "en": "Moon UI"
   },
-  "version": "1.0.0",
-  "build": 1,
+  "version": "1.1.0",
+  "build": 2,
   "uiEntry": "App.tsx",
+  "componentEntry": "component.tsx",
   "backend": "backend.ts",
   "minHostVersion": "1.0.0",
   "protocols": {

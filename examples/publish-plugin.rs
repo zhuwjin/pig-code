@@ -193,6 +193,29 @@ fn run() -> Result<(), String> {
             nsh_engine::BYTECODE_VERSION.as_bytes().to_vec(),
         ));
     }
+    if let Some(entry) = &manifest.component_entry {
+        let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
+            entry: root.join(entry),
+            minify: true,
+            split: false,
+            ui_sets: nsh_base::registry()
+                .sets()
+                .into_iter()
+                .map(nsh_core::element::description::SetDescription::from)
+                .collect(),
+        })
+        .map_err(|error| error.to_string())?;
+        assets.push((
+            pig_protocol::PLUGIN_COMPONENT_BUNDLE_FILE.into(),
+            bundle.code.into_bytes(),
+        ));
+        if let Some(map) = bundle.source_map {
+            assets.push((
+                pig_protocol::PLUGIN_COMPONENT_SOURCE_MAP_FILE.into(),
+                map.into_bytes(),
+            ));
+        }
+    }
     let key = SecretKey::from_base64(
         &std::fs::read_to_string(&args.key)
             .map_err(|error| format!("read release key {}: {error}", args.key.display()))?,

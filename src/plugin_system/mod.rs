@@ -1,3 +1,5 @@
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+pub(crate) mod component;
 pub(crate) mod host_api;
 mod loader;
 mod manager;

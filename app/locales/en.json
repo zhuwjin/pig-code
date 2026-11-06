@@ -376,7 +376,8 @@
   "plugins": {
     "surface": {
       "loading": "Loading plugin",
-      "unsupported": "Plugin surfaces are not available on this platform"
+      "unsupported": "Plugin surfaces are not available on this platform",
+      "component_unavailable": "Plugin component unavailable"
     }
   },
   "conversation": {

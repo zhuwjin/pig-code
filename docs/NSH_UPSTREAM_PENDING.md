@@ -1,8 +1,23 @@
 # NSH 新版本待办
 
-当前项目的 `nsh-core`、`nsh-base`、`nsh-engine` 和 `nsh-testing` 均使用 `0.4.0`（见 `Cargo.toml`）。
+当前项目的 NSH 依赖固定到 `https://github.com/zhuwjin/nsh` 的 `feat/component-chunk-loader` 分支提交 `c4bce5bc29d2e79e70428e33c13cc1409bb58042`（见 `Cargo.toml`）。crate 版本号仍为 `0.4.0`，但该提交基于上游 `main@f8cfd1a650640bd4b2668201d364e08e3b0ab570`，不能当作官方 0.4.0 的未修改版本。
 
 本文只记录依赖 NSH 新版本的事项，不记录 Pig Code 自己的功能 TODO。NSH main 中存在某项实现，不代表它已经发布，也不代表可以直接替换当前版本；升级时必须重新检查公开 API 和兼容性。
+
+## fork 补丁：三平台原生组件向所属 Engine 提供 Chunk
+
+`Cargo.toml` 直接引用上述 fork 的 `nsh-platform-windows`、`nsh-platform-macos`、`nsh-platform-linux` 及配套 NSH crate。三个平台的 `ComponentContext` 都新增 `chunk_loaded(chunk)` 和 `chunk_failed(id, message)`，仅转发已有的 `EngineControl` 方法，没有修改 Engine 的模块执行逻辑。
+
+这是受信任宿主组件所需的桥接，不是 NSH 已发布的 API。Windows 不创建子 HWND；macOS 和 Linux 仅使用满足原生组件接口的空视图，不创建第二个 Engine。正式跨平台发布前，仍需在各平台验证，并向上游提交等价能力。
+
+上游 #211 的 macOS `AppOptions::chunks` 目录加载已评估但未采用：它在创建 AppView 时配置，当前生成宿主缺少对应启动钩子，而且不包含插件验签、导出组件和生命周期。直接桥接保留 source map，也不增加目录读写。上游 #960 涉及同运行时的 TSX children，但不是动态包加载。
+
+调用方必须先交付 Chunk，再发出让 TSX 调用 `__nsh_import(id, [])` 的事件。后台验签完成后直接交付并通知，不依赖 `draw()`。Chunk 以签名包摘要命名；同一包重复导入共享模块。验证需覆盖真实 TSX 文案、多个导出组件和宿主搜索 Dialog 的遮挡关系，不能仅凭原生组件的 `ready` 事件判断成功。
+
+当前验证记录：
+
+- Windows：签名 Moon 包加载、同 Engine 页面与设置页重复导入、宿主搜索 Dialog 覆盖均通过，实际截图无子窗口遮挡。fork 的 `rust-exports` 示例也在 Windows 上真实加载并执行了 Chunk；宿主 Popover、设置页保活、禁用和卸载回归均通过。
+- macOS、Linux：桥接与空原生组件壳已写入，尚未在对应系统运行，不能据此宣称验证完成。
 
 ## 已发布，待接入
 

@@ -242,7 +242,7 @@ test("runs a real shell in the terminal panel", async () => {
   await app.waitFor("id:terminal-panel", { state: "gone" });
 });
 
-test("installs declarative controls and Surface pages and cleans them on disable", async () => {
+test("installs declarative controls and plugin pages and cleans them on disable", async () => {
   const app = await openApp();
   await app.type("id:composer-input", "MOON_SURFACE_SESSION");
   await app.press("id:send-button");
@@ -254,6 +254,7 @@ test("installs declarative controls and Surface pages and cleans them on disable
   await app.press("id:workspace-plugin-com.pigcodets.plugins.moon-moon-page");
   await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-page", { timeout: 10000 });
   if (await realPlatform(app)) {
+    await app.waitFor("text:This page is rendered in the host Engine.", { timeout: 10000 });
     await app.screenshot("target/test-tmp/moon-workspace-surface.png");
   }
 
@@ -273,7 +274,7 @@ test("installs declarative controls and Surface pages and cleans them on disable
   await app.waitFor("id:plugin-surface-com.pigcodets.plugins.moon-moon-popover");
   if (await realPlatform(app)) {
     await app.waitFor(loading, { state: "gone", timeout: 10000 });
-    await app.wait(500);
+    await app.waitFor("text:This popover shares the host View tree.", { timeout: 10000 });
     await app.screenshot("target/test-tmp/moon-popover-open.png");
     await app.keyboard.press("escape");
   } else {
@@ -298,6 +299,56 @@ test("installs declarative controls and Surface pages and cleans them on disable
   await app.press("id:plugin-uninstall-confirm");
   await app.waitFor("id:theme-package-com.pigcodets.plugins.moon", { state: "gone" });
   await app.press("id:settings-back");
+}, 60000);
+
+test("renders signed Moon components in the host Engine", async () => {
+  const app = await openApp();
+  if (!await realPlatform(app)) return;
+  await installMoon(app);
+  await app.waitFor("id:plugin-composer-com.pigcodets.plugins.moon-moon-action", { timeout: 10000 });
+  await app.press("id:workspace-plugin-com.pigcodets.plugins.moon-moon-page");
+  await app.waitFor("id:plugin-page-com.pigcodets.plugins.moon-moon-page", { timeout: 10000 });
+  await app.waitFor("text:This page is rendered in the host Engine.", { timeout: 10000 });
+  expect(app.count("text:This page is rendered by the plugin Surface.")).toBe(0);
+  await app.press("id:title-theme-settings");
+  await app.press("id:settings-plugin-com.pigcodets.plugins.moon-moon-settings");
+  await app.waitFor("text:This settings page is rendered in the host Engine.", { timeout: 10000 });
+  await app.press("id:settings-back");
+  await app.waitFor("text:This page is rendered in the host Engine.");
+  await app.press("id:open-search");
+  await app.waitFor("id:global-search-dialog");
+  await app.waitFor("id:global-search-input");
+  expect(app.texts()).toContain("This page is rendered in the host Engine.");
+  await app.screenshot("target/test-tmp/moon-component-search.png");
+  await app.keyboard.press("escape");
+  await app.waitFor("id:global-search-dialog", { state: "gone" });
+  await app.screenshot("target/test-tmp/moon-component-workspace.png");
+}, 60000);
+
+test("keeps plugin settings pages mounted across navigation", async () => {
+  const app = await openApp();
+  if (!await realPlatform(app)) return;
+  await installMoon(app);
+  const page = "id:plugin-page-com.pigcodets.plugins.moon-moon-settings";
+  const loading = `${page}-loading`;
+  await app.press("id:title-theme-settings");
+  await app.waitFor("id:settings-plugin-com.pigcodets.plugins.moon-moon-settings");
+  await app.press("id:settings-plugin-com.pigcodets.plugins.moon-moon-settings");
+  await app.waitFor(page, { timeout: 10000 });
+  await app.waitFor(loading, { state: "gone", timeout: 10000 });
+  await app.waitFor("text:This settings page is rendered in the host Engine.", { timeout: 10000 });
+  for (let index = 0; index < 3; index += 1) {
+    await app.press("id:settings-plugins");
+    await app.waitFor("id:plugin-manager-page");
+    await app.waitFor(page, { state: "gone" });
+    await app.press("id:settings-plugin-com.pigcodets.plugins.moon-moon-settings");
+    await app.waitFor(page);
+    expect(app.count(loading)).toBe(0);
+    expect(app.count(page)).toBe(1);
+  }
+  await app.wait(500);
+  expect(app.count(loading)).toBe(0);
+  await app.screenshot("target/test-tmp/moon-settings-stable.png");
 }, 60000);
 
 test("answers dangerous command approvals", async () => {

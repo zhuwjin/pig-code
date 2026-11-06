@@ -376,7 +376,8 @@
   "plugins": {
     "surface": {
       "loading": "正在加载插件",
-      "unsupported": "当前平台不支持插件 Surface"
+      "unsupported": "当前平台不支持插件 Surface",
+      "component_unavailable": "插件组件不可用"
     }
   },
   "conversation": {
