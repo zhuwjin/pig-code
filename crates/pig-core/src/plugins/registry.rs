@@ -292,7 +292,8 @@ impl PluginRegistry {
         }
     }
 
-    fn persist(&self) {
+    fn persist(&mut self) {
+        self.recompute_conflicts();
         // `incompatible` is derived from the manifest and this host's version:
         // persisting it would keep a stale diagnostic after a host upgrade.
         let mut packages = self.snapshot.packages.clone();
@@ -469,6 +470,87 @@ impl PluginRegistry {
             .iter()
             .chain(runtime.into_iter().flat_map(|runtime| runtime.hooks.iter()))
             .any(|hook| hook.entry == *entry)
+    }
+
+    /// Same-name contributions across enabled packages, resolved by package id
+    /// (the registry's packages are sorted by id) so the outcome never depends
+    /// on discovery order. The winner is recorded; every loser is named.
+    fn recompute_conflicts(&mut self) {
+        let mut seen: BTreeMap<(&'static str, String), (String, Vec<String>)> = BTreeMap::new();
+        let mut record = |kind: &'static str, name: String, package: &str| {
+            if name.trim().is_empty() {
+                return;
+            }
+            match seen.entry((kind, name)) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((package.to_owned(), Vec::new()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (winner, losers) = entry.get_mut();
+                    if winner != package {
+                        losers.push(package.to_owned());
+                    }
+                }
+            }
+        };
+        let packages: Vec<PluginPackageInfo> = self
+            .snapshot
+            .packages
+            .iter()
+            .filter(|package| package.enabled && package.incompatible.is_none())
+            .map(|package| {
+                let mut package = package.clone();
+                if let Some(runtime) = self
+                    .snapshot
+                    .runtime_contributions
+                    .get(&format!("{}:{}", package.id, package.digest))
+                {
+                    package.contributions = package.contributions.merged(runtime);
+                }
+                package
+            })
+            .collect();
+        for package in &packages {
+            for tool in &package.contributions.tools {
+                record("tool", tool.name.clone(), &package.id);
+            }
+            for agent in &package.contributions.agents {
+                record("agent", agent.name.clone(), &package.id);
+            }
+            for skill in &package.contributions.skills {
+                for discovered in pig_utils::skills::discover_root(
+                    &package.root.join(&skill.path),
+                    pig_utils::skills::SkillSource::User,
+                ) {
+                    record("skill", discovered.name, &package.id);
+                }
+            }
+            for server in &package.contributions.mcp {
+                record("mcp", server.name.clone(), &package.id);
+            }
+            for theme in &package.contributions.themes {
+                record("theme", theme.id.clone(), &package.id);
+            }
+        }
+        self.snapshot.conflicts = seen
+            .into_iter()
+            .filter(|(_, (_, losers))| !losers.is_empty())
+            .map(|((kind, name), (winner, losers))| {
+                tracing::warn!(
+                    kind,
+                    name,
+                    winner,
+                    losers = ?losers,
+                    "plugins contribute the same name; the first package by id wins"
+                );
+                pig_protocol::PluginContributionConflict {
+                    kind: kind.to_owned(),
+                    name,
+                    winner,
+                    losers,
+                }
+            })
+            .collect();
     }
 
     pub fn package(&self, id: &str, digest: &str) -> Result<&PluginPackageInfo, CoreError> {
@@ -818,6 +900,60 @@ fn validate_contributions(
         return Err(permission(
             "hook contributions require the provide_hooks capability",
         ));
+    }
+    if !contributions.agents.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideAgents)
+    {
+        return Err(permission(
+            "agent profile contributions require the provide_agents capability",
+        ));
+    }
+    let mut agent_names = BTreeSet::new();
+    for agent in &contributions.agents {
+        if !crate::agent::valid_name(&agent.name) {
+            return Err(manifest(format!(
+                "invalid plugin agent profile name `{}`",
+                agent.name
+            )));
+        }
+        if !agent_names.insert(&agent.name) {
+            return Err(manifest(format!(
+                "duplicate plugin agent profile `{}`",
+                agent.name
+            )));
+        }
+        if agent.description.trim().is_empty() || agent.system_prompt.trim().is_empty() {
+            return Err(manifest(format!(
+                "agent profile `{}` needs a description and a system prompt",
+                agent.name
+            )));
+        }
+        if agent.max_turns.is_some_and(|turns| turns == 0) {
+            return Err(manifest(format!(
+                "agent profile `{}` maxTurns must be positive",
+                agent.name
+            )));
+        }
+        if agent
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err(manifest(format!(
+                "agent profile `{}` model must not be empty",
+                agent.name
+            )));
+        }
+        if let Some(tools) = &agent.tools
+            && tools.iter().any(|tool| tool.trim().is_empty())
+        {
+            return Err(manifest(format!(
+                "agent profile `{}` tool names must not be empty",
+                agent.name
+            )));
+        }
     }
     let mut hooks = BTreeSet::new();
     for hook in &contributions.hooks {

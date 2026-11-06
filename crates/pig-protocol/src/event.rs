@@ -650,6 +650,14 @@ pub enum Event {
     PluginToolsQuery {
         query: PluginToolsQuery,
     },
+    /// Reply to Op::PluginSessionAction: a session action, a controlled model
+    /// call or a delegated-subagent action.
+    PluginSessionResult {
+        request_id: String,
+        package: String,
+        digest: String,
+        result: Result<serde_json::Value, CoreError>,
+    },
     PluginHttpResponse {
         request_id: String,
         result: Result<PluginHttpResponse, CoreError>,

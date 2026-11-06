@@ -41,6 +41,8 @@ pub struct PluginContributions {
     #[serde(default)]
     pub hooks: Vec<PluginHook>,
     #[serde(default)]
+    pub agents: Vec<PluginAgentProfile>,
+    #[serde(default)]
     pub credentials: Vec<PluginCredentialDeclaration>,
     #[serde(default)]
     pub http: Vec<PluginHttpOrigin>,
@@ -73,6 +75,9 @@ impl PluginContributions {
                 .clone()
                 .unwrap_or_else(|| format!("{}:{}", hook.event.name(), hook.entry.command))
         });
+        merge_replacing(&mut merged.agents, &runtime.agents, |agent| {
+            agent.name.clone()
+        });
         merged
     }
 }
@@ -100,6 +105,7 @@ impl Default for PluginContributions {
             tools: Vec::new(),
             commands: Vec::new(),
             hooks: Vec::new(),
+            agents: Vec::new(),
             credentials: Vec::new(),
             http: Vec::new(),
             config: PluginConfigDeclaration::default(),
@@ -126,6 +132,10 @@ pub struct PluginConfigItem {
     #[serde(default)]
     pub description: BTreeMap<String, String>,
     pub default: serde_json::Value,
+    /// JSON Schema of the value (the host validates writes and renders its
+    /// generic form from it). `None` accepts any value of the default's type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -353,6 +363,166 @@ pub struct PluginHook {
     pub entry: HookEntry,
 }
 
+/// A subagent profile a package contributes (the same fields a Markdown
+/// profile in `{data_dir}/agents` or `.pigcode/agents` declares).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAgentProfile {
+    /// `^[a-zA-Z0-9-]{3,50}$`, unique across the effective profile set.
+    pub name: String,
+    pub description: String,
+    /// `None` or `["*"]` = every child tool; an explicit list narrows it.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// `None` = the parent session's model; otherwise `providerId/modelId` or
+    /// a bare model id of the default provider.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Only effective together with an explicit model.
+    #[serde(default)]
+    pub thought_level: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<usize>,
+    #[serde(default = "default_enabled")]
+    pub inject_agents_md: bool,
+    pub system_prompt: String,
+}
+
+/// A subagent profile projected for `agent.list` (no prompt body).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginAgentProfileInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `built_in`, `plugin`, `user` or `project`.
+    pub source: String,
+}
+
+/// The immediate answer of `agent.start`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginAgentStarted {
+    pub agent_id: String,
+    pub task_id: String,
+    pub profile: String,
+    pub model: String,
+    pub background: bool,
+    pub status: String,
+}
+
+/// The settled state of a delegated subagent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginAgentOutcome {
+    pub agent_id: String,
+    /// `completed`, `stopped`, `failed` or `timeout`.
+    pub status: String,
+    /// The final result, trimmed for the plugin (the full text stays in
+    /// `result_path` when the host has one).
+    pub summary: String,
+    #[serde(default)]
+    pub result_path: Option<String>,
+}
+
+/// A read-only projection of a delegated subagent's conversation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginAgentConversation {
+    pub agent_id: String,
+    pub title: String,
+    pub running: bool,
+    pub items: Vec<crate::SubagentItem>,
+}
+
+/// A controlled one-shot model request from a plugin.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginModelResponse {
+    pub text: String,
+    #[serde(default)]
+    pub usage: Option<PluginModelUsage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginModelUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// One projected session event in a subscription.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginSessionEvent {
+    Configured {
+        model: String,
+        provider_name: String,
+        permissions: crate::PermissionSettings,
+    },
+    TurnStarted {
+        turn_id: String,
+    },
+    UserMessage {
+        text: String,
+        files: usize,
+    },
+    AssistantText {
+        text: String,
+    },
+    ToolStarted {
+        item_id: String,
+        tool: String,
+        summary: String,
+    },
+    ToolFinished {
+        item_id: String,
+        is_error: bool,
+        preview: String,
+    },
+    TurnComplete {
+        duration_ms: u64,
+        finish_reason: Option<crate::FinishReason>,
+        stats: Option<crate::TurnUsageStats>,
+    },
+    TurnAborted,
+    Error {
+        fatal: bool,
+        error: crate::CoreError,
+    },
+    Compacted {
+        automatic: bool,
+    },
+    Agent {
+        agent_id: String,
+        profile: String,
+        description: String,
+        background: bool,
+    },
+    Permissions {
+        permissions: crate::PermissionSettings,
+    },
+    PlanMode {
+        enabled: bool,
+    },
+}
+
+/// The answer to `session.subscribe`; `service.event` messages named
+/// `session.event` then carry `{subscription, epoch, cursor, dropped, event}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginSessionSubscription {
+    pub subscription: String,
+    pub session_id: String,
+    pub epoch: u64,
+    pub cursor: u64,
+    #[serde(default)]
+    pub dropped: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCommand {
@@ -510,6 +680,7 @@ pub enum PluginCapability {
     ProvideTools,
     ProvideThemes,
     ProvideHooks,
+    ProvideAgents,
     Http,
     ManageOwnSecrets,
     ReadConfig,
@@ -685,6 +856,19 @@ pub struct SignedPluginDownload {
     pub package_path: PathBuf,
 }
 
+/// A deterministic same-name conflict between enabled packages. The winner is
+/// the first package by id; the diagnostic names both sides so it never
+/// depends on discovery or load order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginContributionConflict {
+    /// `tool`, `agent`, `skill`, `mcp` or `theme`.
+    pub kind: String,
+    pub name: String,
+    pub winner: String,
+    pub losers: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PluginSnapshot {
     #[serde(default)]
@@ -695,6 +879,8 @@ pub struct PluginSnapshot {
     pub runtime_contributions: BTreeMap<String, PluginContributions>,
     #[serde(default)]
     pub credential_grants: Vec<PluginCredentialGrant>,
+    #[serde(default)]
+    pub conflicts: Vec<PluginContributionConflict>,
     #[serde(default)]
     pub errors: Vec<PluginIssue>,
 }

@@ -238,6 +238,10 @@ pub struct PluginProtocolError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+    /// Structured extras a caller can act on (a stale revision's current
+    /// value, a timeout's remaining budget), never a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl PluginProtocolError {
@@ -246,7 +250,13 @@ impl PluginProtocolError {
             code,
             message: message.into(),
             retryable: false,
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn retryable(mut self) -> Self {
@@ -333,6 +343,49 @@ pub struct PluginServiceRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// A stable key for a side-effecting request: the host records its result
+    /// and replays it instead of executing the effect again (including after a
+    /// restart). Without one, the request's own id is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+impl PluginService {
+    /// Stable wire name (the same string serde writes).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StorageRead => "storage_read",
+            Self::StorageWrite => "storage_write",
+            Self::ConfigRead => "config_read",
+            Self::ConfigWrite => "config_write",
+            Self::HttpRequest => "http_request",
+            Self::CredentialSet => "credential_set",
+            Self::CredentialClear => "credential_clear",
+            Self::SessionRead => "session_read",
+            Self::WorkspaceRead => "workspace_read",
+            Self::NavigationOpen => "navigation_open",
+            Self::ComposerSubmit => "composer_submit",
+            Self::ResourceRead => "resource_read",
+            Self::LocaleRead => "locale_read",
+            Self::StorageList => "storage_list",
+            Self::StorageKeyRead => "storage_key_read",
+            Self::StorageKeyWrite => "storage_key_write",
+            Self::StorageKeyDelete => "storage_key_delete",
+            Self::SessionSubscribe => "session_subscribe",
+            Self::SessionUnsubscribe => "session_unsubscribe",
+            Self::SessionCreate => "session_create",
+            Self::SessionSend => "session_send",
+            Self::SessionInterrupt => "session_interrupt",
+            Self::SessionWait => "session_wait",
+            Self::ModelRequest => "model_request",
+            Self::AgentList => "agent_list",
+            Self::AgentStart => "agent_start",
+            Self::AgentSend => "agent_send",
+            Self::AgentWait => "agent_wait",
+            Self::AgentStop => "agent_stop",
+            Self::AgentRead => "agent_read",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +404,27 @@ pub enum PluginService {
     ComposerSubmit,
     ResourceRead,
     LocaleRead,
+    // Keyed private storage (revision CAS).
+    StorageList,
+    StorageKeyRead,
+    StorageKeyWrite,
+    StorageKeyDelete,
+    // Session observation and control.
+    SessionSubscribe,
+    SessionUnsubscribe,
+    SessionCreate,
+    SessionSend,
+    SessionInterrupt,
+    SessionWait,
+    // A controlled one-shot model call.
+    ModelRequest,
+    // Subagent profiles and delegation.
+    AgentList,
+    AgentStart,
+    AgentSend,
+    AgentWait,
+    AgentStop,
+    AgentRead,
 }
 
 pub const PLUGIN_HOST_NAVIGATION_TARGETS: &[&str] =

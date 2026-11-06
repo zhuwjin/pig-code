@@ -60,16 +60,23 @@ export type PluginErrorCode =
 export class PluginError extends Error {
   readonly code: PluginErrorCode;
   readonly retryable: boolean;
+  readonly details?: unknown;
 
-  constructor(code: PluginErrorCode, message: string, retryable = false) {
+  constructor(code: PluginErrorCode, message: string, retryable = false, details?: unknown) {
     super(message);
     this.name = "PluginError";
     this.code = code;
     this.retryable = retryable;
+    this.details = details;
   }
 
-  toJSON(): { code: PluginErrorCode; message: string; retryable: boolean } {
-    return { code: this.code, message: this.message, retryable: this.retryable };
+  toJSON(): { code: PluginErrorCode; message: string; retryable: boolean; details?: unknown } {
+    return {
+      code: this.code,
+      message: this.message,
+      retryable: this.retryable,
+      ...(this.details === undefined ? {} : { details: this.details }),
+    };
   }
 }
 
@@ -94,6 +101,7 @@ export interface PluginProtocolErrorPayload {
   code: PluginErrorCode;
   message: string;
   retryable?: boolean;
+  details?: unknown;
 }
 
 export interface PluginEnvelope<T = unknown> {

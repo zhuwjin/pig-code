@@ -3,6 +3,7 @@ use super::*;
 pub(super) mod entry;
 mod notifications;
 mod operations;
+mod plugin_sessions;
 mod plugins;
 mod queue;
 mod runtime;
@@ -10,6 +11,7 @@ mod services;
 mod trust;
 
 use entry::{SessionEntry, TurnFuture};
+use plugin_sessions::PluginTurnWaiter;
 use queue::{queue_len, queue_snapshot, start_queued_head, steer_snapshot};
 use runtime::install_sandbox_settings;
 #[cfg(test)]
@@ -38,6 +40,8 @@ pub(super) struct Manager {
     )>,
     id_counter: u64,
     task_notify_tx: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+    /// Plugin turns waited on by `PluginSessionAction::Wait`.
+    plugin_waiters: Vec<PluginTurnWaiter>,
     op_rx: async_channel::Receiver<Op>,
     task_notify_rx: tokio::sync::mpsc::UnboundedReceiver<crate::task::TaskChange>,
 }
@@ -115,6 +119,7 @@ impl Manager {
             pending_terminal: Vec::new(),
             id_counter: 0,
             task_notify_tx,
+            plugin_waiters: Vec::new(),
             op_rx,
             task_notify_rx,
         }
@@ -344,6 +349,19 @@ impl Manager {
             } => self.plugin_action(event_tx, request_id, package, digest, action, session_id),
             Op::PluginToolResult { result } => self.plugin_tool_result(result),
             Op::PluginToolsSelection { selection } => self.plugin_tools_selection(selection),
+            Op::PluginSessionAction {
+                request_id,
+                package,
+                digest,
+                action,
+            } => self.plugin_session_action(
+                event_tx,
+                request_id,
+                package,
+                digest,
+                action,
+                turns,
+            ),
             Op::PluginHttpRequest {
                 request_id,
                 package,
@@ -397,6 +415,7 @@ impl Manager {
             return;
         }
         self.refresh_notification_queue(&event_tx, &session_id);
+        self.settle_plugin_waiters(&event_tx, &session_id, &outcome);
         let sessions = &mut self.sessions;
         if let Some(entry) = sessions.get_mut(&session_id) {
             // Refresh the MCP status cache at turn wrap-up (lazy connection happens inside the turn)
@@ -413,6 +432,11 @@ impl Manager {
             // surface when the decision changed and is a no-op otherwise.
             if let Some(session) = entry.session.as_mut() {
                 session.set_runtime(entry.runtime.clone());
+                if entry.plugin_surfaces_stale {
+                    session.refresh_plugin_surfaces();
+                    entry.plugin_surfaces_stale = false;
+                    entry.mcp_status = None;
+                }
             }
             // Unconsumed steer items fall back to the queue lane IN
             // PLACE (steer flag flip): the turn ended before a safe
@@ -529,6 +553,7 @@ pub async fn agent_loop(
             TaskNotify(crate::task::TaskChange),
             Turn(String, Session, TurnOutcome),
             RetryTerminal,
+            Tick,
         }
         let has_terminal_retries = !manager.pending_terminal.is_empty();
         let incoming = {
@@ -549,6 +574,7 @@ pub async fn agent_loop(
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if has_terminal_retries => {
                     Incoming::RetryTerminal
                 }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => Incoming::Tick,
             }
         };
         match incoming {
@@ -570,6 +596,7 @@ pub async fn agent_loop(
                     manager.start_notification_turn_if_ready(&event_tx, &session_id, &mut turns);
                 }
             }
+            Incoming::Tick => manager.expire_plugin_waiters(&event_tx),
         }
     }
 }

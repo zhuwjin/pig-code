@@ -399,7 +399,8 @@ pub(crate) fn prepare_swarm_children(
         Some(runtime) => runtime.trust().clone(),
         None => WorkspaceTrust::untrusted(ctx.cwd),
     };
-    let profiles = load_profiles_with_trust(ctx.cwd, ctx.data_dir, &trust);
+    let profiles =
+        load_profiles_with_plugins(ctx.cwd, ctx.data_dir, &trust, &ctx.plugin_tools.registry());
     let item_profile = if plan.item_count() > 0 {
         Some(find_profile(&profiles, &plan.subagent_type)?.clone())
     } else {

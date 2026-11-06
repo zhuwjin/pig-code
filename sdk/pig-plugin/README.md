@@ -69,8 +69,12 @@ and only records the applier otherwise, so tests can import the module.
 | `ctx.commands.register(definition, handler)` | Registers a command from the host's command search. |
 | `ctx.hooks.register(definition)` | Contributes a hook (`session_start`, `pre_tool_use`, …); the host runner executes it. Requires the manifest's `provide_hooks`. |
 | `ctx.services.request(service, payload?, options?)` | Typed host service (`config_read`, `storage_write`, `session_read`, `navigation_open`, …). |
-| `ctx.services.config/storage/session` | Convenience wrappers over the services above. |
+| `ctx.services.config/storage/session` | Convenience wrappers over the services above. Keyed storage has `list/get/set/delete` with revision CAS. |
 | `ctx.services.on(name, listener)` / `ctx.events.on` | Host events (`locale.changed`, …). |
+| `ctx.services.session.subscribe(listener, {sessionId})` | Projected session events with cursor/epoch/dropped; call it from `onReady`. |
+| `ctx.services.session.create/send/interrupt/wait` | Narrow session control (the session's own permissions apply). |
+| `ctx.services.model.request({purpose, prompt, …})` | One bounded non-streaming model call. |
+| `ctx.services.agents.list/start/send/wait/stop/read` | Delegate to a contributed or built-in subagent profile. |
 | `ctx.log.debug/info/warn/error` | Size-limited, redacted log events. |
 | `ctx.onReady(listener)` | Runs once the host accepted the instance. Requests made before that are queued. |
 | `ctx.dispose(fn)` | Teardown, run in reverse order on stop. |
@@ -79,6 +83,37 @@ Tool definitions take `readOnly`, `idempotent`, `approval` (`on_request` | `alwa
 `timeoutMs`, `maxConcurrency`, `maxOutputBytes` and `availability` (`static` | `plugin`). The host
 validates arguments and results against the declared schemas and enforces those limits; the SDK
 only forwards them.
+
+## Capabilities
+
+New services are granted through the manifest's `capabilities` (not `actions`):
+
+```json
+"capabilities": [
+  {"name": "session.subscribe", "targets": ["*"]},
+  {"name": "session.create", "targets": ["/path/to/workspace"]},
+  {"name": "session.control", "targets": ["*"]},
+  {"name": "model.request", "targets": ["review", "commit_message"]},
+  {"name": "agent.delegate", "targets": ["*"]}
+]
+```
+
+A project package can only touch sessions inside its trusted workspace. Tool results, session
+events and agent reads are projections: the SDK never sees host stores or credentials.
+
+## Side-effect recovery
+
+`storage.write`, `storage.set`, `storage.delete` and other side-effecting calls accept
+`idempotencyKey`. The host persists the result under that key: a retry (even after a restart)
+replays it instead of executing the effect again; a request that was in flight when the process
+died returns `busy`. Keyed writes also accept `expectedRevision` for compare-and-swap, rejected as
+`stale_revision` with `details.currentRevision`.
+
+## Configuration
+
+Manifest `config.items` are shown in the host's generic options form (string/number/boolean/enum,
+validated against each item's JSON Schema). A trusted workspace's `.pigcode/plugins.json` can
+override them; the form's scope switch writes either the user value or the workspace override.
 
 ## Testing
 
@@ -96,6 +131,8 @@ host.setSession(projection);                            // answer session_read
 await host.emitEvent("locale.changed", { locale: "en" });
 await host.health();
 host.hooks();                                           // hook contributions, as the host sees them
+host.setModelReply("reviewed");                         // answer model.request
+host.emitSessionEvent(subscriptionId, { kind: "turn_started", turn_id: "t1" });
 host.sendRaw(staleEnvelope);                            // stale/foreign envelopes are ignored
 host.stop();
 ```

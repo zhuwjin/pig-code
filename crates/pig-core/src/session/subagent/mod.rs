@@ -14,7 +14,7 @@ use drive::{agent_result_path, drive_subagent};
 use lifecycle::ChildLifecycle;
 use managed::{
     DetachedGateCtx, SubagentSlot, SwarmChildIdentity, aborted_swarm_child, drive_managed,
-    spawn_detached_child, subagent_receipt, swarm_child_result,
+    spawn_detached_child, subagent_receipt, swarm_child_result, DelegatedUi,
 };
 use state::{ProgressSink, SubagentDrive, agent_card_model};
 
@@ -26,6 +26,15 @@ fn child_local_state(state: &crate::task::SessionToolState) -> crate::task::Sess
     state.todos = Default::default();
     state.task_store = None;
     state
+}
+
+/// The immediate answer of a plugin-delegated child.
+pub(crate) struct DelegatedAgentStarted {
+    pub agent_id: String,
+    pub task_id: String,
+    pub profile: String,
+    pub model: String,
+    pub background: bool,
 }
 
 /// Result of drive_subagent
@@ -119,7 +128,12 @@ impl Session {
             .as_ref()
             .map(|runtime| runtime.trust().clone())
             .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.cwd));
-        let profiles = crate::agent::load_profiles_with_trust(&self.cwd, &self.data_dir, &trust);
+        let profiles = crate::agent::load_profiles_with_plugins(
+            &self.cwd,
+            &self.data_dir,
+            &trust,
+            &self.plugin_tools.registry(),
+        );
         let ctx = crate::agent::ChildPrepCtx {
             cwd: &self.cwd,
             data_dir: &self.data_dir,
@@ -668,6 +682,7 @@ impl Session {
                 task_id.clone(),
                 child_cancel,
                 tx.clone(),
+                None,
             );
             cards.push(card);
             receipt.push(crate::agent::SwarmReceiptChild {
@@ -691,12 +706,133 @@ impl Session {
 
     /// Background subagent: its terminal state uses the same task outbox as a
     /// background shell, including cancellation and driver failure.
+    /// Plugin delegation: start a background child from a profile the plugin
+    /// named, using the same preparation/drive pipeline as the Agent tool. The
+    /// parent session must be idle; the child inherits its workspace,
+    /// permissions, trust and tool narrowing.
+    pub(crate) fn start_delegated_agent(
+        &mut self,
+        profile_name: &str,
+        prompt_text: &str,
+        description: &str,
+        parent_config: &ResolvedModel,
+        tx: &async_channel::Sender<Event>,
+    ) -> Result<crate::session::DelegatedAgentStarted, String> {
+        if self.plan_enabled {
+            return Err(
+                "Subagents cannot be delegated in plan mode (a subagent may modify files)."
+                    .into(),
+            );
+        }
+        let description = description.trim();
+        let prompt_text = prompt_text.trim();
+        if description.is_empty() || prompt_text.is_empty() {
+            return Err("a delegated agent needs a description and a prompt".into());
+        }
+        let runtime = self.runtime_config_cloned();
+        let trust = runtime
+            .as_ref()
+            .map(|runtime| runtime.trust().clone())
+            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.cwd));
+        let profiles = crate::agent::load_profiles_with_plugins(
+            &self.cwd,
+            &self.data_dir,
+            &trust,
+            &self.plugin_tools.registry(),
+        );
+        let profile = crate::agent::find_profile(&profiles, profile_name)?.clone();
+        let ctx = crate::agent::ChildPrepCtx {
+            cwd: &self.cwd,
+            data_dir: &self.data_dir,
+            git_snapshot: self.git_snapshot.as_deref(),
+            skills_prompt: &self.skills_prompt,
+            agents_prompt: &self.agents_prompt,
+            runtime: runtime.as_deref(),
+            parent_config,
+            session_id: &self.id,
+            state: &self.state,
+            mcp: self.mcp.as_ref(),
+            plugin_tools: self.plugin_tools.clone(),
+        };
+        let child_config = crate::agent::resolve_child_config(&ctx, &profile)?;
+        let prep = crate::agent::prepare_fresh_child(
+            &ctx,
+            profile,
+            child_config,
+            prompt_text,
+            description,
+            &mut self.agent_seq,
+        )
+        .map_err(|error| error.message())?;
+        let drive = SubagentDrive::from(prep);
+        let agent_id = drive.agent_id.clone();
+        let profile_name = drive.profile.name.clone();
+        let model = agent_card_model(&drive);
+        let item_id = format!("plugin-agent-{agent_id}");
+        let card = crate::rollout::AgentCardRecord {
+            agent_id: agent_id.clone(),
+            profile: profile_name.clone(),
+            description: description.to_owned(),
+            model: model.clone(),
+            background: true,
+        };
+        // The synthetic Agent row and its card use the existing tool-card UI;
+        // the task notification path covers completion.
+        self.emit(
+            |session_id| Event::ToolCallBegin {
+                session_id,
+                item_id: item_id.clone(),
+                tool: "Agent".into(),
+                input_summary: description.to_owned(),
+                detail: format!("profile: {profile_name}"),
+            },
+            tx,
+        );
+        self.emit(
+            |session_id| Event::SubagentCard {
+                session_id,
+                item_id: item_id.clone(),
+                agent_id: agent_id.clone(),
+                profile: profile_name.clone(),
+                description: description.to_owned(),
+                model: model.clone(),
+                background: true,
+            },
+            tx,
+        );
+        let (_, task_id) = self.register_background_drive(
+            drive,
+            tx,
+            card,
+            Some(DelegatedUi { item_id }),
+        );
+        Ok(crate::session::DelegatedAgentStarted {
+            agent_id,
+            task_id,
+            profile: profile_name,
+            model,
+            background: true,
+        })
+    }
+
     fn spawn_subagent_background(
         &self,
         drive: SubagentDrive,
         tx: &async_channel::Sender<Event>,
         card: crate::rollout::AgentCardRecord,
     ) -> SubagentOutcome {
+        self.register_background_drive(drive, tx, card, None).0
+    }
+
+    /// Shared registration + detached spawn of one background child; the
+    /// caller gets its task id back for plugin delegation.
+    fn register_background_drive(
+        &self,
+        drive: SubagentDrive,
+        tx: &async_channel::Sender<Event>,
+        card: crate::rollout::AgentCardRecord,
+        ui: Option<DelegatedUi>,
+    ) -> (SubagentOutcome, String) {
         let bg_cancel = CancellationToken::new();
         let command = format!("Subagent {}: {}", drive.profile.name, drive.description);
         let task_id = crate::task::register_agent_task_queued(
@@ -721,16 +857,20 @@ impl Session {
         spawn_detached_child(
             self.detached_gate_ctx(),
             drive,
-            task_id,
+            task_id.clone(),
             bg_cancel,
             tx.clone(),
+            ui,
         );
-        SubagentOutcome::Finished {
-            note: running_note,
-            is_error: false,
-            card: Some(card),
-            cards: vec![],
-        }
+        (
+            SubagentOutcome::Finished {
+                note: running_note,
+                is_error: false,
+                card: Some(card),
+                cards: vec![],
+            },
+            task_id,
+        )
     }
 
     /// Owned gate context for the background subagent drive (fully owned:

@@ -444,6 +444,20 @@ export interface PluginMarketplacePreview extends PluginMarketplaceSource {
   public_key: string;
 }
 
+export interface PluginConfigItem {
+  key: string;
+  description?: Record<string, string>;
+  default: unknown;
+  schema?: Record<string, unknown> | null;
+}
+
+export interface PluginContributionConflict {
+  kind: string;
+  name: string;
+  winner: string;
+  losers: string[];
+}
+
 export interface PluginPackageInfo {
   id: string;
   name: string;
@@ -461,6 +475,7 @@ export interface PluginPackageInfo {
     themes?: { id: string; entry: string }[];
     tools?: unknown[];
     commands?: PluginCommand[];
+    config?: { items?: PluginConfigItem[] };
     [key: string]: unknown;
   };
 }

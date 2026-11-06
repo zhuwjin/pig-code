@@ -824,6 +824,132 @@ mod tests {
     }
 
     #[test]
+    fn same_name_contributions_are_diagnosed_with_a_stable_winner() {
+        let temp = TempDir::new();
+        let first = temp.0.join("first");
+        let second = temp.0.join("second");
+        for (root, id) in [(&first, "aaa.plugin"), (&second, "zzz.plugin")] {
+            write(
+                &root.join("pig-plugin.json"),
+                &format!(
+                    r#"{{
+                      "apiVersion": 1,
+                      "id": "{id}",
+                      "name": "Plugin",
+                      "version": "1.0.0",
+                      "build": 1,
+                      "minHostVersion": "1.0.0",
+                      "protocols": {{"ui": 1, "services": 1}},
+                      "capabilities": [],
+                      "contributions": {{
+                        "actions": ["provide_agents", "provide_mcp"],
+                        "agents": [{{
+                          "name": "reviewer",
+                          "description": "Reviews",
+                          "system_prompt": "You review."
+                        }}],
+                        "mcp": [{{"name": "docs", "config": {{"command": "server"}}}}]
+                      }}
+                    }}"#
+                ),
+            );
+        }
+        let data = temp.0.join("data");
+        let mut registry = PluginRegistry::new(data);
+        let snapshot = registry.sync(vec![
+            PluginPackageSource {
+                root: first,
+                source: PluginSource::User,
+            },
+            PluginPackageSource {
+                root: second,
+                source: PluginSource::User,
+            },
+        ]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        for package in &snapshot.packages {
+            registry
+                .set_enabled(&package.id, &package.digest, true)
+                .expect("enable");
+        }
+        let conflicts = &registry.snapshot.conflicts;
+        for kind in ["agent", "mcp"] {
+            let conflict = conflicts
+                .iter()
+                .find(|conflict| conflict.kind == kind && conflict.name == "reviewer" || conflict.kind == kind && conflict.name == "docs")
+                .unwrap_or_else(|| panic!("missing {kind} conflict: {conflicts:?}"));
+            assert_eq!(conflict.winner, "aaa.plugin", "the first package by id wins");
+            assert_eq!(conflict.losers, vec!["zzz.plugin"]);
+        }
+    }
+
+    #[test]
+    fn user_skills_win_over_plugin_skills_with_the_same_name() {
+        let temp = TempDir::new();
+        let data = temp.0.join("data");
+        save_skill(
+            &data,
+            &PluginScope::User,
+            "shared",
+            "---
+name: shared
+description: User skill
+---
+User body
+",
+            true,
+        )
+        .expect("user skill");
+        let root = temp.0.join("plugin");
+        write(
+            &root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "aaa.plugin",
+              "name": "Plugin",
+              "version": "1.0.0",
+              "build": 1,
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "skills": [{"path": "skills/shared"}]
+              }
+            }"#,
+        );
+        write(
+            &root.join("skills/shared/SKILL.md"),
+            "---
+name: shared
+description: Plugin skill
+---
+Plugin body
+",
+        );
+        let mut registry = PluginRegistry::new(data.clone());
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root,
+            source: PluginSource::User,
+        }]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        registry
+            .set_enabled("aaa.plugin", &snapshot.packages[0].digest, true)
+            .unwrap();
+        let plugins = registry.into_shared();
+        let skills = discover_skills_with_trust(&temp.0, &plugins, false);
+        let shared = skills
+            .iter()
+            .find(|skill| skill.name == "shared")
+            .expect("shared skill");
+        assert!(
+            shared.path.starts_with(pig_utils::skills::user_root(&data)),
+            "the user's skill must win: {}",
+            shared.path.display()
+        );
+        assert!(shared.description.contains("User skill"));
+    }
+
+    #[test]
     fn an_incompatible_host_requirement_keeps_files_and_choice_but_activates_nothing() {
         let temp = TempDir::new();
         let root = temp.0.join("plugin");

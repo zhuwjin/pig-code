@@ -179,12 +179,33 @@ export type PluginService =
   | "navigation_open"
   | "composer_submit"
   | "resource_read"
-  | "locale_read";
+  | "locale_read"
+  | "storage_list"
+  | "storage_key_read"
+  | "storage_key_write"
+  | "storage_key_delete"
+  | "session_subscribe"
+  | "session_unsubscribe"
+  | "session_create"
+  | "session_send"
+  | "session_interrupt"
+  | "session_wait"
+  | "model_request"
+  | "agent_list"
+  | "agent_start"
+  | "agent_send"
+  | "agent_wait"
+  | "agent_stop"
+  | "agent_read";
 
 export interface ServiceRequestOptions {
   sessionId?: string;
   workspaceId?: string;
   timeoutMs?: number;
+  /** A stable key for a side-effecting request: the host persists its result
+   * and replays it instead of executing the effect again, even after a
+   * restart. Without one the request's own id is used. */
+  idempotencyKey?: string;
 }
 
 export interface PluginHttpRequest {
@@ -216,6 +237,33 @@ export interface ServicePayloads {
   composer_submit: { text: string };
   resource_read: { uri: string };
   locale_read: null;
+  storage_list: null;
+  storage_key_read: { key: string };
+  storage_key_write: { key: string; value: unknown; expectedRevision?: number };
+  storage_key_delete: { key: string; expectedRevision?: number };
+  session_subscribe: null;
+  session_unsubscribe: { subscription: string };
+  session_create: SessionCreateOptions;
+  session_send: { content: string; delivery?: "queue" | "steer" };
+  session_interrupt: null;
+  session_wait: { timeoutMs?: number };
+  model_request: {
+    purpose: ModelPurpose;
+    prompt: string;
+    system?: string;
+    maxOutputTokens?: number;
+  };
+  agent_list: null;
+  agent_start: {
+    profile: string;
+    prompt: string;
+    description?: string;
+    background?: boolean;
+  };
+  agent_send: { agentId: string; message: string };
+  agent_wait: { agentId: string; timeoutMs?: number };
+  agent_stop: { agentId: string };
+  agent_read: { agentId: string };
 }
 
 /** What each service answers with. */
@@ -237,6 +285,23 @@ export interface ServiceResults {
   composer_submit: null;
   resource_read: { mime: string; bytes: number[] };
   locale_read: { locale: string };
+  storage_list: { keys: { key: string; revision: number; bytes: number }[] };
+  storage_key_read: { value: unknown; revision: number };
+  storage_key_write: { revision: number };
+  storage_key_delete: { deleted: boolean };
+  session_subscribe: SessionSubscribeResult;
+  session_unsubscribe: null;
+  session_create: { sessionId: string };
+  session_send: { accepted: boolean };
+  session_interrupt: null;
+  session_wait: SessionWaitResult;
+  model_request: PluginModelResponse;
+  agent_list: { profiles: PluginAgentProfileInfo[] };
+  agent_start: PluginAgentStarted;
+  agent_send: null;
+  agent_wait: PluginAgentOutcome;
+  agent_stop: null;
+  agent_read: PluginAgentConversation;
 }
 
 export interface ContextUsage {
@@ -278,16 +343,186 @@ export interface PluginConfigApi {
   write<Value = unknown>(path: string, value: unknown): Promise<Value>;
 }
 
+export interface StorageEntry {
+  key: string;
+  revision: number;
+  bytes: number;
+}
+
 export interface PluginStorageApi {
-  /** `null` when nothing was written yet. */
+  /** The legacy whole-blob value (`null` when nothing was written yet). */
   read<Value = unknown>(): Promise<Value | null>;
-  write(value: unknown): Promise<void>;
+  write(value: unknown, options?: { idempotencyKey?: string }): Promise<void>;
+  list(): Promise<StorageEntry[]>;
+  get<Value = unknown>(key: string): Promise<{ value: Value | null; revision: number }>;
+  /** `expectedRevision` makes the write compare-and-swap: a stale revision is
+   * rejected with `code: "stale_revision"` and `details.currentRevision`. */
+  set(
+    key: string,
+    value: unknown,
+    options?: { expectedRevision?: number; idempotencyKey?: string },
+  ): Promise<{ revision: number }>;
+  delete(
+    key: string,
+    options?: { expectedRevision?: number; idempotencyKey?: string },
+  ): Promise<{ deleted: boolean }>;
 }
 
 export interface PluginSessionApi {
   /** The host answers `session_read` with `{generation, session}`; this
    * unwraps the projection (`null` when there is no such session). */
   read<Value = unknown>(options?: { sessionId?: string }): Promise<Value | null>;
+  /** Subscribes to the session's projected events. Call it from `onReady`:
+   * requests made while `apply` still runs are queued until the host accepts
+   * the instance, so awaiting one inside `apply` would wait forever. */
+  subscribe(
+    listener: SessionEventListener,
+    options: { sessionId: string },
+  ): Promise<SessionSubscription>;
+  create(options: SessionCreateOptions): Promise<{ sessionId: string }>;
+  send(
+    sessionId: string,
+    content: string,
+    delivery?: "queue" | "steer",
+  ): Promise<{ accepted: boolean }>;
+  interrupt(sessionId: string): Promise<void>;
+  wait(sessionId: string, timeoutMs?: number): Promise<SessionWaitResult>;
+}
+
+export interface PluginModelApi {
+  /** One non-streaming call under the session's model, with a purpose the
+   * package's `model.request` capability grants. */
+  request(options: {
+    purpose: ModelPurpose;
+    prompt: string;
+    system?: string;
+    sessionId?: string;
+    maxOutputTokens?: number;
+  }): Promise<PluginModelResponse>;
+}
+
+export type ModelPurpose =
+  | "review"
+  | "commit_message"
+  | "classify"
+  | "memory"
+  | "summary"
+  | "custom";
+
+export interface PermissionSettings {
+  sandbox: { mode: string };
+  approval: string;
+  reviewer: string;
+}
+
+export interface SessionCreateOptions {
+  cwd: string;
+  providerId?: string;
+  modelId?: string;
+  reasoningLevel?: string;
+  permissions?: PermissionSettings;
+}
+
+export interface SessionSubscribeResult {
+  subscription: string;
+  sessionId: string;
+  epoch: number;
+  cursor: number;
+  dropped: number;
+}
+
+export interface SessionSubscriptionMeta {
+  subscription: string;
+  epoch: number;
+  cursor: number;
+  dropped: number;
+}
+
+export interface SessionSubscription {
+  readonly id: string;
+  readonly epoch: number;
+  readonly cursor: number;
+  readonly dropped: number;
+  close(): Promise<void>;
+}
+
+export type SessionEventListener = (
+  event: PluginSessionEvent,
+  meta: SessionSubscriptionMeta,
+) => void;
+
+export interface SessionWaitResult {
+  /** `completed`, `aborted`, `failed`, `idle` or `timeout`. */
+  status: string;
+}
+
+/** One projected session event (the host's narrow, redacted view). */
+export type PluginSessionEvent =
+  | { kind: "configured"; model: string; provider_name: string; permissions: PermissionSettings }
+  | { kind: "turn_started"; turn_id: string }
+  | { kind: "user_message"; text: string; files: number }
+  | { kind: "assistant_text"; text: string }
+  | { kind: "tool_started"; item_id: string; tool: string; summary: string }
+  | { kind: "tool_finished"; item_id: string; is_error: boolean; preview: string }
+  | {
+      kind: "turn_complete";
+      duration_ms: number;
+      finish_reason: unknown;
+      stats: unknown;
+    }
+  | { kind: "turn_aborted" }
+  | { kind: "error"; fatal: boolean; error: unknown }
+  | { kind: "compacted"; automatic: boolean }
+  | { kind: "agent"; agent_id: string; profile: string; description: string; background: boolean }
+  | { kind: "permissions"; permissions: PermissionSettings }
+  | { kind: "plan_mode"; enabled: boolean };
+
+export interface PluginModelResponse {
+  text: string;
+  usage?: { inputTokens: number; outputTokens: number } | null;
+}
+
+export interface PluginAgentProfileInfo {
+  name: string;
+  description: string;
+  tools?: string[] | null;
+  model?: string | null;
+  source: string;
+}
+
+export interface PluginAgentStarted {
+  agentId: string;
+  taskId: string;
+  profile: string;
+  model: string;
+  background: boolean;
+  status: string;
+}
+
+export interface PluginAgentOutcome {
+  agentId: string;
+  status: string;
+  summary: string;
+  resultPath?: string | null;
+}
+
+export interface PluginAgentConversation {
+  agentId: string;
+  title: string;
+  running: boolean;
+  items: { role: string; text: string; tool?: string | null; output?: string | null; is_error: boolean }[];
+}
+
+export interface PluginAgentsApi {
+  list(sessionId?: string): Promise<{ profiles: PluginAgentProfileInfo[] }>;
+  start(
+    sessionId: string,
+    options: { profile: string; prompt: string; description?: string; background?: boolean },
+  ): Promise<PluginAgentStarted>;
+  send(sessionId: string, agentId: string, message: string): Promise<void>;
+  wait(sessionId: string, agentId: string, timeoutMs?: number): Promise<PluginAgentOutcome>;
+  stop(sessionId: string, agentId: string): Promise<void>;
+  read(sessionId: string, agentId: string): Promise<PluginAgentConversation>;
 }
 
 export interface PluginServices {
@@ -306,6 +541,8 @@ export interface PluginServices {
   readonly config: PluginConfigApi;
   readonly storage: PluginStorageApi;
   readonly session: PluginSessionApi;
+  readonly model: PluginModelApi;
+  readonly agents: PluginAgentsApi;
 }
 
 // --- Context -----------------------------------------------------------------
@@ -527,15 +764,8 @@ class PluginRuntime {
 
   private buildContext(): PluginContext {
     const runtime = this;
-    const on = (name: string, listener: (payload: Record<string, unknown>) => void): Disposer => {
-      let listeners = runtime.eventListeners.get(name);
-      if (!listeners) {
-        listeners = new Set();
-        runtime.eventListeners.set(name, listeners);
-      }
-      listeners.add(listener);
-      return () => listeners?.delete(listener);
-    };
+    const on = (name: string, listener: (payload: Record<string, unknown>) => void): Disposer =>
+      runtime.onEvent(name, listener);
     const request = (service: PluginService, payload: unknown, options?: ServiceRequestOptions) =>
       runtime.requestService(service, payload, options);
     const services: PluginServices = {
@@ -548,9 +778,31 @@ class PluginRuntime {
       },
       storage: {
         read: <Value = unknown>() => runtime.requestService<Value | null>("storage_read", null),
-        write: async (value) => {
-          await runtime.requestService("storage_write", value);
+        write: async (value, options) => {
+          await runtime.requestService("storage_write", value, {
+            idempotencyKey: options?.idempotencyKey,
+          });
         },
+        list: async () => {
+          const result = await runtime.requestService<{ keys: StorageEntry[] }>("storage_list", null);
+          return result.keys;
+        },
+        get: <Value = unknown>(key: string) =>
+          runtime.requestService<{ value: Value | null; revision: number }>("storage_key_read", {
+            key,
+          }),
+        set: (key, value, options) =>
+          runtime.requestService<{ revision: number }>(
+            "storage_key_write",
+            { key, value, expectedRevision: options?.expectedRevision },
+            { idempotencyKey: options?.idempotencyKey },
+          ),
+        delete: (key, options) =>
+          runtime.requestService<{ deleted: boolean }>(
+            "storage_key_delete",
+            { key, expectedRevision: options?.expectedRevision },
+            { idempotencyKey: options?.idempotencyKey },
+          ),
       },
       session: {
         read: async <Value = unknown>(options?: { sessionId?: string }) => {
@@ -561,6 +813,61 @@ class PluginRuntime {
           );
           return result?.session ?? null;
         },
+        subscribe: (listener, options) => runtime.subscribeSession(listener, options),
+        create: (options) => runtime.requestService("session_create", options),
+        send: (sessionId, content, delivery) =>
+          runtime.requestService("session_send", { content, delivery }, { sessionId }),
+        interrupt: async (sessionId) => {
+          await runtime.requestService("session_interrupt", null, { sessionId });
+        },
+        wait: (sessionId, timeoutMs) =>
+          runtime.requestService(
+            "session_wait",
+            { timeoutMs: timeoutMs ?? 30_000 },
+            { sessionId },
+          ),
+      },
+      model: {
+        request: (options) =>
+          runtime.requestService(
+            "model_request",
+            {
+              purpose: options.purpose,
+              prompt: options.prompt,
+              system: options.system,
+              maxOutputTokens: options.maxOutputTokens,
+            },
+            { sessionId: options.sessionId },
+          ),
+      },
+      agents: {
+        list: (sessionId) =>
+          runtime.requestService("agent_list", null, { sessionId }),
+        start: (sessionId, options) =>
+          runtime.requestService(
+            "agent_start",
+            {
+              profile: options.profile,
+              prompt: options.prompt,
+              description: options.description ?? options.prompt,
+              background: options.background ?? true,
+            },
+            { sessionId },
+          ),
+        send: async (sessionId, agentId, message) => {
+          await runtime.requestService("agent_send", { agentId, message }, { sessionId });
+        },
+        wait: (sessionId, agentId, timeoutMs) =>
+          runtime.requestService(
+            "agent_wait",
+            { agentId, timeoutMs: timeoutMs ?? 30_000 },
+            { sessionId },
+          ),
+        stop: async (sessionId, agentId) => {
+          await runtime.requestService("agent_stop", { agentId }, { sessionId });
+        },
+        read: (sessionId, agentId) =>
+          runtime.requestService("agent_read", { agentId }, { sessionId }),
       },
     };
     const context: PluginContext = {
@@ -793,6 +1100,66 @@ class PluginRuntime {
     }
   }
 
+  private onEvent(
+    name: string,
+    listener: (payload: Record<string, unknown>) => void,
+  ): Disposer {
+    let listeners = this.eventListeners.get(name);
+    if (!listeners) {
+      listeners = new Set();
+      this.eventListeners.set(name, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners?.delete(listener);
+    };
+  }
+
+  private async subscribeSession(
+    listener: SessionEventListener,
+    options: { sessionId: string },
+  ): Promise<SessionSubscription> {
+    const result = await this.requestService<SessionSubscribeResult>(
+      "session_subscribe",
+      null,
+      { sessionId: options.sessionId },
+    );
+    const state = { cursor: result.cursor, dropped: result.dropped };
+    const off = this.onEvent("session.event", (payload) => {
+      if (payload.subscription !== result.subscription) return;
+      state.cursor = Number(payload.cursor ?? state.cursor);
+      state.dropped = Number(payload.dropped ?? state.dropped);
+      listener(payload.event as PluginSessionEvent, {
+        subscription: result.subscription,
+        epoch: Number(payload.epoch ?? result.epoch),
+        cursor: state.cursor,
+        dropped: state.dropped,
+      });
+    });
+    return {
+      id: result.subscription,
+      get epoch() {
+        return result.epoch;
+      },
+      get cursor() {
+        return state.cursor;
+      },
+      get dropped() {
+        return state.dropped;
+      },
+      close: async () => {
+        off();
+        try {
+          await this.requestService("session_unsubscribe", {
+            subscription: result.subscription,
+          });
+        } catch {
+          // The instance is already gone: nothing to release.
+        }
+      },
+    };
+  }
+
   private requestService<Result = unknown>(
     service: PluginService,
     payload: unknown,
@@ -825,6 +1192,7 @@ class PluginRuntime {
               payload: payload ?? null,
               sessionId: options.sessionId ?? null,
               workspaceId: options.workspaceId ?? null,
+              idempotencyKey: options.idempotencyKey,
             },
             requestId,
           );
@@ -849,7 +1217,14 @@ class PluginRuntime {
     const result = body.result as Record<string, unknown> | undefined;
     if (result && typeof result === "object" && "Err" in result) {
       const error = (result.Err ?? {}) as PluginProtocolErrorPayload;
-      pending.reject(new PluginError(error.code ?? "internal", error.message ?? `${pending.service} failed`, Boolean(error.retryable)));
+      pending.reject(
+        new PluginError(
+          error.code ?? "internal",
+          error.message ?? `${pending.service} failed`,
+          Boolean(error.retryable),
+          error.details,
+        ),
+      );
       return;
     }
     pending.resolve(result && typeof result === "object" && "Ok" in result ? result.Ok : (result ?? null));

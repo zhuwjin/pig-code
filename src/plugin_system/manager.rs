@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use nsh_core::{ApproxTextEngine, MountBatch};
 use nsh_engine::{App, Engine, EngineConfig, HostChannel, MountSink};
 use pig_protocol::{
-    Event, PluginContributions, PluginEnvelope, PluginErrorCode, PluginHello, PluginLifecycleState,
-    PluginMessageKind, PluginNegotiation, PluginPackageInfo, PluginProtocolError,
-    PluginRuntimeMetrics, PluginRuntimeSnapshot, PluginSequenceTracker, PluginServiceRequest,
-    PluginServiceResponse, PluginSnapshot, PluginSource, PluginStream, PluginTool,
+    AppConfig, Event, PluginContributions, PluginEnvelope, PluginErrorCode, PluginHello,
+    PluginLifecycleState, PluginMessageKind, PluginNegotiation, PluginPackageInfo,
+    PluginProtocolError, PluginRuntimeMetrics, PluginRuntimeSnapshot, PluginSequenceTracker,
+    PluginService, PluginServiceRequest, PluginServiceResponse, PluginSessionEvent,
+    PluginSessionSubscription, PluginSnapshot, PluginSource, PluginStream, PluginTool,
     PluginToolResult, PluginToolsSelection,
 };
 
@@ -42,8 +43,30 @@ pub(super) struct Inner {
     failed: BTreeSet<String>,
     pending: BTreeMap<String, PendingCall>,
     retired_outgoing: BTreeMap<String, (u64, PluginSequenceTracker)>,
+    /// The last configuration snapshot the core sent: workspace trust checks
+    /// for project packages and the workspace config overlay need it.
+    config: Option<AppConfig>,
+    /// Sessions known to the core (from SessionList/SessionConfigured), used
+    /// to scope a plugin's subscriptions and actions to its workspace.
+    session_cwds: BTreeMap<String, PathBuf>,
+    subscriptions: BTreeMap<String, SessionSubscription>,
+    subscription_seq: u64,
     epoch: u64,
 }
+
+struct SessionSubscription {
+    instance: String,
+    epoch: u64,
+    generation: u64,
+    session_id: String,
+    cursor: u64,
+    dropped: u64,
+    window: Instant,
+    count: u32,
+}
+
+const MAX_SUBSCRIPTIONS_PER_INSTANCE: usize = 4;
+const SUBSCRIPTION_EVENTS_PER_SECOND: u32 = 200;
 
 struct RetryInstance {
     package: PluginPackageInfo,
@@ -161,6 +184,10 @@ impl PluginSystemManager {
                 failed: BTreeSet::new(),
                 pending: BTreeMap::new(),
                 retired_outgoing: BTreeMap::new(),
+                config: None,
+                session_cwds: BTreeMap::new(),
+                subscriptions: BTreeMap::new(),
+                subscription_seq: 0,
                 epoch: 0,
             })),
             events,
@@ -323,6 +350,7 @@ impl PluginSystemManager {
     }
 
     pub fn handle_core_event(&self, event: &Event) {
+        self.observe_core_event(event);
         for reply in self.gateway.handle_core_event(event) {
             self.send_service_reply(reply);
         }
@@ -423,6 +451,231 @@ impl PluginSystemManager {
                 }
             }
             _ => {}
+        }
+        self.publish_session_events(event);
+    }
+
+    fn observe_core_event(&self, event: &Event) {
+        let mut inner = self.inner.lock().expect("plugin manager lock");
+        match event {
+            Event::ConfigSnapshot { config } => inner.config = Some(config.clone()),
+            Event::SessionList { sessions } => {
+                for session in sessions {
+                    inner
+                        .session_cwds
+                        .insert(session.id.clone(), session.cwd.clone());
+                }
+            }
+            Event::SessionConfigured {
+                session_id, cwd, ..
+            } => {
+                inner.session_cwds.insert(session_id.clone(), cwd.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn subscription_service(
+        &self,
+        package: &PluginPackageInfo,
+        instance: &str,
+        epoch: u64,
+        generation: u64,
+        request_id: &str,
+        request: PluginServiceRequest,
+    ) -> ServiceReply {
+        let service = request.service;
+        let result = (|| -> Result<serde_json::Value, PluginProtocolError> {
+            super::services::authorize_service(package, &request)?;
+            match service {
+                PluginService::SessionSubscribe => {
+                    let session_id = request
+                        .session_id
+                        .clone()
+                        .or_else(|| {
+                            super::services::payload_str(
+                                &request.payload,
+                                &["sessionId", "session_id"],
+                            )
+                            .map(str::to_owned)
+                        })
+                        .ok_or_else(|| {
+                            PluginProtocolError::new(
+                                PluginErrorCode::InvalidOperation,
+                                "session.subscribe needs a sessionId",
+                            )
+                        })?;
+                    let (cwd, trusted) = {
+                        let inner = self.inner.lock().expect("plugin manager lock");
+                        let cwd =
+                            inner
+                                .session_cwds
+                                .get(&session_id)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    PluginProtocolError::new(
+                                        PluginErrorCode::NotFound,
+                                        "the session is unknown to the host; open it first",
+                                    )
+                                })?;
+                        let trusted = match &package.source {
+                            PluginSource::Project { workspace } => {
+                                inner.config.as_ref().is_some_and(|config| {
+                                    pig_core::config::WorkspaceTrust::for_config(
+                                        Some(config),
+                                        workspace,
+                                    )
+                                    .admits(workspace)
+                                })
+                            }
+                            _ => true,
+                        };
+                        (cwd, trusted)
+                    };
+                    if let PluginSource::Project { workspace } = &package.source {
+                        if !trusted {
+                            return Err(PluginProtocolError::new(
+                                PluginErrorCode::PermissionDenied,
+                                "the workspace containing this plugin is not trusted",
+                            ));
+                        }
+                        if !cwd.starts_with(workspace) {
+                            return Err(PluginProtocolError::new(
+                                PluginErrorCode::PermissionDenied,
+                                "a project plugin cannot subscribe to another workspace's session",
+                            ));
+                        }
+                    }
+                    let subscription = {
+                        let mut inner = self.inner.lock().expect("plugin manager lock");
+                        let current = inner
+                            .subscriptions
+                            .values()
+                            .filter(|subscription| subscription.instance == instance)
+                            .count();
+                        if current >= MAX_SUBSCRIPTIONS_PER_INSTANCE {
+                            return Err(PluginProtocolError::new(
+                                PluginErrorCode::QuotaExceeded,
+                                "too many session subscriptions",
+                            ));
+                        }
+                        inner.subscription_seq += 1;
+                        let id = format!("sub-{}", inner.subscription_seq);
+                        inner.subscriptions.insert(
+                            id.clone(),
+                            SessionSubscription {
+                                instance: instance.to_owned(),
+                                epoch,
+                                generation,
+                                session_id: session_id.clone(),
+                                cursor: 0,
+                                dropped: 0,
+                                window: Instant::now(),
+                                count: 0,
+                            },
+                        );
+                        PluginSessionSubscription {
+                            subscription: id,
+                            session_id,
+                            epoch,
+                            cursor: 0,
+                            dropped: 0,
+                        }
+                    };
+                    serde_json::to_value(subscription).map_err(|error| {
+                        PluginProtocolError::new(PluginErrorCode::Internal, error.to_string())
+                    })
+                }
+                PluginService::SessionUnsubscribe => {
+                    let id = super::services::payload_str(&request.payload, &["subscription"])
+                        .unwrap_or_default()
+                        .to_owned();
+                    let mut inner = self.inner.lock().expect("plugin manager lock");
+                    if inner
+                        .subscriptions
+                        .get(&id)
+                        .is_some_and(|subscription| subscription.instance == instance)
+                    {
+                        inner.subscriptions.remove(&id);
+                    }
+                    Ok(serde_json::Value::Null)
+                }
+                _ => Ok(serde_json::Value::Null),
+            }
+        })();
+        ServiceReply {
+            instance: instance.to_owned(),
+            epoch,
+            generation,
+            request_id: request_id.to_owned(),
+            service,
+            result,
+        }
+    }
+
+    fn publish_session_events(&self, event: &Event) {
+        let Some(session_id) = projected_session_id(event) else {
+            return;
+        };
+        let Some(projected) = project_session_event(event) else {
+            return;
+        };
+        let deliveries: Vec<(String, serde_json::Value)> = {
+            let mut inner = self.inner.lock().expect("plugin manager lock");
+            let Inner {
+                subscriptions,
+                instances,
+                ..
+            } = &mut *inner;
+            let mut deliveries = Vec::new();
+            for (id, subscription) in subscriptions.iter_mut() {
+                if subscription.session_id != session_id {
+                    continue;
+                }
+                // A subscription belongs to one instance generation: after a
+                // restart its events must not leak into the new instance.
+                if !instances
+                    .get(&subscription.instance)
+                    .is_some_and(|instance| {
+                        instance.epoch == subscription.epoch
+                            && instance.engine_generation == subscription.generation
+                            && instance.state == PluginLifecycleState::Active
+                    })
+                {
+                    continue;
+                }
+                if subscription.window.elapsed() >= Duration::from_secs(1) {
+                    subscription.window = Instant::now();
+                    subscription.count = 0;
+                }
+                if subscription.count >= SUBSCRIPTION_EVENTS_PER_SECOND {
+                    subscription.dropped += 1;
+                    continue;
+                }
+                subscription.count += 1;
+                subscription.cursor += 1;
+                deliveries.push((
+                    subscription.instance.clone(),
+                    serde_json::json!({
+                        "name": "session.event",
+                        "subscription": id,
+                        "epoch": subscription.epoch,
+                        "cursor": subscription.cursor,
+                        "dropped": subscription.dropped,
+                        "event": projected,
+                    }),
+                ));
+            }
+            deliveries
+        };
+        for (instance, body) in deliveries {
+            self.send_to_instance(
+                &instance,
+                PluginMessageKind::ServiceEvent,
+                PluginStream::Services,
+                None,
+                body,
+            );
         }
     }
 
@@ -897,6 +1150,21 @@ impl PluginSystemManager {
                     }
                     (instance.package.clone(), instance.engine_generation)
                 };
+                if matches!(
+                    request.service,
+                    PluginService::SessionSubscribe | PluginService::SessionUnsubscribe
+                ) {
+                    let reply = self.subscription_service(
+                        &package,
+                        key,
+                        epoch,
+                        generation,
+                        &request_id,
+                        request,
+                    );
+                    self.send_service_reply(reply);
+                    return Ok(serde_json::Value::Null);
+                }
                 match self
                     .gateway
                     .execute(&package, key, epoch, generation, &request_id, request)
@@ -1301,6 +1569,10 @@ impl PluginSystemManager {
         let Some(mut instance) = instance else {
             return;
         };
+        {
+            let mut inner = self.inner.lock().expect("plugin manager lock");
+            inner.subscriptions.retain(|_, sub| sub.instance != key);
+        }
         self.inner
             .lock()
             .expect("plugin manager lock")
@@ -1440,6 +1712,11 @@ impl PluginSystemManager {
         let generation = instance.generation;
         let attempt = instance.attempt;
         let package = instance.package.clone();
+        self.inner
+            .lock()
+            .expect("plugin manager lock")
+            .subscriptions
+            .retain(|_, sub| sub.instance != key);
         let registered =
             instance.state == PluginLifecycleState::Active || instance.contribution_sync.is_some();
         discard_engine(instance.engine.take());
@@ -1784,6 +2061,120 @@ impl PluginSystemManager {
     }
 }
 
+fn projected_session_id(event: &Event) -> Option<&str> {
+    match event {
+        Event::SessionConfigured { session_id, .. }
+        | Event::TurnStarted { session_id, .. }
+        | Event::UserMessage { session_id, .. }
+        | Event::TextDone { session_id, .. }
+        | Event::ToolCallBegin { session_id, .. }
+        | Event::ToolCallEnd { session_id, .. }
+        | Event::TurnComplete { session_id, .. }
+        | Event::TurnAborted { session_id }
+        | Event::ContextCompacted { session_id, .. }
+        | Event::SubagentCard { session_id, .. }
+        | Event::PermissionsChanged { session_id, .. }
+        | Event::PlanModeChanged { session_id, .. } => Some(session_id),
+        Event::Error {
+            session_id: Some(session_id),
+            ..
+        } => Some(session_id),
+        _ => None,
+    }
+}
+
+fn session_preview(text: &str) -> String {
+    const MAX: usize = 2048;
+    if text.chars().count() <= MAX {
+        return text.to_owned();
+    }
+    let mut preview: String = text.chars().take(MAX).collect();
+    preview.push('…');
+    preview
+}
+
+fn project_session_event(event: &Event) -> Option<PluginSessionEvent> {
+    match event {
+        Event::SessionConfigured {
+            model,
+            provider_name,
+            permissions,
+            ..
+        } => Some(PluginSessionEvent::Configured {
+            model: model.clone(),
+            provider_name: provider_name.clone(),
+            permissions: *permissions,
+        }),
+        Event::TurnStarted { turn_id, .. } => Some(PluginSessionEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+        }),
+        Event::UserMessage { text, files, .. } => Some(PluginSessionEvent::UserMessage {
+            text: session_preview(text),
+            files: files.len(),
+        }),
+        Event::TextDone { full_text, .. } => Some(PluginSessionEvent::AssistantText {
+            text: session_preview(full_text),
+        }),
+        Event::ToolCallBegin {
+            item_id,
+            tool,
+            input_summary,
+            ..
+        } => Some(PluginSessionEvent::ToolStarted {
+            item_id: item_id.clone(),
+            tool: tool.clone(),
+            summary: session_preview(input_summary),
+        }),
+        Event::ToolCallEnd {
+            item_id,
+            output,
+            is_error,
+            ..
+        } => Some(PluginSessionEvent::ToolFinished {
+            item_id: item_id.clone(),
+            is_error: *is_error,
+            preview: session_preview(output),
+        }),
+        Event::TurnComplete {
+            duration_ms,
+            stats,
+            finish_reason,
+            ..
+        } => Some(PluginSessionEvent::TurnComplete {
+            duration_ms: *duration_ms,
+            finish_reason: *finish_reason,
+            stats: stats.clone(),
+        }),
+        Event::TurnAborted { .. } => Some(PluginSessionEvent::TurnAborted),
+        Event::Error { error, fatal, .. } => Some(PluginSessionEvent::Error {
+            fatal: *fatal,
+            error: error.clone(),
+        }),
+        Event::ContextCompacted { automatic, .. } => Some(PluginSessionEvent::Compacted {
+            automatic: *automatic,
+        }),
+        Event::SubagentCard {
+            agent_id,
+            profile,
+            description,
+            background,
+            ..
+        } => Some(PluginSessionEvent::Agent {
+            agent_id: agent_id.clone(),
+            profile: profile.clone(),
+            description: description.clone(),
+            background: *background,
+        }),
+        Event::PermissionsChanged { permissions, .. } => Some(PluginSessionEvent::Permissions {
+            permissions: *permissions,
+        }),
+        Event::PlanModeChanged { enabled, .. } => {
+            Some(PluginSessionEvent::PlanMode { enabled: *enabled })
+        }
+        _ => None,
+    }
+}
+
 fn discard_engine(engine: Option<Engine>) {
     if let Some(engine) = engine {
         std::thread::spawn(move || drop(engine));
@@ -1970,6 +2361,41 @@ mod tests {
         let second = instance_key(&other_project, Path::new("/other"));
         assert_ne!(user, first);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn session_events_project_to_the_narrow_plugin_shape() {
+        let started = Event::TurnStarted {
+            session_id: "s1".into(),
+            turn_id: "turn-1".into(),
+        };
+        assert_eq!(projected_session_id(&started), Some("s1"));
+        assert!(matches!(
+            project_session_event(&started),
+            Some(PluginSessionEvent::TurnStarted { turn_id }) if turn_id == "turn-1"
+        ));
+        let text = "x".repeat(3000);
+        let done = Event::TextDone {
+            session_id: "s1".into(),
+            item_id: "item-1".into(),
+            full_text: text,
+        };
+        let Some(PluginSessionEvent::AssistantText { text }) = project_session_event(&done) else {
+            panic!("assistant text projection");
+        };
+        assert!(text.chars().count() <= 2049, "the preview is capped");
+        assert!(text.ends_with('…'));
+        // Events without a session (or outside the projection) are not
+        // forwarded to any subscription.
+        assert_eq!(
+            projected_session_id(&Event::TestResult {
+                provider_id: "p".into(),
+                result: pig_protocol::ConnTestResult::Failed {
+                    detail: "no".into(),
+                },
+            }),
+            None
+        );
     }
 
     #[test]

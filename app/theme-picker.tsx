@@ -1,7 +1,8 @@
 import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
 import { Button, Input, Popover } from "nsh/base";
-import { PluginPackageInfo, PluginRuntimeState } from "./protocol";
+import { PluginConfigItem, PluginContributionConflict, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
+import { PluginConfigEditor } from "./components/plugin-config-editor";
 import { languagePreference, setLanguagePreference, t } from "./i18n";
 import type { LanguagePreference, MessageKey } from "./i18n";
 import { ThemeStore } from "./theme";
@@ -172,11 +173,24 @@ function ThemePackageRow(props: {
   onToggle: (plugin: PluginPackageInfo) => void;
   onRetry?: () => void;
   onRemove: () => void;
+  onReadConfig?: (
+    plugin: PluginPackageInfo,
+    key: string,
+    sessionId?: string | null,
+  ) => Promise<unknown>;
+  onWriteConfig?: (
+    plugin: PluginPackageInfo,
+    key: string,
+    value: unknown,
+    sessionId?: string | null,
+  ) => Promise<unknown>;
+  currentSessionId?: () => string | null;
 }) {
   const plugin = () => props.item();
   const runtime = () => props.runtime;
   return (
-    <View class="flex-row items-center gap-1">
+    <View class="gap-2">
+      <View class="flex-row items-center gap-1">
       <Button
         testID={`theme-package-${plugin().id}`}
         selected={plugin().enabled}
@@ -235,6 +249,15 @@ function ThemePackageRow(props: {
       <Button testID={`plugin-uninstall-${plugin().id}`} accessibilityLabel={t("settings.plugins.uninstall.label", { name: plugin().name })} class="rounded-(--radius) px-2 py-1 hover:bg-destructive/10" onPress={props.onRemove}>
         <Text class="text-xs text-destructive">{t("settings.plugins.uninstall.action")}</Text>
       </Button>
+      </View>
+      <If when={(plugin().contributions.config?.items?.length ?? 0) > 0}>
+        <PluginConfigEditor
+          plugin={props.item}
+          read={props.onReadConfig}
+          write={props.onWriteConfig}
+          sessionId={props.currentSessionId}
+        />
+      </If>
     </View>
   );
 }
@@ -255,6 +278,19 @@ interface ThemePickerProps {
   onRefreshPackages: () => void;
   onInstallPlugin: (packagePath: string, rootPath: string) => Promise<void>;
   onUninstallPlugin: (plugin: PluginPackageInfo) => void;
+  conflicts?: () => PluginContributionConflict[];
+  readPluginConfig?: (
+    plugin: PluginPackageInfo,
+    key: string,
+    sessionId?: string | null,
+  ) => Promise<unknown>;
+  writePluginConfig?: (
+    plugin: PluginPackageInfo,
+    key: string,
+    value: unknown,
+    sessionId?: string | null,
+  ) => Promise<unknown>;
+  currentSessionId?: () => string | null;
 }
 
 export function ThemePicker(props: ThemePickerProps) {
@@ -541,9 +577,37 @@ export function ThemePicker(props: ThemePickerProps) {
                       onToggle={(value) => props.onTogglePackage(value)}
                       onRetry={() => props.onRetryPackage?.(plugin())}
                       onRemove={() => pendingUninstall.set(plugin())}
+                      onReadConfig={props.readPluginConfig}
+                      onWriteConfig={props.writePluginConfig}
+                      currentSessionId={props.currentSessionId}
                     />
                   )}
                 </Each>
+                <If when={(props.conflicts?.()?.length ?? 0) > 0}>
+                  <View class="gap-1 rounded-(--radius) border border-destructive/30 bg-destructive/10 p-3">
+                    <Text class="text-xs font-medium text-destructive">
+                      {t("settings.plugins.conflicts.title")}
+                    </Text>
+                    <Each
+                      of={props.conflicts?.() ?? []}
+                      key={(conflict) => `${conflict.kind}:${conflict.name}`}
+                    >
+                      {(conflict) => (
+                        <Text
+                          testID={`plugin-conflict-${conflict().kind}-${conflict().name}`}
+                          class="text-[10px] leading-4 text-destructive"
+                        >
+                          {t("settings.plugins.conflicts.conflict", {
+                            kind: conflict().kind,
+                            name: conflict().name,
+                            winner: conflict().winner,
+                            losers: conflict().losers.join(", "),
+                          })}
+                        </Text>
+                      )}
+                    </Each>
+                  </View>
+                </If>
               </View>
               <If when={pendingUninstall()}>
                 {(plugin) => (

@@ -82,15 +82,74 @@ pub fn load_profiles_with_trust(
     data_dir: &Path,
     trust: &WorkspaceTrust,
 ) -> Vec<AgentProfile> {
-    load_profiles_inner(cwd, data_dir, trust.admits(cwd))
+    load_profiles_inner(cwd, data_dir, trust.admits(cwd), Vec::new())
 }
 
-fn load_profiles_inner(cwd: &Path, data_dir: &Path, include_project: bool) -> Vec<AgentProfile> {
+/// The effective profiles with the enabled packages' contributions inserted
+/// between the built-ins and the user directory: a package can add profiles,
+/// but it never silently replaces a user or project profile of the same name.
+/// Within the plugin level the first package by id wins, so the result does not
+/// depend on discovery order.
+pub fn load_profiles_with_plugins(
+    cwd: &Path,
+    data_dir: &Path,
+    trust: &WorkspaceTrust,
+    plugins: &crate::plugins::SharedPluginRegistry,
+) -> Vec<AgentProfile> {
+    let packages = plugins
+        .lock()
+        .map(|registry| crate::plugins::enabled_packages(&registry, trust))
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .unwrap_or_default();
+    let mut contributed = Vec::new();
+    for package in packages {
+        for agent in package.contributions.agents {
+            contributed.push((
+                package.id.clone(),
+                AgentProfile {
+                    name: agent.name,
+                    description: agent.description,
+                    tools: agent.tools,
+                    model: agent.model,
+                    thought_level: agent.thought_level,
+                    max_turns: agent.max_turns,
+                    inject_agents_md: agent.inject_agents_md,
+                    system_prompt: agent.system_prompt,
+                    source: AgentSource::Plugin,
+                },
+            ));
+        }
+    }
+    load_profiles_inner(cwd, data_dir, trust.admits(cwd), contributed)
+}
+
+fn load_profiles_inner(
+    cwd: &Path,
+    data_dir: &Path,
+    include_project: bool,
+    plugin_profiles: Vec<(String, AgentProfile)>,
+) -> Vec<AgentProfile> {
     let mut by_name: HashMap<String, AgentProfile> = HashMap::new();
     for profile in builtin_profiles() {
         by_name.insert(profile.name.clone(), profile);
     }
-    // Directory precedence: project > user > built-in; same name replaces wholesale
+    // Plugin level: an enabled package may add a profile or replace a built-in
+    // of the same name; two packages claiming one name keep the first by id.
+    for (package, profile) in plugin_profiles {
+        if by_name
+            .get(&profile.name)
+            .is_some_and(|existing| existing.source == AgentSource::Plugin)
+        {
+            tracing::warn!(
+                package,
+                profile = profile.name,
+                "ignored a plugin agent profile whose name another package already contributes"
+            );
+            continue;
+        }
+        by_name.insert(profile.name.clone(), profile);
+    }
+    // Directory precedence: project > user > built-in/plugin; same name replaces wholesale
     let mut levels = vec![(data_dir.join("agents"), AgentSource::User)];
     if include_project {
         levels.push((cwd.join(".pigcode").join("agents"), AgentSource::Project));

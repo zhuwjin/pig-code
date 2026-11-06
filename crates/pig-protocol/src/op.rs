@@ -1,5 +1,85 @@
 use super::*;
 
+/// A session action a plugin requests through its host services. The core
+/// runner is the only place that touches sessions, so every action arrives as
+/// one narrow Op and answers with one `Event::PluginSessionResult`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginSessionAction {
+    /// Create a session in `cwd` (the plugin's declared workspace), with the
+    /// same permission settings the UI would use.
+    Create {
+        cwd: PathBuf,
+        #[serde(default)]
+        provider_id: Option<String>,
+        #[serde(default)]
+        model_id: Option<String>,
+        #[serde(default)]
+        reasoning_level: Option<String>,
+        #[serde(default)]
+        permissions: Option<PermissionSettings>,
+    },
+    /// Send a message to an existing session under its own current
+    /// permissions (a plugin can never widen them).
+    Send {
+        session_id: String,
+        content: String,
+        #[serde(default)]
+        delivery: MessageDelivery,
+    },
+    /// Stop the session's running turn.
+    Interrupt { session_id: String },
+    /// Wait for the session's running turn, or answer `idle` at once.
+    Wait { session_id: String, timeout_ms: u64 },
+    /// One non-streaming model call with a purpose and explicit limits.
+    Model {
+        #[serde(default)]
+        session_id: Option<String>,
+        purpose: String,
+        #[serde(default)]
+        system: Option<String>,
+        prompt: String,
+        #[serde(default)]
+        max_output_tokens: Option<u64>,
+    },
+    /// The subagent profiles a session can delegate to.
+    AgentList {
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+    /// Start a delegated subagent in an idle session.
+    AgentStart {
+        session_id: String,
+        profile: String,
+        prompt: String,
+        description: String,
+        #[serde(default)]
+        background: bool,
+    },
+    /// Steer a running delegated subagent.
+    AgentSend {
+        session_id: String,
+        agent_id: String,
+        message: String,
+    },
+    /// Wait for a delegated subagent to settle.
+    AgentWait {
+        session_id: String,
+        agent_id: String,
+        timeout_ms: u64,
+    },
+    /// Stop a delegated subagent.
+    AgentStop {
+        session_id: String,
+        agent_id: String,
+    },
+    /// Read a delegated subagent's conversation projection.
+    AgentRead {
+        session_id: String,
+        agent_id: String,
+    },
+}
+
 /// UI → core commands
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -296,6 +376,12 @@ pub enum Op {
     },
     PluginToolsSelection {
         selection: PluginToolsSelection,
+    },
+    PluginSessionAction {
+        request_id: String,
+        package: String,
+        digest: String,
+        action: PluginSessionAction,
     },
     PluginHttpRequest {
         request_id: String,

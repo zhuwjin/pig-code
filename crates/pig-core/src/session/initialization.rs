@@ -52,7 +52,7 @@ impl SessionFrozen {
             String::new()
         };
         let profiles_summary = crate::agent::agent_description_list(
-            &crate::agent::load_profiles_with_trust(cwd, data_dir, &trust),
+            &crate::agent::load_profiles_with_plugins(cwd, data_dir, &trust, plugins),
         );
         let plugin_tools =
             crate::plugins::PluginToolset::new(plugins, &trust, app_config.cloned(), session_id);

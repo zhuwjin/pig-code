@@ -174,6 +174,76 @@ Navigation targets are limited to `main`, `models`, `appearance`, `plugins` and 
 
 Requests have timeouts and concurrency limits. Disabling, updating or uninstalling a package stops its backend, cancels pending tools and services, removes runtime contributions and drops late replies.
 
+## Session observation, control and model calls
+
+A plugin can observe and drive a session only through narrow, declared services, never through the
+host's stores or mutable objects:
+
+- `session.subscribe` opens a subscription tied to the backend's instance/epoch/generation and
+  returns `{subscription, epoch, cursor}`. The host pushes `service.event` messages named
+  `session.event` with a monotonic `cursor` and a `dropped` count; stale or foreign envelopes are
+  discarded on both sides, and disabling/stopping the backend drops the subscription.
+- The projected event set is closed: `configured`, `turn_started`, `user_message`,
+  `assistant_text` (preview), `tool_started`/`tool_finished` (preview), `turn_complete`,
+  `turn_aborted`, `error`, `compacted`, `agent`, `permissions`, `plan_mode`.
+- `session.create` (capability `session.create`) creates a session in the declared workspace;
+  `session.send`/`session.interrupt`/`session.wait` (capability `session.control`) use the
+  session's own current permissions — a plugin can never widen them — and a project package can
+  only touch sessions inside its trusted workspace.
+- `model.request` (capability `model.request`, target = purpose) performs one non-streaming call:
+  purposes are `review`, `commit_message`, `classify`, `memory`, `summary`, `custom`; the prompt is
+  capped at 64 KiB, the system prompt at 16 KiB, output at 4096 tokens, and the call is recorded in
+  the ordinary API usage log.
+
+## Delegated subagents
+
+- Packages declare `agents` (behind `provide_agents`): the same name/description/tools/model/
+  maxTurns/system prompt fields a Markdown profile has. They rank above the built-ins and below
+  the user/project profile directories, so a package never silently replaces a user profile.
+- `agent.list`, `agent.start`, `agent.send`, `agent.wait`, `agent.stop`, `agent.read` (capability
+  `agent.delegate`) run through the existing subagent preparation/drive pipeline: the child
+  inherits the session's workspace, permissions, trust and tool narrowing; the parent must be idle.
+- A delegated child uses the existing Agent card (`ToolCallBegin` + `SubagentCard`), task
+  registry, `SubagentActivity` and terminal notifications; late results and late steering are
+  isolated exactly like a model-started child, and stopping it removes the pending approvals and
+  releases the context writer.
+
+## User/workspace configuration
+
+- Manifest `config.items` declare a key, a localized description, a default and an optional JSON
+  Schema for the value; the schema subset is the same closed one tools use, validated at install
+  and on every write.
+- A trusted workspace's `.pigcode/plugins.json` overrides options (`config`) and may disable an
+  enabled package (`enabled: false`) or enable a resource-only package; undeclared keys keep
+  inheriting the user value, and the user store is untouched. An untrusted workspace file is not
+  read. Enabling a package with a backend stays a user-level decision (its Engine is global).
+- The host renders a generic options form from the declarations (string, number, boolean, enum) in
+  the plugin manager; there is no plugin-provided settings page. A scope switch writes either the
+  user value or the current workspace's override.
+
+## Storage and side-effect recovery
+
+- Besides the legacy whole-blob `storage_read`/`storage_write`, keyed storage supports
+  `storage_list`, `storage_key_read`, `storage_key_write` and `storage_key_delete` with a per-key
+  `revision`. A write/delete with `expectedRevision` is compare-and-swap: a stale revision fails
+  with `stale_revision` and `details.currentRevision`, never silently overwriting.
+- Side-effecting requests (storage writes, config writes, credential changes, HTTP requests)
+  persist their result under an idempotency key (the request's own id unless the plugin supplies
+  `idempotencyKey`). A retry replays the recorded result; an attempt that was in flight when the
+  process died returns `busy` instead of executing again. Storage files are per-package, private,
+  and separate from the host's business state.
+
+## Conflict rules
+
+- Tools, agent profiles, skills, MCP servers and themes contributed by several enabled packages
+  are resolved by package id (the first id wins); the snapshot carries `conflicts` entries naming
+  the winner and every loser, and the plugin manager shows them.
+- User/project skills and MCP servers always win over a plugin contribution of the same name; a
+  plugin only fills names nobody configured. Disabling, updating or uninstalling a package
+  re-resolves hooks, skills, profiles, tools and MCP servers in every live session; a session
+  owned by a turn refreshes at its wrap-up, and the old MCP manager is dropped (its stdio children
+  are killed).
+
 ## Identity and storage
 
 `pig-core::PluginRegistry` owns installed packages, exact content digests, enable choices, capabilities and committed runtime contributions. Runtime instance identity includes the package digest and source scope. The stable private-data key excludes the digest so ordinary updates retain private plugin data under the existing authorization model.
@@ -207,11 +277,12 @@ cargo check -p pig-protocol
 cargo test -p nsh-app-pig-code-ts signed_moon_package_loads_and_wrong_root_is_refused -- --test-threads=1
 cargo test -p nsh-app-pig-code-ts a_signed_sdk_package_activates_and_answers_tool_calls -- --test-threads=1
 cargo test -p pig-core --lib plugins:: -- --test-threads=1
+cargo test -p pig-core --test plugin_sessions -- --test-threads=1
 nsh check
 nsh test --filter "the SDK serves a real backend" --target windows
 nsh test --filter "loads, applies, disables and restores plugin themes" --target windows
 ```
 
-`a_signed_sdk_package_activates_and_answers_tool_calls` builds a real signed package from `examples/moon-plugin` (whose backend uses `pig/plugin`), starts its Engine through the plugin manager, commits the SDK's runtime contributions and asserts the `MoonEcho` answer. `App.plugin-sdk.test.tsx` runs the same applier through the SDK's test host (tools, commands, events, health, structured errors, stale envelopes, hook contributions).
+`a_signed_sdk_package_activates_and_answers_tool_calls` builds a real signed package from `examples/moon-plugin` (whose backend uses `pig/plugin`), starts its Engine through the plugin manager, commits the SDK's runtime contributions and asserts the `MoonEcho` answer. `crates/pig-core/tests/plugin_sessions.rs` drives session create/send/wait/interrupt, a bounded model request and delegated agents through the real agent loop. `App.plugin-sdk.test.tsx` runs appliers through the SDK's test host (tools, commands, events, health, structured errors, stale envelopes, hook contributions, session subscriptions/control, model calls, agents and keyed storage).
 
 Run the broader project suites for a later, separate verification pass rather than starting overlapping Cargo builds.

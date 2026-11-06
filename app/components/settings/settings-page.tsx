@@ -37,6 +37,19 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
     onRefreshPackages: () => props.store.syncPlugins(),
     onInstallPlugin: (packagePath: string, rootPath: string) => props.store.installPlugin(packagePath, rootPath),
     onUninstallPlugin: (plugin: Parameters<UiContext["store"]["uninstallPlugin"]>[0]) => props.store.uninstallPlugin(plugin),
+    conflicts: () => props.store.pluginConflicts(),
+    readPluginConfig: (
+      plugin: Parameters<UiContext["store"]["readPluginConfig"]>[0],
+      key: string,
+      sessionId?: string | null,
+    ) => props.store.readPluginConfig(plugin, key, sessionId),
+    writePluginConfig: (
+      plugin: Parameters<UiContext["store"]["writePluginConfig"]>[0],
+      key: string,
+      value: unknown,
+      sessionId?: string | null,
+    ) => props.store.writePluginConfig(plugin, key, value, sessionId),
+    currentSessionId: () => props.store.current(),
   });
   return (
     <View testID="settings-page" class={props.themeStore.classes("settings.root", "min-w-0 flex-1 bg-background")}>

@@ -277,7 +277,23 @@
       "diagnostics": {
         "logs": "最近插件日志（已脱敏）"
       },
-      "incompatible": "需要更新版本的 Pig Code — {detail}"
+      "incompatible": "需要更新版本的 Pig Code — {detail}",
+      "config": {
+        "open": "配置",
+        "save": "保存",
+        "saved": "已保存",
+        "failed": "保存失败：{detail}",
+        "loading": "正在加载配置…",
+        "scope": {
+          "user": "用户",
+          "workspace": "当前工作区"
+        },
+        "workspace_unavailable": "请先打开工作区"
+      },
+      "conflicts": {
+        "title": "贡献冲突",
+        "conflict": "冲突：{kind} `{name}` 来自 {winner}，已忽略 {losers}"
+      }
     },
     "marketplace": {
       "title": "插件市场",
@@ -423,7 +439,8 @@
       "send_first": "请先发送一条消息创建会话。"
     },
     "current_session": "当前会话",
-    "compacting": "正在压缩上下文…"
+    "compacting": "正在压缩上下文…",
+    "agent_unavailable": "Agent 不可用"
   },
   "question": {
     "progress": "问题 {current} / {total}",

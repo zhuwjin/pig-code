@@ -22,6 +22,8 @@ import {
   PendingImage,
   PendingQuestion,
   PermissionSettings,
+  PluginConfigItem,
+  PluginContributionConflict,
   PluginPackageInfo,
   PluginCommand,
   PluginMarketplacePackage,
@@ -128,6 +130,12 @@ export class AgentStore {
   readonly pluginMarketplaceLoading = signal<Record<string, boolean>>({});
   readonly pluginMarketplaceErrors = signal<Record<string, string>>({});
   readonly pluginMarketplaceInstalling = signal<{ sourceId: string; packageId: string } | null>(null);
+  readonly pluginConflicts = signal<PluginContributionConflict[]>([]);
+  private readonly pluginConfigPending = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
+  }>();
+  private pluginConfigSeq = 0;
   readonly pluginRuntimeContributions = signal<Record<string, {
     themes?: { id: string; entry: string }[];
     commands?: PluginCommand[];
@@ -1053,6 +1061,51 @@ export class AgentStore {
     }
   }
 
+  readPluginConfig(
+    plugin: PluginPackageInfo,
+    key: string,
+    sessionId?: string | null,
+  ): Promise<unknown> {
+    return this.pluginConfigRequest(plugin, { kind: "read_config", data: { path: key } }, sessionId);
+  }
+
+  writePluginConfig(
+    plugin: PluginPackageInfo,
+    key: string,
+    value: unknown,
+    sessionId?: string | null,
+  ): Promise<unknown> {
+    return this.pluginConfigRequest(
+      plugin,
+      { kind: "write_config", data: { path: key, value } },
+      sessionId,
+    );
+  }
+
+  private pluginConfigRequest(
+    plugin: PluginPackageInfo,
+    action: { kind: "read_config" | "write_config"; data: { path: string; value?: unknown } },
+    sessionId?: string | null,
+  ): Promise<unknown> {
+    const requestId = `plugin-config-${++this.pluginConfigSeq}`;
+    return new Promise((resolve, reject) => {
+      this.pluginConfigPending.set(requestId, { resolve, reject });
+      const sent = this.command({
+        PluginAction: {
+          request_id: requestId,
+          package: plugin.id,
+          digest: plugin.digest,
+          action,
+          session_id: sessionId ?? null,
+        },
+      }, sessionId ?? undefined);
+      if (!sent) {
+        this.pluginConfigPending.delete(requestId);
+        reject(new Error(t("store.agent_unavailable")));
+      }
+    });
+  }
+
   setPluginOrder(order: string[]): void {
     this.pluginOrder.set([...new Set(order)]);
   }
@@ -1228,8 +1281,26 @@ export class AgentStore {
           this.themeError.set(issues.map((issue) => errorMessage(issue.error)).join("\n"));
         }
         this.pluginPackages.set(packages);
+        this.pluginConflicts.set((data.snapshot.conflicts ?? []) as PluginContributionConflict[]);
         this.pluginRuntimeContributions.set(data.snapshot.runtime_contributions ?? {});
         void this.loadPluginThemes(packages);
+        break;
+      }
+      case "PluginActionResult": {
+        const result = data.result as {
+          request_id: string;
+          result: { Ok?: unknown; Err?: { detail?: string } };
+        };
+        const pending = this.pluginConfigPending.get(result.request_id);
+        if (pending) {
+          this.pluginConfigPending.delete(result.request_id);
+          const outcome = result.result;
+          if (outcome && typeof outcome === "object" && "Err" in outcome && outcome.Err) {
+            pending.reject(new Error(outcome.Err.detail ?? "plugin configuration failed"));
+          } else {
+            pending.resolve(outcome && typeof outcome === "object" && "Ok" in outcome ? outcome.Ok : null);
+          }
+        }
         break;
       }
       case "ConfigSnapshot":

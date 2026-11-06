@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pig_protocol::{
-    CoreError, Event, PluginAction, PluginErrorCode, PluginPackageInfo, PluginProtocolError,
-    PluginResource, PluginScope, PluginService, PluginServiceRequest, PluginSource, SecretString,
+    CoreError, Event, MessageDelivery, PermissionSettings, PluginAction, PluginErrorCode,
+    PluginPackageInfo, PluginProtocolError, PluginResource, PluginScope, PluginService,
+    PluginServiceRequest, PluginSessionAction, PluginSource, SecretString,
 };
 
 const MAX_PENDING_SERVICES: usize = 32;
@@ -38,6 +39,10 @@ struct PendingService {
     service: PluginService,
     network_bytes: u64,
     deadline: Instant,
+    /// `(request log path, key)` when this request started a side effect; its
+    /// result is persisted here so a retry (including after a restart) replays
+    /// instead of executing again.
+    request_key: Option<(PathBuf, String)>,
 }
 
 pub struct ServiceReply {
@@ -102,7 +107,7 @@ impl HostServiceGateway {
                 )),
             ));
         }
-        if let Err(error) = authorize_request(package, &request) {
+        if let Err(error) = authorize_service(package, &request) {
             return ServiceExecution::Complete(self.reply(
                 instance,
                 epoch,
@@ -111,6 +116,51 @@ impl HostServiceGateway {
                 request.service,
                 Err(error),
             ));
+        }
+        let mut forwarded_key = None;
+        if is_forwarded_side_effect(request.service) {
+            let key = side_effect_key(request.service, &request, request_id);
+            let path = request_log_path(&storage_path(
+                &self.data_dir,
+                &super::manager::plugin_data_key(package),
+            ));
+            match begin_request(&path, &key) {
+                Ok(BeginRequest::Done(result)) => {
+                    return ServiceExecution::Complete(self.reply(
+                        instance,
+                        epoch,
+                        generation,
+                        request_id,
+                        request.service,
+                        result,
+                    ));
+                }
+                Ok(BeginRequest::InFlight) => {
+                    return ServiceExecution::Complete(self.reply(
+                        instance,
+                        epoch,
+                        generation,
+                        request_id,
+                        request.service,
+                        Err(protocol_error(
+                            PluginErrorCode::Busy,
+                            "this side-effecting request is still in flight; its result is unknown",
+                        )
+                        .retryable()),
+                    ));
+                }
+                Ok(BeginRequest::Start) => forwarded_key = Some((path, key)),
+                Err(error) => {
+                    return ServiceExecution::Complete(self.reply(
+                        instance,
+                        epoch,
+                        generation,
+                        request_id,
+                        request.service,
+                        Err(error),
+                    ));
+                }
+            }
         }
         match request.service {
             PluginService::StorageRead => ServiceExecution::Complete(self.reply(
@@ -121,18 +171,68 @@ impl HostServiceGateway {
                 request.service,
                 read_storage(&self.data_dir, &super::manager::plugin_data_key(package)),
             )),
-            PluginService::StorageWrite => ServiceExecution::Complete(self.reply(
+            PluginService::StorageWrite => {
+                let data_key = super::manager::plugin_data_key(package);
+                let result = self.run_local_side_effect(
+                    package,
+                    request.service,
+                    request_id,
+                    &request,
+                    || write_storage(&self.data_dir, &data_key, &request.payload),
+                );
+                ServiceExecution::Complete(self.reply(
+                    instance,
+                    epoch,
+                    generation,
+                    request_id,
+                    request.service,
+                    result,
+                ))
+            }
+            PluginService::StorageList => ServiceExecution::Complete(self.reply(
                 instance,
                 epoch,
                 generation,
                 request_id,
                 request.service,
-                write_storage(
+                storage_list(&self.data_dir, &super::manager::plugin_data_key(package)),
+            )),
+            PluginService::StorageKeyRead => ServiceExecution::Complete(self.reply(
+                instance,
+                epoch,
+                generation,
+                request_id,
+                request.service,
+                storage_key_read(
                     &self.data_dir,
                     &super::manager::plugin_data_key(package),
                     &request.payload,
                 ),
             )),
+            PluginService::StorageKeyWrite | PluginService::StorageKeyDelete => {
+                let data_key = super::manager::plugin_data_key(package);
+                let result = self.run_local_side_effect(
+                    package,
+                    request.service,
+                    request_id,
+                    &request,
+                    || {
+                        if request.service == PluginService::StorageKeyWrite {
+                            storage_key_write(&self.data_dir, &data_key, &request.payload)
+                        } else {
+                            storage_key_delete(&self.data_dir, &data_key, &request.payload)
+                        }
+                    },
+                );
+                ServiceExecution::Complete(self.reply(
+                    instance,
+                    epoch,
+                    generation,
+                    request_id,
+                    request.service,
+                    result,
+                ))
+            }
             PluginService::ResourceRead => ServiceExecution::Complete(self.reply(
                 instance,
                 epoch,
@@ -196,10 +296,19 @@ impl HostServiceGateway {
                     }),
                 )
             }
-            _ => self.forward(package, instance, epoch, generation, request_id, request),
+            _ => self.forward(
+                package,
+                instance,
+                epoch,
+                generation,
+                request_id,
+                request,
+                forwarded_key,
+            ),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         package: &PluginPackageInfo,
@@ -208,6 +317,7 @@ impl HostServiceGateway {
         generation: u64,
         request_id: &str,
         request: PluginServiceRequest,
+        request_key: Option<(PathBuf, String)>,
     ) -> ServiceExecution {
         let service = request.service;
         let failure = |error| {
@@ -337,6 +447,271 @@ impl HostServiceGateway {
                     },
                 }
             }
+            PluginService::SessionCreate => {
+                let Some(cwd) = payload_str(&request.payload, &["cwd"]) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "session.create needs a cwd",
+                    ));
+                };
+                let permissions = match request.payload.get("permissions") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => {
+                        match serde_json::from_value::<PermissionSettings>(value.clone()) {
+                            Ok(permissions) => Some(permissions),
+                            Err(error) => {
+                                return failure(protocol_error(
+                                    PluginErrorCode::InvalidOperation,
+                                    format!("invalid session permissions: {error}"),
+                                ));
+                            }
+                        }
+                    }
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::Create {
+                        cwd: PathBuf::from(cwd),
+                        provider_id: payload_str(&request.payload, &["providerId"])
+                            .map(str::to_owned),
+                        model_id: payload_str(&request.payload, &["modelId"]).map(str::to_owned),
+                        reasoning_level: payload_str(&request.payload, &["reasoningLevel"])
+                            .map(str::to_owned),
+                        permissions,
+                    },
+                }
+            }
+            PluginService::SessionSend => {
+                let Some(session_id) = session_target(&request) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "session.send needs a sessionId",
+                    ));
+                };
+                let Some(content) = payload_str(&request.payload, &["content"]) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "session.send needs content",
+                    ));
+                };
+                let delivery = match request.payload.get("delivery") {
+                    None | Some(serde_json::Value::Null) => MessageDelivery::default(),
+                    Some(value) => match serde_json::from_value::<MessageDelivery>(value.clone()) {
+                        Ok(delivery) => delivery,
+                        Err(error) => {
+                            return failure(protocol_error(
+                                PluginErrorCode::InvalidOperation,
+                                format!("invalid delivery: {error}"),
+                            ));
+                        }
+                    },
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::Send {
+                        session_id: session_id.to_owned(),
+                        content: content.to_owned(),
+                        delivery,
+                    },
+                }
+            }
+            PluginService::SessionInterrupt => {
+                let Some(session_id) = session_target(&request) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "session.interrupt needs a sessionId",
+                    ));
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::Interrupt {
+                        session_id: session_id.to_owned(),
+                    },
+                }
+            }
+            PluginService::SessionWait => {
+                let Some(session_id) = session_target(&request) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "session.wait needs a sessionId",
+                    ));
+                };
+                let timeout_ms = request
+                    .payload
+                    .get("timeoutMs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(30_000);
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::Wait {
+                        session_id: session_id.to_owned(),
+                        timeout_ms,
+                    },
+                }
+            }
+            PluginService::ModelRequest => {
+                let Some(purpose) = payload_str(&request.payload, &["purpose"]) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "model.request needs a purpose",
+                    ));
+                };
+                let Some(prompt) = payload_str(&request.payload, &["prompt"]) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "model.request needs a prompt",
+                    ));
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::Model {
+                        session_id: session_target(&request).map(str::to_owned),
+                        purpose: purpose.to_owned(),
+                        system: payload_str(&request.payload, &["system"]).map(str::to_owned),
+                        prompt: prompt.to_owned(),
+                        max_output_tokens: request
+                            .payload
+                            .get("maxOutputTokens")
+                            .and_then(serde_json::Value::as_u64),
+                    },
+                }
+            }
+            PluginService::AgentList => pig_protocol::Op::PluginSessionAction {
+                request_id: internal_id.clone(),
+                package: package.id.clone(),
+                digest: package.digest.clone(),
+                action: PluginSessionAction::AgentList {
+                    session_id: session_target(&request).map(str::to_owned),
+                },
+            },
+            PluginService::AgentStart => {
+                let (Some(session_id), Some(profile), Some(prompt)) = (
+                    session_target(&request),
+                    payload_str(&request.payload, &["profile"]),
+                    payload_str(&request.payload, &["prompt"]),
+                ) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "agent.start needs a sessionId, profile and prompt",
+                    ));
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::AgentStart {
+                        session_id: session_id.to_owned(),
+                        profile: profile.to_owned(),
+                        prompt: prompt.to_owned(),
+                        description: payload_str(&request.payload, &["description"])
+                            .unwrap_or(prompt)
+                            .to_owned(),
+                        background: request
+                            .payload
+                            .get("background")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true),
+                    },
+                }
+            }
+            PluginService::AgentSend => {
+                let (Some(session_id), Some(agent_id), Some(message)) = (
+                    session_target(&request),
+                    payload_str(&request.payload, &["agentId"]),
+                    payload_str(&request.payload, &["message"]),
+                ) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "agent.send needs a sessionId, agentId and message",
+                    ));
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::AgentSend {
+                        session_id: session_id.to_owned(),
+                        agent_id: agent_id.to_owned(),
+                        message: message.to_owned(),
+                    },
+                }
+            }
+            PluginService::AgentWait => {
+                let (Some(session_id), Some(agent_id)) = (
+                    session_target(&request),
+                    payload_str(&request.payload, &["agentId"]),
+                ) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "agent.wait needs a sessionId and agentId",
+                    ));
+                };
+                let timeout_ms = request
+                    .payload
+                    .get("timeoutMs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(30_000);
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::AgentWait {
+                        session_id: session_id.to_owned(),
+                        agent_id: agent_id.to_owned(),
+                        timeout_ms,
+                    },
+                }
+            }
+            PluginService::AgentStop => {
+                let (Some(session_id), Some(agent_id)) = (
+                    session_target(&request),
+                    payload_str(&request.payload, &["agentId"]),
+                ) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "agent.stop needs a sessionId and agentId",
+                    ));
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::AgentStop {
+                        session_id: session_id.to_owned(),
+                        agent_id: agent_id.to_owned(),
+                    },
+                }
+            }
+            PluginService::AgentRead => {
+                let (Some(session_id), Some(agent_id)) = (
+                    session_target(&request),
+                    payload_str(&request.payload, &["agentId"]),
+                ) else {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "agent.read needs a sessionId and agentId",
+                    ));
+                };
+                pig_protocol::Op::PluginSessionAction {
+                    request_id: internal_id.clone(),
+                    package: package.id.clone(),
+                    digest: package.digest.clone(),
+                    action: PluginSessionAction::AgentRead {
+                        session_id: session_id.to_owned(),
+                        agent_id: agent_id.to_owned(),
+                    },
+                }
+            }
             _ => {
                 return failure(protocol_error(
                     PluginErrorCode::UnsupportedCapability,
@@ -352,6 +727,7 @@ impl HostServiceGateway {
             service,
             network_bytes,
             deadline: Instant::now() + SERVICE_TIMEOUT,
+            request_key,
         };
         self.pending
             .lock()
@@ -420,6 +796,15 @@ impl HostServiceGateway {
                 result
                     .as_ref()
                     .map(|_| serde_json::Value::Null)
+                    .map_err(PluginProtocolError::from_core),
+            ),
+            Event::PluginSessionResult {
+                request_id, result, ..
+            } => (
+                request_id,
+                result
+                    .as_ref()
+                    .map(Clone::clone)
                     .map_err(PluginProtocolError::from_core),
             ),
             _ => return Vec::new(),
@@ -558,11 +943,45 @@ impl HostServiceGateway {
     }
 
     pub fn storage_bytes(&self, package: &PluginPackageInfo) -> u64 {
-        std::fs::metadata(storage_path(
+        let storage = storage_path(&self.data_dir, &super::manager::plugin_data_key(package));
+        [
+            storage.clone(),
+            kv_path(&storage),
+            request_log_path(&storage),
+        ]
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
+    }
+
+    fn run_local_side_effect(
+        &self,
+        package: &PluginPackageInfo,
+        service: PluginService,
+        request_id: &str,
+        request: &PluginServiceRequest,
+        run: impl FnOnce() -> Result<serde_json::Value, PluginProtocolError>,
+    ) -> Result<serde_json::Value, PluginProtocolError> {
+        let key = side_effect_key(service, request, request_id);
+        let path = request_log_path(&storage_path(
             &self.data_dir,
             &super::manager::plugin_data_key(package),
-        ))
-        .map_or(0, |metadata| metadata.len())
+        ));
+        match begin_request(&path, &key)? {
+            BeginRequest::Done(result) => return result,
+            BeginRequest::InFlight => {
+                return Err(protocol_error(
+                    PluginErrorCode::Busy,
+                    "this side-effecting request is still in flight; its result is unknown",
+                )
+                .retryable());
+            }
+            BeginRequest::Start => {}
+        }
+        let result = run();
+        finish_request(&path, &key, &result);
+        result
     }
 
     fn take(&self, internal_id: &str) -> Option<PendingService> {
@@ -577,6 +996,9 @@ impl HostServiceGateway {
         pending: PendingService,
         result: Result<serde_json::Value, PluginProtocolError>,
     ) -> ServiceReply {
+        if let Some((path, key)) = &pending.request_key {
+            finish_request(path, key, &result);
+        }
         self.reply(
             &pending.instance,
             pending.epoch,
@@ -607,34 +1029,366 @@ impl HostServiceGateway {
     }
 }
 
-fn authorize_request(
+/// Side effects whose result is persisted for replay. Storage writes, config
+/// writes, credential changes and HTTP requests are the observable mutations a
+/// plugin can request; a read is never logged.
+fn is_forwarded_side_effect(service: PluginService) -> bool {
+    matches!(
+        service,
+        PluginService::ConfigWrite
+            | PluginService::CredentialSet
+            | PluginService::CredentialClear
+            | PluginService::HttpRequest
+    )
+}
+
+fn side_effect_key(
+    service: PluginService,
+    request: &PluginServiceRequest,
+    request_id: &str,
+) -> String {
+    let supplied = request
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .unwrap_or(request_id);
+    let supplied: String = supplied.chars().take(256).collect();
+    format!("{}:{supplied}", service.as_str())
+}
+
+fn kv_path(storage: &Path) -> PathBuf {
+    storage.with_file_name("kv.json")
+}
+
+fn request_log_path(storage: &Path) -> PathBuf {
+    storage.with_file_name("requests.json")
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct KeyedStore {
+    #[serde(default)]
+    entries: BTreeMap<String, KeyedEntry>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct KeyedEntry {
+    value: serde_json::Value,
+    revision: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct RequestLog {
+    #[serde(default)]
+    entries: BTreeMap<String, RequestRecord>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RequestRecord {
+    at: u64,
+    #[serde(default)]
+    in_flight: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<Result<serde_json::Value, PluginProtocolError>>,
+}
+
+enum BeginRequest {
+    Done(Result<serde_json::Value, PluginProtocolError>),
+    InFlight,
+    Start,
+}
+
+const MAX_KEY_CHARS: usize = 128;
+const MAX_KEYED_ENTRIES: usize = 512;
+const MAX_REQUEST_RECORDS: usize = 256;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn load_json_file<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+    what: &str,
+) -> Result<T, PluginProtocolError> {
+    match std::fs::read(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(protocol_error(
+            PluginErrorCode::Transport,
+            format!("{what}: {error}"),
+        )),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            protocol_error(
+                PluginErrorCode::Internal,
+                format!("{what} is corrupt; refusing to guess: {error}"),
+            )
+        }),
+    }
+}
+
+fn save_json_file<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+    cap: usize,
+) -> Result<(), PluginProtocolError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| protocol_error(PluginErrorCode::Internal, error.to_string()))?;
+    if bytes.len() > cap {
+        return Err(protocol_error(
+            PluginErrorCode::QuotaExceeded,
+            "the plugin's private storage exceeds 1 MiB",
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| protocol_error(PluginErrorCode::Internal, "storage has no parent"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| protocol_error(PluginErrorCode::Transport, error.to_string()))?;
+    let temporary = path.with_extension("json.tmp");
+    pig_core::config::write_private_file(&temporary, &bytes)
+        .map_err(|error| protocol_error(PluginErrorCode::Transport, format!("{error:?}")))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|error| protocol_error(PluginErrorCode::Transport, error.to_string()))?;
+    Ok(())
+}
+
+fn begin_request(path: &Path, key: &str) -> Result<BeginRequest, PluginProtocolError> {
+    let mut log: RequestLog = load_json_file(path, "the plugin request log")?;
+    if let Some(record) = log.entries.get(key) {
+        if record.in_flight {
+            return Ok(BeginRequest::InFlight);
+        }
+        if let Some(result) = &record.result {
+            return Ok(BeginRequest::Done(result.clone()));
+        }
+    }
+    log.entries.insert(
+        key.to_owned(),
+        RequestRecord {
+            at: now_secs(),
+            in_flight: true,
+            result: None,
+        },
+    );
+    prune_request_log(&mut log);
+    save_json_file(path, &log, MAX_STORAGE_BYTES)?;
+    Ok(BeginRequest::Start)
+}
+
+fn finish_request(path: &Path, key: &str, result: &Result<serde_json::Value, PluginProtocolError>) {
+    let Ok(mut log) = load_json_file::<RequestLog>(path, "the plugin request log") else {
+        return;
+    };
+    log.entries.insert(
+        key.to_owned(),
+        RequestRecord {
+            at: now_secs(),
+            in_flight: false,
+            result: Some(result.clone()),
+        },
+    );
+    prune_request_log(&mut log);
+    if let Err(error) = save_json_file(path, &log, MAX_STORAGE_BYTES) {
+        tracing::warn!(
+            detail = %error.message,
+            "could not persist a plugin side-effect result; a retry will refuse to repeat it"
+        );
+    }
+}
+
+fn prune_request_log(log: &mut RequestLog) {
+    while log.entries.len() > MAX_REQUEST_RECORDS {
+        // Oldest record first; ties keep a deterministic order.
+        let Some(oldest) = log
+            .entries
+            .iter()
+            .min_by_key(|(key, record)| (record.at, key.as_str()))
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        log.entries.remove(&oldest);
+    }
+}
+
+fn valid_key(key: &str) -> Result<(), PluginProtocolError> {
+    if key.is_empty() || key.chars().count() > MAX_KEY_CHARS || key.chars().any(char::is_control) {
+        return Err(protocol_error(
+            PluginErrorCode::InvalidOperation,
+            format!("storage keys must be 1..{MAX_KEY_CHARS} printable characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn payload_key(payload: &serde_json::Value) -> Result<&str, PluginProtocolError> {
+    let key = payload
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            protocol_error(
+                PluginErrorCode::InvalidOperation,
+                "a storage key is required",
+            )
+        })?;
+    valid_key(key)?;
+    Ok(key)
+}
+
+fn expected_revision(payload: &serde_json::Value) -> Option<u64> {
+    payload
+        .get("expectedRevision")
+        .or_else(|| payload.get("expected_revision"))
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn stale_revision(current: u64) -> PluginProtocolError {
+    protocol_error(
+        PluginErrorCode::StaleRevision,
+        format!("the key is at revision {current}"),
+    )
+    .with_details(serde_json::json!({ "currentRevision": current }))
+}
+
+fn load_keyed_store(path: &Path) -> Result<KeyedStore, PluginProtocolError> {
+    load_json_file(path, "the plugin storage")
+}
+
+fn storage_list(data_dir: &Path, data_key: &str) -> Result<serde_json::Value, PluginProtocolError> {
+    let store = load_keyed_store(&kv_path(&storage_path(data_dir, data_key)))?;
+    let keys: Vec<serde_json::Value> = store
+        .entries
+        .iter()
+        .map(|(key, entry)| {
+            serde_json::json!({
+                "key": key,
+                "revision": entry.revision,
+                "bytes": serde_json::to_vec(&entry.value).map_or(0, |bytes| bytes.len()),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "keys": keys }))
+}
+
+fn storage_key_read(
+    data_dir: &Path,
+    data_key: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, PluginProtocolError> {
+    let key = payload_key(payload)?;
+    let store = load_keyed_store(&kv_path(&storage_path(data_dir, data_key)))?;
+    match store.entries.get(key) {
+        Some(entry) => Ok(serde_json::json!({
+            "value": entry.value,
+            "revision": entry.revision,
+        })),
+        None => Ok(serde_json::json!({ "value": null, "revision": 0 })),
+    }
+}
+
+fn storage_key_write(
+    data_dir: &Path,
+    data_key: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, PluginProtocolError> {
+    let key = payload_key(payload)?.to_owned();
+    let value = payload
+        .get("value")
+        .cloned()
+        .ok_or_else(|| protocol_error(PluginErrorCode::InvalidOperation, "a value is required"))?;
+    let path = kv_path(&storage_path(data_dir, data_key));
+    let mut store = load_keyed_store(&path)?;
+    let current = store
+        .entries
+        .get(&key)
+        .map(|entry| entry.revision)
+        .unwrap_or(0);
+    if let Some(expected) = expected_revision(payload)
+        && expected != current
+    {
+        return Err(stale_revision(current));
+    }
+    if !store.entries.contains_key(&key) && store.entries.len() >= MAX_KEYED_ENTRIES {
+        return Err(protocol_error(
+            PluginErrorCode::QuotaExceeded,
+            "the plugin storage holds too many keys",
+        ));
+    }
+    let revision = current.saturating_add(1);
+    store.entries.insert(key, KeyedEntry { value, revision });
+    save_json_file(&path, &store, MAX_STORAGE_BYTES)?;
+    Ok(serde_json::json!({ "revision": revision }))
+}
+
+fn storage_key_delete(
+    data_dir: &Path,
+    data_key: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, PluginProtocolError> {
+    let key = payload_key(payload)?;
+    let path = kv_path(&storage_path(data_dir, data_key));
+    let mut store = load_keyed_store(&path)?;
+    let Some(entry) = store.entries.get(key) else {
+        if let Some(expected) = expected_revision(payload)
+            && expected != 0
+        {
+            return Err(stale_revision(0));
+        }
+        return Ok(serde_json::json!({ "deleted": false }));
+    };
+    if let Some(expected) = expected_revision(payload)
+        && expected != entry.revision
+    {
+        return Err(stale_revision(entry.revision));
+    }
+    store.entries.remove(key);
+    save_json_file(&path, &store, MAX_STORAGE_BYTES)?;
+    Ok(serde_json::json!({ "deleted": true }))
+}
+
+pub(super) fn authorize_service(
     package: &PluginPackageInfo,
     request: &PluginServiceRequest,
 ) -> Result<(), PluginProtocolError> {
-    let target = match request.service {
+    let target: String = match request.service {
         PluginService::ConfigRead
         | PluginService::ConfigWrite
         | PluginService::CredentialSet
-        | PluginService::CredentialClear => request
-            .payload
-            .get("path")
-            .or_else(|| request.payload.get("credential"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default(),
-        PluginService::HttpRequest => request
-            .payload
-            .get("origin")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default(),
-        PluginService::SessionRead => request.session_id.as_deref().unwrap_or_default(),
-        PluginService::WorkspaceRead => request.workspace_id.as_deref().unwrap_or("*"),
-        PluginService::NavigationOpen => request
-            .payload
-            .get("pageId")
-            .or_else(|| request.payload.get("page_id"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default(),
-        _ => "*",
+        | PluginService::CredentialClear => payload_str(&request.payload, &["path", "credential"])
+            .unwrap_or_default()
+            .to_owned(),
+        PluginService::HttpRequest => payload_str(&request.payload, &["origin"])
+            .unwrap_or_default()
+            .to_owned(),
+        PluginService::SessionRead => request.session_id.clone().unwrap_or_default(),
+        PluginService::WorkspaceRead => request
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| "*".to_owned()),
+        PluginService::NavigationOpen => payload_str(&request.payload, &["pageId", "page_id"])
+            .unwrap_or_default()
+            .to_owned(),
+        PluginService::SessionSubscribe
+        | PluginService::SessionUnsubscribe
+        | PluginService::SessionSend
+        | PluginService::SessionInterrupt
+        | PluginService::SessionWait
+        | PluginService::AgentStart
+        | PluginService::AgentSend
+        | PluginService::AgentWait
+        | PluginService::AgentStop
+        | PluginService::AgentRead => session_target(request).unwrap_or_default().to_owned(),
+        PluginService::AgentList => "*".to_owned(),
+        PluginService::SessionCreate => payload_str(&request.payload, &["cwd", "workspaceId"])
+            .map(str::to_owned)
+            .or_else(|| request.workspace_id.clone())
+            .unwrap_or_else(|| "*".to_owned()),
+        PluginService::ModelRequest => payload_str(&request.payload, &["purpose"])
+            .unwrap_or_default()
+            .to_owned(),
+        _ => "*".to_owned(),
     };
     let capability = match request.service {
         PluginService::ConfigRead => Some("config.read"),
@@ -645,10 +1399,24 @@ fn authorize_request(
         PluginService::WorkspaceRead => Some("workspace.read"),
         PluginService::NavigationOpen => Some("navigation.open"),
         PluginService::ComposerSubmit => Some("composer.submit"),
+        PluginService::SessionSubscribe | PluginService::SessionUnsubscribe => {
+            Some("session.subscribe")
+        }
+        PluginService::SessionCreate => Some("session.create"),
+        PluginService::SessionSend
+        | PluginService::SessionInterrupt
+        | PluginService::SessionWait => Some("session.control"),
+        PluginService::ModelRequest => Some("model.request"),
+        PluginService::AgentList
+        | PluginService::AgentStart
+        | PluginService::AgentSend
+        | PluginService::AgentWait
+        | PluginService::AgentStop
+        | PluginService::AgentRead => Some("agent.delegate"),
         _ => None,
     };
     if let Some(capability) = capability
-        && !capability_granted(package, capability, target)
+        && !capability_granted(package, capability, &target)
     {
         return Err(protocol_error(
             PluginErrorCode::PermissionDenied,
@@ -668,6 +1436,18 @@ fn authorize_request(
         ));
     }
     Ok(())
+}
+
+pub(super) fn payload_str<'a>(payload: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| payload.get(*key).and_then(serde_json::Value::as_str))
+}
+
+fn session_target(request: &PluginServiceRequest) -> Option<&str> {
+    request
+        .session_id
+        .as_deref()
+        .or_else(|| payload_str(&request.payload, &["sessionId", "session_id"]))
 }
 
 pub fn capability_granted(package: &PluginPackageInfo, capability: &str, target: &str) -> bool {
@@ -896,6 +1676,134 @@ mod tests {
     }
 
     #[test]
+    fn keyed_storage_uses_revision_cas() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-service-kv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let data_key = "moon:user:default";
+        let written = storage_key_write(
+            &root,
+            data_key,
+            &serde_json::json!({"key": "alpha", "value": {"n": 1}}),
+        )
+        .expect("first write");
+        assert_eq!(written["revision"], 1);
+        assert_eq!(
+            storage_key_read(&root, data_key, &serde_json::json!({"key": "alpha"})).unwrap()["value"]
+                ["n"],
+            1
+        );
+        let stale = storage_key_write(
+            &root,
+            data_key,
+            &serde_json::json!({"key": "alpha", "value": {"n": 2}, "expectedRevision": 0}),
+        )
+        .expect_err("stale revision");
+        assert_eq!(stale.code, PluginErrorCode::StaleRevision);
+        assert_eq!(
+            stale.details.as_ref().unwrap()["currentRevision"],
+            1,
+            "the conflict names the current revision"
+        );
+        let updated = storage_key_write(
+            &root,
+            data_key,
+            &serde_json::json!({"key": "alpha", "value": {"n": 2}, "expectedRevision": 1}),
+        )
+        .expect("compare-and-swap");
+        assert_eq!(updated["revision"], 2);
+        let listed = storage_list(&root, data_key).unwrap();
+        assert_eq!(listed["keys"][0]["key"], "alpha");
+        assert_eq!(listed["keys"][0]["revision"], 2);
+        let deleted = storage_key_delete(
+            &root,
+            data_key,
+            &serde_json::json!({"key": "alpha", "expectedRevision": 2}),
+        )
+        .expect("delete");
+        assert_eq!(deleted["deleted"], true);
+        assert_eq!(
+            storage_key_read(&root, data_key, &serde_json::json!({"key": "alpha"})).unwrap(),
+            serde_json::json!({"value": null, "revision": 0})
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_idempotent_side_effect_is_replayed_instead_of_repeated() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-service-idempotent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (agent, _agent_rx) = async_channel::unbounded();
+        let gateway = HostServiceGateway::new(root.clone(), agent);
+        let package = PluginPackageInfo {
+            id: "moon".into(),
+            name: "Moon".into(),
+            version: "1".into(),
+            digest: "sha256:test".into(),
+            content_digest: "sha256:content".into(),
+            root: PathBuf::new(),
+            source: PluginSource::User,
+            enabled: true,
+            incompatible: None,
+            backend: None,
+            contributions: Default::default(),
+            capabilities: Vec::new(),
+        };
+        let request = |_request_id: &str, key: Option<&str>| PluginServiceRequest {
+            service: PluginService::StorageWrite,
+            payload: serde_json::json!({"answer": 42}),
+            session_id: None,
+            workspace_id: None,
+            idempotency_key: key.map(str::to_owned),
+        };
+        let first = gateway.execute(
+            &package,
+            "instance",
+            1,
+            1,
+            "request-1",
+            request("request-1", Some("write-1")),
+        );
+        let ServiceExecution::Complete(reply) = first else {
+            panic!("the storage write completes locally");
+        };
+        reply.result.expect("first write");
+        let storage = storage_path(&root, &super::super::manager::plugin_data_key(&package));
+        assert!(storage.is_file());
+        // A retry with the same key replays the recorded result even though the
+        // file is gone: the effect is not executed a second time.
+        std::fs::remove_file(&storage).expect("remove the storage file");
+        let retried = gateway.execute(
+            &package,
+            "instance",
+            1,
+            1,
+            "request-2",
+            request("request-2", Some("write-1")),
+        );
+        let ServiceExecution::Complete(reply) = retried else {
+            panic!("the retry completes locally");
+        };
+        reply.result.expect("replayed result");
+        assert!(
+            !storage.is_file(),
+            "a replayed side effect must not run again"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn locale_fallback_is_stable() {
         assert_eq!(normalize_locale("zh_CN.UTF-8"), "zh-CN");
         assert_eq!(normalize_locale("C"), "en");
@@ -935,6 +1843,7 @@ mod tests {
                     payload: serde_json::json!({"pageId": page_id}),
                     session_id: None,
                     workspace_id: None,
+                    idempotency_key: None,
                 },
             )
         };

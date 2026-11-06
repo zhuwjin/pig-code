@@ -277,7 +277,23 @@
       "diagnostics": {
         "logs": "Recent plugin logs (redacted)"
       },
-      "incompatible": "Requires a newer Pig Code — {detail}"
+      "incompatible": "Requires a newer Pig Code — {detail}",
+      "config": {
+        "open": "Options",
+        "save": "Save",
+        "saved": "Saved",
+        "failed": "Could not save: {detail}",
+        "loading": "Loading options…",
+        "scope": {
+          "user": "User",
+          "workspace": "This workspace"
+        },
+        "workspace_unavailable": "Open a workspace first"
+      },
+      "conflicts": {
+        "title": "Contribution conflicts",
+        "conflict": "Conflict: {kind} `{name}` from {winner}; ignored from {losers}"
+      }
     },
     "marketplace": {
       "title": "Plugin marketplace",
@@ -423,7 +439,8 @@
       "send_first": "Send a message to create a session first."
     },
     "current_session": "Current session",
-    "compacting": "Compacting context..."
+    "compacting": "Compacting context...",
+    "agent_unavailable": "The agent is unavailable"
   },
   "question": {
     "progress": "Question {current} / {total}",

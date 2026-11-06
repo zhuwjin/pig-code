@@ -45,6 +45,7 @@ export interface ServiceRequestRecord {
   payload: unknown;
   sessionId?: string;
   workspaceId?: string;
+  idempotencyKey?: string;
 }
 
 export interface TestHost {
@@ -77,6 +78,17 @@ export interface TestHost {
   failService(requestId: string, error: PluginProtocolErrorPayload): void;
   /** Makes `session_read` answer with `projection` (`null`: no session). */
   setSession(projection: unknown): void;
+  /** Answers `model.request` with `text`. */
+  setModelReply(text: string): void;
+  /** Pushes one projected session event into a subscription, as the host
+   * would after a core event. */
+  emitSessionEvent(
+    subscription: string,
+    event: unknown,
+    options?: { cursor?: number; dropped?: number; epoch?: number },
+  ): void;
+  /** The subscriptions the plugin opened (id → session id). */
+  subscriptions(): Readonly<Record<string, string>>;
   /** The merged runtime contributions the plugin registered. */
   contributions(): {
     tools: ToolDefinition[];
@@ -132,6 +144,11 @@ class TestHostImpl implements TestHost {
   private readyResolver: (() => void) | null = null;
   private healthResolver: (() => void) | null = null;
   private session: unknown = undefined;
+  private modelReply = "test model answer";
+  private readonly openSubscriptions = new Map<string, string>();
+  private readonly kv = new Map<string, { value: unknown; revision: number }>();
+  private readonly subscriptionCursors = new Map<string, number>();
+  private subscriptionCounter = 0;
   private started = false;
   private isReady = false;
   private isDisposed = false;
@@ -307,6 +324,31 @@ class TestHostImpl implements TestHost {
     this.session = projection;
   }
 
+  setModelReply(text: string): void {
+    this.modelReply = text;
+  }
+
+  emitSessionEvent(
+    subscription: string,
+    event: unknown,
+    options: { cursor?: number; dropped?: number; epoch?: number } = {},
+  ): void {
+    const cursor = options.cursor ?? (this.subscriptionCursors.get(subscription) ?? 0) + 1;
+    this.subscriptionCursors.set(subscription, cursor);
+    this.deliver("service.event", "services", {
+      name: "session.event",
+      subscription,
+      epoch: options.epoch ?? this.identity_.epoch,
+      cursor,
+      dropped: options.dropped ?? 0,
+      event,
+    });
+  }
+
+  subscriptions(): Readonly<Record<string, string>> {
+    return Object.fromEntries(this.openSubscriptions);
+  }
+
   contributions(): {
     tools: ToolDefinition[];
     commands: Record<string, unknown>[];
@@ -429,6 +471,8 @@ class TestHostImpl implements TestHost {
       payload: body.payload,
       sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
       workspaceId: typeof body.workspaceId === "string" ? body.workspaceId : undefined,
+      idempotencyKey:
+        typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
     };
     this.requests.push(record);
     if (service === "locale_read") {
@@ -436,6 +480,109 @@ class TestHostImpl implements TestHost {
     } else if (service === "session_read" && this.session !== undefined) {
       this.answerService(requestId, { generation: 1, session: this.session });
     } else if (service === "storage_read") {
+      this.answerService(requestId, null);
+    } else if (service === "storage_list") {
+      this.answerService(requestId, {
+        keys: [...this.kv.entries()].map(([key, entry]) => ({
+          key,
+          revision: entry.revision,
+          bytes: JSON.stringify(entry.value).length,
+        })),
+      });
+    } else if (service === "storage_key_read") {
+      const key = String((body.payload as Record<string, unknown> | undefined)?.key ?? "");
+      const entry = this.kv.get(key);
+      this.answerService(
+        requestId,
+        entry ? { value: entry.value, revision: entry.revision } : { value: null, revision: 0 },
+      );
+    } else if (service === "storage_key_write") {
+      const payload = (body.payload ?? {}) as Record<string, unknown>;
+      const key = String(payload.key ?? "");
+      const current = this.kv.get(key)?.revision ?? 0;
+      if (payload.expectedRevision !== undefined && payload.expectedRevision !== current) {
+        this.failService(requestId, {
+          code: "stale_revision",
+          message: `the key is at revision ${current}`,
+          details: { currentRevision: current },
+        });
+      } else {
+        const revision = current + 1;
+        this.kv.set(key, { value: payload.value, revision });
+        this.answerService(requestId, { revision });
+      }
+    } else if (service === "storage_key_delete") {
+      const payload = (body.payload ?? {}) as Record<string, unknown>;
+      const key = String(payload.key ?? "");
+      const entry = this.kv.get(key);
+      if (payload.expectedRevision !== undefined && payload.expectedRevision !== (entry?.revision ?? 0)) {
+        this.failService(requestId, {
+          code: "stale_revision",
+          message: `the key is at revision ${entry?.revision ?? 0}`,
+          details: { currentRevision: entry?.revision ?? 0 },
+        });
+      } else {
+        this.kv.delete(key);
+        this.answerService(requestId, { deleted: entry !== undefined });
+      }
+    } else if (service === "session_subscribe") {
+      const sessionId = String(body.sessionId ?? record.sessionId ?? "");
+      const subscription = `sub-${++this.subscriptionCounter}`;
+      this.openSubscriptions.set(subscription, sessionId);
+      this.subscriptionCursors.set(subscription, 0);
+      this.answerService(requestId, {
+        subscription,
+        sessionId,
+        epoch: this.identity_.epoch,
+        cursor: 0,
+        dropped: 0,
+      });
+    } else if (service === "session_unsubscribe") {
+      const subscription = String((body.payload as Record<string, unknown> | undefined)?.subscription ?? "");
+      this.openSubscriptions.delete(subscription);
+      this.answerService(requestId, null);
+    } else if (service === "session_create") {
+      this.answerService(requestId, { sessionId: "s-created" });
+    } else if (service === "session_send") {
+      this.answerService(requestId, { accepted: true });
+    } else if (service === "session_interrupt" || service === "session_unsubscribe") {
+      this.answerService(requestId, null);
+    } else if (service === "session_wait") {
+      this.answerService(requestId, { status: "completed" });
+    } else if (service === "model_request") {
+      this.answerService(requestId, {
+        text: this.modelReply,
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+    } else if (service === "agent_list") {
+      this.answerService(requestId, {
+        profiles: [
+          { name: "explore", description: "Read-only search", source: "built_in" },
+          { name: "general-purpose", description: "General work", source: "built_in" },
+        ],
+      });
+    } else if (service === "agent_start") {
+      this.answerService(requestId, {
+        agentId: "agent-1",
+        taskId: "agent-1",
+        profile: String(body.profile ?? "explore"),
+        background: Boolean(body.background ?? true),
+        status: "running",
+      });
+    } else if (service === "agent_wait") {
+      this.answerService(requestId, {
+        agentId: String(body.agentId ?? "agent-1"),
+        status: "completed",
+        summary: "done",
+      });
+    } else if (service === "agent_read") {
+      this.answerService(requestId, {
+        agentId: String(body.agentId ?? "agent-1"),
+        title: "agent",
+        running: false,
+        items: [],
+      });
+    } else if (service === "agent_send" || service === "agent_stop") {
       this.answerService(requestId, null);
     }
   }

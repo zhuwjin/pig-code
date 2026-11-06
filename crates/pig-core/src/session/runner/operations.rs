@@ -140,6 +140,7 @@ impl Manager {
                         pending_plan: None,
                         steerable: false,
                         mcp_status: None,
+                        plugin_surfaces_stale: false,
                     },
                 );
                 store.lock().expect("store lock").upsert_session(&meta);
@@ -368,6 +369,7 @@ impl Manager {
                         pending_plan: None,
                         steerable: false,
                         mcp_status: None,
+                        plugin_surfaces_stale: false,
                     },
                 );
                 // Switching back to an already-open session: re-emit

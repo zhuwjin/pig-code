@@ -45,7 +45,25 @@ impl Manager {
             .lock()
             .expect("plugin registry lock")
             .sync(sources);
+        self.refresh_session_plugin_surfaces();
         self.emit_plugin_snapshot(event_tx, snapshot);
+    }
+
+    /// Re-resolve every session's plugin-provided surfaces after the registry
+    /// changed. A session owned by a turn is marked stale and refreshed at its
+    /// wrap-up (dropping a live MCP manager mid-turn would break the running
+    /// child's tool calls).
+    fn refresh_session_plugin_surfaces(&mut self) {
+        for entry in self.sessions.values_mut() {
+            if entry.session.is_some() {
+                if let Some(session) = entry.session.as_mut() {
+                    session.refresh_plugin_surfaces();
+                }
+                entry.mcp_status = None;
+            } else {
+                entry.plugin_surfaces_stale = true;
+            }
+        }
     }
 
     pub(super) fn sync_plugin_runtime_contributions(
@@ -61,13 +79,14 @@ impl Manager {
             generation,
             contributions,
         } = request;
-        match self
+        let result = self
             .plugins
             .lock()
             .expect("plugin registry lock")
-            .sync_runtime_contributions(&package, &digest, epoch, generation, contributions)
-        {
+            .sync_runtime_contributions(&package, &digest, epoch, generation, contributions);
+        match result {
             Ok(snapshot) => {
+                self.refresh_session_plugin_surfaces();
                 self.emit_plugin_snapshot(event_tx.clone(), snapshot.clone());
                 emit(
                     &event_tx,
@@ -128,13 +147,16 @@ impl Manager {
         digest: String,
         enabled: bool,
     ) {
-        match self
+        let result = self
             .plugins
             .lock()
             .expect("plugin registry lock")
-            .set_enabled(&package, &digest, enabled)
-        {
-            Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
+            .set_enabled(&package, &digest, enabled);
+        match result {
+            Ok(snapshot) => {
+                self.refresh_session_plugin_surfaces();
+                self.emit_plugin_snapshot(event_tx, snapshot)
+            }
             Err(error) => self.plugin_action_result(
                 &event_tx,
                 String::new(),
@@ -165,7 +187,10 @@ impl Manager {
                 .cancel_update(&package, &digest)
         };
         match result {
-            Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
+            Ok(snapshot) => {
+                self.refresh_session_plugin_surfaces();
+                self.emit_plugin_snapshot(event_tx, snapshot)
+            }
             Err(error) => self.plugin_action_result(
                 &event_tx,
                 String::new(),
@@ -316,16 +341,34 @@ impl Manager {
                 .map(|session| session.statuses)
                 .ok_or(CoreError::SessionNotFound)
                 .and_then(json),
-            PluginAction::ReadConfig { path } => plugins::config::read(
-                &self.plugins.lock().expect("plugin registry lock"),
-                self.config.as_ref(),
-                package,
-                &path,
-            ),
+            PluginAction::ReadConfig { path } => {
+                let workspace = session_id
+                    .as_deref()
+                    .and_then(|id| self.sessions.get(id))
+                    .map(|entry| entry.cwd.clone());
+                plugins::config::read_with_workspace(
+                    &self.plugins.lock().expect("plugin registry lock"),
+                    self.config.as_ref(),
+                    package,
+                    &path,
+                    workspace.as_deref(),
+                )
+            }
             PluginAction::WriteConfig { path, value } => {
+                let workspace = session_id
+                    .as_deref()
+                    .and_then(|id| self.sessions.get(id))
+                    .map(|entry| entry.cwd.clone());
                 let write = {
                     let registry = self.plugins.lock().expect("plugin registry lock");
-                    plugins::config::write(&registry, self.config.as_ref(), package, &path, value)?
+                    plugins::config::write_with_workspace(
+                        &registry,
+                        self.config.as_ref(),
+                        package,
+                        &path,
+                        value,
+                        workspace.as_deref(),
+                    )?
                 };
                 match write {
                     plugins::config::ConfigWrite::Plugin(value) => Ok(value),
