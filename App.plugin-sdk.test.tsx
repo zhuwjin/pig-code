@@ -49,6 +49,40 @@ test("the SDK serves a real backend's tools, commands and events", async () => {
   expect(host.errors).toEqual([]);
 });
 
+test("disposers are single-shot and cannot remove a newer same-name registration", async () => {
+  let disposeFirst!: () => void;
+  let disposeSecond!: () => void;
+  const host = await createTestHost({
+    applier: (ctx) => {
+      const first = ctx.tools.register({
+        name: "Same",
+        description: "first",
+        parameters: { type: "object" },
+        handler: () => "first",
+      });
+      disposeFirst = first;
+      disposeSecond = ctx.tools.register({
+        name: "Same",
+        description: "second",
+        parameters: { type: "object" },
+        handler: () => "second",
+      });
+    },
+  }).start();
+
+  disposeFirst();
+  disposeFirst();
+  expect(host.tools()).toEqual(["Same"]);
+  expect(await host.tool("Same")).toBe("second");
+  expect(host.envelopes.filter((envelope) => envelope.kind === "contribution.remove")).toHaveLength(0);
+
+  disposeSecond();
+  disposeSecond();
+  expect(host.tools()).toEqual([]);
+  expect(host.envelopes.filter((envelope) => envelope.kind === "contribution.remove")).toHaveLength(1);
+  host.stop();
+});
+
 test("handler failures cross as structured errors", async () => {
   const host = await createTestHost({
     applier: (ctx) => {
@@ -258,7 +292,11 @@ test("keyed storage lists, reads, writes, deletes and rejects stale revisions", 
     updated?: { revision: number };
     list?: { key: string; revision: number }[];
     stale?: PluginError;
-    deleted?: { deleted: boolean };
+    deleted?: { deleted: boolean; revision: number };
+    deletedRead?: { value: unknown; revision: number };
+    recreated?: { revision: number };
+    staleRecreated?: PluginError;
+    listAfter?: { key: string; revision: number }[];
   } = {};
 
   const host = await createTestHost({
@@ -285,6 +323,18 @@ test("keyed storage lists, reads, writes, deletes and rejects stale revisions", 
           captured.deleted = await ctx.services.storage.delete("alpha", {
             expectedRevision: captured.updated.revision,
           });
+          captured.deletedRead = await ctx.services.storage.get("alpha");
+          captured.recreated = await ctx.services.storage.set(
+            "alpha",
+            { n: 3 },
+            { expectedRevision: captured.deleted.revision },
+          );
+          try {
+            await ctx.services.storage.set("alpha", { n: 4 }, { expectedRevision: 1 });
+          } catch (error) {
+            captured.staleRecreated = error as PluginError;
+          }
+          captured.listAfter = await ctx.services.storage.list();
         })();
       });
     },
@@ -297,7 +347,12 @@ test("keyed storage lists, reads, writes, deletes and rejects stale revisions", 
   expect(captured.list?.[0].key).toBe("alpha");
   expect(captured.stale?.code).toBe("stale_revision");
   expect((captured.stale?.details as { currentRevision?: number })?.currentRevision).toBe(2);
-  expect(captured.deleted?.deleted).toBe(true);
+  expect(captured.deleted).toEqual({ deleted: true, revision: 3 });
+  expect(captured.deletedRead).toEqual({ value: null, revision: 3 });
+  expect(captured.recreated?.revision).toBe(4);
+  expect(captured.staleRecreated?.code).toBe("stale_revision");
+  expect((captured.staleRecreated?.details as { currentRevision?: number })?.currentRevision).toBe(4);
+  expect(captured.listAfter).toEqual([{ key: "alpha", revision: 4, bytes: 7 }]);
   const write = host.serviceRequests.find((request) => request.service === "storage_key_write");
   expect(write?.idempotencyKey).toBe("write-alpha-1");
   host.stop();

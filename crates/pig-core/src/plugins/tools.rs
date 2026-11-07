@@ -344,12 +344,6 @@ fn budget_output(
     if text.len() <= budget {
         return text;
     }
-    let head_budget = budget.saturating_mul(3) / 4;
-    let tail_budget = budget.saturating_sub(head_budget);
-    let head_end = char_boundary(&text, head_budget);
-    let tail_start = char_boundary_rev(&text, text.len().saturating_sub(tail_budget));
-    let head = &text[..head_end];
-    let tail = &text[tail_start..];
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = format!(
         "plugin-{}-{}",
@@ -370,16 +364,29 @@ fn budget_output(
                 .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()))
                 .is_ok()
     });
-    let omitted = text.len().saturating_sub(head.len() + tail.len());
-    match target {
+    let marker = |omitted: usize| match &target {
         Some(path) => format!(
-            "{head}\n\n…[{omitted} bytes omitted; the full result is in {}]\n\n{tail}",
+            "\n\n…[{omitted} bytes omitted; the full result is in {}]\n\n",
             path.display()
         ),
-        None => format!(
-            "{head}\n\n…[{omitted} bytes omitted; the result exceeds the inline limit]\n\n{tail}"
-        ),
+        None => format!("\n\n…[{omitted} bytes omitted; the result exceeds the inline limit]\n\n"),
+    };
+    // The maximum omitted count reserves enough room for the complete marker.
+    // The final marker is usually shorter, leaving a few unused bytes rather
+    // than pushing the model-facing result past its declared budget.
+    let preview_budget = budget.saturating_sub(marker(text.len()).len());
+    let head_budget = preview_budget.saturating_mul(3) / 4;
+    let tail_budget = preview_budget.saturating_sub(head_budget);
+    let head_end = char_boundary(&text, head_budget);
+    let tail_start = char_boundary_rev(&text, text.len().saturating_sub(tail_budget));
+    let head = &text[..head_end];
+    let tail = &text[tail_start..];
+    let omitted = text.len().saturating_sub(head.len() + tail.len());
+    let mut output = format!("{head}{}{tail}", marker(omitted));
+    if output.len() > budget {
+        output.truncate(char_boundary(&output, budget));
     }
+    output
 }
 
 fn char_boundary(text: &str, mut index: usize) -> usize {
@@ -1101,6 +1108,16 @@ mod tests {
             .collect();
         assert_eq!(files.len(), 1, "one spill file");
         assert_eq!(std::fs::read_to_string(files[0].path()).unwrap(), rendered);
+    }
+
+    #[test]
+    fn output_preview_and_its_marker_stay_within_the_declared_budget() {
+        let state = crate::task::SessionToolState::for_test();
+        for budget in [1024, 1031, 2048] {
+            let output = budget_output("界".repeat(2000), budget, &state, "ContractTool");
+            assert!(output.len() <= budget, "{} > {budget}", output.len());
+            assert!(output.contains("bytes omitted"), "{output}");
+        }
     }
 
     const TIMEOUT_TOOL: &str = r#"[{

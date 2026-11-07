@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::{recv_until, setup};
 use pig_protocol::{
-    CoreError, Event, ExecMode, MessageDelivery, Op, PluginGitReadRequest, PluginPackageSource,
+    CoreError, Event, MessageDelivery, Op, PluginAction, PluginGitReadRequest, PluginPackageSource,
     PluginSessionAction, PluginSource, PluginWorkspaceFileReadRequest,
 };
 
@@ -52,13 +52,45 @@ fn write_package(root: &Path) {
     .expect("manifest");
 }
 
+fn write_project_package(root: &Path) {
+    write_package(root);
+    let path = root.join("pig-plugin.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read manifest")).unwrap();
+    let contributions = manifest["contributions"].as_object_mut().unwrap();
+    contributions.insert(
+        "actions".into(),
+        serde_json::json!(["provide_agents", "read_config", "write_config"]),
+    );
+    contributions.insert(
+        "config".into(),
+        serde_json::json!({
+            "items": [{
+                "key": "theme",
+                "description": {"en": "Theme"},
+                "default": "light",
+                "schema": {"type": "string", "enum": ["light", "dark"]}
+            }]
+        }),
+    );
+    std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).expect("project manifest");
+}
+
 async fn install(agent: &pig_core::AgentHandle, root: &Path) -> (String, String) {
+    install_with_source(agent, root, PluginSource::User).await
+}
+
+async fn install_with_source(
+    agent: &pig_core::AgentHandle,
+    root: &Path,
+    source: PluginSource,
+) -> (String, String) {
     agent
         .ops
         .send(Op::SyncPlugins {
             packages: vec![PluginPackageSource {
                 root: root.to_path_buf(),
-                source: PluginSource::User,
+                source,
             }],
         })
         .await
@@ -187,7 +219,6 @@ async fn a_plugin_creates_sends_waits_and_interrupts_a_session() {
             provider_id: None,
             model_id: None,
             reasoning_level: None,
-            permissions: Some(ExecMode::Auto.permissions()),
         },
     )
     .await;
@@ -197,6 +228,21 @@ async fn a_plugin_creates_sends_waits_and_interrupts_a_session() {
         .expect("session id")
         .to_owned();
     assert!(!session_id.is_empty());
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("reopen plugin-created session");
+    let configured = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionConfigured { session_id: current, .. } if current == &session_id)
+    })
+    .await;
+    assert!(configured.iter().any(|event| matches!(
+        event,
+        Event::SessionConfigured { permissions, .. } if permissions == &pig_protocol::PermissionSettings::default()
+    )));
 
     action(
         &agent,
@@ -310,7 +356,6 @@ async fn a_plugin_lists_starts_waits_reads_and_stops_contributed_agents() {
             provider_id: None,
             model_id: None,
             reasoning_level: None,
-            permissions: Some(ExecMode::Auto.permissions()),
         },
     )
     .await;
@@ -338,6 +383,24 @@ async fn a_plugin_lists_starts_waits_reads_and_stops_contributed_agents() {
         .find(|profile| profile["name"] == "reviewer")
         .expect("contributed profile");
     assert_eq!(reviewer["source"], "plugin");
+
+    action(
+        &agent,
+        "start-agent-foreground",
+        (&package, &digest),
+        PluginSessionAction::AgentStart {
+            session_id: session_id.clone(),
+            profile: "reviewer".into(),
+            prompt: "Review the pending change.".into(),
+            description: "Review the change".into(),
+            background: false,
+        },
+    )
+    .await;
+    assert!(matches!(
+        result(&agent, "start-agent-foreground").await,
+        Err(CoreError::PluginInvalidInput { .. })
+    ));
 
     action(
         &agent,
@@ -466,7 +529,6 @@ async fn a_plugin_reads_git_and_workspace_files_inside_its_session() {
             provider_id: None,
             model_id: None,
             reasoning_level: None,
-            permissions: Some(ExecMode::Auto.permissions()),
         },
     )
     .await;
@@ -599,4 +661,105 @@ async fn a_plugin_reads_git_and_workspace_files_inside_its_session() {
         error,
         CoreError::PluginInvalidInput { .. } | CoreError::PluginPermission { .. }
     ));
+}
+
+#[tokio::test]
+async fn project_plugins_cannot_cross_workspace_boundaries() {
+    let (config_path, dir, data_dir) = setup("plugin-project-boundaries");
+    let other = dir.with_extension("outside");
+    let _ = std::fs::remove_dir_all(&other);
+    std::fs::create_dir_all(&other).expect("other workspace");
+    let trusted = dir
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let config = std::fs::read_to_string(&config_path).expect("base config");
+    std::fs::write(
+        &config_path,
+        format!("{config}\n[hooks]\ntrusted_projects=[\"{trusted}\"]\n"),
+    )
+    .expect("trust project workspace");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
+    let package_root = dir.join(".pigcode/plugins/test.sessions");
+    write_project_package(&package_root);
+    let (package, digest) = install_with_source(
+        &agent,
+        &package_root,
+        PluginSource::Project {
+            workspace: dir.clone(),
+        },
+    )
+    .await;
+    let other_session = common::new_session(&agent, other.clone()).await;
+
+    action(
+        &agent,
+        "list-other-workspace-agents",
+        (&package, &digest),
+        PluginSessionAction::AgentList {
+            session_id: Some(other_session.clone()),
+        },
+    )
+    .await;
+    assert!(matches!(
+        result(&agent, "list-other-workspace-agents").await,
+        Err(CoreError::PluginPermission { .. })
+    ));
+
+    let linked = dir.join("linked-outside");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&other, &linked).expect("symlink outside workspace");
+    #[cfg(windows)]
+    common::junction(&linked, &other);
+    action(
+        &agent,
+        "create-through-symlink",
+        (&package, &digest),
+        PluginSessionAction::Create {
+            cwd: linked,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        result(&agent, "create-through-symlink").await,
+        Err(CoreError::PluginPermission { .. })
+    ));
+
+    agent
+        .ops
+        .send(Op::PluginAction {
+            request_id: "write-other-workspace-config".into(),
+            package,
+            digest,
+            action: PluginAction::WriteConfig {
+                path: "theme".into(),
+                value: serde_json::json!("dark"),
+            },
+            session_id: Some(other_session),
+        })
+        .await
+        .expect("write other workspace config");
+    let events = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::PluginActionResult { result } if result.request_id == "write-other-workspace-config")
+    })
+    .await;
+    let outcome = events
+        .iter()
+        .find_map(|event| match event {
+            Event::PluginActionResult { result }
+                if result.request_id == "write-other-workspace-config" =>
+            {
+                Some(result.result.clone())
+            }
+            _ => None,
+        })
+        .expect("config action result");
+    assert!(matches!(outcome, Err(CoreError::PluginPermission { .. })));
+    assert!(!other.join(".pigcode/plugins.json").exists());
+
+    agent.ops.send(Op::Shutdown).await.expect("shutdown agent");
+    let _ = std::fs::remove_dir_all(other);
 }

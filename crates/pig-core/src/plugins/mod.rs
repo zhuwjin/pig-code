@@ -15,12 +15,13 @@ pub use marketplace::{
 };
 pub use themes::load_theme;
 pub use tools::{PluginToolDispatcher, PluginToolFilter, PluginToolset};
+pub use workspace::canonical_workspace_contains;
 
+pub(crate) use contributions::providers as plugin_providers;
 pub use contributions::{
     discover_skills_with_trust, enabled_packages, load_skill_output_with_trust, mcp_servers,
     skills_section_with_trust, skills_state,
 };
-pub(crate) use contributions::providers as plugin_providers;
 use registry::authorized_package;
 pub use registry::package_digest;
 pub use services::{
@@ -471,8 +472,8 @@ mod tests {
         let snapshot = sync(&mut registry, &root);
         let digest = snapshot.packages[0].digest.clone();
         registry.set_enabled("demo", &digest, true).unwrap();
-        let contributions: pig_protocol::PluginContributions = serde_json::from_value(
-            serde_json::json!({
+        let contributions: pig_protocol::PluginContributions =
+            serde_json::from_value(serde_json::json!({
               "providers": [{
                 "id": "runtime-acme",
                 "name": "Runtime Acme",
@@ -485,9 +486,8 @@ mod tests {
                   "max_output_tokens": 8192
                 }]
               }]
-            }),
-        )
-        .expect("runtime contributions");
+            }))
+            .expect("runtime contributions");
         registry
             .sync_runtime_contributions("demo", &digest, 1, snapshot.generation, contributions)
             .expect("a runtime provider may use a manifest credential");
@@ -1051,9 +1051,15 @@ mod tests {
         for kind in ["agent", "mcp"] {
             let conflict = conflicts
                 .iter()
-                .find(|conflict| conflict.kind == kind && conflict.name == "reviewer" || conflict.kind == kind && conflict.name == "docs")
+                .find(|conflict| {
+                    conflict.kind == kind && conflict.name == "reviewer"
+                        || conflict.kind == kind && conflict.name == "docs"
+                })
                 .unwrap_or_else(|| panic!("missing {kind} conflict: {conflicts:?}"));
-            assert_eq!(conflict.winner, "aaa.plugin", "the first package by id wins");
+            assert_eq!(
+                conflict.winner, "aaa.plugin",
+                "the first package by id wins"
+            );
             assert_eq!(conflict.losers, vec!["zzz.plugin"]);
         }
     }
@@ -1165,7 +1171,10 @@ Plugin body
         assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
         let package = &snapshot.packages[0];
         let digest = package.digest.clone();
-        let diagnostic = package.incompatible.clone().expect("incompatible diagnostic");
+        let diagnostic = package
+            .incompatible
+            .clone()
+            .expect("incompatible diagnostic");
         assert!(diagnostic.contains("2.0.0") && diagnostic.contains("1.0.0"));
 
         // The user's enable choice is recorded, but nothing activates.
@@ -1189,6 +1198,36 @@ Plugin body
         assert!(activated.packages[0].incompatible.is_none());
         assert_eq!(enabled_packages(&newer, &trust).unwrap().len(), 1);
         newer.tool("demo", &digest, "DemoRead", None).unwrap();
+    }
+
+    #[test]
+    fn hook_only_runtime_contributions_are_not_treated_as_empty() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(&root, r#"{"actions":["provide_hooks"]}"#);
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let contributions: pig_protocol::PluginContributions =
+            serde_json::from_value(serde_json::json!({
+                "hooks": [{"id":"sdk-hook-1","event":"post_tool_use","command":"audit.sh"}]
+            }))
+            .unwrap();
+        let accepted = registry
+            .sync_runtime_contributions(
+                "demo",
+                &digest,
+                1,
+                snapshot.generation,
+                contributions.clone(),
+            )
+            .expect("commit a hook-only runtime contribution");
+        assert_eq!(
+            accepted.runtime_contributions[&format!("demo:{digest}")],
+            contributions
+        );
     }
 
     #[test]

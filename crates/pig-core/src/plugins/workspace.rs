@@ -10,6 +10,15 @@ pub const MAX_RETURN_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_RETURN_BYTES: usize = 256 * 1024;
 pub const MAX_LINES: u64 = 5_000;
 
+/// Compare filesystem identities rather than lexical aliases when admitting a
+/// project plugin to a session workspace.
+pub fn canonical_workspace_contains(workspace: &Path, cwd: &Path) -> bool {
+    match (workspace.canonicalize(), cwd.canonicalize()) {
+        (Ok(workspace), Ok(cwd)) => cwd.starts_with(workspace),
+        _ => false,
+    }
+}
+
 /// Read one workspace-relative text file for a plugin.
 ///
 /// The path is confined to `root` both lexically and through canonicalization;

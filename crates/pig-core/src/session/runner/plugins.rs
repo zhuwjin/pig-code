@@ -395,8 +395,9 @@ impl Manager {
             .lock()
             .expect("plugin registry lock")
             .authorize(&package, &digest, &action, self.config.as_ref());
-        let result = authorized
-            .and_then(|()| self.execute_plugin_action(&package, action, session_id, &event_tx));
+        let result = authorized.and_then(|()| {
+            self.execute_plugin_action(&package, &digest, action, session_id, &event_tx)
+        });
         let refresh_views = refresh_views && result.is_ok();
         self.plugin_action_result(
             &event_tx,
@@ -411,6 +412,7 @@ impl Manager {
     fn execute_plugin_action(
         &mut self,
         package: &str,
+        digest: &str,
         action: PluginAction,
         session_id: Option<String>,
         event_tx: &async_channel::Sender<pig_protocol::Event>,
@@ -477,10 +479,8 @@ impl Manager {
                 .ok_or(CoreError::SessionNotFound)
                 .and_then(json),
             PluginAction::ReadConfig { path } => {
-                let workspace = session_id
-                    .as_deref()
-                    .and_then(|id| self.sessions.get(id))
-                    .map(|entry| entry.cwd.clone());
+                let workspace =
+                    self.plugin_config_workspace(package, digest, session_id.as_deref())?;
                 plugins::config::read_with_workspace(
                     &self.plugins.lock().expect("plugin registry lock"),
                     self.config.as_ref(),
@@ -490,10 +490,8 @@ impl Manager {
                 )
             }
             PluginAction::WriteConfig { path, value } => {
-                let workspace = session_id
-                    .as_deref()
-                    .and_then(|id| self.sessions.get(id))
-                    .map(|entry| entry.cwd.clone());
+                let workspace =
+                    self.plugin_config_workspace(package, digest, session_id.as_deref())?;
                 let write = {
                     let registry = self.plugins.lock().expect("plugin registry lock");
                     plugins::config::write_with_workspace(
@@ -514,6 +512,25 @@ impl Manager {
                 }
             }
         }
+    }
+
+    fn plugin_config_workspace(
+        &self,
+        package: &str,
+        digest: &str,
+        session_id: Option<&str>,
+    ) -> Result<Option<std::path::PathBuf>, CoreError> {
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        let cwd = self
+            .sessions
+            .get(session_id)
+            .map(|entry| entry.cwd.clone())
+            .ok_or(CoreError::SessionNotFound)?;
+        let scope = self.plugin_scope(package, digest)?;
+        super::plugin_sessions::ensure_cwd_in_package(&scope, &cwd)?;
+        Ok(Some(cwd))
     }
 
     fn plugin_services(
@@ -786,40 +803,49 @@ fn json(value: impl serde::Serialize) -> Result<serde_json::Value, CoreError> {
 fn session_scope_permitted(scope: &PluginScope, session_cwd: Option<&std::path::Path>) -> bool {
     match scope {
         PluginScope::User => true,
-        PluginScope::Project { workspace } => {
-            session_cwd.is_none_or(|cwd| cwd.starts_with(workspace))
-        }
+        PluginScope::Project { workspace } => session_cwd
+            .is_none_or(|cwd| crate::plugins::canonical_workspace_contains(workspace, cwd)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
     use pig_protocol::PluginScope;
 
     use super::session_scope_permitted;
 
     #[test]
-    fn project_session_reads_stay_inside_their_workspace() {
+    fn project_session_reads_stay_inside_their_canonical_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-project-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let nested = workspace.join("nested");
+        let other = root.join("workspace-other");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
         let scope = PluginScope::Project {
-            workspace: PathBuf::from("C:/workspace"),
+            workspace: workspace.clone(),
         };
-        assert!(session_scope_permitted(
-            &scope,
-            Some(Path::new("C:/workspace"))
-        ));
-        assert!(session_scope_permitted(
-            &scope,
-            Some(Path::new("C:/workspace/nested"))
-        ));
-        assert!(!session_scope_permitted(
-            &scope,
-            Some(Path::new("C:/workspace-other"))
-        ));
-        assert!(session_scope_permitted(
-            &PluginScope::User,
-            Some(Path::new("C:/workspace-other"))
-        ));
+        assert!(session_scope_permitted(&scope, Some(&workspace)));
+        assert!(session_scope_permitted(&scope, Some(&nested)));
+        assert!(!session_scope_permitted(&scope, Some(&other)));
+        assert!(session_scope_permitted(&PluginScope::User, Some(&other)));
+
+        #[cfg(unix)]
+        {
+            let link = workspace.join("linked-outside");
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            assert!(
+                !session_scope_permitted(&scope, Some(&link)),
+                "a symlink inside the project must not authorize its outside target"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

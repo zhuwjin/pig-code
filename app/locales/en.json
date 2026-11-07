@@ -282,6 +282,8 @@
         "open": "Options",
         "save": "Save",
         "saved": "Saved",
+        "on": "On",
+        "off": "Off",
         "failed": "Could not save: {detail}",
         "loading": "Loading options…",
         "scope": {

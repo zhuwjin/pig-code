@@ -539,7 +539,7 @@ impl PluginSystemManager {
                                 "the workspace containing this plugin is not trusted",
                             ));
                         }
-                        if !cwd.starts_with(workspace) {
+                        if !pig_core::plugins::canonical_workspace_contains(workspace, &cwd) {
                             return Err(PluginProtocolError::new(
                                 PluginErrorCode::PermissionDenied,
                                 "a project plugin cannot subscribe to another workspace's session",

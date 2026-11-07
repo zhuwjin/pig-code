@@ -149,7 +149,7 @@ class TestHostImpl implements TestHost {
   private session: unknown = undefined;
   private modelReply = "test model answer";
   private readonly openSubscriptions = new Map<string, string>();
-  private readonly kv = new Map<string, { value: unknown; revision: number }>();
+  private readonly kv = new Map<string, { value: unknown; revision: number; deleted: boolean }>();
   private readonly subscriptionCursors = new Map<string, number>();
   private subscriptionCounter = 0;
   private started = false;
@@ -492,7 +492,7 @@ class TestHostImpl implements TestHost {
       this.answerService(requestId, null);
     } else if (service === "storage_list") {
       this.answerService(requestId, {
-        keys: [...this.kv.entries()].map(([key, entry]) => ({
+        keys: [...this.kv.entries()].filter(([, entry]) => !entry.deleted).map(([key, entry]) => ({
           key,
           revision: entry.revision,
           bytes: JSON.stringify(entry.value).length,
@@ -503,7 +503,9 @@ class TestHostImpl implements TestHost {
       const entry = this.kv.get(key);
       this.answerService(
         requestId,
-        entry ? { value: entry.value, revision: entry.revision } : { value: null, revision: 0 },
+        entry
+          ? { value: entry.deleted ? null : entry.value, revision: entry.revision }
+          : { value: null, revision: 0 },
       );
     } else if (service === "storage_key_write") {
       const payload = (body.payload ?? {}) as Record<string, unknown>;
@@ -517,22 +519,26 @@ class TestHostImpl implements TestHost {
         });
       } else {
         const revision = current + 1;
-        this.kv.set(key, { value: payload.value, revision });
+        this.kv.set(key, { value: payload.value, revision, deleted: false });
         this.answerService(requestId, { revision });
       }
     } else if (service === "storage_key_delete") {
       const payload = (body.payload ?? {}) as Record<string, unknown>;
       const key = String(payload.key ?? "");
       const entry = this.kv.get(key);
-      if (payload.expectedRevision !== undefined && payload.expectedRevision !== (entry?.revision ?? 0)) {
+      const current = entry?.revision ?? 0;
+      if (payload.expectedRevision !== undefined && payload.expectedRevision !== current) {
         this.failService(requestId, {
           code: "stale_revision",
-          message: `the key is at revision ${entry?.revision ?? 0}`,
-          details: { currentRevision: entry?.revision ?? 0 },
+          message: `the key is at revision ${current}`,
+          details: { currentRevision: current },
         });
+      } else if (!entry || entry.deleted) {
+        this.answerService(requestId, { deleted: false, revision: current });
       } else {
-        this.kv.delete(key);
-        this.answerService(requestId, { deleted: entry !== undefined });
+        const revision = current + 1;
+        this.kv.set(key, { value: null, revision, deleted: true });
+        this.answerService(requestId, { deleted: true, revision });
       }
     } else if (service === "session_subscribe") {
       const sessionId = String(body.sessionId ?? record.sessionId ?? "");

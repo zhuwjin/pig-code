@@ -73,14 +73,21 @@ and only records the applier otherwise, so tests can import the module.
 | `ctx.services.config/storage/session` | Convenience wrappers over the services above. Keyed storage has `list/get/set/delete` with revision CAS. |
 | `ctx.services.on(name, listener)` / `ctx.events.on` | Host events (`locale.changed`, …). |
 | `ctx.services.session.subscribe(listener, {sessionId})` | Projected session events with cursor/epoch/dropped; call it from `onReady`. |
-| `ctx.services.session.create/send/interrupt/wait` | Narrow session control (the session's own permissions apply). |
+| `ctx.services.session.create/send/interrupt/wait` | Narrow session control (host-inherited permissions apply; caller-supplied permissions are rejected). |
 | `ctx.services.model.request({purpose, prompt, …})` | One bounded non-streaming model call. |
-| `ctx.services.agents.list/start/send/wait/stop/read` | Delegate to a contributed or built-in subagent profile. |
+| `ctx.services.agents.list/start/send/wait/stop/read` | Delegate to a contributed or built-in subagent profile. Delegation is background-only; use `wait` instead of `background: false`. |
 | `ctx.services.git.status/diff/log/show/branches` | Read-only Git inspection of the session workspace; requires `git.read`. |
 | `ctx.services.files.read` | Bounded workspace text read with line ranges; requires `files.read`. |
 | `ctx.log.debug/info/warn/error` | Size-limited, redacted log events. |
 | `ctx.onReady(listener)` | Runs once the host accepted the instance. Requests made before that are queued. |
 | `ctx.dispose(fn)` | Teardown, run in reverse order on stop. |
+
+Registration disposers are single-shot and remove only the exact registration they created; an
+older disposer cannot remove a newer same-name tool, command or provider.
+
+Keyed-storage revisions are monotonic across deletion and recreation. `storage.delete` returns the
+tombstone's `revision`, which the next `storage.set` can use as `expectedRevision`; a stale revision
+from before the delete is still rejected.
 
 Tool definitions take `readOnly`, `idempotent`, `approval` (`on_request` | `always` | `never`),
 `timeoutMs`, `maxConcurrency`, `maxOutputBytes` and `availability` (`static` | `plugin`). The host

@@ -266,10 +266,11 @@ host's stores or mutable objects:
 - The projected event set is closed: `configured`, `turn_started`, `user_message`,
   `assistant_text` (preview), `tool_started`/`tool_finished` (preview), `turn_complete`,
   `turn_aborted`, `error`, `compacted`, `agent`, `permissions`, `plan_mode`.
-- `session.create` (capability `session.create`) creates a session in the declared workspace;
+- `session.create` (capability `session.create`) creates a session in the declared workspace with
+  the host's inherited/default permissions; a caller-supplied `permissions` field is rejected.
   `session.send`/`session.interrupt`/`session.wait` (capability `session.control`) use the
   session's own current permissions — a plugin can never widen them — and a project package can
-  only touch sessions inside its trusted workspace.
+  only touch sessions inside its trusted workspace, compared after canonicalization.
 - `model.request` (capability `model.request`, target = purpose) performs one non-streaming call:
   purposes are `review`, `commit_message`, `classify`, `memory`, `summary`, `custom`; the prompt is
   capped at 64 KiB, the system prompt at 16 KiB, output at 4096 tokens, and the call is recorded in
@@ -283,6 +284,8 @@ host's stores or mutable objects:
 - `agent.list`, `agent.start`, `agent.send`, `agent.wait`, `agent.stop`, `agent.read` (capability
   `agent.delegate`) run through the existing subagent preparation/drive pipeline: the child
   inherits the session's workspace, permissions, trust and tool narrowing; the parent must be idle.
+  Delegation is background-only; `background: false` is rejected rather than silently ignored, and
+  `agent.wait` provides the bounded wait operation.
 - A delegated child uses the existing Agent card (`ToolCallBegin` + `SubagentCard`), task
   registry, `SubagentActivity` and terminal notifications; late results and late steering are
   isolated exactly like a model-started child, and stopping it removes the pending approvals and
@@ -299,19 +302,23 @@ host's stores or mutable objects:
   read. Enabling a package with a backend stays a user-level decision (its Engine is global).
 - The host renders a generic options form from the declarations (string, number, boolean, enum) in
   the plugin manager; there is no plugin-provided settings page. A scope switch writes either the
-  user value or the current workspace's override.
+  user value or the current workspace's override. Project packages can only read or write the
+  configuration scope of sessions in their own canonical workspace.
 
 ## Storage and side-effect recovery
 
 - Besides the legacy whole-blob `storage_read`/`storage_write`, keyed storage supports
   `storage_list`, `storage_key_read`, `storage_key_write` and `storage_key_delete` with a per-key
-  `revision`. A write/delete with `expectedRevision` is compare-and-swap: a stale revision fails
-  with `stale_revision` and `details.currentRevision`, never silently overwriting.
-- Side-effecting requests (storage writes, config writes, credential changes, HTTP requests)
-  persist their result under an idempotency key (the request's own id unless the plugin supplies
-  `idempotencyKey`). A retry replays the recorded result; an attempt that was in flight when the
-  process died returns `busy` instead of executing again. Storage files are per-package, private,
-  and separate from the host's business state.
+  `revision`. Revisions never reuse a value after deletion: a delete writes a tombstone with the
+  next revision, and delete/recreate responses carry the revision for the next CAS. A write/delete
+  with `expectedRevision` is compare-and-swap: a stale revision fails with `stale_revision` and
+  `details.currentRevision`, never silently overwriting.
+- Side-effecting requests (storage writes, config writes, credential changes, HTTP requests,
+  session create/send/interrupt, model requests, and agent start/send/stop) persist their result
+  under an idempotency key (the request's own id unless the plugin supplies `idempotencyKey`). A
+  retry replays the recorded result. An attempt that was in flight when the process died settles
+  to a recorded `busy` error instead of executing again; records are never silently evicted.
+  Storage files are per-package, private, and separate from the host's business state.
 
 ## Conflict rules
 

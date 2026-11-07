@@ -7,7 +7,7 @@ use super::*;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginSessionAction {
     /// Create a session in `cwd` (the plugin's declared workspace), with the
-    /// same permission settings the UI would use.
+    /// host's inherited/default permissions rather than caller-selected ones.
     Create {
         cwd: PathBuf,
         #[serde(default)]
@@ -16,8 +16,6 @@ pub enum PluginSessionAction {
         model_id: Option<String>,
         #[serde(default)]
         reasoning_level: Option<String>,
-        #[serde(default)]
-        permissions: Option<PermissionSettings>,
     },
     /// Send a message to an existing session under its own current
     /// permissions (a plugin can never widen them).

@@ -49,6 +49,7 @@ pub(crate) fn check_supported(schema: &Value) -> Result<(), String> {
                 if !SUPPORTED.contains(&key.as_str()) {
                     return Err(format!("unsupported JSON Schema keyword `{key}`"));
                 }
+                check_keyword_shape(key, value)?;
                 match key.as_str() {
                     "properties" => {
                         let properties = value
@@ -73,7 +74,11 @@ pub(crate) fn check_supported(schema: &Value) -> Result<(), String> {
                         }
                     }
                     "type" => {
-                        for name in type_names(value)? {
+                        let names = type_names(value)?;
+                        if names.is_empty() {
+                            return Err("`type` must not be empty".into());
+                        }
+                        for name in names {
                             if !matches!(
                                 name,
                                 "object"
@@ -98,9 +103,57 @@ pub(crate) fn check_supported(schema: &Value) -> Result<(), String> {
                     _ => {}
                 }
             }
+            for (minimum, maximum) in [("minItems", "maxItems"), ("minLength", "maxLength")] {
+                if let (Some(min), Some(max)) = (
+                    fields.get(minimum).and_then(Value::as_u64),
+                    fields.get(maximum).and_then(Value::as_u64),
+                ) && min > max
+                {
+                    return Err(format!("`{minimum}` must not exceed `{maximum}`"));
+                }
+            }
             Ok(())
         }
         _ => Err("a JSON Schema must be an object or a boolean".into()),
+    }
+}
+
+fn check_keyword_shape(key: &str, value: &Value) -> Result<(), String> {
+    match key {
+        "$schema" | "title" | "description" if !value.is_string() => {
+            Err(format!("`{key}` must be a string"))
+        }
+        "examples" if !value.is_array() => Err("`examples` must be an array".into()),
+        "enum" => {
+            let choices = value.as_array().ok_or("`enum` must be an array")?;
+            if choices.is_empty() {
+                return Err("`enum` must not be empty".into());
+            }
+            for (index, choice) in choices.iter().enumerate() {
+                if choices[..index].contains(choice) {
+                    return Err("`enum` values must be unique".into());
+                }
+            }
+            Ok(())
+        }
+        "required" => {
+            let required = value.as_array().ok_or("`required` must be an array")?;
+            let mut names = std::collections::BTreeSet::new();
+            for name in required {
+                let name = name.as_str().ok_or("`required` entries must be strings")?;
+                if !names.insert(name) {
+                    return Err(format!("duplicate required property `{name}`"));
+                }
+            }
+            Ok(())
+        }
+        "minItems" | "maxItems" | "minLength" | "maxLength" if value.as_u64().is_none() => {
+            Err(format!("`{key}` must be a non-negative integer"))
+        }
+        "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" if !value.is_number() => {
+            Err(format!("`{key}` must be a number"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -392,6 +445,31 @@ mod tests {
             check_supported(&json!({"pattern": "([bad"}))
                 .unwrap_err()
                 .contains("pattern")
+        );
+    }
+
+    #[test]
+    fn malformed_constraint_values_fail_the_install_check() {
+        for schema in [
+            json!({"type": "object", "required": "path"}),
+            json!({"type": "object", "required": [1]}),
+            json!({"type": "string", "minLength": "1"}),
+            json!({"type": "array", "minItems": 3, "maxItems": 2}),
+            json!({"enum": []}),
+            json!({"enum": ["a", "a"]}),
+            json!({"minimum": "1"}),
+            json!({"examples": "not-an-array"}),
+            json!({"type": []}),
+        ] {
+            assert!(check_supported(&schema).is_err(), "accepted {schema}");
+        }
+        assert!(
+            check_supported(&json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "minLength": 1}},
+                "required": ["path"]
+            }))
+            .is_ok()
         );
     }
 }

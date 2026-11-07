@@ -413,7 +413,7 @@ export interface ServiceResults {
   storage_list: { keys: { key: string; revision: number; bytes: number }[] };
   storage_key_read: { value: unknown; revision: number };
   storage_key_write: { revision: number };
-  storage_key_delete: { deleted: boolean };
+  storage_key_delete: { deleted: boolean; revision: number };
   session_subscribe: SessionSubscribeResult;
   session_unsubscribe: null;
   session_create: { sessionId: string };
@@ -496,7 +496,7 @@ export interface PluginStorageApi {
   delete(
     key: string,
     options?: { expectedRevision?: number; idempotencyKey?: string },
-  ): Promise<{ deleted: boolean }>;
+  ): Promise<{ deleted: boolean; revision: number }>;
 }
 
 export interface PluginSessionApi {
@@ -551,7 +551,6 @@ export interface SessionCreateOptions {
   providerId?: string;
   modelId?: string;
   reasoningLevel?: string;
-  permissions?: PermissionSettings;
 }
 
 export interface SessionSubscribeResult {
@@ -935,7 +934,7 @@ class PluginRuntime {
             { idempotencyKey: options?.idempotencyKey },
           ),
         delete: (key, options) =>
-          runtime.requestService<{ deleted: boolean }>(
+          runtime.requestService<{ deleted: boolean; revision: number }>(
             "storage_key_delete",
             { key, expectedRevision: options?.expectedRevision },
             { idempotencyKey: options?.idempotencyKey },
@@ -1161,16 +1160,25 @@ class PluginRuntime {
   private registerTool(definition: ToolDefinition<any, any>): Disposer {
     this.tools.set(definition.name, definition);
     if (this.initialized) this.flushContributions();
+    let active = true;
     return () => {
+      if (!active) return;
+      active = false;
+      if (this.tools.get(definition.name) !== definition) return;
       this.tools.delete(definition.name);
       if (this.initialized) this.removeContribution(definition.name);
     };
   }
 
   private registerCommand(definition: CommandDefinition, handler: CommandHandler): Disposer {
-    this.commands.set(definition.id, { definition, handler });
+    const registration = { definition, handler };
+    this.commands.set(definition.id, registration);
     if (this.initialized) this.flushContributions();
+    let active = true;
     return () => {
+      if (!active) return;
+      active = false;
+      if (this.commands.get(definition.id) !== registration) return;
       this.commands.delete(definition.id);
       if (this.initialized) this.removeContribution(definition.id);
     };
@@ -1179,7 +1187,11 @@ class PluginRuntime {
   private registerProvider(definition: ProviderDefinition): Disposer {
     this.providers.set(definition.id, definition);
     if (this.initialized) this.flushContributions();
+    let active = true;
     return () => {
+      if (!active) return;
+      active = false;
+      if (this.providers.get(definition.id) !== definition) return;
       this.providers.delete(definition.id);
       if (this.initialized) this.removeContribution(definition.id);
     };
@@ -1189,7 +1201,11 @@ class PluginRuntime {
     const id = `sdk-hook-${++this.hookCounter}`;
     this.hooks.set(id, definition);
     if (this.initialized) this.flushContributions();
+    let active = true;
     return () => {
+      if (!active) return;
+      active = false;
+      if (this.hooks.get(id) !== definition) return;
       this.hooks.delete(id);
       if (this.initialized) this.removeContribution(id);
     };

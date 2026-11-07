@@ -143,6 +143,8 @@ impl PluginRegistry {
             && contributions.mcp.is_empty()
             && contributions.tools.is_empty()
             && contributions.commands.is_empty()
+            && contributions.hooks.is_empty()
+            && contributions.agents.is_empty()
             && contributions.providers.is_empty();
         if empty {
             if self.runtime_epochs.get(&key) == Some(&epoch) {

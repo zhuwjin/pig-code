@@ -86,10 +86,11 @@ export function PluginConfigEditor(props: {
     const locale = appLocale();
     return item.description?.[locale] ?? item.description?.en ?? item.key;
   };
-  const optionsOf = (item: PluginConfigItem): string[] => {
+  const optionsOf = (item: PluginConfigItem): unknown[] => {
     const schema = item.schema as { enum?: unknown[] } | null | undefined;
-    return Array.isArray(schema?.enum) ? schema!.enum!.map((value) => String(value)) : [];
+    return Array.isArray(schema?.enum) ? schema.enum : [];
   };
+  const optionKey = (value: unknown): string => JSON.stringify(value);
   const kindOf = (item: PluginConfigItem): string => {
     const schema = item.schema as { type?: string } | null | undefined;
     return schema?.type ?? typeof item.default;
@@ -150,23 +151,23 @@ export function PluginConfigEditor(props: {
                       }
                     >
                       <Text class="text-[10px] text-foreground">
-                        {Boolean(current()) ? "on" : "off"}
+                        {t(Boolean(current()) ? "settings.plugins.config.on" : "settings.plugins.config.off")}
                       </Text>
                     </Button>
                   </If>
                   <If when={kind !== "boolean" && options.length > 0}>
                     <View class="flex-row flex-wrap gap-1">
-                      <Each of={options} key={(option) => option}>
+                      <Each of={options} key={(option) => optionKey(option)}>
                         {(option) => (
                           <Button
-                            testID={`plugin-config-option-${props.plugin().id}-${item().key}-${option()}`}
-                            selected={String(current()) === option()}
+                            testID={`plugin-config-option-${props.plugin().id}-${item().key}-${optionKey(option())}`}
+                            selected={Object.is(current(), option())}
                             class="rounded-full border border-border px-2 py-1 selected:border-primary/60 selected:bg-accent"
                             onPress={() =>
                               values.update((all) => ({ ...all, [item().key]: option() }))
                             }
                           >
-                            <Text class="text-[10px] text-foreground">{option()}</Text>
+                            <Text class="text-[10px] text-foreground">{String(option())}</Text>
                           </Button>
                         )}
                       </Each>
@@ -180,7 +181,7 @@ export function PluginConfigEditor(props: {
                         values.update((all) => ({
                           ...all,
                           [item().key]:
-                            kind === "number" && text.trim() !== "" && Number.isFinite(Number(text))
+                            (kind === "number" || kind === "integer") && text.trim() !== "" && Number.isFinite(Number(text))
                               ? Number(text)
                               : text,
                         }))
@@ -188,7 +189,7 @@ export function PluginConfigEditor(props: {
                       class="rounded-(--radius) border border-input bg-background px-3 py-2 text-xs text-foreground"
                     />
                   </If>
-                  <If when={kind === "number" && options.length === 0}>
+                  <If when={(kind === "number" || kind === "integer") && options.length === 0}>
                     <Text class="text-[10px] text-muted-foreground">{kind}</Text>
                   </If>
                 </View>

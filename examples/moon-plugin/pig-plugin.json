@@ -90,6 +90,17 @@
             "type": "string",
             "maxLength": 80
           }
+        },
+        {
+          "key": "max_results",
+          "description": {
+            "en": "Maximum number of results"
+          },
+          "default": 2,
+          "schema": {
+            "type": "integer",
+            "enum": [1, 2, 3]
+          }
         }
       ],
       "read": [],

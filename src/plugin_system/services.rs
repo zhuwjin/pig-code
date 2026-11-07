@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pig_protocol::{
-    CoreError, Event, MessageDelivery, PermissionSettings, PluginAction, PluginErrorCode,
-    PluginGitReadRequest, PluginPackageInfo, PluginProtocolError, PluginResource, PluginScope,
-    PluginService, PluginServiceRequest, PluginSessionAction, PluginSource,
-    PluginWorkspaceFileReadRequest, SecretString,
+    CoreError, Event, MessageDelivery, PluginAction, PluginErrorCode, PluginGitReadRequest,
+    PluginPackageInfo, PluginProtocolError, PluginResource, PluginScope, PluginService,
+    PluginServiceRequest, PluginSessionAction, PluginSource, PluginWorkspaceFileReadRequest,
+    SecretString,
 };
 
 const MAX_PENDING_SERVICES: usize = 32;
@@ -117,51 +117,6 @@ impl HostServiceGateway {
                 request.service,
                 Err(error),
             ));
-        }
-        let mut forwarded_key = None;
-        if is_forwarded_side_effect(request.service) {
-            let key = side_effect_key(request.service, &request, request_id);
-            let path = request_log_path(&storage_path(
-                &self.data_dir,
-                &super::manager::plugin_data_key(package),
-            ));
-            match begin_request(&path, &key) {
-                Ok(BeginRequest::Done(result)) => {
-                    return ServiceExecution::Complete(self.reply(
-                        instance,
-                        epoch,
-                        generation,
-                        request_id,
-                        request.service,
-                        result,
-                    ));
-                }
-                Ok(BeginRequest::InFlight) => {
-                    return ServiceExecution::Complete(self.reply(
-                        instance,
-                        epoch,
-                        generation,
-                        request_id,
-                        request.service,
-                        Err(protocol_error(
-                            PluginErrorCode::Busy,
-                            "this side-effecting request is still in flight; its result is unknown",
-                        )
-                        .retryable()),
-                    ));
-                }
-                Ok(BeginRequest::Start) => forwarded_key = Some((path, key)),
-                Err(error) => {
-                    return ServiceExecution::Complete(self.reply(
-                        instance,
-                        epoch,
-                        generation,
-                        request_id,
-                        request.service,
-                        Err(error),
-                    ));
-                }
-            }
         }
         match request.service {
             PluginService::StorageRead => ServiceExecution::Complete(self.reply(
@@ -297,15 +252,7 @@ impl HostServiceGateway {
                     }),
                 )
             }
-            _ => self.forward(
-                package,
-                instance,
-                epoch,
-                generation,
-                request_id,
-                request,
-                forwarded_key,
-            ),
+            _ => self.forward(package, instance, epoch, generation, request_id, request),
         }
     }
 
@@ -318,9 +265,16 @@ impl HostServiceGateway {
         generation: u64,
         request_id: &str,
         request: PluginServiceRequest,
-        request_key: Option<(PathBuf, String)>,
     ) -> ServiceExecution {
         let service = request.service;
+        let recovery = is_forwarded_side_effect(service).then(|| {
+            let key = side_effect_key(service, &request, request_id);
+            let path = request_log_path(&storage_path(
+                &self.data_dir,
+                &super::manager::plugin_data_key(package),
+            ));
+            (path, key)
+        });
         let failure = |error| {
             ServiceExecution::Complete(self.reply(
                 instance,
@@ -449,25 +403,21 @@ impl HostServiceGateway {
                 }
             }
             PluginService::SessionCreate => {
+                if request
+                    .payload
+                    .get("permissions")
+                    .is_some_and(|permissions| !permissions.is_null())
+                {
+                    return failure(protocol_error(
+                        PluginErrorCode::InvalidOperation,
+                        "plugins cannot choose session permissions; the host defaults apply",
+                    ));
+                }
                 let Some(cwd) = payload_str(&request.payload, &["cwd"]) else {
                     return failure(protocol_error(
                         PluginErrorCode::InvalidOperation,
                         "session.create needs a cwd",
                     ));
-                };
-                let permissions = match request.payload.get("permissions") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(value) => {
-                        match serde_json::from_value::<PermissionSettings>(value.clone()) {
-                            Ok(permissions) => Some(permissions),
-                            Err(error) => {
-                                return failure(protocol_error(
-                                    PluginErrorCode::InvalidOperation,
-                                    format!("invalid session permissions: {error}"),
-                                ));
-                            }
-                        }
-                    }
                 };
                 pig_protocol::Op::PluginSessionAction {
                     request_id: internal_id.clone(),
@@ -480,7 +430,6 @@ impl HostServiceGateway {
                         model_id: payload_str(&request.payload, &["modelId"]).map(str::to_owned),
                         reasoning_level: payload_str(&request.payload, &["reasoningLevel"])
                             .map(str::to_owned),
-                        permissions,
                     },
                 }
             }
@@ -774,6 +723,41 @@ impl HostServiceGateway {
                 ));
             }
         };
+        let request_key = match recovery {
+            Some((path, key)) => match begin_request(&path, &key) {
+                Ok(BeginRequest::Done(result)) => {
+                    return ServiceExecution::Complete(
+                        self.reply(instance, epoch, generation, request_id, service, result),
+                    );
+                }
+                Ok(BeginRequest::InFlight) => {
+                    return ServiceExecution::Complete(self.reply(
+                        instance,
+                        epoch,
+                        generation,
+                        request_id,
+                        service,
+                        Err(protocol_error(
+                            PluginErrorCode::Busy,
+                            "this side-effecting request is still in flight; its result is unknown",
+                        )
+                        .retryable()),
+                    ));
+                }
+                Ok(BeginRequest::Start) => Some((path, key)),
+                Err(error) => {
+                    return ServiceExecution::Complete(self.reply(
+                        instance,
+                        epoch,
+                        generation,
+                        request_id,
+                        service,
+                        Err(error),
+                    ));
+                }
+            },
+            None => None,
+        };
         let pending = PendingService {
             external_id: request_id.to_owned(),
             instance: instance.to_owned(),
@@ -789,13 +773,16 @@ impl HostServiceGateway {
             .expect("plugin service pending lock")
             .insert(internal_id.clone(), pending);
         if let Err(send_error) = self.agent.try_send(op) {
-            self.pending
+            let pending = self
+                .pending
                 .lock()
                 .expect("plugin service pending lock")
-                .remove(&internal_id);
-            return failure(
-                protocol_error(PluginErrorCode::Transport, send_error.to_string()).retryable(),
-            );
+                .remove(&internal_id)
+                .expect("forwarded request was just registered");
+            return ServiceExecution::Complete(self.finish(
+                pending,
+                Err(protocol_error(PluginErrorCode::Transport, send_error.to_string()).retryable()),
+            ));
         }
         ServiceExecution::Forwarded
     }
@@ -1093,9 +1080,9 @@ impl HostServiceGateway {
     }
 }
 
-/// Side effects whose result is persisted for replay. Storage writes, config
-/// writes, credential changes and HTTP requests are the observable mutations a
-/// plugin can request; a read is never logged.
+/// Side effects whose result is persisted for replay. This covers storage,
+/// configuration, credentials, network/model calls, and session/agent control;
+/// read-only queries and bounded waits are never logged.
 fn is_forwarded_side_effect(service: PluginService) -> bool {
     matches!(
         service,
@@ -1103,6 +1090,13 @@ fn is_forwarded_side_effect(service: PluginService) -> bool {
             | PluginService::CredentialSet
             | PluginService::CredentialClear
             | PluginService::HttpRequest
+            | PluginService::SessionCreate
+            | PluginService::SessionSend
+            | PluginService::SessionInterrupt
+            | PluginService::ModelRequest
+            | PluginService::AgentStart
+            | PluginService::AgentSend
+            | PluginService::AgentStop
     )
 }
 
@@ -1139,6 +1133,8 @@ struct KeyedStore {
 struct KeyedEntry {
     value: serde_json::Value,
     revision: u64,
+    #[serde(default)]
+    deleted: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -1151,11 +1147,14 @@ struct RequestLog {
 struct RequestRecord {
     at: u64,
     #[serde(default)]
+    owner: String,
+    #[serde(default)]
     in_flight: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     result: Option<Result<serde_json::Value, PluginProtocolError>>,
 }
 
+#[derive(Debug)]
 enum BeginRequest {
     Done(Result<serde_json::Value, PluginProtocolError>),
     InFlight,
@@ -1164,7 +1163,6 @@ enum BeginRequest {
 
 const MAX_KEY_CHARS: usize = 128;
 const MAX_KEYED_ENTRIES: usize = 512;
-const MAX_REQUEST_RECORDS: usize = 256;
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -1220,23 +1218,47 @@ fn save_json_file<T: serde::Serialize>(
 
 fn begin_request(path: &Path, key: &str) -> Result<BeginRequest, PluginProtocolError> {
     let mut log: RequestLog = load_json_file(path, "the plugin request log")?;
+    let owner = recovery_owner();
     if let Some(record) = log.entries.get(key) {
-        if record.in_flight {
+        if record.in_flight && record.owner == owner {
             return Ok(BeginRequest::InFlight);
+        }
+        if record.in_flight {
+            let error = protocol_error(
+                PluginErrorCode::Busy,
+                "the previous attempt's outcome is unknown; refusing to repeat the side effect",
+            );
+            log.entries.insert(
+                key.to_owned(),
+                RequestRecord {
+                    at: now_secs(),
+                    owner: owner.to_owned(),
+                    in_flight: false,
+                    result: Some(Err(error.clone())),
+                },
+            );
+            save_json_file(path, &log, MAX_STORAGE_BYTES)?;
+            return Ok(BeginRequest::Done(Err(error)));
         }
         if let Some(result) = &record.result {
             return Ok(BeginRequest::Done(result.clone()));
         }
+        return Err(protocol_error(
+            PluginErrorCode::Internal,
+            "the plugin request record has no result; refusing to guess",
+        ));
     }
     log.entries.insert(
         key.to_owned(),
         RequestRecord {
             at: now_secs(),
+            owner: owner.to_owned(),
             in_flight: true,
             result: None,
         },
     );
-    prune_request_log(&mut log);
+    // Records are never silently evicted: reaching the storage quota returns an
+    // explicit error instead of allowing an old request to execute again.
     save_json_file(path, &log, MAX_STORAGE_BYTES)?;
     Ok(BeginRequest::Start)
 }
@@ -1249,11 +1271,11 @@ fn finish_request(path: &Path, key: &str, result: &Result<serde_json::Value, Plu
         key.to_owned(),
         RequestRecord {
             at: now_secs(),
+            owner: recovery_owner().to_owned(),
             in_flight: false,
             result: Some(result.clone()),
         },
     );
-    prune_request_log(&mut log);
     if let Err(error) = save_json_file(path, &log, MAX_STORAGE_BYTES) {
         tracing::warn!(
             detail = %error.message,
@@ -1262,19 +1284,15 @@ fn finish_request(path: &Path, key: &str, result: &Result<serde_json::Value, Plu
     }
 }
 
-fn prune_request_log(log: &mut RequestLog) {
-    while log.entries.len() > MAX_REQUEST_RECORDS {
-        // Oldest record first; ties keep a deterministic order.
-        let Some(oldest) = log
-            .entries
-            .iter()
-            .min_by_key(|(key, record)| (record.at, key.as_str()))
-            .map(|(key, _)| key.clone())
-        else {
-            break;
-        };
-        log.entries.remove(&oldest);
-    }
+fn recovery_owner() -> &'static str {
+    static OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OWNER.get_or_init(|| {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{}-{nonce}", std::process::id())
+    })
 }
 
 fn valid_key(key: &str) -> Result<(), PluginProtocolError> {
@@ -1325,6 +1343,7 @@ fn storage_list(data_dir: &Path, data_key: &str) -> Result<serde_json::Value, Pl
     let keys: Vec<serde_json::Value> = store
         .entries
         .iter()
+        .filter(|(_, entry)| !entry.deleted)
         .map(|(key, entry)| {
             serde_json::json!({
                 "key": key,
@@ -1345,7 +1364,7 @@ fn storage_key_read(
     let store = load_keyed_store(&kv_path(&storage_path(data_dir, data_key)))?;
     match store.entries.get(key) {
         Some(entry) => Ok(serde_json::json!({
-            "value": entry.value,
+            "value": if entry.deleted { serde_json::Value::Null } else { entry.value.clone() },
             "revision": entry.revision,
         })),
         None => Ok(serde_json::json!({ "value": null, "revision": 0 })),
@@ -1381,7 +1400,14 @@ fn storage_key_write(
         ));
     }
     let revision = current.saturating_add(1);
-    store.entries.insert(key, KeyedEntry { value, revision });
+    store.entries.insert(
+        key,
+        KeyedEntry {
+            value,
+            revision,
+            deleted: false,
+        },
+    );
     save_json_file(&path, &store, MAX_STORAGE_BYTES)?;
     Ok(serde_json::json!({ "revision": revision }))
 }
@@ -1394,22 +1420,30 @@ fn storage_key_delete(
     let key = payload_key(payload)?;
     let path = kv_path(&storage_path(data_dir, data_key));
     let mut store = load_keyed_store(&path)?;
-    let Some(entry) = store.entries.get(key) else {
-        if let Some(expected) = expected_revision(payload)
-            && expected != 0
-        {
-            return Err(stale_revision(0));
-        }
-        return Ok(serde_json::json!({ "deleted": false }));
-    };
+    let current = store
+        .entries
+        .get(key)
+        .map(|entry| entry.revision)
+        .unwrap_or(0);
     if let Some(expected) = expected_revision(payload)
-        && expected != entry.revision
+        && expected != current
     {
-        return Err(stale_revision(entry.revision));
+        return Err(stale_revision(current));
     }
-    store.entries.remove(key);
+    if store.entries.get(key).is_none_or(|entry| entry.deleted) {
+        return Ok(serde_json::json!({ "deleted": false, "revision": current }));
+    }
+    let revision = current.saturating_add(1);
+    store.entries.insert(
+        key.to_owned(),
+        KeyedEntry {
+            value: serde_json::Value::Null,
+            revision,
+            deleted: true,
+        },
+    );
     save_json_file(&path, &store, MAX_STORAGE_BYTES)?;
-    Ok(serde_json::json!({ "deleted": true }))
+    Ok(serde_json::json!({ "deleted": true, "revision": revision }))
 }
 
 pub(super) fn authorize_service(
@@ -1805,11 +1839,123 @@ mod tests {
         )
         .expect("delete");
         assert_eq!(deleted["deleted"], true);
+        assert_eq!(deleted["revision"], 3);
         assert_eq!(
             storage_key_read(&root, data_key, &serde_json::json!({"key": "alpha"})).unwrap(),
-            serde_json::json!({"value": null, "revision": 0})
+            serde_json::json!({"value": null, "revision": 3})
         );
+        assert!(
+            storage_list(&root, data_key).unwrap()["keys"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let recreated = storage_key_write(
+            &root,
+            data_key,
+            &serde_json::json!({"key": "alpha", "value": {"n": 3}, "expectedRevision": 3}),
+        )
+        .expect("recreate after the tombstone");
+        assert_eq!(recreated["revision"], 4);
+        let stale = storage_key_write(
+            &root,
+            data_key,
+            &serde_json::json!({"key": "alpha", "value": {"n": 4}, "expectedRevision": 1}),
+        )
+        .expect_err("a pre-delete revision must not match the recreated value");
+        assert_eq!(stale.code, PluginErrorCode::StaleRevision);
+        assert_eq!(stale.details.unwrap()["currentRevision"], 4);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn request_records_survive_the_old_eviction_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-service-request-retention-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("requests.json");
+        for index in 0..300 {
+            let key = format!("request-{index}");
+            assert!(matches!(
+                begin_request(&path, &key),
+                Ok(BeginRequest::Start)
+            ));
+            finish_request(&path, &key, &Ok(serde_json::json!(index)));
+        }
+        for index in 0..300 {
+            let key = format!("request-{index}");
+            match begin_request(&path, &key) {
+                Ok(BeginRequest::Done(Ok(value))) => assert_eq!(value, index),
+                other => panic!("request {index} was forgotten: {other:?}"),
+            }
+        }
+        let log = load_json_file::<RequestLog>(&path, "request log").unwrap();
+        assert_eq!(log.entries.len(), 300);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_stale_in_flight_attempt_settles_without_reexecuting() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-service-request-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("requests.json");
+        assert!(matches!(
+            begin_request(&path, "request"),
+            Ok(BeginRequest::Start)
+        ));
+        let mut log = load_json_file::<RequestLog>(&path, "request log").unwrap();
+        log.entries.get_mut("request").unwrap().owner = "previous-process".into();
+        save_json_file(&path, &log, MAX_STORAGE_BYTES).unwrap();
+        match begin_request(&path, "request") {
+            Ok(BeginRequest::Done(Err(error))) => assert_eq!(error.code, PluginErrorCode::Busy),
+            other => panic!("stale request was re-executed: {other:?}"),
+        }
+        match begin_request(&path, "request") {
+            Ok(BeginRequest::Done(Err(error))) => assert_eq!(error.code, PluginErrorCode::Busy),
+            other => panic!("the recovered error was not replayed: {other:?}"),
+        }
+        let log = load_json_file::<RequestLog>(&path, "request log").unwrap();
+        assert!(!log.entries["request"].in_flight);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn all_forwarded_writes_use_the_recovery_log() {
+        for service in [
+            PluginService::ConfigWrite,
+            PluginService::CredentialSet,
+            PluginService::CredentialClear,
+            PluginService::HttpRequest,
+            PluginService::SessionCreate,
+            PluginService::SessionSend,
+            PluginService::SessionInterrupt,
+            PluginService::ModelRequest,
+            PluginService::AgentStart,
+            PluginService::AgentSend,
+            PluginService::AgentStop,
+        ] {
+            assert!(is_forwarded_side_effect(service), "{service:?}");
+        }
+        for service in [
+            PluginService::SessionRead,
+            PluginService::SessionWait,
+            PluginService::AgentList,
+            PluginService::AgentWait,
+            PluginService::AgentRead,
+        ] {
+            assert!(!is_forwarded_side_effect(service), "{service:?}");
+        }
     }
 
     #[test]
@@ -1923,6 +2069,71 @@ mod tests {
                 targets: vec!["*".into()],
             });
         authorize_service(&package, &file).expect("files.read grants file reads");
+    }
+
+    #[test]
+    fn session_create_rejects_caller_supplied_permissions() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-invalid-session-create-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (agent, agent_rx) = async_channel::unbounded();
+        let gateway = HostServiceGateway::new(root.clone(), agent);
+        let package = PluginPackageInfo {
+            id: "moon".into(),
+            name: "Moon".into(),
+            version: "1".into(),
+            digest: "sha256:test".into(),
+            content_digest: "sha256:content".into(),
+            root: PathBuf::new(),
+            source: PluginSource::User,
+            enabled: true,
+            incompatible: None,
+            backend: None,
+            contributions: Default::default(),
+            capabilities: vec![pig_protocol::PluginCapabilityRequest {
+                name: "session.create".into(),
+                targets: vec!["*".into()],
+            }],
+        };
+        let execution = gateway.execute(
+            &package,
+            "moon:user:default",
+            1,
+            1,
+            "create-full-access",
+            PluginServiceRequest {
+                service: PluginService::SessionCreate,
+                payload: serde_json::json!({
+                    "cwd": "/workspace",
+                    "permissions": {
+                        "sandbox": {"mode": "danger_full_access"},
+                        "approval": "never",
+                        "reviewer": "user"
+                    }
+                }),
+                session_id: None,
+                workspace_id: None,
+                idempotency_key: None,
+            },
+        );
+        let ServiceExecution::Complete(reply) = execution else {
+            panic!("permission override must fail before forwarding");
+        };
+        assert_eq!(
+            reply.result.expect_err("full access is rejected").code,
+            PluginErrorCode::InvalidOperation
+        );
+        assert!(agent_rx.try_recv().is_err());
+        assert!(
+            !root.exists(),
+            "an invalid request must not create an in-flight recovery record"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

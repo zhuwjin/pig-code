@@ -67,7 +67,6 @@ impl Manager {
                 provider_id,
                 model_id,
                 reasoning_level,
-                permissions,
             } => {
                 let cwd = normalize_workspace_path(&cwd);
                 let scope = self.plugin_scope(&package, &digest);
@@ -85,7 +84,7 @@ impl Manager {
                             provider_id,
                             model_id,
                             reasoning_level,
-                            permissions,
+                            None,
                             Some(false),
                         );
                         let created = self
@@ -171,16 +170,25 @@ impl Manager {
                 profile,
                 prompt,
                 description,
-                background: _,
-            } => Some(self.plugin_agent_start(
-                &event_tx,
-                &package,
-                &digest,
-                session_id,
-                profile,
-                prompt,
-                description,
-            )),
+                background,
+            } => {
+                if background {
+                    Some(self.plugin_agent_start(
+                        &event_tx,
+                        &package,
+                        &digest,
+                        session_id,
+                        profile,
+                        prompt,
+                        description,
+                    ))
+                } else {
+                    Some(Err(CoreError::PluginInvalidInput {
+                        detail: "agent.start only supports background delegation; use agent.wait"
+                            .into(),
+                    }))
+                }
+            }
             PluginSessionAction::AgentSend {
                 session_id,
                 agent_id,
@@ -358,20 +366,25 @@ impl Manager {
         {
             return Err(invalid_input("the system prompt is over 16 KiB"));
         }
+        let scope = self.plugin_scope(package, digest)?;
         let resolved = match session_id.as_deref() {
             Some(session_id) => {
                 let entry = self
                     .sessions
                     .get(session_id)
                     .ok_or(CoreError::SessionNotFound)?;
-                ensure_cwd_in_package(&self.plugin_scope(package, digest)?, &entry.cwd)?;
+                ensure_cwd_in_package(&scope, &entry.cwd)?;
                 resolve_entry(entry)?
             }
             None => {
+                let cwd = match &scope.source {
+                    PluginSource::Project { workspace } => workspace,
+                    _ => &self.default_cwd,
+                };
                 let runtime = super::runtime::layered_runtime(
                     self.config.as_ref(),
                     &self.config_path,
-                    &self.default_cwd,
+                    cwd,
                     self.credentials.clone(),
                     &self.plugins,
                 );
@@ -470,13 +483,14 @@ impl Manager {
         digest: &str,
         session_id: Option<String>,
     ) -> Result<serde_json::Value, CoreError> {
-        let _ = self.plugin_scope(package, digest)?;
+        let scope = self.plugin_scope(package, digest)?;
         let (cwd, trust) = match session_id.as_deref() {
             Some(session_id) => {
                 let entry = self
                     .sessions
                     .get(session_id)
                     .ok_or(CoreError::SessionNotFound)?;
+                ensure_cwd_in_package(&scope, &entry.cwd)?;
                 let trust = entry
                     .session
                     .as_ref()
@@ -486,10 +500,19 @@ impl Manager {
                     .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&entry.cwd));
                 (entry.cwd.clone(), trust)
             }
-            None => (
-                self.default_cwd.clone(),
-                crate::config::WorkspaceTrust::for_config(self.config.as_ref(), &self.default_cwd),
-            ),
+            None => match &scope.source {
+                PluginSource::Project { workspace } => (
+                    workspace.clone(),
+                    crate::config::WorkspaceTrust::for_config(self.config.as_ref(), workspace),
+                ),
+                _ => (
+                    self.default_cwd.clone(),
+                    crate::config::WorkspaceTrust::for_config(
+                        self.config.as_ref(),
+                        &self.default_cwd,
+                    ),
+                ),
+            },
         };
         let profiles =
             crate::agent::load_profiles_with_plugins(&cwd, &self.data_dir, &trust, &self.plugins);
@@ -860,7 +883,7 @@ fn ensure_workspace_in_package(package: &PluginPackageInfo, cwd: &Path) -> Resul
     let PluginSource::Project { workspace } = &package.source else {
         return Ok(());
     };
-    if !cwd.starts_with(workspace) {
+    if !crate::plugins::canonical_workspace_contains(workspace, cwd) {
         return Err(CoreError::PluginPermission {
             detail: "a project plugin may only touch sessions inside its workspace".into(),
         });
