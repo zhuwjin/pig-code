@@ -1,5 +1,5 @@
 import { Accessor, Clipboard, Scroll, Text, token, View } from "nsh";
-import { Button, DiffView, Editor, TextView } from "nsh/base";
+import { Button, DiffView, TextView } from "nsh/base";
 import { t } from "../i18n";
 import type { AgentCard, ToolItem } from "../protocol";
 import type { UiContext } from "../ui-context";
@@ -16,6 +16,7 @@ import {
   toolLabel,
 } from "../conversation";
 import { Icon } from "./icon";
+import { CodeView, type CodeViewLine } from "./code-view";
 
 function copyText(props: UiContext, id: string, text: string): void {
   void Clipboard.writeText(text).then(() => props.store.markCopied(id));
@@ -25,7 +26,10 @@ function CodeCard(props: UiContext & {
   id: string;
   title: string;
   code: () => string;
+  lines?: () => CodeViewLine[];
   language: string;
+  lineNumbers?: boolean;
+  maxHeight?: number;
   error?: boolean;
 }) {
   const wrap = () => props.store.isExpanded(`wrap-${props.id}`);
@@ -54,16 +58,16 @@ function CodeCard(props: UiContext & {
           />
         </Button>
       </View>
-      <View class="h-80">
-        <Editor
-          value={props.code()}
-          language={props.language}
-          readOnly
-          softWrap={wrap()}
-          lineNumbers
-          class={props.error ? "flex-1 text-destructive" : "flex-1 text-foreground"}
-        />
-      </View>
+      <CodeView
+        testID={`code-${props.id}`}
+        code={props.code}
+        lines={props.lines}
+        language={props.language}
+        wrap={wrap}
+        lineNumbers={props.lineNumbers}
+        maxHeight={props.maxHeight}
+        error={props.error}
+      />
     </View>
   );
 }
@@ -82,7 +86,13 @@ function ReadBody(props: UiContext & { item: Accessor<ToolItem> }) {
               id={props.item().id}
               title={`${pathParts(props.item().summary).name} · ${t("tools.lines", { count: value().lines.length })}${start && start > 1 ? t("tools.from_line", { line: start }) : ""}`}
               code={() => [...value().lines.map((line) => line.text), ...value().notes].join("\n")}
+              lines={() => [
+                ...value().lines.map((line) => ({ number: line.number, text: line.text })),
+                ...value().notes.map((text) => ({ text })),
+              ]}
               language={props.item().summary}
+              lineNumbers
+              maxHeight={320}
             />
           );
         }}
@@ -101,6 +111,7 @@ function BashBody(props: UiContext & { item: Accessor<ToolItem> }) {
         title={t("tools.command")}
         code={() => props.item().summary || props.item().detail}
         language="bash"
+        maxHeight={160}
       />
       <CodeCard
         {...props}
@@ -108,6 +119,7 @@ function BashBody(props: UiContext & { item: Accessor<ToolItem> }) {
         title={t("tools.output")}
         code={() => props.item().output || (props.item().status === "stopped" ? t("tools.stopped") : t("tools.no_output"))}
         language="text"
+        maxHeight={320}
         error={props.item().status === "error"}
       />
     </View>

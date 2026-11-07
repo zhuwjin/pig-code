@@ -14,6 +14,8 @@
 
 这里不使用官方 `Collapsible.reveal` 的局部 `animate_layout`，避免局部布局动画与 List 的行定位、回收和滚动范围更新同时修改位置。右侧子 Agent 输出（`app/components/right-panel.tsx`）和模型高级设置（`app/components/settings/model-editor.tsx`）不在消息 List 的虚拟行内，继续使用官方 `Collapsible.reveal`。减少动态效果时由系统直接完成展开和收起。
 
+代码正文使用共享的 `app/components/code-view.tsx`，不再为 Read、命令和输出创建完整 `Editor`。组件用虚拟 List 只创建可见代码行，文本立即显示；`src/code_highlight.rs` 在后台线程使用与 NSH 相同的 `syntect` / `two-face` 解析高亮，并以 UTF-16 偏移原位着色。Read 保留真实行号，命令和输出不带行号；命令区按内容增高、上限 160，读取和输出上限 320，不保留固定空高或末尾滚动空白。`App.code-view.test.tsx` 覆盖长输出虚拟化、滚到末行及命令/输出的展开和换行。
+
 **验收**
 
 - 长工作区和长工具输出展开/收起时不出现空白、重叠、正文从顶部下闪或滚动位置异常。
