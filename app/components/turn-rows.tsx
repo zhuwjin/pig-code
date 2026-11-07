@@ -1,5 +1,5 @@
 import { Accessor, Clipboard, Text, token, View, type JSX } from "nsh";
-import { Button, Collapsible } from "nsh/base";
+import { Button } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
@@ -10,18 +10,19 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <Collapsible reveal open={open()} content={props.children}>
+    <View>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"
-        onPress={() => props.store.toggleTurnExpanded(turn().id)}
+        onPress={() => props.store.toggleTurnExpanded(turn().id, true)}
       >
         <Text class="text-xs text-muted-foreground">
           {turn().status === "stopped" ? t("turn.stopped") : formatDuration(turn().durationMs ?? 0, t("turn.worked_for"))}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>
-    </Collapsible>
+      <If when={open()}>{props.children}</If>
+    </View>
   );
 }
 
@@ -127,7 +128,7 @@ export function TurnActionsRow(props: UiContext & {
             testID={`hooks-${turn().id}`}
             accessibilityLabel={t("turn.hooks_summary")}
             class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
-            onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`)}
+            onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`, true)}
           >
             <Icon name="anchor" size={12} color={token("muted-foreground")} />
           </Button>
@@ -139,7 +140,7 @@ export function TurnActionsRow(props: UiContext & {
           <Text class="text-xs text-muted-foreground">{t("turn.finished", { duration: formatCompactDuration(turn().durationMs!) })}</Text>
         </If>
       </View>
-      <Collapsible reveal open={hooksOpen()} content={
+      <If when={hooksOpen()}>
         <View class="gap-2 rounded-xl border border-border bg-tool-surface p-3">
           <Each of={turn().hooks} key={(hook) => hook.id}>
             {(hook) => (
@@ -157,9 +158,7 @@ export function TurnActionsRow(props: UiContext & {
             )}
           </Each>
         </View>
-      }>
-        <View />
-      </Collapsible>
+      </If>
     </View>
   );
 }

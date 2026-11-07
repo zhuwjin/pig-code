@@ -702,7 +702,7 @@
     },
     "trust": "Trust",
     "ignore": "Ignore",
-    "latest": "Latest",
+    "latest": "Latest messages",
     "jump_turn": "Jump to turn {index}",
     "no_text_reply": "No text reply",
     "search_placeholder": "Search this conversation",

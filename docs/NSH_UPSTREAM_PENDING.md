@@ -6,47 +6,44 @@
 
 ## 已发布，待接入
 
-### 1. 工具卡片和工作详情的逐步展开/收起（已接入）
+### 1. 工具卡片和工作详情的展开/收起（按场景接入）
 
 **当前实现**
 
-已在 `app/components/tool-card.tsx`、`app/components/messages.tsx`、`app/components/turn-rows.tsx` 和 `app/components/right-panel.tsx` 的展开区域启用官方 `Collapsible.reveal`。可见高度随展开进度增长，内容在收起完成后退出；这些区域不再叠加 `app/store.ts` 的全局 `LayoutAnimation`。
+消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm、Plan 和 Hook 汇总通过 `If` 直接挂载/卸载，与 Gallery AI Chat 一致，不使用会保留 `content` 的 `Collapsible`。切换展开状态时通过 `animateConversationToggle` 调用 `LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)`；回合完成时也应用同一过渡，不增加强制 `scrollToEnd`。
 
-`app/components/settings/model-editor.tsx` 的高级设置也使用同一机制。减少动态效果时由官方组件直接完成展开和收起。
+这里不使用官方 `Collapsible.reveal` 的局部 `animate_layout`，避免局部布局动画与 List 的行定位、回收和滚动范围更新同时修改位置。右侧子 Agent 输出（`app/components/right-panel.tsx`）和模型高级设置（`app/components/settings/model-editor.tsx`）不在消息 List 的虚拟行内，继续使用官方 `Collapsible.reveal`。减少动态效果时由系统直接完成展开和收起。
 
 **验收**
 
-- 展开第一帧、中间帧和结束帧都不会提前显示完整内容。
-- 快速连续展开/收起不会跳变，也不会遗留不可见但可点击的内容。
+- 长工作区和长工具输出展开/收起时不出现空白、重叠、正文从顶部下闪或滚动位置异常。
+- 快速连续展开/收起不会遗留不可见但可点击的内容。
 - 虚拟列表、搜索定位和上翻阅读行为不受影响。
+- 右侧面板和设置页的 `reveal` 保持原有效果。
+
+`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具和长思考内容的展开/收起；测试使用隔离 Store，不读取真实会话或钥匙串。
 
 **上游参考**
 
-NSH main 的 `crates/nsh-base/src/collapsible.rs` 已包含 `reveal` 的局部裁剪实现。
+NSH 0.4.0 的 `Collapsible.reveal` 使用局部 `animate_layout`。官方 AI Chat 示例也在虚拟 List 中，但思考区使用直接挂载/卸载和普通 `LayoutAnimation`，没有使用该 `reveal`。待上游协调 List 锚定与行动画后，再评估是否在消息 List 内恢复。
 
-## 升级时再评估
+## 滚动与列表能力
 
-### 2. 用原生 List 底部跟随替代手动跟随
+### 2. 用原生 List 底部跟随替代手动跟随（已接入）
 
-**现状**
+**当前实现**
 
-当前保留虚拟 `List`，通过稳定消息行身份、独立正文缓存和接近实际行高的 `estimatedItemSize={28}` 减少测量与滚动跳动。正文更新时仍由应用手动跟随底部。
+`app/components/messages.tsx` 保留虚拟 `List`、稳定消息行身份和 `estimatedItemSize={28}`，新增 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`。列表在接近底部时自动跟随内容增长和视口变化；用户上翻后保留可见内容，不再于正文每次更新时强制 `scrollToEnd`。只有切换 Session 时保留一次主动滚底。
 
-在当前版本试用 `maintainVisibleContentPosition` 和 `initialScrollIndex` 时，长历史初始化与流式测量未通过实际回放验证，因此没有采用。
+`app/conversation.ts` 的 `reuseConversationRows` 按行 ID 复用未变化的数据对象，Session 切换时清空缓存。工具参数和输出等流式更新只替换自己的行，避免 NSH List 将其他行重置为未测量状态而导致滚动条抖动。
 
-**评估条件**
+没有使用 `inverted`，短会话仍从顶部排列，长会话首屏由原生定位到最新内容。搜索定位和回合导航使用 `scrollToIndex`。“最新消息”参考 noop 使用全宽 `box-none` 容器居中按钮，不对按钮自身做位移，避免视觉位置和点击命中区域分离；只要不在底部就出现，点击后延迟 40ms 调用 `scrollToEnd({ animated: true })` 恢复跟随。
 
-NSH main 的 `crates/nsh-js/src/list.rs` 调整了消息行与索引的同步方式，但 main 同时包含大量其他 API 变化。不能据此认定它已经修复本项目的滚动问题，也不为此单独做全量升级。
+**验证**
 
-新版本发布后，可用实际长会话重新评估 `maintainVisibleContentPosition`。只有验证通过才替换手动跟随，不恢复 `inverted`。
+`App.scroll.fixture.tsx` 和 `App.scroll-short.fixture.tsx` 在 selftest 隔离环境中覆盖：长历史首屏与虚拟化、上翻后新消息不抢滚动、点击“最新”恢复跟随、流式正文更新，以及短会话顶部排列。测试不访问真实钥匙串。
 
-**验收**
-
-- 短消息从顶部排列。
-- 长历史首次打开不出现空白或跳变。
-- 流式正文在底部连续跟随，滚动条比例稳定。
-- 用户上翻后不强制拉回，点击“最新”后恢复跟随。
-- 展开/收起和搜索不要求全量渲染消息。
+`App.conversation.test.tsx` 验证工具输入更新时保留其他行的对象身份。另用本地真实会话 JSONL 中的 Markdown 和 Edit 输入流，在 macOS 900×700 窗口按记录的约 84 秒 API 间隔回放：基线出现反复的高度重置，修复后 75 次高度采样均未回缩。真实日志和临时复现页不纳入仓库。
 
 ### 3. 插件 Engine 的真实内存与 CPU 用量
 

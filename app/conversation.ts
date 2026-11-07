@@ -1,3 +1,4 @@
+import { LayoutAnimation } from "nsh";
 import { t } from "./i18n";
 import type { ChatItem, EditDiff, MarkdownItem, TurnState, TurnUsageStats } from "./protocol";
 import type { IconName } from "./components/icon";
@@ -7,6 +8,10 @@ export type ConversationRow =
   | { id: string; type: "work"; turn: TurnState; items: ChatItem[] }
   | { id: string; type: "changes"; turn: TurnState }
   | { id: string; type: "actions"; turn: TurnState; markdown: MarkdownItem[] };
+
+export function animateConversationToggle(): void {
+  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+}
 
 export function buildConversationRows(
   items: ChatItem[],
@@ -73,22 +78,30 @@ function sameConversationItem(previous: ChatItem, next: ChatItem): boolean {
   return previous === next;
 }
 
+function sameConversationRow(previous: ConversationRow, next: ConversationRow): boolean {
+  if (previous.id !== next.id || previous.type !== next.type) return false;
+  if (previous.type === "item" && next.type === "item") return sameConversationItem(previous.item, next.item);
+  if (previous.type === "work" && next.type === "work") {
+    return previous.turn === next.turn && previous.items.length === next.items.length &&
+      previous.items.every((item, itemIndex) => sameConversationItem(item, next.items[itemIndex]));
+  }
+  if (previous.type === "changes" && next.type === "changes") return previous.turn === next.turn;
+  if (previous.type === "actions" && next.type === "actions") {
+    return previous.turn === next.turn && previous.markdown.length === next.markdown.length &&
+      previous.markdown.every((item, itemIndex) => sameConversationItem(item, next.markdown[itemIndex]));
+  }
+  return false;
+}
+
 export function conversationRowsEqual(previous: ConversationRow[], next: ConversationRow[]): boolean {
-  if (previous.length !== next.length) return false;
-  return previous.every((row, index) => {
-    const other = next[index];
-    if (row.id !== other.id || row.type !== other.type) return false;
-    if (row.type === "item" && other.type === "item") return sameConversationItem(row.item, other.item);
-    if (row.type === "work" && other.type === "work") {
-      return row.turn === other.turn && row.items.length === other.items.length &&
-        row.items.every((item, itemIndex) => sameConversationItem(item, other.items[itemIndex]));
-    }
-    if (row.type === "changes" && other.type === "changes") return row.turn === other.turn;
-    if (row.type === "actions" && other.type === "actions") {
-      return row.turn === other.turn && row.markdown.length === other.markdown.length &&
-        row.markdown.every((item, itemIndex) => sameConversationItem(item, other.markdown[itemIndex]));
-    }
-    return false;
+  return previous.length === next.length && previous.every((row, index) => sameConversationRow(row, next[index]));
+}
+
+export function reuseConversationRows(previous: ConversationRow[], next: ConversationRow[]): ConversationRow[] {
+  const cached = new Map(previous.map((row) => [row.id, row]));
+  return next.map((row) => {
+    const old = cached.get(row.id);
+    return old && sameConversationRow(old, row) ? old : row;
   });
 }
 

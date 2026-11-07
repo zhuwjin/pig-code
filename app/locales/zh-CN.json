@@ -702,7 +702,7 @@
     },
     "trust": "信任",
     "ignore": "忽略",
-    "latest": "最新",
+    "latest": "最新消息",
     "jump_turn": "跳转到回合 {index}",
     "no_text_reply": "暂无文字回复",
     "search_placeholder": "搜索当前对话",

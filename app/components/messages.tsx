@@ -14,13 +14,14 @@ import {
   signal,
   token,
 } from "nsh";
-import { Button, Collapsible, Input, TextView } from "nsh/base";
+import { Button, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, UserItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import {
   buildConversationRows,
   conversationRowsEqual,
+  reuseConversationRows,
   type ConversationRow,
   formatClock,
   formatDuration,
@@ -182,22 +183,13 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const open = () => props.store.isExpanded(item().id);
   const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
   return (
-    <Collapsible reveal
-      open={open()}
-      content={
-        <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
-          <Scroll class="max-h-80">
-            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
-          </Scroll>
-        </View>
-      }
-    >
+    <View>
       <View
         role="button"
         testID={`thinking-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(item().id)}
+        onPress={() => props.store.toggleExpanded(item().id, true)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
         <Text class={item().streaming ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm text-muted-foreground"}>
@@ -211,7 +203,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <View class="flex-1" />
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-    </Collapsible>
+      <If when={open()}>
+        <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
+          <Scroll class="max-h-80">
+            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
+          </Scroll>
+        </View>
+      </If>
+    </View>
   );
 }
 
@@ -468,8 +467,18 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
 }
 
 export function MessageList(props: UiContext & { items: ChatItem[] }) {
+  let cachedSession: string | null = null;
+  let cachedRows: ConversationRow[] = [];
   const rows = computed(
-    () => buildConversationRows(props.items, props.store.currentTurns()),
+    () => {
+      const session = props.store.current();
+      cachedRows = reuseConversationRows(
+        cachedSession === session ? cachedRows : [],
+        buildConversationRows(props.items, props.store.currentTurns()),
+      );
+      cachedSession = session;
+      return cachedRows;
+    },
     { equals: conversationRowsEqual },
   );
   const textOverrides = signal<Record<string, string>>({});
@@ -493,20 +502,12 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   const viewportWidth = signal(0);
   const lightbox = signal<{ source: string; label: string } | null>(null);
   let list: ListRef | undefined;
-  let userScrolledAway = false;
-  let lastOffset = 0;
   let followedSession: string | null = null;
   effect(() => {
     const session = props.store.current();
-    if (session !== followedSession) {
-      followedSession = session;
-      userScrolledAway = false;
-      lastOffset = 0;
-      latestVisible.set(false);
-    }
-    rows();
-    textOverrides();
-    if (userScrolledAway) return;
+    if (session === followedSession) return;
+    followedSession = session;
+    latestVisible.set(false);
     const timer = setTimeout(() => list?.scrollToEnd({ animated: false }), 0);
     return () => clearTimeout(timer);
   });
@@ -536,7 +537,6 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
     activeMatch.set(next);
     const index = rows().findIndex((row) => row.id === found[next].id);
     if (index >= 0) {
-      userScrolledAway = true;
       list?.scrollToIndex({ index, viewPosition: 0.5, animated: true });
     }
   };
@@ -585,6 +585,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
+        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
         class="min-w-0 flex-1"
         contentClass="gap-4"
         scrollbar
@@ -592,10 +593,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
         footer={<TailRows {...props} navEligible={userRows().length >= 2} />}
         onScroll={(event) => {
           const distance = event.contentSize.height - event.offset.y - event.size.height;
-          if (event.offset.y < lastOffset - 1) userScrolledAway = distance > 120;
-          if (distance <= 120) userScrolledAway = false;
-          lastOffset = event.offset.y;
-          latestVisible.set(userScrolledAway && distance > 120);
+          latestVisible.set(distance > 1);
         }}
         onViewableItemsChange={({ viewableItems }) => {
           const first = viewableItems[0]?.index ?? 0;
@@ -610,17 +608,19 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
         {(row) => <MessageRow {...props} row={row} textFor={textFor} active={row().id === activeSearchRow()} navEligible={userRows().length >= 2} onImage={(source, label) => lightbox.set({ source, label })} />}
       </List>
       <If when={latestVisible()}>
-        <Button
-          testID="latest-messages"
-          class="absolute bottom-3 right-3 flex-row items-center gap-1 rounded-full border border-border bg-popover px-3 py-1.5 shadow-lg"
-          onPress={() => {
-            userScrolledAway = false;
-            list?.scrollToEnd({ animated: false });
-          }}
-        >
-          <Icon name="arrow-down" size={13} color={token("muted-foreground")} />
-          <Text class="text-xs text-foreground">{t("messages.latest")}</Text>
-        </Button>
+        <View class="absolute inset-x-0 bottom-3 items-center" style={{ pointerEvents: "box-none" }}>
+          <Button
+            testID="latest-messages"
+            class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg"
+            onPress={() => {
+              latestVisible.set(false);
+              setTimeout(() => list?.scrollToEnd({ animated: true }), 40);
+            }}
+          >
+            <Icon name="arrow-down" size={15} color={token("muted-foreground")} />
+            <Text class="text-sm font-medium text-foreground">{t("messages.latest")}</Text>
+          </Button>
+        </View>
       </If>
       <If when={userRows().length >= 2 && viewportWidth() >= 720}>
         <View class="absolute bottom-24 left-2 top-1/2 z-20 justify-center gap-1.5">
@@ -635,10 +635,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
                   testID={`turn-nav-${entry().user.id}`}
                   accessibilityLabel={t("messages.jump_turn", { index: index() + 1 })}
                   class={activeTurn() === index() ? "h-7 w-1.5 rounded-full bg-muted-foreground" : "h-5 w-1 rounded-full bg-muted-foreground/40 hover:w-1.5 hover:bg-muted-foreground"}
-                  onPress={() => {
-                    userScrolledAway = true;
-                    list?.scrollToIndex({ index: entry().index, viewPosition: 0, animated: true });
-                  }}
+                  onPress={() => list?.scrollToIndex({ index: entry().index, viewPosition: 0, animated: true })}
                 />
               </View>
             )}
