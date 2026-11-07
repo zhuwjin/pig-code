@@ -218,7 +218,7 @@ function MarkdownRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const item = () => props.item();
   const { themeStore } = props;
   return (
-    <View class="gap-1 px-1 py-1">
+    <View class="gap-1 py-1">
       <TextView
         markdown={props.textFor(item())}
         options={{ streaming: item().streaming }}
@@ -374,7 +374,7 @@ function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; acti
         </If>
         <If when={row().type === "work"}>
           <WorkRow {...props} turn={() => (row() as Extract<ConversationRow, { type: "work" }>).turn}>
-            <View class="gap-4 pt-4">
+            <View class="gap-2 pt-4">
               <Each of={(row() as Extract<ConversationRow, { type: "work" }>).items} key={(item) => item.id}>
                 {(item) => <ItemMessageRow {...props} item={item} />}
               </Each>
