@@ -16,11 +16,15 @@
   "capabilities": [
     {
       "name": "tools.provide",
-      "targets": ["MoonEcho"]
+      "targets": [
+        "MoonEcho"
+      ]
     },
     {
       "name": "navigation.open",
-      "targets": ["main"]
+      "targets": [
+        "main"
+      ]
     }
   ],
   "contributions": {
@@ -36,9 +40,13 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "text": { "type": "string" }
+            "text": {
+              "type": "string"
+            }
           },
-          "required": ["text"]
+          "required": [
+            "text"
+          ]
         },
         "read_only": true,
         "availability": "static"
@@ -47,7 +55,10 @@
     "commands": [
       {
         "id": "moon-workspace",
-        "title": { "en": "Open workspace with Moon", "zh-CN": "通过月亮打开工作区" },
+        "title": {
+          "en": "Open workspace with Moon",
+          "zh-CN": "通过月亮打开工作区"
+        },
         "export": "openWorkspace",
         "order": 10
       }
@@ -74,12 +85,33 @@
           "description": {
             "en": "Greeting displayed by the moon plugin"
           },
-          "default": "Hello moon"
+          "default": "Hello moon",
+          "schema": {
+            "type": "string",
+            "maxLength": 80
+          }
+        },
+        {
+          "key": "max_results",
+          "description": {
+            "en": "Maximum number of results"
+          },
+          "default": 2,
+          "schema": {
+            "type": "integer",
+            "enum": [1, 2, 3]
+          }
         }
       ],
       "read": [],
       "write": []
     },
-    "actions": ["provide_themes", "provide_tools", "read_config"]
+    "actions": [
+      "provide_themes",
+      "provide_tools",
+      "provide_providers",
+      "read_config",
+      "write_config"
+    ]
   }
 }

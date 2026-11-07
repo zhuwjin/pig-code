@@ -311,7 +311,13 @@ impl CredentialManager {
         if !provider.requires_api_key {
             return Ok(String::new());
         }
-        match self.cached(&CredentialId::provider(&provider.id)) {
+        self.cached_credential(&CredentialId::provider(&provider.id))
+    }
+
+    /// Read one credential from the in-process cache (a plugin-owned
+    /// credential for a contributed provider, or a provider key).
+    pub fn cached_credential(&self, id: &CredentialId) -> Result<String, CredentialError> {
+        match self.cached(id) {
             Some(result) => result,
             None => Err(CredentialError::NoEntry),
         }

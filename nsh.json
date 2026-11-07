@@ -5,5 +5,10 @@
   "build": 1,
   "rust": ".",
   "theme": "theme.json",
-  "appearance": "system"
+  "appearance": "system",
+  "resolve": {
+    "alias": {
+      "pig/plugin": "./sdk/pig-plugin/mod.ts"
+    }
+  }
 }

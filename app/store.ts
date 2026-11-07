@@ -22,8 +22,11 @@ import {
   PendingImage,
   PendingQuestion,
   PermissionSettings,
+  PluginConfigItem,
+  PluginContributionConflict,
   PluginPackageInfo,
   PluginCommand,
+  PluginRuntimeContributions,
   PluginMarketplacePackage,
   PluginMarketplaceCatalog,
   PluginMarketplacePreview,
@@ -52,6 +55,7 @@ import { oppositeDelivery, parseSlashCommand, permissionsForMode } from "./comma
 import { composerImage } from "./media";
 import { PluginThemeDefinition } from "./themes";
 import { PluginSequencer, pluginInstance, validatePluginEnvelope } from "./plugins/runtime";
+import { pluginProviderConfigs } from "./plugins/providers";
 
 let generatedId = 0;
 
@@ -128,10 +132,18 @@ export class AgentStore {
   readonly pluginMarketplaceLoading = signal<Record<string, boolean>>({});
   readonly pluginMarketplaceErrors = signal<Record<string, string>>({});
   readonly pluginMarketplaceInstalling = signal<{ sourceId: string; packageId: string } | null>(null);
-  readonly pluginRuntimeContributions = signal<Record<string, {
-    themes?: { id: string; entry: string }[];
-    commands?: PluginCommand[];
-  }>>({});
+  readonly pluginConflicts = signal<PluginContributionConflict[]>([]);
+  private readonly pluginConfigPending = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
+  }>();
+  private pluginConfigSeq = 0;
+  private readonly pluginSecretPending = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
+  }>();
+  private pluginSecretSeq = 0;
+  readonly pluginRuntimeContributions = signal<PluginRuntimeContributions>({});
   readonly pluginRuntime = signal<Record<string, PluginRuntimeState>>({});
   readonly pluginOrder = signal<string[]>([]);
   readonly pluginNavigation = signal<string | null>(null);
@@ -334,8 +346,16 @@ export class AgentStore {
     return (sessionId && this.queues()[sessionId]) || EMPTY_QUEUE;
   }
 
+  /** Providers contributed by enabled packages. They are runtime-only: the
+   * persisted config never contains them, and their ids are namespaced so a
+   * plugin cannot shadow a user provider. The backend applies the same rules
+   * when it resolves a session model. */
+  pluginProviders(): ProviderConfig[] {
+    return pluginProviderConfigs(this.pluginPackages(), this.pluginRuntimeContributions());
+  }
+
   modelOptions() {
-    return (this.config()?.providers ?? []).flatMap((provider) =>
+    return [...(this.config()?.providers ?? []), ...this.pluginProviders()].flatMap((provider) =>
       provider.enabled
         ? provider.models.filter((model) => model.enabled).map((model) => ({ provider, model }))
         : [],
@@ -1053,6 +1073,96 @@ export class AgentStore {
     }
   }
 
+  readPluginConfig(
+    plugin: PluginPackageInfo,
+    key: string,
+    sessionId?: string | null,
+  ): Promise<unknown> {
+    return this.pluginConfigRequest(plugin, { kind: "read_config", data: { path: key } }, sessionId);
+  }
+
+  writePluginConfig(
+    plugin: PluginPackageInfo,
+    key: string,
+    value: unknown,
+    sessionId?: string | null,
+  ): Promise<unknown> {
+    return this.pluginConfigRequest(
+      plugin,
+      { kind: "write_config", data: { path: key, value } },
+      sessionId,
+    );
+  }
+
+  private pluginConfigRequest(
+    plugin: PluginPackageInfo,
+    action: { kind: "read_config" | "write_config"; data: { path: string; value?: unknown } },
+    sessionId?: string | null,
+  ): Promise<unknown> {
+    const requestId = `plugin-config-${++this.pluginConfigSeq}`;
+    return new Promise((resolve, reject) => {
+      this.pluginConfigPending.set(requestId, { resolve, reject });
+      const sent = this.command({
+        PluginAction: {
+          request_id: requestId,
+          package: plugin.id,
+          digest: plugin.digest,
+          action,
+          session_id: sessionId ?? null,
+        },
+      }, sessionId ?? undefined);
+      if (!sent) {
+        this.pluginConfigPending.delete(requestId);
+        reject(new Error(t("store.agent_unavailable")));
+      }
+    });
+  }
+
+  /** Store a package's owned credential (a provider key) in the host
+   * credential store. The plugin can use it but never reads it back. */
+  setPluginSecret(plugin: PluginPackageInfo, credential: string, secret: string): Promise<unknown> {
+    return this.pluginSecretRequest(plugin, credential, secret);
+  }
+
+  clearPluginSecret(plugin: PluginPackageInfo, credential: string): Promise<unknown> {
+    return this.pluginSecretRequest(plugin, credential, null);
+  }
+
+  private pluginSecretRequest(
+    plugin: PluginPackageInfo,
+    credential: string,
+    secret: string | null,
+  ): Promise<unknown> {
+    const requestId = `plugin-secret-${++this.pluginSecretSeq}`;
+    return new Promise((resolve, reject) => {
+      this.pluginSecretPending.set(requestId, { resolve, reject });
+      const sent = this.command(
+        secret === null
+          ? {
+            ClearPluginSecret: {
+              request_id: requestId,
+              package: plugin.id,
+              digest: plugin.digest,
+              credential,
+            },
+          }
+          : {
+            SetPluginSecret: {
+              request_id: requestId,
+              package: plugin.id,
+              digest: plugin.digest,
+              credential,
+              secret,
+            },
+          },
+      );
+      if (!sent) {
+        this.pluginSecretPending.delete(requestId);
+        reject(new Error(t("store.agent_unavailable")));
+      }
+    });
+  }
+
   setPluginOrder(order: string[]): void {
     this.pluginOrder.set([...new Set(order)]);
   }
@@ -1067,7 +1177,12 @@ export class AgentStore {
       .flatMap((pkg) => {
         const instance = pluginInstance(pkg);
         const dynamic = this.pluginRuntimeContributions()[`${pkg.id}:${pkg.digest}`]?.commands ?? [];
-        return [...(pkg.contributions.commands ?? []), ...dynamic]
+        // A backend may re-register a manifest command with a runtime
+        // definition; the runtime one wins instead of listing it twice.
+        const byId = new Map<string, PluginCommand>();
+        for (const command of pkg.contributions.commands ?? []) byId.set(command.id, command);
+        for (const command of dynamic) byId.set(command.id, command);
+        return [...byId.values()]
           .filter((command) => command.enabled)
           .map((command) => ({
             instance,
@@ -1110,12 +1225,16 @@ export class AgentStore {
       const projected = packages.map((pkg) => {
         const dynamic = contributions[`${pkg.id}:${pkg.digest}`] ?? {};
         const needsEngine = pkg.backend != null;
+        // A runtime theme replaces the manifest theme of the same id.
+        const themes = new Map<string, { id: string; entry: string }>();
+        for (const theme of pkg.contributions.themes ?? []) themes.set(theme.id, theme);
+        for (const theme of dynamic.themes ?? []) themes.set(theme.id, theme);
         return {
           ...pkg,
           enabled: pkg.enabled && (!needsEngine || runtime[pluginInstance(pkg)]?.state === "active"),
           contributions: {
             ...pkg.contributions,
-            themes: [...(pkg.contributions.themes ?? []), ...(dynamic.themes ?? [])],
+            themes: [...themes.values()],
           },
         };
       });
@@ -1219,8 +1338,40 @@ export class AgentStore {
           this.themeError.set(issues.map((issue) => errorMessage(issue.error)).join("\n"));
         }
         this.pluginPackages.set(packages);
+        this.pluginConflicts.set((data.snapshot.conflicts ?? []) as PluginContributionConflict[]);
         this.pluginRuntimeContributions.set(data.snapshot.runtime_contributions ?? {});
         void this.loadPluginThemes(packages);
+        break;
+      }
+      case "PluginActionResult": {
+        const result = data.result as {
+          request_id: string;
+          result: { Ok?: unknown; Err?: { detail?: string } };
+        };
+        const pending = this.pluginConfigPending.get(result.request_id);
+        if (pending) {
+          this.pluginConfigPending.delete(result.request_id);
+          const outcome = result.result;
+          if (outcome && typeof outcome === "object" && "Err" in outcome && outcome.Err) {
+            pending.reject(new Error(outcome.Err.detail ?? "plugin configuration failed"));
+          } else {
+            pending.resolve(outcome && typeof outcome === "object" && "Ok" in outcome ? outcome.Ok : null);
+          }
+        }
+        break;
+      }
+      case "PluginSecretResult": {
+        const result = data.result as { request_id: string; result: { Ok?: unknown; Err?: { detail?: string } } };
+        const pending = this.pluginSecretPending.get(result.request_id);
+        if (pending) {
+          this.pluginSecretPending.delete(result.request_id);
+          const outcome = result.result;
+          if (outcome && typeof outcome === "object" && "Err" in outcome && outcome.Err) {
+            pending.reject(new Error(outcome.Err.detail ?? "plugin credential update failed"));
+          } else {
+            pending.resolve(null);
+          }
+        }
         break;
       }
       case "ConfigSnapshot":

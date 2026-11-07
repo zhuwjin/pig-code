@@ -40,6 +40,7 @@ mod persistence;
 mod replay;
 mod runner;
 mod subagent;
+pub(crate) use subagent::DelegatedAgentStarted;
 #[cfg(test)]
 mod tests;
 mod title;

@@ -48,8 +48,23 @@ pub struct AgentProfile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentSource {
     BuiltIn,
+    /// A profile an enabled package contributes. It ranks above the
+    /// built-ins and below the user/project directories.
+    Plugin,
     User,
     Project,
+}
+
+impl AgentSource {
+    /// The stable projection name used by plugin services.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built_in",
+            Self::Plugin => "plugin",
+            Self::User => "user",
+            Self::Project => "project",
+        }
+    }
 }
 
 mod child;

@@ -180,6 +180,11 @@ pub enum CoreError {
     PluginPermission {
         detail: String,
     },
+    /// A plugin service request is well-formed but cannot be executed as
+    /// written (invalid revision, binary file, line range, size).
+    PluginInvalidInput {
+        detail: String,
+    },
     PluginWrite {
         detail: String,
     },

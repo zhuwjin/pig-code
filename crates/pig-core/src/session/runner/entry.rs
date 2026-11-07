@@ -111,6 +111,9 @@ pub(super) struct SessionEntry {
     /// settings-page queries (None = not lazily connected yet; answered from this
     /// cache while the Session is out of hand mid-turn)
     pub(super) mcp_status: Option<Vec<pig_protocol::McpServerStatus>>,
+    /// A plugin snapshot changed while a turn owned the Session: the
+    /// wrap-up refreshes hooks/skills/profiles/tools/MCP before the next turn.
+    pub(super) plugin_surfaces_stale: bool,
 }
 
 pub(super) type TurnFuture =

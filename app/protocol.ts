@@ -444,6 +444,67 @@ export interface PluginMarketplacePreview extends PluginMarketplaceSource {
   public_key: string;
 }
 
+export interface PluginConfigItem {
+  key: string;
+  description?: Record<string, string>;
+  default: unknown;
+  schema?: Record<string, unknown> | null;
+}
+
+export interface PluginCredentialDeclaration {
+  kind: "owned" | "provider";
+  id: string;
+  label?: string;
+  description?: string | null;
+  provider_id?: string;
+}
+
+export interface PluginModelContribution {
+  id: string;
+  name?: string | null;
+  context_window: number;
+  max_output_tokens: number;
+  input_image?: boolean;
+  input_pdf?: boolean;
+  cap_structured?: boolean;
+  cap_strict_tools?: boolean;
+  cap_web_search?: boolean;
+  reasoning_levels?: string[];
+  default_reasoning_level?: string | null;
+  reasoning_labels?: Record<string, string>;
+  reasoning_params?: Record<string, unknown>;
+  parallel_tool_calls?: boolean;
+}
+
+/** A model provider a package declares. The host runs it through one of its
+ * own protocol adapters; the plugin supplies declarations, not request code. */
+export interface PluginProviderContribution {
+  id: string;
+  name: string;
+  icon?: string | null;
+  base_url: string;
+  api_format: ApiFormat;
+  credential?: string | null;
+  models: PluginModelContribution[];
+}
+
+/** One package's runtime-registered contributions, keyed by
+ * `"<package>:<digest>"` in the snapshot. */
+export interface PluginRuntimeContributions {
+  [packageDigest: string]: {
+    themes?: { id: string; entry: string }[];
+    commands?: PluginCommand[];
+    providers?: PluginProviderContribution[];
+  };
+}
+
+export interface PluginContributionConflict {
+  kind: string;
+  name: string;
+  winner: string;
+  losers: string[];
+}
+
 export interface PluginPackageInfo {
   id: string;
   name: string;
@@ -452,12 +513,18 @@ export interface PluginPackageInfo {
   root: string;
   source: "built_in" | "user" | { project: { workspace: string } };
   enabled: boolean;
+  /** The manifest needs a newer host: files and the enable choice are kept,
+   * the backend and contributions are not activated. */
+  incompatible?: string | null;
   backend?: string | null;
   capabilities: PluginCapabilityRequest[];
   contributions: {
     themes?: { id: string; entry: string }[];
     tools?: unknown[];
     commands?: PluginCommand[];
+    providers?: PluginProviderContribution[];
+    credentials?: PluginCredentialDeclaration[];
+    config?: { items?: PluginConfigItem[] };
     [key: string]: unknown;
   };
 }
@@ -472,7 +539,7 @@ export interface PluginCommand {
 
 export type PluginMessageKind = "lifecycle.hello" | "lifecycle.start" | "lifecycle.ready" | "lifecycle.health" | "lifecycle.stop" | "lifecycle.failed" | "contribution.register" | "contribution.remove" | "service.request" | "service.response" | "service.event" | "tools.call" | "tools.select" | "tools.result" | "log.event" | "host.action" | "runtime";
 export type PluginStream = "lifecycle" | "events" | "contributions" | "tools" | "services" | "logs";
-export type PluginService = "storage_read" | "storage_write" | "config_read" | "config_write" | "http_request" | "credential_set" | "credential_clear" | "session_read" | "workspace_read" | "navigation_open" | "composer_submit" | "resource_read" | "locale_read";
+export type PluginService = "storage_read" | "storage_write" | "config_read" | "config_write" | "http_request" | "credential_set" | "credential_clear" | "session_read" | "workspace_read" | "navigation_open" | "composer_submit" | "resource_read" | "locale_read" | "git_status" | "git_diff" | "git_log" | "git_show" | "git_branches" | "workspace_file_read";
 export type PluginLifecycleState = "discovered" | "verified" | "installed" | "enabled" | "preparing" | "starting" | "retrying" | "active" | "stopping" | "stopped" | "failed";
 
 export interface PluginProtocolError {

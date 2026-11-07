@@ -351,7 +351,7 @@ pub struct QuestionItem {
 }
 
 /// Read-only display row of a subagent conversation (Event::SubagentHistory payload)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentItem {
     /// "user" | "assistant" | "tool"
     pub role: String,

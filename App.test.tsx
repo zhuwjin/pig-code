@@ -389,6 +389,17 @@ test("loads, applies, disables and restores plugin themes", async () => {
   await app.waitFor("id:theme-option-moon");
 });
 
+test("saves numeric enum plugin configuration without changing its JSON type", async () => {
+  const app = await openApp();
+  await installMoon(app);
+  await app.press("id:title-theme-settings");
+  await app.press("id:settings-plugins");
+  await app.press("id:plugin-config-com.pigcodets.plugins.moon");
+  await app.press("id:plugin-config-option-com.pigcodets.plugins.moon-max_results-2");
+  await app.press("id:plugin-config-save-com.pigcodets.plugins.moon");
+  await app.waitFor("text:已保存", { timeout: 10000 });
+});
+
 test("invokes contributed commands through the backend", async () => {
   const app = await openApp();
   await installMoon(app);

@@ -9,6 +9,46 @@ const CONFIG_FILE: &str = "plugins-config.json";
 
 type StoredValues = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
 
+/// `.pigcode/plugins.json`: a trusted workspace's overrides. `config` wins
+/// over the user's value for the same key (undeclared keys keep inheriting);
+/// `enabled: false` disables an enabled package in this workspace. A workspace
+/// may enable a resource-only package it disabled globally; enabling a package
+/// with a backend stays a user-level decision (the backend is global).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct WorkspacePluginLayer {
+    #[serde(default)]
+    pub config: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    pub enabled: BTreeMap<String, bool>,
+}
+
+pub(crate) const WORKSPACE_PLUGIN_CONFIG: &str = ".pigcode/plugins.json";
+
+pub(crate) fn load_workspace_layer(workspace: &Path) -> WorkspacePluginLayer {
+    std::fs::read(workspace.join(WORKSPACE_PLUGIN_CONFIG))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_workspace_layer(workspace: &Path, layer: &WorkspacePluginLayer) -> Result<(), CoreError> {
+    let path = workspace.join(WORKSPACE_PLUGIN_CONFIG);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| CoreError::ConfigWrite {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        })?;
+    }
+    let bytes = serde_json::to_vec_pretty(layer).map_err(|error| CoreError::ConfigSerialize {
+        detail: error.to_string(),
+    })?;
+    crate::config::write_private_file(&path, &bytes)
+}
+
+fn trusted_workspace(app_config: Option<&AppConfig>, workspace: &Path) -> bool {
+    crate::config::WorkspaceTrust::for_config(app_config, workspace).admits(workspace)
+}
+
 pub(crate) enum ConfigWrite {
     Plugin(serde_json::Value),
     App {
@@ -32,6 +72,18 @@ pub(crate) fn validate_declaration(contributions: &PluginContributions) -> Resul
                 "duplicate configuration key `{}`",
                 item.key
             )));
+        }
+        if let Some(schema) = &item.schema {
+            super::schema::check_supported(schema).map_err(|error| {
+                permission(format!("configuration `{}` schema: {error}", item.key))
+            })?;
+            if let Err(issues) = super::schema::validate(schema, &item.default) {
+                return Err(permission(format!(
+                    "configuration `{}` default does not satisfy its schema: {}",
+                    item.key,
+                    issues.join("; ")
+                )));
+            }
         }
     }
     if !declaration.items.is_empty()
@@ -77,11 +129,12 @@ fn validate_paths(
     Ok(())
 }
 
-pub(crate) fn read(
+pub(crate) fn read_with_workspace(
     registry: &super::PluginRegistry,
     app_config: Option<&AppConfig>,
     caller: &str,
     path: &str,
+    workspace: Option<&Path>,
 ) -> Result<serde_json::Value, CoreError> {
     match parse_path(caller, path)? {
         ConfigPath::App(segments) => {
@@ -97,6 +150,17 @@ pub(crate) fn read(
                 authorize_external(registry, caller, path, false)?;
             }
             let item = target_item(registry, &package, &key)?;
+            // An untrusted workspace's file is not even read: it runs on the
+            // user's values.
+            if let Some(workspace) = workspace
+                && trusted_workspace(app_config, workspace)
+                && let Some(value) = load_workspace_layer(workspace)
+                    .config
+                    .get(&package)
+                    .and_then(|package_values| package_values.get(&key))
+            {
+                return Ok(value.clone());
+            }
             let values = load(&registry.data_dir)?;
             Ok(values
                 .get(&package)
@@ -107,12 +171,13 @@ pub(crate) fn read(
     }
 }
 
-pub(crate) fn write(
+pub(crate) fn write_with_workspace(
     registry: &super::PluginRegistry,
     app_config: Option<&AppConfig>,
     caller: &str,
     path: &str,
     value: serde_json::Value,
+    workspace: Option<&Path>,
 ) -> Result<ConfigWrite, CoreError> {
     match parse_path(caller, path)? {
         ConfigPath::App(segments) => {
@@ -137,10 +202,21 @@ pub(crate) fn write(
                 authorize_external(registry, caller, path, true)?;
             }
             let item = target_item(registry, &package, &key)?;
-            if !item.default.is_null() && !same_json_type(&item.default, &value) {
-                return Err(permission(format!(
-                    "configuration `{path}` expects the same JSON type as its default"
-                )));
+            validate_value(&item, &value)?;
+            if let Some(workspace) = workspace {
+                if !trusted_workspace(app_config, workspace) {
+                    return Err(permission(
+                        "the workspace is not trusted; its plugin options cannot be changed",
+                    ));
+                }
+                let mut layer = load_workspace_layer(workspace);
+                layer
+                    .config
+                    .entry(package)
+                    .or_default()
+                    .insert(key, value.clone());
+                save_workspace_layer(workspace, &layer)?;
+                return Ok(ConfigWrite::Plugin(value));
             }
             let mut values = load(&registry.data_dir)?;
             values
@@ -151,6 +227,49 @@ pub(crate) fn write(
             Ok(ConfigWrite::Plugin(value))
         }
     }
+}
+
+/// The user-level read (tests and callers without a workspace).
+#[cfg(test)]
+pub(crate) fn read(
+    registry: &super::PluginRegistry,
+    app_config: Option<&AppConfig>,
+    caller: &str,
+    path: &str,
+) -> Result<serde_json::Value, CoreError> {
+    read_with_workspace(registry, app_config, caller, path, None)
+}
+
+/// The user-level write (tests and callers without a workspace).
+#[cfg(test)]
+pub(crate) fn write(
+    registry: &super::PluginRegistry,
+    app_config: Option<&AppConfig>,
+    caller: &str,
+    path: &str,
+    value: serde_json::Value,
+) -> Result<ConfigWrite, CoreError> {
+    write_with_workspace(registry, app_config, caller, path, value, None)
+}
+
+fn validate_value(item: &PluginConfigItem, value: &serde_json::Value) -> Result<(), CoreError> {
+    if let Some(schema) = &item.schema {
+        if let Err(issues) = super::schema::validate(schema, value) {
+            return Err(permission(format!(
+                "configuration `{}` is invalid: {}",
+                item.key,
+                issues.join("; ")
+            )));
+        }
+        return Ok(());
+    }
+    if !item.default.is_null() && !same_json_type(&item.default, value) {
+        return Err(permission(format!(
+            "configuration `{}` expects the same JSON type as its default",
+            item.key
+        )));
+    }
+    Ok(())
 }
 
 fn authorize_external(
@@ -401,6 +520,7 @@ mod tests {
             key: key.into(),
             description: Default::default(),
             default,
+            schema: None,
         }
     }
 
@@ -419,6 +539,7 @@ mod tests {
             root: PathBuf::new(),
             source: PluginSource::User,
             enabled: true,
+            incompatible: None,
             backend: None,
             contributions: PluginContributions {
                 config: PluginConfigDeclaration {
@@ -572,5 +693,125 @@ mod tests {
         assert!(validate_declaration(&contributions).is_err());
         contributions.config.read = vec!["app.theme".into()];
         assert!(validate_declaration(&contributions).is_ok());
+    }
+
+    #[test]
+    fn a_workspace_overrides_options_only_when_trusted_and_keys_inherit() {
+        let temp = TempDir::new();
+        let workspace = temp.0.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut registry = super::super::PluginRegistry::new(temp.0.clone());
+        registry.snapshot.packages = vec![package(
+            "caller",
+            vec![item("mode", "auto".into()), item("other", "user".into())],
+            &[],
+            &[],
+        )];
+        let app = AppConfig {
+            providers: vec![],
+            default_provider: "x".into(),
+            default_model: "y".into(),
+            ..Default::default()
+        };
+        assert!(
+            write_with_workspace(
+                &registry,
+                Some(&app),
+                "caller",
+                "mode",
+                "workspace".into(),
+                Some(&workspace),
+            )
+            .is_err(),
+            "an untrusted workspace cannot write options"
+        );
+        write(&registry, Some(&app), "caller", "mode", "user".into()).expect("user write");
+        let mut trusted = app.clone();
+        trusted.hooks.trusted_projects = vec![
+            workspace
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.clone())
+                .display()
+                .to_string(),
+        ];
+        write_with_workspace(
+            &registry,
+            Some(&trusted),
+            "caller",
+            "mode",
+            "workspace".into(),
+            Some(&workspace),
+        )
+        .expect("trusted workspace write");
+        assert_eq!(
+            read_with_workspace(
+                &registry,
+                Some(&trusted),
+                "caller",
+                "mode",
+                Some(&workspace)
+            )
+            .expect("workspace value"),
+            "workspace"
+        );
+        assert_eq!(
+            read(&registry, Some(&trusted), "caller", "mode").expect("user value"),
+            "user",
+            "the user store is untouched"
+        );
+        assert_eq!(
+            read_with_workspace(
+                &registry,
+                Some(&trusted),
+                "caller",
+                "other",
+                Some(&workspace)
+            )
+            .expect("inherited value"),
+            "user",
+            "an undeclared key keeps inheriting the user value"
+        );
+        let layer = std::fs::read_to_string(workspace.join(super::WORKSPACE_PLUGIN_CONFIG))
+            .expect("workspace layer file");
+        assert!(layer.contains("workspace"));
+    }
+
+    #[test]
+    fn configuration_schemas_validate_writes_and_defaults() {
+        let mut contributions = PluginContributions {
+            config: PluginConfigDeclaration {
+                items: vec![PluginConfigItem {
+                    key: "mode".into(),
+                    description: Default::default(),
+                    default: "a".into(),
+                    schema: Some(serde_json::json!({
+                        "type": "string",
+                        "enum": ["a", "b"]
+                    })),
+                }],
+                ..Default::default()
+            },
+            actions: vec![PluginCapability::ReadConfig, PluginCapability::WriteConfig],
+            ..Default::default()
+        };
+        assert!(validate_declaration(&contributions).is_ok());
+        let temp = TempDir::new();
+        let mut registry = super::super::PluginRegistry::new(temp.0.clone());
+        registry.snapshot.packages = vec![package(
+            "caller",
+            contributions.config.items.clone(),
+            &[],
+            &[],
+        )];
+        assert!(
+            write(&registry, None, "caller", "mode", "c".into()).is_err(),
+            "the schema rejects a value outside its enum"
+        );
+        assert!(write(&registry, None, "caller", "mode", "b".into()).is_ok());
+        contributions.config.items[0].default = "c".into();
+        assert!(
+            validate_declaration(&contributions).is_err(),
+            "a default outside its schema is a declaration error"
+        );
     }
 }

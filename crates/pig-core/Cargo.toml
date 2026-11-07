@@ -119,6 +119,10 @@ name = "provider"
 path = "tests/provider.rs"
 
 [[test]]
+name = "plugin_sessions"
+path = "tests/plugin_sessions.rs"
+
+[[test]]
 name = "session"
 path = "tests/session.rs"
 

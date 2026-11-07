@@ -426,6 +426,11 @@ pub trait Tool: Send + Sync {
     fn is_plugin(&self) -> bool {
         false
     }
+    /// The declaration a plugin tool was registered with (approval, timeout,
+    /// concurrency, output schema); `None` for host tools.
+    fn plugin_tool(&self) -> Option<&pig_protocol::PluginTool> {
+        None
+    }
     /// Selective strict-schema preference. Only tools whose schemas are fully
     /// expressible in the strict subset opt in (`Read`/`Write`/`Edit`/
     /// `ExecCommand`); the provider still downgrades to the ordinary schema
@@ -595,6 +600,18 @@ pub fn requires_approval(tool: &dyn Tool, permissions: PermissionSettings) -> bo
     }
     if permissions.approval == ApprovalPolicy::Never {
         return false;
+    }
+    // A plugin tool declares its own approval stance. `never` is accepted only
+    // for read-only tools (checked at install); `always` asks in every mode
+    // that asks at all.
+    if let Some(declaration) = tool.plugin_tool() {
+        match declaration.approval {
+            pig_protocol::PluginToolApproval::Never => return false,
+            pig_protocol::PluginToolApproval::Always => {
+                return permissions.approval == ApprovalPolicy::OnRequest;
+            }
+            pig_protocol::PluginToolApproval::OnRequest => {}
+        }
     }
     // Shell commands carry the model's own escalation decision: no routine
     // prompt, the read-only sandbox blocks unrequested writes. File tools

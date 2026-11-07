@@ -63,6 +63,7 @@ impl Manager {
             &config_path,
             &meta.cwd,
             self.credentials.clone(),
+            &self.plugins,
         );
         if meta.reasoning_level.is_none()
             && let Some(cfg) = session_runtime.as_ref().map(|runtime| runtime.config())
@@ -140,6 +141,7 @@ impl Manager {
                         pending_plan: None,
                         steerable: false,
                         mcp_status: None,
+                        plugin_surfaces_stale: false,
                     },
                 );
                 store.lock().expect("store lock").upsert_session(&meta);
@@ -322,6 +324,7 @@ impl Manager {
             &config_path,
             &resume_cwd,
             self.credentials.clone(),
+            &self.plugins,
         );
         match Session::load(
             &session_id,
@@ -368,6 +371,7 @@ impl Manager {
                         pending_plan: None,
                         steerable: false,
                         mcp_status: None,
+                        plugin_surfaces_stale: false,
                     },
                 );
                 // Switching back to an already-open session: re-emit

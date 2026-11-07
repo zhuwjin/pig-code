@@ -59,6 +59,8 @@ pub enum PluginMessageKind {
     ToolsSelect,
     #[serde(rename = "tools.result")]
     ToolsResult,
+    #[serde(rename = "tools.cancel")]
+    ToolsCancel,
     #[serde(rename = "log.event")]
     LogEvent,
     #[serde(rename = "host.action")]
@@ -184,6 +186,12 @@ pub enum PluginErrorCode {
     PermissionDenied,
     InvalidContribution,
     InvalidOperation,
+    /// Tool arguments do not satisfy the declared input JSON Schema.
+    InvalidInput,
+    /// A tool result does not satisfy the declared output JSON Schema.
+    InvalidOutput,
+    /// A tool's concurrency limit is reached or the same call is in flight.
+    Busy,
     ProtectedTarget,
     QuotaExceeded,
     Timeout,
@@ -194,6 +202,35 @@ pub enum PluginErrorCode {
     Internal,
 }
 
+impl PluginErrorCode {
+    /// Stable wire name (the same string serde writes).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedProtocol => "unsupported_protocol",
+            Self::UnsupportedCapability => "unsupported_capability",
+            Self::InvalidEnvelope => "invalid_envelope",
+            Self::StaleSequence => "stale_sequence",
+            Self::StaleEpoch => "stale_epoch",
+            Self::StaleGeneration => "stale_generation",
+            Self::StaleRevision => "stale_revision",
+            Self::PermissionDenied => "permission_denied",
+            Self::InvalidContribution => "invalid_contribution",
+            Self::InvalidOperation => "invalid_operation",
+            Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
+            Self::Busy => "busy",
+            Self::ProtectedTarget => "protected_target",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::NotActive => "not_active",
+            Self::NotFound => "not_found",
+            Self::Transport => "transport",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginProtocolError {
@@ -201,6 +238,10 @@ pub struct PluginProtocolError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+    /// Structured extras a caller can act on (a stale revision's current
+    /// value, a timeout's remaining budget), never a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl PluginProtocolError {
@@ -209,7 +250,13 @@ impl PluginProtocolError {
             code,
             message: message.into(),
             retryable: false,
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn retryable(mut self) -> Self {
@@ -221,12 +268,14 @@ impl PluginProtocolError {
         let code = match error {
             crate::CoreError::PluginPermission { .. } => PluginErrorCode::PermissionDenied,
             crate::CoreError::PluginManifest { .. } => PluginErrorCode::InvalidContribution,
+            crate::CoreError::PluginInvalidInput { .. } => PluginErrorCode::InvalidInput,
             crate::CoreError::PluginTransport { .. } => PluginErrorCode::Transport,
             _ => PluginErrorCode::Internal,
         };
         let message = match error {
             crate::CoreError::PluginPermission { detail }
             | crate::CoreError::PluginManifest { detail }
+            | crate::CoreError::PluginInvalidInput { detail }
             | crate::CoreError::PluginTransport { detail }
             | crate::CoreError::PluginWrite { detail }
             | crate::CoreError::CredentialStore { detail, .. } => detail.clone(),
@@ -296,6 +345,96 @@ pub struct PluginServiceRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// A stable key for a side-effecting request: the host records its result
+    /// and replays it instead of executing the effect again (including after a
+    /// restart). Without one, the request's own id is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// A read-only Git operation. The host derives the repository from the
+/// session's workspace; callers never supply a working directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PluginGitReadRequest {
+    Status,
+    Diff {
+        path: String,
+        #[serde(default)]
+        staged: bool,
+    },
+    Log {
+        /// 1..=100; the host default is 20.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Show {
+        /// A revision or ref accepted by `git show`; leading `-` is rejected.
+        rev: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Branches,
+}
+
+/// One bounded workspace-relative text read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginWorkspaceFileReadRequest {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u64>,
+    /// Returned content budget (default 256 KiB, max 1 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+}
+
+impl PluginService {
+    /// Stable wire name (the same string serde writes).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StorageRead => "storage_read",
+            Self::StorageWrite => "storage_write",
+            Self::ConfigRead => "config_read",
+            Self::ConfigWrite => "config_write",
+            Self::HttpRequest => "http_request",
+            Self::CredentialSet => "credential_set",
+            Self::CredentialClear => "credential_clear",
+            Self::SessionRead => "session_read",
+            Self::WorkspaceRead => "workspace_read",
+            Self::NavigationOpen => "navigation_open",
+            Self::ComposerSubmit => "composer_submit",
+            Self::ResourceRead => "resource_read",
+            Self::LocaleRead => "locale_read",
+            Self::StorageList => "storage_list",
+            Self::StorageKeyRead => "storage_key_read",
+            Self::StorageKeyWrite => "storage_key_write",
+            Self::StorageKeyDelete => "storage_key_delete",
+            Self::SessionSubscribe => "session_subscribe",
+            Self::SessionUnsubscribe => "session_unsubscribe",
+            Self::SessionCreate => "session_create",
+            Self::SessionSend => "session_send",
+            Self::SessionInterrupt => "session_interrupt",
+            Self::SessionWait => "session_wait",
+            Self::ModelRequest => "model_request",
+            Self::AgentList => "agent_list",
+            Self::AgentStart => "agent_start",
+            Self::AgentSend => "agent_send",
+            Self::AgentWait => "agent_wait",
+            Self::AgentStop => "agent_stop",
+            Self::AgentRead => "agent_read",
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitLog => "git_log",
+            Self::GitShow => "git_show",
+            Self::GitBranches => "git_branches",
+            Self::WorkspaceFileRead => "workspace_file_read",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +453,34 @@ pub enum PluginService {
     ComposerSubmit,
     ResourceRead,
     LocaleRead,
+    // Keyed private storage (revision CAS).
+    StorageList,
+    StorageKeyRead,
+    StorageKeyWrite,
+    StorageKeyDelete,
+    // Session observation and control.
+    SessionSubscribe,
+    SessionUnsubscribe,
+    SessionCreate,
+    SessionSend,
+    SessionInterrupt,
+    SessionWait,
+    // A controlled one-shot model call.
+    ModelRequest,
+    // Subagent profiles and delegation.
+    AgentList,
+    AgentStart,
+    AgentSend,
+    AgentWait,
+    AgentStop,
+    AgentRead,
+    // Read-only workspace inspection.
+    GitStatus,
+    GitDiff,
+    GitLog,
+    GitShow,
+    GitBranches,
+    WorkspaceFileRead,
 }
 
 pub const PLUGIN_HOST_NAVIGATION_TARGETS: &[&str] =
@@ -462,6 +629,33 @@ mod tests {
             .negotiate("zh-CN")
             .is_err()
         );
+    }
+
+    #[test]
+    fn workspace_read_requests_parse_the_sdk_shapes() {
+        let git: PluginGitReadRequest = serde_json::from_value(serde_json::json!({
+            "op": "diff",
+            "path": "src/lib.rs",
+            "staged": true
+        }))
+        .expect("git diff request");
+        assert_eq!(
+            git,
+            PluginGitReadRequest::Diff {
+                path: "src/lib.rs".into(),
+                staged: true
+            }
+        );
+        let file: PluginWorkspaceFileReadRequest = serde_json::from_value(serde_json::json!({
+            "path": "src/lib.rs",
+            "startLine": 2,
+            "endLine": 3,
+            "maxBytes": 1024
+        }))
+        .expect("file read request");
+        assert_eq!(file.start_line, Some(2));
+        assert_eq!(file.end_line, Some(3));
+        assert_eq!(file.max_bytes, Some(1024));
     }
 
     #[test]

@@ -26,6 +26,12 @@ pub(super) struct DetachedGateCtx {
     pub(super) tracker: ChangeTracker,
 }
 
+/// UI row a delegated child owns: the synthetic Agent tool card the client
+/// renders, closed when the drive settles.
+pub(super) struct DelegatedUi {
+    pub(super) item_id: String,
+}
+
 /// Spawn one background child through the same managed driver as foreground
 /// children (global slot, writer claim, panic/cancel settlement, one
 /// completion notification). The parent turn is not blocked.
@@ -35,6 +41,7 @@ pub(super) fn spawn_detached_child(
     task_id: String,
     cancel: CancellationToken,
     tx: async_channel::Sender<Event>,
+    ui: Option<DelegatedUi>,
 ) {
     let progress = ProgressSink::Background {
         task_id: task_id.clone(),
@@ -78,7 +85,7 @@ pub(super) fn spawn_detached_child(
         let mut ctx = ctx;
         let mut drive = drive;
         let mut tracker = std::mem::take(&mut ctx.tracker);
-        let _ = drive_managed(
+        let managed = drive_managed(
             life,
             &cancel,
             async {
@@ -112,6 +119,17 @@ pub(super) fn spawn_detached_child(
             },
         )
         .await;
+        if let Some(ui) = ui {
+            let result = &managed.result;
+            crate::session::emit_bg(&ctx.session_id, &tx, |session_id| Event::ToolCallEnd {
+                session_id,
+                item_id: ui.item_id,
+                output: result.result_text.clone(),
+                is_error: result.is_error,
+                stopped: result.cancelled,
+                edit: None,
+            });
+        }
     });
 }
 

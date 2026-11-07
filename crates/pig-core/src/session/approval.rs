@@ -67,6 +67,30 @@ impl Session {
     /// overlay are cleared rather than left stale. Callers pass a runtime only
     /// after the trust decision has been saved and reloaded successfully, so a
     /// failed save/reload activates nothing.
+    /// Re-resolve every plugin-provided surface after the plugin registry
+    /// changed (enable/disable, update, runtime contributions): hooks, skills,
+    /// agent profiles, tools and MCP servers. The old MCP manager is dropped,
+    /// which kills its stdio children; the prompt is rebuilt on the next turn.
+    pub(crate) fn refresh_plugin_surfaces(&mut self) {
+        let trust = self.trust.clone();
+        let config = self
+            .runtime_config()
+            .map(|runtime| runtime.config().clone());
+        let plugins = self.plugin_tools.registry();
+        self.plugin_tools.reload(&trust, config.clone());
+        self.hooks =
+            crate::hooks::HookSet::load_with_plugins(&self.cwd, config.as_ref(), &plugins, &trust);
+        self.skills_prompt =
+            crate::plugins::skills_section_with_trust(&self.cwd, &plugins, trust.admits(&self.cwd));
+        self.profiles_summary = crate::agent::agent_description_list(
+            &crate::agent::load_profiles_with_plugins(&self.cwd, &self.data_dir, &trust, &plugins),
+        );
+        self.mcp = None;
+        self.prompt_text = None;
+        self.prompt_memory_enabled = None;
+        self.prompt_skills_state = None;
+    }
+
     pub(crate) fn apply_trust(&mut self, runtime: Option<Arc<crate::config::RuntimeConfig>>) {
         let trust = runtime
             .as_ref()
@@ -80,7 +104,12 @@ impl Session {
         let config = runtime.as_deref().map(|runtime| runtime.config());
         self.permission_rules =
             super::initialization::load_permissions(&self.cwd, &self.data_dir, &trust);
-        self.hooks = crate::hooks::HookSet::load(&self.cwd, config);
+        self.hooks = crate::hooks::HookSet::load_with_plugins(
+            &self.cwd,
+            config,
+            &self.plugin_tools.registry(),
+            &trust,
+        );
         self.plugin_tools.reload(&trust, config.cloned());
         self.trust = trust;
         self.skills_prompt = crate::plugins::skills_section_with_trust(
@@ -88,9 +117,13 @@ impl Session {
             &self.plugin_tools.registry(),
             trusted,
         );
-        self.profiles_summary = crate::agent::agent_description_list(
-            &crate::agent::load_profiles_with_trust(&self.cwd, &self.data_dir, &self.trust),
-        );
+        self.profiles_summary =
+            crate::agent::agent_description_list(&crate::agent::load_profiles_with_plugins(
+                &self.cwd,
+                &self.data_dir,
+                &self.trust,
+                &self.plugin_tools.registry(),
+            ));
         // Force the next turn to rebuild the system prompt with the newly
         // admitted listing; the old prompt is no longer the truth.
         self.prompt_text = None;

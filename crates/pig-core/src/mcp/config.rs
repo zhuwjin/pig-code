@@ -108,7 +108,7 @@ pub fn load_with_trust(
         Vec::new()
     };
     let configured = merged_enabled(user, project);
-    merge(
+    merge_missing(
         configured,
         crate::plugins::mcp_servers(workspace_root, plugins, trust),
     )
@@ -140,6 +140,29 @@ fn merged_enabled(
         .into_iter()
         .filter(|server| !server.disabled)
         .collect()
+}
+
+/// Plugin servers only fill names the user/project configuration did not
+/// define: a package can never replace a user's server (endpoint, headers or
+/// credentials). The first package by id wins among plugins.
+fn merge_missing(
+    mut base: Vec<McpServerConfig>,
+    additions: Vec<McpServerConfig>,
+) -> Vec<McpServerConfig> {
+    let mut taken: std::collections::BTreeSet<String> =
+        base.iter().map(|server| server.name.clone()).collect();
+    for server in additions {
+        if taken.insert(server.name.clone()) {
+            base.push(server);
+        } else {
+            tracing::warn!(
+                server = server.name,
+                "a plugin MCP server was ignored: the name is already configured by the user or project"
+            );
+        }
+    }
+    base.sort_by(|a, b| a.name.cmp(&b.name));
+    base
 }
 
 /// User level as the base, project level overrides same names; output sorted by name (stable connection order)
@@ -538,6 +561,69 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A plugin's MCP server never replaces a user/project server of the same
+    /// name; it only fills names nobody configured.
+    #[test]
+    fn plugin_servers_never_replace_configured_names() {
+        let tmp = TempDir::new("plugin-precedence");
+        let data = tmp.0.join("data");
+        let ws = tmp.0.join("workspace");
+        std::fs::create_dir_all(&ws).expect("workspace");
+        std::fs::create_dir_all(&data).expect("data");
+        std::fs::write(
+            data.join("mcp.json"),
+            r#"{"mcpServers": {"docs": {"command": "user-server", "timeoutMs": 15000}}}"#,
+        )
+        .expect("user mcp");
+        let package = tmp.0.join("package");
+        std::fs::create_dir_all(&package).expect("package");
+        std::fs::write(
+            package.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "aaa.plugin",
+              "name": "Plugin",
+              "version": "1.0.0",
+              "build": 1,
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "actions": ["provide_mcp"],
+                "mcp": [
+                  {"name": "docs", "config": {"command": "plugin-server", "timeoutMs": 99000}},
+                  {"name": "extra", "config": {"command": "extra-server"}}
+                ]
+              }
+            }"#,
+        )
+        .expect("manifest");
+        let mut registry = crate::plugins::PluginRegistry::new(data.clone());
+        let snapshot = registry.sync(vec![pig_protocol::PluginPackageSource {
+            root: package,
+            source: pig_protocol::PluginSource::User,
+        }]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        registry
+            .set_enabled("aaa.plugin", &snapshot.packages[0].digest, true)
+            .expect("enable");
+        let plugins = registry.into_shared();
+        let servers = load_with_trust(&ws, &data, &WorkspaceTrust::untrusted(&ws), &plugins);
+        assert_eq!(
+            servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs", "extra"]
+        );
+        let docs = servers.iter().find(|server| server.name == "docs").unwrap();
+        assert_eq!(
+            docs.timeout,
+            std::time::Duration::from_secs(15),
+            "the user's server stays in force"
+        );
     }
 
     /// A project MCP file is repository content: no server may spawn until the

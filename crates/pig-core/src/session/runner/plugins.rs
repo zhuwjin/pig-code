@@ -1,4 +1,7 @@
-use pig_protocol::{CoreError, PluginAction, PluginActionResult, PluginPackageSource, PluginScope};
+use pig_protocol::{
+    CoreError, PluginAction, PluginActionResult, PluginGitReadRequest, PluginPackageSource,
+    PluginScope, PluginWorkspaceFileReadRequest,
+};
 
 use super::{Manager, emit};
 use crate::plugins::{self, SessionServices};
@@ -45,7 +48,41 @@ impl Manager {
             .lock()
             .expect("plugin registry lock")
             .sync(sources);
+        self.refresh_session_plugin_surfaces();
         self.emit_plugin_snapshot(event_tx, snapshot);
+    }
+
+    /// Re-resolve every session's plugin-provided surfaces after the registry
+    /// changed. A session owned by a turn is marked stale and refreshed at its
+    /// wrap-up (dropping a live MCP manager mid-turn would break the running
+    /// child's tool calls).
+    fn refresh_session_plugin_surfaces(&mut self) {
+        let config = self.config.clone();
+        let config_path = self.config_path.clone();
+        let credentials = self.credentials.clone();
+        let plugins = self.plugins.clone();
+        for entry in self.sessions.values_mut() {
+            // Provider contributions are resolved into the runtime, not into
+            // the persisted config: rebuilding keeps a plugin that was just
+            // enabled/updated selectable by the next turn.
+            let runtime = super::runtime::layered_runtime(
+                config.as_ref(),
+                &config_path,
+                &entry.cwd,
+                credentials.clone(),
+                &plugins,
+            );
+            entry.runtime = runtime.clone();
+            if entry.session.is_some() {
+                if let Some(session) = entry.session.as_mut() {
+                    session.set_runtime(runtime);
+                    session.refresh_plugin_surfaces();
+                }
+                entry.mcp_status = None;
+            } else {
+                entry.plugin_surfaces_stale = true;
+            }
+        }
     }
 
     pub(super) fn sync_plugin_runtime_contributions(
@@ -61,13 +98,14 @@ impl Manager {
             generation,
             contributions,
         } = request;
-        match self
+        let result = self
             .plugins
             .lock()
             .expect("plugin registry lock")
-            .sync_runtime_contributions(&package, &digest, epoch, generation, contributions)
-        {
+            .sync_runtime_contributions(&package, &digest, epoch, generation, contributions);
+        match result {
             Ok(snapshot) => {
+                self.refresh_session_plugin_surfaces();
                 self.emit_plugin_snapshot(event_tx.clone(), snapshot.clone());
                 emit(
                     &event_tx,
@@ -128,13 +166,16 @@ impl Manager {
         digest: String,
         enabled: bool,
     ) {
-        match self
+        let result = self
             .plugins
             .lock()
             .expect("plugin registry lock")
-            .set_enabled(&package, &digest, enabled)
-        {
-            Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
+            .set_enabled(&package, &digest, enabled);
+        match result {
+            Ok(snapshot) => {
+                self.refresh_session_plugin_surfaces();
+                self.emit_plugin_snapshot(event_tx, snapshot)
+            }
             Err(error) => self.plugin_action_result(
                 &event_tx,
                 String::new(),
@@ -165,7 +206,10 @@ impl Manager {
                 .cancel_update(&package, &digest)
         };
         match result {
-            Ok(snapshot) => self.emit_plugin_snapshot(event_tx, snapshot),
+            Ok(snapshot) => {
+                self.refresh_session_plugin_surfaces();
+                self.emit_plugin_snapshot(event_tx, snapshot)
+            }
             Err(error) => self.plugin_action_result(
                 &event_tx,
                 String::new(),
@@ -220,6 +264,122 @@ impl Manager {
         );
     }
 
+    pub(super) fn plugin_git_read(
+        &mut self,
+        event_tx: async_channel::Sender<pig_protocol::Event>,
+        request_id: String,
+        package: String,
+        digest: String,
+        session_id: String,
+        request: PluginGitReadRequest,
+    ) {
+        match self.plugin_read_workspace(&package, &digest, &session_id, "git.read") {
+            Ok(cwd) => {
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || git_read(&cwd, request))
+                        .await
+                        .map_err(|error| CoreError::Internal {
+                            detail: error.to_string(),
+                        })
+                        .and_then(|result| result);
+                    emit(
+                        &event_tx,
+                        pig_protocol::Event::PluginServiceValue {
+                            request_id,
+                            package,
+                            digest,
+                            result,
+                        },
+                    );
+                });
+            }
+            Err(error) => emit(
+                &event_tx,
+                pig_protocol::Event::PluginServiceValue {
+                    request_id,
+                    package,
+                    digest,
+                    result: Err(error),
+                },
+            ),
+        }
+    }
+
+    pub(super) fn plugin_workspace_file_read(
+        &mut self,
+        event_tx: async_channel::Sender<pig_protocol::Event>,
+        request_id: String,
+        package: String,
+        digest: String,
+        session_id: String,
+        request: PluginWorkspaceFileReadRequest,
+    ) {
+        match self.plugin_read_workspace(&package, &digest, &session_id, "files.read") {
+            Ok(cwd) => {
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::plugins::workspace::read_workspace_file(&cwd, &request)
+                    })
+                    .await
+                    .map_err(|error| CoreError::Internal {
+                        detail: error.to_string(),
+                    })
+                    .and_then(|result| result);
+                    emit(
+                        &event_tx,
+                        pig_protocol::Event::PluginServiceValue {
+                            request_id,
+                            package,
+                            digest,
+                            result,
+                        },
+                    );
+                });
+            }
+            Err(error) => emit(
+                &event_tx,
+                pig_protocol::Event::PluginServiceValue {
+                    request_id,
+                    package,
+                    digest,
+                    result: Err(error),
+                },
+            ),
+        }
+    }
+
+    /// Authorize a read-only workspace service and return the session's cwd.
+    /// The session id is the capability target; a project package may only read
+    /// sessions inside its own workspace.
+    fn plugin_read_workspace(
+        &self,
+        package: &str,
+        digest: &str,
+        session_id: &str,
+        capability: &str,
+    ) -> Result<std::path::PathBuf, CoreError> {
+        let package_info = self.plugin_scope(package, digest)?;
+        let cwd = self
+            .sessions
+            .get(session_id)
+            .map(|entry| entry.cwd.clone())
+            .ok_or(CoreError::SessionNotFound)?;
+        super::plugin_sessions::ensure_cwd_in_package(&package_info, &cwd)?;
+        self.plugins
+            .lock()
+            .expect("plugin registry lock")
+            .authorize_named(
+                package,
+                digest,
+                capability,
+                session_id,
+                self.config.as_ref(),
+            )?;
+        Ok(cwd)
+    }
+
     pub(super) fn plugin_action(
         &mut self,
         event_tx: async_channel::Sender<pig_protocol::Event>,
@@ -235,8 +395,9 @@ impl Manager {
             .lock()
             .expect("plugin registry lock")
             .authorize(&package, &digest, &action, self.config.as_ref());
-        let result = authorized
-            .and_then(|()| self.execute_plugin_action(&package, action, session_id, &event_tx));
+        let result = authorized.and_then(|()| {
+            self.execute_plugin_action(&package, &digest, action, session_id, &event_tx)
+        });
         let refresh_views = refresh_views && result.is_ok();
         self.plugin_action_result(
             &event_tx,
@@ -251,6 +412,7 @@ impl Manager {
     fn execute_plugin_action(
         &mut self,
         package: &str,
+        digest: &str,
         action: PluginAction,
         session_id: Option<String>,
         event_tx: &async_channel::Sender<pig_protocol::Event>,
@@ -316,16 +478,30 @@ impl Manager {
                 .map(|session| session.statuses)
                 .ok_or(CoreError::SessionNotFound)
                 .and_then(json),
-            PluginAction::ReadConfig { path } => plugins::config::read(
-                &self.plugins.lock().expect("plugin registry lock"),
-                self.config.as_ref(),
-                package,
-                &path,
-            ),
+            PluginAction::ReadConfig { path } => {
+                let workspace =
+                    self.plugin_config_workspace(package, digest, session_id.as_deref())?;
+                plugins::config::read_with_workspace(
+                    &self.plugins.lock().expect("plugin registry lock"),
+                    self.config.as_ref(),
+                    package,
+                    &path,
+                    workspace.as_deref(),
+                )
+            }
             PluginAction::WriteConfig { path, value } => {
+                let workspace =
+                    self.plugin_config_workspace(package, digest, session_id.as_deref())?;
                 let write = {
                     let registry = self.plugins.lock().expect("plugin registry lock");
-                    plugins::config::write(&registry, self.config.as_ref(), package, &path, value)?
+                    plugins::config::write_with_workspace(
+                        &registry,
+                        self.config.as_ref(),
+                        package,
+                        &path,
+                        value,
+                        workspace.as_deref(),
+                    )?
                 };
                 match write {
                     plugins::config::ConfigWrite::Plugin(value) => Ok(value),
@@ -336,6 +512,25 @@ impl Manager {
                 }
             }
         }
+    }
+
+    fn plugin_config_workspace(
+        &self,
+        package: &str,
+        digest: &str,
+        session_id: Option<&str>,
+    ) -> Result<Option<std::path::PathBuf>, CoreError> {
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        let cwd = self
+            .sessions
+            .get(session_id)
+            .map(|entry| entry.cwd.clone())
+            .ok_or(CoreError::SessionNotFound)?;
+        let scope = self.plugin_scope(package, digest)?;
+        super::plugin_sessions::ensure_cwd_in_package(&scope, &cwd)?;
+        Ok(Some(cwd))
     }
 
     fn plugin_services(
@@ -571,6 +766,34 @@ impl Manager {
     }
 }
 
+fn git_read(
+    cwd: &std::path::Path,
+    request: PluginGitReadRequest,
+) -> Result<serde_json::Value, CoreError> {
+    match request {
+        PluginGitReadRequest::Status => {
+            let (unstaged, staged) = crate::git::git_status_read(cwd)?;
+            Ok(serde_json::json!({ "unstaged": unstaged, "staged": staged }))
+        }
+        PluginGitReadRequest::Diff { path, staged } => {
+            let (diff, note) = crate::git::git_diff_read(cwd, &path, staged)?;
+            Ok(serde_json::json!({ "diff": diff, "note": note }))
+        }
+        PluginGitReadRequest::Log { limit, path } => {
+            let commits = crate::git::git_log_read(cwd, limit, path.as_deref())?;
+            Ok(serde_json::json!({ "commits": commits }))
+        }
+        PluginGitReadRequest::Show { rev, path } => {
+            let (text, truncated) = crate::git::git_show_read(cwd, &rev, path.as_deref())?;
+            Ok(serde_json::json!({ "text": text, "truncated": truncated }))
+        }
+        PluginGitReadRequest::Branches => {
+            let (current, branches) = crate::git::git_branches_read(cwd)?;
+            Ok(serde_json::json!({ "current": current, "branches": branches }))
+        }
+    }
+}
+
 fn json(value: impl serde::Serialize) -> Result<serde_json::Value, CoreError> {
     serde_json::to_value(value).map_err(|error| CoreError::Internal {
         detail: error.to_string(),
@@ -580,40 +803,49 @@ fn json(value: impl serde::Serialize) -> Result<serde_json::Value, CoreError> {
 fn session_scope_permitted(scope: &PluginScope, session_cwd: Option<&std::path::Path>) -> bool {
     match scope {
         PluginScope::User => true,
-        PluginScope::Project { workspace } => {
-            session_cwd.is_none_or(|cwd| cwd.starts_with(workspace))
-        }
+        PluginScope::Project { workspace } => session_cwd
+            .is_none_or(|cwd| crate::plugins::canonical_workspace_contains(workspace, cwd)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
     use pig_protocol::PluginScope;
 
     use super::session_scope_permitted;
 
     #[test]
-    fn project_session_reads_stay_inside_their_workspace() {
+    fn project_session_reads_stay_inside_their_canonical_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-project-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let nested = workspace.join("nested");
+        let other = root.join("workspace-other");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
         let scope = PluginScope::Project {
-            workspace: PathBuf::from("C:/workspace"),
+            workspace: workspace.clone(),
         };
-        assert!(session_scope_permitted(
-            &scope,
-            Some(Path::new("C:/workspace"))
-        ));
-        assert!(session_scope_permitted(
-            &scope,
-            Some(Path::new("C:/workspace/nested"))
-        ));
-        assert!(!session_scope_permitted(
-            &scope,
-            Some(Path::new("C:/workspace-other"))
-        ));
-        assert!(session_scope_permitted(
-            &PluginScope::User,
-            Some(Path::new("C:/workspace-other"))
-        ));
+        assert!(session_scope_permitted(&scope, Some(&workspace)));
+        assert!(session_scope_permitted(&scope, Some(&nested)));
+        assert!(!session_scope_permitted(&scope, Some(&other)));
+        assert!(session_scope_permitted(&PluginScope::User, Some(&other)));
+
+        #[cfg(unix)]
+        {
+            let link = workspace.join("linked-outside");
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            assert!(
+                !session_scope_permitted(&scope, Some(&link)),
+                "a symlink inside the project must not authorize its outside target"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

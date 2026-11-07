@@ -3,9 +3,11 @@ mod contributions;
 mod http;
 mod marketplace;
 mod registry;
+mod schema;
 mod services;
 mod themes;
 mod tools;
+pub(crate) mod workspace;
 
 pub use http::request_http;
 pub use marketplace::{
@@ -13,7 +15,9 @@ pub use marketplace::{
 };
 pub use themes::load_theme;
 pub use tools::{PluginToolDispatcher, PluginToolFilter, PluginToolset};
+pub use workspace::canonical_workspace_contains;
 
+pub(crate) use contributions::providers as plugin_providers;
 pub use contributions::{
     discover_skills_with_trust, enabled_packages, load_skill_output_with_trust, mcp_servers,
     skills_section_with_trust, skills_state,
@@ -37,6 +41,8 @@ pub type SharedPluginRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>
 pub struct PluginRegistry {
     pub(crate) data_dir: std::path::PathBuf,
     pub(crate) generation: u64,
+    /// The host's plugin-capability version, checked against `minHostVersion`.
+    pub(crate) host_version: String,
     pub(crate) snapshot: PluginSnapshot,
     enabled: std::collections::BTreeMap<String, String>,
     disabled_builtin: std::collections::BTreeMap<String, String>,
@@ -47,6 +53,16 @@ pub struct PluginRegistry {
 
 pub fn is_builtin(id: &str, source: &PluginSource) -> bool {
     matches!(source, PluginSource::BuiltIn) && BUILTIN_PACKAGES.contains(&id)
+}
+
+/// The diagnostic for a manifest that needs a newer host, or `None` when this
+/// host satisfies it. A malformed `minHostVersion` is a manifest error.
+pub(crate) fn host_version_mismatch(
+    host: &str,
+    min: &str,
+) -> Result<Option<String>, pig_protocol::CoreError> {
+    pig_protocol::host_version_check(host, min)
+        .map_err(|detail| pig_protocol::CoreError::PluginManifest { detail })
 }
 
 #[cfg(test)]
@@ -386,6 +402,178 @@ mod tests {
         assert!(
             crate::mcp::McpServerConfig::load_with_trust(&temp.0, &data, &trust, &plugins)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn provider_contributions_are_namespaced_and_use_owned_credentials() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": ["provide_providers", "manage_own_secrets"],
+              "credentials": [{
+                "kind": "owned",
+                "id": "acme-key",
+                "label": "Acme key"
+              }],
+              "providers": [{
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "credential": "acme-key",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let providers = crate::plugins::plugin_providers(&registry, &trust);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider.id, "plugin:demo:acme");
+        assert_eq!(providers[0].provider.name, "Acme");
+        assert!(providers[0].provider.requires_api_key);
+        assert_eq!(providers[0].provider.models[0].id, "acme-large");
+        assert_eq!(
+            providers[0].credential,
+            Some(crate::credentials::CredentialId::plugin("demo", "acme-key"))
+        );
+        registry.set_enabled("demo", &digest, false).unwrap();
+        assert!(crate::plugins::plugin_providers(&registry, &trust).is_empty());
+    }
+
+    #[test]
+    fn runtime_provider_contributions_use_the_manifest_credential() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": ["provide_providers", "manage_own_secrets"],
+              "credentials": [{
+                "kind": "owned",
+                "id": "acme-key",
+                "label": "Acme key"
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let contributions: pig_protocol::PluginContributions =
+            serde_json::from_value(serde_json::json!({
+              "providers": [{
+                "id": "runtime-acme",
+                "name": "Runtime Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "credential": "acme-key",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }))
+            .expect("runtime contributions");
+        registry
+            .sync_runtime_contributions("demo", &digest, 1, snapshot.generation, contributions)
+            .expect("a runtime provider may use a manifest credential");
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let providers = crate::plugins::plugin_providers(&registry, &trust);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider.id, "plugin:demo:runtime-acme");
+        assert_eq!(
+            providers[0].credential,
+            Some(crate::credentials::CredentialId::plugin("demo", "acme-key"))
+        );
+    }
+
+    #[test]
+    fn provider_contributions_require_the_provide_providers_capability() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": [],
+              "providers": [{
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            format!("{:?}", snapshot.errors[0].error).contains("provide_providers"),
+            "{:?}",
+            snapshot.errors
+        );
+    }
+
+    #[test]
+    fn provider_contributions_reject_another_providers_credential() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": ["provide_providers", "manage_own_secrets"],
+              "credentials": [{
+                "kind": "provider",
+                "id": "shared",
+                "provider_id": "openai"
+              }],
+              "providers": [{
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://acme.example/v1",
+                "api_format": "OpenAiChat",
+                "credential": "shared",
+                "models": [{
+                  "id": "acme-large",
+                  "context_window": 128000,
+                  "max_output_tokens": 8192
+                }]
+              }]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            format!("{:?}", snapshot.errors[0].error).contains("owned credential"),
+            "{:?}",
+            snapshot.errors
         );
     }
 
@@ -759,6 +947,286 @@ mod tests {
                 .find(|package| package.digest == new_digest)
                 .unwrap()
                 .enabled
+        );
+    }
+
+    #[test]
+    fn hook_contributions_need_the_capability_and_a_valid_entry() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(
+            &root,
+            r#"{
+              "actions": [],
+              "hooks": [{"event": "pre_tool_use", "command": "guard.sh", "matcher": "Write"}]
+            }"#,
+        );
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert_eq!(snapshot.errors.len(), 1);
+        assert!(
+            format!("{:?}", snapshot.errors[0].error).contains("provide_hooks"),
+            "{:?}",
+            snapshot.errors
+        );
+
+        extend_user_plugin(&root, r#"{"actions": ["provide_hooks"]}"#);
+        let accepted = registry.sync(vec![PluginPackageSource {
+            root: root.clone(),
+            source: PluginSource::User,
+        }]);
+        assert!(accepted.errors.is_empty(), "{:?}", accepted.errors);
+        assert_eq!(accepted.packages[0].contributions.hooks.len(), 1);
+
+        extend_user_plugin(
+            &root,
+            r#"{"hooks": [{"event": "pre_tool_use", "type": "process", "command": "guard", "shell": "bash"}]}"#,
+        );
+        let rejected = registry.sync(vec![PluginPackageSource {
+            root,
+            source: PluginSource::User,
+        }]);
+        assert_eq!(rejected.errors.len(), 1);
+        assert!(
+            format!("{:?}", rejected.errors[0].error).contains("shell"),
+            "{:?}",
+            rejected.errors
+        );
+    }
+
+    #[test]
+    fn same_name_contributions_are_diagnosed_with_a_stable_winner() {
+        let temp = TempDir::new();
+        let first = temp.0.join("first");
+        let second = temp.0.join("second");
+        for (root, id) in [(&first, "aaa.plugin"), (&second, "zzz.plugin")] {
+            write(
+                &root.join("pig-plugin.json"),
+                &format!(
+                    r#"{{
+                      "apiVersion": 1,
+                      "id": "{id}",
+                      "name": "Plugin",
+                      "version": "1.0.0",
+                      "build": 1,
+                      "minHostVersion": "1.0.0",
+                      "protocols": {{"ui": 1, "services": 1}},
+                      "capabilities": [],
+                      "contributions": {{
+                        "actions": ["provide_agents", "provide_mcp"],
+                        "agents": [{{
+                          "name": "reviewer",
+                          "description": "Reviews",
+                          "system_prompt": "You review."
+                        }}],
+                        "mcp": [{{"name": "docs", "config": {{"command": "server"}}}}]
+                      }}
+                    }}"#
+                ),
+            );
+        }
+        let data = temp.0.join("data");
+        let mut registry = PluginRegistry::new(data);
+        let snapshot = registry.sync(vec![
+            PluginPackageSource {
+                root: first,
+                source: PluginSource::User,
+            },
+            PluginPackageSource {
+                root: second,
+                source: PluginSource::User,
+            },
+        ]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        for package in &snapshot.packages {
+            registry
+                .set_enabled(&package.id, &package.digest, true)
+                .expect("enable");
+        }
+        let conflicts = &registry.snapshot.conflicts;
+        for kind in ["agent", "mcp"] {
+            let conflict = conflicts
+                .iter()
+                .find(|conflict| {
+                    conflict.kind == kind && conflict.name == "reviewer"
+                        || conflict.kind == kind && conflict.name == "docs"
+                })
+                .unwrap_or_else(|| panic!("missing {kind} conflict: {conflicts:?}"));
+            assert_eq!(
+                conflict.winner, "aaa.plugin",
+                "the first package by id wins"
+            );
+            assert_eq!(conflict.losers, vec!["zzz.plugin"]);
+        }
+    }
+
+    #[test]
+    fn user_skills_win_over_plugin_skills_with_the_same_name() {
+        let temp = TempDir::new();
+        let data = temp.0.join("data");
+        save_skill(
+            &data,
+            &PluginScope::User,
+            "shared",
+            "---
+name: shared
+description: User skill
+---
+User body
+",
+            true,
+        )
+        .expect("user skill");
+        let root = temp.0.join("plugin");
+        write(
+            &root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "aaa.plugin",
+              "name": "Plugin",
+              "version": "1.0.0",
+              "build": 1,
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "skills": [{"path": "skills/shared"}]
+              }
+            }"#,
+        );
+        write(
+            &root.join("skills/shared/SKILL.md"),
+            "---
+name: shared
+description: Plugin skill
+---
+Plugin body
+",
+        );
+        let mut registry = PluginRegistry::new(data.clone());
+        let snapshot = registry.sync(vec![PluginPackageSource {
+            root,
+            source: PluginSource::User,
+        }]);
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        registry
+            .set_enabled("aaa.plugin", &snapshot.packages[0].digest, true)
+            .unwrap();
+        let plugins = registry.into_shared();
+        let skills = discover_skills_with_trust(&temp.0, &plugins, false);
+        let shared = skills
+            .iter()
+            .find(|skill| skill.name == "shared")
+            .expect("shared skill");
+        assert!(
+            shared.path.starts_with(pig_utils::skills::user_root(&data)),
+            "the user's skill must win: {}",
+            shared.path.display()
+        );
+        assert!(shared.description.contains("User skill"));
+    }
+
+    #[test]
+    fn an_incompatible_host_requirement_keeps_files_and_choice_but_activates_nothing() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        write(
+            &root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "2.0.0",
+              "build": 1,
+              "backend": "backend.ts",
+              "minHostVersion": "2.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "actions": ["provide_tools"],
+                "tools": [{
+                  "name": "DemoRead",
+                  "description": "Read demo data",
+                  "read_only": true,
+                  "parameters": {"type": "object"}
+                }]
+              }
+            }"#,
+        );
+        write(&root.join("backend.ts"), "export {};");
+        let data = temp.0.join("data");
+        let sources = || {
+            vec![PluginPackageSource {
+                root: root.clone(),
+                source: PluginSource::User,
+            }]
+        };
+        let trust = crate::config::WorkspaceTrust::untrusted(&temp.0);
+        let mut registry = PluginRegistry::with_host_version(data.clone(), "1.0.0");
+        let snapshot = registry.sync(sources());
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        let package = &snapshot.packages[0];
+        let digest = package.digest.clone();
+        let diagnostic = package
+            .incompatible
+            .clone()
+            .expect("incompatible diagnostic");
+        assert!(diagnostic.contains("2.0.0") && diagnostic.contains("1.0.0"));
+
+        // The user's enable choice is recorded, but nothing activates.
+        let enabled = registry.set_enabled("demo", &digest, true).unwrap();
+        assert!(enabled.packages[0].enabled);
+        assert!(enabled.packages[0].incompatible.is_some());
+        assert!(enabled_packages(&registry, &trust).unwrap().is_empty());
+        assert!(registry.tool("demo", &digest, "DemoRead", None).is_err());
+
+        // Restarting keeps the package, its files and the enable choice.
+        let mut restored = PluginRegistry::with_host_version(data.clone(), "1.0.0");
+        let restored_snapshot = restored.sync(sources());
+        assert!(restored_snapshot.packages[0].enabled);
+        assert!(restored_snapshot.packages[0].incompatible.is_some());
+        assert!(root.join("backend.ts").is_file());
+
+        // A host that satisfies the requirement activates the same choice.
+        let mut newer = PluginRegistry::with_host_version(data, "2.1.0");
+        let activated = newer.sync(sources());
+        assert!(activated.packages[0].enabled);
+        assert!(activated.packages[0].incompatible.is_none());
+        assert_eq!(enabled_packages(&newer, &trust).unwrap().len(), 1);
+        newer.tool("demo", &digest, "DemoRead", None).unwrap();
+    }
+
+    #[test]
+    fn hook_only_runtime_contributions_are_not_treated_as_empty() {
+        let temp = TempDir::new();
+        let root = temp.0.join("plugin");
+        user_plugin(&root);
+        extend_user_plugin(&root, r#"{"actions":["provide_hooks"]}"#);
+        let mut registry = PluginRegistry::new(temp.0.join("data"));
+        let snapshot = sync(&mut registry, &root);
+        let digest = snapshot.packages[0].digest.clone();
+        registry.set_enabled("demo", &digest, true).unwrap();
+        let contributions: pig_protocol::PluginContributions =
+            serde_json::from_value(serde_json::json!({
+                "hooks": [{"id":"sdk-hook-1","event":"post_tool_use","command":"audit.sh"}]
+            }))
+            .unwrap();
+        let accepted = registry
+            .sync_runtime_contributions(
+                "demo",
+                &digest,
+                1,
+                snapshot.generation,
+                contributions.clone(),
+            )
+            .expect("commit a hook-only runtime contribution");
+        assert_eq!(
+            accepted.runtime_contributions[&format!("demo:{digest}")],
+            contributions
         );
     }
 

@@ -635,14 +635,37 @@ pub enum Event {
         digest: String,
         result: Result<PluginServiceSnapshot, CoreError>,
     },
+    /// A narrow, value-shaped plugin service result (Git reads, workspace file
+    /// reads). Kept separate from `PluginServices` so the session snapshot
+    /// projection stays typed.
+    PluginServiceValue {
+        request_id: String,
+        package: String,
+        digest: String,
+        result: Result<serde_json::Value, CoreError>,
+    },
     PluginActionResult {
         result: PluginActionResult,
     },
     PluginToolCall {
         call: PluginToolCall,
     },
+    /// The session dropped a pending plugin call (turn cancellation or a
+    /// dispatcher timeout): the host asks the backend to stop working on it.
+    PluginToolCancel {
+        session_id: String,
+        request_id: String,
+    },
     PluginToolsQuery {
         query: PluginToolsQuery,
+    },
+    /// Reply to Op::PluginSessionAction: a session action, a controlled model
+    /// call or a delegated-subagent action.
+    PluginSessionResult {
+        request_id: String,
+        package: String,
+        digest: String,
+        result: Result<serde_json::Value, CoreError>,
     },
     PluginHttpResponse {
         request_id: String,

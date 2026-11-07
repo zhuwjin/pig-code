@@ -52,7 +52,7 @@ impl SessionFrozen {
             String::new()
         };
         let profiles_summary = crate::agent::agent_description_list(
-            &crate::agent::load_profiles_with_trust(cwd, data_dir, &trust),
+            &crate::agent::load_profiles_with_plugins(cwd, data_dir, &trust, plugins),
         );
         let plugin_tools =
             crate::plugins::PluginToolset::new(plugins, &trust, app_config.cloned(), session_id);
@@ -116,7 +116,12 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         state,
         permission_rules: load_permissions(&parts.cwd, &parts.data_dir, &trust),
         git_snapshot: prompt::git_snapshot(&parts.cwd),
-        hooks: crate::hooks::HookSet::load(&parts.cwd, app_config),
+        hooks: crate::hooks::HookSet::load_with_plugins(
+            &parts.cwd,
+            app_config,
+            &plugin_tools.registry(),
+            &trust,
+        ),
         id: parts.id,
         cwd: parts.cwd,
         history: parts.history,

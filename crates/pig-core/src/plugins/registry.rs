@@ -27,12 +27,19 @@ pub(crate) struct PersistedPlugins {
 
 impl PluginRegistry {
     pub fn new(data_dir: PathBuf) -> Self {
+        Self::with_host_version(data_dir, pig_protocol::PLUGIN_HOST_VERSION)
+    }
+
+    /// A registry that checks manifests against `host_version` (tests and
+    /// hosts that version their plugin API separately from the crate).
+    pub fn with_host_version(data_dir: PathBuf, host_version: impl Into<String>) -> Self {
         let state = std::fs::read(data_dir.join(PLUGIN_STATE_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PersistedPlugins>(&bytes).ok())
             .unwrap_or_default();
         let mut registry = Self {
             data_dir,
+            host_version: host_version.into(),
             generation: 0,
             snapshot: PluginSnapshot {
                 packages: state.packages,
@@ -135,7 +142,10 @@ impl PluginRegistry {
             && contributions.skills.is_empty()
             && contributions.mcp.is_empty()
             && contributions.tools.is_empty()
-            && contributions.commands.is_empty();
+            && contributions.commands.is_empty()
+            && contributions.hooks.is_empty()
+            && contributions.agents.is_empty()
+            && contributions.providers.is_empty();
         if empty {
             if self.runtime_epochs.get(&key) == Some(&epoch) {
                 self.snapshot.runtime_contributions.remove(&key);
@@ -176,6 +186,10 @@ impl PluginRegistry {
         }
         let mut validated = contributions.clone();
         validated.actions = package.contributions.actions.clone();
+        // Runtime deltas cannot add credentials, but a runtime provider may
+        // reference a credential the manifest declared; validate against that
+        // declaration set.
+        validated.credentials = package.contributions.credentials.clone();
         validate_contributions(&package.root, &validated)?;
         self.snapshot
             .runtime_contributions
@@ -205,6 +219,8 @@ impl PluginRegistry {
         let identity = package_manifest.id.clone();
         let name = package_manifest.name.fallback();
         let version = package_manifest.version;
+        let incompatible =
+            super::host_version_mismatch(&self.host_version, &package_manifest.min_host_version)?;
         let backend = package_manifest.backend;
         let contributions = package_manifest.contributions;
         let capabilities = package_manifest.capabilities;
@@ -237,6 +253,7 @@ impl PluginRegistry {
             root,
             source: source.source.clone(),
             enabled: false,
+            incompatible,
             backend,
             contributions,
             capabilities,
@@ -282,9 +299,16 @@ impl PluginRegistry {
         }
     }
 
-    fn persist(&self) {
+    fn persist(&mut self) {
+        self.recompute_conflicts();
+        // `incompatible` is derived from the manifest and this host's version:
+        // persisting it would keep a stale diagnostic after a host upgrade.
+        let mut packages = self.snapshot.packages.clone();
+        for package in &mut packages {
+            package.incompatible = None;
+        }
         let state = PersistedPlugins {
-            packages: self.snapshot.packages.clone(),
+            packages,
             enabled: self.enabled.clone(),
             disabled_builtin: self.disabled_builtin.clone(),
             pending_updates: self.pending_updates.clone(),
@@ -425,6 +449,120 @@ impl PluginRegistry {
         Ok(self.snapshot.clone())
     }
 
+    /// Whether a package still declares `entry` and may run it now. Used on
+    /// every hook run so disabling, updating or uninstalling the package (or
+    /// removing the hook through runtime contributions) revokes it at once.
+    pub fn plugin_hook_active(
+        &self,
+        id: &str,
+        digest: &str,
+        entry: &pig_protocol::HookEntry,
+    ) -> bool {
+        let Ok(package) = self.package(id, digest) else {
+            return false;
+        };
+        if !package.enabled || package.incompatible.is_some() {
+            return false;
+        }
+        if package_digest(&package.root).ok().as_deref() != Some(&package.content_digest) {
+            return false;
+        }
+        let runtime = self
+            .snapshot
+            .runtime_contributions
+            .get(&format!("{id}:{digest}"));
+        package
+            .contributions
+            .hooks
+            .iter()
+            .chain(runtime.into_iter().flat_map(|runtime| runtime.hooks.iter()))
+            .any(|hook| hook.entry == *entry)
+    }
+
+    /// Same-name contributions across enabled packages, resolved by package id
+    /// (the registry's packages are sorted by id) so the outcome never depends
+    /// on discovery order. The winner is recorded; every loser is named.
+    fn recompute_conflicts(&mut self) {
+        let mut seen: BTreeMap<(&'static str, String), (String, Vec<String>)> = BTreeMap::new();
+        let mut record = |kind: &'static str, name: String, package: &str| {
+            if name.trim().is_empty() {
+                return;
+            }
+            match seen.entry((kind, name)) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((package.to_owned(), Vec::new()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (winner, losers) = entry.get_mut();
+                    if winner != package {
+                        losers.push(package.to_owned());
+                    }
+                }
+            }
+        };
+        let packages: Vec<PluginPackageInfo> = self
+            .snapshot
+            .packages
+            .iter()
+            .filter(|package| package.enabled && package.incompatible.is_none())
+            .map(|package| {
+                let mut package = package.clone();
+                if let Some(runtime) = self
+                    .snapshot
+                    .runtime_contributions
+                    .get(&format!("{}:{}", package.id, package.digest))
+                {
+                    package.contributions = package.contributions.merged(runtime);
+                }
+                package
+            })
+            .collect();
+        for package in &packages {
+            for tool in &package.contributions.tools {
+                record("tool", tool.name.clone(), &package.id);
+            }
+            for agent in &package.contributions.agents {
+                record("agent", agent.name.clone(), &package.id);
+            }
+            for skill in &package.contributions.skills {
+                for discovered in pig_utils::skills::discover_root(
+                    &package.root.join(&skill.path),
+                    pig_utils::skills::SkillSource::User,
+                ) {
+                    record("skill", discovered.name, &package.id);
+                }
+            }
+            for server in &package.contributions.mcp {
+                record("mcp", server.name.clone(), &package.id);
+            }
+            for provider in &package.contributions.providers {
+                record("provider", provider.id.clone(), &package.id);
+            }
+            for theme in &package.contributions.themes {
+                record("theme", theme.id.clone(), &package.id);
+            }
+        }
+        self.snapshot.conflicts = seen
+            .into_iter()
+            .filter(|(_, (_, losers))| !losers.is_empty())
+            .map(|((kind, name), (winner, losers))| {
+                tracing::warn!(
+                    kind,
+                    name,
+                    winner,
+                    losers = ?losers,
+                    "plugins contribute the same name; the first package by id wins"
+                );
+                pig_protocol::PluginContributionConflict {
+                    kind: kind.to_owned(),
+                    name,
+                    winner,
+                    losers,
+                }
+            })
+            .collect();
+    }
+
     pub fn package(&self, id: &str, digest: &str) -> Result<&PluginPackageInfo, CoreError> {
         self.snapshot
             .packages
@@ -448,6 +586,7 @@ impl PluginRegistry {
         if !package.enabled {
             return Err(permission("the plugin is disabled"));
         }
+        ensure_compatible(package)?;
         if let PluginSource::Project { workspace } = &package.source {
             let trust = crate::config::WorkspaceTrust::for_config(config, workspace);
             if !trust.admits(workspace) {
@@ -657,6 +796,7 @@ impl PluginRegistry {
         if !package.enabled {
             return Err(permission("the plugin is disabled"));
         }
+        ensure_compatible(package)?;
         if let PluginSource::Project { workspace } = &package.source {
             let trust = crate::config::WorkspaceTrust::for_config(config, workspace);
             if !trust.admits(workspace) {
@@ -674,12 +814,23 @@ impl PluginRegistry {
     }
 }
 
+fn ensure_compatible(package: &PluginPackageInfo) -> Result<(), CoreError> {
+    match &package.incompatible {
+        Some(detail) => Err(permission(format!(
+            "plugin `{}` is not active: {detail}",
+            package.id
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn authorized_package(
     data_dir: &Path,
     package: &PluginPackageInfo,
     trusted_workspace: Option<&crate::config::WorkspaceTrust>,
 ) -> bool {
     if !package.enabled
+        || package.incompatible.is_some()
         || package_digest(&package.root).ok().as_deref() != Some(&package.content_digest)
     {
         return false;
@@ -751,6 +902,238 @@ fn validate_contributions(
             "tool contributions require the provide_tools capability",
         ));
     }
+    if !contributions.hooks.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideHooks)
+    {
+        return Err(permission(
+            "hook contributions require the provide_hooks capability",
+        ));
+    }
+    if !contributions.agents.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideAgents)
+    {
+        return Err(permission(
+            "agent profile contributions require the provide_agents capability",
+        ));
+    }
+    let mut agent_names = BTreeSet::new();
+    for agent in &contributions.agents {
+        if !crate::agent::valid_name(&agent.name) {
+            return Err(manifest(format!(
+                "invalid plugin agent profile name `{}`",
+                agent.name
+            )));
+        }
+        if !agent_names.insert(&agent.name) {
+            return Err(manifest(format!(
+                "duplicate plugin agent profile `{}`",
+                agent.name
+            )));
+        }
+        if agent.description.trim().is_empty() || agent.system_prompt.trim().is_empty() {
+            return Err(manifest(format!(
+                "agent profile `{}` needs a description and a system prompt",
+                agent.name
+            )));
+        }
+        if agent.max_turns.is_some_and(|turns| turns == 0) {
+            return Err(manifest(format!(
+                "agent profile `{}` maxTurns must be positive",
+                agent.name
+            )));
+        }
+        if agent
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err(manifest(format!(
+                "agent profile `{}` model must not be empty",
+                agent.name
+            )));
+        }
+        if let Some(tools) = &agent.tools
+            && tools.iter().any(|tool| tool.trim().is_empty())
+        {
+            return Err(manifest(format!(
+                "agent profile `{}` tool names must not be empty",
+                agent.name
+            )));
+        }
+    }
+    if !contributions.providers.is_empty()
+        && !contributions
+            .actions
+            .contains(&PluginCapability::ProvideProviders)
+    {
+        return Err(permission(
+            "provider contributions require the provide_providers capability",
+        ));
+    }
+    let mut provider_ids = BTreeSet::new();
+    for provider in &contributions.providers {
+        validate_id(&provider.id)?;
+        if !provider_ids.insert(&provider.id) {
+            return Err(manifest(format!(
+                "duplicate provider contribution `{}`",
+                provider.id
+            )));
+        }
+        if provider.name.trim().is_empty() {
+            return Err(manifest(format!("provider `{}` needs a name", provider.id)));
+        }
+        let url = reqwest::Url::parse(provider.base_url.trim()).map_err(|error| {
+            manifest(format!(
+                "provider `{}` base URL is invalid: {error}",
+                provider.id
+            ))
+        })?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback)) {
+            return Err(manifest(format!(
+                "provider `{}` must use https (http is allowed only for loopback)",
+                provider.id
+            )));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(manifest(format!(
+                "provider `{}` base URL must not embed credentials",
+                provider.id
+            )));
+        }
+        if provider.models.is_empty() {
+            return Err(manifest(format!(
+                "provider `{}` needs at least one model",
+                provider.id
+            )));
+        }
+        let mut model_ids = BTreeSet::new();
+        for model in &provider.models {
+            if model.id.trim().is_empty() || model.id.len() > 256 {
+                return Err(manifest(format!(
+                    "provider `{}` has an empty or overlong model id",
+                    provider.id
+                )));
+            }
+            if !model_ids.insert(&model.id) {
+                return Err(manifest(format!(
+                    "duplicate model `{}` in provider `{}`",
+                    model.id, provider.id
+                )));
+            }
+            if model.context_window == 0
+                || model.max_output_tokens == 0
+                || model.max_output_tokens > model.context_window
+            {
+                return Err(manifest(format!(
+                    "model `{}` in provider `{}` needs 0 < maxOutputTokens <= contextWindow",
+                    model.id, provider.id
+                )));
+            }
+            if let Some(level) = &model.default_reasoning_level
+                && !model.reasoning_levels.contains(level)
+            {
+                return Err(manifest(format!(
+                    "model `{}` default reasoning level `{level}` is not declared",
+                    model.id
+                )));
+            }
+            for level in model
+                .reasoning_labels
+                .keys()
+                .chain(model.reasoning_params.keys())
+            {
+                if !model.reasoning_levels.contains(level) {
+                    return Err(manifest(format!(
+                        "model `{}` reasoning level `{level}` is not declared",
+                        model.id
+                    )));
+                }
+            }
+        }
+        if let Some(credential) = &provider.credential {
+            if !contributions
+                .actions
+                .contains(&PluginCapability::ManageOwnSecrets)
+            {
+                return Err(permission(format!(
+                    "provider `{}` with a credential requires the manage_own_secrets capability",
+                    provider.id
+                )));
+            }
+            match contributions
+                .credentials
+                .iter()
+                .find(|declaration| declaration.id() == credential)
+            {
+                Some(pig_protocol::PluginCredentialDeclaration::Owned { .. }) => {}
+                Some(pig_protocol::PluginCredentialDeclaration::Provider { .. }) => {
+                    return Err(manifest(format!(
+                        "provider `{}` must use an owned credential, not another provider's",
+                        provider.id
+                    )));
+                }
+                None => {
+                    return Err(manifest(format!(
+                        "provider `{}` references undeclared credential `{credential}`",
+                        provider.id
+                    )));
+                }
+            }
+        }
+    }
+    let mut hooks = BTreeSet::new();
+    for hook in &contributions.hooks {
+        if !crate::hooks::valid_hook_entry(&hook.entry) {
+            return Err(manifest(format!(
+                "plugin hook for {} must not select a shell for a process entry",
+                hook.event.name()
+            )));
+        }
+        if hook.entry.command.trim().is_empty() {
+            return Err(manifest("plugin hooks need a command"));
+        }
+        if hook.entry.timeout_ms.is_some_and(|timeout| timeout == 0) {
+            return Err(manifest("plugin hook timeouts must be positive"));
+        }
+        if let Some(matcher) = hook
+            .entry
+            .matcher
+            .as_deref()
+            .map(str::trim)
+            .filter(|matcher| !matcher.is_empty() && *matcher != "*")
+        {
+            let plain = matcher
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|');
+            if !plain && regex::Regex::new(matcher).is_err() {
+                return Err(manifest(format!(
+                    "plugin hook matcher `{matcher}` is not a valid regex"
+                )));
+            }
+        }
+        let key = (
+            hook.event,
+            hook.entry.command.clone(),
+            hook.entry.args.join("\u{0}"),
+            hook.entry.matcher.clone().unwrap_or_default(),
+        );
+        if !hooks.insert(key) {
+            return Err(manifest(format!(
+                "duplicate plugin hook for {}",
+                hook.event.name()
+            )));
+        }
+    }
     if !contributions.http.is_empty() && !contributions.actions.contains(&PluginCapability::Http) {
         return Err(permission("HTTP contributions require the http capability"));
     }
@@ -784,6 +1167,58 @@ fn validate_contributions(
             return Err(manifest(format!(
                 "tool `{}` needs a description and an object JSON Schema",
                 tool.name
+            )));
+        }
+        if tool
+            .output_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.is_object())
+        {
+            return Err(manifest(format!(
+                "tool `{}` output schema must be an object JSON Schema",
+                tool.name
+            )));
+        }
+        super::schema::check_supported(&tool.parameters)
+            .map_err(|error| manifest(format!("tool `{}` parameters: {error}", tool.name)))?;
+        if let Some(output) = &tool.output_schema {
+            super::schema::check_supported(output).map_err(|error| {
+                manifest(format!("tool `{}` output schema: {error}", tool.name))
+            })?;
+        }
+        if tool.approval == pig_protocol::PluginToolApproval::Never && !tool.read_only {
+            return Err(manifest(format!(
+                "tool `{}` may waive approval only when it is read-only",
+                tool.name
+            )));
+        }
+        if tool.timeout_ms.is_some_and(|timeout| {
+            timeout == 0 || timeout > pig_protocol::PLUGIN_TOOL_MAX_TIMEOUT_MS
+        }) {
+            return Err(manifest(format!(
+                "tool `{}` timeout must be between 1 and {} ms",
+                tool.name,
+                pig_protocol::PLUGIN_TOOL_MAX_TIMEOUT_MS
+            )));
+        }
+        if tool.max_concurrency.is_some_and(|limit| {
+            limit == 0 || limit as usize > pig_protocol::PLUGIN_TOOL_MAX_CONCURRENCY
+        }) {
+            return Err(manifest(format!(
+                "tool `{}` concurrency must be between 1 and {}",
+                tool.name,
+                pig_protocol::PLUGIN_TOOL_MAX_CONCURRENCY
+            )));
+        }
+        if tool.max_output_bytes.is_some_and(|bytes| {
+            bytes < pig_protocol::PLUGIN_TOOL_MIN_OUTPUT_BYTES
+                || bytes > pig_protocol::PLUGIN_TOOL_MAX_OUTPUT_BYTES
+        }) {
+            return Err(manifest(format!(
+                "tool `{}` output budget must be between {} and {} bytes",
+                tool.name,
+                pig_protocol::PLUGIN_TOOL_MIN_OUTPUT_BYTES,
+                pig_protocol::PLUGIN_TOOL_MAX_OUTPUT_BYTES
             )));
         }
     }

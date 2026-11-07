@@ -974,6 +974,7 @@ mod tests {
             pending_plan: None,
             steerable: false,
             mcp_status: None,
+            plugin_surfaces_stale: false,
         };
         stop_session_tasks(&entry);
         let tasks = state.tasks.lock().expect("task registry lock");

@@ -20,12 +20,12 @@ nsh package --target web     # or ios, android, macos, linux, windows
 ## Unified plugins
 
 Signed `.nshpkg` packages are verified and installed at runtime without rebuilding or restarting the app. Open Plugin Management
-and provide the package path plus its trusted root public key. Packages can contribute Agent tools, commands, themes, Skills,
-MCP servers and configuration. A package with a backend starts an independent NSH `Engine`; resource-only packages do not need one.
-Disabling a package stops its backend and removes its runtime contributions.
+and provide the package path plus its trusted root public key. Packages can contribute Agent tools, commands, model-provider
+presets, themes, Skills, MCP servers and configuration. A package with a backend starts an independent NSH `Engine`;
+resource-only packages do not need one. Disabling a package stops its backend and removes its runtime contributions.
 
 The main branch does not render plugin-provided UI or allow plugins to modify host components. `examples/moon-plugin`
-demonstrates a backend tool, a command, themes, a Skill and configuration. The architecture and protocol contract live in
+demonstrates a backend tool, a command, a local model provider, themes, a Skill and configuration. The architecture and protocol contract live in
 `docs/PLUGIN_SYSTEM.md`.
 
 `nsh` describes the crate's exports with a small program of the crate and builds the app's hosts with it linked in.
