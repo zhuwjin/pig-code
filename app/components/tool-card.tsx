@@ -267,7 +267,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   if (props.item().tool === "AgentSwarm") {
     const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
     return (
-      <Collapsible open={open()} content={rows}>
+      <Collapsible reveal open={open()} content={rows}>
         <View
           role="button"
           accessibilityState={{ expanded: open() }}
@@ -335,6 +335,7 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
   };
   return (
     <Collapsible
+      reveal
       open={open()}
       class="rounded-xl border border-border bg-tool-surface"
       content={
@@ -380,7 +381,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
     <View class="w-full">
-      <Collapsible open={open()} content={<ToolBody {...props} />}>
+      <Collapsible reveal open={open()} content={<ToolBody {...props} />}>
         <View
           role="button"
           testID={`tool-${item().id}`}

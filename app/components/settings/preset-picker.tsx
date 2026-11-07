@@ -1,5 +1,5 @@
 import { Scroll, signal, Text, View } from "nsh";
-import { Button, Input } from "nsh/base";
+import { Button, Dialog, Input } from "nsh/base";
 import { t } from "../../i18n";
 import { Icon } from "../icon";
 import { ProviderIcon } from "./provider-icon";
@@ -13,9 +13,14 @@ export function PresetPicker(props: {
   const query = signal("");
   const presets = () => SORTED_PROVIDER_PRESETS.filter((preset) => presetMatchesQuery(preset, query()));
   return (
-    <View class="absolute inset-0 z-50 items-center justify-center">
-      <Button accessibilityLabel={t("settings.models.preset.close_label")} class="absolute inset-0 bg-black/30" onPress={props.onClose} />
-      <View testID="preset-picker" class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl">
+    <Dialog
+      open
+      animation="fade"
+      backdropClass="bg-black/30"
+      onOpenChange={({ open }) => { if (!open) props.onClose(); }}
+      testID="preset-picker"
+      class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
+    >
         <View class="flex-row items-center">
           <Text class="flex-1 text-lg font-semibold text-foreground">{t("settings.models.preset.title")}</Text>
           <Button testID="preset-picker-close" accessibilityLabel={t("settings.models.preset.close_label")} class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onClose}>
@@ -80,7 +85,6 @@ export function PresetPicker(props: {
             <Text class="text-xs text-foreground">{t("common.cancel")}</Text>
           </Button>
         </View>
-      </View>
-    </View>
+    </Dialog>
   );
 }

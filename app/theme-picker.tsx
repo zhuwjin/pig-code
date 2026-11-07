@@ -1,5 +1,5 @@
 import { colorScheme, Scroll, Text, token, View, signal } from "nsh";
-import { Button, Input, Popover } from "nsh/base";
+import { Button, Input, Select } from "nsh/base";
 import { PluginConfigItem, PluginContributionConflict, PluginPackageInfo, PluginRuntimeState } from "./protocol";
 import { Icon } from "./components/icon";
 import { PluginConfigEditor, PluginCredentialEditor } from "./components/plugin-config-editor";
@@ -66,22 +66,43 @@ function FontSelect(props: {
   fonts: () => string[];
   onChange: (family: string | null) => void;
 }) {
-  const open = signal(false);
-  const query = signal("");
-  const filtered = () => {
-    const normalized = query().trim().toLowerCase();
-    return normalized ? props.fonts().filter((font) => font.toLowerCase().includes(normalized)) : props.fonts();
-  };
+  const items = () => [
+    { value: "", title: t("settings.appearance.fonts.system_default") },
+    ...props.fonts().map((font) => ({ value: font, title: font })),
+  ];
   return (
-    <Popover
-      open={open()}
-      onOpenChange={({ open: next }) => {
-        if (next) query.set("");
-        open.set(next);
-      }}
+    <Select
+      items={items()}
+      value={props.value()}
+      onChange={({ value }) => props.onChange(value || null)}
+      accessibilityLabel={t("settings.appearance.fonts.ui")}
       placement="bottom"
       align="end"
-      popupClass="w-72 rounded-xl border border-border bg-popover p-2 shadow-xl"
+      popupClass="max-h-72 w-72 rounded-xl border border-border bg-popover p-2 shadow-xl"
+      searchable
+      searchPlaceholder={t("settings.appearance.fonts.search")}
+      searchAccessibilityLabel={t("settings.appearance.fonts.search")}
+      searchClass="mx-1 mb-1 rounded-(--radius) border border-border bg-background px-3 py-2 text-sm"
+      empty={<Text class="px-2 py-3 text-center text-xs text-muted-foreground">{t("settings.appearance.fonts.no_matches")}</Text>}
+      itemClass="group rounded-(--radius) px-2 py-1.5 hover:bg-accent selected:bg-accent/60"
+      renderItem={(item) => (
+        <View
+          testID={item.value === "" ? `${props.testID}-system` : `${props.testID}-option-${item.value}`}
+          class="flex-row items-center gap-2"
+        >
+          <Text
+            class="min-w-0 flex-1 text-sm text-foreground"
+            style={item.value ? { numberOfLines: 1, fontFamily: item.value } : { numberOfLines: 1 }}
+          >
+            {item.title}
+          </Text>
+          <If when={props.value() === item.value}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
+        </View>
+      )}
+      cleanable
+      clearButton={<Icon name="x" size={12} color={token("muted-foreground")} />}
+      clearButtonClass="absolute right-2 top-2 z-10 rounded-full p-1 hover:bg-accent"
+      clearButtonAccessibilityLabel={t("settings.appearance.fonts.system_default")}
       trigger={
         <View role="button" testID={props.testID} class="h-9 w-64 cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
           <Text class="min-w-0 flex-1 text-sm text-foreground" style={props.value() ? { numberOfLines: 1, fontFamily: props.value() } : { numberOfLines: 1 }}>
@@ -90,56 +111,7 @@ function FontSelect(props: {
           <Icon name="chevron-down" size={12} />
         </View>
       }
-    >
-      <View class="gap-2">
-        <View class="relative w-full">
-          <Input
-            testID={`${props.testID}-search`}
-            autoFocus
-            value={query()}
-            onChange={({ value: text }) => query.set(text)}
-            placeholder={t("settings.appearance.fonts.search")}
-            class="w-full rounded-(--radius) border border-border bg-background pl-8 pr-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
-          />
-          <Icon name="search" size={13} color={token("muted-foreground")} class="absolute left-2 top-1/2 -translate-y-1/2" />
-        </View>
-        <Scroll class="max-h-72">
-          <View class="gap-1">
-            <Button
-              testID={`${props.testID}-system`}
-              selected={!props.value()}
-              class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent selected:bg-accent/60"
-              onPress={() => {
-                props.onChange(null);
-                open.set(false);
-              }}
-            >
-              <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{t("settings.appearance.fonts.system_default")}</Text>
-              <If when={!props.value()}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
-            </Button>
-            <Each of={filtered()} key={(font) => font}>
-              {(font, index) => (
-                <Button
-                  testID={`${props.testID}-option-${index()}`}
-                  selected={props.value() === font()}
-                  class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent selected:bg-accent/60"
-                  onPress={() => {
-                    props.onChange(font());
-                    open.set(false);
-                  }}
-                >
-                  <Text class="min-w-0 flex-1 text-sm text-foreground" style={{ numberOfLines: 1, fontFamily: font() }}>{font()}</Text>
-                  <If when={props.value() === font()}><Icon name="check" size={13} color={token("muted-foreground")} /></If>
-                </Button>
-              )}
-            </Each>
-            <If when={filtered().length === 0}>
-              <Text class="px-2 py-3 text-center text-xs text-muted-foreground">{t("settings.appearance.fonts.no_matches")}</Text>
-            </If>
-          </View>
-        </Scroll>
-      </View>
-    </Popover>
+    />
   );
 }
 
@@ -322,7 +294,6 @@ export function ThemePicker(props: ThemePickerProps) {
   const packagePath = signal("");
   const rootPath = signal("");
   const installing = signal(false);
-  const languageOpen = signal(false);
   const uiFont = signal(store.fonts().ui ?? "");
   const monoFont = signal(store.fonts().mono ?? "");
   const themeFilter = signal<ThemeFilter>("all");
@@ -340,7 +311,6 @@ export function ThemePicker(props: ThemePickerProps) {
   const chooseLanguage = (value: LanguagePreference) => {
     setLanguagePreference(value);
     props.onLanguageChange(value);
-    languageOpen.set(false);
   };
   const filteredThemes = () => {
     const query = themeQuery().trim().toLowerCase();
@@ -472,34 +442,29 @@ export function ThemePicker(props: ThemePickerProps) {
                       <Text class="text-sm font-medium text-foreground">{t("settings.appearance.language.label")}</Text>
                       <Text class="text-xs text-muted-foreground">{t("settings.appearance.language.description")}</Text>
                     </View>
-                    <Popover
-                      open={languageOpen()}
-                      onOpenChange={({ open }) => languageOpen.set(open)}
+                    <Select
+                      items={LANGUAGE_OPTIONS.map((option) => ({ value: option.value, title: t(option.labelKey) }))}
+                      value={languagePreference()}
+                      onChange={({ value }) => {
+                        if (value !== null) chooseLanguage(value as LanguagePreference);
+                      }}
+                      accessibilityLabel={t("settings.appearance.language.label")}
                       placement="bottom"
                       align="end"
                       popupClass="w-64 rounded-xl border border-border bg-popover p-1 shadow-xl"
+                      itemClass="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
+                      renderItem={(item) => (
+                        <View testID={`language-option-${item.value}`}>
+                          <Text class="text-sm text-foreground">{item.title}</Text>
+                        </View>
+                      )}
                       trigger={
                         <View role="button" testID="language-select" class="h-9 w-64 cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
                           <Text class="flex-1 text-sm text-foreground">{languageLabel(languagePreference())}</Text>
                           <Icon name="chevron-down" size={12} />
                         </View>
                       }
-                    >
-                      <View class="gap-1">
-                        <Each of={LANGUAGE_OPTIONS} key={(option) => option.value}>
-                          {(option) => (
-                            <Button
-                              testID={`language-option-${option().value}`}
-                              selected={languagePreference() === option().value}
-                              class="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-                              onPress={() => chooseLanguage(option().value)}
-                            >
-                              <Text class="text-sm text-foreground">{t(option().labelKey)}</Text>
-                            </Button>
-                          )}
-                        </Each>
-                      </View>
-                    </Popover>
+                    />
                   </View>
                   <View class="flex-row items-center gap-4 border-b border-border p-4">
                     <View class="min-w-0 flex-1 gap-0.5">

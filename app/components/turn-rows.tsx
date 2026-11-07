@@ -10,7 +10,7 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <Collapsible open={open()} content={props.children}>
+    <Collapsible reveal open={open()} content={props.children}>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"
@@ -139,7 +139,7 @@ export function TurnActionsRow(props: UiContext & {
           <Text class="text-xs text-muted-foreground">{t("turn.finished", { duration: formatCompactDuration(turn().durationMs!) })}</Text>
         </If>
       </View>
-      <Collapsible open={hooksOpen()} content={
+      <Collapsible reveal open={hooksOpen()} content={
         <View class="gap-2 rounded-xl border border-border bg-tool-surface p-3">
           <Each of={turn().hooks} key={(hook) => hook.id}>
             {(hook) => (

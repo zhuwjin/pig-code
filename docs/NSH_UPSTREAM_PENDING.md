@@ -6,26 +6,13 @@
 
 ## 已发布，待接入
 
-### 1. 工具卡片和工作详情的逐步展开/收起
+### 1. 工具卡片和工作详情的逐步展开/收起（已接入）
 
-**现状**
+**当前实现**
 
-当前 `Collapsible` 在 `open` 变化时一次性挂载或卸载内容。快速展开时，完整内容会在容器动画结束前显示；`LayoutAnimation` 只改变布局位置，不能逐步裁剪内容。
+已在 `app/components/tool-card.tsx`、`app/components/messages.tsx`、`app/components/turn-rows.tsx` 和 `app/components/right-panel.tsx` 的展开区域启用官方 `Collapsible.reveal`。可见高度随展开进度增长，内容在收起完成后退出；这些区域不再叠加 `app/store.ts` 的全局 `LayoutAnimation`。
 
-NSH `0.4.0` 已提供 `Collapsible.reveal`，当前项目尚未接入；仍不自建 `Reveal` 组件。
-
-**涉及位置**
-
-- `app/components/tool-card.tsx`：工具详情。
-- `app/components/messages.tsx`：思考过程。
-- `app/components/turn-rows.tsx`：工作详情和 Hook 汇总。
-- `app/store.ts` 的 `toggleExpanded`、`toggleTurnExpanded`：目前配置全局布局动画。
-
-**升级后的处理**
-
-- 在这些区域启用正式的 `reveal`，让可见高度随展开进度增长，并在收起完成后卸载内容。
-- 移除这些区域对应的全局布局动画，避免与局部 reveal 叠加；不要影响其他使用布局动画的界面。
-- 保留减少动态效果（reduced motion）设置。
+`app/components/settings/model-editor.tsx` 的高级设置也使用同一机制。减少动态效果时由官方组件直接完成展开和收起。
 
 **验收**
 
@@ -95,28 +82,17 @@ NSH main 的 `crates/nsh-core/src/ops.rs` 仍将 `UiTheme` 标为 `internal`，�
 
 等待公开且稳定的根主题 API 或 TypeScript 声明后，移除局部豁免并检查动态主题切换。无需仅为这项声明问题升级。
 
-## 非阻塞的组件导出
+## 已接入的组件导出
 
-### 5. `nsh/base` 的 `Link` 与 `Select` 导出
+### 5. `nsh/base` 的 `Link`、`Select` 及其他正式组件
 
-**现状**
+**当前实现**
 
-NSH `0.4.0` 已导出 `Link` 和 `Select`，当前项目尚未迁移：
-
-- 设置页“获取密钥”使用 `Button` + `openUrl` 模拟链接外观，见 `app/components/settings/provider-detail.tsx`。
-- API 协议选择使用 `Popover` + `Button` 实现，见同一文件的格式选择器。
-
-两处当前功能正常，本次依赖升级不扩大为组件替换。
-
-**后续处理**
-
-- 用官方 `Link` 替换“获取密钥”的 `Button` + `openUrl`，保留下划线文字和外链图标。
-- 评估是否用 `Select` 替换格式选择器；替换时保持现有外观、键盘操作和选择后立即保存的行为。
-
-**验收**
-
-- “获取密钥”由系统打开 `provider.key_url`，不改变页面状态。
-- 格式选择器的触发器宽度、长标签显示、键盘操作和保存时机与当前一致。
+- “获取密钥”已在 `app/components/settings/provider-detail.tsx` 改用官方 `Link`，保留下划线文字、外链图标和系统打开行为。
+- API 协议、工作区、语言、字体和插件枚举配置已改用官方 `Select`；字体使用官方搜索与清空能力，插件枚举保留原始 JSON 值类型。
+- 模型上下文窗口和最大输出使用 `NumberInput`；模型设置页签使用 `Tabs`/`Tab`，默认推理等级使用 `RadioGroup`/`Radio`。
+- 模型编辑、Provider 预设和图标选择弹窗使用 `Dialog`；插件布尔配置使用 `Switch`。
+- 权限和模型选择等包含额外操作的复合 Popover 保持现有实现，没有为了换组件而拆分产品流程。
 
 ### 6. macOS 原生 `Input` 滚动后的短暂空白
 

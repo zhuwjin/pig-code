@@ -328,8 +328,8 @@ test("switches language and applies fonts from appearance settings", async () =>
   expect(app.texts()).toContain("Language & fonts");
 
   await app.press("id:ui-font-select");
-  await app.type("id:ui-font-select-search", "Menlo");
-  await app.press("id:ui-font-select-option-0");
+  await app.type("text:Search...", "Menlo");
+  await app.press("id:ui-font-select-option-Menlo");
   expect(app.texts()).toContain("Menlo");
 
   await app.press("id:language-select");
@@ -395,6 +395,7 @@ test("saves numeric enum plugin configuration without changing its JSON type", a
   await app.press("id:title-theme-settings");
   await app.press("id:settings-plugins");
   await app.press("id:plugin-config-com.pigcodets.plugins.moon");
+  await app.press("id:plugin-config-select-com.pigcodets.plugins.moon-max_results");
   await app.press("id:plugin-config-option-com.pigcodets.plugins.moon-max_results-2");
   await app.press("id:plugin-config-save-com.pigcodets.plugins.moon");
   await app.waitFor("text:已保存", { timeout: 10000 });

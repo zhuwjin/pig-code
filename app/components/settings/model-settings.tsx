@@ -1,5 +1,5 @@
 import { Scroll, signal, Text, token, View } from "nsh";
-import { Button, Input } from "nsh/base";
+import { Button, Input, Tab, Tabs } from "nsh/base";
 import { t, tCount } from "../../i18n";
 import type { ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
@@ -125,14 +125,14 @@ export function ModelSettings(props: UiContext) {
         <Text class="text-xl font-semibold text-foreground">{t("settings.models.title")}</Text>
         <Text class="text-sm text-muted-foreground">{t("settings.models.description")}</Text>
         <View class="mt-2 flex-row items-center gap-3">
-          <View class="flex-row rounded-full bg-muted p-1">
-            <Button testID="providers-tab" selected={view() === "providers"} class="rounded-full px-3 py-1.5 selected:bg-background" onPress={() => { view.set("providers"); editor.set(null); }}>
+          <Tabs class="flex-row rounded-full bg-muted p-1">
+            <Tab testID="providers-tab" selected={view() === "providers"} class="rounded-full px-3 py-1.5 selected:bg-background" onPress={() => { view.set("providers"); editor.set(null); }}>
               <Text class="text-xs text-foreground">{t("settings.models.providers_tab")}</Text>
-            </Button>
-            <Button testID="models-tab" selected={view() === "models"} class="rounded-full px-3 py-1.5 selected:bg-background" onPress={() => { view.set("models"); editor.set(null); }}>
+            </Tab>
+            <Tab testID="models-tab" selected={view() === "models"} class="rounded-full px-3 py-1.5 selected:bg-background" onPress={() => { view.set("models"); editor.set(null); }}>
               <Text class="text-xs text-foreground">{t("settings.models.all_models_tab")}</Text>
-            </Button>
-          </View>
+            </Tab>
+          </Tabs>
           <Text class="text-xs text-muted-foreground">{t(view() === "providers" ? "settings.models.providers_hint" : "settings.models.models_hint")}</Text>
         </View>
       </View>

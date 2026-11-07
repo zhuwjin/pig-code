@@ -1,5 +1,5 @@
 import { signal, Text, View } from "nsh";
-import { Button, Input } from "nsh/base";
+import { Button, Input, Select, Switch } from "nsh/base";
 import { appLocale, t } from "../i18n";
 import {
   errorMessage,
@@ -142,36 +142,50 @@ export function PluginConfigEditor(props: {
                 <View class="gap-1">
                   <Text class="text-xs font-medium text-foreground">{descriptionOf(item())}</Text>
                   <If when={kind === "boolean"}>
-                    <Button
-                      testID={`plugin-config-toggle-${props.plugin().id}-${item().key}`}
-                      selected={Boolean(current())}
-                      class="w-12 rounded-full border border-border px-2 py-0.5 selected:border-primary/60 selected:bg-accent"
-                      onPress={() =>
-                        values.update((all) => ({ ...all, [item().key]: !Boolean(current()) }))
-                      }
-                    >
+                    <View class="flex-row items-center gap-2">
+                      <Switch
+                        testID={`plugin-config-toggle-${props.plugin().id}-${item().key}`}
+                        checked={Boolean(current())}
+                        onChange={({ checked }) =>
+                          values.update((all) => ({ ...all, [item().key]: checked }))
+                        }
+                        trackClass="h-5 w-9 rounded-full bg-muted p-0.5 transition-colors checked:bg-primary"
+                        thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
+                      />
                       <Text class="text-[10px] text-foreground">
                         {t(Boolean(current()) ? "settings.plugins.config.on" : "settings.plugins.config.off")}
                       </Text>
-                    </Button>
+                    </View>
                   </If>
                   <If when={kind !== "boolean" && options.length > 0}>
-                    <View class="flex-row flex-wrap gap-1">
-                      <Each of={options} key={(option) => optionKey(option)}>
-                        {(option) => (
-                          <Button
-                            testID={`plugin-config-option-${props.plugin().id}-${item().key}-${optionKey(option())}`}
-                            selected={Object.is(current(), option())}
-                            class="rounded-full border border-border px-2 py-1 selected:border-primary/60 selected:bg-accent"
-                            onPress={() =>
-                              values.update((all) => ({ ...all, [item().key]: option() }))
-                            }
-                          >
-                            <Text class="text-[10px] text-foreground">{String(option())}</Text>
-                          </Button>
-                        )}
-                      </Each>
-                    </View>
+                    <Select
+                      items={options.map((option, index) => ({ value: String(index), title: String(option) }))}
+                      value={options.findIndex((option) => Object.is(current(), option)) >= 0 ? String(options.findIndex((option) => Object.is(current(), option))) : null}
+                      onChange={({ value }) => {
+                        if (value === null) return;
+                        const option = options[Number(value)];
+                        values.update((all) => ({ ...all, [item().key]: option }));
+                      }}
+                      accessibilityLabel={descriptionOf(item())}
+                      placement="bottom"
+                      align="start"
+                      popupClass="w-64 rounded-xl border border-border bg-popover p-1 shadow-xl"
+                      itemClass="rounded-(--radius) px-2 py-1 hover:bg-accent selected:bg-accent/60"
+                      renderItem={(entry) => {
+                        const option = options[Number(entry.value)];
+                        return (
+                          <View testID={`plugin-config-option-${props.plugin().id}-${item().key}-${optionKey(option)}`}>
+                            <Text class="text-[10px] text-foreground">{entry.title}</Text>
+                          </View>
+                        );
+                      }}
+                      trigger={
+                        <View role="button" testID={`plugin-config-select-${props.plugin().id}-${item().key}`} class="h-8 min-w-24 cursor-pointer flex-row items-center gap-2 rounded-(--radius) border border-border bg-background px-2 hover:bg-accent">
+                          <Text class="flex-1 text-xs text-foreground">{String(current())}</Text>
+                          <Text class="text-xs text-muted-foreground">▾</Text>
+                        </View>
+                      }
+                    />
                   </If>
                   <If when={kind !== "boolean" && options.length === 0}>
                     <Input

@@ -1,5 +1,5 @@
 import { Scroll, signal, Text, View } from "nsh";
-import { Button, Input } from "nsh/base";
+import { Button, Dialog, Input } from "nsh/base";
 import { t } from "../../i18n";
 import { resolveIcon } from "./icon-catalog";
 import { searchIcons } from "./icon-search";
@@ -16,9 +16,14 @@ export function IconPicker(props: {
   const options = () => searchIcons(query());
   const kind = () => props.kind;
   return (
-    <View class="absolute inset-0 z-50 items-center justify-center">
-      <Button accessibilityLabel={t("settings.models.icon_picker.close_label")} class="absolute inset-0 bg-black/30" onPress={props.onClose} />
-      <View testID="icon-picker" class="w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl">
+    <Dialog
+      open
+      animation="fade"
+      backdropClass="bg-black/30"
+      onOpenChange={({ open }) => { if (!open) props.onClose(); }}
+      testID="icon-picker"
+      class="w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
+    >
         <View class="flex-row items-center gap-3">
           <View class="min-w-0 flex-1 gap-0.5">
             <Text class="text-lg font-semibold text-foreground">{t("settings.models.icon_picker.title")}</Text>
@@ -72,7 +77,6 @@ export function IconPicker(props: {
             <Text class="text-xs text-foreground">{t("common.cancel")}</Text>
           </Button>
         </View>
-      </View>
-    </View>
+    </Dialog>
   );
 }

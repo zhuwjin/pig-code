@@ -1,4 +1,4 @@
-import { batch, LayoutAnimation, signal } from "nsh";
+import { batch, signal } from "nsh";
 import { Agent } from "pig-code-ts/native";
 import { t } from "./i18n";
 import {
@@ -700,7 +700,6 @@ export class AgentStore {
   }
 
   toggleExpanded(id: string): void {
-    LayoutAnimation.configureNext({ duration: 200, update: { type: "easeOut" } });
     this.expandedItems.update((all) => ({ ...all, [id]: !this.isExpanded(id) }));
   }
 
@@ -709,7 +708,6 @@ export class AgentStore {
   }
 
   toggleTurnExpanded(id: string): void {
-    LayoutAnimation.configureNext({ duration: 200, update: { type: "easeOut" } });
     this.expandedTurns.update((all) => ({ ...all, [id]: !this.isTurnExpanded(id) }));
   }
 

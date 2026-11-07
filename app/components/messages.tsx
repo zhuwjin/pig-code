@@ -182,7 +182,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const open = () => props.store.isExpanded(item().id);
   const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
   return (
-    <Collapsible
+    <Collapsible reveal
       open={open()}
       content={
         <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">

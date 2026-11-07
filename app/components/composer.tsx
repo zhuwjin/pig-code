@@ -1,5 +1,5 @@
 import { effect, Image, keymap, signal, Text, token, View, type InputRef } from "nsh";
-import { Button, Dialog, Input, Popover } from "nsh/base";
+import { Button, Dialog, Input, Select } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
 import { t } from "../i18n";
@@ -14,7 +14,6 @@ import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
 function WorkspaceSelector(props: UiContext) {
-  const open = signal(false);
   const selected = () => props.store.heroCwd();
   const workspaces = () => Array.from(new Set([
     props.store.cwd(),
@@ -23,12 +22,29 @@ function WorkspaceSelector(props: UiContext) {
   ]));
   return (
     <View class="w-full flex-row items-center gap-2 border-b border-border pb-1">
-      <Popover
-        open={open()}
-        onOpenChange={({ open: value }) => open.set(value)}
+      <Select
+        items={workspaces().map((path) => ({ value: path, title: workspaceName(path) }))}
+        value={selected()}
+        onChange={({ value }) => props.store.selectHeroWorkspace(value)}
+        accessibilityLabel={t("composer.select_workspace")}
         placement="top"
         align="start"
         popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
+        itemClass="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
+        renderItem={(item) => (
+          <View testID={`hero-cwd-option-${item.index}`} class="min-w-0 gap-0.5">
+            <Text style={{ numberOfLines: 1 }} class="text-sm text-foreground">{item.title}</Text>
+            <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{item.value}</Text>
+          </View>
+        )}
+        cleanable
+        clearButton={
+          <View testID="hero-cwd-clear">
+            <Icon name="x" size={12} color={token("muted-foreground")} />
+          </View>
+        }
+        clearButtonClass="absolute right-1 top-1 z-10 rounded-full bg-accent/50 p-1 hover:bg-accent"
+        clearButtonAccessibilityLabel={t("composer.clear_workspace")}
         trigger={
           <View role="button" testID="hero-cwd" class="flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent">
             <Icon name="folder-closed" color={token("muted-foreground")} />
@@ -38,40 +54,7 @@ function WorkspaceSelector(props: UiContext) {
             <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
           </View>
         }
-      >
-        <View class="gap-1">
-          <Each of={workspaces()} key={(path) => path}>
-            {(path, index) => (
-              <Button
-                testID={`hero-cwd-option-${index()}`}
-                selected={selected() === path()}
-                class="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-                onPress={() => {
-                  props.store.selectHeroWorkspace(path());
-                  open.set(false);
-                }}
-              >
-                <View class="min-w-0 gap-0.5">
-                  <Text style={{ numberOfLines: 1 }} class="text-sm text-foreground">{workspaceName(path())}</Text>
-                  <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{path()}</Text>
-                </View>
-              </Button>
-            )}
-          </Each>
-          <If when={selected()}>
-            <Button
-              testID="hero-cwd-clear"
-              class="rounded-(--radius) px-3 py-2 hover:bg-accent"
-              onPress={() => {
-                props.store.selectHeroWorkspace(null);
-                open.set(false);
-              }}
-            >
-              <Text class="text-sm text-muted-foreground">{t("composer.clear_workspace")}</Text>
-            </Button>
-          </If>
-        </View>
-      </Popover>
+      />
     </View>
   );
 }

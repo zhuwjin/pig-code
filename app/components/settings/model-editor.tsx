@@ -1,5 +1,5 @@
 import { effect, Scroll, signal, Text, token, View } from "nsh";
-import { Button, Checkbox, Input, Switch } from "nsh/base";
+import { Button, Checkbox, Collapsible, Dialog, Input, NumberInput, Radio, RadioGroup, Switch } from "nsh/base";
 import { t } from "../../i18n";
 import type { MessageKey } from "../../i18n";
 import type { ModelConfig, ModelRegistryInfo, ProviderConfig } from "../../protocol";
@@ -30,8 +30,8 @@ export function ModelEditor(props: UiContext & {
 }) {
   const id = signal("");
   const name = signal("");
-  const contextWindow = signal("128000");
-  const maxOutput = signal("8192");
+  const contextWindow = signal(128000);
+  const maxOutput = signal(8192);
   const enabled = signal(true);
   const advanced = signal(false);
   const inputImage = signal(false);
@@ -54,8 +54,8 @@ export function ModelEditor(props: UiContext & {
     const model = props.model;
     id.set(model?.id ?? "");
     name.set(model?.name ?? "");
-    contextWindow.set(String(model?.context_window ?? 128000));
-    maxOutput.set(String(model?.max_output_tokens ?? 8192));
+    contextWindow.set(model?.context_window ?? 128000);
+    maxOutput.set(model?.max_output_tokens ?? 8192);
     enabled.set(model?.enabled ?? true);
     advanced.set(false);
     inputImage.set(model?.input_image ?? false);
@@ -98,8 +98,8 @@ export function ModelEditor(props: UiContext & {
   });
   const applyInfo = (info: ModelRegistryInfo, overwrite: boolean) => {
     const context = info.context ?? info.input;
-    if (overwrite || context != null) contextWindow.set(String(context ?? 128000));
-    if (overwrite || info.output != null) maxOutput.set(String(info.output ?? 8192));
+    if (overwrite || context != null) contextWindow.set(context ?? 128000);
+    if (overwrite || info.output != null) maxOutput.set(info.output ?? 8192);
     if (overwrite || info.reasoning_levels.length > 0) {
       const nextLevels = [...info.reasoning_levels];
       const nextLabels = Object.fromEntries(Object.entries(labels()).filter(([level]) => nextLevels.includes(level)));
@@ -228,9 +228,14 @@ export function ModelEditor(props: UiContext & {
     else error.set(props.store.globalError() || t("settings.models.error.save_failed"));
   };
   return (
-    <View class="absolute inset-0 z-50 items-center justify-center">
-      <Button accessibilityLabel={t("settings.models.dialog.close_label")} class="absolute inset-0 bg-black/30" onPress={props.onClose} />
-      <View testID="model-editor" class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl">
+    <Dialog
+      open
+      animation="fade"
+      backdropClass="bg-black/30"
+      onOpenChange={({ open }) => { if (!open) props.onClose(); }}
+      testID="model-editor"
+      class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
+    >
         <View class="flex-row items-center">
           <Text class="flex-1 text-lg font-semibold text-foreground">{t(props.model ? "settings.models.dialog.edit_title" : "settings.models.dialog.add_title")}</Text>
           <Button testID="model-dialog-close" accessibilityLabel={t("settings.models.dialog.close_label")} class="rounded-(--radius) px-2 py-1 hover:bg-muted" onPress={props.onClose}>
@@ -263,11 +268,31 @@ export function ModelEditor(props: UiContext & {
             <View class="flex-row gap-3">
               <View class="flex-1 gap-1">
                 <Text class="text-xs text-muted-foreground">{t("settings.models.field.context_window")}</Text>
-                <Input testID="model-context" value={contextWindow()} onChange={({ value: text }) => contextWindow.set(text)} keyboardType="number-pad" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-sm text-foreground" />
+                <NumberInput
+                  testID="model-context"
+                  value={contextWindow()}
+                  min={1}
+                  onChange={({ value }) => { if (value !== null) contextWindow.set(value); }}
+                  accessibilityLabel={t("settings.models.field.context_window")}
+                  class="flex-row rounded-(--radius) border border-border bg-background px-2 py-1"
+                  inputClass="flex-1 font-mono text-sm text-foreground"
+                  decrementButton={<Text class="px-2 text-sm text-muted-foreground">−</Text>}
+                  incrementButton={<Text class="px-2 text-sm text-muted-foreground">+</Text>}
+                />
               </View>
               <View class="flex-1 gap-1">
                 <Text class="text-xs text-muted-foreground">{t("settings.models.field.max_output")}</Text>
-                <Input testID="model-max-output" value={maxOutput()} onChange={({ value: text }) => maxOutput.set(text)} keyboardType="number-pad" class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-sm text-foreground" />
+                <NumberInput
+                  testID="model-max-output"
+                  value={maxOutput()}
+                  min={1}
+                  onChange={({ value }) => { if (value !== null) maxOutput.set(value); }}
+                  accessibilityLabel={t("settings.models.field.max_output")}
+                  class="flex-row rounded-(--radius) border border-border bg-background px-2 py-1"
+                  inputClass="flex-1 font-mono text-sm text-foreground"
+                  decrementButton={<Text class="px-2 text-sm text-muted-foreground">−</Text>}
+                  incrementButton={<Text class="px-2 text-sm text-muted-foreground">+</Text>}
+                />
               </View>
             </View>
             <View class="flex-row items-center gap-2">
@@ -280,11 +305,7 @@ export function ModelEditor(props: UiContext & {
                 thumbClass="h-4 w-4 rounded-full bg-background shadow-sm transition-transform checked:translate-x-4"
               />
             </View>
-            <Button testID="advanced-toggle" class="flex-row items-center gap-2 rounded-(--radius) py-1 hover:bg-muted" onPress={() => advanced.update((open) => !open)}>
-              <Icon name="chevron-down" class={advanced() ? undefined : "-rotate-90"} size={14} />
-              <Text class="text-sm text-foreground">{t("settings.models.field.advanced")}</Text>
-            </Button>
-            <If when={advanced()}>
+            <Collapsible open={advanced()} reveal content={
               <View class="gap-3">
                 <View class="flex-row flex-wrap gap-3">
                   <Checkbox testID="model-vision" checked={inputImage()} onChange={({ checked }) => inputImage.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_image")}</Text></Checkbox>
@@ -332,25 +353,30 @@ export function ModelEditor(props: UiContext & {
                 </View>
                 <View class="gap-1">
                   <Text class="text-xs text-muted-foreground">{t("settings.models.field.default_level")}</Text>
-                  <View class="flex-row flex-wrap gap-1">
-                    <Button testID="default-level-unset" selected={!defaultLevel()} class="rounded-full px-2 py-0.5 hover:bg-accent selected:bg-accent" onPress={() => defaultLevel.set("")}>
+                  <RadioGroup class="flex-row flex-wrap gap-1">
+                    <Radio testID="default-level-unset" checked={!defaultLevel()} onChange={() => defaultLevel.set("")} class="rounded-full px-2 py-0.5 hover:bg-accent selected:bg-accent">
                       <Text class="text-xs text-foreground">{t("settings.models.field.default_level_unset")}</Text>
-                    </Button>
+                    </Radio>
                     <Each of={levels()} key={(level) => level}>
                       {(level) => (
-                        <Button testID={`default-level-${level()}`} selected={defaultLevel() === level()} class="rounded-full px-2 py-0.5 hover:bg-accent selected:bg-accent" onPress={() => defaultLevel.set(level())}>
+                        <Radio testID={`default-level-${level()}`} checked={defaultLevel() === level()} onChange={() => defaultLevel.set(level())} class="rounded-full px-2 py-0.5 hover:bg-accent selected:bg-accent">
                           <Text class="text-xs text-foreground">{labels()[level()] || level()}</Text>
-                        </Button>
+                        </Radio>
                       )}
                     </Each>
-                  </View>
+                  </RadioGroup>
                 </View>
                 <View class="gap-1">
                   <Text class="text-xs text-muted-foreground">{t("settings.models.field.params_json")}</Text>
                   <Input testID="model-params-json" multiline value={paramsJson()} onChange={({ value: text }) => paramsJson.set(text)} class="min-h-24 rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-xs text-foreground" />
                 </View>
               </View>
-            </If>
+            }>
+              <Button testID="advanced-toggle" class="flex-row items-center gap-2 rounded-(--radius) py-1 hover:bg-muted" onPress={() => advanced.update((open) => !open)}>
+                <Icon name="chevron-down" class={advanced() ? undefined : "-rotate-90"} size={14} />
+                <Text class="text-sm text-foreground">{t("settings.models.field.advanced")}</Text>
+              </Button>
+            </Collapsible>
             <If when={error()}><Text style={{ userSelect: "text" }} class="text-xs leading-5 text-destructive">{error()}</Text></If>
           </View>
         </Scroll>
@@ -366,7 +392,6 @@ export function ModelEditor(props: UiContext & {
             <Text class="text-xs text-primary-foreground">{t("settings.models.action.save")}</Text>
           </Button>
         </View>
-      </View>
-    </View>
+    </Dialog>
   );
 }

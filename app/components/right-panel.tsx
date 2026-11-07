@@ -201,7 +201,7 @@ function SubagentItemRow(props: UiContext & { item: SubagentItem; index: number;
     const id = `subagent-${props.agentId}-${props.index}`;
     const open = () => props.store.isExpanded(id);
     return (
-      <Collapsible
+      <Collapsible reveal
         open={open()}
         content={
           <View class="ml-6 mt-1 rounded-lg bg-tool-surface p-2">

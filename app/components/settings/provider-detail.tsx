@@ -1,5 +1,5 @@
-import { effect, openUrl, Scroll, signal, Text, token, View } from "nsh";
-import { Button, Input, Popover, Switch } from "nsh/base";
+import { effect, Scroll, signal, Text, token, View } from "nsh";
+import { Button, Input, Link, Select, Switch } from "nsh/base";
 import { t } from "../../i18n";
 import type { ApiFormat, ConnectionTestResult, ModelConfig, ProviderConfig } from "../../protocol";
 import type { UiContext } from "../../ui-context";
@@ -96,7 +96,6 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
   const apiKey = signal("");
   const masked = signal(true);
   const collapsed = signal(false);
-  const formatOpen = signal(false);
   const credential = () => store.providerCredentials()[provider().id];
   const result = () => store.testResults()[provider().id];
   const hasKey = () => credential() === "configured" || credential() === "not_required" || provider().requires_api_key === false;
@@ -196,38 +195,32 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
           <View class="flex-row items-start gap-3">
             <View class="min-w-0 flex-1 gap-1">
               <Text class="text-sm text-muted-foreground">{t("settings.provider.api_format")}</Text>
-              <Popover
-                open={formatOpen()}
-                onOpenChange={({ open }) => formatOpen.set(open)}
+              <Select
+                items={FORMATS.map((item) => ({ value: item.id, title: item.label }))}
+                value={format()}
+                onChange={({ value }) => {
+                  if (value === null) return;
+                  const next = value as ApiFormat;
+                  format.set(next);
+                  save({ api_format: next });
+                }}
+                accessibilityLabel={t("settings.provider.api_format")}
                 placement="bottom"
                 align="start"
                 popupClass="w-96 rounded-xl border border-border bg-popover p-1 shadow-xl"
+                itemClass="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
+                renderItem={(item) => (
+                  <View testID={`provider-format-${item.value}`}>
+                    <Text style={{ numberOfLines: 1 }} class="text-xs text-foreground">{item.title}</Text>
+                  </View>
+                )}
                 trigger={
                   <View role="button" testID="provider-format" class="h-9 w-full cursor-pointer flex-row items-center rounded-(--radius) border border-border bg-background px-3 hover:bg-accent">
                     <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-foreground">{formatLabel(format())}</Text>
                     <Icon name="chevron-down" size={12} />
                   </View>
                 }
-              >
-                <View class="gap-1">
-                  <Each of={FORMATS} key={(item) => item.id}>
-                    {(item) => (
-                      <Button
-                        testID={`provider-format-${item().id}`}
-                        selected={format() === item().id}
-                        class="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-                        onPress={() => {
-                          format.set(item().id);
-                          save({ api_format: item().id });
-                          formatOpen.set(false);
-                        }}
-                      >
-                        <Text style={{ numberOfLines: 1 }} class="text-xs text-foreground">{item().label}</Text>
-                      </Button>
-                    )}
-                  </Each>
-                </View>
-              </Popover>
+              />
             </View>
             <View class="min-w-0 flex-1 gap-1">
               <View class="flex-row items-center gap-2">
@@ -251,10 +244,10 @@ function ConnectionCard(props: UiContext & { provider: () => ProviderConfig }) {
                 </Button>
                 <If when={provider().key_url}>
                   {(url) => (
-                    <Button testID={`provider-key-link-${provider().id}`} class="flex-row items-center gap-0.5 rounded px-0" onPress={() => void openUrl(url())}>
+                    <Link testID={`provider-key-link-${provider().id}`} href={url()} class="flex-row items-center gap-0.5 rounded px-0">
                       <Text class="text-xs text-foreground underline">{t("settings.provider.get_key")}</Text>
                       <Icon name="external-link" size={12} color={token("foreground")} />
-                    </Button>
+                    </Link>
                   )}
                 </If>
               </View>
