@@ -19,8 +19,10 @@ import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, UserItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import {
+  activitySummary,
   buildConversationRows,
   conversationRowsEqual,
+  groupConversationActivity,
   reuseConversationRows,
   type ConversationRow,
   formatClock,
@@ -207,11 +209,10 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
           {item().streaming ? t("messages.thinking") : turn()?.durationMs ? formatDuration(turn()!.durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
         </Text>
         <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-muted-foreground">
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">
             · {lastNonEmptyLine(props.textFor(item()))}
           </Text>
         </If>
-        <View class="flex-1" />
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
     </ListCollapsible>
@@ -338,6 +339,38 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
   );
 }
 
+function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "activity" }>> }) {
+  const row = () => props.row();
+  const open = () => props.store.isExpanded(row().id);
+  return (
+    <ListCollapsible
+      open={open()}
+      testID={row().id}
+      content={
+        <View class="gap-2 pt-2">
+          <Each of={row().items} key={(item) => item.id}>
+            {(item) => <ItemMessageRow {...props} item={item} />}
+          </Each>
+        </View>
+      }
+    >
+      <View
+        role="button"
+        testID={row().id}
+        accessibilityState={{ expanded: open() }}
+        class="flex-row items-center gap-2 py-1"
+        onPress={() => props.store.toggleExpanded(row().id)}
+      >
+        <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">
+          {activitySummary(row().items)}
+        </Text>
+        <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
+      </View>
+    </ListCollapsible>
+  );
+}
+
 function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
   const item = () => props.item();
   return (
@@ -376,11 +409,23 @@ function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; acti
         <If when={row().type === "item"}>
           <ItemMessageRow {...props} item={() => (row() as Extract<ConversationRow, { type: "item" }>).item} />
         </If>
+        <If when={row().type === "activity"}>
+          <ActivityRow {...props} row={() => row() as Extract<ConversationRow, { type: "activity" }>} />
+        </If>
         <If when={row().type === "work"}>
           <WorkRow {...props} turn={() => (row() as Extract<ConversationRow, { type: "work" }>).turn}>
             <View class="gap-2 pt-4">
-              <Each of={(row() as Extract<ConversationRow, { type: "work" }>).items} key={(item) => item.id}>
-                {(item) => <ItemMessageRow {...props} item={item} />}
+              <Each of={groupConversationActivity((row() as Extract<ConversationRow, { type: "work" }>).items)} key={(activity) => activity.id}>
+                {(activity) => (
+                  <>
+                    <If when={activity().type === "item"}>
+                      <ItemMessageRow {...props} item={() => (activity() as Extract<ConversationRow, { type: "item" }>).item} />
+                    </If>
+                    <If when={activity().type === "activity"}>
+                      <ActivityRow {...props} row={() => activity() as Extract<ConversationRow, { type: "activity" }>} />
+                    </If>
+                  </>
+                )}
               </Each>
             </View>
           </WorkRow>
@@ -529,7 +574,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
       return false;
     };
     return rows().filter((row) => {
-      if (row.type === "work") return row.items.some(itemMatches);
+      if (row.type === "work" || row.type === "activity") return row.items.some(itemMatches);
       if (row.type !== "item") return false;
       return itemMatches(row.item);
     });

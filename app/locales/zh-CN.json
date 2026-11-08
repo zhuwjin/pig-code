@@ -681,6 +681,36 @@
     "compacted": "上下文已压缩（{before} → {after} tokens）",
     "compacted_plain": "上下文已压缩",
     "view_summary": "查看摘要",
+    "activity": {
+      "grep": {
+        "one": "搜索了 {count} 个模式",
+        "other": "搜索了 {count} 个模式"
+      },
+      "glob": {
+        "one": "找了 {count} 次文件",
+        "other": "找了 {count} 次文件"
+      },
+      "command": {
+        "one": "运行了 {count} 条命令",
+        "other": "运行了 {count} 条命令"
+      },
+      "web_search": {
+        "one": "网络搜索了 {count} 次",
+        "other": "网络搜索了 {count} 次"
+      },
+      "reasoning": {
+        "one": "思考了 {count} 次",
+        "other": "思考了 {count} 次"
+      },
+      "tools": {
+        "one": "执行了 {count} 次工具调用",
+        "other": "执行了 {count} 次工具调用"
+      },
+      "failures": {
+        "one": "（{count} 失败）",
+        "other": "（{count} 失败）"
+      }
+    },
     "notification": {
       "completed": "完成",
       "failed": "失败"

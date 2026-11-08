@@ -135,14 +135,14 @@ function SearchBody(props: UiContext & { item: Accessor<ToolItem> }) {
         {(value) => (
           <View class="max-h-60 overflow-hidden rounded-xl border border-border bg-tool-surface">
             <Scroll class="max-h-60" contentClass="p-1">
-              <View class="gap-0.5">
+              <View>
                 <Each of={value().rows.slice(0, 400)} key={(row) => `${row.path}:${row.line ?? 0}:${row.content ?? ""}`}>
                   {(row) => (
                     <Button
-                      class="flex-row items-center gap-2 rounded px-2 py-1.5 hover:bg-accent"
+                      class="group flex-row items-center gap-2 rounded px-2 py-0.5"
                       onPress={() => props.store.openFile(row().path, row().line)}
                     >
-                      <Text style={{ numberOfLines: 1 }} class="w-56 shrink-0 text-left font-mono text-xs text-info">
+                      <Text style={{ numberOfLines: 1 }} class="w-56 shrink-0 text-left font-mono text-xs text-foreground group-hover:text-info">
                         {row().path}{row().line ? `:${row().line}` : ""}
                       </Text>
                       <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left font-mono text-xs text-foreground">
@@ -289,7 +289,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
         >
           <Icon name="bot" size={16} color={token("muted-foreground")} />
           <Text class="text-sm font-medium text-muted-foreground">Swarm</Text>
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-muted-foreground">{props.item().summary}</Text>
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{props.item().summary}</Text>
           <Text class="text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
           <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
         </View>
@@ -365,7 +365,7 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
         onPress={() => props.store.toggleExpanded(`plan-${item().id}`)}
       >
         <Icon name="lightbulb" size={16} color={token("info")} />
-        <Text class="flex-1 text-sm text-foreground">
+        <Text class="min-w-0 text-sm text-foreground">
           {t(item().status === "done" && approved() ? "tools.plan_approved" : item().status === "input" || item().status === "running" ? "tools.plan_waiting" : "tools.plan_not_approved")}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
@@ -408,7 +408,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         <If when={item().tool === "Read"}>
           <Button
             testID="read-path"
-            class="min-w-0 flex-1"
+            class="min-w-0"
             onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
           >
             <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
@@ -420,7 +420,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
           </If>
         </If>
         <If when={item().tool !== "Read"}>
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-muted-foreground">{summary()}</Text>
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{summary()}</Text>
         </If>
         <If when={item().edit}>
           <Text class="shrink-0 font-mono text-xs text-success">+{item().edit!.additions}</Text>

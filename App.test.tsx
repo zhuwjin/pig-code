@@ -137,6 +137,7 @@ test("creates, streams and replays a session", async () => {
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
   await app.waitFor("text:/工作了/");
   await app.press("text:/工作了/");
+  await app.press("text:/执行了 1 次工具调用/");
   await app.waitFor("读取");
   expect(app.value("id:composer-input")).toBe("");
 

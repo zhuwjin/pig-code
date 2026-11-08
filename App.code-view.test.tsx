@@ -1,11 +1,13 @@
 import { expect, open, test } from "nsh/test";
 
-function openCodeView() {
-  return open("./App.code-view.fixture.tsx", {
+async function openCodeView() {
+  const app = await open("./App.code-view.fixture.tsx", {
     platform: "macos",
     width: 1200,
     height: 800,
   });
+  await app.press("id:activity-read");
+  return app;
 }
 
 test("virtualizes long read output and reaches the real last line", async () => {

@@ -681,6 +681,36 @@
     "compacted": "Context compacted ({before} → {after} tokens)",
     "compacted_plain": "Context compacted",
     "view_summary": "View summary",
+    "activity": {
+      "grep": {
+        "one": "Searched {count} pattern",
+        "other": "Searched {count} patterns"
+      },
+      "glob": {
+        "one": "Found files {count} time",
+        "other": "Found files {count} times"
+      },
+      "command": {
+        "one": "Ran {count} command",
+        "other": "Ran {count} commands"
+      },
+      "web_search": {
+        "one": "Searched the web {count} time",
+        "other": "Searched the web {count} times"
+      },
+      "reasoning": {
+        "one": "Thought {count} time",
+        "other": "Thought {count} times"
+      },
+      "tools": {
+        "one": "Used {count} tool",
+        "other": "Used {count} tools"
+      },
+      "failures": {
+        "one": " ({count} failure)",
+        "other": " ({count} failures)"
+      }
+    },
     "notification": {
       "completed": "Completed",
       "failed": "Failed"

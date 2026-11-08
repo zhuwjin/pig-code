@@ -1,12 +1,67 @@
-import { t } from "./i18n";
+import { t, tCount } from "./i18n";
 import type { ChatItem, EditDiff, MarkdownItem, TurnState, TurnUsageStats } from "./protocol";
 import type { IconName } from "./components/icon";
 
 export type ConversationRow =
   | { id: string; type: "item"; item: ChatItem }
+  | { id: string; type: "activity"; items: ChatItem[] }
   | { id: string; type: "work"; turn: TurnState; items: ChatItem[] }
   | { id: string; type: "changes"; turn: TurnState }
   | { id: string; type: "actions"; turn: TurnState; markdown: MarkdownItem[] };
+
+export type ConversationActivityRow = Extract<ConversationRow, { type: "item" | "activity" }>;
+
+export function groupConversationActivity(items: ChatItem[]): ConversationActivityRow[] {
+  const rows: ConversationActivityRow[] = [];
+  let activity: ChatItem[] = [];
+  const flush = () => {
+    if (activity.length === 1) rows.push({ id: `item-${activity[0].id}`, type: "item", item: activity[0] });
+    if (activity.length > 1) rows.push({ id: `activity-${activity[0].id}`, type: "activity", items: [...activity] });
+    activity = [];
+  };
+  for (const item of items) {
+    if (item.kind === "reasoning" || item.kind === "tool") {
+      activity.push(item);
+      continue;
+    }
+    flush();
+    rows.push({ id: `item-${item.id}`, type: "item", item });
+  }
+  flush();
+  return rows;
+}
+
+type ActivityCategory = "grep" | "glob" | "command" | "web_search" | "reasoning" | "tools";
+const activityCategoryOrder: ActivityCategory[] = ["grep", "glob", "command", "web_search", "reasoning", "tools"];
+
+function activityCategory(item: ChatItem): ActivityCategory | null {
+  if (item.kind === "reasoning") return "reasoning";
+  if (item.kind !== "tool") return null;
+  if (item.tool === "Grep") return "grep";
+  if (item.tool === "Glob") return "glob";
+  if (isExecTool(item.tool)) return "command";
+  if (item.tool === "WebSearch") return "web_search";
+  return "tools";
+}
+
+export function activitySummary(items: ChatItem[]): string {
+  const counts = new Map<ActivityCategory, { count: number; failures: number }>();
+  for (const item of items) {
+    const category = activityCategory(item);
+    if (!category) continue;
+    const current = counts.get(category) ?? { count: 0, failures: 0 };
+    current.count += 1;
+    if (item.kind === "tool" && item.status === "error") current.failures += 1;
+    counts.set(category, current);
+  }
+  return activityCategoryOrder.flatMap((category) => {
+    const current = counts.get(category);
+    if (!current) return [];
+    const summary = tCount(`messages.activity.${category}`, current.count);
+    const failures = current.failures ? tCount("messages.activity.failures", current.failures) : "";
+    return [`${summary}${failures}`];
+  }).join(" · ");
+}
 
 export function buildConversationRows(
   items: ChatItem[],
@@ -46,9 +101,7 @@ export function buildConversationRows(
       })
       : [];
     if (turn && ended && hasWork) rows.push({ id: `work-${turnId}`, type: "work", turn, items: workItems });
-    group.forEach((entry) => {
-      if (!workItems.includes(entry)) rows.push({ id: `item-${entry.id}`, type: "item", item: entry });
-    });
+    rows.push(...groupConversationActivity(group.filter((entry) => !workItems.includes(entry))));
     if (turn?.changes.length) rows.push({ id: `changes-${turnId}`, type: "changes", turn });
     if (turn && ended) {
       rows.push({
@@ -76,6 +129,10 @@ function sameConversationItem(previous: ChatItem, next: ChatItem): boolean {
 function sameConversationRow(previous: ConversationRow, next: ConversationRow): boolean {
   if (previous.id !== next.id || previous.type !== next.type) return false;
   if (previous.type === "item" && next.type === "item") return sameConversationItem(previous.item, next.item);
+  if (previous.type === "activity" && next.type === "activity") {
+    return previous.items.length === next.items.length &&
+      previous.items.every((item, itemIndex) => sameConversationItem(item, next.items[itemIndex]));
+  }
   if (previous.type === "work" && next.type === "work") {
     return previous.turn === next.turn && previous.items.length === next.items.length &&
       previous.items.every((item, itemIndex) => sameConversationItem(item, next.items[itemIndex]));

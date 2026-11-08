@@ -58,6 +58,8 @@ test("collapses long work and inner cards without hiding the final answer", asyn
 
   await app.press("id:work-turn-1");
   await app.waitFor("id:thinking-thinking");
+  await app.press("id:activity-tool-0");
+  await app.waitFor("id:tool-tool-0");
   await app.press("id:tool-tool-0");
   await app.waitFor("id:wrap-tool-0-command");
   await app.press("id:tool-tool-0");
@@ -88,6 +90,8 @@ test("keeps long nested content and siblings consistent through reveals", async 
   await app.press("id:thinking-thinking");
   await app.wait(120);
   expect(app.shows("text:/Reasoning section 1/")).toBe(true);
+  await app.press("id:activity-tool-0");
+  await app.waitFor("id:tool-tool-0");
   expect(app.shows("id:tool-tool-0")).toBe(true);
   await app.wait(400);
 

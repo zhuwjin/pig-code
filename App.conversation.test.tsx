@@ -1,8 +1,10 @@
 import { expect, open, test } from "nsh/test";
 import {
+  activitySummary,
   buildConversationRows,
   conversationRowsEqual,
   formatClock,
+  groupConversationActivity,
   formatTokens,
   mentionSegments,
   parseReadOutput,
@@ -14,6 +16,7 @@ import {
   userMessageIsLong,
 } from "./app/conversation";
 import type { ChatItem, TurnState } from "./app/protocol";
+import { setLanguagePreference } from "./app/i18n";
 
 const turn: TurnState = {
   id: "turn-1",
@@ -70,6 +73,42 @@ test("folds a finished turn around its final answer and restores work on demand"
   }
 });
 
+test("groups consecutive activity while preserving body and single tools", () => {
+  const grouped = groupConversationActivity(items);
+  expect(grouped.map((row) => row.type)).toEqual(["item", "activity", "item", "item"]);
+  expect(grouped[1].id).toBe("activity-r1");
+  if (grouped[1].type === "activity") {
+    expect(grouped[1].items.map((item) => item.id)).toEqual(["r1", "call-1"]);
+  }
+
+  const call = items[2] as Extract<ChatItem, { kind: "tool" }>;
+  const appended = groupConversationActivity([items[0], items[1], call, { ...call, id: "call-2" }]);
+  expect(appended.map((row) => row.type)).toEqual(["item", "activity"]);
+  expect(appended[1].id).toBe(grouped[1].id);
+  expect(groupConversationActivity([call, items[3]]).map((row) => row.type)).toEqual(["item", "item"]);
+});
+
+test("summarizes activity categories and failures in both locales", () => {
+  const call = items[2] as Extract<ChatItem, { kind: "tool" }>;
+  const activityItems: ChatItem[] = [
+    items[1],
+    { ...call, id: "grep-1", tool: "Grep" },
+    { ...call, id: "grep-2", tool: "Grep", status: "error" },
+    { ...call, id: "glob-1", tool: "Glob" },
+    { ...call, id: "bash-1", tool: "Bash" },
+    { ...call, id: "web-1", tool: "WebSearch", status: "error" },
+    call,
+  ];
+  try {
+    setLanguagePreference("en");
+    expect(activitySummary(activityItems)).toBe("Searched 2 patterns (1 failure) · Found files 1 time · Ran 1 command · Searched the web 1 time (1 failure) · Thought 1 time · Used 1 tool");
+    setLanguagePreference("zh-CN");
+    expect(activitySummary(activityItems)).toBe("搜索了 2 个模式（1 失败） · 找了 1 次文件 · 运行了 1 条命令 · 网络搜索了 1 次（1 失败） · 思考了 1 次 · 执行了 1 次工具调用");
+  } finally {
+    setLanguagePreference("system");
+  }
+});
+
 test("keeps row identity while Markdown streams and releases it when the text settles", () => {
   const runningTurn: TurnState = { ...turn, status: "running" };
   const before = buildConversationRows(items, [runningTurn]);
@@ -92,9 +131,9 @@ test("reuses unchanged row objects while tool input streams", () => {
   const next = buildConversationRows(streamed, [runningTurn]);
   const merged = reuseConversationRows(before, next);
   expect(merged).not.toBe(before);
-  for (const index of [0, 1, 3, 4]) expect(merged[index]).toBe(before[index]);
-  expect(merged[2]).toBe(next[2]);
-  expect(merged[2]).not.toBe(before[2]);
+  for (const index of [0, 2, 3, 4]) expect(merged[index]).toBe(before[index]);
+  expect(merged[1]).toBe(next[1]);
+  expect(merged[1]).not.toBe(before[1]);
   expect(conversationRowsEqual(before, next)).toBe(false);
   expect(conversationRowsEqual(merged, next)).toBe(true);
 });
@@ -167,6 +206,7 @@ test("collapses completed work and keeps turn actions available", async () => {
   expect(app.texts()).not.toContain("读取");
 
   await app.press("text:/工作了/");
+  await app.press("text:/执行了 1 次工具调用/");
   await app.waitFor("读取");
 });
 
@@ -213,6 +253,7 @@ test("opens a Read result in the right-side file tab", async () => {
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
   await app.waitFor("text:/工作了/");
   await app.press("text:/工作了/");
+  await app.press("text:/执行了 1 次工具调用/");
   await app.press("id:read-path");
   await app.waitFor("id:right-tab-file:README.mock.md");
   expect(app.texts()).toContain("README.mock.md");
