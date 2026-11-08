@@ -33,12 +33,17 @@ import {
   formatClock,
   formatDuration,
   formatTokens,
-  lastNonEmptyLine,
   mentionSegments,
   userMessageIsLong,
 } from "../conversation";
 import { Icon } from "./icon";
 import { ListCollapsible } from "./list-collapsible";
+import {
+  REASONING_TICKER_INTERVAL_MS,
+  REASONING_TICKER_ROLL_MS,
+  ReasoningTicker,
+  reasoningTickerLine,
+} from "./reasoning-ticker";
 import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
 
@@ -190,53 +195,98 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const item = () => props.item();
   const open = () => props.store.isExpanded(item().id);
   const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
-  const tickerCurrent = signal(lastNonEmptyLine(props.textFor(item())));
+  const roll = new ReasoningTicker();
+  const tickerCurrent = signal(reasoningTickerLine(props.textFor(item()))?.text ?? "");
   const tickerPrevious = signal<{ text: string } | null>(null);
   const tickerProgress = createAnimatedValue(1);
   const fadeLeft = signal(false);
   const fadeRight = signal(false);
   let tickerAnimation: ReturnType<typeof Animated.timing> | undefined;
+  let tickerTimer: ReturnType<typeof setTimeout> | undefined;
+  let tickerScrollFrame: number | undefined;
   let tickerScroll: ScrollRef | undefined;
-  effect(() => {
-    const next = lastNonEmptyLine(props.textFor(item()));
-    const current = tickerCurrent();
-    if (next === current) return;
-    const animate = item().streaming && !open() && !reduceMotion();
-    tickerPrevious.set(animate ? { text: current } : null);
-    tickerCurrent.set(next);
-    if (animate) {
-      tickerProgress.set(0);
-      tickerAnimation?.stop();
-      tickerAnimation = Animated.timing(tickerProgress, {
-        toValue: 1,
-        duration: 180,
-        easing: Easing.out(Easing.cubic),
-      });
-      tickerAnimation.start(({ finished }) => {
-        if (finished) tickerPrevious.set(null);
-      });
-    } else {
+
+  const syncTicker = () => {
+    tickerCurrent.set(roll.displayed?.text ?? "");
+    tickerPrevious.set(roll.exiting ? { text: roll.exiting.text } : null);
+  };
+  const scrollTickerToEnd = () => {
+    if (tickerScrollFrame !== undefined) cancelAnimationFrame(tickerScrollFrame);
+    tickerScrollFrame = requestAnimationFrame(() => {
+      tickerScrollFrame = undefined;
+      tickerScroll?.scrollToEnd({ animated: false });
+    });
+  };
+  const playTicker = () => {
+    tickerAnimation?.stop();
+    if (reduceMotion()) {
       tickerProgress.set(1);
+      tickerPrevious.set(null);
+      return;
     }
-    requestAnimationFrame(() => tickerScroll?.scrollToEnd({ animated: false }));
+    tickerProgress.set(0);
+    tickerAnimation = Animated.timing(tickerProgress, {
+      toValue: 1,
+      duration: REASONING_TICKER_ROLL_MS,
+      easing: Easing.bezier(0.4, 0, 0.2, 1),
+    });
+    tickerAnimation.start(({ finished }) => {
+      if (finished) tickerPrevious.set(null);
+    });
+  };
+  const armTicker = () => {
+    if (tickerTimer !== undefined) clearTimeout(tickerTimer);
+    const generation = roll.generation;
+    tickerTimer = setTimeout(() => {
+      tickerTimer = undefined;
+      if (roll.fire(generation, Date.now())) {
+        syncTicker();
+        playTicker();
+        armTicker();
+        scrollTickerToEnd();
+      } else {
+        syncTicker();
+        tickerProgress.set(1);
+      }
+    }, REASONING_TICKER_INTERVAL_MS);
+  };
+  effect(() => {
+    const target = reasoningTickerLine(props.textFor(item()));
+    if (!item().streaming || open() || !target) {
+      if (tickerTimer !== undefined) clearTimeout(tickerTimer);
+      tickerTimer = undefined;
+      tickerAnimation?.stop();
+      roll.reset(target);
+      tickerProgress.set(1);
+      syncTicker();
+      return;
+    }
+    const promoted = roll.feed(target);
+    syncTicker();
+    if (promoted) {
+      playTicker();
+      armTicker();
+    }
+    scrollTickerToEnd();
   });
   effect(() => {
-    const frame = requestAnimationFrame(() => tickerScroll?.scrollToEnd({ animated: false }));
+    scrollTickerToEnd();
     return () => {
-      cancelAnimationFrame(frame);
+      if (tickerTimer !== undefined) clearTimeout(tickerTimer);
+      if (tickerScrollFrame !== undefined) cancelAnimationFrame(tickerScrollFrame);
       tickerAnimation?.stop();
     };
   });
   const ticker = () => (
-    <View class="min-w-0 flex-row items-center">
-      <Text class="shrink-0 text-sm text-muted-foreground">·&nbsp;</Text>
-      <View class="relative min-w-0">
+    <View class="min-w-0 shrink flex-row items-center gap-2">
+      <Text class="shrink-0 text-sm leading-5 text-muted-foreground">·</Text>
+      <View class="relative min-w-0 shrink">
         <Scroll
           ref={(node) => { tickerScroll = node; }}
           testID={`thinking-ticker-${item().id}`}
           horizontal
-          class="min-w-0"
-          scrollbar={false}
+          class="w-full min-w-0"
+          scrollbar={{ horizontal: { class: "hidden" } }}
           bounces={false}
           onScroll={(event) => {
             const max = Math.max(0, event.contentSize.width - event.size.width);
@@ -251,7 +301,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
                   class="absolute inset-x-0 top-0 h-5 overflow-hidden"
                   style={{
                     opacity: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
-                    transform: [{ translateY: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -20] }) }],
+                    transform: [{ translateY: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -11] }) }],
                   }}
                 >
                   <Text class="shrink-0 text-sm leading-5 text-muted-foreground">{previous().text}</Text>
@@ -262,7 +312,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
               class="h-5 overflow-hidden"
               style={{
                 opacity: tickerProgress,
-                transform: [{ translateY: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+                transform: [{ translateY: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [11, 0] }) }],
               }}
             >
               <Text class="shrink-0 text-sm leading-5 text-muted-foreground">{tickerCurrent()}</Text>
@@ -272,13 +322,13 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <If when={fadeLeft()}>
           <View
             class="absolute left-0 top-0 h-5 w-4"
-            style={{ pointerEvents: "none", backgroundImage: `linear-gradient(to right, ${token("background")}, ${token("background")}00)` }}
+            style={{ pointerEvents: "none", backgroundImage: `linear-gradient(to right, ${token("background")}, transparent)` }}
           />
         </If>
         <If when={fadeRight()}>
           <View
             class="absolute right-0 top-0 h-5 w-4"
-            style={{ pointerEvents: "none", backgroundImage: `linear-gradient(to right, ${token("background")}00, ${token("background")})` }}
+            style={{ pointerEvents: "none", backgroundImage: `linear-gradient(to right, transparent, ${token("background")})` }}
           />
         </If>
       </View>
@@ -300,14 +350,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         role="button"
         testID={`thinking-${item().id}`}
         accessibilityState={{ expanded: open() }}
-        class="flex-row items-center gap-2 py-1"
+        class="w-full flex-row items-center gap-2 py-1"
         onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
-        <Text class={item().streaming ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm text-muted-foreground"}>
+        <Text class={item().streaming ? "shrink-0 text-sm leading-5 text-muted-foreground animate-pulse" : "shrink-0 text-sm leading-5 text-muted-foreground"}>
           {item().streaming ? t("messages.thinking") : turn()?.durationMs ? formatDuration(turn()!.durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
         </Text>
-        <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>{ticker()}</If>
+        <If when={item().streaming && !open() && reasoningTickerLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
     </ListCollapsible>
@@ -453,11 +503,11 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         role="button"
         testID={row().id}
         accessibilityState={{ expanded: open() }}
-        class="flex-row items-center gap-2 py-1"
+        class="w-full min-w-0 flex-row items-center gap-2 py-1"
         onPress={() => props.store.toggleExpanded(row().id)}
       >
         <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
-        <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
           {activitySummary(row().items)}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />

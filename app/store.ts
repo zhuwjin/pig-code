@@ -1418,6 +1418,7 @@ export class AgentStore {
         this.queueMarkdownDelta(sessionId!, data.item_id, "markdown", String(data.delta ?? ""));
         break;
       case "TextDone":
+        this.finishStreamingReasoning(sessionId!);
         this.upsertMarkdown(sessionId!, data.item_id, "markdown", data.full_text, false, false);
         break;
       case "Sources":
@@ -1429,6 +1430,7 @@ export class AgentStore {
         break;
       case "ToolInputStart":
         this.clearRetry(sessionId!);
+        this.finishStreamingReasoning(sessionId!);
         this.upsertTool(sessionId!, data.item_id, { tool: data.tool, status: "input" });
         break;
       case "ToolInputDelta":
@@ -1439,6 +1441,7 @@ export class AgentStore {
         break;
       case "ToolCallBegin":
         this.clearRetry(sessionId!);
+        this.finishStreamingReasoning(sessionId!);
         this.upsertTool(sessionId!, data.item_id, {
           tool: data.tool,
           summary: data.input_summary,
@@ -1785,6 +1788,20 @@ export class AgentStore {
     this.retrying.update((all) => ({ ...all, [sessionId]: null }));
   }
 
+  private static settleStreamingReasoning(items: ChatItem[]): ChatItem[] {
+    let changed = false;
+    const next = items.map((item) => {
+      if (item.kind !== "reasoning" || !item.streaming) return item;
+      changed = true;
+      return { ...item, streaming: false };
+    });
+    return changed ? next : items;
+  }
+
+  private finishStreamingReasoning(sessionId: string): void {
+    this.updateItems(sessionId, AgentStore.settleStreamingReasoning);
+  }
+
   private queueMarkdownDelta(
     sessionId: string,
     id: string,
@@ -1814,8 +1831,11 @@ export class AgentStore {
     batch(() => {
       for (const [sessionId, deltas] of pending) {
         this.updateItems(sessionId, (items) => {
-          const next = [...items];
+          let next = [...items];
           for (const delta of deltas) {
+            if (delta.kind === "markdown" || (delta.kind === "reasoning" && !next.some((item) => item.id === delta.id))) {
+              next = AgentStore.settleStreamingReasoning(next);
+            }
             const index = next.findIndex((item) => item.id === delta.id);
             if (index < 0) {
               next.push({ kind: delta.kind, id: delta.id, text: delta.text, streaming: true, turnId: delta.turnId });
@@ -1825,7 +1845,7 @@ export class AgentStore {
             next[index] = {
               ...previous,
               text: previous.text + delta.text,
-              streaming: true,
+              streaming: previous.kind === "reasoning" && !previous.streaming ? false : true,
               turnId: previous.turnId ?? delta.turnId,
             };
           }

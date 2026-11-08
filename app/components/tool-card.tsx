@@ -324,13 +324,13 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
           role="button"
           testID={`swarm-${props.item().id}`}
           accessibilityState={{ expanded: open() }}
-          class="flex-row items-center gap-2 py-1"
+          class="w-full min-w-0 flex-row items-center gap-2 py-1"
           onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
         >
           <Icon name="bot" size={16} color={token("muted-foreground")} />
-          <Text class="text-sm font-medium text-muted-foreground">Swarm</Text>
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{props.item().summary}</Text>
-          <Text class="text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
+          <Text class="shrink-0 text-sm font-medium text-muted-foreground">Swarm</Text>
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{props.item().summary}</Text>
+          <Text class="shrink-0 text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
           <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
         </View>
       </ListCollapsible>
@@ -473,7 +473,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         role="button"
         testID={`tool-${item().id}`}
         accessibilityState={{ expanded: open() }}
-        class="flex-row items-center gap-2 py-1"
+        class="w-full min-w-0 flex-row items-center gap-2 py-1"
         onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
@@ -482,11 +482,12 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         </Text>
         <If when={item().tool === "Read"}>
           <ContextMenu
+            class="min-w-0 shrink"
             popupClass="w-48 rounded-xl border border-border bg-popover p-1 shadow-xl"
             trigger={
               <Button
                 testID="read-path"
-                class="min-w-0"
+                class="w-full min-w-0"
                 onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
               >
                 <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
@@ -511,16 +512,16 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         <If when={item().tool !== "Read"}>
           <If when={fileChip()}>
             {(chip) => (
-              <View class="min-w-0 flex-row items-center gap-1">
+              <View class="min-w-0 shrink flex-row items-center gap-1">
                 <Text class="shrink-0 text-sm text-foreground">{chip().name}</Text>
                 <If when={chip().directory}>
-                  <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{chip().directory}</Text>
+                  <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{chip().directory}</Text>
                 </If>
               </View>
             )}
           </If>
           <If when={!fileChip()}>
-            <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{summary()}</Text>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{summary()}</Text>
           </If>
         </If>
         <If when={item().edit}>

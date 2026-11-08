@@ -14,7 +14,7 @@
 
 正文之间连续两项及以上的 `reasoning` / `tool` 由 `groupConversationActivity` 生成 `activity` 行并默认折叠，单项不重复分组，展开后仍使用原有行组件；已完成回合的工作详情内部使用同一规则。分组 ID 取首项 ID，流式追加工具不会重置展开状态。汇总按搜索、查文件、命令、网络搜索、思考和普通工具分类计数并标记各类失败数，中英文文案分别维护；会话内搜索同时匹配分组内容。`App.activity.test.tsx` 覆盖默认折叠、展开/收起、追加工具后的状态保持和中英文汇总。
 
-Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及序号排序，展示父卡片和行号；等待审批、失败和完成状态分别显示。Plan 状态使用主题 `warning` / `success` / `destructive`；Write/Edit 显示文件名和目录；Read 路径支持复制与右侧打开；失败叉号通过官方 `Tooltip` 展示原因。思考预览行使用原生 `Animated` 纵向切换和横向尾部跟随，动画结束后卸载旧行，减少动态效果时直接切换。`App.tool-cards.test.tsx` 覆盖这些交互及完成序号分配。
+Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及序号排序，展示父卡片和行号；等待审批、失败和完成状态分别显示。Plan 状态使用主题 `warning` / `success` / `destructive`；Write/Edit 显示文件名和目录；Read 路径支持复制与右侧打开；失败叉号通过官方 `Tooltip` 展示原因。工具输入/执行、正文和不同 ID 的思考开始时会结束旧思考的流式状态，已结束条目不会被后续增量重新开启。思考预览按非空行号切换：同一行追加只刷新文本，新行使用原生 `Animated` 纵向切换 300ms，两次切换至少间隔 800ms；快速更新保留有界队列，延迟时跳过过期中间行，展开/收起重置到最新行，减少动态效果时直接切换。预览按内容宽度排列并允许收缩，分隔点与文本共用 20px 行高，横向尾部跟随保留，箭头在左侧跟随内容；macOS 横向系统指示器由隐藏的内置 `Scrollbar` 主题替代，不显示横向滚动条。长命令、路径和活动标题使用 `min-w-0 shrink` 收缩，避免撑宽消息列表。`App.reasoning.test.tsx` 覆盖节奏队列、状态边界、可见标签、预览点击展开和收起恢复；`App.tool-cards.test.tsx` 覆盖工具交互及完成序号分配。
 
 这里不使用官方 `Collapsible.reveal` 的局部 `animate_layout`，也不使用全局 `LayoutAnimation.configureNext`，避免原生布局动画与 List 的行高测量、回收和滚动范围更新各自修改位置。右侧子 Agent 输出（`app/components/right-panel.tsx`）和模型高级设置（`app/components/settings/model-editor.tsx`）不在消息 List 的虚拟行内，继续使用官方 `Collapsible.reveal`。减少动态效果时直接完成展开和收起。
 
