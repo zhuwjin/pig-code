@@ -5,24 +5,24 @@ import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration } from "../conversation";
 import { Icon } from "./icon";
+import { ListCollapsible } from "./list-collapsible";
 
 export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children: JSX.Element }) {
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <View>
+    <ListCollapsible open={open()} testID={`work-${turn().id}`} content={props.children}>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"
-        onPress={() => props.store.toggleTurnExpanded(turn().id, true)}
+        onPress={() => props.store.toggleTurnExpanded(turn().id)}
       >
         <Text class="text-xs text-muted-foreground">
           {turn().status === "stopped" ? t("turn.stopped") : formatDuration(turn().durationMs ?? 0, t("turn.worked_for"))}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>
-      <If when={open()}>{props.children}</If>
-    </View>
+    </ListCollapsible>
   );
 }
 
@@ -128,7 +128,7 @@ export function TurnActionsRow(props: UiContext & {
             testID={`hooks-${turn().id}`}
             accessibilityLabel={t("turn.hooks_summary")}
             class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
-            onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`, true)}
+            onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`)}
           >
             <Icon name="anchor" size={12} color={token("muted-foreground")} />
           </Button>

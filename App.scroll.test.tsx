@@ -71,3 +71,33 @@ test("collapses long work and inner cards without hiding the final answer", asyn
   await app.press("id:work-turn-1");
   await app.waitFor("一句话概括");
 });
+
+test("keeps long nested content and siblings consistent through reveals", async () => {
+  const app = await open("./App.collapse.fixture.tsx", {
+    platform: "macos",
+    width: 1200,
+    height: 800,
+  });
+  await app.waitFor("当前状态");
+  await app.keyboard.press("mod+f");
+  await app.type("id:thread-search-input", "module-1");
+  await app.keyboard.press("enter");
+  await app.keyboard.press("escape");
+  await app.waitFor("id:work-turn-1");
+
+  await app.press("id:thinking-thinking");
+  await app.wait(120);
+  expect(app.shows("text:/Reasoning section 1/")).toBe(true);
+  expect(app.shows("id:tool-tool-0")).toBe(true);
+  await app.wait(400);
+
+  await app.press("id:thinking-thinking");
+  await app.wait(400);
+  expect(app.shows("text:/Reasoning section 1/")).toBe(false);
+
+  await app.press("id:work-turn-1");
+  await app.wait(120);
+  await app.press("id:work-turn-1");
+  await app.wait(400);
+  expect(app.shows("id:thinking-thinking")).toBe(true);
+});

@@ -31,6 +31,7 @@ import {
   userMessageIsLong,
 } from "../conversation";
 import { Icon } from "./icon";
+import { ListCollapsible } from "./list-collapsible";
 import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
 
@@ -183,13 +184,23 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const open = () => props.store.isExpanded(item().id);
   const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
   return (
-    <View>
+    <ListCollapsible
+      open={open()}
+      testID={`thinking-${item().id}`}
+      content={
+        <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
+          <Scroll class="max-h-80">
+            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
+          </Scroll>
+        </View>
+      }
+    >
       <View
         role="button"
         testID={`thinking-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(item().id, true)}
+        onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
         <Text class={item().streaming ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm text-muted-foreground"}>
@@ -203,14 +214,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <View class="flex-1" />
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-      <If when={open()}>
-        <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
-          <Scroll class="max-h-80">
-            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
-          </Scroll>
-        </View>
-      </If>
-    </View>
+    </ListCollapsible>
   );
 }
 

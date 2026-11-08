@@ -1,4 +1,3 @@
-import { LayoutAnimation } from "nsh";
 import { t } from "./i18n";
 import type { ChatItem, EditDiff, MarkdownItem, TurnState, TurnUsageStats } from "./protocol";
 import type { IconName } from "./components/icon";
@@ -8,10 +7,6 @@ export type ConversationRow =
   | { id: string; type: "work"; turn: TurnState; items: ChatItem[] }
   | { id: string; type: "changes"; turn: TurnState }
   | { id: string; type: "actions"; turn: TurnState; markdown: MarkdownItem[] };
-
-export function animateConversationToggle(): void {
-  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-}
 
 export function buildConversationRows(
   items: ChatItem[],

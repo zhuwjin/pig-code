@@ -1,6 +1,5 @@
 import { batch, signal } from "nsh";
 import { Agent } from "pig-code-ts/native";
-import { animateConversationToggle } from "./conversation";
 import { t } from "./i18n";
 import {
   AppConfig,
@@ -700,8 +699,7 @@ export class AgentStore {
     return this.expandedItems()[id] ?? false;
   }
 
-  toggleExpanded(id: string, animate = false): void {
-    if (animate) animateConversationToggle();
+  toggleExpanded(id: string): void {
     this.expandedItems.update((all) => ({ ...all, [id]: !this.isExpanded(id) }));
   }
 
@@ -709,8 +707,7 @@ export class AgentStore {
     return this.expandedTurns()[id] ?? false;
   }
 
-  toggleTurnExpanded(id: string, animate = false): void {
-    if (animate) animateConversationToggle();
+  toggleTurnExpanded(id: string): void {
     this.expandedTurns.update((all) => ({ ...all, [id]: !this.isTurnExpanded(id) }));
   }
 
@@ -1757,7 +1754,6 @@ export class AgentStore {
   ): void {
     const turn = this.currentTurn(sessionId);
     if (turn?.status === "running") {
-      animateConversationToggle();
       this.updateTurn(sessionId, {
         status,
         durationMs: durationMs ?? Math.max(0, Date.now() - turn.startedAt),

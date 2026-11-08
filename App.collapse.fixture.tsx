@@ -42,7 +42,7 @@ const finalText = [
   "This is the final answer after a long completed turn with many tool calls.",
   ...Array.from({ length: 20 }, (_, index) => `Section ${index + 1}: the final answer stays readable while the large work region and individual tool cards open and close.`),
   "## 当前状态",
-  "The message list measures the final row height without replaying a large reveal animation.",
+  "The message list uses the same measured window height during the reveal and at the final position.",
 ].join("\n\n");
 const items: ChatItem[] = [
   { kind: "user", id: "user-1", text: "Explain this project", files: [], imageNums: [], sentAtMs: 1 },

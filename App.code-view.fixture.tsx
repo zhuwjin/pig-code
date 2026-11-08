@@ -63,10 +63,10 @@ store.running.set({ "code-view": false });
 mount(() => (
   <View class="h-full w-full">
     <View class="flex-row gap-2 border-b border-border p-2">
-      <Button testID="open-read" class="rounded border border-border px-3 py-1" onPress={() => store.toggleExpanded("read", true)}>
+      <Button testID="open-read" class="rounded border border-border px-3 py-1" onPress={() => store.toggleExpanded("read")}>
         <Text class="text-xs text-foreground">Toggle Read</Text>
       </Button>
-      <Button testID="open-bash" class="rounded border border-border px-3 py-1" onPress={() => store.toggleExpanded("bash", true)}>
+      <Button testID="open-bash" class="rounded border border-border px-3 py-1" onPress={() => store.toggleExpanded("bash")}>
         <Text class="text-xs text-foreground">Toggle Bash</Text>
       </Button>
     </View>

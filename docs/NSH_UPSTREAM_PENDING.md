@@ -10,9 +10,9 @@
 
 **当前实现**
 
-消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm、Plan 和 Hook 汇总通过 `If` 直接挂载/卸载，与 Gallery AI Chat 一致，不使用会保留 `content` 的 `Collapsible`。切换展开状态时通过 `animateConversationToggle` 调用 `LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)`；回合完成时也应用同一过渡，不增加强制 `scrollToEnd`。
+消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm 和 Plan 使用 `app/components/list-collapsible.tsx`。折叠窗口先通过 `onLayout` 测量真实内容高度，再以 20ms 为间隔、最多 14 步更新窗口高度；窗口和 List 使用同一份实际布局高度，不再分别运行 `LayoutAnimation` 和 List 行定位。首次已经展开的内容直接采用测量高度，不重放入场动画；嵌套卡片的测量变化同步给外层窗口，收起完成后卸载内容。Hook 汇总仍直接挂载/卸载。
 
-这里不使用官方 `Collapsible.reveal` 的局部 `animate_layout`，避免局部布局动画与 List 的行定位、回收和滚动范围更新同时修改位置。右侧子 Agent 输出（`app/components/right-panel.tsx`）和模型高级设置（`app/components/settings/model-editor.tsx`）不在消息 List 的虚拟行内，继续使用官方 `Collapsible.reveal`。减少动态效果时由系统直接完成展开和收起。
+这里不使用官方 `Collapsible.reveal` 的局部 `animate_layout`，也不使用全局 `LayoutAnimation.configureNext`，避免原生布局动画与 List 的行高测量、回收和滚动范围更新各自修改位置。右侧子 Agent 输出（`app/components/right-panel.tsx`）和模型高级设置（`app/components/settings/model-editor.tsx`）不在消息 List 的虚拟行内，继续使用官方 `Collapsible.reveal`。减少动态效果时直接完成展开和收起。
 
 代码正文使用共享的 `app/components/code-view.tsx`，不再为 Read、命令和输出创建完整 `Editor`。组件用虚拟 List 只创建可见代码行，文本立即显示；`src/code_highlight.rs` 在后台线程使用与 NSH 相同的 `syntect` / `two-face` 解析高亮，并以 UTF-16 偏移原位着色。Read 保留真实行号，命令和输出不带行号；命令区按内容增高、上限 160，读取和输出上限 320，不保留固定空高或末尾滚动空白。`App.code-view.test.tsx` 覆盖长输出虚拟化、滚到末行及命令/输出的展开和换行。
 
@@ -23,7 +23,7 @@
 - 虚拟列表、搜索定位和上翻阅读行为不受影响。
 - 右侧面板和设置页的 `reveal` 保持原有效果。
 
-`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具和长思考内容的展开/收起；测试使用隔离 Store，不读取真实会话或钥匙串。
+`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具、长思考内容和快速连续切换；`App.list-collapsible.test.tsx` 通过实际 `onLayout` 记录验证中间高度、最多 14 步的节流更新和最终高度。测试使用隔离 Store，不读取真实会话或钥匙串。
 
 **上游参考**
 
