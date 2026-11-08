@@ -23,6 +23,28 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function CapabilityCheckbox(props: {
+  testID: string;
+  checked: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <Checkbox
+      testID={props.testID}
+      checked={props.checked}
+      onChange={({ checked }) => props.onChange(checked)}
+      class="flex-row items-center gap-2"
+      indicatorClass="h-4 w-4 items-center justify-center rounded border border-border checked:border-primary checked:bg-primary"
+      indicator={props.checked
+        ? <Icon testID={`${props.testID}-check`} name="check" size={12} color={token("primary-foreground")} />
+        : null}
+    >
+      <Text class="text-xs text-foreground">{props.label}</Text>
+    </Checkbox>
+  );
+}
+
 export function ModelEditor(props: UiContext & {
   provider: ProviderConfig;
   model?: ModelConfig;
@@ -234,7 +256,7 @@ export function ModelEditor(props: UiContext & {
       backdropClass="bg-black/30"
       onOpenChange={({ open }) => { if (!open) props.onClose(); }}
       testID="model-editor"
-      class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
+      class="m-auto max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
     >
         <View class="flex-row items-center">
           <Text class="flex-1 text-lg font-semibold text-foreground">{t(props.model ? "settings.models.dialog.edit_title" : "settings.models.dialog.add_title")}</Text>
@@ -242,7 +264,7 @@ export function ModelEditor(props: UiContext & {
             <Text class="text-sm text-muted-foreground">{t("common.close")}</Text>
           </Button>
         </View>
-        <Scroll class="max-h-[520px]">
+        <Scroll class="-mr-4 max-h-[520px] pr-4">
           <View class="gap-3 pr-2">
             <View class="gap-1">
               <View class="flex-row items-center gap-2">
@@ -308,15 +330,15 @@ export function ModelEditor(props: UiContext & {
             <Collapsible open={advanced()} reveal content={
               <View class="gap-3">
                 <View class="flex-row flex-wrap gap-3">
-                  <Checkbox testID="model-vision" checked={inputImage()} onChange={({ checked }) => inputImage.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_image")}</Text></Checkbox>
-                  <Checkbox testID="model-pdf" checked={inputPdf()} onChange={({ checked }) => inputPdf.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.input_pdf")}</Text></Checkbox>
+                  <CapabilityCheckbox testID="model-vision" checked={inputImage()} onChange={(checked) => inputImage.set(checked)} label={t("settings.models.field.input_image")} />
+                  <CapabilityCheckbox testID="model-pdf" checked={inputPdf()} onChange={(checked) => inputPdf.set(checked)} label={t("settings.models.field.input_pdf")} />
                 </View>
                 <View class="flex-row flex-wrap gap-3">
-                  <Checkbox testID="cap-structured" checked={capStructured()} onChange={({ checked }) => capStructured.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.structured_output")}</Text></Checkbox>
-                  <Checkbox testID="cap-strict-tools" checked={capStrictTools()} onChange={({ checked }) => capStrictTools.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.strict_tools")}</Text></Checkbox>
+                  <CapabilityCheckbox testID="cap-structured" checked={capStructured()} onChange={(checked) => capStructured.set(checked)} label={t("settings.models.field.structured_output")} />
+                  <CapabilityCheckbox testID="cap-strict-tools" checked={capStrictTools()} onChange={(checked) => capStrictTools.set(checked)} label={t("settings.models.field.strict_tools")} />
                 </View>
                 <If when={props.provider.api_format !== "OpenAiChat"}>
-                  <Checkbox testID="cap-web-search" checked={capWebSearch()} onChange={({ checked }) => capWebSearch.set(checked)} class="flex-row items-center gap-2" indicatorClass="h-4 w-4 rounded border border-border"><Text class="text-xs text-foreground">{t("settings.models.field.web_search")}</Text></Checkbox>
+                  <CapabilityCheckbox testID="cap-web-search" checked={capWebSearch()} onChange={(checked) => capWebSearch.set(checked)} label={t("settings.models.field.web_search")} />
                   <View class="gap-1">
                     <Text class="text-xs text-muted-foreground">{t("settings.models.field.web_search_definition")}</Text>
                     <Input testID="web-search-json" multiline value={webSearchJson()} onChange={({ value: text }) => webSearchJson.set(text)} class="min-h-20 rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground font-mono text-xs text-foreground" />

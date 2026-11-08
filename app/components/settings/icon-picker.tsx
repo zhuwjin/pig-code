@@ -22,7 +22,7 @@ export function IconPicker(props: {
       backdropClass="bg-black/30"
       onOpenChange={({ open }) => { if (!open) props.onClose(); }}
       testID="icon-picker"
-      class="w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
+      class="m-auto w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
     >
         <View class="flex-row items-center gap-3">
           <View class="min-w-0 flex-1 gap-0.5">
@@ -41,7 +41,7 @@ export function IconPicker(props: {
           placeholder={t("settings.models.icon_picker.search")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
-        <Scroll class="max-h-96">
+        <Scroll class="-mr-4 max-h-96 pr-4">
           <View class="flex-row flex-wrap gap-2 pr-1">
             <Button
               testID="icon-option-default"

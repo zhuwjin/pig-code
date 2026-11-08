@@ -19,7 +19,7 @@ export function PresetPicker(props: {
       backdropClass="bg-black/30"
       onOpenChange={({ open }) => { if (!open) props.onClose(); }}
       testID="preset-picker"
-      class="max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
+      class="m-auto max-h-[640px] w-[560px] max-w-[90%] gap-3 rounded-xl border border-border bg-popover p-4 shadow-xl"
     >
         <View class="flex-row items-center">
           <Text class="flex-1 text-lg font-semibold text-foreground">{t("settings.models.preset.title")}</Text>
@@ -35,7 +35,7 @@ export function PresetPicker(props: {
           placeholder={t("settings.models.preset.search")}
           class="rounded-(--radius) border border-border bg-background px-3 py-2 selection:bg-foreground text-sm text-foreground placeholder:text-muted-foreground"
         />
-        <Scroll class="max-h-[480px]">
+        <Scroll class="-mr-4 max-h-[480px] pr-4">
           <View class="gap-4 pr-1">
             <Text class="text-sm text-muted-foreground">{t("settings.models.preset.description")}</Text>
             <View class="flex-row flex-wrap gap-2">

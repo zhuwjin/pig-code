@@ -74,12 +74,20 @@ test("creates, edits and deletes providers and models through real config", asyn
   await app.type("id:model-id", "mock-copy-model");
   await app.type("id:model-name", "Mock Copy Model");
   await app.press("id:advanced-toggle");
+  for (const id of ["model-vision", "model-pdf", "cap-structured", "cap-strict-tools"]) {
+    expect(app.shows(`id:${id}-check`)).toBe(false);
+    await app.press(`id:${id}`);
+    expect(app.shows(`id:${id}-check`)).toBe(true);
+  }
+  await app.press("id:model-vision");
+  expect(app.shows("id:model-vision-check")).toBe(false);
+  await app.press("id:model-vision");
+  expect(app.shows("id:model-vision-check")).toBe(true);
   await app.type("id:model-reasoning", "low");
   await app.press("id:add-level");
   await app.type("id:model-reasoning", "high");
   await app.press("id:add-level");
   await app.press("id:default-level-low");
-  await app.press("id:model-vision");
   expect(app.value("id:model-id")).toBe("mock-copy-model");
   await app.press("id:model-save");
   await app.waitFor("id:model-edit-custom-1-mock-copy-model");
