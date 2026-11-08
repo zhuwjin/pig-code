@@ -1,24 +1,54 @@
-import { PanResponder, Scroll, signal, Text, View } from "nsh";
-import { Button } from "nsh/base";
+import { PanResponder, Scroll, signal, Text, token, View } from "nsh";
+import { Button, Tooltip } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { QueueItem } from "../protocol";
 import type { UiContext } from "../ui-context";
+import { Icon, type IconName } from "./icon";
+
+function QueueTooltip(props: { label: string }) {
+  return (
+    <Tooltip delay={300} class="max-w-80 rounded-md border border-border bg-popover px-2 py-1 shadow-lg">
+      <Text class="text-xs text-foreground">{props.label}</Text>
+    </Tooltip>
+  );
+}
+
+function QueueAction(props: {
+  testID: string;
+  label: string;
+  accessibilityLabel: string;
+  icon: IconName;
+  onPress: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <Button
+      testID={props.testID}
+      accessibilityLabel={props.accessibilityLabel}
+      tooltip={<QueueTooltip label={props.label} />}
+      class={props.danger
+        ? "h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-destructive/30"
+        : "h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-accent/50"}
+      onPress={props.onPress}
+    >
+      <Icon name={props.icon} size={16} color={token("muted-foreground")} />
+    </Button>
+  );
+}
 
 function QueueRow(props: UiContext & {
   item: () => QueueItem;
-  index: () => number;
-  count: number;
   steer: boolean;
 }) {
   const item = () => props.item();
   const dragY = signal(0);
   const dragging = signal(false);
   const pan = PanResponder.create({
-    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 3,
+    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 3 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
     onPanResponderGrant: () => dragging.set(true),
     onPanResponderMove: (_, gesture) => dragY.set(gesture.dy),
     onPanResponderRelease: (_, gesture) => {
-      props.store.reorderQueuedBy(item().id, Math.round(gesture.dy / 72));
+      props.store.reorderQueuedBy(item().id, Math.round(gesture.dy / 38));
       dragY.set(0);
       dragging.set(false);
     },
@@ -27,96 +57,89 @@ function QueueRow(props: UiContext & {
       dragging.set(false);
     },
   });
+  const laneLabel = () => t(props.steer ? "queue.steer_lane" : "queue.pending_lane");
+  const switchLabel = () => t(props.steer ? "queue.move_to_queue" : "queue.convert_to_steer");
   return (
     <View
+      testID={`queue-row-${item().id}`}
       class={dragging()
-        ? "z-10 gap-2 rounded-(--radius) border border-border bg-background px-3 py-2 opacity-90 shadow-xl"
-        : "gap-2 rounded-(--radius) border border-border bg-background/70 px-3 py-2"}
+        ? "relative z-10 w-full flex-row items-center gap-2 rounded-lg bg-accent px-1.5 py-1 opacity-90 shadow-lg"
+        : "relative w-full flex-row items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-accent/30"}
       style={{ transform: [{ translateY: dragY() }] }}
     >
-      <View class="flex-row items-center gap-2">
+      <View
+        testID={`queue-drag-${item().id}`}
+        accessibilityLabel={t("queue.drag_aria", { text: item().text })}
+        tooltip={<QueueTooltip label={t("queue.drag")} />}
+        class="h-7 w-7 shrink-0 cursor-grab items-center justify-center rounded-lg"
+        {...pan.panHandlers}
+      >
+        <Icon name="grip-vertical" size={16} color={token("muted-foreground")} />
+      </View>
+      <If when={(item().images?.length ?? 0) > 0}>
         <View
-          testID={`queue-drag-${item().id}`}
-          accessibilityLabel={t("queue.drag")}
-          class="w-4 cursor-grab items-center"
-          {...pan.panHandlers}
+          accessibilityLabel={tCount("queue.image_count", item().images?.length ?? 0)}
+          class="shrink-0 flex-row items-center gap-1"
         >
-          <Text class="text-xs text-muted-foreground">⋮⋮</Text>
+          <Icon name="image" size={14} color={token("muted-foreground")} />
+          <Text class="text-xs text-muted-foreground">{item().images?.length ?? 0}</Text>
         </View>
-        <Text style={{ numberOfLines: 2 }} class="min-w-0 flex-1 text-xs leading-5 text-foreground">{item().text}</Text>
-        <If when={(item().images?.length ?? 0) > 0}>
-          <Text class="text-xs text-muted-foreground">{tCount("queue.image_count", item().images?.length ?? 0)}</Text>
-        </If>
+      </If>
+      <View
+        testID={`queue-lane-icon-${item().id}`}
+        accessibilityLabel={laneLabel()}
+        tooltip={<QueueTooltip label={laneLabel()} />}
+        class="shrink-0"
+      >
+        <Icon name={props.steer ? "send" : "list-ordered"} size={16} color={token("muted-foreground")} />
       </View>
-      <View class="flex-row flex-wrap items-center gap-1">
-        <Button
-          testID={`queue-up-${item().id}`}
-          accessibilityLabel={t("queue.move_up_aria", { text: item().text })}
-          disabled={props.index() === 0}
-          class="rounded px-2 py-0.5 hover:bg-muted disabled:opacity-30"
-          onPress={() => props.store.reorderQueued(item().id, -1)}
-        >
-          <Text class="text-xs text-muted-foreground">{t("queue.move_up")}</Text>
-        </Button>
-        <Button
-          testID={`queue-down-${item().id}`}
-          accessibilityLabel={t("queue.move_down_aria", { text: item().text })}
-          disabled={props.index() + 1 >= props.count}
-          class="rounded px-2 py-0.5 hover:bg-muted disabled:opacity-30"
-          onPress={() => props.store.reorderQueued(item().id, 1)}
-        >
-          <Text class="text-xs text-muted-foreground">{t("queue.move_down")}</Text>
-        </Button>
-        <Button
-          testID={`queue-lane-${item().id}`}
-          accessibilityLabel={t(props.steer ? "queue.move_to_queue_aria" : "queue.convert_to_steer_aria", { text: item().text })}
-          class="rounded px-2 py-0.5 hover:bg-muted"
-          onPress={() => props.store.moveQueuedLane(item().id, !props.steer)}
-        >
-          <Text class="text-xs text-muted-foreground">{t(props.steer ? "queue.move_to_queue" : "queue.convert_to_steer")}</Text>
-        </Button>
-        <Button
-          testID={`queue-edit-${item().id}`}
-          accessibilityLabel={t("queue.edit_aria", { text: item().text })}
-          class="rounded px-2 py-0.5 hover:bg-muted"
-          onPress={() => props.store.editQueued(item())}
-        >
-          <Text class="text-xs text-muted-foreground">{t("common.edit")}</Text>
-        </Button>
-        <View class="flex-1" />
-        <Button
-          testID={`queue-send-${item().id}`}
-          accessibilityLabel={t("queue.send_now_aria", { text: item().text })}
-          class="rounded px-2 py-0.5 hover:bg-muted"
-          onPress={() => props.store.sendQueuedNow(item().id)}
-        >
-          <Text class="text-xs text-primary">{t("queue.send_now")}</Text>
-        </Button>
-        <Button
-          testID={`queue-cancel-${item().id}`}
-          accessibilityLabel={t("queue.cancel_aria", { text: item().text })}
-          class="rounded px-2 py-0.5 hover:bg-muted"
-          onPress={() => props.store.cancelQueued(item().id)}
-        >
-          <Text class="text-xs text-destructive">{t("common.cancel")}</Text>
-        </Button>
-      </View>
+      <Text
+        testID={`queue-preview-${item().id}`}
+        style={{ numberOfLines: 1 }}
+        class="min-w-0 flex-1 truncate text-sm text-foreground"
+      >
+        {item().text}
+      </Text>
+      <QueueAction
+        testID={`queue-lane-${item().id}`}
+        label={switchLabel()}
+        accessibilityLabel={t(props.steer ? "queue.move_to_queue_aria" : "queue.convert_to_steer_aria", { text: item().text })}
+        icon="arrow-right-left"
+        onPress={() => props.store.moveQueuedLane(item().id, !props.steer)}
+      />
+      <Button
+        testID={`queue-send-${item().id}`}
+        accessibilityLabel={t("queue.send_now_aria", { text: item().text })}
+        class="h-7 shrink-0 flex-row items-center gap-1 rounded-md bg-secondary px-2 hover:bg-secondary/80"
+        onPress={() => props.store.sendQueuedNow(item().id)}
+      >
+        <Icon name="arrow-up" size={14} color={token("foreground")} />
+        <Text class="text-xs text-foreground">{t("queue.send_now")}</Text>
+      </Button>
+      <QueueAction
+        testID={`queue-edit-${item().id}`}
+        label={t("queue.edit")}
+        accessibilityLabel={t("queue.edit_aria", { text: item().text })}
+        icon="square-pen"
+        onPress={() => props.store.editQueued(item())}
+      />
+      <QueueAction
+        testID={`queue-cancel-${item().id}`}
+        label={t("queue.cancel")}
+        accessibilityLabel={t("queue.cancel_aria", { text: item().text })}
+        icon="trash"
+        danger
+        onPress={() => props.store.cancelQueued(item().id)}
+      />
     </View>
   );
 }
 
-function QueueLane(props: UiContext & { title: string; items: QueueItem[]; steer: boolean }) {
+function QueueLane(props: UiContext & { items: QueueItem[]; steer: boolean }) {
   return (
-    <If when={props.items.length > 0}>
-      <View class="gap-1.5">
-        <Text class="px-1 text-xs text-muted-foreground">{props.title}</Text>
-        <Each of={props.items} key={(item) => item.id}>
-          {(item, index) => (
-            <QueueRow {...props} item={item} index={index} count={props.items.length} />
-          )}
-        </Each>
-      </View>
-    </If>
+    <Each of={props.items} key={(item) => item.id}>
+      {(item) => <QueueRow {...props} item={item} />}
+    </Each>
   );
 }
 
@@ -131,36 +154,40 @@ export function QueuePanel(props: UiContext) {
     }
   };
   return (
-    <View class={props.themeStore.classes("queue.root", "mb-2 gap-3 rounded-t-xl border border-input bg-composer p-3")}>
+    <View
+      testID="queue-panel"
+      class={props.themeStore.classes("queue.root", "-mb-4 gap-1 rounded-t-xl border border-input bg-composer p-1 pb-5")}
+    >
       <If when={queue().paused}>
-        <View class="flex-row items-center gap-3 rounded-(--radius) border border-warning/40 bg-warning/10 px-3 py-2">
-          <Text class="min-w-0 flex-1 text-xs leading-5 text-foreground">{pausedText()}</Text>
-          <Button testID="queue-resume" class="rounded px-2 py-1 hover:bg-muted" onPress={() => props.store.resumeQueue()}>
-            <Text class="text-xs font-medium text-foreground">{t("queue.resume")}</Text>
+        <View testID="queue-paused-banner" class="min-h-10 w-full flex-row items-center gap-3 rounded-lg border border-border/70 px-3 py-2">
+          <Text class="min-w-0 flex-1 text-sm text-foreground">{pausedText()}</Text>
+          <Button testID="queue-resume" class="shrink-0 rounded-md px-2 py-0.5 hover:bg-accent/50" onPress={() => props.store.resumeQueue()}>
+            <Text class="text-sm text-muted-foreground">{t("queue.resume")}</Text>
           </Button>
         </View>
       </If>
       <If when={queue().held}>
-        <View class="gap-2 rounded-(--radius) border border-warning/40 bg-warning/10 p-3">
-          <Text class="text-xs font-medium text-foreground">{t("queue.paused_title")}</Text>
-          <Text style={{ numberOfLines: 2 }} class="text-xs leading-5 text-muted-foreground">{queue().held}</Text>
-          <View class="flex-row flex-wrap gap-2">
-            <Button testID="held-clear" class="rounded px-2 py-1 hover:bg-muted" onPress={() => props.store.resolveHeld("clear_queue_and_send")}>
-              <Text class="text-xs text-destructive">{t("queue.clear_and_send")}</Text>
+        <View testID="held-queue-prompt" class="w-full flex-row items-center gap-2 rounded-lg border border-border/70 bg-warning/15 px-3 py-2">
+          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 truncate text-sm text-foreground">
+            {t("queue.held_prompt", { text: Array.from(queue().held ?? "").slice(0, 60).join("") })}
+          </Text>
+          <View class="shrink-0 flex-row items-center gap-1">
+            <Button testID="held-clear" class="rounded-md px-2 py-0.5 hover:bg-accent/50" onPress={() => props.store.resolveHeld("clear_queue_and_send")}>
+              <Text class="text-xs text-muted-foreground">{t("queue.clear_and_send")}</Text>
             </Button>
-            <Button testID="held-keep" class="rounded px-2 py-1 hover:bg-muted" onPress={() => props.store.resolveHeld("keep_queue_and_send")}>
-              <Text class="text-xs text-foreground">{t("queue.keep_and_enqueue")}</Text>
+            <Button testID="held-keep" class="rounded-md px-2 py-0.5 hover:bg-accent/50" onPress={() => props.store.resolveHeld("keep_queue_and_send")}>
+              <Text class="text-xs text-muted-foreground">{t("queue.keep_and_enqueue")}</Text>
             </Button>
-            <Button testID="held-cancel" class="rounded px-2 py-1 hover:bg-muted" onPress={() => props.store.resolveHeld("cancel")}>
-              <Text class="text-xs text-muted-foreground">{t("queue.cancel_new")}</Text>
+            <Button testID="held-cancel" class="rounded-md px-2 py-0.5 hover:bg-accent/50" onPress={() => props.store.resolveHeld("cancel")}>
+              <Text class="text-xs text-muted-foreground">{t("common.cancel")}</Text>
             </Button>
           </View>
         </View>
       </If>
-      <Scroll class="max-h-56">
-        <View class="gap-3 pr-1">
-          <QueueLane {...props} title={t("queue.steer_lane")} items={queue().steer} steer />
-          <QueueLane {...props} title={t("queue.pending_lane")} items={queue().pending} steer={false} />
+      <Scroll testID="queue-list" class="max-h-[122px]">
+        <View class="w-full gap-0.5 pr-3">
+          <QueueLane {...props} items={queue().steer} steer />
+          <QueueLane {...props} items={queue().pending} steer={false} />
         </View>
       </Scroll>
     </View>

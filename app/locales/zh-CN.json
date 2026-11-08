@@ -503,11 +503,13 @@
     "clear_workspace": "清除工作区",
     "remove_attachment": "移除 {path}",
     "remove_image": "移除图片",
+    "image_mention": "提及图片 {index}",
     "no_matching_files": "没有匹配文件",
     "send": "发送",
     "image_limit": "每条消息最多添加 8 张图片",
     "steer_hint": "继续输入以引导后续修改",
     "queue_hint": "继续输入以排队后续修改",
+    "paused_hint": "提出后续修改要求",
     "steer_keys": "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列",
     "queue_keys": "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息",
     "stop": "停止",
@@ -616,32 +618,30 @@
   },
   "queue": {
     "drag": "拖动排序",
+    "drag_aria": "拖动排序 {text}",
     "image_count": {
       "one": "{count} 张图片",
       "other": "{count} 张图片"
     },
-    "move_up": "上移",
-    "move_up_aria": "上移 {text}",
-    "move_down": "下移",
-    "move_down_aria": "下移 {text}",
-    "move_to_queue": "移到队列",
+    "move_to_queue": "转为排队",
     "move_to_queue_aria": "移到队列 {text}",
     "convert_to_steer": "转为引导",
     "convert_to_steer_aria": "转为引导 {text}",
+    "edit": "撤回编辑",
     "edit_aria": "编辑 {text}",
-    "send_now": "立即发送",
+    "send_now": "立即",
     "send_now_aria": "立即发送 {text}",
+    "cancel": "取消排队",
     "cancel_aria": "取消排队 {text}",
     "pause": {
-      "stopped": "回合已停止，队列已暂停。",
-      "restarted": "应用已重启，请确认后继续队列。",
-      "error": "上一个回合出错，队列已暂停。"
+      "stopped": "由于你中断了当前响应，队列已暂停",
+      "restarted": "由于应用重启，队列已暂停（内容未丢失）",
+      "error": "由于当前响应出错，队列已暂停（内容未丢失）"
     },
-    "resume": "继续队列",
-    "paused_title": "队列已暂停，如何处理新消息？",
-    "clear_and_send": "清空队列并发送",
-    "keep_and_enqueue": "保留并加入队列",
-    "cancel_new": "取消新消息",
+    "resume": "继续",
+    "held_prompt": "队列已暂停。新消息“{text}”如何处理？",
+    "clear_and_send": "清空并发送",
+    "keep_and_enqueue": "保留并入队",
     "steer_lane": "当前回合引导",
     "pending_lane": "后续消息队列"
   },
@@ -672,6 +672,13 @@
     "no_conversation": "暂无对话记录",
     "close_tab": "关闭 {name}",
     "close_panel": "关闭右侧面板"
+  },
+  "image_viewer": {
+    "previous": "上一张图片",
+    "next": "下一张图片",
+    "zoom_out": "缩小",
+    "zoom_in": "放大",
+    "fit": "适配"
   },
   "messages": {
     "image_label": "图片 {index}",

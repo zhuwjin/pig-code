@@ -37,6 +37,7 @@ import {
   userMessageIsLong,
 } from "../conversation";
 import { Icon } from "./icon";
+import { ImageViewer } from "./image-viewer";
 import { ListCollapsible } from "./list-collapsible";
 import {
   REASONING_TICKER_INTERVAL_MS,
@@ -694,7 +695,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   const query = signal("");
   const activeMatch = signal(0);
   const viewportWidth = signal(0);
-  const lightbox = signal<{ source: string; label: string } | null>(null);
+  const lightbox = signal<{ src: string; label: string } | null>(null);
   let list: ListRef | undefined;
   let followedSession: string | null = null;
   effect(() => {
@@ -799,7 +800,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
           activeTurn.set(active);
         }}
       >
-        {(row) => <MessageRow {...props} row={row} textFor={textFor} active={row().id === activeSearchRow()} navEligible={userRows().length >= 2} onImage={(source, label) => lightbox.set({ source, label })} />}
+        {(row) => <MessageRow {...props} row={row} textFor={textFor} active={row().id === activeSearchRow()} navEligible={userRows().length >= 2} onImage={(src, label) => lightbox.set({ src, label })} />}
       </List>
       <If when={latestVisible()}>
         <View class="absolute inset-x-0 bottom-3 items-center" style={{ pointerEvents: "box-none" }}>
@@ -872,26 +873,12 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
           </Button>
         </View>
       </If>
-      <If when={lightbox()}>
-        {(value) => (
-          <View class="absolute inset-0 z-50 bg-black/85">
-            <Button accessibilityLabel={t("messages.close_image")} class="absolute inset-0" onPress={() => lightbox.set(null)} />
-            <View class="absolute inset-8 items-center justify-center pointer-events-none">
-              <Image src={value().source} style={{ objectFit: "contain" }} class="h-full w-full" />
-            </View>
-            <View class="absolute left-4 top-4 rounded bg-black/50 px-2 py-1">
-              <Text class="text-xs text-white">{value().label}</Text>
-            </View>
-            <Button
-              accessibilityLabel={t("messages.close_image")}
-              class="absolute right-4 top-4 h-8 w-8 items-center justify-center rounded-full bg-black/50"
-              onPress={() => lightbox.set(null)}
-            >
-              <Icon name="x" size={16} color="#ffffff" />
-            </Button>
-          </View>
-        )}
-      </If>
+      <ImageViewer
+        images={lightbox() ? [lightbox()!] : []}
+        index={lightbox() ? 0 : null}
+        onIndexChange={() => {}}
+        onClose={() => lightbox.set(null)}
+      />
     </View>
   );
 }

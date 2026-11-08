@@ -141,10 +141,13 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   await app.keyboard.press("enter");
   await app.type("id:composer-input", "Q_TWO");
   await app.keyboard.press("enter");
-  await app.waitFor("上移 Q_TWO");
-  await app.press("上移 Q_TWO");
-  const queuedTexts = app.texts();
-  expect(queuedTexts.indexOf("Q_TWO")).toBeLessThan(queuedTexts.indexOf("Q_ONE"));
+  await app.waitFor("拖动排序 Q_TWO");
+  expect(app.count("上移 Q_TWO")).toBe(0);
+  await app.drag("拖动排序 Q_TWO", { x: 0, y: -38 });
+  await app.waitUntil(() => {
+    const texts = app.texts();
+    return texts.indexOf("Q_TWO") < texts.indexOf("Q_ONE");
+  });
 
   await app.press("编辑 Q_TWO");
   expect(app.value("id:composer-input")).toBe("Q_TWO");
@@ -159,6 +162,7 @@ test("queues, steers, reorders, edits and resumes messages while running", async
 
   await app.press("id:stop-button");
   await app.waitFor("id:queue-resume", { timeout: 20000 });
+  expect(app.texts()).toContain("由于你中断了当前响应，队列已暂停");
   await app.press("id:queue-resume");
   await app.waitFor("id:queue-resume", { state: "gone", timeout: 20000 });
 });

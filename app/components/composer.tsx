@@ -1,5 +1,5 @@
 import { effect, Image, keymap, signal, Text, token, View, type InputRef } from "nsh";
-import { Button, Dialog, Input, Select } from "nsh/base";
+import { Button, Input, Select } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
 import { t } from "../i18n";
@@ -10,6 +10,7 @@ import { ApprovalCard } from "./approval-card";
 import { ComposerAux } from "./composer-aux";
 import { ModelPicker, PermissionPicker, SlashCandidates } from "./composer-popups";
 import { Icon } from "./icon";
+import { ImageViewer } from "./image-viewer";
 import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
@@ -59,7 +60,10 @@ function WorkspaceSelector(props: UiContext) {
   );
 }
 
-function AttachmentStrip(props: UiContext & { onPreview: (source: string) => void }) {
+function AttachmentStrip(props: UiContext & {
+  onPreview: (index: number) => void;
+  onMention: (index: number) => void;
+}) {
   const files = () => props.store.draftFiles();
   const images = () => props.store.draftImages();
   return (
@@ -77,22 +81,40 @@ function AttachmentStrip(props: UiContext & { onPreview: (source: string) => voi
           )}
         </Each>
         <Each of={images()} key={(image) => image.id}>
-          {(image) => (
-            <View class="relative h-16 w-20">
-              <Button
-                testID={`composer-image-${image().id}`}
-                class="h-16 w-20 overflow-hidden rounded-lg border border-border"
-                onPress={() => props.onPreview(image().preview)}
-              >
-                <Image src={image().preview} style={{ objectFit: "cover" }} class="h-16 w-20" />
-              </Button>
-              <Button
-                accessibilityLabel={t("composer.remove_image")}
-                class="absolute -right-1 -top-1 h-5 w-5 items-center justify-center rounded-full border border-border bg-background"
-                onPress={() => props.store.removeDraftImage(image().id)}
-              >
-                <Icon name="x" size={10} color={token("muted-foreground")} />
-              </Button>
+          {(image, index) => (
+            <View class="gap-1">
+              <View class="group relative h-14 w-14">
+                <Button
+                  testID={`composer-image-${image().id}`}
+                  accessibilityLabel={t("messages.image_label", { index: index() + 1 })}
+                  class="h-14 w-14 overflow-hidden rounded-lg border border-border"
+                  onPress={() => props.onPreview(index())}
+                >
+                  <Image src={image().preview} style={{ objectFit: "cover" }} class="h-14 w-14" />
+                </Button>
+                <View
+                  class="absolute inset-0 flex-row items-end justify-between rounded-lg bg-black/45 p-1 opacity-0 group-hover:opacity-100"
+                  style={{ pointerEvents: "box-none" }}
+                >
+                  <Button
+                    testID={`composer-image-mention-${image().id}`}
+                    accessibilityLabel={t("composer.image_mention", { index: index() + 1 })}
+                    class="h-5 w-5 items-center justify-center rounded bg-black/60 hover:bg-black/80"
+                    onPress={() => props.onMention(index() + 1)}
+                  >
+                    <Icon name="at-sign" size={12} color="#ffffff" />
+                  </Button>
+                  <Button
+                    testID={`composer-image-remove-${image().id}`}
+                    accessibilityLabel={t("composer.remove_image")}
+                    class="h-5 w-5 items-center justify-center rounded bg-black/60 hover:bg-black/80"
+                    onPress={() => props.store.removeDraftImage(image().id)}
+                  >
+                    <Icon name="trash" size={12} color="#ffffff" />
+                  </Button>
+                </View>
+              </View>
+              <Text class="w-14 text-center text-[10px] text-muted-foreground">{t("messages.image_label", { index: index() + 1 })}</Text>
             </View>
           )}
         </Each>
@@ -134,7 +156,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const mentionIndex = signal(0);
   const inputFocused = signal(false);
   const caret = signal(0);
-  const preview = signal<string | null>(null);
+  const preview = signal<number | null>(null);
   let inputNode: InputRef | undefined;
   const sessionId = () => store.current();
   const running = () => {
@@ -271,8 +293,8 @@ export function Composer(props: UiContext & { hero?: boolean }) {
           class={themeStore.classes(
             "composer.root",
             inputFocused()
-              ? "gap-2 rounded-2xl border border-ring/40 bg-composer px-3 pb-2 pt-2"
-              : "gap-2 rounded-2xl border border-input bg-composer px-3 pb-2 pt-2",
+              ? "gap-2 rounded-2xl border border-ring/40 bg-composer px-3 pb-2 pt-3"
+              : "gap-2 rounded-2xl border border-input bg-composer px-3 pb-2 pt-3",
           )}
         >
           <If when={props.hero}><WorkspaceSelector {...props} /></If>
@@ -286,7 +308,14 @@ export function Composer(props: UiContext & { hero?: boolean }) {
             {(value) => <ApprovalCard {...props} approval={value()} />}
           </If>
           <If when={!question() && !approval()}>
-            <AttachmentStrip {...props} onPreview={(source) => preview.set(source)} />
+            <AttachmentStrip
+              {...props}
+              onPreview={(index) => preview.set(index)}
+              onMention={(index) => {
+                insertDraft(`Image ${index} `);
+                inputNode?.focus();
+              }}
+            />
             <View class="relative">
               <If when={slashCommands().length > 0}>
                 <SlashCandidates query={slashQuery() ?? ""} selected={slashIndex()} onSelect={chooseSlash} />
@@ -322,16 +351,18 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                 multiline
                 pasteBehavior="report"
                 submitBehavior="submit"
-                placeholder={t(running()
-                  ? store.config()?.default_delivery === "steer"
-                    ? "composer.steer_hint"
-                    : "composer.queue_hint"
-                  : store.config()?.default_delivery === "steer"
-                    ? "composer.steer_keys"
-                    : "composer.queue_keys")}
+                placeholder={t(queue().paused
+                  ? "composer.paused_hint"
+                  : running()
+                    ? store.config()?.default_delivery === "steer"
+                      ? "composer.steer_hint"
+                      : "composer.queue_hint"
+                    : store.config()?.default_delivery === "steer"
+                      ? "composer.steer_keys"
+                      : "composer.queue_keys")}
                 class={themeStore.classes(
                   "composer.input",
-                  "max-h-40 min-h-10 px-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
+                  "max-h-40 min-h-10 p-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
                 )}
                 style={{ fontSize: 14 }}
               />
@@ -355,25 +386,15 @@ export function Composer(props: UiContext & { hero?: boolean }) {
           </If>
         </View>
       </View>
-      <Dialog
-        open={Boolean(preview())}
-        animation="fade"
-        backdropClass="bg-black/85"
-        onOpenChange={({ open }) => { if (!open) preview.set(null); }}
-      >
-        <View class="relative h-[720px] w-[1000px] max-w-[92%] items-center justify-center">
-          <If when={preview()}>
-            {(source) => <Image src={source()} style={{ objectFit: "contain" }} class="h-full w-full" />}
-          </If>
-          <Button
-            accessibilityLabel={t("composer.close_image")}
-            class="absolute right-3 top-3 h-8 w-8 items-center justify-center rounded-full bg-black/50"
-            onPress={() => preview.set(null)}
-          >
-            <Icon name="x" size={16} color="#ffffff" />
-          </Button>
-        </View>
-      </Dialog>
+      <ImageViewer
+        images={store.draftImages().map((image, index) => ({
+          src: image.preview,
+          label: t("messages.image_label", { index: index + 1 }),
+        }))}
+        index={preview()}
+        onIndexChange={(index) => preview.set(index)}
+        onClose={() => preview.set(null)}
+      />
     </View>
   );
 }

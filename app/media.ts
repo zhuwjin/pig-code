@@ -24,3 +24,12 @@ export async function fileComposerImage(file: {
   const mime = file.type || "image/png";
   return composerImage({ bytes: Array.from(new Uint8Array(bytes)), mime });
 }
+
+export function updateImageMentionsAfterRemoval(text: string, removed: number, previousCount: number): string {
+  return text.replace(/Image (\d+) ?/g, (match, raw) => {
+    const value = Number(raw);
+    if (value < 1 || value > previousCount) return match;
+    if (value === removed) return "";
+    return `Image ${value > removed ? value - 1 : value}${match.endsWith(" ") ? " " : ""}`;
+  });
+}

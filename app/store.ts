@@ -52,7 +52,7 @@ import {
   eventKind,
 } from "./protocol";
 import { oppositeDelivery, parseSlashCommand, permissionsForMode } from "./commands";
-import { composerImage } from "./media";
+import { composerImage, updateImageMentionsAfterRemoval } from "./media";
 import { PluginThemeDefinition } from "./themes";
 import { PluginSequencer, pluginInstance, validatePluginEnvelope } from "./plugins/runtime";
 import { pluginProviderConfigs } from "./plugins/providers";
@@ -516,7 +516,11 @@ export class AgentStore {
   }
 
   removeDraftImage(id: string): void {
-    this.draftImages.update((images) => images.filter((image) => image.id !== id));
+    const images = this.draftImages();
+    const index = images.findIndex((image) => image.id === id);
+    if (index < 0) return;
+    this.draftImages.set(images.filter((image) => image.id !== id));
+    this.draft.update((text) => updateImageMentionsAfterRemoval(text, index + 1, images.length));
   }
 
   searchFiles(query: string): void {

@@ -503,11 +503,13 @@
     "clear_workspace": "Clear workspace",
     "remove_attachment": "Remove {path}",
     "remove_image": "Remove image",
+    "image_mention": "Mention image {index}",
     "no_matching_files": "No matching files",
     "send": "Send",
     "image_limit": "Add at most 8 images per message",
     "steer_hint": "Keep typing to steer the next change",
     "queue_hint": "Keep typing to queue the next change",
+    "paused_hint": "Propose follow-up changes",
     "steer_keys": "Enter sends a steer · Ctrl+Enter queues",
     "queue_keys": "Enter queues · Ctrl+Enter sends a steer",
     "stop": "Stop",
@@ -616,32 +618,30 @@
   },
   "queue": {
     "drag": "Drag to reorder",
+    "drag_aria": "Drag to reorder {text}",
     "image_count": {
       "one": "{count} image",
       "other": "{count} images"
     },
-    "move_up": "Move up",
-    "move_up_aria": "Move up {text}",
-    "move_down": "Move down",
-    "move_down_aria": "Move down {text}",
     "move_to_queue": "Move to queue",
     "move_to_queue_aria": "Move to queue {text}",
     "convert_to_steer": "Convert to steer",
     "convert_to_steer_aria": "Convert to steer {text}",
+    "edit": "Recall to composer",
     "edit_aria": "Edit {text}",
-    "send_now": "Send now",
+    "send_now": "Now",
     "send_now_aria": "Send now {text}",
+    "cancel": "Cancel queued message",
     "cancel_aria": "Cancel queued {text}",
     "pause": {
-      "stopped": "The turn stopped and the queue is paused.",
-      "restarted": "The app restarted. Review and resume the queue.",
-      "error": "The previous turn failed and the queue is paused."
+      "stopped": "Queue paused because you interrupted the current response",
+      "restarted": "Queue paused because the app restarted (nothing lost)",
+      "error": "Queue paused because the last response errored (nothing lost)"
     },
-    "resume": "Resume queue",
-    "paused_title": "Queue paused. What should happen to the new message?",
+    "resume": "Resume",
+    "held_prompt": "The queue is paused. What should happen to the new message \"{text}\"?",
     "clear_and_send": "Clear queue and send",
-    "keep_and_enqueue": "Keep and enqueue",
-    "cancel_new": "Cancel new message",
+    "keep_and_enqueue": "Keep queue and append",
     "steer_lane": "Current turn steers",
     "pending_lane": "Pending message queue"
   },
@@ -672,6 +672,13 @@
     "no_conversation": "No conversation yet",
     "close_tab": "Close {name}",
     "close_panel": "Close right panel"
+  },
+  "image_viewer": {
+    "previous": "Previous image",
+    "next": "Next image",
+    "zoom_out": "Zoom out",
+    "zoom_in": "Zoom in",
+    "fit": "Fit"
   },
   "messages": {
     "image_label": "Image {index}",
