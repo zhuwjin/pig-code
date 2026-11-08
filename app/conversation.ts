@@ -157,6 +157,11 @@ export function reuseConversationRows(previous: ConversationRow[], next: Convers
   });
 }
 
+export function turnDurationMs(turn: TurnState | undefined): number | undefined {
+  const statsDuration = turn?.stats?.duration_ms;
+  return statsDuration && statsDuration > 0 ? statsDuration : turn?.durationMs;
+}
+
 export function formatDuration(ms: number, prefix = ""): string {
   const seconds = Math.max(1, Math.round(ms / 1000));
   const value = seconds >= 60

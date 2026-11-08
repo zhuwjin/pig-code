@@ -586,6 +586,7 @@
   "turn": {
     "stopped": "Stopped",
     "worked_for": "Worked for ",
+    "processed": "Processed",
     "files_changed": "Changed {count} files",
     "restore": "Restore {path}",
     "more_files": "{count} more files",

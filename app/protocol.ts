@@ -124,6 +124,8 @@ export interface MarkdownItem {
   text: string;
   streaming: boolean;
   turnId?: string;
+  startedAtMs?: number;
+  durationMs?: number;
   sources?: Source[];
 }
 

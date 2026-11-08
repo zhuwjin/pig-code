@@ -44,6 +44,7 @@ import {
   ReasoningTicker,
   reasoningTickerLine,
 } from "./reasoning-ticker";
+import { ShimmerText } from "./shimmer-text";
 import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
 
@@ -194,7 +195,6 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
 function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const item = () => props.item();
   const open = () => props.store.isExpanded(item().id);
-  const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
   const roll = new ReasoningTicker();
   const tickerCurrent = signal(reasoningTickerLine(props.textFor(item()))?.text ?? "");
   const tickerPrevious = signal<{ text: string } | null>(null);
@@ -354,9 +354,9 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
-        <Text class={item().streaming ? "shrink-0 text-sm leading-5 text-muted-foreground animate-pulse" : "shrink-0 text-sm leading-5 text-muted-foreground"}>
-          {item().streaming ? t("messages.thinking") : turn()?.durationMs ? formatDuration(turn()!.durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
-        </Text>
+        <ShimmerText active={item().streaming} baseOpacity={item().streaming ? 0.6 : 1} class="shrink-0" textClass="text-sm leading-5">
+          {item().streaming ? t("messages.thinking") : item().durationMs != null ? formatDuration(item().durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
+        </ShimmerText>
         <If when={item().streaming && !open() && reasoningTickerLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>

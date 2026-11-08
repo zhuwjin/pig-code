@@ -18,6 +18,7 @@ import {
 import { Icon } from "./icon";
 import { CodeView, type CodeViewLine } from "./code-view";
 import { ListCollapsible } from "./list-collapsible";
+import { ShimmerText } from "./shimmer-text";
 
 function copyText(props: UiContext, id: string, text: string): void {
   void Clipboard.writeText(text).then(() => props.store.markCopied(id));
@@ -477,9 +478,9 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
-        <Text class={running() ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm font-medium text-muted-foreground"}>
+        <ShimmerText active={running()} baseOpacity={running() ? 0.6 : 1} class="shrink-0" textClass={running() ? "text-sm" : "text-sm font-medium"}>
           {toolLabel(item().tool, running())}
-        </Text>
+        </ShimmerText>
         <If when={item().tool === "Read"}>
           <ContextMenu
             class="min-w-0 shrink"

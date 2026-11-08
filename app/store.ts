@@ -1776,8 +1776,7 @@ export class AgentStore {
     this.hookRunning.update((all) => ({ ...all, [sessionId]: null }));
     this.approvals.update((all) => ({ ...all, [sessionId]: [] }));
     this.questions.update((all) => ({ ...all, [sessionId]: null }));
-    this.updateItems(sessionId, (items) => items.map((item) => {
-      if (item.kind === "reasoning" && item.streaming) return { ...item, streaming: false };
+    this.updateItems(sessionId, (items) => AgentStore.settleStreamingReasoning(items).map((item) => {
       if (item.kind === "tool" && item.approvalPending) return { ...item, approvalPending: false };
       return item;
     }));
@@ -1789,11 +1788,16 @@ export class AgentStore {
   }
 
   private static settleStreamingReasoning(items: ChatItem[]): ChatItem[] {
+    const now = Date.now();
     let changed = false;
     const next = items.map((item) => {
       if (item.kind !== "reasoning" || !item.streaming) return item;
       changed = true;
-      return { ...item, streaming: false };
+      const replay = item.turnId?.startsWith("replay-") ?? false;
+      const durationMs = !replay && item.startedAtMs !== undefined
+        ? Math.max(0, now - item.startedAtMs)
+        : undefined;
+      return { ...item, streaming: false, durationMs };
     });
     return changed ? next : items;
   }
@@ -1838,7 +1842,14 @@ export class AgentStore {
             }
             const index = next.findIndex((item) => item.id === delta.id);
             if (index < 0) {
-              next.push({ kind: delta.kind, id: delta.id, text: delta.text, streaming: true, turnId: delta.turnId });
+              next.push({
+                kind: delta.kind,
+                id: delta.id,
+                text: delta.text,
+                streaming: true,
+                turnId: delta.turnId,
+                startedAtMs: delta.kind === "reasoning" ? Date.now() : undefined,
+              });
               continue;
             }
             const previous = next[index] as MarkdownItem;

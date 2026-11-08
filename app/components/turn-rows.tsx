@@ -3,7 +3,7 @@ import { Button } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { changeTotals, formatClock, formatCompactDuration, formatDuration } from "../conversation";
+import { changeTotals, formatClock, formatCompactDuration, formatDuration, turnDurationMs } from "../conversation";
 import { Icon } from "./icon";
 import { ListCollapsible } from "./list-collapsible";
 
@@ -18,7 +18,11 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
         onPress={() => props.store.toggleTurnExpanded(turn().id)}
       >
         <Text class="text-xs text-muted-foreground">
-          {turn().status === "stopped" ? t("turn.stopped") : formatDuration(turn().durationMs ?? 0, t("turn.worked_for"))}
+          {turn().status === "stopped"
+            ? t("turn.stopped")
+            : (turnDurationMs(turn()) ?? 0) > 0
+              ? formatDuration(turnDurationMs(turn())!, t("turn.worked_for"))
+              : t("turn.processed")}
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>

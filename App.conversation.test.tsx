@@ -12,6 +12,7 @@ import {
   partialJsonField,
   reuseConversationRows,
   streamingDiffRows,
+  turnDurationMs,
   turnSpeed,
   userMessageIsLong,
 } from "./app/conversation";
@@ -157,6 +158,14 @@ test("parses Grep content and count rows without splitting Windows drive letters
     ],
     notes: [],
   });
+});
+
+test("resolves replay durations from stats without inventing unknown durations", () => {
+  expect(turnDurationMs({ ...turn, durationMs: 0, stats: { ...turn.stats!, duration_ms: 33000 } })).toBe(33000);
+  expect(turnDurationMs({ ...turn, durationMs: 2400, stats: null })).toBe(2400);
+  expect(turnDurationMs({ ...turn, durationMs: 0, stats: null })).toBe(0);
+  expect(turnDurationMs({ ...turn, durationMs: 2400, stats: { ...turn.stats!, duration_ms: 0 } })).toBe(2400);
+  expect(turnDurationMs(undefined)).toBeUndefined();
 });
 
 test("calculates decode speed from provider timing rather than character estimates", () => {

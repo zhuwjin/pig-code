@@ -82,7 +82,7 @@ test("settles visible reasoning labels as tools, new reasoning and text arrive",
   await app.press("id:next-reasoning");
   await app.waitFor("id:thinking-ticker-thinking-next-1");
   expect(app.shows("id:thinking-ticker-thinking")).toBe(false);
-  expect(app.texts().filter((text) => text === "思考中")).toHaveLength(1);
+  expect(app.count("label:思考中")).toBe(1);
 
   await app.press("id:next-text");
   await app.waitFor("Answer body");
@@ -91,13 +91,14 @@ test("settles visible reasoning labels as tools, new reasoning and text arrive",
 
   await app.press("id:next-reasoning");
   await app.waitFor("id:thinking-ticker-thinking-next-2");
-  expect(app.texts().filter((text) => text === "思考中")).toHaveLength(1);
+  expect(app.count("label:思考中")).toBe(1);
   await app.press("id:next-tool");
   await app.press("id:activity-thinking-next-2");
   await app.waitFor("id:tool-tool-2");
   expect(app.shows("id:thinking-ticker-thinking-next-2")).toBe(false);
   expect(app.texts()).not.toContain("思考中");
-  expect(app.texts().filter((text) => text === "思考过程")).toHaveLength(3);
+  expect(app.texts().filter((text) => text === "思考过程")).toHaveLength(1);
+  expect(app.texts().filter((text) => /^思考了 \d+ 秒$/.test(text))).toHaveLength(2);
 }, 90000);
 
 test("opens reasoning from its preview and restores the latest line on collapse", async () => {

@@ -586,6 +586,7 @@
   "turn": {
     "stopped": "已停止",
     "worked_for": "工作了 ",
+    "processed": "处理完成",
     "files_changed": "修改了 {count} 个文件",
     "restore": "还原 {path}",
     "more_files": "还有 {count} 个文件",
