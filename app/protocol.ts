@@ -105,6 +105,7 @@ export interface AgentCard {
   model: string;
   background: boolean;
   finished: boolean;
+  finishedSeq?: number;
   live_note?: string | null;
 }
 

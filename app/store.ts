@@ -116,6 +116,7 @@ export class AgentStore {
   readonly hookRunning = signal<Record<string, { event: string; label: string } | null>>({});
   readonly projectHooks = signal<Record<string, ProjectHooksNotice | null>>({});
   readonly subagents = signal<Record<string, SubagentHistory>>({});
+  private agentFinishSeq = 0;
   readonly rightPanelRequest = signal<RightPanelRequest | null>(null);
   readonly config = signal<AppConfig | null>(null);
   readonly gitStatus = signal<GitStatusSnapshot | null>(null);
@@ -1490,13 +1491,19 @@ export class AgentStore {
           if (item.kind !== "tool" || !item.agents?.some((agent) => agent.agent_id === data.agent_id)) return item;
           return {
             ...item,
-            agents: item.agents.map((agent) => agent.agent_id === data.agent_id
-              ? {
-                  ...agent,
-                  finished: agent.finished || data.finished,
-                  live_note: data.finished ? null : (data.item?.text ?? agent.live_note),
-                }
-              : agent),
+            agents: item.agents.map((agent) => {
+              if (agent.agent_id !== data.agent_id) return agent;
+              const finished = agent.finished || data.finished;
+              const finishedSeq = data.finished && !agent.finished
+                ? (agent.finishedSeq ?? ++this.agentFinishSeq)
+                : agent.finishedSeq;
+              return {
+                ...agent,
+                finished,
+                finishedSeq,
+                live_note: data.finished ? null : (data.item?.text ?? agent.live_note),
+              };
+            }),
           };
         }));
         break;

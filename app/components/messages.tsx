@@ -1,10 +1,15 @@
 import {
   Accessor,
+  Animated,
   Clipboard,
+  createAnimatedValue,
+  Easing,
   Image,
   List,
   type ListRef,
+  reduceMotion,
   Scroll,
+  type ScrollRef,
   Text,
   View,
   computed,
@@ -185,6 +190,100 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const item = () => props.item();
   const open = () => props.store.isExpanded(item().id);
   const turn = () => props.store.currentTurns().find((candidate) => candidate.id === item().turnId);
+  const tickerCurrent = signal(lastNonEmptyLine(props.textFor(item())));
+  const tickerPrevious = signal<{ text: string } | null>(null);
+  const tickerProgress = createAnimatedValue(1);
+  const fadeLeft = signal(false);
+  const fadeRight = signal(false);
+  let tickerAnimation: ReturnType<typeof Animated.timing> | undefined;
+  let tickerScroll: ScrollRef | undefined;
+  effect(() => {
+    const next = lastNonEmptyLine(props.textFor(item()));
+    const current = tickerCurrent();
+    if (next === current) return;
+    const animate = item().streaming && !open() && !reduceMotion();
+    tickerPrevious.set(animate ? { text: current } : null);
+    tickerCurrent.set(next);
+    if (animate) {
+      tickerProgress.set(0);
+      tickerAnimation?.stop();
+      tickerAnimation = Animated.timing(tickerProgress, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.cubic),
+      });
+      tickerAnimation.start(({ finished }) => {
+        if (finished) tickerPrevious.set(null);
+      });
+    } else {
+      tickerProgress.set(1);
+    }
+    requestAnimationFrame(() => tickerScroll?.scrollToEnd({ animated: false }));
+  });
+  effect(() => {
+    const frame = requestAnimationFrame(() => tickerScroll?.scrollToEnd({ animated: false }));
+    return () => {
+      cancelAnimationFrame(frame);
+      tickerAnimation?.stop();
+    };
+  });
+  const ticker = () => (
+    <View class="min-w-0 flex-row items-center">
+      <Text class="shrink-0 text-sm text-muted-foreground">·&nbsp;</Text>
+      <View class="relative min-w-0">
+        <Scroll
+          ref={(node) => { tickerScroll = node; }}
+          testID={`thinking-ticker-${item().id}`}
+          horizontal
+          class="min-w-0"
+          scrollbar={false}
+          bounces={false}
+          onScroll={(event) => {
+            const max = Math.max(0, event.contentSize.width - event.size.width);
+            fadeLeft.set(event.offset.x > 1);
+            fadeRight.set(event.offset.x < max - 1);
+          }}
+        >
+          <View class="relative h-5 overflow-hidden">
+            <If when={tickerPrevious()}>
+              {(previous) => (
+                <View
+                  class="absolute inset-x-0 top-0 h-5 overflow-hidden"
+                  style={{
+                    opacity: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
+                    transform: [{ translateY: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -20] }) }],
+                  }}
+                >
+                  <Text class="shrink-0 text-sm leading-5 text-muted-foreground">{previous().text}</Text>
+                </View>
+              )}
+            </If>
+            <View
+              class="h-5 overflow-hidden"
+              style={{
+                opacity: tickerProgress,
+                transform: [{ translateY: tickerProgress.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+              }}
+            >
+              <Text class="shrink-0 text-sm leading-5 text-muted-foreground">{tickerCurrent()}</Text>
+            </View>
+          </View>
+        </Scroll>
+        <If when={fadeLeft()}>
+          <View
+            class="absolute left-0 top-0 h-5 w-4"
+            style={{ pointerEvents: "none", backgroundImage: `linear-gradient(to right, ${token("background")}, ${token("background")}00)` }}
+          />
+        </If>
+        <If when={fadeRight()}>
+          <View
+            class="absolute right-0 top-0 h-5 w-4"
+            style={{ pointerEvents: "none", backgroundImage: `linear-gradient(to right, ${token("background")}00, ${token("background")})` }}
+          />
+        </If>
+      </View>
+    </View>
+  );
   return (
     <ListCollapsible
       open={open()}
@@ -208,11 +307,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <Text class={item().streaming ? "shrink-0 text-sm text-muted-foreground animate-pulse" : "shrink-0 text-sm text-muted-foreground"}>
           {item().streaming ? t("messages.thinking") : turn()?.durationMs ? formatDuration(turn()!.durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
         </Text>
-        <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">
-            · {lastNonEmptyLine(props.textFor(item()))}
-          </Text>
-        </If>
+        <If when={item().streaming && !open() && lastNonEmptyLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
     </ListCollapsible>

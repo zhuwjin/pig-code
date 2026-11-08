@@ -1,5 +1,5 @@
 import { Accessor, Clipboard, Scroll, Text, token, View } from "nsh";
-import { Button, DiffView, TextView } from "nsh/base";
+import { Button, ContextMenu, DiffView, MenuItem, TextView, Tooltip } from "nsh/base";
 import { t } from "../i18n";
 import type { AgentCard, ToolItem } from "../protocol";
 import type { UiContext } from "../ui-context";
@@ -270,10 +270,49 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   const complete = () => agents().filter((agent) =>
     agent.finished || (!agent.background && status() !== "input" && status() !== "running")
   ).length;
+  const ordered = () => agents().map((agent, index) => ({ agent, index })).sort((a, b) => {
+    if (props.item().tool !== "AgentSwarm") return a.index - b.index;
+    const aDone = a.agent.finishedSeq !== undefined;
+    const bDone = b.agent.finishedSeq !== undefined;
+    return Number(bDone) - Number(aDone) || (a.agent.finishedSeq ?? a.index) - (b.agent.finishedSeq ?? b.index);
+  });
+  const parent = () => {
+    const first = agents()[0];
+    if (!first) return null;
+    return (
+      <Button
+        testID={`swarm-parent-${props.item().id}`}
+        class="w-full flex-row items-center gap-3 rounded-lg border border-border bg-tool-surface p-3 hover:bg-accent"
+        onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
+      >
+        <View class="h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent">
+          <Icon name="bot" size={20} color={token("foreground")} />
+        </View>
+        <View class="min-w-0 flex-1 gap-0.5">
+          <Text style={{ numberOfLines: 1 }} class="text-left text-sm font-medium text-foreground">
+            {first.description || props.item().summary}
+          </Text>
+          <Text style={{ numberOfLines: 1 }} class="text-left text-xs text-muted-foreground">
+            {first.model || first.profile}
+          </Text>
+        </View>
+        <Text class="shrink-0 text-sm text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
+      </Button>
+    );
+  };
   const rows = (
     <View class="gap-1">
-      <Each of={agents()} key={(agent) => agent.agent_id}>
-        {(agent) => <AgentRow {...props} agent={agent} status={status()} />}
+      <If when={props.item().tool === "AgentSwarm"}>{parent()}</If>
+      <Each of={ordered()} key={(entry) => entry.agent.agent_id}>
+        {(entry, index) => (
+          <AgentRow
+            {...props}
+            agent={() => entry().agent}
+            status={status()}
+            approvalPending={props.item().approvalPending ?? false}
+            index={props.item().tool === "AgentSwarm" ? index() + 1 : undefined}
+          />
+        )}
       </Each>
     </View>
   );
@@ -283,6 +322,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
       <ListCollapsible open={open()} testID={`swarm-${props.item().id}`} content={rows}>
         <View
           role="button"
+          testID={`swarm-${props.item().id}`}
           accessibilityState={{ expanded: open() }}
           class="flex-row items-center gap-2 py-1"
           onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
@@ -299,9 +339,19 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   return rows;
 }
 
-function AgentRow(props: UiContext & { agent: Accessor<AgentCard>; status: ToolItem["status"] }) {
+function AgentRow(props: UiContext & {
+  agent: Accessor<AgentCard>;
+  status: ToolItem["status"];
+  approvalPending: boolean;
+  index?: number;
+}) {
   const agent = () => props.agent();
-  const finished = () => agent().finished || (!agent().background && props.status !== "input" && props.status !== "running");
+  const failed = () => props.status === "error";
+  const done = () => agent().finished || (!agent().background && props.status !== "input" && props.status !== "running");
+  const waiting = () => !agent().background && props.approvalPending;
+  const running = () => agent().background
+    ? !agent().finished
+    : (props.status === "input" || props.status === "running") && !agent().finished && !props.approvalPending;
   return (
     <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
       <Button
@@ -309,27 +359,37 @@ function AgentRow(props: UiContext & { agent: Accessor<AgentCard>; status: ToolI
         class="flex-row items-center gap-3 px-3 py-3 hover:bg-accent"
         onPress={() => props.store.openSubagent(agent().agent_id)}
       >
-        <View class="h-9 w-9 items-center justify-center rounded-lg bg-accent">
-          <Icon name="bot" size={18} color={token("muted-foreground")} />
+        <View class="h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-info/10">
+          <Icon name="bot" size={18} color={token("info")} />
         </View>
         <View class="min-w-0 flex-1 gap-0.5">
           <Text style={{ numberOfLines: 1 }} class="text-left text-sm font-medium text-foreground">{agent().description}</Text>
-          <Text style={{ numberOfLines: 1 }} class="text-left text-xs text-muted-foreground">
-            {agent().profile} · {agent().model}
+          <Text style={{ numberOfLines: 1 }} class={failed() ? "text-left text-xs text-destructive" : "text-left text-xs text-muted-foreground"}>
+            {failed() ? t("tools.failed") : `${agent().profile} · ${agent().model}`}
           </Text>
+          <If when={running() && agent().live_note}>
+            <View class="flex-row items-center gap-1">
+              <Icon name="loader-circle" size={12} class="animate-spin" color={token("muted-foreground")} />
+              <Text style={{ numberOfLines: 1 }} class="min-w-0 text-xs text-muted-foreground">{agent().live_note}</Text>
+            </View>
+          </If>
         </View>
-        <If when={finished()}>
-          <Text class="text-xs text-success">{t("tools.done")}</Text>
+        <If when={waiting()}>
+          <Text testID={`agent-waiting-${agent().agent_id}`} class="shrink-0 text-xs text-warning">{t("tools.waiting_approval")}</Text>
         </If>
-        <If when={!finished()}>
+        <If when={!waiting() && running()}>
           <Icon name="loader-circle" size={14} class="animate-spin" color={token("muted-foreground")} />
         </If>
+        <If when={!waiting() && !running() && failed()}>
+          <Text testID={`agent-failed-${agent().agent_id}`} class="shrink-0 text-xs text-destructive">{t("tools.failed")}</Text>
+        </If>
+        <If when={!waiting() && !running() && !failed() && done()}>
+          <Icon testID={`agent-complete-${agent().agent_id}`} name="circle-check" size={16} color={token("success")} />
+        </If>
+        <If when={props.index !== undefined}>
+          <Text class="w-6 shrink-0 text-right text-xs text-muted-foreground">{String(props.index).padStart(2, "0")}</Text>
+        </If>
       </Button>
-      <If when={agent().live_note}>
-        <View class="flex-row items-center gap-2 px-3 pb-2 pl-12">
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{agent().live_note}</Text>
-        </View>
-      </If>
     </View>
   );
 }
@@ -338,6 +398,10 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
   const item = () => props.item();
   const open = () => props.store.isExpanded(`plan-${item().id}`);
   const approved = () => item().output.includes("Plan approved");
+  const statusLabel = () => item().status !== "done"
+    ? t("tools.plan_pending")
+    : approved() ? t("tools.plan_approved") : t("tools.plan_rejected");
+  const statusColor = () => token(item().status !== "done" ? "warning" : approved() ? "success" : "destructive");
   const plan = () => {
     try {
       const detail = JSON.parse(item().detail) as { plan?: string };
@@ -365,9 +429,8 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
         onPress={() => props.store.toggleExpanded(`plan-${item().id}`)}
       >
         <Icon name="lightbulb" size={16} color={token("info")} />
-        <Text class="min-w-0 text-sm text-foreground">
-          {t(item().status === "done" && approved() ? "tools.plan_approved" : item().status === "input" || item().status === "running" ? "tools.plan_waiting" : "tools.plan_not_approved")}
-        </Text>
+        <Text class="shrink-0 text-sm text-muted-foreground">{t("tools.exit_plan")}</Text>
+        <Text class="min-w-0 text-sm" style={{ color: statusColor() }}>{statusLabel()}</Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
     </ListCollapsible>
@@ -390,6 +453,18 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
     if (item().status === "input" && !item().detail) return "…";
     return item().detail.split(/\s+/).join(" ") || "…";
   };
+  const fileChip = () => {
+    if (item().edit) return pathParts(summary());
+    if (running() && (item().tool === "Write" || item().tool === "Edit")) {
+      const path = partialJsonField(item().detail, "path");
+      return path ? pathParts(path) : null;
+    }
+    return null;
+  };
+  const failureReason = () => {
+    const collapsed = item().output.split(/\s+/).join(" ");
+    return collapsed.length > 200 ? `${collapsed.slice(0, 199).trimEnd()}…` : collapsed;
+  };
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
@@ -406,21 +481,47 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
           {toolLabel(item().tool, running())}
         </Text>
         <If when={item().tool === "Read"}>
-          <Button
-            testID="read-path"
-            class="min-w-0"
-            onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
+          <ContextMenu
+            popupClass="w-48 rounded-xl border border-border bg-popover p-1 shadow-xl"
+            trigger={
+              <Button
+                testID="read-path"
+                class="min-w-0"
+                onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
+              >
+                <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
+                  {summary()}
+                </Text>
+              </Button>
+            }
           >
-            <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
-              {summary()}
-            </Text>
-          </Button>
+            <MenuItem testID="read-copy-path" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent" onSelect={() => void Clipboard.writeText(item().summary)}>
+              <Icon name="copy" size={13} color={token("muted-foreground")} />
+              <Text class="flex-1 text-sm text-foreground">{t("sidebar.copy_path")}</Text>
+            </MenuItem>
+            <MenuItem testID="read-open-right" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent" onSelect={() => props.store.openFile(item().summary, readFirstLine(item().output))}>
+              <Icon name="eye" size={13} color={token("muted-foreground")} />
+              <Text class="flex-1 text-sm text-foreground">{t("tools.open_file_right")}</Text>
+            </MenuItem>
+          </ContextMenu>
           <If when={readLineCount(item().output) > 0}>
             <Text class="shrink-0 text-xs text-muted-foreground">{t("tools.lines", { count: readLineCount(item().output) })}</Text>
           </If>
         </If>
         <If when={item().tool !== "Read"}>
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{summary()}</Text>
+          <If when={fileChip()}>
+            {(chip) => (
+              <View class="min-w-0 flex-row items-center gap-1">
+                <Text class="shrink-0 text-sm text-foreground">{chip().name}</Text>
+                <If when={chip().directory}>
+                  <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{chip().directory}</Text>
+                </If>
+              </View>
+            )}
+          </If>
+          <If when={!fileChip()}>
+            <Text style={{ numberOfLines: 1 }} class="min-w-0 text-sm text-muted-foreground">{summary()}</Text>
+          </If>
         </If>
         <If when={item().edit}>
           <Text class="shrink-0 font-mono text-xs text-success">+{item().edit!.additions}</Text>
@@ -438,7 +539,18 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
           <Text class="shrink-0 text-xs text-warning">{t("tools.waiting_approval")}</Text>
         </If>
         <If when={item().status === "error"}>
-          <Icon name="x" size={13} color={token("destructive")} />
+          <View
+            testID={`tool-error-${item().id}`}
+            class="h-5 w-5 shrink-0 items-center justify-center"
+            hitSlop={4}
+            tooltip={
+              <Tooltip delay={300} class="max-w-80 rounded-md border border-border bg-popover px-2 py-1 shadow-lg">
+                <Text class="text-xs text-foreground">{failureReason()}</Text>
+              </Tooltip>
+            }
+          >
+            <Icon name="x" size={13} color={token("destructive")} />
+          </View>
         </If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
