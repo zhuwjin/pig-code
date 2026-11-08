@@ -21,7 +21,7 @@ function readOutput(count: number): string {
     const line = index + 1;
     if (line % 10 === 1) return `${line}\t# Plugin system ${line}`;
     if (line % 10 === 2 || line % 10 === 4 || line % 10 === 6) return `${line}\t`;
-    if (line % 10 === 3) return `${line}\tPig Code installs signed NSH packages without rebuilding or restarting the app.`;
+    if (line % 10 === 3) return `${line}\tPig Code installs signed NSH packages without rebuilding or restarting the app. ${"The horizontal viewport keeps its vertical scrollbar at the visible right edge. ".repeat(4)}`;
     if (line % 10 === 5) return `${line}\t## Scope ${line}`;
     if (line % 10 === 7) return `${line}\t- Agent tools, including model- and session-aware tool selection;`;
     if (line % 10 === 8) return `${line}\t- Commands invoked from the host's command search;`;

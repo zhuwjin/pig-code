@@ -8,9 +8,10 @@ import {
   signal,
   Text,
   View,
+  type ScrollRef,
 } from "nsh";
 import { CodeHighlighter } from "pig-code-ts/native";
-import type { EditorToken } from "nsh/base";
+import { Scrollbar, type EditorToken } from "nsh/base";
 
 export type CodeViewLine = { number?: number; text: string };
 
@@ -93,7 +94,10 @@ function CodeLine(props: {
   const row = () => props.row();
   const content = () => segments(row(), props.spans());
   return (
-    <View class={props.wrap ? "w-full flex-row items-start" : "flex-row items-start"} style={{ minHeight: LINE_HEIGHT }}>
+    <View
+      class={props.wrap ? "w-full flex-row items-start" : "flex-row items-start"}
+      style={{ minHeight: LINE_HEIGHT, cursor: props.wrap ? "default" : "text" }}
+    >
       <If when={props.lineNumbers && row().number !== undefined}>
         <Text
           class="shrink-0 pr-2 font-mono text-xs text-muted-foreground"
@@ -135,6 +139,9 @@ export function CodeView(props: CodeViewProps) {
   const spans = signal<TokenSpan[]>([]);
   const measuredHeight = signal<number | null>(null);
   const viewportWidth = signal(0);
+  const textViewportWidth = signal(0);
+  const scrollY = signal(0);
+  let horizontal: ScrollRef | undefined;
   let highlightRevision = 0;
   effect(() => {
     const code = props.code();
@@ -167,57 +174,145 @@ export function CodeView(props: CodeViewProps) {
     measuredHeight.set(null);
   });
   const maxHeight = () => props.maxHeight ?? 320;
+  const contentHeight = () => Math.max(LINE_HEIGHT, rows().length * LINE_HEIGHT);
   const height = () => Math.max(
     LINE_HEIGHT,
-    Math.min(measuredHeight() ?? rows().length * LINE_HEIGHT, maxHeight()),
+    Math.min(props.wrap() ? measuredHeight() ?? contentHeight() : contentHeight(), maxHeight()),
   );
   const gutterWidth = () => {
     if (!props.lineNumbers) return 0;
     const digits = Math.max(1, ...rows().map((row) => row.number ?? 0)).toString().length;
     return 18 + digits * 8;
   };
+  const textWidth = () => Math.max(1, textViewportWidth() || viewportWidth() - gutterWidth());
   const contentWidth = () => {
     const text = Math.max(1, ...rows().map((row) => textUnits(row.text)));
-    return Math.max(viewportWidth(), Math.ceil(gutterWidth() + 24 + text * CHARACTER_WIDTH));
+    return Math.max(textWidth(), Math.ceil(24 + text * CHARACTER_WIDTH));
   };
   const list = () => (
-    <List
-      testID={props.testID}
-      each={rows()}
-      keyExtractor={(row) => row.id}
-      estimatedItemSize={LINE_HEIGHT}
-      class="h-full"
-      style={props.wrap() ? { width: "100%" } : { width: contentWidth() }}
-      scrollbar
-      onScroll={(event) => {
-        const next = Math.ceil(event.contentSize.height);
-        if (measuredHeight() !== next) measuredHeight.set(next);
-      }}
-    >
-      {(row) => (
-        <CodeLine
-          row={row}
-          spans={spans}
-          wrap={props.wrap()}
-          lineNumbers={props.lineNumbers ?? false}
-          gutterWidth={gutterWidth()}
-          error={props.error ?? false}
+    <View selectable class="h-full w-full">
+      <List
+        testID={props.testID}
+        each={rows()}
+        keyExtractor={(row) => row.id}
+        estimatedItemSize={LINE_HEIGHT}
+        class="h-full w-full"
+        scrollbar
+        bounces={false}
+        onScroll={(event) => {
+          const next = Math.ceil(event.contentSize.height);
+          if (measuredHeight() !== next) measuredHeight.set(next);
+        }}
+      >
+        {(row) => (
+          <CodeLine
+            row={row}
+            spans={spans}
+            wrap={props.wrap()}
+            lineNumbers={props.lineNumbers ?? false}
+            gutterWidth={gutterWidth()}
+            error={props.error ?? false}
+          />
+        )}
+      </List>
+    </View>
+  );
+  const visible = computed(() => {
+    const first = Math.max(0, Math.floor(scrollY() / LINE_HEIGHT) - 6);
+    const last = Math.min(rows().length, Math.ceil((scrollY() + height()) / LINE_HEIGHT) + 6);
+    return { first, last, items: rows().slice(first, last) };
+  });
+  const spacers = (after: boolean) => {
+    const count = after ? rows().length - visible().last : visible().first;
+    return <View style={{ height: count * LINE_HEIGHT }} />;
+  };
+  const scrolling = () => (
+    <View class="h-full w-full">
+      <Scroll
+        testID={props.testID}
+        class="h-full w-full cursor-default"
+        scrollbar
+        bounces={false}
+        onScroll={(event) => {
+          const max = Math.max(0, contentHeight() - height());
+          scrollY.set(Math.max(0, Math.min(event.offset.y, max)));
+        }}
+      >
+        <View class="relative flex-row" style={{ height: contentHeight() }}>
+          <If when={props.lineNumbers}>
+            <View class="shrink-0" style={{ width: gutterWidth(), height: contentHeight() }}>
+              {spacers(false)}
+              <Each of={visible().items} key={(row) => row.id}>
+                {(row) => (
+                  <Text
+                    class="shrink-0 pr-2 font-mono text-xs text-muted-foreground"
+                    style={{ width: gutterWidth(), lineHeight: LINE_HEIGHT, textAlign: "right", userSelect: "text", cursor: "default" }}
+                  >
+                    {row().number}
+                  </Text>
+                )}
+              </Each>
+              {spacers(true)}
+            </View>
+          </If>
+          <Scroll
+            ref={horizontal}
+            horizontal
+            testID={props.testID ? `${props.testID}-horizontal` : undefined}
+            class="min-w-0 flex-1 cursor-default"
+            scrollbar={false}
+            bounces={false}
+            onLayout={({ bounds }) => textViewportWidth.set(bounds.size.width)}
+          >
+            <View selectable class="relative" style={{ width: contentWidth(), height: contentHeight() }}>
+              {spacers(false)}
+              <Each of={visible().items} key={(row) => row.id}>
+                {(row) => (
+                  <CodeLine
+                    row={row}
+                    spans={spans}
+                    wrap={false}
+                    lineNumbers={false}
+                    gutterWidth={0}
+                    error={props.error ?? false}
+                  />
+                )}
+              </Each>
+              {spacers(true)}
+            </View>
+          </Scroll>
+          <If when={contentHeight() > height()}>
+            <View
+              class="absolute right-0 cursor-default"
+              style={{ top: scrollY(), width: 12, height: height() }}
+            />
+          </If>
+        </View>
+      </Scroll>
+      <If when={contentWidth() > textWidth()}>
+        <Scrollbar
+          testID={props.testID ? `${props.testID}-horizontal-scrollbar` : undefined}
+          scroll={horizontal}
+          axis="horizontal"
+          mode="hover"
+          motion={{ idle: 700, enter: 0, exit: 300, entrance: "fade", thumbHoverEntrance: "fade" }}
+          minThumbLength={32}
+          class="absolute bottom-0 h-3 items-end pb-[2px]"
+          style={{ left: gutterWidth(), right: 0 }}
+          thumbClass="h-1.5 rounded-full"
+          thumbStyle={{ backgroundColor: colorScheme() === "dark" ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.45)" }}
         />
-      )}
-    </List>
+      </If>
+    </View>
   );
   return (
     <View
-      class="w-full overflow-hidden"
+      class="relative w-full overflow-hidden"
       style={{ height: height() }}
       onLayout={({ bounds }) => viewportWidth.set(bounds.size.width)}
     >
       <If when={props.wrap()}>{list()}</If>
-      <If when={!props.wrap()}>
-        <Scroll horizontal class="h-full w-full" contentClass="h-full">
-          {list()}
-        </Scroll>
-      </If>
+      <If when={!props.wrap()}>{scrolling()}</If>
     </View>
   );
 }

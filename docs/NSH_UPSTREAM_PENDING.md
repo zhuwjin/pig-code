@@ -14,7 +14,7 @@
 
 这里不使用官方 `Collapsible.reveal` 的局部 `animate_layout`，也不使用全局 `LayoutAnimation.configureNext`，避免原生布局动画与 List 的行高测量、回收和滚动范围更新各自修改位置。右侧子 Agent 输出（`app/components/right-panel.tsx`）和模型高级设置（`app/components/settings/model-editor.tsx`）不在消息 List 的虚拟行内，继续使用官方 `Collapsible.reveal`。减少动态效果时直接完成展开和收起。
 
-代码正文使用共享的 `app/components/code-view.tsx`，不再为 Read、命令和输出创建完整 `Editor`。组件用虚拟 List 只创建可见代码行，文本立即显示；`src/code_highlight.rs` 在后台线程使用与 NSH 相同的 `syntect` / `two-face` 解析高亮，并以 UTF-16 偏移原位着色。Read 保留真实行号，命令和输出不带行号；命令区按内容增高、上限 160，读取和输出上限 320，不保留固定空高或末尾滚动空白。`App.code-view.test.tsx` 覆盖长输出虚拟化、滚到末行及命令/输出的展开和换行。
+代码正文使用共享的 `app/components/code-view.tsx`，不再为 Read、命令和输出创建完整 `Editor`。组件用虚拟 List 只创建可见代码行，文本立即显示；`src/code_highlight.rs` 在后台线程使用与 NSH 相同的 `syntect` / `two-face` 解析高亮，并以 UTF-16 偏移原位着色。Read 保留真实行号，命令和输出不带行号；命令区按内容增高、上限 160，读取和输出上限 320，不保留固定空高或末尾滚动空白。非换行模式由外层原生纵向 Scroll 提供完整滚动范围，行号和正文只随原生纵向偏移移动，不再手动 `translateY`；独立横向 Scroll 处理长行，官方 `Scrollbar` 固定在当前视口底部。文本只创建视野及预取行，不同步两个纵向滚动视图，也不使用 `sticky`。横向条的厚度、颜色、最短滑块和淡出时间与 NSH 原生指示器一致；纵向滚动条区域在 Scroll 内使用默认箭头命中层，避免 macOS 将下层文本的 I-beam 用于滚动条，同时保留原生拖动。代码行使用文本光标，滚动条覆盖在文本上但保持默认箭头，两个滚动条均固定在卡片可视区边缘。两种换行模式的代码正文都放在共享的 `selectable` View 中，支持跨行拖选和复制，行号栏不参与选区。`App.code-view.test.tsx` 覆盖长输出虚拟化、滚到末行、长行横纵组合滚动及命令/输出的展开和换行；真实 macOS 窗口另验证两种模式的多行选区。
 
 **验收**
 
