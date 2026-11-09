@@ -130,6 +130,7 @@ export function ImageViewer(props: {
     <Dialog
       open={Boolean(current())}
       animation="fade"
+      backdropStyle={{ backgroundColor: "rgba(0,0,0,0.2)", backdropFilter: "blur(4px)" }}
       style={{ flex: 1 }}
       onOpenChange={({ open }) => { if (!open) props.onClose(); }}
     >
@@ -146,7 +147,7 @@ export function ImageViewer(props: {
           if (at.scale <= 1.01 && (dy > SWIPE_CLOSE || event.velocity.y > 1200)) return props.onClose();
           settle({ scale: at.scale, x: event.value?.x ?? at.x, y: event.value?.y ?? at.y });
         }}
-        style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.94)" }}
+        style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "transparent" }}
       >
         <View
           testID="image-viewer-frame"
@@ -169,7 +170,7 @@ export function ImageViewer(props: {
           />
         </View>
         <View
-          class="absolute right-3 top-3 z-10 flex-row items-center gap-1 rounded-md border border-white/20 bg-black/70 px-2 py-1"
+          class="absolute right-3 top-12 z-10 flex-row items-center gap-1 rounded-md border border-white/20 bg-black/70 px-2 py-1"
           onPress={() => {}}
         >
           <Text class="px-2 text-sm text-white/90">{shown()?.label ?? ""}</Text>

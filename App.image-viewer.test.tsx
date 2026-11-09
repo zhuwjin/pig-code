@@ -38,7 +38,7 @@ test("deduplicates image file URIs while keeping other pasted files", async () =
     ],
   });
   await app.waitFor("id:composer-image-image-1");
-  expect(app.texts()).toContain("图片 1");
+  expect(app.count("id:composer-image-badge-image-1 >> text:1")).toBe(1);
   expect(app.texts().some((text) => text.includes("@notes.txt"))).toBe(true);
   expect(app.texts().some((text) => text.includes("PixPin_2026-11-09_08-57-10.png"))).toBe(false);
 });
@@ -73,8 +73,8 @@ test("mentions, previews, navigates, zooms and renumbers composer images", async
     files: ["target/test-tmp/conversation/pixel.png"],
   });
   await app.waitFor("id:composer-image-image-2");
-  expect(app.texts()).toContain("图片 1");
-  expect(app.texts()).toContain("图片 2");
+  expect(app.count("id:composer-image-badge-image-1 >> text:1")).toBe(1);
+  expect(app.count("id:composer-image-badge-image-2 >> text:2")).toBe(1);
 
   await app.hover("id:composer-image-image-2");
   await app.press("id:composer-image-mention-image-2");
@@ -100,6 +100,7 @@ test("mentions, previews, navigates, zooms and renumbers composer images", async
   await app.hover("id:composer-image-image-1");
   await app.press("id:composer-image-remove-image-1");
   expect(app.count("id:composer-chip-image")).toBe(1);
+  expect(app.count("id:composer-image-badge-image-2 >> text:1")).toBe(1);
   expect(app.texts()).toContain("图片 1");
   expect(app.texts()).not.toContain("图片 2");
 });

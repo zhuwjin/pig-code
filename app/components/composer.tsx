@@ -76,39 +76,45 @@ function AttachmentStrip(props: UiContext & {
       <View class="w-full flex-row flex-wrap gap-2">
         <Each of={images()} key={(image) => image.id}>
           {(image, index) => (
-            <View class="gap-1">
-              <View class="group relative h-14 w-14">
-                <Button
-                  testID={`composer-image-${image().id}`}
-                  accessibilityLabel={t("messages.image_label", { index: index() + 1 })}
-                  class="h-14 w-14 overflow-hidden rounded-lg border border-border"
-                  onPress={() => props.onPreview(index())}
-                >
-                  <Image src={image().preview} style={{ objectFit: "cover" }} class="h-14 w-14" />
-                </Button>
-                <View
-                  class="absolute inset-0 flex-row items-end justify-between rounded-lg bg-black/45 p-1 opacity-0 group-hover:opacity-100"
-                  style={{ pointerEvents: "box-none" }}
-                >
+            <View class="group relative h-14 w-14">
+              <Button
+                testID={`composer-image-${image().id}`}
+                accessibilityLabel={t("messages.image_label", { index: index() + 1 })}
+                class="h-14 w-14 overflow-hidden rounded-lg border border-border"
+                onPress={() => props.onPreview(index())}
+              >
+                <Image src={image().preview} style={{ objectFit: "cover" }} class="h-14 w-14" />
+              </Button>
+              <View
+                class="absolute inset-0 rounded-lg bg-black/45 opacity-0 group-hover:opacity-100"
+                style={{ pointerEvents: "box-none" }}
+              >
+                <View class="absolute inset-0 flex-row items-center justify-center gap-1" style={{ pointerEvents: "box-none" }}>
                   <Button
                     testID={`composer-image-mention-${image().id}`}
                     accessibilityLabel={t("composer.image_mention", { index: index() + 1 })}
-                    class="h-5 w-5 items-center justify-center rounded bg-black/60 hover:bg-black/80"
+                    class="h-5 w-5 items-center justify-center rounded-full border border-border bg-background/90 text-foreground hover:bg-accent"
                     onPress={() => props.onMention(index() + 1)}
                   >
-                    <Icon name="at-sign" size={12} color="#ffffff" />
+                    <Icon name="at-sign" size={12} color={token("foreground")} />
                   </Button>
                   <Button
                     testID={`composer-image-remove-${image().id}`}
                     accessibilityLabel={t("composer.remove_image")}
-                    class="h-5 w-5 items-center justify-center rounded bg-black/60 hover:bg-black/80"
+                    class="h-5 w-5 items-center justify-center rounded-full border border-border bg-background/90 text-foreground hover:bg-accent"
                     onPress={() => props.store.removeDraftImage(image().id)}
                   >
-                    <Icon name="trash" size={12} color="#ffffff" />
+                    <Icon name="trash" size={12} color={token("foreground")} />
                   </Button>
                 </View>
               </View>
-              <Text class="w-14 text-center text-[10px] text-muted-foreground">{t("messages.image_label", { index: index() + 1 })}</Text>
+              <View
+                testID={`composer-image-badge-${image().id}`}
+                class="absolute -bottom-1 -right-1 h-5 min-w-5 items-center justify-center rounded-full border border-border bg-background px-1"
+                style={{ pointerEvents: "none" }}
+              >
+                <Text style={{ fontSize: 10, lineHeight: 12 }} class="text-foreground">{index() + 1}</Text>
+              </View>
             </View>
           )}
         </Each>
