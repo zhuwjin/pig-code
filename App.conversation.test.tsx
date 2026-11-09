@@ -11,6 +11,7 @@ import {
   parseSearchOutput,
   partialJsonField,
   reuseConversationRows,
+  resolveActiveUserRow,
   streamingDiffRows,
   turnDurationMs,
   turnSpeed,
@@ -194,6 +195,16 @@ test("splits file and image mentions and identifies long user bubbles", () => {
   ]);
   expect(userMessageIsLong("one\ntwo\nthree\nfour\nfive\nsix")).toBe(true);
   expect(userMessageIsLong("short")).toBe(false);
+});
+
+test("resolves the active turn from the viewport and forces the latest at the tail", () => {
+  const users = [0, 4, 8];
+  expect(resolveActiveUserRow(users, [4, 5], false)).toBe(1);
+  expect(resolveActiveUserRow(users, [0, 4], true)).toBe(2);
+  expect(resolveActiveUserRow(users, [5, 6], false)).toBe(1);
+  expect(resolveActiveUserRow(users, [1, 2], false)).toBe(0);
+  expect(resolveActiveUserRow(users, [], false)).toBeNull();
+  expect(resolveActiveUserRow([], [0], false)).toBeNull();
 });
 
 function openApp(clipboard?: string) {

@@ -152,7 +152,7 @@ function MentionCandidates(props: {
   );
 }
 
-export function Composer(props: UiContext & { hero?: boolean }) {
+export function Composer(props: UiContext & { hero?: boolean; onHeightChange?: (height: number) => void }) {
   const { store, themeStore } = props;
   const slashIndex = signal(0);
   const mentionIndex = signal(0);
@@ -317,7 +317,10 @@ export function Composer(props: UiContext & { hero?: boolean }) {
     </Button>
   );
   return (
-    <View class={props.hero ? "p-3 pb-1" : "px-4 pb-1 pt-2"}>
+    <View
+      class={props.hero ? "p-3 pb-1" : "px-4 pb-1 pt-2"}
+      onLayout={({ bounds }) => props.onHeightChange?.(bounds.size.height)}
+    >
       <View class="mx-auto w-full" style={{ maxWidth: 860 }}>
         <If when={showQueue()}><QueuePanel {...props} /></If>
         <View

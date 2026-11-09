@@ -309,6 +309,23 @@ export function userMessageIsLong(text: string): boolean {
   return text.split("\n").length > 5 || text.length > 320;
 }
 
+export function resolveActiveUserRow(
+  userRows: readonly number[],
+  visibleRows: readonly number[],
+  atLatest: boolean,
+): number | null {
+  if (userRows.length === 0) return null;
+  if (atLatest) return userRows.length - 1;
+  const visible = [...new Set(visibleRows)].sort((a, b) => a - b);
+  if (visible.length === 0) return null;
+  for (const row of visible) {
+    const index = userRows.indexOf(row);
+    if (index >= 0) return index;
+  }
+  const owner = userRows.findLastIndex((row) => row <= visible[0]);
+  return owner >= 0 ? owner : 0;
+}
+
 export type MentionSegment = { type: "text" | "file" | "image"; text: string; index?: number };
 
 export function mentionSegments(text: string, files: string[], imageCount: number): MentionSegment[] {

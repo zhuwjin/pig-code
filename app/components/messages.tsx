@@ -34,6 +34,7 @@ import {
   formatDuration,
   formatTokens,
   mentionSegments,
+  resolveActiveUserRow,
   userMessageIsLong,
 } from "../conversation";
 import { Icon } from "./icon";
@@ -670,7 +671,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
   );
 }
 
-export function MessageList(props: UiContext & { items: ChatItem[] }) {
+export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number }) {
   let cachedSession: string | null = null;
   let cachedRows: ConversationRow[] = [];
   const rows = computed(
@@ -700,12 +701,23 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   const latestVisible = signal(false);
   const activeTurn = signal(0);
   const hoveredTurn = signal<string | null>(null);
+  const navFocus = signal<number | null>(null);
   const searchOpen = props.store.threadSearchOpen;
   const query = signal("");
   const activeMatch = signal(0);
   const viewportWidth = signal(0);
   const lightbox = signal<{ src: string; label: string } | null>(null);
   let list: ListRef | undefined;
+  let visibleRowIndices: number[] = [];
+  const updateActiveTurn = () => {
+    const next = resolveActiveUserRow(
+      userRows().map((entry) => entry.index),
+      visibleRowIndices,
+      !latestVisible(),
+    );
+    if (next !== null) activeTurn.set(next);
+  };
+  effect(updateActiveTurn);
   let followedSession: string | null = null;
   effect(() => {
     const session = props.store.current();
@@ -754,6 +766,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   }, { when: "always" }));
   const activeSearchRow = () => matches()[activeMatch()]?.id;
   const hovered = () => userRows().find((entry) => entry.user.id === hoveredTurn());
+  const navBarTops = new Map<string, number>();
   const previewText = (userId: string) => {
     const start = props.items.findIndex((item) => item.id === userId);
     if (start < 0) return "";
@@ -800,13 +813,8 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
           latestVisible.set(distance > 1);
         }}
         onViewableItemsChange={({ viewableItems }) => {
-          const first = viewableItems[0]?.index ?? 0;
-          const users = userRows();
-          let active = 0;
-          users.forEach((entry, index) => {
-            if (entry.index <= first) active = index;
-          });
-          activeTurn.set(active);
+          visibleRowIndices = viewableItems.filter((item) => item.isViewable).map((item) => item.index);
+          updateActiveTurn();
         }}
       >
         {(row) => <MessageRow {...props} row={row} textFor={textFor} active={row().id === activeSearchRow()} navEligible={userRows().length >= 2} onImage={(src, label) => lightbox.set({ src, label })} />}
@@ -827,28 +835,82 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
         </View>
       </If>
       <If when={userRows().length >= 2 && viewportWidth() >= 720}>
-        <View class="absolute bottom-24 left-2 top-1/2 z-20 justify-center gap-1.5">
+        <View
+          class="absolute left-2 top-0 z-20 justify-center"
+          style={{ bottom: -(props.navFoot ?? 0) }}
+        >
           <Each of={userRows()} key={(entry) => entry.user.id}>
-            {(entry, index) => (
-              <View
-                class="relative"
-                onMouseEnter={() => hoverIn(entry().user.id)}
-                onMouseLeave={hoverOut}
-              >
-                <Button
-                  testID={`turn-nav-${entry().user.id}`}
-                  accessibilityLabel={t("messages.jump_turn", { index: index() + 1 })}
-                  class={activeTurn() === index() ? "h-7 w-1.5 rounded-full bg-muted-foreground" : "h-5 w-1 rounded-full bg-muted-foreground/40 hover:w-1.5 hover:bg-muted-foreground"}
-                  onPress={() => list?.scrollToIndex({ index: entry().index, viewPosition: 0, animated: true })}
-                />
-              </View>
-            )}
+            {(entry, index) => {
+              const distance = () => {
+                const focus = navFocus();
+                return focus === null ? null : Math.abs(focus - index());
+              };
+              const scale = () => {
+                const value = distance();
+                return value === 0 ? 2.6 : value === 1 ? 1.7 : value === 2 ? 1.25 : 1;
+              };
+              const highlighted = () => distance() === 0 || (navFocus() === null && activeTurn() === index());
+              const opacity = () => {
+                const value = distance();
+                if (value === 0) return 1;
+                if (value === 1) return 0.86;
+                if (value === 2) return 0.72;
+                return navFocus() === null && activeTurn() === index() ? 0.9 : 0.58;
+              };
+              const barScale = createAnimatedValue(scale());
+              const barOpacity = createAnimatedValue(opacity());
+              effect(() => {
+                const nextScale = scale();
+                const nextOpacity = opacity();
+                if (reduceMotion()) {
+                  barScale.set(nextScale);
+                  barOpacity.set(nextOpacity);
+                  return;
+                }
+                void barScale.spring(nextScale, { stiffness: 260, damping: 30, mass: 1 });
+                void barOpacity.spring(nextOpacity, { stiffness: 260, damping: 30, mass: 1 });
+              });
+              effect(() => () => {
+                void barScale.stop();
+                void barOpacity.stop();
+              });
+              return (
+                <View
+                  class="relative"
+                  onLayout={({ bounds }) => navBarTops.set(entry().user.id, bounds.origin.y)}
+                  onMouseEnter={() => {
+                    navFocus.set(index());
+                    hoverIn(entry().user.id);
+                  }}
+                  onMouseLeave={() => {
+                    if (navFocus() === index()) navFocus.set(null);
+                    hoverOut();
+                  }}
+                >
+                  <Button
+                    testID={`turn-nav-${entry().user.id}`}
+                    accessibilityLabel={t("messages.jump_turn", { index: index() + 1 })}
+                    class="h-2.5 w-8 flex-row items-center"
+                    onPress={() => list?.scrollToIndex({ index: entry().index, viewPosition: 0, animated: true })}
+                  >
+                    <View
+                      class={highlighted() ? "h-0.5 rounded-full bg-foreground" : "h-0.5 rounded-full bg-muted-foreground/60"}
+                      style={{ width: 12, opacity: barOpacity, scale: [barScale, 1], transformOrigin: "left" }}
+                    />
+                  </Button>
+                </View>
+              );
+            }}
           </Each>
         </View>
       </If>
       <If when={hovered()}>
         {(value) => (
-          <View class="absolute bottom-24 left-8 z-30 w-80 gap-2 rounded-xl border border-border bg-popover p-3 shadow-xl pointer-events-none">
+          <View
+            testID="turn-nav-card"
+            class="absolute left-12 z-30 w-80 gap-2 rounded-xl border border-border bg-popover p-3 shadow-xl pointer-events-none"
+            style={{ top: navBarTops.get(value().user.id) ?? 0 }}
+          >
             <Text style={{ numberOfLines: 2 }} class="text-sm text-foreground">{value().user.text}</Text>
             <Text style={{ numberOfLines: 3 }} class="text-sm text-muted-foreground">
               {previewText(value().user.id) || t("messages.no_text_reply")}

@@ -1,4 +1,4 @@
-import { Text, View } from "nsh";
+import { signal, Text, View } from "nsh";
 import type { UiContext } from "../ui-context";
 import { Composer } from "./composer";
 import { EmptyWorkspace } from "./hero";
@@ -6,6 +6,7 @@ import { MessageList } from "./messages";
 
 export function Workspace(props: UiContext) {
   const { store } = props;
+  const composerHeight = signal(0);
   const items = () => {
     const id = store.current();
     return id ? (store.items()[id] ?? []) : [];
@@ -26,8 +27,8 @@ export function Workspace(props: UiContext) {
         </View>
       </If>
       <If when={!hero()}>
-        <MessageList {...props} items={items()} />
-        <Composer {...props} />
+        <MessageList {...props} items={items()} navFoot={composerHeight()} />
+        <Composer {...props} onHeightChange={(height) => composerHeight.set(height)} />
       </If>
       <If when={hero()}><EmptyWorkspace {...props} /></If>
     </View>

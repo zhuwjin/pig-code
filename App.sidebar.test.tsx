@@ -42,6 +42,26 @@ test("paginates workspace sessions five at a time and resets after collapsing", 
   expect(nextWorkspaceSessionLimit(10, true)).toBe(15);
 });
 
+test("mounts show more when workspace sessions grow beyond the first page", async () => {
+  const app = await open("./App.selftest.tsx", {
+    platform: "macos",
+    locale: "zh-CN",
+    width: 1280,
+    height: 800,
+  });
+  for (let index = 0; index < 6; index++) {
+    await app.type("id:composer-input", `session ${index}`);
+    await app.press("id:send-button");
+    await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
+    if (index < 5) await app.press("id:new-task");
+  }
+  await app.waitFor("id:workspace-more");
+  await app.press("id:workspace-more");
+  await app.waitFor("id:workspace-collapse");
+  expect(app.count("id:workspace-more")).toBe(0);
+  expect(app.count("id:session-list >> text:session 0")).toBe(1);
+});
+
 test("expands and collapses the workspace from both disclosure controls", async () => {
   const app = await open("./App.selftest.tsx", {
     platform: "macos",

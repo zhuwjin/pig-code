@@ -577,9 +577,9 @@ export function Sidebar(props: UiContext & {
               </If>
             </>
           }
-          footer={
+          footer={() => (
             <If when={sidebarView() === "workspace" && (canShowMore() || workspacePageOpen())}>
-              <View class="pl-6">
+              <View class="pl-5">
                 <View class="flex-row items-center gap-3 px-2 py-0.5">
                   <If when={canShowMore()}>
                     <Button
@@ -609,7 +609,7 @@ export function Sidebar(props: UiContext & {
                 </View>
               </View>
             </If>
-          }
+          )}
         >
           {(session) => renderSessionRow(session, () => sidebarView() === "flat")}
         </List>
