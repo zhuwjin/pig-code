@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nsh_core::prelude::*;
+use nsh_core::{file_dialog::OpenDialog, prelude::*};
 use pig_protocol::{ApprovalDecision, Event, ExecMode, MessageDelivery, Op};
 
 static SELFTEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -121,6 +121,17 @@ default_reasoning_level = "low"
     /// Installed font family names for the appearance font pickers.
     pub fn list_fonts(&self) -> Vec<String> {
         pig_core::fonts::installed_font_families()
+    }
+
+    /// Chooses a workspace directory with the system's folder picker.
+    pub async fn pick_directory(this: Instance<Agent>) -> Result<Option<String>, String> {
+        let _ = &this;
+        let picked = pick_paths(OpenDialog::folders())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(picked
+            .and_then(|paths| paths.into_iter().next())
+            .map(|path| path.display().to_string()))
     }
 
     /// Sends any JSON-encoded `Op` from `pig-protocol`.

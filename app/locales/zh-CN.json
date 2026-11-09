@@ -503,6 +503,10 @@
   },
   "composer": {
     "select_workspace": "选择工作区",
+    "search_workspace": "搜索工作区",
+    "open_folder": "打开文件夹",
+    "no_workspace": "不在工作区中工作",
+    "no_matching_workspaces": "没有匹配的工作区",
     "clear_workspace": "清除工作区",
     "remove_attachment": "移除 {path}",
     "remove_image": "移除图片",

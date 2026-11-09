@@ -503,6 +503,10 @@
   },
   "composer": {
     "select_workspace": "Select workspace",
+    "search_workspace": "Search workspaces",
+    "open_folder": "Open folder",
+    "no_workspace": "Work without a workspace",
+    "no_matching_workspaces": "No matching workspaces",
     "clear_workspace": "Clear workspace",
     "remove_attachment": "Remove {path}",
     "remove_image": "Remove image",

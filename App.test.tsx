@@ -160,10 +160,15 @@ test("restores the hero layout and fills a suggestion", async () => {
   expect(app.texts()).not.toContain("Rust agent");
 
   await app.press("id:hero-cwd");
-  await app.press("id:hero-cwd-option-0");
+  await app.waitFor("label:搜索工作区");
+  expect(app.texts()).toContain("打开文件夹 …");
+  await app.type("label:搜索工作区", "no-such-workspace");
+  await app.waitFor("text:没有匹配的工作区");
+  await app.keyboard.press("escape");
+  await app.press("id:hero-cwd-command >> text:workspace");
   expect(app.texts()).not.toContain("选择工作区");
   await app.press("id:hero-cwd");
-  await app.press("id:hero-cwd-clear");
+  await app.press("id:hero-cwd-command >> text:不在工作区中工作");
   expect(app.texts()).toContain("选择工作区");
 
   await app.press("id:empty-suggestion-1");

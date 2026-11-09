@@ -1,5 +1,5 @@
 import { batch, Clipboard, effect, Image, keymap, signal, Text, token, View } from "nsh";
-import { Button, focus as focusEditor, RichEditor, Select } from "nsh/base";
+import { Button, Command, type CommandItem, focus as focusEditor, Popover, RichEditor } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../composer-editor";
 import { t } from "../i18n";
 import { composerImage } from "../media";
+import { errorMessage } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { ApprovalCard } from "./approval-card";
@@ -23,37 +24,43 @@ import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
 
 function WorkspaceSelector(props: UiContext) {
+  const open = signal(false);
+  const query = signal("");
   const selected = () => props.store.heroCwd();
   const workspaces = () => Array.from(new Set([
     props.store.cwd(),
     ...props.store.sessions().map((session) => session.cwd),
     ...(selected() ? [selected()!] : []),
   ]));
+  const items = (): CommandItem[] => [
+    ...workspaces().map((path) => ({
+      id: `workspace:${path}`,
+      label: workspaceName(path),
+      keywords: [path],
+      checked: selected() === path,
+      group: "workspaces",
+    })),
+    { id: "open-folder", label: `${t("composer.open_folder")} …`, group: "actions" },
+    ...(selected() ? [{ id: "clear-workspace", label: t("composer.no_workspace"), group: "actions" }] : []),
+  ];
   return (
     <View class="w-full flex-row items-center gap-2 border-b border-border pb-1">
-      <Select
-        items={workspaces().map((path) => ({ value: path, title: workspaceName(path) }))}
-        value={selected()}
-        onChange={({ value }) => props.store.selectHeroWorkspace(value)}
-        accessibilityLabel={t("composer.select_workspace")}
+      <Popover
+        open={open()}
+        onOpenChange={({ open: value }) => {
+          open.set(value);
+          query.set("");
+        }}
+        closeOnEscape={false}
+        onCancel={() => {
+          if (query()) query.set("");
+          else open.set(false);
+        }}
         placement="top"
         align="start"
-        popupClass="w-80 rounded-xl border border-border bg-popover p-2 shadow-xl"
-        itemClass="rounded-(--radius) px-3 py-2 hover:bg-accent selected:bg-accent/60"
-        renderItem={(item) => (
-          <View testID={`hero-cwd-option-${item.index}`} class="min-w-0 gap-0.5">
-            <Text style={{ numberOfLines: 1 }} class="text-sm text-foreground">{item.title}</Text>
-            <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{item.value}</Text>
-          </View>
-        )}
-        cleanable
-        clearButton={
-          <View testID="hero-cwd-clear">
-            <Icon name="x" size={12} color={token("muted-foreground")} />
-          </View>
-        }
-        clearButtonClass="absolute right-1 top-1 z-10 rounded-full bg-accent/50 p-1 hover:bg-accent"
-        clearButtonAccessibilityLabel={t("composer.clear_workspace")}
+        offset={8}
+        margin={8}
+        popupClass="w-64 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
         trigger={
           <View role="button" testID="hero-cwd" class="flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent">
             <Icon name="folder-closed" color={token("muted-foreground")} />
@@ -63,7 +70,60 @@ function WorkspaceSelector(props: UiContext) {
             <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
           </View>
         }
-      />
+      >
+        <Command
+          testID="hero-cwd-command"
+          items={items()}
+          query={query()}
+          onQueryChange={({ query: value }) => query.set(value)}
+          autoFocus
+          placeholder={t("composer.search_workspace")}
+          accessibilityLabel={t("composer.select_workspace")}
+          searchAccessibilityLabel={t("composer.search_workspace")}
+          class="w-64 bg-popover"
+          searchBarClass="h-10 flex-row items-center gap-2 border-b border-border px-3"
+          searchClass="min-w-0 flex-1 text-sm text-foreground placeholder:text-muted-foreground"
+          searchPrefix={<Icon name="search" size={14} color={token("muted-foreground")} />}
+          listClass="max-h-64"
+          itemClass="group flex-row items-center gap-2 px-3 py-2 focus:bg-accent checked:bg-accent/60"
+          groupClass="hidden"
+          separatorClass="h-px bg-border"
+          empty={<Text class="px-3 py-2 text-sm text-muted-foreground">{t("composer.no_matching_workspaces")}</Text>}
+          renderItem={(entry) => {
+            const isWorkspace = entry.id.startsWith("workspace:");
+            const testID = isWorkspace
+              ? `hero-cwd-option-${workspaces().indexOf(entry.id.slice("workspace:".length))}`
+              : entry.id === "clear-workspace" ? "hero-cwd-clear" : `hero-cwd-${entry.id}`;
+            return (
+              <View testID={testID} class="min-w-0 flex-1 flex-row items-center gap-2">
+                <Icon
+                  name={entry.id === "open-folder" ? "folder-open" : entry.id === "clear-workspace" ? "circle-x" : "folder-closed"}
+                  size={14}
+                  color={token("muted-foreground")}
+                />
+                <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{entry.label}</Text>
+                <If when={entry.checked}><Icon name="check" size={14} color={token("foreground")} /></If>
+              </View>
+            );
+          }}
+          onCancel={() => open.set(false)}
+          onSelect={({ id }) => {
+            if (id.startsWith("workspace:")) {
+              props.store.selectHeroWorkspace(id.slice("workspace:".length));
+              open.set(false);
+              return;
+            }
+            open.set(false);
+            if (id === "clear-workspace") {
+              props.store.selectHeroWorkspace(null);
+              return;
+            }
+            void props.store.agent.pickDirectory().then((path) => {
+              if (path) props.store.selectHeroWorkspace(path);
+            }).catch((error) => props.store.globalError.set(errorMessage(error)));
+          }}
+        />
+      </Popover>
     </View>
   );
 }
