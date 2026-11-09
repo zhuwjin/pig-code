@@ -55,6 +55,30 @@ export function createComposerEditor(
   });
 }
 
+function composerInlineSize(node: RichNodeJSON): number {
+  if (node.type === "text") return node.text?.length ?? 0;
+  if (!node.content) return 1;
+  return 2 + node.content.reduce((size, child) => size + composerInlineSize(child), 0);
+}
+
+export function measureComposerEditorHeight(editor: RichEditorSession): number | null {
+  let position = 0;
+  let height = 8;
+  for (const block of editor.doc.content ?? []) {
+    const rect = editor.pageNodeRect(position) as { height: number } | null;
+    if (!rect) return null;
+    height += rect.height;
+    position += 2 + (block.content ?? []).reduce((size, node) => size + composerInlineSize(node), 0);
+  }
+  return height;
+}
+
+export function measureComposerEditorLineHeight(editor: RichEditorSession): number | null {
+  const selection = editor.selection;
+  const rect = editor.pageCoordsAtPos(selection.head ?? selection.anchor ?? 0) as { height: number } | null;
+  return rect?.height ?? null;
+}
+
 export function insertComposerMention(
   editor: RichEditorSession,
   kind: ComposerMentionKind,

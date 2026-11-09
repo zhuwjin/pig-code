@@ -98,16 +98,25 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
                   ? props.store.sessionImageSource(props.store.current()!, number())
                   : "";
                 return (
-                  <Button
-                    testID={`user-image-${item().id}-${number()}`}
-                    accessibilityLabel={t("messages.image_label", { index: index() + 1 })}
-                    class="h-32 w-40 overflow-hidden rounded-lg border border-border"
-                    onPress={() => props.onImage(source(), t("messages.image_label", { index: index() + 1 }))}
-                  >
-                    <If when={source()}>
-                      <Image src={source()} style={{ objectFit: "cover" }} class="h-32 w-40" fadeDuration={150} />
-                    </If>
-                  </Button>
+                  <View class="relative h-14 w-14">
+                    <Button
+                      testID={`user-image-${item().id}-${number()}`}
+                      accessibilityLabel={t("messages.image_label", { index: index() + 1 })}
+                      class="h-14 w-14 overflow-hidden rounded-lg border border-border"
+                      onPress={() => props.onImage(source(), t("messages.image_label", { index: index() + 1 }))}
+                    >
+                      <If when={source()}>
+                        <Image src={source()} style={{ objectFit: "cover" }} class="h-14 w-14" fadeDuration={150} />
+                      </If>
+                    </Button>
+                    <View
+                      testID={`user-image-badge-${item().id}-${number()}`}
+                      class="absolute -bottom-1 -right-1 h-5 min-w-5 items-center justify-center rounded-full border border-border bg-background px-1"
+                      style={{ pointerEvents: "none" }}
+                    >
+                      <Text style={{ fontSize: 10, lineHeight: 12 }} class="text-foreground">{index() + 1}</Text>
+                    </View>
+                  </View>
                 );
               }}
             </Each>

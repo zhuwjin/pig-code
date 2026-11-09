@@ -242,6 +242,7 @@ test("pastes an image and sends it as a persisted user attachment", async () => 
   await app.press("id:send-button");
   await app.waitFor("label:图片 1", { timeout: 20000 });
   expect(app.count("label:移除图片")).toBe(0);
+  expect(app.count("id:user-image-badge-user-1-1 >> text:1")).toBe(1);
   await app.press("label:图片 1");
   await app.wait(100);
   expect(app.texts()).toContain("图片 1");

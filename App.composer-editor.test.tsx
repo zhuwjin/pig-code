@@ -95,3 +95,37 @@ test("deletes a chip as one inline atom", async () => {
   await app.press("id:measure");
   expect(report().text).toBe("before");
 });
+
+test("grows with content up to ten lines and then keeps a scrolling viewport", async () => {
+  const app = await open("./App.composer-editor.fixture.tsx", {
+    platform: "macos",
+    locale: "zh-CN",
+    width: 500,
+    height: 500,
+  });
+  const height = () => {
+    const value = app.texts().find((text) => text.startsWith("editor-height:"));
+    expect(value).toBeDefined();
+    return Number(value!.slice("editor-height:".length));
+  };
+
+  await app.waitUntil(() => height() === 40);
+  await app.type("id:rich", "1");
+  await app.keyboard.press("shift+enter");
+  await app.type("id:rich", "2");
+  await app.waitUntil(() => height() > 40);
+  for (let line = 3; line <= 9; line++) {
+    await app.keyboard.press("shift+enter");
+    await app.type("id:rich", `${line}`);
+  }
+  const nineLineHeight = height();
+  await app.keyboard.press("shift+enter");
+  await app.type("id:rich", "10");
+  await app.waitUntil(() => height() > nineLineHeight);
+  const tenLineHeight = height();
+  await app.keyboard.press("shift+enter");
+  await app.type("id:rich", "11");
+  await app.wait(100);
+  expect(height()).toBe(tenLineHeight);
+  await app.scroll("id:rich", -100);
+});

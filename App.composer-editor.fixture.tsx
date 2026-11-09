@@ -1,10 +1,27 @@
 import { mount, signal, Text, View } from "nsh";
 import { Button, RichEditor } from "nsh/base";
-import { createComposerEditor, insertComposerMention, readComposerDocument } from "./app/composer-editor";
+import { createComposerEditor, insertComposerMention, measureComposerEditorHeight, measureComposerEditorLineHeight, readComposerDocument } from "./app/composer-editor";
 
 const editor = createComposerEditor(() => {}, () => {});
 const report = signal("");
 const block = signal("");
+const editorHeight = signal(40);
+const actualEditorHeight = signal(0);
+let editorResizeFrame: number | undefined;
+let editorWidth = 0;
+let editorLineHeight = 0;
+function scheduleEditorResize() {
+  if (editorResizeFrame !== undefined) cancelAnimationFrame(editorResizeFrame);
+  editorResizeFrame = requestAnimationFrame(() => {
+    editorResizeFrame = undefined;
+    const measured = measureComposerEditorHeight(editor);
+    const lineHeight = measureComposerEditorLineHeight(editor);
+    if (lineHeight !== null) editorLineHeight = lineHeight;
+    const maxHeight = editorLineHeight > 0 ? 8 + editorLineHeight * 10 : 208;
+    if (measured !== null) editorHeight.set(Math.max(40, Math.min(maxHeight, measured)));
+  });
+}
+editor.on("revision", scheduleEditorResize);
 function measure() {
   const selection = editor.selection;
   report.set(JSON.stringify({
@@ -28,6 +45,13 @@ mount(() => (
     <RichEditor
       testID="rich"
       editor={editor}
+      onLayout={({ bounds }) => {
+        actualEditorHeight.set(bounds.size.height);
+        if (editorWidth === bounds.size.width) return;
+        editorWidth = bounds.size.width;
+        scheduleEditorResize();
+      }}
+      style={{ height: editorHeight() }}
       classes={{
         content: "min-h-10 p-1 text-sm text-foreground",
         caret: "bg-foreground",
@@ -35,6 +59,7 @@ mount(() => (
       }}
       class="min-h-10"
     />
+    <Text testID="editor-height">{`editor-height:${actualEditorHeight()}`}</Text>
     <Text testID="report">{report()}</Text>
     <Text testID="block">{block()}</Text>
   </View>

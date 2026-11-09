@@ -6,6 +6,8 @@ import {
   buildComposerDocument,
   createComposerEditor,
   insertComposerMention,
+  measureComposerEditorHeight,
+  measureComposerEditorLineHeight,
   readComposerDocument,
 } from "../composer-editor";
 import { t } from "../i18n";
@@ -229,6 +231,10 @@ export function Composer(props: UiContext & { hero?: boolean }) {
     else store.send();
   };
   const editor = createComposerEditor(submit, () => store.threadSearchOpen.set(true));
+  const editorHeight = signal(40);
+  let editorResizeFrame: number | undefined;
+  let editorWidth = 0;
+  let editorLineHeight = 0;
   const syncDraft = () => {
     const value = readComposerDocument(editor.doc, store.draftImages());
     const files = store.draftFiles();
@@ -240,7 +246,24 @@ export function Composer(props: UiContext & { hero?: boolean }) {
       editorRevision.set(editor.revision);
     });
   };
-  editor.on("revision", syncDraft);
+  const scheduleEditorResize = () => {
+    if (editorResizeFrame !== undefined) cancelAnimationFrame(editorResizeFrame);
+    editorResizeFrame = requestAnimationFrame(() => {
+      editorResizeFrame = undefined;
+      const measured = measureComposerEditorHeight(editor);
+      const lineHeight = measureComposerEditorLineHeight(editor);
+      if (lineHeight !== null) editorLineHeight = lineHeight;
+      const maxHeight = editorLineHeight > 0 ? 8 + editorLineHeight * 10 : 208;
+      if (measured !== null) editorHeight.set(Math.max(40, Math.min(maxHeight, measured)));
+    });
+  };
+  editor.on("revision", () => {
+    syncDraft();
+    scheduleEditorResize();
+  });
+  effect(() => () => {
+    if (editorResizeFrame !== undefined) cancelAnimationFrame(editorResizeFrame);
+  });
   effect(() => {
     editorRevision();
     const text = store.draft();
@@ -301,8 +324,8 @@ export function Composer(props: UiContext & { hero?: boolean }) {
           class={themeStore.classes(
             "composer.root",
             inputFocused()
-              ? "gap-2 rounded-2xl border border-ring/40 bg-composer px-3 pb-2 pt-3"
-              : "gap-2 rounded-2xl border border-input bg-composer px-3 pb-2 pt-3",
+              ? "gap-2 rounded-2xl border border-ring/40 bg-composer px-2 pb-2 pt-2"
+              : "gap-2 rounded-2xl border border-input bg-composer px-2 pb-2 pt-2",
           )}
         >
           <If when={props.hero}><WorkspaceSelector {...props} /></If>
@@ -341,6 +364,12 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                 testID="composer-input"
                 onFocus={() => inputFocused.set(true)}
                 onBlur={() => inputFocused.set(false)}
+                onLayout={({ bounds }) => {
+                  if (editorWidth === bounds.size.width) return;
+                  editorWidth = bounds.size.width;
+                  scheduleEditorResize();
+                }}
+                style={{ height: editorHeight() }}
                 onPasteFiles={({ paste }) => {
                   void (async () => {
                     syncDraft();
@@ -389,7 +418,7 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                 }}
                 class={themeStore.classes(
                   "composer.input",
-                  "max-h-40 min-h-10 text-foreground",
+                  "min-h-10 text-foreground",
                 )}
               />
             </View>

@@ -130,7 +130,7 @@ export function ImageViewer(props: {
     <Dialog
       open={Boolean(current())}
       animation="fade"
-      backdropStyle={{ backgroundColor: "rgba(0,0,0,0.2)", backdropFilter: "blur(4px)" }}
+      backdropStyle={{ backgroundColor: "rgba(0,0,0,0.75)" }}
       style={{ flex: 1 }}
       onOpenChange={({ open }) => { if (!open) props.onClose(); }}
     >
