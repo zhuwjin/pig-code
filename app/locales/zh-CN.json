@@ -361,8 +361,11 @@
   },
   "commands": {
     "clear": "清空当前消息显示",
+    "clear_label": "Clear",
     "compact": "压缩上下文，可附加重点关注的内容",
-    "plan": "切换 Plan 模式，支持 on / off"
+    "compact_label": "Compact",
+    "plan": "切换 Plan 模式，支持 on / off",
+    "plan_label": "Plan"
   },
   "search": {
     "untitled_session": "未命名会话",

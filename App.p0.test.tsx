@@ -78,7 +78,8 @@ test("selects model, reasoning, permissions and Plan through real controls", asy
   await app.type("id:composer-input", "/plan");
   await app.waitFor("id:slash-candidates");
   await app.keyboard.press("enter");
-  expect(app.value("id:composer-input")).toBe("/plan ");
+  expect(app.count("id:composer-chip-command")).toBe(1);
+  expect(app.count("id:composer-chip-icon-command")).toBe(1);
   await app.keyboard.press("enter");
   expect(app.value("id:composer-input")).toBe("");
   expect(app.count("id:plan-chip")).toBe(0);
@@ -100,14 +101,14 @@ test("dispatches clear and compact instead of sending them as chat", async () =>
 
   await app.type("id:composer-input", "/clear");
   await app.keyboard.press("enter");
-  expect(app.value("id:composer-input")).toBe("/clear ");
+  expect(app.count("id:composer-chip-command")).toBe(1);
   await app.keyboard.press("enter");
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { state: "gone" });
   expect(app.count("id:hero-cwd")).toBe(1);
 
   await app.type("id:composer-input", "/compact");
   await app.keyboard.press("enter");
-  expect(app.value("id:composer-input")).toBe("/compact ");
+  expect(app.count("id:composer-chip-command")).toBe(1);
   await app.type("id:composer-input", "focus on tests");
   await app.keyboard.press("enter");
   await app.waitFor("查看摘要", { timeout: 20000 });
@@ -150,7 +151,7 @@ test("queues, steers, reorders, edits and resumes messages while running", async
   });
 
   await app.press("编辑 Q_TWO");
-  expect(app.value("id:composer-input")).toBe("Q_TWO");
+  expect(app.texts()).toContain("Q_TWO");
   await app.press("取消排队 Q_ONE");
   await app.waitFor("Q_ONE", { state: "gone" });
 

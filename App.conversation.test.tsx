@@ -196,12 +196,13 @@ test("splits file and image mentions and identifies long user bubbles", () => {
   expect(userMessageIsLong("short")).toBe(false);
 });
 
-function openApp() {
+function openApp(clipboard?: string) {
   return open("./App.selftest.tsx", {
     platform: "macos",
     locale: "zh-CN",
     width: 1280,
     height: 800,
+    clipboard,
   });
 }
 
@@ -231,13 +232,13 @@ test("keeps stop and send as separate controls during a running turn", async () 
 });
 
 test("pastes an image and sends it as a persisted user attachment", async () => {
-  const app = await openApp();
+  const app = await openApp("describe this image");
   await app.paste("id:composer-input", {
     text: "describe this image",
     files: ["target/test-tmp/conversation/pixel.png"],
   });
   await app.waitFor("label:移除图片");
-  expect(app.value("id:composer-input")).toBe("describe this image");
+  expect(app.texts()).toContain("describe this image");
   await app.press("id:send-button");
   await app.waitFor("label:图片 1", { timeout: 20000 });
   expect(app.count("label:移除图片")).toBe(0);
@@ -251,8 +252,13 @@ test("searches and inserts an @ file reference through the real composer", async
   await app.type("id:composer-input", "@README");
   await app.waitFor("id:mention-0", { timeout: 10000 });
   await app.press("id:mention-0");
-  expect(app.value("id:composer-input")).toContain("@README.mock.md");
-  expect(app.texts()).toContain("README.mock.md");
+  expect(app.texts()).toContain("@README.mock.md");
+  expect(app.count("id:composer-chip-icon-file")).toBe(1);
+  await app.keyboard.press("backspace");
+  expect(app.texts()).toContain("@README.mock.md");
+  await app.keyboard.press("backspace");
+  expect(app.texts().some((text) => text.includes("@README.mock.md"))).toBe(false);
+  expect(app.enabled("id:send-button")).toBe(false);
 });
 
 test("opens a Read result in the right-side file tab", async () => {
@@ -320,6 +326,6 @@ test("copies and recalls the latest user message through the original action con
   await app.waitUntil(() => app.clipboard() === "read the mock file");
   await app.press("label:撤回并编辑");
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { state: "gone" });
-  expect(app.value("id:composer-input")).toBe("read the mock file");
+  expect(app.texts()).toContain("read the mock file");
   expect(app.count("label:撤回并编辑")).toBe(0);
 });

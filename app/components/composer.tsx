@@ -1,9 +1,15 @@
-import { effect, Image, keymap, signal, Text, token, View, type InputRef } from "nsh";
-import { Button, Input, Select } from "nsh/base";
+import { batch, Clipboard, effect, Image, keymap, signal, Text, token, View } from "nsh";
+import { Button, focus as focusEditor, RichEditor, Select } from "nsh/base";
 import type { SlashCommand } from "../commands";
 import { filterSlashCommands } from "../commands";
+import {
+  buildComposerDocument,
+  createComposerEditor,
+  insertComposerMention,
+  readComposerDocument,
+} from "../composer-editor";
 import { t } from "../i18n";
-import { fileComposerImage } from "../media";
+import { composerImage } from "../media";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { ApprovalCard } from "./approval-card";
@@ -64,22 +70,10 @@ function AttachmentStrip(props: UiContext & {
   onPreview: (index: number) => void;
   onMention: (index: number) => void;
 }) {
-  const files = () => props.store.draftFiles();
   const images = () => props.store.draftImages();
   return (
-    <If when={files().length > 0 || images().length > 0}>
+    <If when={images().length > 0}>
       <View class="w-full flex-row flex-wrap gap-2">
-        <Each of={files()} key={(path) => path}>
-          {(path) => (
-            <View class="max-w-56 flex-row items-center gap-1 rounded-lg bg-accent px-2 py-1">
-              <Icon name="file-text" size={13} color={token("muted-foreground")} />
-              <Text style={{ numberOfLines: 1 }} class="min-w-0 text-xs text-foreground">{path().split(/[\\/]/).pop()}</Text>
-              <Button accessibilityLabel={t("composer.remove_attachment", { path: path() })} onPress={() => props.store.removeDraftFile(path())}>
-                <Icon name="x" size={11} color={token("muted-foreground")} />
-              </Button>
-            </View>
-          )}
-        </Each>
         <Each of={images()} key={(image) => image.id}>
           {(image, index) => (
             <View class="gap-1">
@@ -155,9 +149,8 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   const slashIndex = signal(0);
   const mentionIndex = signal(0);
   const inputFocused = signal(false);
-  const caret = signal(0);
+  const editorRevision = signal(0);
   const preview = signal<number | null>(null);
-  let inputNode: InputRef | undefined;
   const sessionId = () => store.current();
   const running = () => {
     const id = sessionId();
@@ -171,37 +164,45 @@ export function Composer(props: UiContext & { hero?: boolean }) {
     const id = sessionId();
     return id ? store.questions()[id] : null;
   };
-  const slashQuery = () => /^\/([^\s]*)$/.exec(store.draft())?.[1] ?? null;
+  const slash = () => {
+    editorRevision();
+    if (approval() || question()) return null;
+    const state = editor.suggestion("slash");
+    return state?.active ? state : null;
+  };
+  const slashQuery = () => slash()?.query ?? null;
   const slashCommands = () => {
     const query = slashQuery();
-    return query === null || approval() || question() ? [] : filterSlashCommands(query);
+    return query === null ? [] : filterSlashCommands(query);
   };
   const mention = () => {
+    editorRevision();
     if (approval() || question()) return null;
-    const before = store.draft().slice(0, Math.min(caret(), store.draft().length));
-    return /(?:^|\s)@([^\s@]*)$/.exec(before);
+    const state = editor.suggestion("mention");
+    return state?.active ? state : null;
   };
   const mentionPaths = () => {
     const current = mention();
     if (!current) return [];
     const search = store.fileSearchResults();
-    return search.query === current[1] ? search.results : [];
+    return search.query === (current.query ?? "") ? search.results : [];
   };
   const chooseSlash = (name: SlashCommand["name"]) => {
-    store.draft.set(`${name} `);
-    caret.set(name.length + 1);
-    inputNode?.setSelection(name.length + 1);
+    const current = slash();
+    if (!current) return;
+    const label = name === "/compact"
+      ? t("commands.compact_label")
+      : name === "/plan"
+        ? t("commands.plan_label")
+        : t("commands.clear_label");
+    insertComposerMention(editor, "command", name, label, current.range);
+    editor.focus();
   };
   const chooseMention = (path: string) => {
     const current = mention();
     if (!current) return;
-    const start = (current.index ?? 0) + current[0].lastIndexOf("@");
-    const value = `${store.draft().slice(0, start)}@${path} ${store.draft().slice(caret())}`;
-    store.draft.set(value);
-    store.addDraftFile(path);
-    const position = start + path.length + 2;
-    caret.set(position);
-    inputNode?.setSelection(position);
+    insertComposerMention(editor, "file", path, path.split(/[\\/]/).pop() ?? path, current.range);
+    editor.focus();
     store.fileSearchResults.set({ query: "", results: [] });
   };
   const submit = (opposite = false) => {
@@ -221,14 +222,30 @@ export function Composer(props: UiContext & { hero?: boolean }) {
     if (opposite) store.sendWithOppositeDelivery();
     else store.send();
   };
-  const insertDraft = (text: string) => {
-    if (!text) return;
-    const position = Math.min(caret(), store.draft().length);
-    const value = store.draft().slice(0, position) + text + store.draft().slice(position);
-    store.draft.set(value);
-    caret.set(position + text.length);
-    inputNode?.setSelection(position + text.length);
+  const editor = createComposerEditor(submit, () => store.threadSearchOpen.set(true));
+  const syncDraft = () => {
+    const value = readComposerDocument(editor.doc, store.draftImages());
+    const files = store.draftFiles();
+    batch(() => {
+      if (store.draft() !== value.text) store.draft.set(value.text);
+      if (value.files.length !== files.length || value.files.some((file, index) => file !== files[index])) {
+        store.draftFiles.set(value.files);
+      }
+      editorRevision.set(editor.revision);
+    });
   };
+  editor.on("revision", syncDraft);
+  effect(() => {
+    editorRevision();
+    const text = store.draft();
+    const files = store.draftFiles();
+    const images = store.draftImages();
+    const current = readComposerDocument(editor.doc, images);
+    const sameFiles = current.files.length === files.length && current.files.every((file, index) => file === files[index]);
+    if (current.current && current.text === text && sameFiles) return;
+    editor.setContent(buildComposerDocument(text, files, images));
+    editor.run(focusEditor("end"));
+  });
   effect(() => {
     store.draft();
     slashIndex.set(0);
@@ -237,16 +254,8 @@ export function Composer(props: UiContext & { hero?: boolean }) {
   effect(() => {
     const current = mention();
     if (!current) return;
-    const timer = setTimeout(() => store.searchFiles(current[1]), 120);
+    const timer = setTimeout(() => store.searchFiles(current.query ?? ""), 120);
     return () => clearTimeout(timer);
-  });
-  effect(() => {
-    if (!inputFocused()) return;
-    return keymap.bind({
-      enter: () => submit(),
-      "ctrl+enter": () => submit(true),
-      "cmd+enter": () => submit(true),
-    }, { when: "always" });
   });
   effect(() => {
     if (!inputFocused()) return;
@@ -260,13 +269,6 @@ export function Composer(props: UiContext & { hero?: boolean }) {
       down: () => {
         if (mention()) mentionIndex.update((index) => (index + 1) % count);
         else slashIndex.update((index) => (index + 1) % count);
-      },
-      escape: () => {
-        if (mention()) {
-          const current = mention()!;
-          const start = (current.index ?? 0) + current[0].lastIndexOf("@");
-          store.draft.set(store.draft().slice(0, start) + store.draft().slice(caret()));
-        } else if (/^\/[^\s]*$/.test(store.draft())) store.draft.set("");
       },
     }, { when: "always" });
   });
@@ -310,10 +312,15 @@ export function Composer(props: UiContext & { hero?: boolean }) {
           <If when={!question() && !approval()}>
             <AttachmentStrip
               {...props}
-              onPreview={(index) => preview.set(index)}
+              onPreview={(index) => {
+                editor.blur();
+                preview.set(index);
+              }}
               onMention={(index) => {
-                insertDraft(`Image ${index} `);
-                inputNode?.focus();
+                const image = store.draftImages()[index - 1];
+                if (!image) return;
+                insertComposerMention(editor, "image", image.id, t("messages.image_label", { index }));
+                editor.focus();
               }}
             />
             <View class="relative">
@@ -323,34 +330,36 @@ export function Composer(props: UiContext & { hero?: boolean }) {
               <If when={mention()}>
                 <MentionCandidates paths={mentionPaths()} selected={mentionIndex()} onSelect={chooseMention} />
               </If>
-              <Input
-                ref={(node) => inputNode = node}
+              <RichEditor
+                editor={editor}
                 testID="composer-input"
-                value={store.draft()}
-                onChange={({ value }: { value: string }) => store.draft.set(value)}
-                onSubmit={() => submit()}
                 onFocus={() => inputFocused.set(true)}
                 onBlur={() => inputFocused.set(false)}
-                onSelectionChange={(selection: { start: number }) => caret.set(selection.start)}
-                onPaste={(event: { text: string; files: File[]; uris: string[] }) => {
+                onPasteFiles={({ paste }) => {
                   void (async () => {
-                    insertDraft(event.text);
+                    syncDraft();
+                    const text = await Clipboard.readText();
+                    if (text) editor.insertContent(text);
+                    syncDraft();
                     const remaining = Math.max(0, 8 - store.draftImages().length);
-                    const images = event.files.filter((file) => file.type.startsWith("image/")).slice(0, remaining);
-                    const converted = await Promise.all(images.map(fileComposerImage));
-                    store.addDraftImages(converted);
-                    if (images.length < event.files.filter((file) => file.type.startsWith("image/")).length) {
+                    const pastedImages = paste.files.filter((file) => file.mime.startsWith("image/"));
+                    const images = pastedImages.slice(0, remaining);
+                    store.addDraftImages(images.map((image) => composerImage({
+                      bytes: Array.from(image.data),
+                      mime: image.mime || "image/png",
+                    })));
+                    if (images.length < pastedImages.length) {
                       store.globalError.set(t("composer.image_limit"));
                     }
-                    for (const uri of event.uris) {
+                    for (const uri of paste.uris) {
                       const path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/^\/(?=[A-Za-z]:)/, ""));
-                      if (path) store.addDraftFile(path);
+                      const duplicateImage = pastedImages.length > 0 && /\.(avif|bmp|gif|heic|heif|ico|jpe?g|png|svg|tiff?|webp)$/i.test(path);
+                      if (path && !duplicateImage) {
+                        insertComposerMention(editor, "file", path, path.split(/[\\/]/).pop() ?? path);
+                      }
                     }
                   })();
                 }}
-                multiline
-                pasteBehavior="report"
-                submitBehavior="submit"
                 placeholder={t(queue().paused
                   ? "composer.paused_hint"
                   : running()
@@ -360,11 +369,22 @@ export function Composer(props: UiContext & { hero?: boolean }) {
                     : store.config()?.default_delivery === "steer"
                       ? "composer.steer_keys"
                       : "composer.queue_keys")}
+                classes={{
+                  content: "min-h-10 p-1 text-sm text-foreground",
+                  caret: "bg-foreground",
+                  selection: "bg-foreground/20",
+                  placeholder: "text-muted-foreground",
+                  nodes: {
+                    file: "h-[18px] align-text-bottom",
+                    image: "h-[18px] align-text-bottom",
+                    command: "h-[18px] align-text-bottom",
+                    space: "px-0.5",
+                  },
+                }}
                 class={themeStore.classes(
                   "composer.input",
-                  "max-h-40 min-h-10 p-1 text-foreground selection:bg-foreground placeholder:text-muted-foreground",
+                  "max-h-40 min-h-10 text-foreground",
                 )}
-                style={{ fontSize: 14 }}
               />
             </View>
             <View class="flex-row items-center gap-2">

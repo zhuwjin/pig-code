@@ -154,7 +154,7 @@ test("restores the hero layout and fills a suggestion", async () => {
   expect(app.texts()).toContain("Pig Code v0.1.0");
   expect(app.texts()).toContain("总结这个工作区");
   expect(app.texts()).toContain("选择工作区");
-  expect(app.count("text:按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息")).toBe(1);
+  expect(app.count("text:/按 Enter 加入队列 · 按 Ctrl\\+Enter 发送引导消息/")).toBe(1);
   expect(app.texts()).not.toContain("暂无历史会话");
   expect(app.count("id:hero-cwd")).toBe(1);
   expect(app.texts()).not.toContain("Rust agent");
@@ -167,7 +167,7 @@ test("restores the hero layout and fills a suggestion", async () => {
   expect(app.texts()).toContain("选择工作区");
 
   await app.press("id:empty-suggestion-1");
-  expect(app.value("id:composer-input")).toBe("我遇到了一个报错： ");
+  expect(app.texts()).toContain("我遇到了一个报错： ");
 });
 
 test("searches workspaces and toggles search with the keyboard", async () => {

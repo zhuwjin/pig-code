@@ -82,6 +82,7 @@ export class AgentStore {
   readonly draft = signal("");
   readonly draftFiles = signal<string[]>([]);
   readonly draftImages = signal<ComposerImage[]>([]);
+  readonly threadSearchOpen = signal(false);
   readonly sessions = signal<SessionMeta[]>([]);
   readonly workspaces = signal<WorkspaceMeta[]>([]);
   readonly current = signal<string | null>(null);

@@ -691,7 +691,7 @@ export function MessageList(props: UiContext & { items: ChatItem[] }) {
   const latestVisible = signal(false);
   const activeTurn = signal(0);
   const hoveredTurn = signal<string | null>(null);
-  const searchOpen = signal(false);
+  const searchOpen = props.store.threadSearchOpen;
   const query = signal("");
   const activeMatch = signal(0);
   const viewportWidth = signal(0);

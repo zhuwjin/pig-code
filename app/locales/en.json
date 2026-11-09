@@ -361,8 +361,11 @@
   },
   "commands": {
     "clear": "Clear the current message display",
+    "clear_label": "Clear",
     "compact": "Compact the context, optionally with a focus",
-    "plan": "Toggle Plan mode; accepts on / off"
+    "compact_label": "Compact",
+    "plan": "Toggle Plan mode; accepts on / off",
+    "plan_label": "Plan"
   },
   "search": {
     "untitled_session": "Untitled session",
