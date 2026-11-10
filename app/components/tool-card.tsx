@@ -2,7 +2,7 @@ import { Accessor, Clipboard, Scroll, Text, token, View } from "nsh";
 import { Button, ContextMenu, DiffView, MenuItem, TextView, Tooltip } from "nsh/base";
 import { t } from "../i18n";
 import type { AgentCard, ToolItem } from "../protocol";
-import type { UiContext } from "../ui-context";
+import { toggleExpanded, type UiContext } from "../ui-context";
 import {
   isExecTool,
   parseReadOutput,
@@ -43,7 +43,7 @@ function CodeCard(props: UiContext & {
           testID={`wrap-${props.id}`}
           accessibilityLabel={t(wrap() ? "tools.wrap_off" : "tools.wrap_on")}
           class="h-6 w-6 items-center justify-center rounded hover:bg-accent"
-          onPress={() => props.store.toggleExpanded(`wrap-${props.id}`)}
+          onPress={() => toggleExpanded(props, `wrap-${props.id}`)}
         >
           <Icon name="text-wrap" size={13} color={token(wrap() ? "foreground" : "muted-foreground")} />
         </Button>
@@ -284,7 +284,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
       <Button
         testID={`swarm-parent-${props.item().id}`}
         class="w-full flex-row items-center gap-3 rounded-lg border border-border bg-tool-surface p-3 hover:bg-accent"
-        onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
+        onPress={() => toggleExpanded(props, `swarm-${props.item().id}`)}
       >
         <View class="h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent">
           <Icon name="bot" size={20} color={token("foreground")} />
@@ -320,13 +320,13 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   if (props.item().tool === "AgentSwarm") {
     const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
     return (
-      <ListCollapsible open={open()} testID={`swarm-${props.item().id}`} content={rows}>
+      <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange} testID={`swarm-${props.item().id}`} content={rows}>
         <View
           role="button"
           testID={`swarm-${props.item().id}`}
           accessibilityState={{ expanded: open() }}
           class="w-full min-w-0 flex-row items-center gap-2 py-1"
-          onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
+          onPress={() => toggleExpanded(props, `swarm-${props.item().id}`)}
         >
           <Icon name="bot" size={16} color={token("muted-foreground")} />
           <Text class="shrink-0 text-sm font-medium text-muted-foreground">Swarm</Text>
@@ -414,6 +414,8 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
   return (
     <ListCollapsible
       open={open()}
+      onTransition={props.onLayoutAnimation}
+      onHeightChange={props.onLayoutHeightChange}
       testID={`plan-${item().id}`}
       class="rounded-xl border border-border bg-tool-surface"
       content={
@@ -427,7 +429,7 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
         testID={`plan-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="flex-row items-center gap-2 px-3 py-2"
-        onPress={() => props.store.toggleExpanded(`plan-${item().id}`)}
+        onPress={() => toggleExpanded(props, `plan-${item().id}`)}
       >
         <Icon name="lightbulb" size={16} color={token("info")} />
         <Text class="shrink-0 text-sm text-muted-foreground">{t("tools.exit_plan")}</Text>
@@ -469,13 +471,13 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
-    <ListCollapsible open={open()} testID={`tool-${item().id}`} class="w-full" content={<ToolBody {...props} />}>
+    <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange} testID={`tool-${item().id}`} class="w-full" content={<ToolBody {...props} />}>
       <View
         role="button"
         testID={`tool-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(item().id)}
+        onPress={() => toggleExpanded(props, item().id)}
       >
         <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
         <ShimmerText active={running()} baseOpacity={running() ? 0.6 : 1} class="shrink-0" textClass={running() ? "text-sm" : "text-sm font-medium"}>

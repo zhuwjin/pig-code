@@ -28,3 +28,21 @@ test("measures throttled intermediate window heights and exact final sizes", asy
   expect(closing.length).toBeLessThanOrEqual(30);
   expect(closing[closing.length - 1]).toBe(0);
 });
+
+test("reports transition lifecycle while preserving every animated collapse frame", async () => {
+  const app = await open("./App.list-collapsible.fixture.tsx", {
+    platform: "macos",
+    width: 800,
+    height: 600,
+  });
+  await app.waitFor("id:toggle");
+  await app.press("id:toggle");
+  await app.wait(500);
+  const opening = heights(app);
+
+  await app.press("id:toggle");
+  await app.wait(500);
+  const closing = heights(app);
+  expect(closing.slice(opening.length).some((height) => height > 0 && height < 320)).toBe(true);
+  expect(app.texts()).toContain("start,end,start,end,");
+});

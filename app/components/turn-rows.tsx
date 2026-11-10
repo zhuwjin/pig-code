@@ -2,7 +2,7 @@ import { Accessor, Clipboard, Text, token, View, type JSX } from "nsh";
 import { Button } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
-import type { UiContext } from "../ui-context";
+import { toggleExpanded, toggleTurnExpanded, type UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration, turnDurationMs } from "../conversation";
 import { Icon } from "./icon";
 import { ListCollapsible } from "./list-collapsible";
@@ -11,11 +11,11 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <ListCollapsible open={open()} testID={`work-${turn().id}`} content={props.children}>
+    <ListCollapsible open={open()} testID={`work-${turn().id}`} content={props.children} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange}>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"
-        onPress={() => props.store.toggleTurnExpanded(turn().id)}
+        onPress={() => toggleTurnExpanded(props, turn().id)}
       >
         <Text class="text-xs text-muted-foreground">
           {turn().status === "stopped"
@@ -72,7 +72,7 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
       <If when={turn().changes.length > 3}>
         <Button
           class="flex-row items-center justify-center gap-1 border-t border-border py-1.5 hover:bg-accent"
-          onPress={() => props.store.toggleExpanded(`turn-changes-${turn().id}`)}
+          onPress={() => toggleExpanded(props, `turn-changes-${turn().id}`)}
         >
           <Text class="text-xs text-muted-foreground">
             {open() ? t("common.collapse") : t("turn.more_files", { count: turn().changes.length - 3 })}
@@ -132,7 +132,7 @@ export function TurnActionsRow(props: UiContext & {
             testID={`hooks-${turn().id}`}
             accessibilityLabel={t("turn.hooks_summary")}
             class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
-            onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`)}
+            onPress={() => toggleExpanded(props, `hooks-${turn().id}`)}
           >
             <Icon name="anchor" size={12} color={token("muted-foreground")} />
           </Button>

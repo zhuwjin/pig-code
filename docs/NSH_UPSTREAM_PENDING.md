@@ -10,7 +10,7 @@
 
 **当前实现**
 
-消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm 和 Plan 使用 `app/components/list-collapsible.tsx`。折叠窗口先通过 `onLayout` 测量真实内容高度，再以 20ms 为间隔、最多 14 步更新窗口高度；窗口和 List 使用同一份实际布局高度，不再分别运行 `LayoutAnimation` 和 List 行定位。首次已经展开的内容直接采用测量高度，不重放入场动画；嵌套卡片的测量变化同步给外层窗口，收起完成后卸载内容。Hook 汇总仍直接挂载/卸载。
+消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm 和 Plan 使用 `app/components/list-collapsible.tsx`。折叠窗口先通过 `onLayout` 测量真实内容高度，再以 20ms 为间隔、最多 14 步更新窗口高度；窗口和 List 使用同一份实际布局高度，不再分别运行 `LayoutAnimation` 和 List 行定位。首次已经展开的内容直接采用测量高度，不重放入场动画；嵌套卡片的测量变化同步给外层窗口，收起完成后卸载内容。`onTransition` 报告动画开始和结束，取消或组件回收会结束旧通知；`onHeightChange` 在每帧高度更新后提供增量，供消息 List 同步滚动位置。Hook 汇总仍直接挂载/卸载。
 
 正文之间连续两项及以上的 `reasoning` / `tool` 由 `groupConversationActivity` 生成 `activity` 行并默认折叠，单项不重复分组，展开后仍使用原有行组件；已完成回合的工作详情内部使用同一规则。分组 ID 取首项 ID，流式追加工具不会重置展开状态。汇总按搜索、查文件、命令、网络搜索、思考和普通工具分类计数并标记各类失败数，中英文文案分别维护；会话内搜索同时匹配分组内容。`App.activity.test.tsx` 覆盖默认折叠、展开/收起、追加工具后的状态保持和中英文汇总。
 
@@ -27,7 +27,7 @@ Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及
 - 虚拟列表、搜索定位和上翻阅读行为不受影响。
 - 右侧面板和设置页的 `reveal` 保持原有效果。
 
-`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具、长思考内容和快速连续切换；`App.list-collapsible.test.tsx` 通过实际 `onLayout` 记录验证中间高度、最多 14 步的节流更新和最终高度。测试使用隔离 Store，不读取真实会话或钥匙串。
+`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具、长思考内容和快速连续切换；`App.list-collapsible.test.tsx` 通过实际 `onLayout` 记录验证中间高度、最多 14 步的节流更新、最终高度和完整动画生命周期通知。测试使用隔离 Store，不读取真实会话或钥匙串。
 
 **上游参考**
 
@@ -39,15 +39,15 @@ NSH 0.4.0 的 `Collapsible.reveal` 使用局部 `animate_layout`。官方 AI Cha
 
 **当前实现**
 
-`app/components/messages.tsx` 保留虚拟 `List`、稳定消息行身份和 `estimatedItemSize={28}`，新增 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`。列表在接近底部时自动跟随内容增长和视口变化；用户上翻后保留可见内容，不再于正文每次更新时强制 `scrollToEnd`。只有切换 Session 时保留一次主动滚底。
+`app/components/messages.tsx` 保留虚拟 `List`、稳定消息行身份和 `estimatedItemSize={28}`，在跟随状态下使用 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`，上翻后移除该配置。列表在底部或接近底部时自动跟随内容增长和视口变化；用户上翻后出现“最新消息”，展开工作区、思考或工具内容时保留可见位置，不再于正文每次更新时强制 `scrollToEnd`。消息区手动展开或收起会先通过 `onManualLayoutChange` 退出跟随，`onLayoutAnimation` 按嵌套动画计数锁定禁用状态，避免展开后回到底部再收起时中途恢复跟随。仅在 `latestVisible` 为 false 且实际距底不超过 1px 的贴底收起中，`onLayoutHeightChange` 才将每帧高度增量同步为新的 `内容高度 - 视口高度` 偏移，避免原生边界钳制在后续帧产生超调和回拉；展开后立即收起不会因旧距底值误启用补偿，用户拖动也会退出补偿。动画期间的滚动事件只记录距底部距离，结束后据此恢复；没有滚动事件时，根据累计高度增量和当前偏移重新计算距底位置，展开后回到原位置会隐藏“最新消息”。只有切换 Session 时保留一次主动滚底。
 
 `app/conversation.ts` 的 `reuseConversationRows` 按行 ID 复用未变化的数据对象，Session 切换时清空缓存。工具参数和输出等流式更新只替换自己的行，避免 NSH List 将其他行重置为未测量状态而导致滚动条抖动。
 
-没有使用 `inverted`，短会话仍从顶部排列，长会话首屏由原生定位到最新内容。搜索定位和回合导航使用 `scrollToIndex`。“最新消息”参考 noop 使用全宽 `box-none` 容器居中按钮，不对按钮自身做位移，避免视觉位置和点击命中区域分离；只要不在底部就出现，点击后延迟 40ms 调用 `scrollToEnd({ animated: true })` 恢复跟随。
+没有使用 `inverted`，短会话仍从顶部排列，长会话首屏由原生定位到最新内容。搜索定位和回合导航使用 `scrollToIndex`。“最新消息”参考 noop 使用全宽 `box-none` 容器居中按钮，不对按钮自身做位移，避免视觉位置和点击命中区域分离；只要不在底部就出现。按钮使用 `hover:bg-accent` 提供悬停高亮，外层隐藏的可滚动承载层将滚轮增量转发给消息 List，内部 sticky 按钮保持视觉位置，滚轮穿透不影响点击。点击时不提前改变按钮状态，延迟 40ms 调用 `scrollToEnd({ animated: true })` 恢复跟随，按钮在滚动过程中保持显示，只有实际距底不超过 1px 时才隐藏，避免点击瞬间先消失再出现。
 
 **验证**
 
-`App.scroll.fixture.tsx` 和 `App.scroll-short.fixture.tsx` 在 selftest 隔离环境中覆盖：长历史首屏与虚拟化、上翻后新消息不抢滚动、点击“最新”恢复跟随、流式正文更新，以及短会话顶部排列。测试不访问真实钥匙串。
+`App.scroll.fixture.tsx`、`App.scroll-expand.fixture.tsx` 和 `App.scroll-short.fixture.tsx` 在 selftest 隔离环境中覆盖：长历史首屏与虚拟化、上翻后新消息不抢滚动、在 120px 跟随阈值内上翻后展开工作区不抢滚动、底部展开和收起时保持可见行、点击“最新”恢复跟随、流式正文更新，以及短会话顶部排列。底部用例还记录实际滚动帧，要求每个偏移相对新最大值的超调不超过 1.5px，并验证收起过程中存在多个内容高度；关闭同步补偿后该用例会因边界超调失败。另有展开后立即收起用例，要求非贴底场景的滚动位移不超过 1.5px、回到原底部后隐藏“最新消息”，防止旧距底值误启用补偿或残留按钮。另有按钮状态序列测试，检查点击“最新消息”后在非底部不会隐藏，只有到达底部才消失；滚轮用例验证悬浮按钮上的滚动会移动消息 List，点击仍能回到底部，Windows 截图验证悬停高亮。展开回归测试也在 Windows 真实运行目标验证动画完成后的位置。测试不访问真实钥匙串。
 
 `App.conversation.test.tsx` 验证工具输入更新时保留其他行的对象身份。另用本地真实会话 JSONL 中的 Markdown 和 Edit 输入流，在 macOS 900×700 窗口按记录的约 84 秒 API 间隔回放：基线出现反复的高度重置，修复后 75 次高度采样均未回缩。真实日志和临时复现页不纳入仓库。
 

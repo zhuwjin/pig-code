@@ -9,6 +9,8 @@ export function ListCollapsible(props: {
   children: JSX.Element;
   class?: string;
   testID?: string;
+  onTransition?: (active: boolean) => void;
+  onHeightChange?: (delta: number) => void;
 }) {
   const open = () => props.open;
   const shown = signal(open());
@@ -19,11 +21,16 @@ export function ListCollapsible(props: {
   let pending: boolean | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let generation = 0;
+  let transitioning = false;
 
   const stop = () => {
     generation += 1;
     if (timer !== null) clearTimeout(timer);
     timer = null;
+    if (transitioning) {
+      transitioning = false;
+      props.onTransition?.(false);
+    }
   };
 
   const transition = (target: number) => {
@@ -36,9 +43,14 @@ export function ListCollapsible(props: {
       return;
     }
     const currentGeneration = generation;
+    transitioning = true;
+    props.onTransition?.(true);
     const tick = (step: number) => {
       if (generation !== currentGeneration) return;
-      height.set(start + (target - start) * PROGRESS[step]);
+      const previous = untracked(height);
+      const next = start + (target - start) * PROGRESS[step];
+      height.set(next);
+      props.onHeightChange?.(next - previous);
       if (step < PROGRESS.length - 1) {
         timer = setTimeout(() => tick(step + 1), FRAME_MS);
         return;
@@ -47,6 +59,7 @@ export function ListCollapsible(props: {
       pending = null;
       height.set(target);
       shown.set(open());
+      stop();
     };
     timer = setTimeout(() => tick(1), FRAME_MS);
   };

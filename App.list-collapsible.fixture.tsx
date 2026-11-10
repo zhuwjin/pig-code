@@ -4,6 +4,7 @@ import { ListCollapsible } from "./app/components/list-collapsible";
 
 const open = signal(false);
 const samples = signal("");
+const transitions = signal("");
 
 mount(() => {
   const heights: number[] = [];
@@ -22,6 +23,7 @@ mount(() => {
       >
         <ListCollapsible
           open={open()}
+          onTransition={(active) => transitions.update((value) => `${value}${active ? "start" : "end"},`)}
           content={
             <List each={[0]} estimatedItemSize={320} class="h-80">
               {() => <Text>Long content</Text>}
@@ -32,6 +34,7 @@ mount(() => {
         </ListCollapsible>
       </View>
       <Text testID="height-samples">{samples()}</Text>
+      <Text testID="transition-samples">{transitions()}</Text>
     </View>
   );
 });

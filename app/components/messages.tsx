@@ -10,6 +10,7 @@ import {
   reduceMotion,
   Scroll,
   type ScrollRef,
+  type ScrollEvent,
   Text,
   View,
   computed,
@@ -22,7 +23,7 @@ import {
 import { Button, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, TaskNotification, UserItem } from "../protocol";
-import type { UiContext } from "../ui-context";
+import { toggleExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
   buildConversationRows,
@@ -50,6 +51,8 @@ import {
 import { ShimmerText } from "./shimmer-text";
 import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
+
+const LATEST_WHEEL_ORIGIN = 500_000;
 
 type MessageProps = UiContext & {
   textFor: (item: MarkdownItem) => string;
@@ -158,7 +161,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
               testID={`user-expand-${item().id}`}
               accessibilityLabel={t("messages.expand")}
               class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
-              onPress={() => props.store.toggleExpanded(`user-${item().id}`)}
+              onPress={() => toggleExpanded(props, `user-${item().id}`)}
             >
               <Icon name="chevron-down" size={13} color={token("muted-foreground")} />
             </Button>
@@ -170,7 +173,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
               testID={`user-collapse-${item().id}`}
               accessibilityLabel={t("messages.collapse")}
               class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
-              onPress={() => props.store.toggleExpanded(`user-${item().id}`)}
+              onPress={() => toggleExpanded(props, `user-${item().id}`)}
             >
               <Icon name="chevron-up" size={13} color={token("muted-foreground")} />
             </Button>
@@ -349,6 +352,8 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   return (
     <ListCollapsible
       open={open()}
+      onTransition={props.onLayoutAnimation}
+      onHeightChange={props.onLayoutHeightChange}
       testID={`thinking-${item().id}`}
       content={
         <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
@@ -363,7 +368,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         testID={`thinking-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="w-full flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(item().id)}
+        onPress={() => toggleExpanded(props, item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
         <ShimmerText active={item().streaming} baseOpacity={item().streaming ? 0.6 : 1} class="shrink-0" textClass="text-sm leading-5">
@@ -535,6 +540,8 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
   return (
     <ListCollapsible
       open={open()}
+      onTransition={props.onLayoutAnimation}
+      onHeightChange={props.onLayoutHeightChange}
       testID={row().id}
       content={
         <View class="gap-2 pt-2">
@@ -549,7 +556,7 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         testID={row().id}
         accessibilityState={{ expanded: open() }}
         class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(row().id)}
+        onPress={() => toggleExpanded(props, row().id)}
       >
         <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
         <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
@@ -705,7 +712,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
   );
 }
 
-export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number }) {
+export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number; onScroll?: (event: ScrollEvent) => void; onLatestVisibleChange?: (visible: boolean) => void }) {
   let cachedSession: string | null = null;
   let cachedRows: ConversationRow[] = [];
   const rows = computed(
@@ -733,6 +740,20 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
     ? [{ row, index, user: row.item }]
     : []);
   const latestVisible = signal(false);
+  const setLatestVisible = (visible: boolean) => {
+    if (latestVisible() === visible) return;
+    latestVisible.update(() => visible);
+    props.onLatestVisibleChange?.(visible);
+  };
+  const layoutAnimating = signal(false);
+  let layoutAnimationCount = 0;
+  let distanceFromEnd = 0;
+  let layoutDistanceUpdated = false;
+  let lastContentHeight = 0;
+  let lastViewportHeight = 0;
+  let lastScrollOffset = 0;
+  let collapseContentHeight = 0;
+  let syncingCollapse = false;
   const activeTurn = signal(0);
   const hoveredTurn = signal<string | null>(null);
   const navFocus = signal<number | null>(null);
@@ -742,6 +763,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   const viewportWidth = signal(0);
   const lightbox = signal<{ src: string; label: string } | null>(null);
   let list: ListRef | undefined;
+  let latestWheelOffset = LATEST_WHEEL_ORIGIN;
   let visibleRowIndices: number[] = [];
   const updateActiveTurn = () => {
     const next = resolveActiveUserRow(
@@ -757,7 +779,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
     const session = props.store.current();
     if (session === followedSession) return;
     followedSession = session;
-    latestVisible.set(false);
+    setLatestVisible(false);
     const timer = setTimeout(() => list?.scrollToEnd({ animated: false }), 0);
     return () => clearTimeout(timer);
   });
@@ -836,36 +858,99 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
-        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
+        maintainVisibleContentPosition={latestVisible() || layoutAnimating() ? undefined : { autoscrollToBottomThreshold: 120 }}
         class="min-w-0 flex-1"
         contentClass="gap-4"
         scrollbar
         header={<View class="h-4" />}
         footer={<TailRows {...props} navEligible={userRows().length >= 2} />}
         onScroll={(event) => {
-          const distance = event.contentSize.height - event.offset.y - event.size.height;
-          latestVisible.set(distance > 1);
+          props.onScroll?.(event);
+          lastContentHeight = event.contentSize.height;
+          lastViewportHeight = event.size.height;
+          lastScrollOffset = event.offset.y;
+          distanceFromEnd = event.contentSize.height - event.offset.y - event.size.height;
+          if (layoutAnimating()) layoutDistanceUpdated = true;
+          else setLatestVisible(distanceFromEnd > 1);
         }}
+        onScrollDragStart={() => { syncingCollapse = false; }}
         onViewableItemsChange={({ viewableItems }) => {
           visibleRowIndices = viewableItems.filter((item) => item.isViewable).map((item) => item.index);
           updateActiveTurn();
         }}
       >
-        {(row) => <MessageRow {...props} row={row} textFor={textFor} active={row().id === activeSearchRow()} navEligible={userRows().length >= 2} onImage={(src, label) => lightbox.set({ src, label })} />}
+        {(row) => (
+          <MessageRow
+            {...props}
+            row={row}
+            textFor={textFor}
+            active={row().id === activeSearchRow()}
+            navEligible={userRows().length >= 2}
+            onManualLayoutChange={(collapsing) => {
+              syncingCollapse = collapsing && !latestVisible() && distanceFromEnd <= 1;
+              if (syncingCollapse) collapseContentHeight = lastContentHeight;
+              setLatestVisible(true);
+            }}
+            onLayoutAnimation={(active) => {
+              if (active) {
+                if (layoutAnimationCount === 0) layoutDistanceUpdated = false;
+                layoutAnimationCount += 1;
+                layoutAnimating.set(true);
+              } else {
+                layoutAnimationCount = Math.max(0, layoutAnimationCount - 1);
+                if (layoutAnimationCount === 0) {
+                  syncingCollapse = false;
+                  if (!layoutDistanceUpdated) {
+                    distanceFromEnd = lastContentHeight - lastViewportHeight - lastScrollOffset;
+                  }
+                  setLatestVisible(distanceFromEnd > 1);
+                  layoutAnimating.set(false);
+                }
+              }
+            }}
+            onLayoutHeightChange={(delta) => {
+              lastContentHeight += delta;
+              if (!syncingCollapse) return;
+              collapseContentHeight += delta;
+              list?.scrollToOffset({ offset: Math.max(0, collapseContentHeight - lastViewportHeight), animated: false });
+            }}
+            onImage={(src, label) => lightbox.set({ src, label })}
+          />
+        )}
       </List>
       <If when={latestVisible()}>
         <View class="absolute inset-x-0 bottom-3 items-center" style={{ pointerEvents: "box-none" }}>
-          <Button
-            testID="latest-messages"
-            class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg"
-            onPress={() => {
-              latestVisible.set(false);
-              setTimeout(() => list?.scrollToEnd({ animated: true }), 40);
+          <Scroll
+            testID="latest-scroll"
+            class="h-[38px] w-full"
+            contentOffset={{ y: LATEST_WHEEL_ORIGIN }}
+            scrollbar={false}
+            bounces={false}
+            onScroll={(event) => {
+              const delta = event.offset.y - latestWheelOffset;
+              latestWheelOffset = event.offset.y;
+              if (delta === 0) return;
+              const max = Math.max(0, lastContentHeight - lastViewportHeight);
+              const next = Math.min(max, Math.max(0, lastScrollOffset + delta));
+              lastScrollOffset = next;
+              list?.scrollToOffset({ offset: next, animated: false });
             }}
           >
-            <Icon name="arrow-down" size={15} color={token("muted-foreground")} />
-            <Text class="text-sm font-medium text-foreground">{t("messages.latest")}</Text>
-          </Button>
+            <View style={{ height: LATEST_WHEEL_ORIGIN * 2 }}>
+              <View class="sticky top-0 items-center">
+                <Button
+                  testID="latest-messages"
+                  class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg hover:bg-accent"
+                  onPress={() => {
+                    setTimeout(() => list?.scrollToEnd({ animated: true }), 40);
+                  }}
+                >
+                  <Icon name="arrow-down" size={15} color={token("muted-foreground")} />
+                  <Text class="text-sm font-medium text-foreground">{t("messages.latest")}</Text>
+                </Button>
+              </View>
+            </View>
+          </Scroll>
         </View>
       </If>
       <If when={userRows().length >= 2 && viewportWidth() >= 720}>
