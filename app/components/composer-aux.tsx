@@ -5,6 +5,7 @@ import type { TaskStatus, TaskSummary } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { changeTotals, formatDuration } from "../conversation";
 import { Icon, type IconName } from "./icon";
+import { Segmented } from "./segmented";
 
 function taskStatus(status: TaskStatus): string {
   switch (status) {
@@ -18,6 +19,18 @@ function taskStatus(status: TaskStatus): string {
   }
 }
 
+function taskStatusIcon(status: TaskStatus): { name: IconName; color: string; spin?: boolean } {
+  switch (status) {
+    case "queued": return { name: "clock", color: token("muted-foreground") };
+    case "running": return { name: "loader-circle", color: token("info"), spin: true };
+    case "completed": return { name: "circle-check", color: token("success") };
+    case "failed": return { name: "circle-x", color: token("destructive") };
+    case "timed_out": return { name: "circle-alert", color: token("warning") };
+    case "killed": return { name: "ban", color: token("muted-foreground") };
+    case "lost": return { name: "circle-alert", color: token("warning") };
+  }
+}
+
 function TaskPanel(props: UiContext & { kind: "shell" | "subagent" }) {
   const filter = signal<"running" | "finished" | "all">("running");
   const tasks = () => props.store.currentTasks().filter((task) => {
@@ -28,20 +41,24 @@ function TaskPanel(props: UiContext & { kind: "shell" | "subagent" }) {
   });
   return (
     <View class="gap-2">
-      <View class="flex-row items-center gap-1">
-        <Each of={["running", "finished", "all"] as const} key={(value) => value}>
-          {(value) => (
-            <Button
-              selected={filter() === value()}
-              class="rounded-full px-2 py-1 selected:bg-accent"
-              onPress={() => filter.set(value())}
-            >
-              <Text class="text-xs text-muted-foreground">
-                {t(value() === "running" ? "tasks.filter.running" : value() === "finished" ? "tasks.filter.finished" : "tasks.filter.all")}
-              </Text>
-            </Button>
-          )}
-        </Each>
+      <View class="flex-row items-center gap-2">
+        <View class="min-w-0 flex-row items-center gap-1.5">
+          <Icon name={props.kind === "shell" ? "square-terminal" : "bot"} size={14} color={token("muted-foreground")} />
+          <Text style={{ numberOfLines: 1 }} class="text-sm font-semibold text-foreground">
+            {t(props.kind === "shell" ? "tasks.background_terminal" : "tasks.background_agent")}
+          </Text>
+        </View>
+        <View class="flex-1" />
+        <Segmented
+          testID={`task-filter-${props.kind}`}
+          value={filter()}
+          onChange={(value) => filter.set(value)}
+          options={[
+            { value: "running", label: t("tasks.filter.running") },
+            { value: "finished", label: t("tasks.filter.finished") },
+            { value: "all", label: t("tasks.filter.all") },
+          ]}
+        />
       </View>
       <If when={tasks().length === 0}>
         <Text class="py-4 text-center text-xs text-muted-foreground">{t("tasks.empty")}</Text>
@@ -55,21 +72,28 @@ function TaskPanel(props: UiContext & { kind: "shell" | "subagent" }) {
 
 function TaskRow(props: UiContext & { task: () => TaskSummary }) {
   const task = () => props.task();
+  const icon = () => taskStatusIcon(task().status);
+  const duration = () => formatDuration((task().ended_at_ms ?? Date.now()) - task().started_at_ms);
   return (
     <Button
       testID={`task-${task().id}`}
-      class="gap-1 rounded-lg px-2 py-2 text-left hover:bg-accent"
+      accessibilityLabel={`${task().command}, ${taskStatus(task().status)}, ${duration()}`}
+      class="flex-row items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent"
       onPress={() => props.store.openTask(task())}
     >
-      <View class="flex-row items-center gap-2">
-        <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-xs font-medium text-foreground">{task().command}</Text>
-        <Text class={task().status === "failed" ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
-          {taskStatus(task().status)}
-        </Text>
-      </View>
-      <Text class="text-left text-xs text-muted-foreground">
-        {formatDuration((task().ended_at_ms ?? Date.now()) - task().started_at_ms)}
+      <Icon
+        name={icon().name}
+        size={14}
+        color={icon().color}
+        class={icon().spin ? "shrink-0 animate-spin" : "shrink-0"}
+      />
+      <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left font-mono text-xs text-foreground">
+        {task().command}
       </Text>
+      <Text class="text-xs text-muted-foreground" style={{ fontVariant: ["tabular-nums"] }}>
+        {duration()}
+      </Text>
+      <Icon name="chevron-right" size={13} color={token("muted-foreground")} />
     </Button>
   );
 }
