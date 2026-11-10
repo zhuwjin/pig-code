@@ -312,8 +312,8 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
   };
   return (
     <View testID="right-panel" class="w-full flex-1 bg-background">
-      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: titleBar().right, borderBottomWidth: 0.5 }}>
-        <Scroll horizontal class="min-w-0 flex-1" contentClass="h-10 items-center gap-1 px-1">
+      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: titleBar().right, borderBottomWidth: 0.5 }} desktop={{ windowDrag: true }}>
+        <Scroll horizontal class="min-w-0 flex-1" contentClass="h-10 items-center gap-1 px-1" desktop={{ windowDrag: true }}>
           <Tabs class="h-10 flex-row items-center gap-1">
             <Each of={tabs()} key={(tab) => tabId(tab)}>
               {(tab) => {
