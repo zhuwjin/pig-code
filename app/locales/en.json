@@ -659,6 +659,11 @@
       "task": "Task output",
       "compact": "Compact summary"
     },
+    "add_tab": "New tab",
+    "tab_list": "Tab list",
+    "search_tabs": "Search tabs…",
+    "open_tabs": "Open tabs",
+    "no_matching_tabs": "No matching tabs",
     "file_changes": "File changes",
     "refresh_changes": "Refresh changes",
     "diff": {
@@ -678,7 +683,9 @@
     "running": "Running",
     "no_conversation": "No conversation yet",
     "close_tab": "Close {name}",
-    "close_panel": "Close right panel"
+    "close_panel": "Close right panel",
+    "fullscreen": "Full screen",
+    "restore": "Exit full screen"
   },
   "image_viewer": {
     "previous": "Previous image",

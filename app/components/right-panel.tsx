@@ -1,11 +1,11 @@
 import { Scroll, Text, View, effect, signal, token } from "nsh";
-import { Button, Collapsible, DiffView, Editor, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
+import { Button, Collapsible, DiffView, Editor, Input, Menu, MenuItem, Popover, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { GitFileChange, RightPanelRequest, SubagentItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import { formatDuration, pathParts } from "../conversation";
-import { Icon } from "./icon";
+import { Icon, type IconName } from "./icon";
 
 function tabId(request: RightPanelRequest): string {
   switch (request.kind) {
@@ -24,6 +24,16 @@ function tabTitle(request: RightPanelRequest): string {
     case "subagent": return t("right_panel.tab.subagent");
     case "task": return t("right_panel.tab.task");
     case "compact": return t("right_panel.tab.compact");
+  }
+}
+
+function tabIcon(request: RightPanelRequest): IconName {
+  switch (request.kind) {
+    case "changes": return "git-branch";
+    case "file": return "file-text";
+    case "subagent": return "bot";
+    case "task": return "square-terminal";
+    case "compact": return "archive";
   }
 }
 
@@ -285,9 +295,12 @@ function ActiveContent(props: UiContext & { request: RightPanelRequest }) {
   );
 }
 
-export function RightPanel(props: UiContext & { onClose: () => void }) {
+export function RightPanel(props: UiContext & { onClose: () => void; maximized: boolean; onToggleMaximize: () => void }) {
   const tabs = signal<RightPanelRequest[]>([]);
   const activeKey = signal("");
+  const addOpen = signal(false);
+  const tabListOpen = signal(false);
+  const tabQuery = signal("");
   let initialized = false;
   effect(() => {
     const incoming = props.store.rightPanelRequest();
@@ -296,8 +309,9 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
     const request = incoming ?? { kind: "changes", key: "changes" } as RightPanelRequest;
     const id = tabId(request);
     const existing = tabs().find((tab) => tabId(tab) === id);
-    if (!existing) tabs.update((current) => [...current, request]);
-    else if (existing.key !== request.key) {
+    if (!existing) {
+      tabs.update((current) => [...current, request]);
+    } else if (existing.key !== request.key) {
       tabs.update((current) => current.map((tab) => tabId(tab) === id ? request : tab));
     }
     activeKey.set(id);
@@ -308,11 +322,93 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
     const remaining = tabs().filter((tab) => tabId(tab) !== id);
     tabs.set(remaining);
     if (activeKey() === id) activeKey.set(remaining.length ? tabId(remaining[remaining.length - 1]) : "");
-    if (remaining.length === 0) props.onClose();
+    if (remaining.length === 0) {
+      tabListOpen.set(false);
+      props.onClose();
+    }
+  };
+  const filteredTabs = () => {
+    const query = tabQuery().trim().toLowerCase();
+    return query ? tabs().filter((tab) => tabTitle(tab).toLowerCase().includes(query)) : tabs();
   };
   return (
     <View testID="right-panel" class="w-full flex-1 bg-background">
       <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: titleBar().right, borderBottomWidth: 0.5 }} desktop={{ windowDrag: true }}>
+        <Popover
+          open={tabListOpen()}
+          onOpenChange={({ open }) => {
+            tabListOpen.set(open);
+            if (!open) tabQuery.set("");
+          }}
+          placement="bottom"
+          align="start"
+          offset={4}
+          margin={8}
+          popupClass="w-60 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
+          trigger={
+            <View
+              role="button"
+              testID="right-tab-list-toggle"
+              accessibilityLabel={t("right_panel.tab_list")}
+              class="ml-1 h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
+              desktop={{ windowDrag: false }}
+            >
+              <Icon name="chevron-down" size={14} color={token("muted-foreground")} />
+            </View>
+          }
+        >
+          <View class="w-full">
+            <View class="h-10 flex-row items-center gap-2 border-b border-border px-3">
+              <Icon name="search" size={14} color={token("muted-foreground")} />
+              <Input
+                testID="right-tab-search"
+                autoFocus
+                value={tabQuery()}
+                onChange={({ value }) => tabQuery.set(value)}
+                placeholder={t("right_panel.search_tabs")}
+                class="min-w-0 flex-1 text-sm text-foreground placeholder:text-muted-foreground"
+              />
+            </View>
+            <Scroll class="max-h-72">
+              <View class="py-1">
+                <Text class="px-3 pb-1 pt-2 text-xs font-medium text-muted-foreground">{t("right_panel.open_tabs")}</Text>
+                <View class="gap-0.5 px-1.5">
+                  <Each of={filteredTabs()} key={(tab) => tabId(tab)}>
+                    {(tab) => {
+                      const id = () => tabId(tab());
+                      return (
+                        <View class="flex-row items-center gap-2 rounded-(--radius) px-2 hover:bg-accent">
+                          <Button
+                            testID={`right-tab-list-${id()}`}
+                            class="min-w-0 flex-1 flex-row items-center gap-2 rounded-(--radius) px-1 py-1"
+                            onPress={() => {
+                              activeKey.set(id());
+                              tabListOpen.set(false);
+                            }}
+                          >
+                            <Icon name={tabIcon(tab())} size={14} color={token("muted-foreground")} />
+                            <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-sm text-foreground">{tabTitle(tab())}</Text>
+                          </Button>
+                          <Button
+                            testID={`right-tab-list-close-${id()}`}
+                            accessibilityLabel={t("right_panel.close_tab", { name: tabTitle(tab()) })}
+                            class="h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-foreground/10"
+                            onPress={() => closeTab(id())}
+                          >
+                            <Icon name="x" size={12} color={token("muted-foreground")} />
+                          </Button>
+                        </View>
+                      );
+                    }}
+                  </Each>
+                </View>
+                <If when={filteredTabs().length === 0}>
+                  <Text class="px-3 py-2 text-sm text-muted-foreground">{t("right_panel.no_matching_tabs")}</Text>
+                </If>
+              </View>
+            </Scroll>
+          </View>
+        </Popover>
         <Scroll horizontal class="min-w-0 flex-1" contentClass="h-10 items-center gap-1 px-1" desktop={{ windowDrag: true }}>
           <Tabs class="h-10 flex-row items-center gap-1">
             <Each of={tabs()} key={(tab) => tabId(tab)}>
@@ -322,16 +418,21 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
                   <Tab
                     testID={`right-tab-${id()}`}
                     selected={activeKey() === id()}
-                    class="group h-10 flex-row items-center gap-1 px-2"
+                    class={`h-6 flex-row items-center gap-1 rounded-(--radius) pl-2 pr-1 ${activeKey() === id() ? "bg-accent" : "hover:bg-accent/60"}`}
                     onPress={() => activeKey.set(id())}
                   >
+                    <Icon
+                      name={tabIcon(tab())}
+                      size={14}
+                      color={activeKey() === id() ? token("foreground") : token("muted-foreground")}
+                    />
                     <Text class={activeKey() === id() ? "max-w-32 text-xs text-foreground" : "max-w-32 text-xs text-muted-foreground"} style={{ numberOfLines: 1 }}>
                       {tabTitle(tab())}
                     </Text>
                     <Button
                       testID={`right-tab-close-${id()}`}
                       accessibilityLabel={t("right_panel.close_tab", { name: tabTitle(tab()) })}
-                      class="h-5 w-5 items-center justify-center rounded opacity-0 hover:bg-accent group-hover:opacity-100"
+                      class="h-4 w-4 items-center justify-center rounded hover:bg-foreground/10"
                       onPress={() => closeTab(id())}
                     >
                       <Icon name="x" size={10} color={token("muted-foreground")} />
@@ -342,6 +443,44 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
             </Each>
           </Tabs>
         </Scroll>
+        <Menu
+          open={addOpen()}
+          onOpenChange={({ open }) => addOpen.set(open)}
+          placement="bottom"
+          align="end"
+          popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
+          trigger={
+            <View
+              role="button"
+              testID="right-tab-add"
+              accessibilityLabel={t("right_panel.add_tab")}
+              class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
+              desktop={{ windowDrag: false }}
+            >
+              <Icon name="plus" size={14} color={token("muted-foreground")} />
+            </View>
+          }
+        >
+          <MenuItem
+            testID="right-tab-add-changes"
+            class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-accent"
+            onSelect={() => {
+              addOpen.set(false);
+              props.store.openChanges();
+            }}
+          >
+            <Icon name="git-branch" size={14} color={token("muted-foreground")} />
+            <Text class="flex-1 text-sm text-foreground">{t("right_panel.tab.changes")}</Text>
+          </MenuItem>
+        </Menu>
+        <Button
+          testID="right-panel-maximize"
+          accessibilityLabel={t(props.maximized ? "right_panel.restore" : "right_panel.fullscreen")}
+          class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
+          onPress={props.onToggleMaximize}
+        >
+          <Icon name={props.maximized ? "minimize-2" : "maximize-2"} size={14} color={token("muted-foreground")} />
+        </Button>
         <Button
           testID="right-panel-close"
           accessibilityLabel={t("right_panel.close_panel")}

@@ -659,6 +659,11 @@
       "task": "任务输出",
       "compact": "压缩摘要"
     },
+    "add_tab": "新建标签页",
+    "tab_list": "标签页列表",
+    "search_tabs": "搜索标签页…",
+    "open_tabs": "打开的标签页",
+    "no_matching_tabs": "没有匹配的标签页",
     "file_changes": "文件变更",
     "refresh_changes": "刷新变更",
     "diff": {
@@ -678,7 +683,9 @@
     "running": "运行中",
     "no_conversation": "暂无对话记录",
     "close_tab": "关闭 {name}",
-    "close_panel": "关闭右侧面板"
+    "close_panel": "关闭右侧面板",
+    "fullscreen": "全屏",
+    "restore": "退出全屏"
   },
   "image_viewer": {
     "previous": "上一张图片",

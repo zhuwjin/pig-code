@@ -48,6 +48,7 @@ function AnimatedResizablePanel(props: {
   open: boolean;
   size: number;
   minSize: number;
+  expanded?: boolean;
   animating: Signal<boolean>;
   onResize: (size: number) => void;
   children: JSX.Element;
@@ -88,9 +89,9 @@ function AnimatedResizablePanel(props: {
   });
   return (
     <ResizablePanel
-      size={props.open ? props.size : 0}
-      minSize={props.open ? props.minSize : 0}
-      fixed
+      size={props.expanded ? null : props.open ? props.size : 0}
+      minSize={props.expanded ? 0 : props.open ? props.minSize : 0}
+      fixed={!props.expanded}
       visible={presented()}
       onResize={({ size }) => props.onResize(size)}
     >
@@ -122,6 +123,7 @@ function App(props: UiContext) {
   const sidebarWidth = signal(220);
   const sidebarAnimating = signal(false);
   const rightVisible = signal(false);
+  const rightMaximized = signal(false);
   const rightWidth = signal(300);
   const rightAnimating = signal(false);
   const terminalVisible = signal(false);
@@ -132,6 +134,7 @@ function App(props: UiContext) {
   const settingsPage = signal<SettingsPageId>("models");
   const searchVisible = signal(false);
   const panelsAnimating = () => sidebarAnimating() || rightAnimating();
+  const rightExpanded = () => rightMaximized() && rightVisible() && !settingsVisible();
   const saveTheme = () => store.saveThemePreference(themeStore.activeId(), themeStore.mode());
   const openAppearance = () => {
     settingsPage.set("appearance");
@@ -147,6 +150,9 @@ function App(props: UiContext) {
     terminalStarted.set(true);
     terminalVisible.update((visible) => !visible);
   };
+  effect(() => {
+    if (!rightVisible() || settingsVisible()) rightMaximized.set(false);
+  });
   effect(() => {
     store.start();
   });
@@ -222,7 +228,7 @@ function App(props: UiContext) {
               onOpenSearch={() => searchVisible.set(true)}
             />
           </AnimatedResizablePanel>
-          <ResizablePanel minSize={480}>
+          <ResizablePanel minSize={480} visible={!rightExpanded()}>
             <View class={themeStore.classes("app.content", "min-w-0 flex-1")}>
               <TitleBar
                 {...props}
@@ -274,10 +280,16 @@ function App(props: UiContext) {
             open={rightVisible() && !settingsVisible()}
             size={rightWidth()}
             minSize={280}
+            expanded={rightExpanded()}
             animating={rightAnimating}
             onResize={(width) => rightWidth.set(width)}
           >
-            <RightPanel {...props} onClose={toggleRight} />
+            <RightPanel
+              {...props}
+              onClose={toggleRight}
+              maximized={rightExpanded()}
+              onToggleMaximize={() => rightMaximized.update((maximized) => !maximized)}
+            />
           </AnimatedResizablePanel>
         </ResizablePanelGroup>
       </View>
