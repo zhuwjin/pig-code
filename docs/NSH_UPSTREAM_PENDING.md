@@ -139,6 +139,40 @@ nsh run InputScrollRepro.tsx --target macos --window-size 900x700
 - 输入框被回收和重建时，外层状态及用户正在编辑的内容保持正确。
 - 普通表单、外观搜索框和模型编辑弹窗均通过相同场景检查。
 
+## 窗口标题栏
+
+### 7. Windows 标题栏按钮自绘（未发布）
+
+**现状**
+
+Windows 上隐藏系统标题栏后（`Window.setTitleBar({ style: "hidden", height: 44 })`），最小化、最大化和关闭三个按钮仍由 NSH 平台层绘制：`nsh-platform-windows` 的 `chrome.rs::draw` 用 Direct2D 按 Windows 11 样式画在应用内容之上，固定占用窗口右上角 `titleBar().right`（138pt）。点击由 `WM_NCHITTEST` 返回 `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE`，属于非客户区，应用的 View 收不到这些点击，也无法用自绘内容覆盖或替换。
+
+当前应用只能给它们让位：`app/components/title-bar.tsx` 在标题栏贴窗口右边时预留 `titleBar().right`，`app/components/right-panel.tsx` 在右侧面板头部预留同一区域。0.4.0 的 `Window.setTitleBar` 只有 `"default"` 和 `"hidden"`，没有隐藏或替换系统按钮的选项。
+
+**上游参考**
+
+NSH main 已增加完全自绘窗口所需的能力（2026-11-10 检查 `main@643ca53d0cb0ff3d57a02500d2859f62698bb143`）：
+
+- `WindowFrameStyle::None`：无边框窗口，平台不画标题栏、边框和按钮；`Attrs::frameless()` 为真时 `chrome::draw` 直接返回。
+- `windowControl` 标记（`WindowControl::{Minimize, Maximize, Close}`）：应用自绘的按钮仍由 `WM_NCHITTEST` 返回对应的系统命中码，最大化按钮保留 Windows 11 贴靠布局。
+- `windowResize` 标记以及 `Window.minimize()`、`Window.toggleMaximize()`、`Window.close()` 可以配合使用。
+
+这些能力尚未发布：crates.io 上 `nsh-core` / `nsh-platform-windows` 最新仍为 0.4.0。
+
+**升级后的处理**
+
+- Windows 上把主窗口切换为无边框，自绘最小化、最大化、关闭按钮，使用主题色和 `hover:` / `active:` 样式；按钮标记 `windowControl` 并分别调用 `Window.minimize()`、`Window.toggleMaximize()`、`Window.close()`。
+- 保留 `windowDrag` 的空白拖动区和双击最大化行为；移除 Windows 上标题栏和右侧面板头部为系统按钮预留的空白。
+- macOS 先保留系统 traffic lights；如果要同样自绘，单独验证键盘、全屏和减少动态效果，不要在一次改动中同时切换所有平台。
+- 检查无边框窗口的缩放边框、阴影、圆角、最大化/还原、贴靠布局和全屏行为。
+
+**验收**
+
+- Windows 上三个按钮的图标、悬停、按下以及最大化/还原状态与主题一致，点击分别最小化、最大化或还原、关闭窗口。
+- 最大化按钮悬停仍显示 Windows 11 贴靠布局，双击空白标题栏仍最大化/还原。
+- 标题栏和右侧面板头部不再为系统按钮留出空白区；窗口缩放边框、阴影和圆角正常。
+- macOS 的 traffic lights、拖动和双击行为不回归。
+
 ## 不属于 NSH 新版本待办
 
 - 模型编辑弹窗的首次回显延迟和复选框缺少选中指示属于项目自身的初始化与样式问题；原生 `Input` 的滚动空白见第 6 节，不再笼统归为项目自身问题。
