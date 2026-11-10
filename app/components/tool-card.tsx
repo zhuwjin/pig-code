@@ -1,5 +1,5 @@
 import { Accessor, Clipboard, Scroll, Text, token, View } from "nsh";
-import { Button, ContextMenu, DiffView, MenuItem, TextView, Tooltip } from "nsh/base";
+import { Button, Collapsible, ContextMenu, DiffView, MenuItem, TextView, Tooltip } from "nsh/base";
 import { t } from "../i18n";
 import type { AgentCard, ToolItem } from "../protocol";
 import { toggleExpanded, type UiContext } from "../ui-context";
@@ -285,7 +285,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
       <Button
         testID={`swarm-parent-${props.item().id}`}
         class="w-full flex-row items-center gap-3 rounded-lg border border-border bg-tool-surface p-3 hover:bg-accent"
-        onPress={() => toggleExpanded(props, `swarm-${props.item().id}`)}
+        onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
       >
         <View class="h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent">
           <Icon name="bot" size={20} color={token("foreground")} />
@@ -321,13 +321,13 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   if (props.item().tool === "AgentSwarm") {
     const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
     return (
-      <View>
+      <Collapsible open={open()} reveal content={rows}>
         <View
           role="button"
           testID={`swarm-${props.item().id}`}
           accessibilityState={{ expanded: open() }}
           class="w-full min-w-0 flex-row items-center gap-2 py-1"
-          onPress={() => toggleExpanded(props, `swarm-${props.item().id}`)}
+          onPress={() => props.store.toggleExpanded(`swarm-${props.item().id}`)}
         >
           <Icon name="bot" size={16} color={token("muted-foreground")} />
           <Text class="shrink-0 text-sm font-medium text-muted-foreground">Swarm</Text>
@@ -335,8 +335,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
           <Text class="shrink-0 text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
           <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
         </View>
-        <If when={open()}>{rows}</If>
-      </View>
+      </Collapsible>
     );
   }
   return rows;
@@ -414,25 +413,29 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
     }
   };
   return (
-    <View class="rounded-xl border border-border bg-tool-surface">
+    <Collapsible
+      class="rounded-xl border border-border bg-tool-surface"
+      open={open()}
+      reveal
+      content={
+        <View class="max-h-80 border-t border-border p-3">
+          <TextView markdown={plan()} selectable classes={{ root: "text-sm leading-6 text-foreground" }} />
+        </View>
+      }
+    >
       <View
         role="button"
         testID={`plan-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="flex-row items-center gap-2 px-3 py-2"
-        onPress={() => toggleExpanded(props, `plan-${item().id}`)}
+        onPress={() => props.store.toggleExpanded(`plan-${item().id}`)}
       >
         <Icon name="lightbulb" size={16} color={token("info")} />
         <Text class="shrink-0 text-sm text-muted-foreground">{t("tools.exit_plan")}</Text>
         <Text class="min-w-0 text-sm" style={{ color: statusColor() }}>{statusLabel()}</Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-      <If when={open()}>
-        <View class="max-h-80 border-t border-border p-3">
-          <TextView markdown={plan()} selectable classes={{ root: "text-sm leading-6 text-foreground" }} />
-        </View>
-      </If>
-    </View>
+    </Collapsible>
   );
 }
 
@@ -467,13 +470,13 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
-    <View class="w-full">
+    <Collapsible class="w-full" open={open()} reveal content={<ToolBody {...props} />}>
       <View
         role="button"
         testID={`tool-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => toggleExpanded(props, item().id)}
+        onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
         <ShimmerText active={running()} baseOpacity={running() ? 0.6 : 1} class="shrink-0" textClass={running() ? "text-sm" : "text-sm font-medium"}>
@@ -560,7 +563,6 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
           <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{item().liveNote}</Text>
         </View>
       </If>
-      <If when={open()}><ToolBody {...props} /></If>
-    </View>
+    </Collapsible>
   );
 }

@@ -1,8 +1,8 @@
 import { Accessor, Clipboard, Text, token, View, type JSX } from "nsh";
-import { Button } from "nsh/base";
+import { Button, Collapsible } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
-import { toggleExpanded, toggleTurnExpanded, type UiContext } from "../ui-context";
+import { toggleExpanded, type UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration, turnDurationMs } from "../conversation";
 import { Icon } from "./icon";
 
@@ -10,11 +10,11 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <View>
+    <Collapsible open={open()} reveal content={props.children}>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"
-        onPress={() => toggleTurnExpanded(props, turn().id)}
+        onPress={() => props.store.toggleTurnExpanded(turn().id)}
       >
         <Text class="text-xs text-muted-foreground">
           {turn().status === "stopped"
@@ -25,8 +25,7 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>
-      <If when={open()}>{props.children}</If>
-    </View>
+    </Collapsible>
   );
 }
 
@@ -106,63 +105,68 @@ export function TurnActionsRow(props: UiContext & {
           </Text>
         </View>
       </If>
-      <View class={latest() ? "flex-row items-center gap-1" : "flex-row items-center gap-1 opacity-0 group-hover:opacity-100"}>
-        <If when={props.markdownText()}>
-          <Button
-            testID={`copy-turn-${turn().id}`}
-            accessibilityLabel={t("turn.copy_answer")}
-            class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
-            onPress={() => {
-              void Clipboard.writeText(props.markdownText()).then(() => props.store.markCopied(`turn-copy-${turn().id}`));
-            }}
-          >
-            <Icon name={copied() ? "check" : "copy"} size={12} color={token(copied() ? "success" : "muted-foreground")} />
-          </Button>
-        </If>
-        <Button
-          testID={`fork-${turn().id}`}
-          accessibilityLabel={t("turn.fork")}
-          class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
-          onPress={() => props.store.forkTurn(turn().id)}
-        >
-          <Icon name="git-fork" size={12} color={token("muted-foreground")} />
-        </Button>
-        <If when={turn().hooks.length > 0}>
-          <Button
-            testID={`hooks-${turn().id}`}
-            accessibilityLabel={t("turn.hooks_summary")}
-            class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
-            onPress={() => toggleExpanded(props, `hooks-${turn().id}`)}
-          >
-            <Icon name="anchor" size={12} color={token("muted-foreground")} />
-          </Button>
-        </If>
-        <If when={stats()}>
-          <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>
-        </If>
-        <If when={!stats() && turn().durationMs}>
-          <Text class="text-xs text-muted-foreground">{t("turn.finished", { duration: formatCompactDuration(turn().durationMs!) })}</Text>
-        </If>
-      </View>
-      <If when={hooksOpen()}>
-        <View class="gap-2 rounded-xl border border-border bg-tool-surface p-3">
-          <Each of={turn().hooks} key={(hook) => hook.id}>
-            {(hook) => (
-              <View class="gap-0.5">
-                <View class="flex-row items-center gap-2">
-                  <Text class="flex-1 text-xs font-medium text-foreground">{hook().label}</Text>
-                  <Text class="text-xs text-muted-foreground">{formatCompactDuration(hook().duration_ms)}</Text>
-                  <Text class={hook().state === "failed" || hook().state === "blocked" ? "text-xs text-destructive" : "text-xs text-success"}>
-                    {t(hook().state === "finished" ? "turn.hook.finished" : hook().state === "blocked" ? "turn.hook.blocked" : "turn.hook.failed")}
-                  </Text>
+      <Collapsible
+        open={hooksOpen()}
+        reveal
+        content={
+          <View class="gap-2 rounded-xl border border-border bg-tool-surface p-3">
+            <Each of={turn().hooks} key={(hook) => hook.id}>
+              {(hook) => (
+                <View class="gap-0.5">
+                  <View class="flex-row items-center gap-2">
+                    <Text class="flex-1 text-xs font-medium text-foreground">{hook().label}</Text>
+                    <Text class="text-xs text-muted-foreground">{formatCompactDuration(hook().duration_ms)}</Text>
+                    <Text class={hook().state === "failed" || hook().state === "blocked" ? "text-xs text-destructive" : "text-xs text-success"}>
+                      {t(hook().state === "finished" ? "turn.hook.finished" : hook().state === "blocked" ? "turn.hook.blocked" : "turn.hook.failed")}
+                    </Text>
+                  </View>
+                  <Text class="text-xs text-muted-foreground">{hook().hook_event}</Text>
+                  <If when={hook().reason}><Text class="text-xs text-warning">{hook().reason}</Text></If>
                 </View>
-                <Text class="text-xs text-muted-foreground">{hook().hook_event}</Text>
-                <If when={hook().reason}><Text class="text-xs text-warning">{hook().reason}</Text></If>
-              </View>
-            )}
-          </Each>
+              )}
+            </Each>
+          </View>
+        }
+      >
+        <View class={latest() ? "flex-row items-center gap-1" : "flex-row items-center gap-1 opacity-0 group-hover:opacity-100"}>
+          <If when={props.markdownText()}>
+            <Button
+              testID={`copy-turn-${turn().id}`}
+              accessibilityLabel={t("turn.copy_answer")}
+              class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
+              onPress={() => {
+                void Clipboard.writeText(props.markdownText()).then(() => props.store.markCopied(`turn-copy-${turn().id}`));
+              }}
+            >
+              <Icon name={copied() ? "check" : "copy"} size={12} color={token(copied() ? "success" : "muted-foreground")} />
+            </Button>
+          </If>
+          <Button
+            testID={`fork-${turn().id}`}
+            accessibilityLabel={t("turn.fork")}
+            class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
+            onPress={() => props.store.forkTurn(turn().id)}
+          >
+            <Icon name="git-fork" size={12} color={token("muted-foreground")} />
+          </Button>
+          <If when={turn().hooks.length > 0}>
+            <Button
+              testID={`hooks-${turn().id}`}
+              accessibilityLabel={t("turn.hooks_summary")}
+              class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
+              onPress={() => props.store.toggleExpanded(`hooks-${turn().id}`)}
+            >
+              <Icon name="anchor" size={12} color={token("muted-foreground")} />
+            </Button>
+          </If>
+          <If when={stats()}>
+            <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>
+          </If>
+          <If when={!stats() && turn().durationMs}>
+            <Text class="text-xs text-muted-foreground">{t("turn.finished", { duration: formatCompactDuration(turn().durationMs!) })}</Text>
+          </If>
         </View>
-      </If>
+      </Collapsible>
     </View>
   );
 }

@@ -21,10 +21,10 @@ import {
   token,
   untracked,
 } from "nsh";
-import { Button, Input, TextView } from "nsh/base";
+import { Button, Collapsible, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, TaskNotification, UserItem } from "../protocol";
-import { toggleExpanded, type UiContext } from "../ui-context";
+import { toggleUserExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
   buildConversationRows,
@@ -127,7 +127,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
             </Each>
           </View>
         </If>
-        <View selectable class={long() && !open() ? "max-h-28 flex-row flex-wrap items-center overflow-hidden" : "flex-row flex-wrap items-center"}>
+        <View selectable class={`flex-row flex-wrap items-center overflow-hidden${long() && !open() ? " max-h-28" : ""}`}>
           <Each of={segments()} key={(segment) => `${segment.type}-${segment.text}-${segment.index ?? 0}`}>
             {(segment) => (
               <View class="flex-row items-center">
@@ -155,27 +155,15 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
             )}
           </Each>
         </View>
-        <If when={long() && !open()}>
+        <If when={long()}>
           <View class="items-center pt-1">
             <Button
-              testID={`user-expand-${item().id}`}
-              accessibilityLabel={t("messages.expand")}
+              testID={`user-${open() ? "collapse" : "expand"}-${item().id}`}
+              accessibilityLabel={t(open() ? "messages.collapse" : "messages.expand")}
               class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
-              onPress={() => toggleExpanded(props, `user-${item().id}`)}
+              onPress={() => toggleUserExpanded(props, item().id)}
             >
-              <Icon name="chevron-down" size={13} color={token("muted-foreground")} />
-            </Button>
-          </View>
-        </If>
-        <If when={long() && open()}>
-          <View class="items-center pt-1">
-            <Button
-              testID={`user-collapse-${item().id}`}
-              accessibilityLabel={t("messages.collapse")}
-              class="h-6 w-6 items-center justify-center rounded-full border border-border bg-background"
-              onPress={() => toggleExpanded(props, `user-${item().id}`)}
-            >
-              <Icon name="chevron-up" size={13} color={token("muted-foreground")} />
+              <Icon name={open() ? "chevron-up" : "chevron-down"} size={13} color={token("muted-foreground")} />
             </Button>
           </View>
         </If>
@@ -350,13 +338,23 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     </View>
   );
   return (
-    <View>
+    <Collapsible
+      open={open()}
+      reveal
+      content={
+        <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
+          <Scroll class="max-h-80">
+            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
+          </Scroll>
+        </View>
+      }
+    >
       <View
         role="button"
         testID={`thinking-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="w-full flex-row items-center gap-2 py-1"
-        onPress={() => toggleExpanded(props, item().id)}
+        onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
         <ShimmerText active={item().streaming} baseOpacity={item().streaming ? 0.6 : 1} class="shrink-0" textClass="text-sm leading-5">
@@ -365,14 +363,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <If when={item().streaming && !open() && reasoningTickerLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-      <If when={open()}>
-        <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
-          <Scroll class="max-h-80">
-            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
-          </Scroll>
-        </View>
-      </If>
-    </View>
+    </Collapsible>
   );
 }
 
@@ -569,21 +560,10 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
     untracked(scheduleMount);
   });
   return (
-    <View>
-      <View
-        role="button"
-        testID={row().id}
-        accessibilityState={{ expanded: open() }}
-        class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => toggleExpanded(props, row().id)}
-      >
-        <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
-        <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
-          {activitySummary(row().items)}
-        </Text>
-        <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
-      </View>
-      <If when={open()}>
+    <Collapsible
+      open={open()}
+      reveal
+      content={
         <View class="gap-2 pt-2">
           <Each of={row().items.slice(0, mountedCount())} key={(item) => item.id}>
             {(item) => <ItemMessageRow {...props} item={item} />}
@@ -592,8 +572,22 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
             {() => <View style={{ height: 28 }} />}
           </Each>
         </View>
-      </If>
-    </View>
+      }
+    >
+      <View
+        role="button"
+        testID={row().id}
+        accessibilityState={{ expanded: open() }}
+        class="w-full min-w-0 flex-row items-center gap-2 py-1"
+        onPress={() => props.store.toggleExpanded(row().id)}
+      >
+        <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
+        <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
+          {activitySummary(row().items)}
+        </Text>
+        <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
+      </View>
+    </Collapsible>
   );
 }
 
@@ -884,7 +878,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
-        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
+        maintainVisibleContentPosition={latestVisible() ? undefined : { autoscrollToBottomThreshold: 120 }}
         class="min-w-0 flex-1"
         contentClass="gap-4"
         scrollbar

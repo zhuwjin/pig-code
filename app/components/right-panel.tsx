@@ -366,7 +366,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         header={<View class="h-4" />}
         empty={<Text class="py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_conversation")}</Text>}
         scrollbar
-        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
+        maintainVisibleContentPosition={latestVisible() ? undefined : { autoscrollToBottomThreshold: 120 }}
         onScroll={(event) => {
           const distance = event.contentSize.height - event.offset.y - event.size.height;
           latestVisible.set(distance > 1);
