@@ -15,7 +15,6 @@ import {
   View,
   computed,
   effect,
-  fontScale,
   keymap,
   openUrl,
   signal,
@@ -29,7 +28,6 @@ import { toggleExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
   buildConversationRows,
-  conversationMeasureVersion,
   conversationRowsEqual,
   groupConversationActivity,
   reuseConversationRows,
@@ -44,7 +42,6 @@ import {
 } from "../conversation";
 import { Icon } from "./icon";
 import { ImageViewer } from "./image-viewer";
-import { ListCollapsible } from "./list-collapsible";
 import {
   REASONING_TICKER_INTERVAL_MS,
   REASONING_TICKER_ROLL_MS,
@@ -353,21 +350,7 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     </View>
   );
   return (
-    <ListCollapsible
-      open={open()}
-      onTransition={props.onLayoutAnimation}
-      layoutVersion={props.layoutVersion}
-      version={props.measureVersion}
-      onHeightChange={props.onLayoutHeightChange}
-      testID={`thinking-${item().id}`}
-      content={
-        <View class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
-          <Scroll class="max-h-80">
-            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
-          </Scroll>
-        </View>
-      }
-    >
+    <View>
       <View
         role="button"
         testID={`thinking-${item().id}`}
@@ -382,7 +365,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <If when={item().streaming && !open() && reasoningTickerLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-    </ListCollapsible>
+      <If when={open()}>
+        <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
+          <Scroll class="max-h-80">
+            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
+          </Scroll>
+        </View>
+      </If>
+    </View>
   );
 }
 
@@ -579,24 +569,7 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
     untracked(scheduleMount);
   });
   return (
-    <ListCollapsible
-      open={open()}
-      onTransition={props.onLayoutAnimation}
-      layoutVersion={props.layoutVersion}
-      version={conversationMeasureVersion(row().items)}
-      onHeightChange={props.onLayoutHeightChange}
-      testID={row().id}
-      content={
-        <View class="gap-2 pt-2">
-          <Each of={row().items.slice(0, mountedCount())} key={(item) => item.id}>
-            {(item) => <ItemMessageRow {...props} item={item} />}
-          </Each>
-          <Each of={row().items.slice(mountedCount())} key={(item) => item.id}>
-            {() => <View style={{ height: 28 }} />}
-          </Each>
-        </View>
-      }
-    >
+    <View>
       <View
         role="button"
         testID={row().id}
@@ -610,18 +583,23 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-    </ListCollapsible>
+      <If when={open()}>
+        <View class="gap-2 pt-2">
+          <Each of={row().items.slice(0, mountedCount())} key={(item) => item.id}>
+            {(item) => <ItemMessageRow {...props} item={item} />}
+          </Each>
+          <Each of={row().items.slice(mountedCount())} key={(item) => item.id}>
+            {() => <View style={{ height: 28 }} />}
+          </Each>
+        </View>
+      </If>
+    </View>
   );
 }
 
 function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
   const item = () => props.item();
-  const rowProps = {
-    ...props,
-    get measureVersion() {
-      return conversationMeasureVersion([item()]);
-    },
-  };
+  const rowProps = props;
   return (
     <View>
       <If when={item().kind === "user"}>
@@ -648,15 +626,7 @@ function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
 
 export function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; active: boolean; navEligible: boolean }) {
   const row = () => props.row();
-  const rowProps = {
-    ...props,
-    get measureVersion() {
-      const current = row();
-      if (current.type === "work" || current.type === "activity") return conversationMeasureVersion(current.items);
-      if (current.type === "item") return conversationMeasureVersion([current.item]);
-      return 0;
-    },
-  };
+  const rowProps = props;
   return (
     <View
       class={props.active
@@ -806,15 +776,10 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
     latestVisible.update(() => visible);
     props.onLatestVisibleChange?.(visible);
   };
-  const layoutAnimating = signal(false);
-  let layoutAnimationCount = 0;
   let distanceFromEnd = 0;
-  let layoutDistanceUpdated = false;
   let lastContentHeight = 0;
   let lastViewportHeight = 0;
   let lastScrollOffset = 0;
-  let collapseContentHeight = 0;
-  let syncingCollapse = false;
   const activeTurn = signal(0);
   const hoveredTurn = signal<string | null>(null);
   const navFocus = signal<number | null>(null);
@@ -822,7 +787,6 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   const query = signal("");
   const activeMatch = signal(0);
   const viewportWidth = signal(0);
-  const layoutVersion = computed(() => `${viewportWidth()}:${fontScale()}`);
   const lightbox = signal<{ src: string; label: string } | null>(null);
   let list: ListRef | undefined;
   let latestWheelOffset = LATEST_WHEEL_ORIGIN;
@@ -920,7 +884,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
-        maintainVisibleContentPosition={latestVisible() || layoutAnimating() ? undefined : { autoscrollToBottomThreshold: 120 }}
+        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
         class="min-w-0 flex-1"
         contentClass="gap-4"
         scrollbar
@@ -932,10 +896,8 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
           lastViewportHeight = event.size.height;
           lastScrollOffset = event.offset.y;
           distanceFromEnd = event.contentSize.height - event.offset.y - event.size.height;
-          if (layoutAnimating()) layoutDistanceUpdated = true;
-          else setLatestVisible(distanceFromEnd > 1);
+          setLatestVisible(distanceFromEnd > 1);
         }}
-        onScrollDragStart={() => { syncingCollapse = false; }}
         onViewableItemsChange={({ viewableItems }) => {
           visibleRowIndices = viewableItems.filter((item) => item.isViewable).map((item) => item.index);
           updateActiveTurn();
@@ -945,38 +907,9 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
           <MessageRow
             {...props}
             row={row}
-            layoutVersion={layoutVersion()}
             textFor={textFor}
             active={row().id === activeSearchRow()}
             navEligible={userRows().length >= 2}
-            onManualLayoutChange={(collapsing) => {
-              syncingCollapse = collapsing && !latestVisible() && distanceFromEnd <= 1;
-              if (syncingCollapse) collapseContentHeight = lastContentHeight;
-              setLatestVisible(true);
-            }}
-            onLayoutAnimation={(active) => {
-              if (active) {
-                if (layoutAnimationCount === 0) layoutDistanceUpdated = false;
-                layoutAnimationCount += 1;
-                layoutAnimating.set(true);
-              } else {
-                layoutAnimationCount = Math.max(0, layoutAnimationCount - 1);
-                if (layoutAnimationCount === 0) {
-                  syncingCollapse = false;
-                  if (!layoutDistanceUpdated) {
-                    distanceFromEnd = lastContentHeight - lastViewportHeight - lastScrollOffset;
-                  }
-                  setLatestVisible(distanceFromEnd > 1);
-                  layoutAnimating.set(false);
-                }
-              }
-            }}
-            onLayoutHeightChange={(delta) => {
-              lastContentHeight += delta;
-              if (!syncingCollapse) return;
-              collapseContentHeight += delta;
-              list?.scrollToOffset({ offset: Math.max(0, collapseContentHeight - lastViewportHeight), animated: false });
-            }}
             onImage={(src, label) => lightbox.set({ src, label })}
           />
         )}

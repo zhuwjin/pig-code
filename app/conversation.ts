@@ -11,21 +11,6 @@ export type ConversationRow =
 
 export type ConversationActivityRow = Extract<ConversationRow, { type: "item" | "activity" }>;
 
-export function conversationMeasureVersion(items: ChatItem[]): number {
-  let hash = 2166136261;
-  for (const item of items) {
-    const value = item.kind === "markdown" || item.kind === "reasoning"
-      ? item.text
-      : item.kind === "tool"
-        ? `${item.detail}\0${item.output}\0${item.status}`
-        : `${item.kind}\0${item.id}`;
-    for (let index = 0; index < value.length; index += 1) {
-      hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
-    }
-  }
-  return hash >>> 0;
-}
-
 export function groupConversationActivity(items: ChatItem[]): ConversationActivityRow[] {
   const rows: ConversationActivityRow[] = [];
   let activity: ChatItem[] = [];

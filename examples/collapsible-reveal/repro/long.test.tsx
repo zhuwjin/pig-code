@@ -1,4 +1,4 @@
-import { expect, open, test } from "nsh/test";
+import { open, test } from "nsh/test";
 
 test("expands official reveal after long-history navigation", async () => {
   const app = await open("../main.tsx", {
@@ -7,6 +7,7 @@ test("expands official reveal after long-history navigation", async () => {
     height: 700,
     reducedMotion: false,
   });
+  const visibleState = () => app.texts().find((text) => text.startsWith("Visible rows: ")) ?? "";
   await app.waitFor("Final answer");
   await app.press("id:load-history");
   await app.waitFor("History answer 80");
@@ -17,9 +18,10 @@ test("expands official reveal after long-history navigation", async () => {
   await app.waitUntil(() => !app.shows("id:latest-messages"));
 
   await app.press("id:show-work");
+  await app.waitUntil(() => visibleState().includes("work=yes"));
   await app.press("id:toggle-work");
   await app.waitFor("id:tool-0");
   await app.scroll("id:message-list", 2000);
   await app.waitFor("id:tool-39");
-  expect(app.shows("Final answer")).toBe(true);
+  await app.waitUntil(() => visibleState().includes("answer=yes"));
 });

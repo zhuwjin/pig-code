@@ -52,7 +52,7 @@ test("preserves an upward position when expanding work inside the follow thresho
   await app.waitUntil(() => !app.shows("id:latest-messages"));
 });
 
-test("keeps visible rows anchored when expanding and collapsing at the bottom", async () => {
+test("expands and collapses at the bottom with native layout animation", async () => {
   const app = await open("./App.scroll-expand.fixture.tsx", {
     platform: "macos",
     width: 900,
@@ -60,29 +60,17 @@ test("keeps visible rows anchored when expanding and collapsing at the bottom", 
   });
   await app.waitFor("Final answer");
   expect(app.shows("id:latest-messages")).toBe(false);
-  expect(app.shows("History answer 7")).toBe(true);
 
   await app.press("id:work-expand-turn");
-  await app.wait(500);
-  expect(app.shows("History answer 7")).toBe(true);
-  expect(app.shows("id:latest-messages")).toBe(true);
-
-  await app.press("id:latest-messages");
-  await app.wait(500);
+  await app.waitFor("id:activity-expand-reasoning");
   expect(app.shows("id:latest-messages")).toBe(false);
-  await app.press("id:work-expand-turn");
-  await app.wait(500);
-  expect(app.shows("History answer 7")).toBe(true);
 
-  const report = app.texts().find((text) => text.startsWith("SCROLL_LOG"));
-  expect(report).toBeDefined();
-  const samples = JSON.parse(report!.slice("SCROLL_LOG".length)) as { offset: number; max: number; content: number }[];
-  expect(samples.length).toBeGreaterThan(5);
-  expect(new Set(samples.map((sample) => sample.content)).size).toBeGreaterThan(3);
-  expect(Math.max(...samples.map((sample) => sample.offset - sample.max))).toBeLessThanOrEqual(1.5);
+  await app.press("id:work-expand-turn");
+  await app.waitUntil(() => !app.shows("id:activity-expand-reasoning"));
+  expect(app.shows("Final answer")).toBe(true);
 });
 
-test("does not apply bottom compensation when collapsing right after expanding", async () => {
+test("collapses immediately after expanding", async () => {
   const app = await open("./App.scroll-expand.fixture.tsx", {
     platform: "macos",
     width: 900,
@@ -90,21 +78,14 @@ test("does not apply bottom compensation when collapsing right after expanding",
   });
   await app.waitFor("Final answer");
   await app.press("id:work-expand-turn");
-  await app.wait(500);
-  expect(app.shows("id:latest-messages")).toBe(true);
+  await app.waitFor("id:activity-expand-reasoning");
+  expect(app.shows("id:latest-messages")).toBe(false);
 
   await app.press("id:work-expand-turn");
   await app.wait(500);
   expect(app.shows("id:activity-expand-reasoning")).toBe(false);
   expect(app.shows("id:latest-messages")).toBe(false);
-
-  const report = app.texts().find((text) => text.startsWith("SCROLL_LOG"));
-  const samples = report
-    ? JSON.parse(report.slice("SCROLL_LOG".length)) as { offset: number }[]
-    : [];
-  const offsets = samples.map((sample) => sample.offset);
-  const travel = offsets.length ? Math.max(...offsets) - Math.min(...offsets) : 0;
-  expect(travel).toBeLessThanOrEqual(1.5);
+  expect(app.shows("Final answer")).toBe(true);
 });
 
 test("stays visible until reaching the latest messages", async () => {

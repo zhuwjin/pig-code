@@ -5,13 +5,12 @@ import type { TurnState } from "../protocol";
 import { toggleExpanded, toggleTurnExpanded, type UiContext } from "../ui-context";
 import { changeTotals, formatClock, formatCompactDuration, formatDuration, turnDurationMs } from "../conversation";
 import { Icon } from "./icon";
-import { ListCollapsible } from "./list-collapsible";
 
 export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children: JSX.Element }) {
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <ListCollapsible open={open()} testID={`work-${turn().id}`} content={props.children} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange} layoutVersion={props.layoutVersion} version={props.measureVersion}>
+    <View>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"
@@ -26,7 +25,8 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>
-    </ListCollapsible>
+      <If when={open()}>{props.children}</If>
+    </View>
   );
 }
 

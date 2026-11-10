@@ -17,7 +17,6 @@ import {
 } from "../conversation";
 import { Icon } from "./icon";
 import { CodeView, type CodeViewLine } from "./code-view";
-import { ListCollapsible } from "./list-collapsible";
 import { ShimmerText } from "./shimmer-text";
 
 function copyText(props: UiContext, id: string, text: string): void {
@@ -322,7 +321,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   if (props.item().tool === "AgentSwarm") {
     const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
     return (
-      <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} layoutVersion={props.layoutVersion} version={props.measureVersion} onHeightChange={props.onLayoutHeightChange} testID={`swarm-${props.item().id}`} content={rows}>
+      <View>
         <View
           role="button"
           testID={`swarm-${props.item().id}`}
@@ -336,7 +335,8 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
           <Text class="shrink-0 text-xs text-info">{t("tools.agents_complete", { done: complete(), total: agents().length })}</Text>
           <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
         </View>
-      </ListCollapsible>
+        <If when={open()}>{rows}</If>
+      </View>
     );
   }
   return rows;
@@ -414,18 +414,7 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
     }
   };
   return (
-    <ListCollapsible
-      open={open()}
-      onTransition={props.onLayoutAnimation} layoutVersion={props.layoutVersion} version={props.measureVersion}
-      onHeightChange={props.onLayoutHeightChange}
-      testID={`plan-${item().id}`}
-      class="rounded-xl border border-border bg-tool-surface"
-      content={
-        <View class="max-h-80 border-t border-border p-3">
-          <TextView markdown={plan()} selectable classes={{ root: "text-sm leading-6 text-foreground" }} />
-        </View>
-      }
-    >
+    <View class="rounded-xl border border-border bg-tool-surface">
       <View
         role="button"
         testID={`plan-${item().id}`}
@@ -438,7 +427,12 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
         <Text class="min-w-0 text-sm" style={{ color: statusColor() }}>{statusLabel()}</Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-    </ListCollapsible>
+      <If when={open()}>
+        <View class="max-h-80 border-t border-border p-3">
+          <TextView markdown={plan()} selectable classes={{ root: "text-sm leading-6 text-foreground" }} />
+        </View>
+      </If>
+    </View>
   );
 }
 
@@ -473,7 +467,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
-    <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} layoutVersion={props.layoutVersion} version={props.measureVersion} onHeightChange={props.onLayoutHeightChange} testID={`tool-${item().id}`} class="w-full" content={<ToolBody {...props} />}>
+    <View class="w-full">
       <View
         role="button"
         testID={`tool-${item().id}`}
@@ -566,6 +560,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
           <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{item().liveNote}</Text>
         </View>
       </If>
-    </ListCollapsible>
+      <If when={open()}><ToolBody {...props} /></If>
+    </View>
   );
 }

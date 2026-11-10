@@ -1,23 +1,19 @@
+import { LayoutAnimation } from "nsh";
 import type { AgentStore } from "./store";
 import type { ThemeStore } from "./theme";
 
 export interface UiContext {
   store: AgentStore;
   themeStore: ThemeStore;
-  onManualLayoutChange?: (collapsing: boolean) => void;
-  onLayoutAnimation?: (active: boolean) => void;
-  onLayoutHeightChange?: (delta: number) => void;
-  layoutVersion?: string | number;
-  measureVersion?: string | number;
 }
 
 export function toggleExpanded(context: UiContext, id: string): void {
-  context.onManualLayoutChange?.(context.store.isExpanded(id));
+  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
   context.store.toggleExpanded(id);
 }
 
 export function toggleTurnExpanded(context: UiContext, id: string): void {
-  context.onManualLayoutChange?.(context.store.isTurnExpanded(id));
+  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
   context.store.toggleTurnExpanded(id);
 }
 

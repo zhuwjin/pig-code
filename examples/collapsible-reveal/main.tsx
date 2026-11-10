@@ -19,6 +19,7 @@ const baseRows: Row[] = [
 const rows = signal<Row[]>(baseRows);
 const expanded = signal(false);
 const latestVisible = signal(false);
+const visibleRowKeys = signal("");
 let list: ListRef | undefined;
 
 function loadHistory(): void {
@@ -64,6 +65,9 @@ mount(() => (
         <Text>{expanded() ? "Collapse work" : "Expand work"}</Text>
       </View>
     </View>
+    <Text testID="visible-row-keys" style={{ numberOfLines: 1 }} class="h-4 shrink-0 text-xs text-muted-foreground">
+      Visible rows: {visibleRowKeys().split(",").filter(Boolean).length}; work={visibleRowKeys().split(",").includes("work") ? "yes" : "no"}; answer={visibleRowKeys().split(",").includes("answer") ? "yes" : "no"}
+    </Text>
     <List
       ref={(node) => { list = node; }}
       testID="message-list"
@@ -74,15 +78,18 @@ mount(() => (
       scrollEventThrottle={100}
       class="min-h-0 flex-1"
       contentClass="gap-4"
+      onViewableItemsChange={({ viewableItems }) => {
+        visibleRowKeys.set(viewableItems.map((entry) => entry.key).join(","));
+      }}
       onScroll={(event) => {
         latestVisible.update(() => event.contentSize.height - event.offset.y - event.size.height > 1);
       }}
     >
-      {(row) => {
-        if (row().kind === "work") {
-          return (
+      {(row) => (
+        <View>
+          <If when={row().kind === "work"}>
             <View>
-              <Text class="text-sm text-muted-foreground">Worked for 1s</Text>
+              <Text testID="work-row" class="text-sm text-muted-foreground">Worked for 1s</Text>
               <If when={expanded()}>
                 <View class="gap-2 pt-2">
                   <Each of={tools} key={(tool) => tool.id}>
@@ -96,10 +103,12 @@ mount(() => (
                 </View>
               </If>
             </View>
-          );
-        }
-        return <Text class="text-sm leading-6">{row().text}</Text>;
-      }}
+          </If>
+          <If when={row().kind !== "work"}>
+            <Text class="text-sm leading-6">{row().text}</Text>
+          </If>
+        </View>
+      )}
     </List>
     <Collapsible
       open={expanded()}
