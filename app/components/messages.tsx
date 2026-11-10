@@ -624,7 +624,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
   return (
     <View class={`w-full pb-4 pt-2 ${props.navEligible ? "px-12" : ""}`}>
       <View class="mx-auto w-full max-w-[860px] gap-4 px-4">
-        <If when={running()}>
+        <If when={running() && !retry()}>
           <View class="flex-row items-center gap-2">
             <Icon name="loader-circle" size={14} class="animate-spin" color={token("muted-foreground")} />
             <Text class="text-xs text-muted-foreground animate-pulse">
@@ -636,10 +636,10 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
           {(value) => (
             <View class="flex-row items-center gap-2">
               <Icon name="loader-circle" size={13} class="animate-spin" color={token("muted-foreground")} />
-              <Text class="flex-1 text-xs text-muted-foreground">{retryLabel(value())}</Text>
               <Button testID="retry-now" class="rounded-full border border-border px-2 py-0.5" onPress={() => props.store.retryNow()}>
                 <Text class="text-xs text-foreground">{t("messages.retry_now")}</Text>
               </Button>
+              <Text class="min-w-0 flex-1 text-xs text-muted-foreground">{retryLabel(value())}</Text>
             </View>
           )}
         </If>
