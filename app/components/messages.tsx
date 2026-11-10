@@ -774,6 +774,13 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   let lastContentHeight = 0;
   let lastViewportHeight = 0;
   let lastScrollOffset = 0;
+  let followTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelFollow = () => {
+    if (followTimer !== undefined) {
+      clearTimeout(followTimer);
+      followTimer = undefined;
+    }
+  };
   const activeTurn = signal(0);
   const hoveredTurn = signal<string | null>(null);
   const navFocus = signal<number | null>(null);
@@ -785,6 +792,20 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   let list: ListRef | undefined;
   let latestWheelOffset = LATEST_WHEEL_ORIGIN;
   let visibleRowIndices: number[] = [];
+  effect(() => {
+    if (latestVisible()) {
+      cancelFollow();
+      return;
+    }
+    rows();
+    textOverrides();
+    if (followTimer !== undefined) return;
+    followTimer = setTimeout(() => {
+      followTimer = undefined;
+      if (!latestVisible()) list?.scrollToEnd({ animated: false });
+    }, 80);
+  });
+  effect(() => () => cancelFollow());
   const updateActiveTurn = () => {
     const next = resolveActiveUserRow(
       userRows().map((entry) => entry.index),
@@ -878,14 +899,15 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
-        maintainVisibleContentPosition={latestVisible() ? undefined : { autoscrollToBottomThreshold: 120 }}
         class="min-w-0 flex-1"
         contentClass="gap-4"
         scrollbar
         header={<View class="h-4" />}
         footer={<TailRows {...props} navEligible={userRows().length >= 2} />}
+        onScrollDragStart={() => cancelFollow()}
         onScroll={(event) => {
           props.onScroll?.(event);
+          cancelFollow();
           lastContentHeight = event.contentSize.height;
           lastViewportHeight = event.size.height;
           lastScrollOffset = event.offset.y;

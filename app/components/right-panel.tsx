@@ -335,12 +335,32 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
   const latestVisible = signal(false);
   let list: ListRef | undefined;
   let scrolledToEnd = false;
+  let followTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelFollow = () => {
+    if (followTimer !== undefined) {
+      clearTimeout(followTimer);
+      followTimer = undefined;
+    }
+  };
   effect(() => {
     const snapshot = history();
     if (!snapshot || scrolledToEnd) return;
     scrolledToEnd = true;
     requestAnimationFrame(() => requestAnimationFrame(() => list?.scrollToEnd({ animated: false })));
   });
+  effect(() => {
+    if (latestVisible()) {
+      cancelFollow();
+      return;
+    }
+    rows();
+    if (followTimer !== undefined) return;
+    followTimer = setTimeout(() => {
+      followTimer = undefined;
+      if (!latestVisible()) list?.scrollToEnd({ animated: false });
+    }, 80);
+  });
+  effect(() => () => cancelFollow());
   return (
     <View class="relative min-h-0 flex-1">
       <View class="gap-1 border-b border-border px-3 py-2">
@@ -366,8 +386,9 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         header={<View class="h-4" />}
         empty={<Text class="py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_conversation")}</Text>}
         scrollbar
-        maintainVisibleContentPosition={latestVisible() ? undefined : { autoscrollToBottomThreshold: 120 }}
+        onScrollDragStart={() => cancelFollow()}
         onScroll={(event) => {
+          cancelFollow();
           const distance = event.contentSize.height - event.offset.y - event.size.height;
           latestVisible.set(distance > 1);
         }}
