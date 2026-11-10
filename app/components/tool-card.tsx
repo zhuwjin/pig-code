@@ -24,7 +24,7 @@ function copyText(props: UiContext, id: string, text: string): void {
   void Clipboard.writeText(text).then(() => props.store.markCopied(id));
 }
 
-function CodeCard(props: UiContext & {
+export function CodeCard(props: UiContext & {
   id: string;
   title: string;
   code: () => string;
@@ -32,30 +32,31 @@ function CodeCard(props: UiContext & {
   language: string;
   lineNumbers?: boolean;
   maxHeight?: number;
+  fill?: boolean;
   error?: boolean;
 }) {
   const wrap = () => props.store.isExpanded(`wrap-${props.id}`);
   return (
-    <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
-      <View class="h-8 flex-row items-center gap-2 border-b border-border px-3">
+    <View class={`overflow-hidden rounded-xl border border-border bg-tool-surface ${props.fill ? "min-h-0 flex-1" : ""}`}>
+      <View class="h-6 shrink-0 flex-row items-center gap-2 border-b border-border px-3">
         <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{props.title}</Text>
         <Button
           testID={`wrap-${props.id}`}
           accessibilityLabel={t(wrap() ? "tools.wrap_off" : "tools.wrap_on")}
-          class="h-6 w-6 items-center justify-center rounded hover:bg-accent"
+          class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
           onPress={() => toggleExpanded(props, `wrap-${props.id}`)}
         >
-          <Icon name="text-wrap" size={13} color={token(wrap() ? "foreground" : "muted-foreground")} />
+          <Icon name="text-wrap" size={12} color={token(wrap() ? "foreground" : "muted-foreground")} />
         </Button>
         <Button
           testID={`copy-${props.id}`}
           accessibilityLabel={t("tools.copy_code")}
-          class="h-6 w-6 items-center justify-center rounded hover:bg-accent"
+          class="h-5 w-5 items-center justify-center rounded hover:bg-accent"
           onPress={() => copyText(props, `copy-${props.id}`, props.code())}
         >
           <Icon
             name={props.store.copiedItems()[`copy-${props.id}`] ? "check" : "copy"}
-            size={13}
+            size={12}
             color={token(props.store.copiedItems()[`copy-${props.id}`] ? "success" : "muted-foreground")}
           />
         </Button>
@@ -68,6 +69,7 @@ function CodeCard(props: UiContext & {
         wrap={wrap}
         lineNumbers={props.lineNumbers}
         maxHeight={props.maxHeight}
+        fill={props.fill}
         error={props.error}
       />
     </View>

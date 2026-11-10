@@ -26,6 +26,7 @@ type CodeViewProps = {
   wrap: Accessor<boolean>;
   lineNumbers?: boolean;
   maxHeight?: number;
+  fill?: boolean;
   error?: boolean;
   testID?: string;
 };
@@ -139,6 +140,7 @@ export function CodeView(props: CodeViewProps) {
   const spans = signal<TokenSpan[]>([]);
   const measuredHeight = signal<number | null>(null);
   const viewportWidth = signal(0);
+  const viewportHeight = signal(0);
   const textViewportWidth = signal(0);
   const scrollY = signal(0);
   let horizontal: ScrollRef | undefined;
@@ -171,19 +173,32 @@ export function CodeView(props: CodeViewProps) {
   effect(() => {
     rows();
     props.wrap();
+    viewportWidth();
     measuredHeight.set(null);
   });
   const maxHeight = () => props.maxHeight ?? 320;
   const contentHeight = () => Math.max(LINE_HEIGHT, rows().length * LINE_HEIGHT);
-  const height = () => Math.max(
-    LINE_HEIGHT,
-    Math.min(props.wrap() ? measuredHeight() ?? contentHeight() : contentHeight(), maxHeight()),
-  );
   const gutterWidth = () => {
     if (!props.lineNumbers) return 0;
     const digits = Math.max(1, ...rows().map((row) => row.number ?? 0)).toString().length;
     return 18 + digits * 8;
   };
+  const wrappedContentHeight = () => {
+    const width = viewportWidth() - gutterWidth() - 24;
+    if (width <= 0) return contentHeight();
+    let height = 0;
+    for (const row of rows()) {
+      height += Math.max(1, Math.ceil(textUnits(row.text) * CHARACTER_WIDTH / width)) * LINE_HEIGHT;
+      if (height >= maxHeight()) return maxHeight();
+    }
+    return Math.max(LINE_HEIGHT, height);
+  };
+  const height = () => props.fill
+    ? Math.max(LINE_HEIGHT, viewportHeight())
+    : Math.max(
+      LINE_HEIGHT,
+      Math.min(props.wrap() ? measuredHeight() ?? wrappedContentHeight() : contentHeight(), maxHeight()),
+    );
   const textWidth = () => Math.max(1, textViewportWidth() || viewportWidth() - gutterWidth());
   const contentWidth = () => {
     const text = Math.max(1, ...rows().map((row) => textUnits(row.text)));
@@ -307,9 +322,12 @@ export function CodeView(props: CodeViewProps) {
   );
   return (
     <View
-      class="relative w-full overflow-hidden"
-      style={{ height: height() }}
-      onLayout={({ bounds }) => viewportWidth.set(bounds.size.width)}
+      class={`relative w-full overflow-hidden ${props.fill ? "min-h-0 flex-1" : ""}`}
+      style={props.fill ? undefined : { height: height() }}
+      onLayout={({ bounds }) => {
+        viewportWidth.set(bounds.size.width);
+        viewportHeight.set(bounds.size.height);
+      }}
     >
       <If when={props.wrap()}>{list()}</If>
       <If when={!props.wrap()}>{scrolling()}</If>

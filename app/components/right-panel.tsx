@@ -4,8 +4,9 @@ import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { GitFileChange, RightPanelRequest, SubagentItem } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { formatDuration, pathParts } from "../conversation";
+import { formatDuration, pathParts, taskStatusLabel } from "../conversation";
 import { Icon, type IconName } from "./icon";
+import { CodeCard } from "./tool-card";
 
 function tabId(request: RightPanelRequest): string {
   switch (request.kind) {
@@ -184,6 +185,10 @@ function FileContent(props: UiContext & { request: Extract<RightPanelRequest, { 
 function TaskContent(props: UiContext & { request: Extract<RightPanelRequest, { kind: "task" }> }) {
   const task = () => props.request.task;
   const output = signal(task().output_tail);
+  const cardsHeight = signal(0);
+  const commandMaxHeight = () => cardsHeight() > 0
+    ? Math.max(40, Math.floor((cardsHeight() - 8) / 2) - 26)
+    : 160;
   effect(() => {
     output.set(task().output_tail);
     if (!task().spill_path) return;
@@ -194,15 +199,31 @@ function TaskContent(props: UiContext & { request: Extract<RightPanelRequest, { 
     }
   });
   return (
-    <View class="min-h-0 flex-1">
-      <View class="gap-1 border-b border-border px-3 py-2">
-        <Text style={{ numberOfLines: 1 }} class="text-xs font-medium text-foreground">{task().command}</Text>
+    <View class="min-h-0 flex-1 gap-2 p-3">
+      <View class="flex-row items-center gap-2 px-1">
         <Text class="text-xs text-muted-foreground">
-          {task().status} · {formatDuration((task().ended_at_ms ?? Date.now()) - task().started_at_ms)}
+          {taskStatusLabel(task().status)} · {formatDuration((task().ended_at_ms ?? Date.now()) - task().started_at_ms)}
           {task().exit_code != null ? t("right_panel.exit_code", { code: task().exit_code ?? 0 }) : ""}
         </Text>
       </View>
-      <Editor value={output()} language="text" readOnly softWrap lineNumbers={false} class="min-h-0 flex-1" />
+      <View class="min-h-0 flex-1 gap-2" onLayout={({ bounds }) => cardsHeight.set(bounds.size.height)}>
+        <CodeCard
+          {...props}
+          id={`task-${task().id}-command`}
+          title={t("tools.command")}
+          code={() => task().command}
+          language="bash"
+          maxHeight={commandMaxHeight()}
+        />
+        <CodeCard
+          {...props}
+          id={`task-${task().id}-output`}
+          title={t("tools.output")}
+          code={() => output()}
+          language="text"
+          fill
+        />
+      </View>
     </View>
   );
 }
