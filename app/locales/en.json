@@ -464,7 +464,7 @@
     "progress": "Question {current} / {total}",
     "multi_hint": "Choose one or more, or write another answer.",
     "other_placeholder": "Other answer (optional)",
-    "skip": "Skip Esc",
+    "skip": "Skip",
     "previous": "Previous",
     "next": "Next",
     "submit": "Submit"
