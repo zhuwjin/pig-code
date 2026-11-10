@@ -8,7 +8,7 @@ import { Icon } from "./icon";
 
 export function TitleBar(props: UiContext & {
   sidebarVisible: boolean;
-  rightVisible: boolean;
+  rightPanelShown: boolean;
   terminalVisible: boolean;
   onToggleSidebar: () => void;
   onToggleRight: () => void;
@@ -24,7 +24,7 @@ export function TitleBar(props: UiContext & {
       style={themeStore.styles("title-bar.root", {
         height: titleBar().height || 44,
         paddingLeft: props.sidebarVisible ? 8 : titleBar().left + 8,
-        paddingRight: titleBar().right + 8,
+        paddingRight: props.rightPanelShown ? 8 : titleBar().right + 8,
         borderBottomWidth: 0.5,
       })}
       class={themeStore.classes(
@@ -80,15 +80,16 @@ export function TitleBar(props: UiContext & {
         >
           <Icon size={14} color={token("secondary-foreground")} name="square-terminal" />
         </Button>
-        <Button
-          testID="right-panel-toggle"
-          selected={props.rightVisible}
-          accessibilityLabel={t(props.rightVisible ? "title_bar.close_right_panel" : "title_bar.open_right_panel")}
-          class="h-8 w-8 items-center justify-center rounded-(--radius) hover:bg-muted selected:bg-accent active:bg-accent"
-          onPress={props.onToggleRight}
-        >
-          <Icon size={14} color={token("secondary-foreground")} name="panel-right-close" />
-        </Button>
+        <If when={!props.rightPanelShown}>
+          <Button
+            testID="right-panel-toggle"
+            accessibilityLabel={t("title_bar.open_right_panel")}
+            class="h-8 w-8 items-center justify-center rounded-(--radius) hover:bg-muted active:bg-accent"
+            onPress={props.onToggleRight}
+          >
+            <Icon size={14} color={token("secondary-foreground")} name="panel-right-open" />
+          </Button>
+        </If>
       </View>
     </View>
   );

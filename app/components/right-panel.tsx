@@ -1,5 +1,6 @@
 import { Scroll, Text, View, effect, signal, token } from "nsh";
 import { Button, Collapsible, DiffView, Editor, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
+import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { GitFileChange, RightPanelRequest, SubagentItem } from "../protocol";
 import type { UiContext } from "../ui-context";
@@ -311,9 +312,9 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
   };
   return (
     <View testID="right-panel" class="w-full flex-1 bg-background">
-      <View class="h-10 shrink-0 flex-row items-center border-b border-border">
+      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: titleBar().right, borderBottomWidth: 0.5 }}>
         <Scroll horizontal class="min-w-0 flex-1" contentClass="h-10 items-center gap-1 px-1">
-          <Tabs class="h-10 flex-row items-center gap-1 border-b border-border">
+          <Tabs class="h-10 flex-row items-center gap-1">
             <Each of={tabs()} key={(tab) => tabId(tab)}>
               {(tab) => {
                 const id = () => tabId(tab());
@@ -347,7 +348,7 @@ export function RightPanel(props: UiContext & { onClose: () => void }) {
           class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
           onPress={props.onClose}
         >
-          <Icon name="x" size={14} color={token("muted-foreground")} />
+          <Icon name="panel-right-close" size={14} color={token("muted-foreground")} />
         </Button>
       </View>
       <If when={active()}>

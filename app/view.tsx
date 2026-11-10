@@ -227,7 +227,7 @@ function App(props: UiContext) {
               <TitleBar
                 {...props}
                 sidebarVisible={sidebarVisible()}
-                rightVisible={rightVisible()}
+                rightPanelShown={rightVisible() && !settingsVisible()}
                 terminalVisible={terminalVisible()}
                 onToggleSidebar={() => toggleSidebar(true)}
                 onToggleRight={toggleRight}
