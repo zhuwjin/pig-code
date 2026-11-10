@@ -1,7 +1,10 @@
 import { LayoutAnimation, List, type ListRef, mount, signal, Text, View } from "nsh";
 import { Button, Collapsible } from "nsh/base";
+import { ThemeStore } from "../../app/theme";
 
 type Row = { id: string; kind: "history" | "work" | "answer"; text?: string };
+
+const themeStore = new ThemeStore();
 
 const tools = Array.from({ length: 40 }, (_, index) => ({
   id: `tool-${index}`,
@@ -36,7 +39,11 @@ function showWork(): void {
 }
 
 mount(() => (
-  <View class="h-full w-full gap-2 p-3">
+  <View
+    // @ts-expect-error NSH's reactive uiTheme prop is not in its public TS declarations yet.
+    uiTheme={themeStore.serialized()}
+    class="h-full w-full gap-2 bg-background p-3 text-foreground"
+  >
     <View class="flex-row gap-2">
       <Button testID="load-history" class="rounded border border-border px-3 py-1" onPress={loadHistory}>
         <Text>Load 80 history rows</Text>
@@ -94,7 +101,11 @@ mount(() => (
         return <Text class="text-sm leading-6">{row().text}</Text>;
       }}
     </List>
-    <Collapsible open={expanded()} reveal content={<Text testID="outside-content">Outside content</Text>} />
+    <Collapsible
+      open={expanded()}
+      reveal
+      content={<Text testID="outside-content" class="text-foreground">Outside content</Text>}
+    />
     <If when={latestVisible()}>
       <Button
         testID="latest-messages"
