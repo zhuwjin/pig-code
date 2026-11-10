@@ -13,7 +13,11 @@ test("opens long history at the latest, preserves an upward position and resumes
   await app.scroll("id:message-list", -10);
   await app.waitFor("id:latest-messages");
 
-  await app.scroll("id:message-list", -20000);
+  await app.scroll("id:message-list", -1000);
+  await app.keyboard.press("mod+f");
+  await app.type("id:thread-search-input", "User message 0");
+  await app.keyboard.press("enter");
+  await app.keyboard.press("escape");
   await app.waitFor("Message 1");
   expect(app.shows("Message 249")).toBe(false);
 

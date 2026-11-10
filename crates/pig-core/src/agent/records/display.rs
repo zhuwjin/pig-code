@@ -2,9 +2,10 @@ use super::*;
 
 /// Subagent context -> projection for the right panel's read-only display (A3b):
 /// returns (title=meta.description, subtitle="{provider} · {model}", items).
-/// user -> task line; assistant -> body line + one tool line per tool call (summary from
-/// tool::summarize); tool results backfill the matching tool line's output by tool_call_id
-/// (truncated to 2000 chars at a char boundary); system is skipped.
+/// user -> task line; assistant -> reasoning line (when present) + body line
+/// + one tool line per tool call (summary from tool::summarize); tool results
+/// backfill the matching tool line's output by tool_call_id (truncated to 2000
+/// chars at a char boundary); system is skipped.
 /// The tool row's is_error comes from the result message's execution status.
 pub fn display_items(
     meta: &AgentMeta,
@@ -35,6 +36,16 @@ pub fn project_display_items(msgs: &[pig_provider::ChatMsg]) -> Vec<pig_protocol
                 stopped: false,
             }),
             "assistant" => {
+                if let Some(reasoning) = msg.reasoning.as_ref().filter(|text| !text.is_empty()) {
+                    items.push(pig_protocol::SubagentItem {
+                        role: "reasoning".to_string(),
+                        text: reasoning.clone(),
+                        tool: None,
+                        output: None,
+                        is_error: false,
+                        stopped: false,
+                    });
+                }
                 if let Some(text) = msg.content.as_ref().filter(|t| !t.is_empty()) {
                     items.push(pig_protocol::SubagentItem {
                         role: "assistant".to_string(),

@@ -1,11 +1,12 @@
-import { Scroll, Text, View, effect, signal, token } from "nsh";
-import { Button, Collapsible, DiffView, Editor, Input, Menu, MenuItem, Popover, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
+import { List, Scroll, Text, View, effect, signal, token, type ListRef } from "nsh";
+import { Button, DiffView, Editor, Input, Menu, MenuItem, Popover, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
-import type { GitFileChange, RightPanelRequest, SubagentItem } from "../protocol";
+import type { ChatItem, GitFileChange, RightPanelRequest, SubagentHistory, SubagentItem, TaskSummary, ToolItem, TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { formatDuration, pathParts, taskStatusLabel } from "../conversation";
+import { buildConversationRows, formatDuration, pathParts, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
 import { Icon, type IconName } from "./icon";
+import { MessageRow, type MessageProps } from "./messages";
 import { CodeCard } from "./tool-card";
 
 function tabId(request: RightPanelRequest): string {
@@ -228,42 +229,120 @@ function TaskContent(props: UiContext & { request: Extract<RightPanelRequest, { 
   );
 }
 
-function SubagentItemRow(props: UiContext & { item: SubagentItem; index: number; agentId: string }) {
-  if (props.item.role === "tool") {
-    const id = `subagent-${props.agentId}-${props.index}`;
-    const open = () => props.store.isExpanded(id);
-    return (
-      <Collapsible reveal
-        open={open()}
-        content={
-          <View class="ml-6 mt-1 rounded-lg bg-tool-surface p-2">
-            <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{props.item.output || t("tools.no_output")}</Text>
-          </View>
-        }
-      >
-        <View role="button" class="flex-row items-center gap-2 py-1" onPress={() => props.store.toggleExpanded(id)}>
-          <Icon name="chevron-right" size={12} color={token("muted-foreground")} />
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">
-            {props.item.tool ?? t("right_panel.tool")} · {props.item.text}
-          </Text>
-        </View>
-      </Collapsible>
-    );
+function subagentToolItem(item: SubagentItem, agentId: string, index: number): ToolItem {
+  return {
+    kind: "tool",
+    id: `subagent-${agentId}-${index}`,
+    tool: item.tool ?? "",
+    summary: item.text,
+    detail: item.text,
+    output: item.output ?? "",
+    status: item.is_error ? "error" : item.stopped ? "stopped" : "done",
+  };
+}
+
+function subagentRows(
+  agentId: string,
+  history: SubagentHistory | undefined,
+  task: TaskSummary | undefined,
+  fallbackDuration: number | undefined,
+): ConversationRow[] {
+  if (!history) return [];
+  const items: ChatItem[] = [];
+  const turns: TurnState[] = [];
+  let turnIndex = -1;
+  let currentTurnId: string | undefined;
+  const startTurn = () => {
+    turnIndex += 1;
+    currentTurnId = `subagent-${agentId}-turn-${turnIndex}`;
+    turns.push({
+      id: currentTurnId,
+      status: "done",
+      startedAt: task?.started_at_ms ?? 0,
+      changes: [],
+      hooks: [],
+    });
+    return currentTurnId;
+  };
+  const turnForItem = () => currentTurnId ?? startTurn();
+  history.items.forEach((item, index) => {
+    const id = `subagent-${agentId}-${index}`;
+    if (item.role === "user") {
+      items.push({ kind: "user", id, text: item.text, files: [], imageNums: [], sentAtMs: 0 });
+      currentTurnId = undefined;
+      return;
+    }
+    const turnId = turnForItem();
+    if (item.role === "reasoning") {
+      items.push({ kind: "reasoning", id, text: item.text, streaming: false, turnId });
+    } else if (item.role === "tool") {
+      items.push({ ...subagentToolItem(item, agentId, index), turnId });
+    } else {
+      items.push({ kind: "markdown", id, text: item.text, streaming: false, turnId });
+    }
+  });
+  const stream = history.stream;
+  if (stream && (stream.reasoning || stream.assistant || Object.keys(stream.tools ?? {}).length > 0)) {
+    const turnId = turnForItem();
+    if (stream.reasoning) {
+      items.push({ kind: "reasoning", id: `subagent-${agentId}-live-reasoning`, text: stream.reasoning, streaming: true, turnId });
+    }
+    if (stream.assistant) {
+      items.push({ kind: "markdown", id: `subagent-${agentId}-live-assistant`, text: stream.assistant, streaming: true, turnId });
+    }
+    for (const [id, tool] of Object.entries(stream.tools ?? {})) {
+      items.push({
+        kind: "tool",
+        id: `subagent-live-${id}`,
+        tool: tool.tool,
+        summary: tool.detail,
+        detail: tool.detail,
+        output: "",
+        status: "input",
+        turnId,
+      });
+    }
   }
-  return (
-    <View class={props.item.role === "user" ? "items-end" : "items-start"}>
-      <View class={props.item.role === "user" ? "max-w-[85%] rounded-xl bg-accent px-3 py-2" : "w-full px-1 py-1"}>
-        <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-foreground">{props.item.text}</Text>
-      </View>
-    </View>
-  );
+  if (turns.length > 0) {
+    const last = turns[turns.length - 1];
+    last.status = history.running ? "running" : "done";
+    const duration = task
+      ? Math.max(0, (task.ended_at_ms ?? Date.now()) - task.started_at_ms)
+      : fallbackDuration;
+    last.durationMs = duration;
+  }
+  return buildConversationRows(items, turns).filter((row) => row.type !== "actions" && row.type !== "changes");
 }
 
 function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest, { kind: "subagent" }> }) {
   const key = () => `${props.request.sessionId}:${props.request.agentId}`;
   const history = () => props.store.subagents()[key()];
+  const task = () => (props.store.tasks()[props.request.sessionId] ?? [])
+    .find((entry) => entry.kind === "subagent" && entry.agent_id === props.request.agentId);
+  const parentTurnDuration = () => {
+    const items = props.store.items()[props.request.sessionId] ?? [];
+    const item = items.find((entry) => entry.kind === "tool" && entry.agents?.some((agent) => agent.agent_id === props.request.agentId));
+    if (!item || item.kind !== "tool" || !item.turnId) return undefined;
+    const turn = (props.store.turns()[props.request.sessionId] ?? []).find((entry) => entry.id === item.turnId);
+    return turn ? turnDurationMs(turn) : undefined;
+  };
+  const rows = () => subagentRows(props.request.agentId, history(), task(), parentTurnDuration());
+  const messageProps: MessageProps = {
+    ...props,
+    textFor: (item) => item.text,
+    onImage: () => {},
+  };
+  const latestVisible = signal(false);
+  let list: ListRef | undefined;
+  let scrolledToEnd = false;
+  effect(() => {
+    const snapshot = history();
+    if (!snapshot || scrolledToEnd) return;
+    scrolledToEnd = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => list?.scrollToEnd({ animated: false })));
+  });
   return (
-    <View class="min-h-0 flex-1">
+    <View class="relative min-h-0 flex-1">
       <View class="gap-1 border-b border-border px-3 py-2">
         <View class="flex-row items-center gap-2">
           <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs font-medium text-foreground">
@@ -276,14 +355,40 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         </View>
         <Text style={{ numberOfLines: 1 }} class="text-xs text-muted-foreground">{history()?.subtitle ?? props.request.agentId}</Text>
       </View>
-      <Scroll class="flex-1" contentClass="gap-3 p-3">
-        <Each of={history()?.items ?? []} key={(item) => `${item.role}-${item.text}-${item.output ?? ""}`}>
-          {(item, index) => <SubagentItemRow {...props} item={item()} index={index()} agentId={props.request.agentId} />}
-        </Each>
-        <If when={history() && history()!.items.length === 0}>
-          <Text class="py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_conversation")}</Text>
-        </If>
-      </Scroll>
+      <List
+        ref={(node) => { list = node; }}
+        testID="subagent-message-list"
+        each={rows()}
+        keyExtractor={(row) => row.id}
+        estimatedItemSize={28}
+        class="min-h-0 flex-1"
+        contentClass="gap-3"
+        header={<View class="h-4" />}
+        empty={<Text class="py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_conversation")}</Text>}
+        scrollbar
+        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}
+        onScroll={(event) => {
+          const distance = event.contentSize.height - event.offset.y - event.size.height;
+          latestVisible.set(distance > 1);
+        }}
+      >
+        {(row) => <MessageRow {...messageProps} row={row} active={false} navEligible={false} />}
+      </List>
+      <If when={latestVisible()}>
+        <View class="absolute inset-x-0 bottom-3 items-center" style={{ pointerEvents: "box-none" }}>
+          <Button
+            testID="subagent-latest"
+            class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg hover:bg-accent"
+            onPress={() => {
+              latestVisible.set(false);
+              list?.scrollToEnd({ animated: true });
+            }}
+          >
+            <Icon name="arrow-down" size={15} color={token("muted-foreground")} />
+            <Text class="text-sm font-medium text-foreground">{t("messages.latest")}</Text>
+          </Button>
+        </View>
+      </If>
     </View>
   );
 }

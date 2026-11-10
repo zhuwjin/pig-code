@@ -353,9 +353,9 @@ pub struct QuestionItem {
 /// Read-only display row of a subagent conversation (Event::SubagentHistory payload)
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentItem {
-    /// "user" | "assistant" | "tool"
+    /// "user" | "assistant" | "reasoning" | "tool"
     pub role: String,
-    /// user/assistant body text; for tool rows, the call summary
+    /// user/assistant/reasoning body text; for tool rows, the call summary
     pub text: String,
     /// Tool name of a tool row
     pub tool: Option<String>,

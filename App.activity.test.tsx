@@ -35,3 +35,17 @@ test("renders the activity summary in English", async () => {
   expect(app.texts()).toContain(enSummary);
   expect(app.shows("id:tool-grep-1")).toBe(false);
 });
+
+test("reaches and expands every item in a large activity", async () => {
+  const app = await open("./App.activity-large.fixture.tsx", {
+    platform: "macos",
+    width: 1200,
+    height: 4000,
+  });
+  await app.waitFor("Final answer");
+  await app.press("id:activity-tool-0");
+  await app.waitFor("id:tool-tool-0");
+  await app.waitFor("id:tool-tool-79");
+  await app.press("id:tool-tool-79");
+  await app.waitFor("id:wrap-tool-79");
+});

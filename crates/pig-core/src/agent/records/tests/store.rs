@@ -23,6 +23,31 @@ fn display_items_keep_tool_error_status() {
     assert!(row.is_error, "tool row reflects the result status");
 }
 
+/// The subagent panel renders reasoning before the assistant body, like the
+/// main conversation.
+#[test]
+fn display_items_keep_reasoning_before_the_assistant_body() {
+    let assistant = pig_provider::ChatMsg::assistant(
+        "answer".into(),
+        vec![],
+        Some("thinking".into()),
+    );
+    let msgs = vec![
+        pig_provider::ChatMsg::user("do it".into()),
+        assistant,
+    ];
+    let items = project_display_items(&msgs);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user", "reasoning", "assistant"]
+    );
+    assert_eq!(items[1].text, "thinking");
+    assert_eq!(items[2].text, "answer");
+}
+
 #[test]
 fn stopped_tool_status_survives_jsonl_and_display() {
     let dir = std::env::temp_dir().join(format!("pig-agent-stopped-{}", std::process::id()));

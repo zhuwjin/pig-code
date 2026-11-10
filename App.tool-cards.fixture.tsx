@@ -97,7 +97,7 @@ mount(() => (
     </View>
     <If when={store.rightPanelRequest()}>
       <View class="w-[360px]">
-        <RightPanel store={store} themeStore={themeStore} onClose={() => store.rightPanelRequest.set(null)} />
+        <RightPanel store={store} themeStore={themeStore} onClose={() => store.rightPanelRequest.set(null)} maximized={false} onToggleMaximize={() => {}} />
       </View>
     </If>
   </View>

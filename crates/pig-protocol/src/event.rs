@@ -566,6 +566,32 @@ pub enum Event {
         item: Option<SubagentItem>,
         finished: bool,
     },
+    /// Live-only: an in-progress subagent model output delta while it streams;
+    /// the panel shows it until the step's final display items arrive
+    SubagentDelta {
+        session_id: String,
+        agent_id: String,
+        /// "assistant" | "reasoning"
+        role: String,
+        delta: String,
+    },
+    /// Live-only: a subagent tool call started streaming its arguments; the
+    /// panel shows a pending tool card until the step's final display items
+    /// arrive
+    SubagentToolInputStart {
+        session_id: String,
+        agent_id: String,
+        item_id: String,
+        tool: String,
+    },
+    /// Live-only: one incremental raw-JSON argument fragment for a pending
+    /// subagent tool call
+    SubagentToolInputDelta {
+        session_id: String,
+        agent_id: String,
+        item_id: String,
+        delta: String,
+    },
     /// Live-only: the session's model call entered a retry wait (transient,
     /// never persisted; superseded by the next delta or the turn's end)
     RetryStatus {

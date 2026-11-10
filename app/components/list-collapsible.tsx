@@ -1,4 +1,4 @@
-import { Easing, effect, reduceMotion, signal, untracked, View, type JSX } from "nsh";
+import { computed, Easing, effect, reduceMotion, signal, untracked, View, type JSX } from "nsh";
 
 const FRAME_MS = 20;
 const PROGRESS = Easing.sample(Easing.out(Easing.cubic), 15);
@@ -29,7 +29,7 @@ export function ListCollapsible(props: {
   onTransition?: (active: boolean) => void;
   onHeightChange?: (delta: number) => void;
 }) {
-  const open = () => props.open;
+  const open = computed(() => props.open);
   const identity = () => props.testID;
   const measurementKey = () => identity()
     ? `${identity()}:${props.layoutVersion ?? ""}:${props.version ?? ""}`

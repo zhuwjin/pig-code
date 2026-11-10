@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::HashMap;
+
 use super::state::{ProgressSink, SubagentDrive};
 
 use super::compact::{
@@ -297,6 +299,9 @@ async fn drive_subagent_loop(
             ));
             let mut failed: Option<CoreError> = None;
             let mut first_token_at: Option<Instant> = None;
+            // Provider tool-call id per streaming index (start events carry
+            // the id; delta events only carry the index)
+            let mut tool_input_ids: HashMap<usize, String> = HashMap::new();
             // Any model-authored content makes a transparent retry unsafe.
             let mut forwarded_content = false;
             let mut api_tracker = crate::api_usage::ApiCallTracker::default();
@@ -309,18 +314,31 @@ async fn drive_subagent_loop(
                     api_tracker.observe(event);
                 }
                 match event {
-                    // Subagent reasoning/text deltas are not forwarded as
-                    // top-level events: the parent timeline only gets progress
-                    // status lines
+                    // Subagent reasoning/text deltas stream to its own panel;
+                    // the parent timeline only gets progress status lines
                     Some(ProviderEvent::Reasoning(delta)) => {
                         first_token_at.get_or_insert_with(Instant::now);
                         forwarded_content = true;
                         reasoning.push_str(&delta);
+                        let agent_id = run.agent_id.clone();
+                        emit_bg(ctx.session_id, tx, move |session_id| Event::SubagentDelta {
+                            session_id,
+                            agent_id,
+                            role: "reasoning".to_string(),
+                            delta,
+                        });
                     }
                     Some(ProviderEvent::Text(delta)) => {
                         first_token_at.get_or_insert_with(Instant::now);
                         forwarded_content = true;
                         text.push_str(&delta);
+                        let agent_id = run.agent_id.clone();
+                        emit_bg(ctx.session_id, tx, move |session_id| Event::SubagentDelta {
+                            session_id,
+                            agent_id,
+                            role: "assistant".to_string(),
+                            delta,
+                        });
                     }
                     Some(ProviderEvent::AssistantReplay(snapshot)) => {
                         forwarded_content = true;
@@ -330,11 +348,34 @@ async fn drive_subagent_loop(
                         forwarded_content |= !calls.is_empty();
                         tool_calls = calls;
                     }
-                    // Live tool-input streaming events are root-session UI
-                    // only: child tool cards live in the subagent panel, not
-                    // the parent timeline (same rule as the deltas above)
-                    Some(ProviderEvent::ToolCallStart { .. })
-                    | Some(ProviderEvent::ToolCallDelta { .. }) => {}
+                    // Live tool-input streaming goes to the subagent panel as
+                    // pending tool cards, not to the parent timeline
+                    Some(ProviderEvent::ToolCallStart { index, id, name }) => {
+                        forwarded_content = true;
+                        tool_input_ids.insert(index, id.clone());
+                        let agent_id = run.agent_id.clone();
+                        emit_bg(ctx.session_id, tx, move |session_id| {
+                            Event::SubagentToolInputStart {
+                                session_id,
+                                agent_id,
+                                item_id: id,
+                                tool: name,
+                            }
+                        });
+                    }
+                    Some(ProviderEvent::ToolCallDelta { index, delta }) => {
+                        if let Some(item_id) = tool_input_ids.get(&index).cloned() {
+                            let agent_id = run.agent_id.clone();
+                            emit_bg(ctx.session_id, tx, move |session_id| {
+                                Event::SubagentToolInputDelta {
+                                    session_id,
+                                    agent_id,
+                                    item_id,
+                                    delta,
+                                }
+                            });
+                        }
+                    }
                     Some(ProviderEvent::ResponseMetadata(_)) => {}
                     // Subagent retries stay out of the parent timeline; the
                     // tracker handles their reporting bookkeeping.

@@ -107,16 +107,21 @@ export function buildConversationRows(
     const turn = turns.find((candidate) => candidate.id === turnId);
     const ended = turn?.status === "done" || turn?.status === "stopped";
     const hasWork = group.some((entry) => entry.kind === "reasoning" || entry.kind === "tool");
-    const lastBody = group.map((entry) => entry.kind).lastIndexOf("markdown");
-    const workItems = turn && ended && lastBody >= 0
+    // Only a trailing markdown is the final answer left outside the work row.
+    // A turn that ends on a tool or reasoning item (for example a subagent
+    // stopped on a tool call) folds all of its work, so the work row never
+    // opens empty while the work sits below it.
+    const bodyEnd = group[group.length - 1]?.kind === "markdown" ? group.length - 1 : group.length;
+    const workItems = turn && ended && hasWork
       ? group.filter((entry, entryIndex) => {
         const foldable = entry.kind === "reasoning" || entry.kind === "tool" || entry.kind === "markdown";
         const isPlan = entry.kind === "tool" && entry.tool === "ExitPlanMode";
-        return entryIndex < lastBody && foldable && !isPlan;
+        return entryIndex < bodyEnd && foldable && !isPlan;
       })
       : [];
+    const workItemSet = new Set(workItems);
     if (turn && ended && hasWork) rows.push({ id: `work-${turnId}`, type: "work", turn, items: workItems });
-    rows.push(...groupConversationActivity(group.filter((entry) => !workItems.includes(entry))));
+    rows.push(...groupConversationActivity(group.filter((entry) => !workItemSet.has(entry))));
     if (turn?.changes.length) rows.push({ id: `changes-${turnId}`, type: "changes", turn });
     if (turn && ended) {
       rows.push({

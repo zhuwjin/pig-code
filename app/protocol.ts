@@ -289,12 +289,24 @@ export interface SubagentItem {
   stopped: boolean;
 }
 
+export interface SubagentLiveTool {
+  tool: string;
+  detail: string;
+}
+
+export interface SubagentStream {
+  reasoning: string;
+  assistant: string;
+  tools?: Record<string, SubagentLiveTool>;
+}
+
 export interface SubagentHistory {
   sessionId: string;
   agentId: string;
   title: string;
   subtitle: string;
   items: SubagentItem[];
+  stream?: SubagentStream | null;
   running: boolean;
 }
 

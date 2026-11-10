@@ -1492,6 +1492,7 @@ export class AgentStore {
               ...previous,
               running: !data.finished,
               items: data.item ? [...previous.items, data.item] : previous.items,
+              stream: data.item || data.finished ? null : previous.stream,
             },
           };
         });
@@ -1514,6 +1515,76 @@ export class AgentStore {
             }),
           };
         }));
+        break;
+      }
+      case "SubagentDelta": {
+        const key = `${sessionId!}:${data.agent_id}`;
+        const delta = typeof data.delta === "string" ? data.delta : "";
+        if (!delta) break;
+        this.subagents.update((all) => {
+          const previous = all[key];
+          if (!previous) return all;
+          const stream = previous.stream ?? { reasoning: "", assistant: "" };
+          return {
+            ...all,
+            [key]: {
+              ...previous,
+              stream: data.role === "reasoning"
+                ? { ...stream, reasoning: stream.reasoning + delta }
+                : { ...stream, assistant: stream.assistant + delta },
+            },
+          };
+        });
+        break;
+      }
+      case "SubagentToolInputStart": {
+        const key = `${sessionId!}:${data.agent_id}`;
+        const itemId = typeof data.item_id === "string" ? data.item_id : "";
+        if (!itemId) break;
+        this.subagents.update((all) => {
+          const previous = all[key];
+          if (!previous) return all;
+          const stream = previous.stream ?? { reasoning: "", assistant: "" };
+          const tools = stream.tools ?? {};
+          return {
+            ...all,
+            [key]: {
+              ...previous,
+              stream: {
+                ...stream,
+                tools: {
+                  ...tools,
+                  [itemId]: { tool: data.tool ?? "", detail: tools[itemId]?.detail ?? "" },
+                },
+              },
+            },
+          };
+        });
+        break;
+      }
+      case "SubagentToolInputDelta": {
+        const key = `${sessionId!}:${data.agent_id}`;
+        const itemId = typeof data.item_id === "string" ? data.item_id : "";
+        const delta = typeof data.delta === "string" ? data.delta : "";
+        if (!itemId || !delta) break;
+        this.subagents.update((all) => {
+          const previous = all[key];
+          if (!previous) return all;
+          const stream = previous.stream ?? { reasoning: "", assistant: "" };
+          const tools = stream.tools ?? {};
+          const tool = tools[itemId];
+          if (!tool) return all;
+          return {
+            ...all,
+            [key]: {
+              ...previous,
+              stream: {
+                ...stream,
+                tools: { ...tools, [itemId]: { ...tool, detail: tool.detail + delta } },
+              },
+            },
+          };
+        });
         break;
       }
       case "QueueChanged":
@@ -1689,6 +1760,7 @@ export class AgentStore {
             title: data.title,
             subtitle: data.subtitle,
             items: data.items ?? [],
+            stream: null,
             running: data.running ?? false,
           },
         }));

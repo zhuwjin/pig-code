@@ -46,3 +46,21 @@ test("reports transition lifecycle while preserving every animated collapse fram
   expect(closing.slice(opening.length).some((height) => height > 0 && height < 320)).toBe(true);
   expect(app.texts()).toContain("start,end,start,end,");
 });
+
+test("does not restart a transition when another expansion state changes", async () => {
+  const app = await open("./App.list-collapsible-isolated.fixture.tsx", {
+    platform: "macos",
+    width: 800,
+    height: 600,
+  });
+  await app.waitFor("id:first");
+  await app.press("id:first");
+  await app.wait(100);
+  await app.press("id:other");
+  await app.wait(500);
+
+  expect(app.texts()).toContain("start,end,");
+  const measured = heights(app);
+  expect(measured[measured.length - 1]).toBe(320);
+  expect(measured.every((height, index) => index === 0 || height >= measured[index - 1])).toBe(true);
+});

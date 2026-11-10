@@ -20,6 +20,7 @@ import {
   openUrl,
   signal,
   token,
+  untracked,
 } from "nsh";
 import { Button, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
@@ -56,7 +57,7 @@ import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
 
 const LATEST_WHEEL_ORIGIN = 500_000;
 
-type MessageProps = UiContext & {
+export type MessageProps = UiContext & {
   textFor: (item: MarkdownItem) => string;
   onImage: (source: string, label: string) => void;
 };
@@ -540,19 +541,58 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
 
 function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "activity" }>> }) {
   const row = () => props.row();
-  const open = () => props.store.isExpanded(row().id);
+  const identity = computed(() => row().id);
+  const open = computed(() => props.store.isExpanded(identity()));
+  const itemCount = computed(() => row().items.length);
+  const mountedCount = signal(4);
+  let mountFrame: number | undefined;
+  let mountGeneration = 0;
+  let previousIdentity = identity();
+  const stopMounting = () => {
+    mountGeneration += 1;
+    if (mountFrame !== undefined) cancelAnimationFrame(mountFrame);
+    mountFrame = undefined;
+  };
+  const scheduleMount = () => {
+    if (mountFrame !== undefined) return;
+    if (open() ? mountedCount() >= itemCount() : mountedCount() <= 4) return;
+    const generation = mountGeneration;
+    mountFrame = requestAnimationFrame(() => {
+      mountFrame = undefined;
+      if (generation !== mountGeneration) return;
+      mountedCount.update((count) => open() ? Math.min(count + 4, itemCount()) : Math.max(4, count - 4));
+      scheduleMount();
+    });
+  };
+  effect(() => {
+    const currentIdentity = identity();
+    const expanded = open();
+    const identityChanged = currentIdentity !== previousIdentity;
+    previousIdentity = currentIdentity;
+    stopMounting();
+    if (identityChanged || expanded) mountedCount.set(4);
+    untracked(scheduleMount);
+    return stopMounting;
+  });
+  effect(() => {
+    itemCount();
+    untracked(scheduleMount);
+  });
   return (
     <ListCollapsible
       open={open()}
       onTransition={props.onLayoutAnimation}
       layoutVersion={props.layoutVersion}
-      version={props.measureVersion}
+      version={conversationMeasureVersion(row().items)}
       onHeightChange={props.onLayoutHeightChange}
       testID={row().id}
       content={
         <View class="gap-2 pt-2">
-          <Each of={row().items} key={(item) => item.id}>
+          <Each of={row().items.slice(0, mountedCount())} key={(item) => item.id}>
             {(item) => <ItemMessageRow {...props} item={item} />}
+          </Each>
+          <Each of={row().items.slice(mountedCount())} key={(item) => item.id}>
+            {() => <View style={{ height: 28 }} />}
           </Each>
         </View>
       }
@@ -576,31 +616,37 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
 
 function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
   const item = () => props.item();
+  const rowProps = {
+    ...props,
+    get measureVersion() {
+      return conversationMeasureVersion([item()]);
+    },
+  };
   return (
     <View>
       <If when={item().kind === "user"}>
-        <UserRow {...props} item={() => item() as UserItem} />
+        <UserRow {...rowProps} item={() => item() as UserItem} />
       </If>
       <If when={item().kind === "reasoning"}>
-        <ReasoningRow {...props} item={() => item() as MarkdownItem} />
+        <ReasoningRow {...rowProps} item={() => item() as MarkdownItem} />
       </If>
       <If when={item().kind === "markdown"}>
-        <MarkdownRow {...props} item={() => item() as MarkdownItem} />
+        <MarkdownRow {...rowProps} item={() => item() as MarkdownItem} />
       </If>
       <If when={item().kind === "tool"}>
-        <ToolRow {...props} item={() => item() as Extract<ChatItem, { kind: "tool" }>} />
+        <ToolRow {...rowProps} item={() => item() as Extract<ChatItem, { kind: "tool" }>} />
       </If>
       <If when={item().kind === "note"}>
-        <NoteRow {...props} item={() => item() as NoteItem} />
+        <NoteRow {...rowProps} item={() => item() as NoteItem} />
       </If>
       <If when={item().kind === "notification"}>
-        <NotificationRow {...props} item={() => item() as NotificationItem} />
+        <NotificationRow {...rowProps} item={() => item() as NotificationItem} />
       </If>
     </View>
   );
 }
 
-function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; active: boolean; navEligible: boolean }) {
+export function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; active: boolean; navEligible: boolean }) {
   const row = () => props.row();
   const rowProps = {
     ...props,
@@ -959,6 +1005,12 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
                   testID="latest-messages"
                   class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg hover:bg-accent"
                   onPress={() => {
+                    if (distanceFromEnd > lastViewportHeight) {
+                      list?.scrollToOffset({
+                        offset: Math.max(0, lastContentHeight - lastViewportHeight * 1.5),
+                        animated: false,
+                      });
+                    }
                     setTimeout(() => list?.scrollToEnd({ animated: true }), 40);
                   }}
                 >
@@ -995,10 +1047,22 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
               };
               const barScale = createAnimatedValue(scale());
               const barOpacity = createAnimatedValue(opacity());
+              let targetScale = scale();
+              let targetOpacity = opacity();
+              let wasReduceMotion = reduceMotion();
+              let wasFocused = navFocus() !== null;
               effect(() => {
                 const nextScale = scale();
                 const nextOpacity = opacity();
-                if (reduceMotion()) {
+                const reduced = reduceMotion();
+                if (reduced === wasReduceMotion && nextScale === targetScale && nextOpacity === targetOpacity) return;
+                const focused = navFocus() !== null;
+                const animate = focused || wasFocused;
+                wasReduceMotion = reduced;
+                wasFocused = focused;
+                targetScale = nextScale;
+                targetOpacity = nextOpacity;
+                if (reduced || !animate) {
                   barScale.set(nextScale);
                   barOpacity.set(nextOpacity);
                   return;
