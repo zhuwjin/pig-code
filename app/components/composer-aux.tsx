@@ -3,21 +3,9 @@ import { Button, Popover } from "nsh/base";
 import { t } from "../i18n";
 import type { TaskStatus, TaskSummary } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { changeTotals, formatDuration } from "../conversation";
+import { changeTotals, formatDuration, taskStatusLabel } from "../conversation";
 import { Icon, type IconName } from "./icon";
 import { Segmented } from "./segmented";
-
-function taskStatus(status: TaskStatus): string {
-  switch (status) {
-    case "queued": return t("tasks.status.queued");
-    case "running": return t("tasks.status.running");
-    case "completed": return t("tasks.status.completed");
-    case "failed": return t("tasks.status.failed");
-    case "timed_out": return t("tasks.status.timed_out");
-    case "killed": return t("tasks.status.killed");
-    case "lost": return t("tasks.status.lost");
-  }
-}
 
 function taskStatusIcon(status: TaskStatus): { name: IconName; color: string; spin?: boolean } {
   switch (status) {
@@ -77,7 +65,7 @@ function TaskRow(props: UiContext & { task: () => TaskSummary }) {
   return (
     <Button
       testID={`task-${task().id}`}
-      accessibilityLabel={`${task().command}, ${taskStatus(task().status)}, ${duration()}`}
+      accessibilityLabel={`${task().command}, ${taskStatusLabel(task().status)}, ${duration()}`}
       class="flex-row items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent"
       onPress={() => props.store.openTask(task())}
     >

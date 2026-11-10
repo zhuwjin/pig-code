@@ -1,5 +1,5 @@
 import { t, tCount } from "./i18n";
-import type { ChatItem, EditDiff, MarkdownItem, TurnState, TurnUsageStats } from "./protocol";
+import type { ChatItem, EditDiff, MarkdownItem, TaskStatus, TurnState, TurnUsageStats } from "./protocol";
 import type { IconName } from "./components/icon";
 
 export type ConversationRow =
@@ -160,6 +160,18 @@ export function reuseConversationRows(previous: ConversationRow[], next: Convers
 export function turnDurationMs(turn: TurnState | undefined): number | undefined {
   const statsDuration = turn?.stats?.duration_ms;
   return statsDuration && statsDuration > 0 ? statsDuration : turn?.durationMs;
+}
+
+export function taskStatusLabel(status: TaskStatus): string {
+  switch (status) {
+    case "queued": return t("tasks.status.queued");
+    case "running": return t("tasks.status.running");
+    case "completed": return t("tasks.status.completed");
+    case "failed": return t("tasks.status.failed");
+    case "timed_out": return t("tasks.status.timed_out");
+    case "killed": return t("tasks.status.killed");
+    case "lost": return t("tasks.status.lost");
+  }
 }
 
 export function formatDuration(ms: number, prefix = ""): string {

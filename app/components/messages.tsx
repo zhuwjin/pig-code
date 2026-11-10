@@ -21,7 +21,7 @@ import {
 } from "nsh";
 import { Button, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
-import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, UserItem } from "../protocol";
+import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, TaskNotification, UserItem } from "../protocol";
 import type { UiContext } from "../ui-context";
 import {
   activitySummary,
@@ -35,6 +35,7 @@ import {
   formatTokens,
   mentionSegments,
   resolveActiveUserRow,
+  taskStatusLabel,
   userMessageIsLong,
 } from "../conversation";
 import { Icon } from "./icon";
@@ -451,45 +452,78 @@ function NoteRow(props: UiContext & { item: Accessor<NoteItem> }) {
   );
 }
 
+function notificationFailed(notification: TaskNotification): boolean {
+  return notification.status === "failed"
+    || notification.status === "timed_out"
+    || notification.status === "lost";
+}
+
+function notificationTitle(notification: TaskNotification): string {
+  const description = notification.description
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return description || notification.title;
+}
+
+function notificationStatusLine(notification: TaskNotification): string {
+  const status = taskStatusLabel(notification.status);
+  return notification.duration_ms != null
+    ? `${status} · ${t("messages.notification.duration", { duration: formatDuration(notification.duration_ms) })}`
+    : status;
+}
+
 function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }) {
   const item = () => props.item();
   return (
-    <View class="gap-2">
+    <View class="w-full items-end gap-2">
       <Each of={item().notifications} key={(notification) => notification.id}>
-        {(notification) => (
-          <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
-            <Button
-              testID={`notification-${notification().id}`}
-              class="flex-row items-start gap-3 px-3 py-3 hover:bg-accent"
-              onPress={() => {
-                if (notification().kind === "subagent" && notification().agent_id) {
-                  props.store.openSubagent(notification().agent_id!);
-                  return;
-                }
-                const task = props.store.currentTasks().find((candidate) => candidate.id === notification().task_id);
-                if (task) props.store.openTask(task);
-              }}
-            >
-              <Icon name={notification().kind === "subagent" ? "bot" : "square-terminal"} size={17} color={token("muted-foreground")} />
-              <View class="min-w-0 flex-1 gap-1">
-                <View class="flex-row items-center gap-2">
-                  <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-sm font-medium text-foreground">
-                    {notification().title || notification().description}
-                  </Text>
-                  <Text class={notification().severity === "warning" ? "text-xs text-warning" : "text-xs text-success"}>
-                    {notification().status === "completed" ? t("messages.notification.completed") : notification().status === "failed" ? t("messages.notification.failed") : notification().status}
-                  </Text>
-                </View>
-                <Text style={{ userSelect: "text" }} class="text-left text-xs leading-5 text-muted-foreground">{notification().body}</Text>
+        {(notification) => {
+          const failed = () => notificationFailed(notification());
+          return (
+            <View class="w-full items-end gap-1">
+              <View class="flex-row items-center gap-1">
+                <Icon
+                  name={failed() ? "circle-x" : "circle-check"}
+                  size={12}
+                  color={token(failed() ? "destructive" : "success")}
+                />
+                <Text class={failed() ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+                  {t(notification().kind === "subagent" ? "messages.notification.sent_by_agent" : "messages.notification.sent_by_shell")}
+                </Text>
+              </View>
+              <Button
+                testID={`notification-${notification().id}`}
+                class="max-w-[520px] items-start gap-1 rounded-2xl bg-accent px-3 py-2 hover:bg-accent active:opacity-90"
+                onPress={() => {
+                  if (notification().kind === "subagent" && notification().agent_id) {
+                    props.store.openSubagent(notification().agent_id!);
+                    return;
+                  }
+                  const task = props.store.currentTasks().find((candidate) => candidate.id === notification().task_id);
+                  if (task) props.store.openTask(task);
+                }}
+              >
+                <Text
+                  style={{ numberOfLines: 1 }}
+                  class={notification().kind === "shell"
+                    ? "text-left font-mono text-sm leading-5 text-foreground"
+                    : "text-left text-sm font-medium leading-5 text-foreground"}
+                >
+                  {notificationTitle(notification())}
+                </Text>
+                <Text class={failed() ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+                  {notificationStatusLine(notification())}
+                </Text>
                 <If when={notification().output?.type === "preview"}>
-                  <Text style={{ numberOfLines: 4 }} class="text-left font-mono text-xs text-foreground">
+                  <Text style={{ numberOfLines: 3 }} class="text-left font-mono text-xs leading-5 text-muted-foreground">
                     {(notification().output as { text?: string } | null | undefined)?.text ?? ""}
                   </Text>
                 </If>
-              </View>
-            </Button>
-          </View>
-        )}
+              </Button>
+            </View>
+          );
+        }}
       </Each>
     </View>
   );

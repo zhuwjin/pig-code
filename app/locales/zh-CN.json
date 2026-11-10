@@ -731,8 +731,9 @@
       }
     },
     "notification": {
-      "completed": "完成",
-      "failed": "失败"
+      "sent_by_shell": "由后台发送（Shell）",
+      "sent_by_agent": "由后台发送（Agent）",
+      "duration": "耗时 {duration}"
     },
     "retry": {
       "rate_limit": "请求受限",

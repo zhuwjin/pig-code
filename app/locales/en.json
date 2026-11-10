@@ -731,8 +731,9 @@
       }
     },
     "notification": {
-      "completed": "Completed",
-      "failed": "Failed"
+      "sent_by_shell": "Sent from background (Shell)",
+      "sent_by_agent": "Sent from background (Agent)",
+      "duration": "took {duration}"
     },
     "retry": {
       "rate_limit": "Rate limited",
