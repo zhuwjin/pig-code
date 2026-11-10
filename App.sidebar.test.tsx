@@ -60,6 +60,21 @@ test("mounts show more when workspace sessions grow beyond the first page", asyn
   await app.waitFor("id:workspace-collapse");
   expect(app.count("id:workspace-more")).toBe(0);
   expect(app.count("id:session-list >> text:session 0")).toBe(1);
+
+  await app.press("id:toggle-workspace");
+  await app.waitFor("id:workspace-collapse", { state: "gone" });
+  expect(app.count("id:workspace-more")).toBe(0);
+  expect(app.count("id:session-list >> text:session 0")).toBe(0);
+  await app.press("id:toggle-workspace");
+  await app.waitFor("id:workspace-collapse");
+  expect(app.count("id:session-list >> text:session 0")).toBe(1);
+
+  await app.press("id:workspace-collapse");
+  await app.waitFor("id:workspace-collapse", { state: "gone" });
+  await app.waitFor("id:session-list >> text:session 0", { state: "gone" });
+  expect(app.count("id:workspace-more")).toBe(1);
+  await app.press("id:workspace-more");
+  await app.waitFor("id:workspace-collapse");
 });
 
 test("expands and collapses the workspace from both disclosure controls", async () => {
@@ -78,15 +93,17 @@ test("expands and collapses the workspace from both disclosure controls", async 
 
   expect(app.count("id:session-list")).toBe(1);
   await app.press("id:workspace-row");
-  expect(app.count(row)).toBe(0);
+  await app.waitFor(row, { state: "gone" });
   expect(app.count("label:展开当前工作区")).toBe(1);
   await app.press("id:workspace-row");
+  await app.waitFor(row);
   expect(app.count(row)).toBe(1);
 
   await app.press("id:toggle-workspace");
-  expect(app.count(row)).toBe(0);
+  await app.waitFor(row, { state: "gone" });
   expect(app.count("label:展开工作区")).toBe(1);
   await app.press("id:toggle-workspace");
+  await app.waitFor(row);
   expect(app.count(row)).toBe(1);
 });
 
@@ -191,11 +208,11 @@ test("renames, pins, archives and deletes sessions through row actions", async (
   await app.waitFor("label:取消置顶");
   expect(app.count("id:pinned-sessions >> text:Renamed session")).toBe(1);
   expect(app.count("id:pinned-sessions >> text:workspace")).toBe(1);
-  expect(app.count("id:session-list >> text:Renamed session")).toBe(1);
+  expect(app.count("id:session-list >> text:Renamed session")).toBe(0);
 
   await app.hover("id:pinned-sessions >> text:Renamed session");
   await app.press("label:归档");
-  await app.waitFor("id:session-list >> text:Renamed session", { state: "gone" });
+  await app.waitFor("id:pinned-sessions", { state: "gone" });
 
   await app.press("id:new-task");
   await app.type("id:composer-input", "read the mock file");

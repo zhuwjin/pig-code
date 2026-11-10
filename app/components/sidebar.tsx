@@ -1,5 +1,5 @@
-import { Canvas, Clipboard, Easing, List, Text, View, createAnimatedValue, effect, platform, signal, token } from "nsh";
-import { Button, ContextMenu, Input, Menu, MenuItem, MenuSeparator } from "nsh/base";
+import { Canvas, Clipboard, Easing, List, Scroll, Text, View, createAnimatedValue, effect, platform, signal, token } from "nsh";
+import { Button, Collapsible, ContextMenu, Input, Menu, MenuItem, MenuSeparator } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { SessionMeta } from "../protocol";
@@ -75,7 +75,7 @@ export function blendColors(background: string, foreground: string, amount: numb
   ).join("")}`;
 }
 
-function SessionTitle(props: { session: () => SessionMeta; selected: () => boolean; fontFamily?: string | null }) {
+function SessionTitle(props: { session: () => SessionMeta; selected: () => boolean; rowHovered?: () => boolean; fontFamily?: string | null }) {
   const offset = createAnimatedValue(0);
   const hovering = signal(false);
   const fade = signal(false);
@@ -158,7 +158,7 @@ function SessionTitle(props: { session: () => SessionMeta; selected: () => boole
           style={{ pointerEvents: "none", width: 20, height: 20 }}
           draw={(cx, { width, height }) => {
             const gradient = cx.createLinearGradient(0, 0, width, 0);
-            const background = hovering() || props.selected()
+            const background = hovering() || props.rowHovered?.() || props.selected()
               ? token("sidebar-accent")
               : blendColors(token("sidebar"), token("foreground"), 0.05);
             gradient.addColorStop(0, background.length === 7 ? `${background}00` : `${background.slice(0, 7)}00`);
@@ -184,6 +184,7 @@ export function Sidebar(props: UiContext & {
   const { store, themeStore } = props;
   const manageOpen = signal(false);
   const workspaceMenuOpen = signal(false);
+  const hoveredSession = signal<string | null>(null);
   const renaming = signal<{ kind: "workspace" | "session"; id: string } | null>(null);
   const renameValue = signal("");
   const workspaceMeta = () => store.workspaces().find((workspace) => workspace.path === store.cwd());
@@ -210,19 +211,26 @@ export function Sidebar(props: UiContext & {
   const sessions = () => store.sessions()
     .filter((session) => session.cwd === store.cwd() && !session.pinned)
     .sort((a, b) => b.updated_at - a.updated_at);
-  const shownSessions = () => {
-    if (sidebarView() === "flat") {
-      return [...store.sessions()].sort((a, b) =>
-        Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at
-      );
+  const flatSessions = () => [...store.sessions()].sort((a, b) =>
+    Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at
+  );
+  const firstPageSessions = () => sessions().slice(0, WORKSPACE_PAGE_SIZE);
+  const morePages = () => {
+    const remaining = sessions().slice(WORKSPACE_PAGE_SIZE);
+    const pages: SessionMeta[][] = [];
+    for (let index = 0; index < remaining.length; index += WORKSPACE_PAGE_SIZE) {
+      pages.push(remaining.slice(index, index + WORKSPACE_PAGE_SIZE));
     }
-    if (workspaceHidden() || !workspaceExpanded()) return [];
-    return sessions().slice(0, workspaceSessionLimit(workspaceShown(), workspacePageOpen()));
+    return pages;
   };
   const canShowMore = () => sessions().length > workspaceSessionLimit(workspaceShown(), workspacePageOpen());
   const showMore = () => {
     workspaceShown.set(nextWorkspaceSessionLimit(workspaceShown(), workspacePageOpen()));
     workspacePageOpen.set(true);
+  };
+  const collapseSessions = () => {
+    workspacePageOpen.set(false);
+    workspaceShown.set(WORKSPACE_PAGE_SIZE);
   };
   const workspaceItems = () => (
     <>
@@ -372,7 +380,11 @@ export function Sidebar(props: UiContext & {
         <ContextMenu
           popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
           trigger={
-            <View class="group relative">
+            <View
+              class="group relative"
+              onMouseEnter={() => hoveredSession.set(session().id)}
+              onMouseLeave={() => hoveredSession.update((current) => current === session().id ? null : current)}
+            >
               <Button
                 testID={`session-${session().id}`}
                 selected={store.current() === session().id}
@@ -384,7 +396,7 @@ export function Sidebar(props: UiContext & {
               >
                 <If when={!detailed()}>
                   <View class="min-w-0 flex-1 flex-row items-center gap-2">
-                    <SessionTitle session={session} selected={() => store.current() === session().id} fontFamily={themeStore.fonts().ui} />
+                    <SessionTitle session={session} selected={() => store.current() === session().id} rowHovered={() => hoveredSession() === session().id} fontFamily={themeStore.fonts().ui} />
                     <View class="flex-row items-center gap-2 group-hover:hidden">
                       <SessionTiming store={store} session={session} />
                     </View>
@@ -393,7 +405,7 @@ export function Sidebar(props: UiContext & {
                 <If when={detailed()}>
                   <View testID="session-detail" class="min-w-0 flex-1 gap-0.5">
                     <View class="flex-row items-center gap-2">
-                      <SessionTitle session={session} selected={() => store.current() === session().id} fontFamily={themeStore.fonts().ui} />
+                      <SessionTitle session={session} selected={() => store.current() === session().id} rowHovered={() => hoveredSession() === session().id} fontFamily={themeStore.fonts().ui} />
                       <View class="flex-row items-center gap-2 group-hover:hidden">
                         <SessionTiming store={store} session={session} />
                       </View>
@@ -492,6 +504,14 @@ export function Sidebar(props: UiContext & {
           </Button>
         </View>
       </If>
+      <If when={props.mode === "workspace" && sidebarView() === "workspace" && pinnedSessions().length > 0}>
+        <View testID="pinned-sessions" class="gap-0.5 px-2 pb-1">
+          <Text class="px-1 py-0.5 text-xs text-muted-foreground">{t("sidebar.pinned")}</Text>
+          <Each of={pinnedSessions()} key={(session) => session.id}>
+            {(session) => renderSessionRow(session, () => true)}
+          </Each>
+        </View>
+      </If>
       <If when={props.mode === "workspace"}>
       <View class="flex-row items-center gap-1 pl-3 pr-2 py-0.5">
         <Text class="flex-1 text-xs text-muted-foreground">{t("sidebar.sessions")}</Text>
@@ -555,64 +575,81 @@ export function Sidebar(props: UiContext & {
         </Menu>
       </View>
       </If>
-      <If when={props.mode === "workspace"}>
+      <If when={props.mode === "workspace" && sidebarView() === "flat"}>
         <List
           testID="session-list"
-          each={shownSessions()}
+          each={flatSessions()}
           keyExtractor={(item) => item.id}
           class="flex-1"
           contentClass="gap-0.5 px-2 pb-1"
-          header={
-            <>
-              <If when={sidebarView() === "workspace" && pinnedSessions().length > 0}>
-                <View testID="pinned-sessions" class="gap-0.5">
-                  <Text class="px-1 py-0.5 text-xs text-muted-foreground">{t("sidebar.pinned")}</Text>
-                  <Each of={pinnedSessions()} key={(session) => session.id}>
-                    {(session) => renderSessionRow(session, () => true)}
-                  </Each>
-                </View>
-              </If>
-              <If when={sidebarView() === "workspace" && !workspaceHidden()}>
-                {renderWorkspaceRow()}
-              </If>
-            </>
-          }
-          footer={() => (
-            <If when={sidebarView() === "workspace" && (canShowMore() || workspacePageOpen())}>
-              <View class="pl-5">
-                <View class="flex-row items-center gap-3 px-2 py-0.5">
-                  <If when={canShowMore()}>
-                    <Button
-                      testID="workspace-more"
-                      accessibilityLabel={t("sidebar.show_more")}
-                      class="flex-row items-center gap-1 rounded-(--radius) px-1 hover:bg-sidebar-accent"
-                      onPress={showMore}
-                    >
-                      <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
-                      <Text class="text-xs text-muted-foreground">{t("sidebar.show_more")}</Text>
-                    </Button>
-                  </If>
-                  <If when={canShowMore() && workspacePageOpen()}>
-                    <Text class="text-xs text-muted-foreground">·</Text>
-                  </If>
-                  <If when={workspacePageOpen()}>
-                    <Button
-                      testID="workspace-collapse"
-                      accessibilityLabel={t("sidebar.collapse_sessions")}
-                      class="flex-row items-center gap-1 rounded-(--radius) px-1 hover:bg-sidebar-accent"
-                      onPress={() => workspacePageOpen.set(false)}
-                    >
-                      <Icon name="chevron-up" size={12} color={token("muted-foreground")} />
-                      <Text class="text-xs text-muted-foreground">{t("sidebar.collapse_sessions")}</Text>
-                    </Button>
-                  </If>
-                </View>
-              </View>
-            </If>
-          )}
         >
-          {(session) => renderSessionRow(session, () => sidebarView() === "flat")}
+          {(session) => renderSessionRow(session, () => true)}
         </List>
+      </If>
+      <If when={props.mode === "workspace" && sidebarView() === "workspace"}>
+        <Scroll testID="session-list" class="flex-1" contentClass="gap-0.5 px-2 pb-1">
+          <If when={!workspaceHidden()}>
+            <Collapsible
+              open={workspaceExpanded()}
+              reveal
+              content={
+                <View>
+                  <View class="gap-0.5 pt-0.5">
+                    <Each of={firstPageSessions()} key={(session) => session.id}>
+                      {(session) => renderSessionRow(session, () => false)}
+                    </Each>
+                  </View>
+                  <Each of={morePages()} key="index">
+                    {(page, index) => (
+                      <Collapsible
+                        open={workspacePageOpen() && workspaceShown() >= (index() + 2) * WORKSPACE_PAGE_SIZE}
+                        reveal
+                        content={<View class="gap-0.5 pt-0.5">
+                          <Each of={page()} key={(session) => session.id}>
+                            {(session) => renderSessionRow(session, () => false)}
+                          </Each>
+                        </View>}
+                      />
+                    )}
+                  </Each>
+                  <If when={canShowMore() || workspacePageOpen()}>
+                    <View class="pl-5 pt-0.5">
+                      <View class="flex-row items-center gap-3 px-2 py-0.5">
+                        <If when={canShowMore()}>
+                          <Button
+                            testID="workspace-more"
+                            accessibilityLabel={t("sidebar.show_more")}
+                            class="flex-row items-center gap-1 rounded-(--radius) px-1 hover:bg-sidebar-accent"
+                            onPress={showMore}
+                          >
+                            <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
+                            <Text class="text-xs text-muted-foreground">{t("sidebar.show_more")}</Text>
+                          </Button>
+                        </If>
+                        <If when={canShowMore() && workspacePageOpen()}>
+                          <Text class="text-xs text-muted-foreground">·</Text>
+                        </If>
+                        <If when={workspacePageOpen()}>
+                          <Button
+                            testID="workspace-collapse"
+                            accessibilityLabel={t("sidebar.collapse_sessions")}
+                            class="flex-row items-center gap-1 rounded-(--radius) px-1 hover:bg-sidebar-accent"
+                            onPress={collapseSessions}
+                          >
+                            <Icon name="chevron-up" size={12} color={token("muted-foreground")} />
+                            <Text class="text-xs text-muted-foreground">{t("sidebar.collapse_sessions")}</Text>
+                          </Button>
+                        </If>
+                      </View>
+                    </View>
+                  </If>
+                </View>
+              }
+            >
+              {renderWorkspaceRow()}
+            </Collapsible>
+          </If>
+        </Scroll>
       </If>
       <If when={props.mode === "settings"}>
         <View testID="settings-navigation" class="flex-1">
