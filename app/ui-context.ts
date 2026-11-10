@@ -7,6 +7,8 @@ export interface UiContext {
   onManualLayoutChange?: (collapsing: boolean) => void;
   onLayoutAnimation?: (active: boolean) => void;
   onLayoutHeightChange?: (delta: number) => void;
+  layoutVersion?: string | number;
+  measureVersion?: string | number;
 }
 
 export function toggleExpanded(context: UiContext, id: string): void {

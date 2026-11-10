@@ -10,7 +10,7 @@
 
 **当前实现**
 
-消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm 和 Plan 使用 `app/components/list-collapsible.tsx`。折叠窗口先通过 `onLayout` 测量真实内容高度，再以 20ms 为间隔、最多 14 步更新窗口高度；窗口和 List 使用同一份实际布局高度，不再分别运行 `LayoutAnimation` 和 List 行定位。首次已经展开的内容直接采用测量高度，不重放入场动画；嵌套卡片的测量变化同步给外层窗口，收起完成后卸载内容。`onTransition` 报告动画开始和结束，取消或组件回收会结束旧通知；`onHeightChange` 在每帧高度更新后提供增量，供消息 List 同步滚动位置。Hook 汇总仍直接挂载/卸载。
+消息虚拟 List 内的外层工作区、思考、工具输出、AgentSwarm 和 Plan 使用 `app/components/list-collapsible.tsx`。折叠窗口先通过 `onLayout` 测量真实内容高度，再以 20ms 为间隔、最多 14 步更新窗口高度；窗口和 List 使用同一份实际布局高度，不再分别运行 `LayoutAnimation` 和 List 行定位。首次已经展开的内容直接采用测量高度，不重放入场动画；嵌套卡片的测量变化同步给外层窗口，收起完成后卸载内容。组件按 `testID`、布局版本和内容版本缓存真实测量高度，最多保留 500 项；布局版本由视口宽度与 `fontScale` 组成，内容版本由 `conversationMeasureVersion` 计算。行回收或 ID 改变时重置旧状态并恢复已测高度，避免多层展开在快速滚动时反复从 0 撑开；版本变化但没有新缓存时保留当前窗口，避免流式正文清零。`onTransition` 报告动画开始和结束，取消或组件回收会结束旧通知；`onHeightChange` 在每帧高度更新后提供增量，供消息 List 同步滚动位置。Hook 汇总仍直接挂载/卸载。
 
 正文之间连续两项及以上的 `reasoning` / `tool` 由 `groupConversationActivity` 生成 `activity` 行并默认折叠，单项不重复分组，展开后仍使用原有行组件；已完成回合的工作详情内部使用同一规则。分组 ID 取首项 ID，流式追加工具不会重置展开状态。汇总按搜索、查文件、命令、网络搜索、思考和普通工具分类计数并标记各类失败数，中英文文案分别维护；会话内搜索同时匹配分组内容。`App.activity.test.tsx` 覆盖默认折叠、展开/收起、追加工具后的状态保持和中英文汇总。
 
@@ -27,7 +27,7 @@ Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及
 - 虚拟列表、搜索定位和上翻阅读行为不受影响。
 - 右侧面板和设置页的 `reveal` 保持原有效果。
 
-`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具、长思考内容和快速连续切换；`App.list-collapsible.test.tsx` 通过实际 `onLayout` 记录验证中间高度、最多 14 步的节流更新、最终高度和完整动画生命周期通知。测试使用隔离 Store，不读取真实会话或钥匙串。
+`App.scroll.test.tsx` 和 `App.collapse.fixture.tsx` 覆盖长工作区、内层工具、长思考内容和快速连续切换；`App.list-collapsible.test.tsx` 通过实际 `onLayout` 记录验证中间高度、最多 14 步的节流更新、最终高度和完整动画生命周期通知；`App.list-collapsible-cache.test.tsx` 验证 ID 回收后的高度恢复、卸载重挂恢复，以及内容版本变化时不清零。多层展开回收验证不再出现重复的 0 高度初始化。测试使用隔离 Store，不读取真实会话或钥匙串。
 
 **上游参考**
 

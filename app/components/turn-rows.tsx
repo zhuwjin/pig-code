@@ -11,7 +11,7 @@ export function WorkRow(props: UiContext & { turn: Accessor<TurnState>; children
   const turn = () => props.turn();
   const open = () => props.store.isTurnExpanded(turn().id);
   return (
-    <ListCollapsible open={open()} testID={`work-${turn().id}`} content={props.children} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange}>
+    <ListCollapsible open={open()} testID={`work-${turn().id}`} content={props.children} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange} layoutVersion={props.layoutVersion} version={props.measureVersion}>
       <Button
         testID={`work-${turn().id}`}
         class="flex-row items-center gap-1 self-start py-1"

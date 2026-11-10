@@ -320,7 +320,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   if (props.item().tool === "AgentSwarm") {
     const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
     return (
-      <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange} testID={`swarm-${props.item().id}`} content={rows}>
+      <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} layoutVersion={props.layoutVersion} version={props.measureVersion} onHeightChange={props.onLayoutHeightChange} testID={`swarm-${props.item().id}`} content={rows}>
         <View
           role="button"
           testID={`swarm-${props.item().id}`}
@@ -414,7 +414,7 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
   return (
     <ListCollapsible
       open={open()}
-      onTransition={props.onLayoutAnimation}
+      onTransition={props.onLayoutAnimation} layoutVersion={props.layoutVersion} version={props.measureVersion}
       onHeightChange={props.onLayoutHeightChange}
       testID={`plan-${item().id}`}
       class="rounded-xl border border-border bg-tool-surface"
@@ -471,7 +471,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
-    <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} onHeightChange={props.onLayoutHeightChange} testID={`tool-${item().id}`} class="w-full" content={<ToolBody {...props} />}>
+    <ListCollapsible open={open()} onTransition={props.onLayoutAnimation} layoutVersion={props.layoutVersion} version={props.measureVersion} onHeightChange={props.onLayoutHeightChange} testID={`tool-${item().id}`} class="w-full" content={<ToolBody {...props} />}>
       <View
         role="button"
         testID={`tool-${item().id}`}

@@ -15,6 +15,7 @@ import {
   View,
   computed,
   effect,
+  fontScale,
   keymap,
   openUrl,
   signal,
@@ -27,6 +28,7 @@ import { toggleExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
   buildConversationRows,
+  conversationMeasureVersion,
   conversationRowsEqual,
   groupConversationActivity,
   reuseConversationRows,
@@ -353,6 +355,8 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     <ListCollapsible
       open={open()}
       onTransition={props.onLayoutAnimation}
+      layoutVersion={props.layoutVersion}
+      version={props.measureVersion}
       onHeightChange={props.onLayoutHeightChange}
       testID={`thinking-${item().id}`}
       content={
@@ -541,6 +545,8 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
     <ListCollapsible
       open={open()}
       onTransition={props.onLayoutAnimation}
+      layoutVersion={props.layoutVersion}
+      version={props.measureVersion}
       onHeightChange={props.onLayoutHeightChange}
       testID={row().id}
       content={
@@ -596,6 +602,15 @@ function ItemMessageRow(props: MessageProps & { item: Accessor<ChatItem> }) {
 
 function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; active: boolean; navEligible: boolean }) {
   const row = () => props.row();
+  const rowProps = {
+    ...props,
+    get measureVersion() {
+      const current = row();
+      if (current.type === "work" || current.type === "activity") return conversationMeasureVersion(current.items);
+      if (current.type === "item") return conversationMeasureVersion([current.item]);
+      return 0;
+    },
+  };
   return (
     <View
       class={props.active
@@ -604,22 +619,22 @@ function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; acti
     >
       <View class="mx-auto w-full max-w-[860px] px-4">
         <If when={row().type === "item"}>
-          <ItemMessageRow {...props} item={() => (row() as Extract<ConversationRow, { type: "item" }>).item} />
+          <ItemMessageRow {...rowProps} item={() => (row() as Extract<ConversationRow, { type: "item" }>).item} />
         </If>
         <If when={row().type === "activity"}>
-          <ActivityRow {...props} row={() => row() as Extract<ConversationRow, { type: "activity" }>} />
+          <ActivityRow {...rowProps} row={() => row() as Extract<ConversationRow, { type: "activity" }>} />
         </If>
         <If when={row().type === "work"}>
-          <WorkRow {...props} turn={() => (row() as Extract<ConversationRow, { type: "work" }>).turn}>
+          <WorkRow {...rowProps} turn={() => (row() as Extract<ConversationRow, { type: "work" }>).turn}>
             <View class="gap-2 pt-4">
               <Each of={groupConversationActivity((row() as Extract<ConversationRow, { type: "work" }>).items)} key={(activity) => activity.id}>
                 {(activity) => (
                   <>
                     <If when={activity().type === "item"}>
-                      <ItemMessageRow {...props} item={() => (activity() as Extract<ConversationRow, { type: "item" }>).item} />
+                      <ItemMessageRow {...rowProps} item={() => (activity() as Extract<ConversationRow, { type: "item" }>).item} />
                     </If>
                     <If when={activity().type === "activity"}>
-                      <ActivityRow {...props} row={() => activity() as Extract<ConversationRow, { type: "activity" }>} />
+                      <ActivityRow {...rowProps} row={() => activity() as Extract<ConversationRow, { type: "activity" }>} />
                     </If>
                   </>
                 )}
@@ -628,11 +643,11 @@ function MessageRow(props: MessageProps & { row: Accessor<ConversationRow>; acti
           </WorkRow>
         </If>
         <If when={row().type === "changes"}>
-          <TurnChangesRow {...props} turn={() => (row() as Extract<ConversationRow, { type: "changes" }>).turn} />
+          <TurnChangesRow {...rowProps} turn={() => (row() as Extract<ConversationRow, { type: "changes" }>).turn} />
         </If>
         <If when={row().type === "actions"}>
           <TurnActionsRow
-            {...props}
+            {...rowProps}
             turn={() => (row() as Extract<ConversationRow, { type: "actions" }>).turn}
             markdownText={() => (row() as Extract<ConversationRow, { type: "actions" }>).markdown.map((item) => item.text).join("\n\n")}
           />
@@ -761,6 +776,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   const query = signal("");
   const activeMatch = signal(0);
   const viewportWidth = signal(0);
+  const layoutVersion = computed(() => `${viewportWidth()}:${fontScale()}`);
   const lightbox = signal<{ src: string; label: string } | null>(null);
   let list: ListRef | undefined;
   let latestWheelOffset = LATEST_WHEEL_ORIGIN;
@@ -883,6 +899,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
           <MessageRow
             {...props}
             row={row}
+            layoutVersion={layoutVersion()}
             textFor={textFor}
             active={row().id === activeSearchRow()}
             navEligible={userRows().length >= 2}

@@ -2,6 +2,21 @@ import { Easing, effect, reduceMotion, signal, untracked, View, type JSX } from 
 
 const FRAME_MS = 20;
 const PROGRESS = Easing.sample(Easing.out(Easing.cubic), 15);
+const MAX_MEASUREMENTS = 500;
+const measurements = new Map<string, number>();
+
+function readMeasurement(key: string | undefined): number {
+  return key ? measurements.get(key) ?? 0 : 0;
+}
+
+function writeMeasurement(key: string | undefined, height: number): void {
+  if (!key) return;
+  measurements.delete(key);
+  measurements.set(key, height);
+  if (measurements.size > MAX_MEASUREMENTS) {
+    measurements.delete(measurements.keys().next().value!);
+  }
+}
 
 export function ListCollapsible(props: {
   open: boolean;
@@ -9,15 +24,25 @@ export function ListCollapsible(props: {
   children: JSX.Element;
   class?: string;
   testID?: string;
+  layoutVersion?: string | number;
+  version?: string | number;
   onTransition?: (active: boolean) => void;
   onHeightChange?: (delta: number) => void;
 }) {
   const open = () => props.open;
+  const identity = () => props.testID;
+  const measurementKey = () => identity()
+    ? `${identity()}:${props.layoutVersion ?? ""}:${props.version ?? ""}`
+    : undefined;
+  const initialKey = measurementKey();
+  const initialHeight = readMeasurement(initialKey);
   const shown = signal(open());
-  const contentHeight = signal(0);
-  const height = signal(0);
+  const contentHeight = signal(initialHeight);
+  const height = signal(open() ? initialHeight : 0);
   let initialized = false;
   let previousOpen = open();
+  let previousIdentity = identity();
+  let previousMeasurementKey = initialKey;
   let pending: boolean | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let generation = 0;
@@ -67,6 +92,26 @@ export function ListCollapsible(props: {
   effect(() => {
     stop();
     const expanded = open();
+    const currentIdentity = identity();
+    const currentKey = measurementKey();
+    if (currentIdentity !== previousIdentity) {
+      previousIdentity = currentIdentity;
+      previousMeasurementKey = currentKey;
+      initialized = false;
+      pending = null;
+      const cached = readMeasurement(currentKey);
+      contentHeight.set(cached);
+      height.set(expanded ? cached : 0);
+      shown.set(expanded);
+      previousOpen = expanded;
+    }
+    if (currentKey !== previousMeasurementKey) {
+      previousMeasurementKey = currentKey;
+      if (initialized) {
+        const cached = readMeasurement(currentKey);
+        if (cached > 0) contentHeight.set(cached);
+      }
+    }
     const target = expanded ? contentHeight() : 0;
     if (!initialized) {
       initialized = true;
@@ -101,7 +146,10 @@ export function ListCollapsible(props: {
         <If when={shown()}>
           <View
             testID={props.testID ? `${props.testID}-content` : undefined}
-            onLayout={({ bounds }) => contentHeight.set(bounds.size.height)}
+            onLayout={({ bounds }) => {
+              contentHeight.set(bounds.size.height);
+              writeMeasurement(measurementKey(), bounds.size.height);
+            }}
           >
             {props.content}
           </View>
