@@ -9,6 +9,7 @@ import {
   ConnectionTestResult,
   ContextBreakdown,
   ContextUsage,
+  DeveloperConfig,
   EditDiff,
   HeldDisposition,
   GitDiffSnapshot,
@@ -32,6 +33,7 @@ import {
   PluginMarketplacePreview,
   PluginMarketplaceSource,
   PluginRuntimeState,
+  ProcessSample,
   ProjectHooksNotice,
   RetryStatus,
   RightPanelRequest,
@@ -864,6 +866,19 @@ export class AgentStore {
   saveFonts(ui: string, mono: string): void {
     const config = this.config();
     if (config) this.saveConfig({ ...config, ui_font: ui.trim() || null, mono_font: mono.trim() || null });
+  }
+
+  saveDeveloperOptions(options: Partial<DeveloperConfig>): void {
+    const config = this.config();
+    if (config) this.saveConfig({ ...config, developer: { ...config.developer, ...options } });
+  }
+
+  processSample(): ProcessSample {
+    try {
+      return JSON.parse(this.agent.processSample()) as ProcessSample;
+    } catch {
+      return {};
+    }
   }
 
   saveConfig(config: AppConfig): boolean {

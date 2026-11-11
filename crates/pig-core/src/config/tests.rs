@@ -701,14 +701,17 @@ mod seeding_tests {
             write_exceptions: vec!["**/.env.example".to_string()],
         }]);
         config.sandbox.deny_read = vec!["secrets/**".to_string()];
+        config.developer.show_fps = true;
 
         save(&scratch.user, &config).expect("save");
         let text = scratch.read();
         assert!(text.contains("[[sandbox.deny]]"), "{text}");
         assert!(text.contains("write_exceptions"), "{text}");
+        assert!(text.contains("[developer]"), "{text}");
         let loaded = load(&scratch.user).expect("reload");
         assert_eq!(loaded.sandbox.deny, config.sandbox.deny);
         assert_eq!(loaded.sandbox.deny_read, config.sandbox.deny_read);
+        assert_eq!(loaded.developer, config.developer);
     }
 }
 

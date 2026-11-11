@@ -409,6 +409,14 @@ mod reasoning_params_tests {
     }
 }
 
+/// Developer-only diagnostics and instrumentation; off for normal use.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeveloperConfig {
+    /// Overlay a live frames-per-second readout in the app's corner.
+    #[serde(default)]
+    pub show_fps: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub providers: Vec<ProviderConfig>,
@@ -466,6 +474,9 @@ pub struct AppConfig {
     /// Windows-specific execution settings (see WindowsConfig)
     #[serde(default)]
     pub windows: WindowsConfig,
+    /// Developer options (UI diagnostics); off by default
+    #[serde(default)]
+    pub developer: DeveloperConfig,
 }
 
 impl AppConfig {

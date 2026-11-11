@@ -54,7 +54,29 @@
       "models": "Models",
       "appearance": "Appearance",
       "plugins": "Plugins",
-      "marketplace": "Marketplace"
+      "marketplace": "Marketplace",
+      "developer": "Developer"
+    },
+    "developer": {
+      "title": "Developer options",
+      "description": "Diagnostics and instrumentation for development and troubleshooting.",
+      "hud": {
+        "fps": "FPS",
+        "interval": "INTERVAL",
+        "p95": "P95",
+        "drop": "DROP",
+        "gpu": "GPU",
+        "cpu": "CPU",
+        "memory": "MEM",
+        "ms": "{value} ms",
+        "percent": "{value}%",
+        "mb": "{value} MB",
+        "unavailable": "—"
+      },
+      "show_fps": {
+        "label": "Show performance HUD",
+        "description": "Overlay this process' CPU and memory use in the corner of the window."
+      }
     },
     "appearance": {
       "title": "Theme",

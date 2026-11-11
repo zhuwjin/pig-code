@@ -59,6 +59,41 @@ test("uses dedicated pages for models, appearance and plugin management", async 
   await app.waitFor("id:settings-page", { state: "gone" });
 });
 
+test("toggles the developer resource HUD", async () => {
+  const app = await openApp();
+  await app.press("id:settings-open");
+  await app.waitFor("id:settings-navigation");
+  await app.waitFor("id:settings-developer");
+  await app.press("id:settings-developer");
+  await app.waitFor("id:developer-settings");
+  expect(app.texts()).toContain("开发者选项");
+  expect(app.texts()).toContain("显示性能 HUD");
+  expect(app.count("id:fps-meter")).toBe(0);
+
+  await app.waitUntil(() => app.enabled("id:developer-show-fps"), { timeout: 10000 });
+  await app.press("id:developer-show-fps");
+  await app.waitFor("id:fps-meter", { timeout: 10000 });
+  for (const text of ["CPU", "MEM"]) {
+    expect(app.texts()).toContain(text);
+  }
+  for (const text of ["FPS", "INTERVAL", "P95", "DROP"]) {
+    expect(app.texts()).not.toContain(text);
+  }
+  expect(app.count("id:fps-meter-fps")).toBe(0);
+  expect(app.count("id:fps-meter-trace")).toBe(0);
+  await app.waitUntil(
+    () => app.texts().some((text) => /^\d+ MB$/.test(text)),
+    { timeout: 5000 },
+  );
+  await app.waitUntil(
+    () => app.texts().some((text) => /^\d+%$/.test(text)),
+    { timeout: 5000 },
+  );
+
+  await app.press("id:developer-show-fps");
+  await app.waitFor("id:fps-meter", { state: "gone" });
+});
+
 test("creates, edits and deletes providers and models through real config", async () => {
   const app = await openApp();
   await app.press("id:settings-open");

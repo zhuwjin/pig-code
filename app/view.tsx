@@ -12,6 +12,7 @@ import { Workspace } from "./components/workspace";
 import { RightPanel } from "./components/right-panel";
 import { TerminalPanel } from "./components/terminal-panel";
 import { SearchPopup } from "./components/search-popup";
+import { FpsMeter } from "./components/fps-meter";
 import { SettingsPage, type SettingsPageId } from "./components/settings/settings-page";
 
 Window.setTitle("Pig Code");
@@ -295,6 +296,9 @@ function App(props: UiContext) {
       </View>
       <If when={searchVisible()}>
         <SearchPopup {...props} onClose={() => searchVisible.set(false)} />
+      </If>
+      <If when={store.config()?.developer?.show_fps}>
+        <FpsMeter sample={() => store.processSample()} />
       </If>
     </View>
   );

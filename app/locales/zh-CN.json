@@ -54,7 +54,29 @@
       "models": "模型设置",
       "appearance": "外观",
       "plugins": "插件管理",
-      "marketplace": "插件市场"
+      "marketplace": "插件市场",
+      "developer": "开发者选项"
+    },
+    "developer": {
+      "title": "开发者选项",
+      "description": "用于开发与排查问题的诊断和性能选项。",
+      "hud": {
+        "fps": "FPS",
+        "interval": "INTERVAL",
+        "p95": "P95",
+        "drop": "DROP",
+        "gpu": "GPU",
+        "cpu": "CPU",
+        "memory": "MEM",
+        "ms": "{value} ms",
+        "percent": "{value}%",
+        "mb": "{value} MB",
+        "unavailable": "—"
+      },
+      "show_fps": {
+        "label": "显示性能 HUD",
+        "description": "在窗口角落实时显示本进程的 CPU 和内存占用。"
+      }
     },
     "appearance": {
       "title": "主题",

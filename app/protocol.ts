@@ -583,6 +583,16 @@ export interface PluginRuntimeState {
   metrics?: PluginRuntimeMetrics;
 }
 
+export interface DeveloperConfig {
+  show_fps?: boolean;
+}
+
+export interface ProcessSample {
+  cpu?: number | null;
+  memory?: number | null;
+  gpu?: number | null;
+}
+
 export interface AppConfig {
   default_provider?: string | null;
   default_model?: string | null;
@@ -593,6 +603,7 @@ export interface AppConfig {
   language?: "system" | "zh-CN" | "en" | null;
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;
+  developer?: DeveloperConfig;
   [key: string]: unknown;
 }
 

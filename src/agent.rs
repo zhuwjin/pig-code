@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nsh_core::{file_dialog::OpenDialog, prelude::*};
+use nsh_engine::perf::ProcessSampler;
 use pig_protocol::{ApprovalDecision, Event, ExecMode, MessageDelivery, Op};
 
 static SELFTEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -21,6 +23,7 @@ pub struct Agent {
     cwd: PathBuf,
     data_dir: PathBuf,
     plugins: crate::plugin_system::PluginSystemManager,
+    process_sampler: Mutex<ProcessSampler>,
     _selftest_dir: Option<SelftestDir>,
 }
 
@@ -108,6 +111,7 @@ default_reasoning_level = "low"
             handle,
             cwd,
             data_dir,
+            process_sampler: Mutex::new(ProcessSampler::new()),
             _selftest_dir: selftest_dir,
         }
     }
@@ -121,6 +125,24 @@ default_reasoning_level = "low"
     /// Installed font family names for the appearance font pickers.
     pub fn list_fonts(&self) -> Vec<String> {
         pig_core::fonts::installed_font_families()
+    }
+
+    /// The process' CPU, memory and GPU use as JSON: CPU is percent of one
+    /// core since the previous call (null on the first), memory bytes, and
+    /// GPU percent when the platform's performance monitor reports it (null
+    /// from this sampler).
+    pub fn process_sample(&self) -> String {
+        let mut sampler = self
+            .process_sampler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sample = sampler.sample();
+        serde_json::json!({
+            "cpu": sample.cpu,
+            "memory": sample.memory,
+            "gpu": sample.gpu,
+        })
+        .to_string()
     }
 
     /// Chooses a workspace directory with the system's folder picker.
