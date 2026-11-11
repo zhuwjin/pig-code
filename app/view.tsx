@@ -1,4 +1,4 @@
-import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, reduceMotion, signal, untracked } from "nsh";
+import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, platform, reduceMotion, signal, untracked } from "nsh";
 import type { JSX, Signal } from "nsh";
 import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { currentWindow } from "nsh/desktop";
@@ -13,6 +13,7 @@ import { RightPanel } from "./components/right-panel";
 import { TerminalPanel } from "./components/terminal-panel";
 import { SearchPopup } from "./components/search-popup";
 import { FpsMeter } from "./components/fps-meter";
+import { WindowControls, WindowResizeEdges } from "./components/window-controls";
 import { SettingsPage, type SettingsPageId } from "./components/settings/settings-page";
 
 function ThemeBackground(props: UiContext) {
@@ -297,6 +298,8 @@ function App(props: UiContext) {
       <If when={store.config()?.developer?.show_fps}>
         <FpsMeter sample={() => store.processSample()} />
       </If>
+      <WindowResizeEdges />
+      <WindowControls />
     </View>
   );
 }
@@ -305,7 +308,11 @@ export function mountApp(selftest = false): void {
   const themeStore = new ThemeStore();
   const store = new AgentStore(selftest);
   mount(() => {
-    currentWindow().set({ title: "Pig Code", titleBar: { style: "hidden", height: 44 } });
+    currentWindow().set({
+      title: "Pig Code",
+      ...(platform.os === "windows" ? { frame: "none" as const } : {}),
+      titleBar: { style: "hidden" as const, height: 44 },
+    });
     return <App store={store} themeStore={themeStore} />;
   });
 }

@@ -43,6 +43,11 @@ test("reaches and expands every item in a large activity", async () => {
     height: 4000,
   });
   await app.waitFor("Final answer");
+  await app.keyboard.press("mod+f");
+  await app.type("id:thread-search-input", "Inspect activity");
+  await app.keyboard.press("enter");
+  await app.keyboard.press("escape");
+  await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
   await app.waitFor("id:tool-tool-0");
   await app.scroll("id:message-list", 40000);
@@ -57,6 +62,11 @@ test("virtualizes a long expanded activity", async () => {
     width: 1200,
     height: 700,
   });
+  await app.waitFor("Final answer");
+  await app.keyboard.press("mod+f");
+  await app.type("id:thread-search-input", "Inspect activity");
+  await app.keyboard.press("enter");
+  await app.keyboard.press("escape");
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
   await app.waitFor("id:tool-tool-0");

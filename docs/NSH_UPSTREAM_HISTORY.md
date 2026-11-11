@@ -48,7 +48,25 @@ Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及
 
 **上游参考**
 
-0.4.0 期间曾使用 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`，后来把阈值降到 0 仍存在用户上滚与流式新增行的时序竞态，最终改为应用侧延迟跟随。NSH main 已提供更适合聊天的 `alignment="bottom"`，待升级验证后再决定是否替换当前策略，见 [NSH_UPSTREAM_PENDING.md](./NSH_UPSTREAM_PENDING.md) 的「原生 List 的聊天式底部跟随」。
+0.4.0 期间曾使用 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`，后来把阈值降到 0 仍存在用户上滚与流式新增行的时序竞态，最终改为应用侧延迟跟随。0.5.0 已按 Noop 的写法接入 `alignment="bottom"` + `maintainVisibleContentPosition`，见下面的「0.5.0 升级与窗口」。
+
+## 0.5.0 升级与窗口
+
+### 1. 升级到 0.5.0（已完成）
+
+CLI 和 `nsh-core` / `nsh-base` / `nsh-engine` / `nsh-platform-windows` / `nsh-testing` 从 0.4.0 升级到 0.5.0。0.5.0 移除了 `Window.setTitle` / `Window.setTitleBar`，改为渲染时调用 `currentWindow().set({ title, titleBar, frame })`；`nsh check` 和定向测试通过。
+
+### 2. 原生底部跟随（已完成）
+
+主消息列表和右侧子 Agent 列表改为 `alignment="bottom"` + `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 24 }}`。删除了 80ms 延迟跟随、`cancelFollow`、`onScrollDragStart` 取消和 Session 切换主动滚底；`onScroll` 只保留“最新消息”按钮状态。
+
+折叠展开时通过 `followSuspended` 临时关闭原生跟随，直到用户滚回距底 24 点以内再恢复，避免在底部展开 activity 后被钉回末尾、刚展开的内容被顶出视口。展开新增 3 行以上且处于暂停状态时显示“最新消息”按钮，小折叠保持底部状态。`App.scroll.test.tsx` 9/9、`App.stream-scroll.test.tsx` 1/1、1000 项活动的虚拟化和完整展开、`App.conversation.test.tsx` 20/20、`App.tool-cards.test.tsx` 5/5 通过；1000 项测试先通过搜索跳到用户消息再展开，匹配真实操作。
+
+`App.follow-matrix.test.tsx` 另覆盖 7 种位置与展开/收起组合：底部展开 work/activity、距底 10px 展开、距底 200px 展开、底部收起长折叠到短内容、短内容再展开、距底 10px 收起夹紧回底部、底部收起后内容仍高于视口。
+
+### 3. Windows 无边框标题栏（已完成）
+
+Windows 上设置 `frame: "none"`，标题栏右上角自绘最小化、最大化/还原、关闭按钮，按钮标记 `desktop={{ windowControl }}`，由平台原生处理点击和 Windows 11 贴靠布局；主标题栏和右侧面板头部预留 138pt。窗口四周和四角增加 `windowResize` 边缘（5px / 12px）。真实 Windows 窗口验证了最大化/还原和右边缘缩放（1372 → 1452 物理像素）。
 
 ## 已接入的组件导出
 

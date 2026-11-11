@@ -1,13 +1,14 @@
-import { List, Scroll, Text, View, computed, effect, signal, token, type ListRef } from "nsh";
+import { List, Scroll, Text, View, computed, effect, platform, signal, token, type ListRef } from "nsh";
 import { Button, DiffView, Editor, Input, Menu, MenuItem, Popover, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { ChatItem, GitFileChange, RightPanelRequest, SubagentHistory, SubagentItem, TaskSummary, ToolItem, TurnState } from "../protocol";
-import type { UiContext } from "../ui-context";
+import { followSuspended, type UiContext } from "../ui-context";
 import { buildConversationRows, conversationRowsEqual, formatDuration, pathParts, reuseConversationRows, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
 import { Icon, type IconName } from "./icon";
 import { MessageRow, type MessageProps } from "./messages";
 import { CodeCard } from "./tool-card";
+import { WINDOW_CONTROLS_WIDTH } from "./window-controls";
 
 function tabId(request: RightPanelRequest): string {
   switch (request.kind) {
@@ -372,33 +373,44 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
   };
   const latestVisible = signal(false);
   let list: ListRef | undefined;
-  let scrolledToEnd = false;
-  let followTimer: ReturnType<typeof setTimeout> | undefined;
-  const cancelFollow = () => {
-    if (followTimer !== undefined) {
-      clearTimeout(followTimer);
-      followTimer = undefined;
-    }
-  };
+  let followedKey = "";
   effect(() => {
-    const snapshot = history();
-    if (!snapshot || scrolledToEnd) return;
-    scrolledToEnd = true;
-    requestAnimationFrame(() => requestAnimationFrame(() => list?.scrollToEnd({ animated: false })));
+    const key = sessionKey();
+    if (key === followedKey) return;
+    followedKey = key;
+    followSuspended.set(false);
   });
+  let distanceFromEnd = 0;
+  let suspendedAt = 0;
+  let suspendTimer: ReturnType<typeof setTimeout> | undefined;
   effect(() => {
-    if (latestVisible()) {
-      cancelFollow();
+    if (!followSuspended()) {
+      if (suspendTimer !== undefined) {
+        clearTimeout(suspendTimer);
+        suspendTimer = undefined;
+      }
       return;
     }
-    rows();
-    if (followTimer !== undefined) return;
-    followTimer = setTimeout(() => {
-      followTimer = undefined;
-      if (!latestVisible()) list?.scrollToEnd({ animated: false });
-    }, 80);
+    suspendedAt = Date.now();
+    if (suspendTimer !== undefined) clearTimeout(suspendTimer);
+    suspendTimer = setTimeout(() => {
+      suspendTimer = undefined;
+      if (distanceFromEnd <= 24) followSuspended.set(false);
+    }, 350);
+    return () => {
+      if (suspendTimer !== undefined) {
+        clearTimeout(suspendTimer);
+        suspendTimer = undefined;
+      }
+    };
   });
-  effect(() => () => cancelFollow());
+  let lastRowCount = 0;
+  effect(() => {
+    const count = rows().length;
+    const grew = count - lastRowCount;
+    lastRowCount = count;
+    if (grew >= 3 && followSuspended()) latestVisible.set(true);
+  });
   return (
     <View class="relative min-h-0 flex-1">
       <View class="gap-1 border-b border-border px-3 py-2">
@@ -421,14 +433,20 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         estimatedItemSize={28}
         class="min-h-0 flex-1"
         contentClass="gap-3"
+        alignment={followSuspended() ? "top" : "bottom"}
+        maintainVisibleContentPosition={followSuspended() ? undefined : { autoscrollToBottomThreshold: 24 }}
         header={<View class="h-4" />}
         empty={<Text class="py-8 text-center text-sm text-muted-foreground">{t("right_panel.no_conversation")}</Text>}
         scrollbar
-        onScrollDragStart={() => cancelFollow()}
         onScroll={(event) => {
-          cancelFollow();
           const distance = event.contentSize.height - event.offset.y - event.size.height;
+          distanceFromEnd = distance;
+          if (distance <= 24 && Date.now() - suspendedAt > 350) followSuspended.set(false);
           latestVisible.set(distance > 1);
+        }}
+        onViewableItemsChange={({ viewableItems }) => {
+          const last = rows().length - 1;
+          if (!viewableItems.some((item) => item.isViewable && item.index === last)) latestVisible.set(true);
         }}
       >
         {(row) => <MessageRow {...messageProps} row={row} active={false} navEligible={false} />}
@@ -518,7 +536,7 @@ export function RightPanel(props: UiContext & { onClose: () => void; maximized: 
   };
   return (
     <View testID="right-panel" class="w-full flex-1 bg-background">
-      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: titleBar().right, borderBottomWidth: 0.5 }} desktop={{ windowDrag: true }}>
+      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: platform.os === "windows" ? WINDOW_CONTROLS_WIDTH + 8 : titleBar().right, borderBottomWidth: 0.5 }} desktop={{ windowDrag: true }}>
         <Popover
           open={tabListOpen()}
           onOpenChange={({ open }) => {

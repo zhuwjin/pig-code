@@ -1,10 +1,11 @@
-import { View, Text, colorScheme, token } from "nsh";
+import { View, Text, colorScheme, platform, token } from "nsh";
 import { Button } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { Icon } from "./icon";
+import { WINDOW_CONTROLS_WIDTH } from "./window-controls";
 
 export function TitleBar(props: UiContext & {
   sidebarVisible: boolean;
@@ -24,7 +25,9 @@ export function TitleBar(props: UiContext & {
       style={themeStore.styles("title-bar.root", {
         height: titleBar().height || 44,
         paddingLeft: props.sidebarVisible ? 8 : titleBar().left + 8,
-        paddingRight: props.rightPanelShown ? 8 : titleBar().right + 8,
+        paddingRight: props.rightPanelShown
+          ? 8
+          : (platform.os === "windows" ? WINDOW_CONTROLS_WIDTH : titleBar().right) + 8,
         borderBottomWidth: 0.5,
       })}
       class={themeStore.classes(

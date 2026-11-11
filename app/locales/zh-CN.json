@@ -11,6 +11,12 @@
     "copy": "复制",
     "not_provided": "未提供"
   },
+  "window": {
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "还原",
+    "close": "关闭"
+  },
   "sidebar": {
     "collapse": "折叠侧边栏",
     "new_task": "新建任务",

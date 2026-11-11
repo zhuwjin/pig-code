@@ -24,7 +24,7 @@ import {
 import { Button, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, TaskNotification, UserItem } from "../protocol";
-import { toggleExpanded, toggleTurnExpanded, toggleUserExpanded, type UiContext } from "../ui-context";
+import { followSuspended, toggleExpanded, toggleTurnExpanded, toggleUserExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
   conversationRowsEqual,
@@ -54,6 +54,7 @@ import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow } from "./turn-rows";
 
 const LATEST_WHEEL_ORIGIN = 500_000;
+const FOLLOW_THRESHOLD = 24;
 
 export type MessageProps = UiContext & {
   textFor: (item: MarkdownItem) => string;
@@ -845,13 +846,6 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   let lastContentHeight = 0;
   let lastViewportHeight = 0;
   let lastScrollOffset = 0;
-  let followTimer: ReturnType<typeof setTimeout> | undefined;
-  const cancelFollow = () => {
-    if (followTimer !== undefined) {
-      clearTimeout(followTimer);
-      followTimer = undefined;
-    }
-  };
   const activeTurn = signal(0);
   const hoveredTurn = signal<string | null>(null);
   const navFocus = signal<number | null>(null);
@@ -863,28 +857,43 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   let list: ListRef | undefined;
   let latestWheelOffset = LATEST_WHEEL_ORIGIN;
   let visibleRowIndices: number[] = [];
-  let lastExpansion = "";
+  let followedSession: string | null = null;
   effect(() => {
-    const expansion = JSON.stringify([props.store.expandedTurns(), props.store.expandedItems()]);
-    if (latestVisible()) {
-      lastExpansion = expansion;
-      cancelFollow();
-      return;
-    }
-    rows();
-    textOverrides();
-    if (expansion !== lastExpansion) {
-      lastExpansion = expansion;
-      cancelFollow();
-      return;
-    }
-    if (followTimer !== undefined) return;
-    followTimer = setTimeout(() => {
-      followTimer = undefined;
-      if (!latestVisible()) list?.scrollToEnd({ animated: false });
-    }, 80);
+    const session = props.store.current();
+    if (session === followedSession) return;
+    followedSession = session;
+    followSuspended.set(false);
   });
-  effect(() => () => cancelFollow());
+  let suspendedAt = 0;
+  let suspendTimer: ReturnType<typeof setTimeout> | undefined;
+  effect(() => {
+    if (!followSuspended()) {
+      if (suspendTimer !== undefined) {
+        clearTimeout(suspendTimer);
+        suspendTimer = undefined;
+      }
+      return;
+    }
+    suspendedAt = Date.now();
+    if (suspendTimer !== undefined) clearTimeout(suspendTimer);
+    suspendTimer = setTimeout(() => {
+      suspendTimer = undefined;
+      if (distanceFromEnd <= FOLLOW_THRESHOLD) followSuspended.set(false);
+    }, 350);
+    return () => {
+      if (suspendTimer !== undefined) {
+        clearTimeout(suspendTimer);
+        suspendTimer = undefined;
+      }
+    };
+  });
+  let lastRowCount = 0;
+  effect(() => {
+    const count = rows().length;
+    const grew = count - lastRowCount;
+    lastRowCount = count;
+    if (grew >= 3 && followSuspended()) setLatestVisible(true);
+  });
   const updateActiveTurn = () => {
     const next = resolveActiveUserRow(
       userRows().map((entry) => entry.index),
@@ -894,15 +903,6 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
     if (next !== null) activeTurn.set(next);
   };
   effect(updateActiveTurn);
-  let followedSession: string | null = null;
-  effect(() => {
-    const session = props.store.current();
-    if (session === followedSession) return;
-    followedSession = session;
-    setLatestVisible(false);
-    const timer = setTimeout(() => list?.scrollToEnd({ animated: false }), 0);
-    return () => clearTimeout(timer);
-  });
   const matches = () => {
     const normalized = query().trim().toLowerCase();
     if (!normalized) return [];
@@ -985,21 +985,24 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
         estimatedItemSize={28}
         class="min-h-0 min-w-0 flex-1"
         contentClass="gap-4"
+        alignment={followSuspended() ? "top" : "bottom"}
+        maintainVisibleContentPosition={followSuspended() ? undefined : { autoscrollToBottomThreshold: FOLLOW_THRESHOLD }}
         scrollbar
         header={<View class="h-4" />}
         footer={<TailRows {...props} navEligible={userRows().length >= 2} />}
-        onScrollDragStart={() => cancelFollow()}
         onScroll={(event) => {
           props.onScroll?.(event);
-          cancelFollow();
           lastContentHeight = event.contentSize.height;
           lastViewportHeight = event.size.height;
           lastScrollOffset = event.offset.y;
           distanceFromEnd = event.contentSize.height - event.offset.y - event.size.height;
+          if (distanceFromEnd <= FOLLOW_THRESHOLD && Date.now() - suspendedAt > 350) followSuspended.set(false);
           setLatestVisible(distanceFromEnd > 1);
         }}
         onViewableItemsChange={({ viewableItems }) => {
           visibleRowIndices = viewableItems.filter((item) => item.isViewable).map((item) => item.index);
+          const last = rows().length - 1;
+          if (!viewableItems.some((item) => item.isViewable && item.index === last)) setLatestVisible(true);
           updateActiveTurn();
         }}
       >

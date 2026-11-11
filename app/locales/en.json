@@ -11,6 +11,12 @@
     "copy": "Copy",
     "not_provided": "Not provided"
   },
+  "window": {
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
+    "close": "Close"
+  },
   "sidebar": {
     "collapse": "Collapse sidebar",
     "new_task": "New task",
