@@ -344,39 +344,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     : item().durationMs != null
       ? formatDuration(item().durationMs!, t("messages.thought_for"))
       : t("messages.thought_process");
-  const reasoningViewport = signal(0);
-  const reasoningScrollY = signal(0);
-  const reasoningLines = computed(() => {
-    const maxUnits = Math.max(12, Math.floor((reasoningViewport() - 16) / 7.2));
-    const lines: { id: number; text: string }[] = [];
-    for (const paragraph of props.textFor(item()).split("\n")) {
-      if (!paragraph) {
-        lines.push({ id: lines.length, text: " " });
-        continue;
-      }
-      let line = "";
-      let units = 0;
-      for (const char of paragraph) {
-        const width = char.codePointAt(0)! > 0xff ? 2 : 1;
-        if (line && units + width > maxUnits) {
-          lines.push({ id: lines.length, text: line });
-          line = "";
-          units = 0;
-        }
-        line += char;
-        units += width;
-      }
-      if (line) lines.push({ id: lines.length, text: line });
-    }
-    return lines;
-  });
-  const reasoningContentHeight = () => Math.max(24, reasoningLines().length * 24);
-  const reasoningHeight = () => Math.min(reasoningContentHeight(), 320);
-  const reasoningWindow = computed(() => {
-    const first = Math.max(0, Math.floor(reasoningScrollY() / 24) - 4);
-    const last = Math.min(reasoningLines().length, Math.ceil((reasoningScrollY() + reasoningHeight()) / 24) + 4);
-    return { first, last, items: reasoningLines().slice(first, last) };
-  });
+  const reasoningParagraphs = computed(() =>
+    props.textFor(item()).split("\n").map((text, index) => ({ id: index, text: text || " " })),
+  );
+  const reasoningMeasured = signal(0);
+  const reasoningHeight = () => {
+    const estimate = Math.max(24, reasoningParagraphs().length * 24);
+    return Math.max(24, Math.min(reasoningMeasured() || estimate, 320));
+  };
   return (
     <View class="w-full">
       <View
@@ -402,33 +377,26 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <View
           testID={`thinking-${item().id}-content`}
           class="ml-2 mt-1 overflow-hidden border-l border-border pl-3.5"
-          style={{ height: reasoningHeight(), overflow: "hidden" }}
-          onLayout={({ bounds }) => reasoningViewport.set(bounds.size.width)}
+          style={{ height: reasoningHeight() }}
         >
-          <Scroll
+          <List
+            each={reasoningParagraphs()}
+            keyExtractor={(paragraph) => String(paragraph.id)}
+            estimatedItemSize={24}
             class="h-full w-full"
             scrollbar
             bounces={false}
             onScroll={(event) => {
-              const max = Math.max(0, reasoningContentHeight() - reasoningHeight());
-              reasoningScrollY.set(Math.max(0, Math.min(event.offset.y, max)));
+              const next = Math.ceil(event.contentSize.height);
+              if (reasoningMeasured() !== next) reasoningMeasured.set(next);
             }}
           >
-            <View style={{ height: reasoningContentHeight() }}>
-              <View style={{ height: reasoningWindow().first * 24 }} />
-              <Each of={reasoningWindow().items} key={(line) => String(line.id)}>
-                {(line) => (
-                  <Text
-                    style={{ height: 24, lineHeight: 24, numberOfLines: 1, userSelect: "text" }}
-                    class="text-sm text-muted-foreground"
-                  >
-                    {line().text}
-                  </Text>
-                )}
-              </Each>
-              <View style={{ height: (reasoningLines().length - reasoningWindow().last) * 24 }} />
-            </View>
-          </Scroll>
+            {(paragraph) => (
+              <Text class="w-full text-sm leading-6 text-muted-foreground" style={{ userSelect: "text" }}>
+                {paragraph().text}
+              </Text>
+            )}
+          </List>
         </View>
       </If>
     </View>
