@@ -343,6 +343,9 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     : item().durationMs != null
       ? formatDuration(item().durationMs!, t("messages.thought_for"))
       : t("messages.thought_process");
+  const reasoningLines = computed(() =>
+    props.textFor(item()).split("\n").map((text, index) => ({ id: index, text }))
+  );
   return (
     <View class="w-full">
       <View
@@ -366,9 +369,18 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
       </View>
       <If when={open()}>
         <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 border-l border-border pl-3.5">
-          <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">
-            {props.textFor(item())}
-          </Text>
+          <List
+            viewport="parent"
+            class="w-full"
+            contentClass="py-1"
+            each={reasoningLines()}
+            keyExtractor={(line) => String(line.id)}
+            estimatedItemSize={24}
+          >
+            {(line) => (
+              <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{line().text || " "}</Text>
+            )}
+          </List>
         </View>
       </If>
     </View>
@@ -908,7 +920,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
-        class="min-w-0 flex-1"
+        class="min-h-0 min-w-0 flex-1"
         contentClass="gap-4"
         scrollbar
         header={<View class="h-4" />}

@@ -1,10 +1,10 @@
-import { List, Scroll, Text, View, effect, signal, token, type ListRef } from "nsh";
+import { List, Scroll, Text, View, computed, effect, signal, token, type ListRef } from "nsh";
 import { Button, DiffView, Editor, Input, Menu, MenuItem, Popover, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { ChatItem, GitFileChange, RightPanelRequest, SubagentHistory, SubagentItem, TaskSummary, ToolItem, TurnState } from "../protocol";
 import type { UiContext } from "../ui-context";
-import { buildConversationRows, formatDuration, pathParts, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
+import { buildConversationRows, conversationRowsEqual, formatDuration, pathParts, reuseConversationRows, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
 import { Icon, type IconName } from "./icon";
 import { MessageRow, type MessageProps } from "./messages";
 import { CodeCard } from "./tool-card";
@@ -246,6 +246,7 @@ function subagentRows(
   history: SubagentHistory | undefined,
   task: TaskSummary | undefined,
   fallbackDuration: number | undefined,
+  turnCache: Map<string, TurnState>,
 ): ConversationRow[] {
   if (!history) return [];
   const items: ChatItem[] = [];
@@ -311,6 +312,23 @@ function subagentRows(
       : fallbackDuration;
     last.durationMs = duration;
   }
+  // `buildConversationRows` reuses a work row only while its turn keeps its
+  // identity; the panel builds turns itself, so keep one object per unchanged
+  // turn instead of making the rows (and their nested lists) new every time.
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    const cached = turnCache.get(turn.id);
+    if (
+      cached
+      && cached.status === turn.status
+      && cached.startedAt === turn.startedAt
+      && cached.durationMs === turn.durationMs
+    ) {
+      turns[index] = cached;
+    } else {
+      turnCache.set(turn.id, turn);
+    }
+  }
   return buildConversationRows(items, turns).filter((row) => row.type !== "actions" && row.type !== "changes");
 }
 
@@ -326,7 +344,27 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
     const turn = (props.store.turns()[props.request.sessionId] ?? []).find((entry) => entry.id === item.turnId);
     return turn ? turnDurationMs(turn) : undefined;
   };
-  const rows = () => subagentRows(props.request.agentId, history(), task(), parentTurnDuration());
+  const sessionKey = () => `${props.request.sessionId}:${props.request.agentId}`;
+  let cachedRows: ConversationRow[] = [];
+  let cachedKey = "";
+  let cachedTurns = new Map<string, TurnState>();
+  let cachedTurnsKey = "";
+  const rows = computed(
+    () => {
+      const key = sessionKey();
+      if (key !== cachedTurnsKey) {
+        cachedTurns = new Map();
+        cachedTurnsKey = key;
+      }
+      cachedRows = reuseConversationRows(
+        cachedKey === key ? cachedRows : [],
+        subagentRows(props.request.agentId, history(), task(), parentTurnDuration(), cachedTurns),
+      );
+      cachedKey = key;
+      return cachedRows;
+    },
+    { equals: conversationRowsEqual },
+  );
   const messageProps: MessageProps = {
     ...props,
     textFor: (item) => item.text,

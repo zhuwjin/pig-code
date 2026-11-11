@@ -16,7 +16,7 @@ const turn: TurnState = {
 };
 const items: ChatItem[] = [
   { kind: "user", id: "user-1", text: "Inspect activity", files: [], imageNums: [], sentAtMs: 1 },
-  ...Array.from({ length: 80 }, (_, index): ChatItem => ({
+  ...Array.from({ length: 1000 }, (_, index): ChatItem => ({
     kind: "tool",
     id: `tool-${index}`,
     tool: index % 3 === 0 ? "Bash" : "Read",

@@ -45,10 +45,11 @@ test("reaches and expands every item in a large activity", async () => {
   await app.waitFor("Final answer");
   await app.press("id:activity-tool-0");
   await app.waitFor("id:tool-tool-0");
-  await app.waitFor("id:tool-tool-79");
-  await app.press("id:tool-tool-79");
-  await app.waitFor("id:wrap-tool-79");
-});
+  await app.scroll("id:message-list", 40000);
+  await app.waitFor("id:tool-tool-998");
+  await app.press("id:tool-tool-998");
+  await app.waitFor("id:wrap-tool-998");
+}, 180_000);
 
 test("virtualizes a long expanded activity", async () => {
   const app = await open("./App.activity-large.fixture.tsx", {
@@ -59,8 +60,8 @@ test("virtualizes a long expanded activity", async () => {
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
   await app.waitFor("id:tool-tool-0");
-  await app.scroll("id:message-list", 1800);
-  await app.waitFor("id:tool-tool-79");
+  await app.scroll("id:message-list", 40000);
+  await app.waitFor("id:tool-tool-998");
   expect(app.count("id:message-list")).toBe(1);
   expect(app.count("id:tool-tool-0")).toBe(0);
-});
+}, 180_000);
