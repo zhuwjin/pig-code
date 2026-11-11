@@ -109,28 +109,6 @@ test("stays visible until reaching the latest messages", async () => {
   expect(samples[samples.length - 1]?.distance).toBeLessThanOrEqual(1);
 });
 
-test("passes wheel scrolling through the latest messages button", async () => {
-  const app = await open("./App.scroll-expand.fixture.tsx", {
-    platform: "macos",
-    width: 900,
-    height: 700,
-  });
-  await app.waitFor("Final answer");
-  await app.scroll("id:message-list", -200);
-  await app.waitFor("id:latest-messages");
-  const before = app.texts().find((text) => text.startsWith("POSITION_"));
-  expect(before).toBeDefined();
-
-  await app.hover("id:latest-messages");
-  await app.scroll("id:latest-scroll", -100);
-  const after = app.texts().find((text) => text.startsWith("POSITION_"));
-  expect(after).toBeDefined();
-  expect(Number(after!.slice("POSITION_".length))).toBeGreaterThan(Number(before!.slice("POSITION_".length)) + 50);
-
-  await app.press("id:latest-messages");
-  await app.waitUntil(() => !app.shows("id:latest-messages"));
-});
-
 test("keeps short conversations at the top", async () => {
   const app = await open("./App.scroll-short.fixture.tsx", {
     platform: "macos",

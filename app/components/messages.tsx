@@ -53,7 +53,6 @@ import { ShimmerText } from "./shimmer-text";
 import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow } from "./turn-rows";
 
-const LATEST_WHEEL_ORIGIN = 500_000;
 const FOLLOW_THRESHOLD = 24;
 
 export type MessageProps = UiContext & {
@@ -855,7 +854,6 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   const viewportWidth = signal(0);
   const lightbox = signal<{ src: string; label: string } | null>(null);
   let list: ListRef | undefined;
-  let latestWheelOffset = LATEST_WHEEL_ORIGIN;
   let visibleRowIndices: number[] = [];
   let followedSession: string | null = null;
   effect(() => {
@@ -1020,43 +1018,22 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
       </List>
       <If when={latestVisible()}>
         <View class="absolute inset-x-0 bottom-3 items-center" style={{ pointerEvents: "box-none" }}>
-          <Scroll
-            testID="latest-scroll"
-            class="h-[38px] w-full"
-            contentOffset={{ y: LATEST_WHEEL_ORIGIN }}
-            scrollbar={false}
-            bounces={false}
-            onScroll={(event) => {
-              const delta = event.offset.y - latestWheelOffset;
-              latestWheelOffset = event.offset.y;
-              if (delta === 0) return;
-              const max = Math.max(0, lastContentHeight - lastViewportHeight);
-              const next = Math.min(max, Math.max(0, lastScrollOffset + delta));
-              lastScrollOffset = next;
-              list?.scrollToOffset({ offset: next, animated: false });
+          <Button
+            testID="latest-messages"
+            class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg hover:bg-accent"
+            onPress={() => {
+              if (distanceFromEnd > lastViewportHeight) {
+                list?.scrollToOffset({
+                  offset: Math.max(0, lastContentHeight - lastViewportHeight * 1.5),
+                  animated: false,
+                });
+              }
+              setTimeout(() => list?.scrollToEnd({ animated: true }), 40);
             }}
           >
-            <View style={{ height: LATEST_WHEEL_ORIGIN * 2 }}>
-              <View class="sticky top-0 items-center">
-                <Button
-                  testID="latest-messages"
-                  class="h-[38px] flex-row items-center gap-2 rounded-full border border-border bg-popover px-4 shadow-lg hover:bg-accent"
-                  onPress={() => {
-                    if (distanceFromEnd > lastViewportHeight) {
-                      list?.scrollToOffset({
-                        offset: Math.max(0, lastContentHeight - lastViewportHeight * 1.5),
-                        animated: false,
-                      });
-                    }
-                    setTimeout(() => list?.scrollToEnd({ animated: true }), 40);
-                  }}
-                >
-                  <Icon name="arrow-down" size={15} color={token("muted-foreground")} />
-                  <Text class="text-sm font-medium text-foreground">{t("messages.latest")}</Text>
-                </Button>
-              </View>
-            </View>
-          </Scroll>
+            <Icon name="arrow-down" size={15} color={token("muted-foreground")} />
+            <Text class="text-sm font-medium text-foreground">{t("messages.latest")}</Text>
+          </Button>
         </View>
       </If>
       <If when={userRows().length >= 2 && viewportWidth() >= 720}>
