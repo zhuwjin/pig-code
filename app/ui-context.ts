@@ -1,4 +1,4 @@
-import { LayoutAnimation, reduceMotion, signal } from "nsh";
+import { LayoutAnimation, reduceMotion } from "nsh";
 import type { AgentStore } from "./store";
 import type { ThemeStore } from "./theme";
 
@@ -7,19 +7,12 @@ export interface UiContext {
   themeStore: ThemeStore;
 }
 
-export const followSuspended = signal(false);
-function suspendFollow(): void {
-  followSuspended.set(true);
-}
-
 export function toggleExpanded(context: UiContext, id: string): void {
-  suspendFollow();
   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
   context.store.toggleExpanded(id);
 }
 
 export function toggleUserExpanded(context: UiContext, id: string): void {
-  suspendFollow();
   if (!reduceMotion()) {
     LayoutAnimation.configureNext({ duration: 265, update: { type: "spring", springDamping: 1.0 } });
   }
@@ -27,7 +20,6 @@ export function toggleUserExpanded(context: UiContext, id: string): void {
 }
 
 export function toggleTurnExpanded(context: UiContext, id: string): void {
-  suspendFollow();
   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
   context.store.toggleTurnExpanded(id);
 }

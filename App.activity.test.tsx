@@ -36,7 +36,7 @@ test("renders the activity summary in English", async () => {
   expect(app.shows("id:tool-grep-1")).toBe(false);
 });
 
-test("reaches and expands every item in a large activity", async () => {
+test("expands the last item in a large activity", async () => {
   const app = await open("./App.activity-large.fixture.tsx", {
     platform: "macos",
     width: 1200,
@@ -49,8 +49,6 @@ test("reaches and expands every item in a large activity", async () => {
   await app.keyboard.press("escape");
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
-  await app.waitFor("id:tool-tool-0");
-  await app.scroll("id:message-list", 40000);
   await app.waitFor("id:tool-tool-998");
   await app.press("id:tool-tool-998");
   await app.waitFor("id:wrap-tool-998");
@@ -69,8 +67,6 @@ test("virtualizes a long expanded activity", async () => {
   await app.keyboard.press("escape");
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
-  await app.waitFor("id:tool-tool-0");
-  await app.scroll("id:message-list", 40000);
   await app.waitFor("id:tool-tool-998");
   expect(app.count("id:message-list")).toBe(1);
   expect(app.count("id:tool-tool-0")).toBe(0);

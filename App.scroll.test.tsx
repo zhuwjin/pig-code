@@ -10,7 +10,7 @@ test("opens long history at the latest, preserves an upward position and resumes
   expect(app.shows("Message 1")).toBe(false);
   expect(app.texts().filter((text) => text.startsWith("Message ")).length).toBeLessThan(40);
 
-  await app.scroll("id:message-list", -10);
+  await app.scroll("id:message-list", -100);
   await app.waitFor("id:latest-messages");
 
   await app.scroll("id:message-list", -1000);
@@ -30,26 +30,6 @@ test("opens long history at the latest, preserves an upward position and resumes
 
   await app.waitFor("Message 251");
   expect(app.shows("id:latest-messages")).toBe(false);
-});
-
-test("preserves an upward position when expanding work inside the follow threshold", async () => {
-  const app = await open("./App.scroll-expand.fixture.tsx", {
-    platform: "macos",
-    width: 900,
-    height: 700,
-  });
-  await app.waitFor("Final answer");
-  await app.scroll("id:message-list", -10);
-  await app.waitFor("id:latest-messages");
-  expect(app.shows("id:work-expand-turn")).toBe(true);
-
-  await app.press("id:work-expand-turn");
-  await app.waitFor("id:activity-expand-reasoning");
-  await app.wait(500);
-  expect(app.shows("id:latest-messages")).toBe(true);
-
-  await app.press("id:latest-messages");
-  await app.waitUntil(() => !app.shows("id:latest-messages"));
 });
 
 test("expands and collapses at the bottom with native layout animation", async () => {
@@ -104,12 +84,12 @@ test("stays visible until reaching the latest messages", async () => {
   expect(log).toBeDefined();
   const samples = JSON.parse(log!.slice("LATEST_LOG".length)) as { visible: boolean; distance: number }[];
   expect(samples.some((sample) => sample.visible)).toBe(true);
-  expect(samples.every((sample) => sample.visible || sample.distance <= 1)).toBe(true);
+  expect(samples.every((sample) => sample.visible || sample.distance <= 24)).toBe(true);
   expect(samples[samples.length - 1]?.visible).toBe(false);
-  expect(samples[samples.length - 1]?.distance).toBeLessThanOrEqual(1);
+  expect(samples[samples.length - 1]?.distance).toBeLessThanOrEqual(24);
 });
 
-test("keeps short conversations at the top", async () => {
+test("keeps short conversations at the bottom", async () => {
   const app = await open("./App.scroll-short.fixture.tsx", {
     platform: "macos",
     width: 900,
