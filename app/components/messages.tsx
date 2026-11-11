@@ -21,10 +21,10 @@ import {
   token,
   untracked,
 } from "nsh";
-import { Button, Collapsible, Input, TextView } from "nsh/base";
+import { Button, Input, TextView } from "nsh/base";
 import { t, tCount } from "../i18n";
 import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, TaskNotification, UserItem } from "../protocol";
-import { toggleUserExpanded, type UiContext } from "../ui-context";
+import { toggleExpanded, toggleTurnExpanded, toggleUserExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
   buildConversationRows,
@@ -38,6 +38,7 @@ import {
   mentionSegments,
   resolveActiveUserRow,
   taskStatusLabel,
+  turnDurationMs,
   userMessageIsLong,
 } from "../conversation";
 import { Icon } from "./icon";
@@ -50,7 +51,7 @@ import {
 } from "./reasoning-ticker";
 import { ShimmerText } from "./shimmer-text";
 import { ToolRow } from "./tool-card";
-import { TurnActionsRow, TurnChangesRow, WorkRow } from "./turn-rows";
+import { TurnActionsRow, TurnChangesRow } from "./turn-rows";
 
 const LATEST_WHEEL_ORIGIN = 500_000;
 
@@ -342,37 +343,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     : item().durationMs != null
       ? formatDuration(item().durationMs!, t("messages.thought_for"))
       : t("messages.thought_process");
-  const reasoningLines = computed(() =>
-    props.textFor(item()).split("\n").map((text, index) => ({ id: index, text }))
-  );
   return (
-    <Collapsible
-      open={open()}
-      reveal
-      content={
-        <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
-          <View style={{ height: Math.min(reasoningLines().length * 24, 320) }}>
-            <List
-              class="h-full"
-              contentClass="py-1"
-              each={reasoningLines()}
-              keyExtractor={(line) => String(line.id)}
-              estimatedItemSize={24}
-            >
-              {(line) => (
-                <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{line().text || " "}</Text>
-              )}
-            </List>
-          </View>
-        </View>
-      }
-    >
+    <View class="w-full">
       <View
         role="button"
         testID={`thinking-${item().id}`}
         accessibilityState={{ expanded: open() }}
         class="w-full flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(item().id)}
+        onPress={() => toggleExpanded(props, item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
         <If when={item().streaming}>
@@ -386,7 +364,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <If when={item().streaming && !open() && reasoningTickerLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-    </Collapsible>
+      <If when={open()}>
+        <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 border-l border-border pl-3.5">
+          <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">
+            {props.textFor(item())}
+          </Text>
+        </View>
+      </If>
+    </View>
   );
 }
 
@@ -545,34 +530,15 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
 
 function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "activity" }>> }) {
   const row = () => props.row();
-  const identity = computed(() => row().id);
-  const open = computed(() => props.store.isExpanded(identity()));
+  const open = () => props.store.isExpanded(row().id);
   return (
-    <Collapsible
-      open={open()}
-      reveal
-      content={
-        <View class="pt-2">
-          <List
-            testID={`activity-list-${row().id}`}
-            each={row().items}
-            keyExtractor={(item) => item.id}
-            estimatedItemSize={32}
-            viewport="parent"
-            class="w-full"
-            contentClass="gap-2"
-          >
-            {(item) => <ItemMessageRow {...props} item={item} />}
-          </List>
-        </View>
-      }
-    >
+    <View class="w-full">
       <View
         role="button"
         testID={row().id}
         accessibilityState={{ expanded: open() }}
         class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => props.store.toggleExpanded(row().id)}
+        onPress={() => toggleExpanded(props, row().id)}
       >
         <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
         <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
@@ -580,7 +546,67 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-    </Collapsible>
+      <If when={open()}>
+        <View class="pt-2">
+          <List
+            viewport="parent"
+            class="w-full"
+            contentClass="gap-2"
+            each={row().items}
+            keyExtractor={(item) => item.id}
+            estimatedItemSize={32}
+          >
+            {(item) => <ItemMessageRow {...props} item={item} />}
+          </List>
+        </View>
+      </If>
+    </View>
+  );
+}
+
+function WorkRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "work" }>> }) {
+  const row = () => props.row();
+  const turn = () => row().turn;
+  const open = () => props.store.isTurnExpanded(turn().id);
+  const grouped = computed(() => groupConversationActivity(row().items));
+  return (
+    <View class="w-full">
+      <Button
+        testID={`work-${turn().id}`}
+        class="flex-row items-center gap-1 self-start py-1"
+        onPress={() => toggleTurnExpanded(props, turn().id)}
+      >
+        <Text class="text-xs text-muted-foreground">
+          {turn().status === "stopped"
+            ? t("turn.stopped")
+            : (turnDurationMs(turn()) ?? 0) > 0
+              ? formatDuration(turnDurationMs(turn())!, t("turn.worked_for"))
+              : t("turn.processed")}
+        </Text>
+        <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
+      </Button>
+      <If when={open()}>
+        <View class="pt-2">
+          <List
+            viewport="parent"
+            class="w-full"
+            contentClass="gap-2"
+            each={grouped()}
+            keyExtractor={(child) => child.id}
+            estimatedItemSize={32}
+          >
+            {(child) => (
+              <If
+                when={child().type === "activity"}
+                else={<ItemMessageRow {...props} item={() => (child() as Extract<ConversationRow, { type: "item" }>).item} />}
+              >
+                <ActivityRow {...props} row={() => child() as Extract<ConversationRow, { type: "activity" }>} />
+              </If>
+            )}
+          </List>
+        </View>
+      </If>
+    </View>
   );
 }
 
@@ -628,22 +654,7 @@ export function MessageRow(props: MessageProps & { row: Accessor<ConversationRow
           <ActivityRow {...rowProps} row={() => row() as Extract<ConversationRow, { type: "activity" }>} />
         </If>
         <If when={row().type === "work"}>
-          <WorkRow {...rowProps} turn={() => (row() as Extract<ConversationRow, { type: "work" }>).turn}>
-            <View class="gap-2 pt-4">
-              <Each of={groupConversationActivity((row() as Extract<ConversationRow, { type: "work" }>).items)} key={(activity) => activity.id}>
-                {(activity) => (
-                  <>
-                    <If when={activity().type === "item"}>
-                      <ItemMessageRow {...rowProps} item={() => (activity() as Extract<ConversationRow, { type: "item" }>).item} />
-                    </If>
-                    <If when={activity().type === "activity"}>
-                      <ActivityRow {...rowProps} row={() => activity() as Extract<ConversationRow, { type: "activity" }>} />
-                    </If>
-                  </>
-                )}
-              </Each>
-            </View>
-          </WorkRow>
+          <WorkRow {...rowProps} row={() => row() as Extract<ConversationRow, { type: "work" }>} />
         </If>
         <If when={row().type === "changes"}>
           <TurnChangesRow {...rowProps} turn={() => (row() as Extract<ConversationRow, { type: "changes" }>).turn} />
@@ -831,7 +842,12 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
       return false;
     };
     return rows().filter((row) => {
-      if (row.type === "work" || row.type === "activity") return row.items.some(itemMatches);
+      if (row.type === "work") {
+        return row.items.some(itemMatches);
+      }
+      if (row.type === "activity") {
+        return row.items.some(itemMatches);
+      }
       if (row.type !== "item") return false;
       return itemMatches(row.item);
     });

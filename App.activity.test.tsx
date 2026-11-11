@@ -58,7 +58,9 @@ test("virtualizes a long expanded activity", async () => {
   });
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
+  await app.waitFor("id:tool-tool-0");
+  await app.scroll("id:message-list", 1800);
   await app.waitFor("id:tool-tool-79");
-  expect(app.count("id:activity-list-activity-tool-0")).toBe(1);
+  expect(app.count("id:message-list")).toBe(1);
   expect(app.count("id:tool-tool-0")).toBe(0);
 });
