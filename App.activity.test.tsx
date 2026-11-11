@@ -49,3 +49,16 @@ test("reaches and expands every item in a large activity", async () => {
   await app.press("id:tool-tool-79");
   await app.waitFor("id:wrap-tool-79");
 });
+
+test("virtualizes a long expanded activity", async () => {
+  const app = await open("./App.activity-large.fixture.tsx", {
+    platform: "macos",
+    width: 1200,
+    height: 700,
+  });
+  await app.waitFor("id:activity-tool-0");
+  await app.press("id:activity-tool-0");
+  await app.waitFor("id:tool-tool-79");
+  expect(app.count("id:activity-list-activity-tool-0")).toBe(1);
+  expect(app.count("id:tool-tool-0")).toBe(0);
+});

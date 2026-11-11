@@ -1,4 +1,4 @@
-import { Accessor, Clipboard, Scroll, Text, token, View } from "nsh";
+import { Accessor, Clipboard, List, Text, token, View } from "nsh";
 import { Button, Collapsible, ContextMenu, DiffView, MenuItem, TextView, Tooltip } from "nsh/base";
 import { t } from "../i18n";
 import type { AgentCard, ToolItem } from "../protocol";
@@ -136,28 +136,36 @@ function SearchBody(props: UiContext & { item: Accessor<ToolItem> }) {
       <If when={results()}>
         {(value) => (
           <View class="max-h-60 overflow-hidden rounded-xl border border-border bg-tool-surface">
-            <Scroll class="max-h-60" contentClass="p-1">
-              <View>
-                <Each of={value().rows.slice(0, 400)} key={(row) => `${row.path}:${row.line ?? 0}:${row.content ?? ""}`}>
-                  {(row) => (
-                    <Button
-                      class="group flex-row items-center gap-2 rounded px-2 py-0.5"
-                      onPress={() => props.store.openFile(row().path, row().line)}
-                    >
-                      <Text style={{ numberOfLines: 1 }} class="w-56 shrink-0 text-left font-mono text-xs text-foreground group-hover:text-info">
-                        {row().path}{row().line ? `:${row().line}` : ""}
-                      </Text>
-                      <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left font-mono text-xs text-foreground">
-                        {row().content ?? ""}
-                      </Text>
-                    </Button>
-                  )}
-                </Each>
-                <Each of={value().notes} key={(note) => note}>
-                  {(note) => <Text class="px-2 py-1 text-xs text-muted-foreground">{note()}</Text>}
-                </Each>
-              </View>
-            </Scroll>
+            <View style={{ height: Math.max(24, Math.min(value().rows.slice(0, 400).length * 24 + value().notes.length * 20, 240)) }}>
+              <List
+                class="h-full"
+                contentClass="p-1"
+                each={value().rows.slice(0, 400)}
+                keyExtractor={(row, index) => `${row.path}:${row.line ?? 0}:${index}`}
+                estimatedItemSize={24}
+                footer={value().notes.length > 0 ? (
+                  <View class="gap-0.5 px-2 py-1">
+                    <Each of={value().notes} key={(note) => note}>
+                      {(note) => <Text class="text-xs text-muted-foreground">{note()}</Text>}
+                    </Each>
+                  </View>
+                ) : undefined}
+              >
+                {(row) => (
+                  <Button
+                    class="group flex-row items-center gap-2 rounded px-2 py-0.5"
+                    onPress={() => props.store.openFile(row().path, row().line)}
+                  >
+                    <Text style={{ numberOfLines: 1 }} class="w-56 shrink-0 text-left font-mono text-xs text-foreground group-hover:text-info">
+                      {row().path}{row().line ? `:${row().line}` : ""}
+                    </Text>
+                    <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left font-mono text-xs text-foreground">
+                      {row().content ?? ""}
+                    </Text>
+                  </Button>
+                )}
+              </List>
+            </View>
           </View>
         )}
       </If>
@@ -169,28 +177,23 @@ function SearchBody(props: UiContext & { item: Accessor<ToolItem> }) {
 function GenericBody(props: UiContext & { item: Accessor<ToolItem> }) {
   const item = () => props.item();
   const showInput = () => item().status === "input" || item().detail.includes("\n") || item().detail.length > 80;
+  const code = () => [showInput() ? item().detail : "", item().output].filter(Boolean).join("\n");
   return (
     <View class="max-h-60 overflow-hidden rounded-xl border border-border bg-tool-surface">
-      <Scroll class="max-h-60" contentClass="gap-2 px-3 py-2">
-        <View class="gap-2">
-          <If when={showInput() && item().detail}>
-            <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{item().detail}</Text>
-          </If>
-          <If when={item().output}>
-            <Text style={{ userSelect: "text" }} class={item().status === "error"
-              ? "font-mono text-xs leading-5 text-destructive"
-              : "font-mono text-xs leading-5 text-foreground"}
-            >
-              {item().output}
-            </Text>
-          </If>
-          <If when={!item().output && item().status !== "input" && item().status !== "running"}>
-            <Text class="font-mono text-xs text-muted-foreground">
-              {item().status === "stopped" ? t("tools.stopped") : t("tools.no_output")}
-            </Text>
-          </If>
-        </View>
-      </Scroll>
+      <If when={code()}>
+        <CodeView
+          code={code}
+          language="text"
+          wrap={() => false}
+          maxHeight={240}
+          error={item().status === "error"}
+        />
+      </If>
+      <If when={!code() && item().status !== "input" && item().status !== "running"}>
+        <Text class="px-3 py-2 font-mono text-xs text-muted-foreground">
+          {item().status === "stopped" ? t("tools.stopped") : t("tools.no_output")}
+        </Text>
+      </If>
     </View>
   );
 }
@@ -200,17 +203,21 @@ function StreamingDiffBody(props: UiContext & { item: Accessor<ToolItem> }) {
     .map((row, index) => ({ ...row, id: index }));
   return (
     <View class="mt-2 max-h-60 overflow-hidden rounded-xl border border-border bg-tool-surface">
-      <Scroll class="max-h-60" contentClass="p-2">
-        <View class="gap-0.5">
-          <Each of={rows()} key={(row) => row.id}>
-            {(row) => (
-              <View class={row().kind === "added" ? "border-l-2 border-success bg-diff-added px-2 py-0.5" : "border-l-2 border-destructive bg-diff-deleted px-2 py-0.5"}>
-                <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{row().text || " "}</Text>
-              </View>
-            )}
-          </Each>
-        </View>
-      </Scroll>
+      <View style={{ height: Math.max(24, Math.min(rows().length * 24 + 16, 240)) }}>
+        <List
+          class="h-full"
+          contentClass="p-2"
+          each={rows()}
+          keyExtractor={(row) => String(row.id)}
+          estimatedItemSize={24}
+        >
+          {(row) => (
+            <View class={row().kind === "added" ? "border-l-2 border-success bg-diff-added px-2 py-0.5" : "border-l-2 border-destructive bg-diff-deleted px-2 py-0.5"}>
+              <Text style={{ userSelect: "text" }} class="font-mono text-xs leading-5 text-foreground">{row().text || " "}</Text>
+            </View>
+          )}
+        </List>
+      </View>
     </View>
   );
 }
@@ -302,17 +309,15 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
       </Button>
     );
   };
-  const rows = (
+  const rows = () => (
     <View class="gap-1">
-      <If when={props.item().tool === "AgentSwarm"}>{parent()}</If>
       <Each of={ordered()} key={(entry) => entry.agent.agent_id}>
-        {(entry, index) => (
+        {(entry) => (
           <AgentRow
             {...props}
             agent={() => entry().agent}
             status={status()}
             approvalPending={props.item().approvalPending ?? false}
-            index={props.item().tool === "AgentSwarm" ? index() + 1 : undefined}
           />
         )}
       </Each>
@@ -321,7 +326,34 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
   if (props.item().tool === "AgentSwarm") {
     const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
     return (
-      <Collapsible open={open()} reveal content={rows}>
+      <Collapsible
+        open={open()}
+        reveal
+        content={open() ? (
+          <View class="gap-1">
+            {parent()}
+            <View style={{ height: Math.min(ordered().length * 80, 384) }}>
+              <List
+                class="h-full"
+                contentClass="gap-1"
+                each={ordered()}
+                keyExtractor={(entry) => entry.agent.agent_id}
+                estimatedItemSize={80}
+              >
+                {(entry, index) => (
+                  <AgentRow
+                    {...props}
+                    agent={() => entry().agent}
+                    status={status()}
+                    approvalPending={props.item().approvalPending ?? false}
+                    index={index() + 1}
+                  />
+                )}
+              </List>
+            </View>
+          </View>
+        ) : undefined}
+      >
         <View
           role="button"
           testID={`swarm-${props.item().id}`}
@@ -338,7 +370,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
       </Collapsible>
     );
   }
-  return rows;
+  return rows();
 }
 
 function AgentRow(props: UiContext & {
@@ -417,11 +449,11 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
       class="rounded-xl border border-border bg-tool-surface"
       open={open()}
       reveal
-      content={
+      content={open() ? (
         <View class="max-h-80 border-t border-border p-3">
           <TextView markdown={plan()} selectable classes={{ root: "text-sm leading-6 text-foreground" }} />
         </View>
-      }
+      ) : undefined}
     >
       <View
         role="button"
@@ -470,7 +502,7 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
   if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
-    <Collapsible class="w-full" open={open()} reveal content={<ToolBody {...props} />}>
+    <Collapsible class="w-full" open={open()} reveal content={open() ? <ToolBody {...props} /> : undefined}>
       <View
         role="button"
         testID={`tool-${item().id}`}
@@ -479,9 +511,16 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
         onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
-        <ShimmerText active={running()} baseOpacity={running() ? 0.6 : 1} class="shrink-0" textClass={running() ? "text-sm" : "text-sm font-medium"}>
-          {toolLabel(item().tool, running())}
-        </ShimmerText>
+        <If when={running()}>
+          <ShimmerText active baseOpacity={0.6} class="shrink-0" textClass="text-sm">
+            {toolLabel(item().tool, true)}
+          </ShimmerText>
+        </If>
+        <If when={!running()}>
+          <Text class="shrink-0 text-sm font-medium text-muted-foreground">
+            {toolLabel(item().tool, false)}
+          </Text>
+        </If>
         <If when={item().tool === "Read"}>
           <ContextMenu
             class="min-w-0 shrink"

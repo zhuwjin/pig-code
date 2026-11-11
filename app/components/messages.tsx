@@ -337,15 +337,33 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
       </View>
     </View>
   );
+  const label = () => item().streaming
+    ? t("messages.thinking")
+    : item().durationMs != null
+      ? formatDuration(item().durationMs!, t("messages.thought_for"))
+      : t("messages.thought_process");
+  const reasoningLines = computed(() =>
+    props.textFor(item()).split("\n").map((text, index) => ({ id: index, text }))
+  );
   return (
     <Collapsible
       open={open()}
       reveal
       content={
         <View testID={`thinking-${item().id}-content`} class="ml-2 mt-1 max-h-80 border-l border-border pl-3.5">
-          <Scroll class="max-h-80">
-            <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{props.textFor(item())}</Text>
-          </Scroll>
+          <View style={{ height: Math.min(reasoningLines().length * 24, 320) }}>
+            <List
+              class="h-full"
+              contentClass="py-1"
+              each={reasoningLines()}
+              keyExtractor={(line) => String(line.id)}
+              estimatedItemSize={24}
+            >
+              {(line) => (
+                <Text style={{ userSelect: "text" }} class="text-sm leading-6 text-muted-foreground">{line().text || " "}</Text>
+              )}
+            </List>
+          </View>
         </View>
       }
     >
@@ -357,9 +375,14 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         onPress={() => props.store.toggleExpanded(item().id)}
       >
         <Icon name="brain" size={16} color={token("muted-foreground")} />
-        <ShimmerText active={item().streaming} baseOpacity={item().streaming ? 0.6 : 1} class="shrink-0" textClass="text-sm leading-5">
-          {item().streaming ? t("messages.thinking") : item().durationMs != null ? formatDuration(item().durationMs!, t("messages.thought_for")) : t("messages.thought_process")}
-        </ShimmerText>
+        <If when={item().streaming}>
+          <ShimmerText active baseOpacity={0.6} class="shrink-0" textClass="text-sm leading-5">
+            {label()}
+          </ShimmerText>
+        </If>
+        <If when={!item().streaming}>
+          <Text class="shrink-0 text-sm leading-5 text-muted-foreground">{label()}</Text>
+        </If>
         <If when={item().streaming && !open() && reasoningTickerLine(props.textFor(item()))}>{ticker()}</If>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
@@ -524,53 +547,23 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
   const row = () => props.row();
   const identity = computed(() => row().id);
   const open = computed(() => props.store.isExpanded(identity()));
-  const itemCount = computed(() => row().items.length);
-  const mountedCount = signal(4);
-  let mountFrame: number | undefined;
-  let mountGeneration = 0;
-  let previousIdentity = identity();
-  const stopMounting = () => {
-    mountGeneration += 1;
-    if (mountFrame !== undefined) cancelAnimationFrame(mountFrame);
-    mountFrame = undefined;
-  };
-  const scheduleMount = () => {
-    if (mountFrame !== undefined) return;
-    if (open() ? mountedCount() >= itemCount() : mountedCount() <= 4) return;
-    const generation = mountGeneration;
-    mountFrame = requestAnimationFrame(() => {
-      mountFrame = undefined;
-      if (generation !== mountGeneration) return;
-      mountedCount.update((count) => open() ? Math.min(count + 4, itemCount()) : Math.max(4, count - 4));
-      scheduleMount();
-    });
-  };
-  effect(() => {
-    const currentIdentity = identity();
-    const expanded = open();
-    const identityChanged = currentIdentity !== previousIdentity;
-    previousIdentity = currentIdentity;
-    stopMounting();
-    if (identityChanged || expanded) mountedCount.set(4);
-    untracked(scheduleMount);
-    return stopMounting;
-  });
-  effect(() => {
-    itemCount();
-    untracked(scheduleMount);
-  });
   return (
     <Collapsible
       open={open()}
       reveal
       content={
-        <View class="gap-2 pt-2">
-          <Each of={row().items.slice(0, mountedCount())} key={(item) => item.id}>
+        <View class="pt-2">
+          <List
+            testID={`activity-list-${row().id}`}
+            each={row().items}
+            keyExtractor={(item) => item.id}
+            estimatedItemSize={32}
+            viewport="parent"
+            class="w-full"
+            contentClass="gap-2"
+          >
             {(item) => <ItemMessageRow {...props} item={item} />}
-          </Each>
-          <Each of={row().items.slice(mountedCount())} key={(item) => item.id}>
-            {() => <View style={{ height: 28 }} />}
-          </Each>
+          </List>
         </View>
       }
     >

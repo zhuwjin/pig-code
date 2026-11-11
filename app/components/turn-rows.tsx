@@ -1,4 +1,4 @@
-import { Accessor, Clipboard, Text, token, View, type JSX } from "nsh";
+import { Accessor, Clipboard, List, Text, token, View, type JSX } from "nsh";
 import { Button, Collapsible } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
@@ -33,7 +33,28 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
   const turn = () => props.turn();
   const open = () => props.store.isExpanded(`turn-changes-${turn().id}`);
   const totals = () => changeTotals(turn().changes);
-  const visible = () => turn().changes.slice(0, open() ? undefined : 3);
+  const changeRow = (change: Accessor<TurnState["changes"][number]>) => (
+    <View class="group flex-row items-center gap-2 px-3 py-1.5 hover:bg-accent">
+      <Button
+        class="min-w-0 flex-1"
+        onPress={() => props.store.openFile(change().path)}
+      >
+        <Text style={{ numberOfLines: 1 }} class="text-left font-mono text-xs text-muted-foreground group-hover:text-info group-hover:underline">
+          {change().path}
+        </Text>
+      </Button>
+      <Text class="font-mono text-xs text-success">+{change().additions}</Text>
+      <Text class="font-mono text-xs text-destructive">-{change().deletions}</Text>
+      <Button
+        testID={`revert-${turn().id}-${change().path}`}
+        accessibilityLabel={t("turn.restore", { path: change().path })}
+        class="rounded px-1.5 py-0.5 opacity-0 hover:bg-muted group-hover:opacity-100"
+        onPress={() => props.store.revertFile(change().path)}
+      >
+        <Icon name="undo-2" size={12} color={token("muted-foreground")} />
+      </Button>
+    </View>
+  );
   return (
     <View class="overflow-hidden rounded-xl border border-border bg-tool-surface">
       <View class="flex-row items-center gap-2 px-3 py-2.5">
@@ -42,32 +63,27 @@ export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> })
         <Text class="font-mono text-xs text-success">+{totals().additions}</Text>
         <Text class="font-mono text-xs text-destructive">-{totals().deletions}</Text>
       </View>
-      <View class="border-t border-border py-1">
-        <Each of={visible()} key={(change) => change.path}>
-          {(change) => (
-            <View class="group flex-row items-center gap-2 px-3 py-1.5 hover:bg-accent">
-              <Button
-                class="min-w-0 flex-1"
-                onPress={() => props.store.openFile(change().path)}
-              >
-                <Text style={{ numberOfLines: 1 }} class="text-left font-mono text-xs text-muted-foreground group-hover:text-info group-hover:underline">
-                  {change().path}
-                </Text>
-              </Button>
-              <Text class="font-mono text-xs text-success">+{change().additions}</Text>
-              <Text class="font-mono text-xs text-destructive">-{change().deletions}</Text>
-              <Button
-                testID={`revert-${turn().id}-${change().path}`}
-                accessibilityLabel={t("turn.restore", { path: change().path })}
-                class="rounded px-1.5 py-0.5 opacity-0 hover:bg-muted group-hover:opacity-100"
-                onPress={() => props.store.revertFile(change().path)}
-              >
-                <Icon name="undo-2" size={12} color={token("muted-foreground")} />
-              </Button>
-            </View>
-          )}
-        </Each>
-      </View>
+      <If when={!open()}>
+        <View class="border-t border-border py-1">
+          <Each of={turn().changes.slice(0, 3)} key={(change) => change.path}>
+            {changeRow}
+          </Each>
+        </View>
+      </If>
+      <If when={open()}>
+        <View class="max-h-80 overflow-hidden border-t border-border py-1">
+          <View style={{ height: Math.max(28, Math.min(turn().changes.length * 28, 320)) }}>
+            <List
+              class="h-full"
+              each={turn().changes}
+              keyExtractor={(change) => change.path}
+              estimatedItemSize={28}
+            >
+              {changeRow}
+            </List>
+          </View>
+        </View>
+      </If>
       <If when={turn().changes.length > 3}>
         <Button
           class="flex-row items-center justify-center gap-1 border-t border-border py-1.5 hover:bg-accent"
@@ -108,25 +124,33 @@ export function TurnActionsRow(props: UiContext & {
       <Collapsible
         open={hooksOpen()}
         reveal
-        content={
-          <View class="gap-2 rounded-xl border border-border bg-tool-surface p-3">
-            <Each of={turn().hooks} key={(hook) => hook.id}>
-              {(hook) => (
-                <View class="gap-0.5">
-                  <View class="flex-row items-center gap-2">
-                    <Text class="flex-1 text-xs font-medium text-foreground">{hook().label}</Text>
-                    <Text class="text-xs text-muted-foreground">{formatCompactDuration(hook().duration_ms)}</Text>
-                    <Text class={hook().state === "failed" || hook().state === "blocked" ? "text-xs text-destructive" : "text-xs text-success"}>
-                      {t(hook().state === "finished" ? "turn.hook.finished" : hook().state === "blocked" ? "turn.hook.blocked" : "turn.hook.failed")}
-                    </Text>
+        content={hooksOpen() ? (
+          <View class="rounded-xl border border-border bg-tool-surface p-3">
+            <View style={{ height: Math.max(56, Math.min(turn().hooks.length * 56, 320)) }}>
+              <List
+                class="h-full"
+                contentClass="gap-2"
+                each={turn().hooks}
+                keyExtractor={(hook) => hook.id}
+                estimatedItemSize={56}
+              >
+                {(hook) => (
+                  <View class="gap-0.5">
+                    <View class="flex-row items-center gap-2">
+                      <Text class="flex-1 text-xs font-medium text-foreground">{hook().label}</Text>
+                      <Text class="text-xs text-muted-foreground">{formatCompactDuration(hook().duration_ms)}</Text>
+                      <Text class={hook().state === "failed" || hook().state === "blocked" ? "text-xs text-destructive" : "text-xs text-success"}>
+                        {t(hook().state === "finished" ? "turn.hook.finished" : hook().state === "blocked" ? "turn.hook.blocked" : "turn.hook.failed")}
+                      </Text>
+                    </View>
+                    <Text class="text-xs text-muted-foreground">{hook().hook_event}</Text>
+                    <If when={hook().reason}><Text class="text-xs text-warning">{hook().reason}</Text></If>
                   </View>
-                  <Text class="text-xs text-muted-foreground">{hook().hook_event}</Text>
-                  <If when={hook().reason}><Text class="text-xs text-warning">{hook().reason}</Text></If>
-                </View>
-              )}
-            </Each>
+                )}
+              </List>
+            </View>
           </View>
-        }
+        ) : undefined}
       >
         <View class={latest() ? "flex-row items-center gap-1" : "flex-row items-center gap-1 opacity-0 group-hover:opacity-100"}>
           <If when={props.markdownText()}>
