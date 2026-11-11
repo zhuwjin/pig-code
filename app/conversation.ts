@@ -120,6 +120,74 @@ export function buildConversationRows(
   return rows;
 }
 
+export function flattenConversationRows(
+  items: ChatItem[],
+  turns: TurnState[],
+  isTurnExpanded: (id: string) => boolean,
+  isItemExpanded: (id: string) => boolean,
+): ConversationRow[] {
+  const rows: ConversationRow[] = [];
+  const pushGrouped = (entries: ChatItem[]) => {
+    for (const child of groupConversationActivity(entries)) {
+      rows.push(child);
+      if (child.type === "activity" && isItemExpanded(child.id)) {
+        for (const item of child.items) {
+          rows.push({ id: `item-${item.id}`, type: "item", item });
+        }
+      }
+    }
+  };
+  let index = 0;
+  while (index < items.length) {
+    const item = items[index];
+    const turnId = item.kind === "markdown" || item.kind === "reasoning" || item.kind === "tool"
+      ? item.turnId
+      : undefined;
+    if (!turnId) {
+      rows.push({ id: `item-${item.id}`, type: "item", item });
+      index += 1;
+      continue;
+    }
+    const group: ChatItem[] = [];
+    while (index < items.length) {
+      const next = items[index];
+      const nextTurn = next.kind === "markdown" || next.kind === "reasoning" || next.kind === "tool"
+        ? next.turnId
+        : undefined;
+      if (nextTurn !== turnId) break;
+      group.push(next);
+      index += 1;
+    }
+    const turn = turns.find((candidate) => candidate.id === turnId);
+    const ended = turn?.status === "done" || turn?.status === "stopped";
+    const hasWork = group.some((entry) => entry.kind === "reasoning" || entry.kind === "tool");
+    const bodyEnd = group[group.length - 1]?.kind === "markdown" ? group.length - 1 : group.length;
+    const workItems = turn && ended && hasWork
+      ? group.filter((entry, entryIndex) => {
+        const foldable = entry.kind === "reasoning" || entry.kind === "tool" || entry.kind === "markdown";
+        const isPlan = entry.kind === "tool" && entry.tool === "ExitPlanMode";
+        return entryIndex < bodyEnd && foldable && !isPlan;
+      })
+      : [];
+    const workItemSet = new Set(workItems);
+    if (turn && ended && hasWork) {
+      rows.push({ id: `work-${turnId}`, type: "work", turn, items: workItems });
+      if (isTurnExpanded(turnId)) pushGrouped(workItems);
+    }
+    pushGrouped(group.filter((entry) => !workItemSet.has(entry)));
+    if (turn?.changes.length) rows.push({ id: `changes-${turnId}`, type: "changes", turn });
+    if (turn && ended) {
+      rows.push({
+        id: `actions-${turnId}`,
+        type: "actions",
+        turn,
+        markdown: group.filter((entry): entry is MarkdownItem => entry.kind === "markdown"),
+      });
+    }
+  }
+  return rows;
+}
+
 function sameConversationItem(previous: ChatItem, next: ChatItem): boolean {
   if (previous.kind !== next.kind || previous.id !== next.id) return false;
   if (previous.kind === "markdown" || previous.kind === "reasoning") {

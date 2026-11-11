@@ -27,8 +27,8 @@ import type { ChatItem, MarkdownItem, NoteItem, NotificationItem, TaskNotificati
 import { toggleExpanded, toggleTurnExpanded, toggleUserExpanded, type UiContext } from "../ui-context";
 import {
   activitySummary,
-  buildConversationRows,
   conversationRowsEqual,
+  flattenConversationRows,
   groupConversationActivity,
   reuseConversationRows,
   type ConversationRow,
@@ -58,6 +58,7 @@ const LATEST_WHEEL_ORIGIN = 500_000;
 export type MessageProps = UiContext & {
   textFor: (item: MarkdownItem) => string;
   onImage: (source: string, label: string) => void;
+  flat?: boolean;
 };
 
 function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
@@ -543,6 +544,7 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
 function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "activity" }>> }) {
   const row = () => props.row();
   const open = () => props.store.isExpanded(row().id);
+  const flat = () => props.flat === true;
   return (
     <View class="w-full">
       <View
@@ -558,7 +560,7 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-      <If when={open()}>
+      <If when={open() && !flat()}>
         <View class="pt-2">
           <List
             viewport="parent"
@@ -580,6 +582,7 @@ function WorkRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, 
   const row = () => props.row();
   const turn = () => row().turn;
   const open = () => props.store.isTurnExpanded(turn().id);
+  const flat = () => props.flat === true;
   const grouped = computed(() => groupConversationActivity(row().items));
   return (
     <View class="w-full">
@@ -597,7 +600,7 @@ function WorkRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, 
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} color={token("muted-foreground")} />
       </Button>
-      <If when={open()}>
+      <If when={open() && !flat()}>
         <View class="pt-2">
           <List
             viewport="parent"
@@ -761,7 +764,12 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
       const session = props.store.current();
       cachedRows = reuseConversationRows(
         cachedSession === session ? cachedRows : [],
-        buildConversationRows(props.items, props.store.currentTurns()),
+        flattenConversationRows(
+          props.items,
+          props.store.currentTurns(),
+          (id) => props.store.isTurnExpanded(id),
+          (id) => props.store.isExpanded(id),
+        ),
       );
       cachedSession = session;
       return cachedRows;
@@ -808,13 +816,21 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
   let list: ListRef | undefined;
   let latestWheelOffset = LATEST_WHEEL_ORIGIN;
   let visibleRowIndices: number[] = [];
+  let lastExpansion = "";
   effect(() => {
+    const expansion = JSON.stringify([props.store.expandedTurns(), props.store.expandedItems()]);
     if (latestVisible()) {
+      lastExpansion = expansion;
       cancelFollow();
       return;
     }
     rows();
     textOverrides();
+    if (expansion !== lastExpansion) {
+      lastExpansion = expansion;
+      cancelFollow();
+      return;
+    }
     if (followTimer !== undefined) return;
     followTimer = setTimeout(() => {
       followTimer = undefined;
@@ -948,6 +964,7 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
             active={row().id === activeSearchRow()}
             navEligible={userRows().length >= 2}
             onImage={(src, label) => lightbox.set({ src, label })}
+            flat
           />
         )}
       </List>
