@@ -3,6 +3,7 @@ import {
   activitySummary,
   buildConversationRows,
   conversationRowsEqual,
+  flattenConversationRows,
   formatClock,
   groupConversationActivity,
   formatTokens,
@@ -72,6 +73,35 @@ test("folds a finished turn around its final answer and restores work on demand"
   if (expanded[1].type === "work") {
     expect(expanded[1].items.map((item) => item.id)).toEqual(["r1", "call-1", "m1"]);
   }
+});
+
+test("folds a background notification that arrives mid-turn into the work row", () => {
+  const notification: ChatItem = {
+    kind: "notification",
+    id: "n1",
+    sentAtMs: 2,
+    notifications: [{
+      id: "tn1",
+      task_id: "task-1",
+      kind: "shell",
+      status: "completed",
+      severity: "info",
+      description: "command finished",
+      title: "command finished",
+      body: "",
+      output: null,
+    }],
+  };
+  const withNotification = [items[0], items[1], items[2], notification, items[3], items[4]];
+  const rows = buildConversationRows(withNotification, [turn]);
+  expect(rows.map((row) => row.type)).toEqual(["item", "work", "item", "changes", "actions"]);
+  if (rows[1].type === "work") {
+    expect(rows[1].items.map((item) => item.id)).toEqual(["r1", "call-1", "n1", "m1"]);
+  }
+  if (rows[2].type === "item") expect(rows[2].item.id).toBe("m2");
+
+  const flat = flattenConversationRows(withNotification, [turn], () => false, () => false);
+  expect(flat.map((row) => row.type)).toEqual(["item", "work", "item", "changes", "actions"]);
 });
 
 test("groups consecutive activity while preserving body and single tools", () => {

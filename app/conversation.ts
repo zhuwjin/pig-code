@@ -63,6 +63,30 @@ export function activitySummary(items: ChatItem[]): string {
   }).join(" · ");
 }
 
+function turnIdOf(item: ChatItem): string | undefined {
+  return item.kind === "markdown" || item.kind === "reasoning" || item.kind === "tool"
+    ? item.turnId
+    : undefined;
+}
+
+/// A background notification that arrives between a turn's items belongs to
+/// that turn (and its work fold) instead of splitting the turn in two. Only a
+/// notification whose next turn item is the same turn counts; one between two
+/// turns stays standalone.
+function continuesTurn(items: ChatItem[], index: number, turnId: string): boolean {
+  let look = index;
+  while (look < items.length && items[look].kind === "notification") look += 1;
+  return look < items.length && turnIdOf(items[look]) === turnId;
+}
+
+/// The final markdown answer stays outside the work fold; trailing background
+/// notifications do not turn it into work.
+function bodyEndOf(group: ChatItem[]): number {
+  let end = group.length;
+  while (end > 0 && group[end - 1].kind === "notification") end -= 1;
+  return end > 0 && group[end - 1].kind === "markdown" ? end - 1 : group.length;
+}
+
 export function buildConversationRows(
   items: ChatItem[],
   turns: TurnState[],
@@ -71,9 +95,7 @@ export function buildConversationRows(
   let index = 0;
   while (index < items.length) {
     const item = items[index];
-    const turnId = item.kind === "markdown" || item.kind === "reasoning" || item.kind === "tool"
-      ? item.turnId
-      : undefined;
+    const turnId = turnIdOf(item);
     if (!turnId) {
       rows.push({ id: `item-${item.id}`, type: "item", item });
       index += 1;
@@ -82,10 +104,15 @@ export function buildConversationRows(
     const group: ChatItem[] = [];
     while (index < items.length) {
       const next = items[index];
-      const nextTurn = next.kind === "markdown" || next.kind === "reasoning" || next.kind === "tool"
-        ? next.turnId
-        : undefined;
-      if (nextTurn !== turnId) break;
+      const nextTurn = turnIdOf(next);
+      if (nextTurn !== turnId) {
+        if (next.kind === "notification" && group.length > 0 && continuesTurn(items, index, turnId)) {
+          group.push(next);
+          index += 1;
+          continue;
+        }
+        break;
+      }
       group.push(next);
       index += 1;
     }
@@ -96,10 +123,10 @@ export function buildConversationRows(
     // A turn that ends on a tool or reasoning item (for example a subagent
     // stopped on a tool call) folds all of its work, so the work row never
     // opens empty while the work sits below it.
-    const bodyEnd = group[group.length - 1]?.kind === "markdown" ? group.length - 1 : group.length;
+    const bodyEnd = bodyEndOf(group);
     const workItems = turn && ended && hasWork
       ? group.filter((entry, entryIndex) => {
-        const foldable = entry.kind === "reasoning" || entry.kind === "tool" || entry.kind === "markdown";
+        const foldable = entry.kind === "reasoning" || entry.kind === "tool" || entry.kind === "markdown" || entry.kind === "notification";
         const isPlan = entry.kind === "tool" && entry.tool === "ExitPlanMode";
         return entryIndex < bodyEnd && foldable && !isPlan;
       })
@@ -140,9 +167,7 @@ export function flattenConversationRows(
   let index = 0;
   while (index < items.length) {
     const item = items[index];
-    const turnId = item.kind === "markdown" || item.kind === "reasoning" || item.kind === "tool"
-      ? item.turnId
-      : undefined;
+    const turnId = turnIdOf(item);
     if (!turnId) {
       rows.push({ id: `item-${item.id}`, type: "item", item });
       index += 1;
@@ -151,20 +176,25 @@ export function flattenConversationRows(
     const group: ChatItem[] = [];
     while (index < items.length) {
       const next = items[index];
-      const nextTurn = next.kind === "markdown" || next.kind === "reasoning" || next.kind === "tool"
-        ? next.turnId
-        : undefined;
-      if (nextTurn !== turnId) break;
+      const nextTurn = turnIdOf(next);
+      if (nextTurn !== turnId) {
+        if (next.kind === "notification" && group.length > 0 && continuesTurn(items, index, turnId)) {
+          group.push(next);
+          index += 1;
+          continue;
+        }
+        break;
+      }
       group.push(next);
       index += 1;
     }
     const turn = turns.find((candidate) => candidate.id === turnId);
     const ended = turn?.status === "done" || turn?.status === "stopped";
     const hasWork = group.some((entry) => entry.kind === "reasoning" || entry.kind === "tool");
-    const bodyEnd = group[group.length - 1]?.kind === "markdown" ? group.length - 1 : group.length;
+    const bodyEnd = bodyEndOf(group);
     const workItems = turn && ended && hasWork
       ? group.filter((entry, entryIndex) => {
-        const foldable = entry.kind === "reasoning" || entry.kind === "tool" || entry.kind === "markdown";
+        const foldable = entry.kind === "reasoning" || entry.kind === "tool" || entry.kind === "markdown" || entry.kind === "notification";
         const isPlan = entry.kind === "tool" && entry.tool === "ExitPlanMode";
         return entryIndex < bodyEnd && foldable && !isPlan;
       })
