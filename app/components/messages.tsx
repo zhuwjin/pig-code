@@ -54,6 +54,7 @@ import { ToolRow } from "./tool-card";
 import { TurnActionsRow, TurnChangesRow } from "./turn-rows";
 
 const FOLLOW_THRESHOLD = 24;
+const ACTIVITY_MAX_HEIGHT = 420;
 
 export type MessageProps = UiContext & {
   textFor: (item: MarkdownItem) => string;
@@ -535,7 +536,26 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
 function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "activity" }>> }) {
   const row = () => props.row();
   const open = () => props.store.isExpanded(row().id);
-  const flat = () => props.flat === true;
+  const body = () => (
+    <Scroll
+      testID={`${row().id}-body`}
+      class="w-full"
+      style={{ maxHeight: ACTIVITY_MAX_HEIGHT }}
+      scrollbar
+      bounces={false}
+    >
+      <List
+        viewport="parent"
+        class="w-full"
+        contentClass="gap-2"
+        each={row().items}
+        keyExtractor={(item) => item.id}
+        estimatedItemSize={32}
+      >
+        {(item) => <ItemMessageRow {...props} item={item} />}
+      </List>
+    </Scroll>
+  );
   return (
     <View class="w-full">
       <View
@@ -551,19 +571,8 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         </Text>
         <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
       </View>
-      <If when={open() && !flat()}>
-        <View class="pt-2">
-          <List
-            viewport="parent"
-            class="w-full"
-            contentClass="gap-2"
-            each={row().items}
-            keyExtractor={(item) => item.id}
-            estimatedItemSize={32}
-          >
-            {(item) => <ItemMessageRow {...props} item={item} />}
-          </List>
-        </View>
+      <If when={open()}>
+        <View class="pt-2">{body()}</View>
       </If>
     </View>
   );
@@ -753,7 +762,6 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
       props.items,
       props.store.currentTurns(),
       (id) => props.store.isTurnExpanded(id),
-      (id) => props.store.isExpanded(id),
     ),
     { equals: conversationRowsEqual },
   );

@@ -93,6 +93,22 @@ NSH 0.5.0 的 `crates/nsh-base/src/term/vt.rs` 在 `csi_dispatch` 中把 `'u'` �
 
 `src/terminal.rs` 的 `filter_kitty_keyboard` 在 PTY 输出进入官方 Terminal 前丢弃带 `<`、`>` 或 `=` 中间字节、以 `u` 结尾的 CSI 序列，并用 `filter_carry` 处理跨读取块的拆分。`terminal::tests` 覆盖完整序列、拆分序列和真正的 `CSI u` 恢复光标。上游修复后应删除此过滤。
 
+### 4. 分批挂载导致嵌套虚拟列表出现空白
+
+**现状**
+
+活动明细改为最高 420 点的 `Scroll` 内嵌 `List viewport="parent"` 后，Windows 实际界面中静态展开包含 13 个工具记录的活动，曾只绘制前 7 项，剩余区域空白。JSONL 中的数据完整，不依赖流式追加。使用同一主会话和内容宽度进行自动化截图尚未稳定复现，因此当前现象与下述上游问题高度吻合，但尚未完全确认。
+
+**上游参考**
+
+NSH 0.5.0 的 [longbridge/nsh#1783](https://github.com/longbridge/nsh/issues/1783) 记录了 view pacing 的缺陷：一轮已创建至少 64 个视图后，`Scroll` 内虚拟 List 的被延迟单元格可能已经创建，却始终收不到 `Frame`，直到再次布局才恢复。节点仍可被自动化查询，因此 `shows()` / `waitFor()` 通过不代表实际绘制正常；继续滚动也可能触发布局并掩盖问题。
+
+**升级后的处理**
+
+- 检查该 issue 的修复是否已进入当前使用的 NSH 版本，并重新验证嵌套虚拟列表。
+- 使用 `nsh run --target windows` 和真实静态会话展开工作区与活动，检查所有可见行均实际绘制，内部滚动可以到达最后一项且底部无异常空白。
+- 不只依赖节点存在性断言或滚动后的截图；需要覆盖首次展开时的真实渲染。
+
 ## 升级检查
 
 后续升级 NSH 时，先处理公开 API 的兼容变化，再运行：

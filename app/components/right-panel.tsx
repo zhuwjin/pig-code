@@ -250,7 +250,6 @@ function subagentRows(
   fallbackDuration: number | undefined,
   turnCache: Map<string, TurnState>,
   isTurnExpanded: (id: string) => boolean,
-  isItemExpanded: (id: string) => boolean,
 ): ConversationRow[] {
   if (!history) return [];
   const items: ChatItem[] = [];
@@ -359,7 +358,7 @@ function subagentRows(
       turnCache.set(turn.id, turn);
     }
   }
-  return flattenConversationRows(items, turns, isTurnExpanded, isItemExpanded)
+  return flattenConversationRows(items, turns, isTurnExpanded)
     .filter((row) => row.type !== "actions" && row.type !== "changes");
 }
 
@@ -392,7 +391,6 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         parentTurnDuration(),
         cachedTurns,
         (id) => props.store.isTurnExpanded(id),
-        (id) => props.store.isExpanded(id),
       );
     },
     { equals: conversationRowsEqual },

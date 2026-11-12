@@ -49,8 +49,11 @@ test("expands the last item in a large activity", async () => {
   await app.keyboard.press("escape");
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
+  await app.waitFor("id:activity-tool-0-body");
+  await app.scroll("id:activity-tool-0-body", 40000);
   await app.waitFor("id:tool-tool-998");
   await app.press("id:tool-tool-998");
+  await app.scroll("id:activity-tool-0-body", 500);
   await app.waitFor("id:wrap-tool-998");
 }, 180_000);
 
@@ -67,7 +70,8 @@ test("virtualizes a long expanded activity", async () => {
   await app.keyboard.press("escape");
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
-  await app.waitFor("id:tool-tool-998");
+  await app.waitFor("id:activity-tool-0-body");
+  await app.waitFor("id:tool-tool-0");
+  expect(app.shows("id:tool-tool-998")).toBe(false);
   expect(app.count("id:message-list")).toBe(1);
-  expect(app.count("id:tool-tool-0")).toBe(0);
 }, 180_000);

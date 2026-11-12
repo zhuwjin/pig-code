@@ -151,18 +151,10 @@ export function flattenConversationRows(
   items: ChatItem[],
   turns: TurnState[],
   isTurnExpanded: (id: string) => boolean,
-  isItemExpanded: (id: string) => boolean,
 ): ConversationRow[] {
   const rows: ConversationRow[] = [];
   const pushGrouped = (entries: ChatItem[]) => {
-    for (const child of groupConversationActivity(entries)) {
-      rows.push(child);
-      if (child.type === "activity" && isItemExpanded(child.id)) {
-        for (const item of child.items) {
-          rows.push({ id: `item-${item.id}`, type: "item", item });
-        }
-      }
-    }
+    for (const child of groupConversationActivity(entries)) rows.push(child);
   };
   let index = 0;
   while (index < items.length) {

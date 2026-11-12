@@ -100,7 +100,7 @@ test("folds a background notification that arrives mid-turn into the work row", 
   }
   if (rows[2].type === "item") expect(rows[2].item.id).toBe("m2");
 
-  const flat = flattenConversationRows(withNotification, [turn], () => false, () => false);
+  const flat = flattenConversationRows(withNotification, [turn], () => false);
   expect(flat.map((row) => row.type)).toEqual(["item", "work", "item", "changes", "actions"]);
 });
 
