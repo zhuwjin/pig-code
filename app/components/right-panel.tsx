@@ -4,7 +4,7 @@ import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { ChatItem, GitFileChange, RightPanelRequest, SubagentHistory, SubagentItem, TaskSummary, ToolItem, TurnState } from "../protocol";
 import { type UiContext } from "../ui-context";
-import { buildConversationRows, conversationRowsEqual, formatDuration, pathParts, reuseConversationRows, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
+import { buildConversationRows, conversationRowsEqual, formatDuration, pathParts, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
 import { Icon, type IconName } from "./icon";
 import { MessageRow, type MessageProps } from "./messages";
 import { CodeCard } from "./tool-card";
@@ -346,8 +346,6 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
     return turn ? turnDurationMs(turn) : undefined;
   };
   const sessionKey = () => `${props.request.sessionId}:${props.request.agentId}`;
-  let cachedRows: ConversationRow[] = [];
-  let cachedKey = "";
   let cachedTurns = new Map<string, TurnState>();
   let cachedTurnsKey = "";
   const rows = computed(
@@ -357,12 +355,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         cachedTurns = new Map();
         cachedTurnsKey = key;
       }
-      cachedRows = reuseConversationRows(
-        cachedKey === key ? cachedRows : [],
-        subagentRows(props.request.agentId, history(), task(), parentTurnDuration(), cachedTurns),
-      );
-      cachedKey = key;
-      return cachedRows;
+      return subagentRows(props.request.agentId, history(), task(), parentTurnDuration(), cachedTurns);
     },
     { equals: conversationRowsEqual },
   );

@@ -30,7 +30,6 @@ import {
   conversationRowsEqual,
   flattenConversationRows,
   groupConversationActivity,
-  reuseConversationRows,
   type ConversationRow,
   formatClock,
   formatDuration,
@@ -772,23 +771,13 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
 }
 
 export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number; onScroll?: (event: ScrollEvent) => void; onLatestVisibleChange?: (visible: boolean) => void }) {
-  let cachedSession: string | null = null;
-  let cachedRows: ConversationRow[] = [];
   const rows = computed(
-    () => {
-      const session = props.store.current();
-      cachedRows = reuseConversationRows(
-        cachedSession === session ? cachedRows : [],
-        flattenConversationRows(
-          props.items,
-          props.store.currentTurns(),
-          (id) => props.store.isTurnExpanded(id),
-          (id) => props.store.isExpanded(id),
-        ),
-      );
-      cachedSession = session;
-      return cachedRows;
-    },
+    () => flattenConversationRows(
+      props.items,
+      props.store.currentTurns(),
+      (id) => props.store.isTurnExpanded(id),
+      (id) => props.store.isExpanded(id),
+    ),
     { equals: conversationRowsEqual },
   );
   const textOverrides = signal<Record<string, string>>({});

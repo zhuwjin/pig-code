@@ -26,23 +26,9 @@
 
 `docs/PLUGIN_SYSTEM.md` 的 “Resource budgets and isolation” 部分。
 
-## 非阻塞的声明完善
-
-### 2. `uiTheme` 的公开 TypeScript 声明
-
-**现状**
-
-`app/view.tsx` 通过 `uiTheme` 应用动态主题，运行时可用，但当前公开声明没有该属性，因此保留了局部 `@ts-expect-error`。
-
-NSH main 的 `crates/nsh-core/src/ops.rs` 仍将 `UiTheme` 标为 `internal`，不能仅凭 main 就删除该类型豁免。
-
-**升级后的处理**
-
-等待公开且稳定的根主题 API 或 TypeScript 声明后，移除局部豁免并检查动态主题切换。无需仅为这项声明问题升级。
-
 ## 平台问题
 
-### 3. macOS 原生 `Input` 滚动后的短暂空白
+### 2. macOS 原生 `Input` 滚动后的短暂空白
 
 **现状**
 
@@ -83,6 +69,29 @@ nsh run InputScrollRepro.tsx --target macos --window-size 900x700
 - 快速来回滚动及停留后，单行文字和多行 JSON 均不出现短暂空白。
 - 输入框被回收和重建时，外层状态及用户正在编辑的内容保持正确。
 - 普通表单、外观搜索框和模型编辑弹窗均通过相同场景检查。
+
+### 3. VT 把 `CSI < u` 误判为恢复光标
+
+**现状**
+
+NSH 0.5.0 的 `crates/nsh-base/src/term/vt.rs` 在 `csi_dispatch` 中把 `'u'` 直接交给 `restore()`，没有检查 `intermediates`。Claude Code 等 TUI 会发送 `ESC[<u`（kitty keyboard protocol 查询）；模拟器把 `CSI < u` 当成 `CSI u`（恢复光标），在 TUI 退出时把光标恢复到较早保存的位置，PowerShell 随后把新提示符打印到 TUI 内容上方。
+
+**复现**
+
+在终端运行 `claude`，等待安全确认界面出现后按 Esc/选择 No 退出。提示符会出现在 Claude 界面上方。抓取原始 PTY 字节并直接喂给 `VtEmulator`，可见退出序列里的 `ESC[<u` 使光标从第 19 行跳到第 2 行；过滤该序列后，光标停在 TUI 下方第 18 行。
+
+**上游修复**
+
+`'u'` 和 `'s'` 都应只在 `intermediates.is_empty()` 时分别恢复/保存光标，例如：
+
+```rust
+'u' if !private && intermediates.is_empty() => self.restore(),
+'s' if !private && intermediates.is_empty() => self.save(),
+```
+
+**当前规避**
+
+`src/terminal.rs` 的 `filter_kitty_keyboard` 在 PTY 输出进入官方 Terminal 前丢弃带 `<`、`>` 或 `=` 中间字节、以 `u` 结尾的 CSI 序列，并用 `filter_carry` 处理跨读取块的拆分。`terminal::tests` 覆盖完整序列、拆分序列和真正的 `CSI u` 恢复光标。上游修复后应删除此过滤。
 
 ## 升级检查
 

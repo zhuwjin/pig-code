@@ -1,5 +1,5 @@
-import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, platform, reduceMotion, signal, untracked } from "nsh";
-import type { JSX, Signal } from "nsh";
+import { Animated, Easing, Image, LayoutAnimation, View, createAnimatedValue, effect, keymap, mount, platform, reduceMotion, setTheme, signal, untracked } from "nsh";
+import type { JSX, Signal, Theme } from "nsh";
 import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { currentWindow } from "nsh/desktop";
 import { AgentStore } from "./store";
@@ -182,6 +182,13 @@ function App(props: UiContext) {
   effect(() => {
     themeStore.syncPlugins(store.pluginThemes());
   });
+  effect(() => {
+    try {
+      setTheme(JSON.parse(themeStore.serialized()) as Theme);
+    } catch (cause) {
+      store.themeError.set(cause instanceof Error ? cause.message : String(cause));
+    }
+  });
   effect(() => keymap.bind({
     "mod+k": () => searchVisible.update((visible) => !visible),
     "mod+n": () => {
@@ -192,8 +199,6 @@ function App(props: UiContext) {
   }, { when: "always" }));
   return (
     <View
-      // @ts-expect-error NSH's reactive uiTheme prop is not in its public TS declarations yet.
-      uiTheme={themeStore.serialized()}
       class={themeStore.classes(
         "app.root",
         "relative flex-1 bg-background text-foreground selection:bg-selection pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]",

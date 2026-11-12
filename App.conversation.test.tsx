@@ -10,7 +10,6 @@ import {
   parseReadOutput,
   parseSearchOutput,
   partialJsonField,
-  reuseConversationRows,
   resolveActiveUserRow,
   streamingDiffRows,
   turnDurationMs,
@@ -122,22 +121,6 @@ test("keeps row identity while Markdown streams and releases it when the text se
     ? { ...item, streaming: true }
     : item);
   expect(conversationRowsEqual(before, buildConversationRows(settled, [runningTurn]))).toBe(false);
-});
-
-test("reuses unchanged row objects while tool input streams", () => {
-  const runningTurn: TurnState = { ...turn, status: "running" };
-  const before = buildConversationRows(items, [runningTurn]);
-  const streamed = items.map((item) => item.id === "call-1" && item.kind === "tool"
-    ? { ...item, detail: '{"path":"src/a.ts"' }
-    : item);
-  const next = buildConversationRows(streamed, [runningTurn]);
-  const merged = reuseConversationRows(before, next);
-  expect(merged).not.toBe(before);
-  for (const index of [0, 2, 3, 4]) expect(merged[index]).toBe(before[index]);
-  expect(merged[1]).toBe(next[1]);
-  expect(merged[1]).not.toBe(before[1]);
-  expect(conversationRowsEqual(before, next)).toBe(false);
-  expect(conversationRowsEqual(merged, next)).toBe(true);
 });
 
 test("parses numbered Read output and preserves trailing notes", () => {

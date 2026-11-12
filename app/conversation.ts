@@ -222,14 +222,6 @@ export function conversationRowsEqual(previous: ConversationRow[], next: Convers
   return previous.length === next.length && previous.every((row, index) => sameConversationRow(row, next[index]));
 }
 
-export function reuseConversationRows(previous: ConversationRow[], next: ConversationRow[]): ConversationRow[] {
-  const cached = new Map(previous.map((row) => [row.id, row]));
-  return next.map((row) => {
-    const old = cached.get(row.id);
-    return old && sameConversationRow(old, row) ? old : row;
-  });
-}
-
 export function turnDurationMs(turn: TurnState | undefined): number | undefined {
   const statsDuration = turn?.stats?.duration_ms;
   return statsDuration && statsDuration > 0 ? statsDuration : turn?.durationMs;

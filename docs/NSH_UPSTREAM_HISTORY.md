@@ -68,6 +68,22 @@ CLI 和 `nsh-core` / `nsh-base` / `nsh-engine` / `nsh-platform-windows` / `nsh-t
 
 Windows 上设置 `frame: "none"`，标题栏右上角自绘最小化、最大化/还原、关闭按钮，按钮标记 `desktop={{ windowControl }}`，由平台原生处理点击和 Windows 11 贴靠布局；主标题栏和右侧面板头部预留 138pt。窗口四周和四角增加 `windowResize` 边缘（5px / 12px）。真实 Windows 窗口验证了最大化/还原和右边缘缩放（1372 → 1452 物理像素）。
 
+### 4. 终端改用官方 Terminal（0.5.0）
+
+`app/components/terminal-panel.tsx` 改用 `nsh/base` 的 `Terminal`；官方组件负责 VT 仿真、回滚、键盘、光标、ANSI 颜色和文本选择。Rust `src/terminal.rs` 只保留 `portable-pty` 的进程启动、UTF-8 输出缓冲、`write` / `resize` / `read` / `exit`，删除 `alacritty_terminal` 依赖、ANSI 色表、Canvas 绘制、自绘选区和 80ms 快照。面板保留 tab、错误提示、折叠和已退出标记；隐藏 tab 仍挂载以保留回滚，PTY 在面板不可见时忽略 1×1 的 resize。输出经过 `filter_kitty_keyboard` 规避 NSH 0.5.0 把 `CSI < u` 误判为恢复光标的问题（见待办）。
+
+### 5. 主题应用改用公开 setTheme（0.5.0）
+
+`app/view.tsx` 删除私有 `uiTheme` 和 `@ts-expect-error`，改为在 effect 中调用公开的 `setTheme()`；`app/themes.ts` 的 `serializedTheme()` 继续生成 `cssVars`，插件主题和 style pack 逻辑不变。`docs/NSH_UPSTREAM_PENDING.md` 中该项待办已移除。
+
+### 6. CodeView 原生离屏创建评估（未采用）
+
+`app/components/code-view.tsx` 的非换行模式尝试删除按 `scrollY` 计算 `visible()` 和 `spacers()` 的手工虚拟化，改为对全部行使用 `Each`。验证发现该模式是纵向 `Scroll` 内嵌横向 `Scroll`，0.5 的离屏创建按最近的横向视口判断，160 行会全部创建，`App.code-view.test.tsx` 的虚拟化断言失败。已保留手工虚拟化；如果后续 NSH 支持跨嵌套滚动视口的纵向剔除，再重新评估。
+
+### 7. 消息行复用减法（已完成）
+
+消息列表和右侧子 Agent 列表删除 `reuseConversationRows()` 及其缓存数组，依赖 0.5 `keyExtractor` diff 在行对象重建时保留行身份和滚动位置。`App.conversation.test.tsx` 中针对该函数的单元测试已移除。
+
 ## 已接入的组件导出
 
 ### 3. `nsh/base` 的 `Link`、`Select` 及其他正式组件（已完成）

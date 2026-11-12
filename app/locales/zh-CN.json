@@ -505,7 +505,8 @@
     "empty": "没有终端",
     "new": "新建终端",
     "text_selected": "已选择终端文本",
-    "input_label": "终端输入"
+    "input_label": "终端输入",
+    "output_label": "终端输出"
   },
   "tasks": {
     "status": {

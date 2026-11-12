@@ -505,7 +505,8 @@
     "empty": "No terminals",
     "new": "New terminal",
     "text_selected": "Terminal text selected",
-    "input_label": "Terminal input"
+    "input_label": "Terminal input",
+    "output_label": "Terminal output"
   },
   "tasks": {
     "status": {
