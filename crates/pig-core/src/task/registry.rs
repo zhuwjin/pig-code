@@ -52,6 +52,9 @@ pub struct TaskEntry {
     pub cancel: Option<tokio_util::sync::CancellationToken>,
     /// agent_id of subagent tasks (always None for shell commands); used for resume-while-running conflict detection
     pub agent_id: Option<String>,
+    /// The agent that spawned this task; None for the root session. A child's
+    /// background task must not wake the parent.
+    pub owner_agent_id: Option<String>,
     pub record_path: Option<PathBuf>,
     pub result_path: Option<PathBuf>,
     pub turns: Option<u32>,
@@ -208,6 +211,9 @@ pub struct SessionToolState {
     /// Task snapshots and terminal notifications share one channel to the manager.
     pub task_notify: UnboundedSender<super::notification::TaskChange>,
     pub session_id: String,
+    /// The subagent that owns tasks spawned through this state; None for the
+    /// root session (its background tasks notify it directly).
+    pub owner_agent_id: Option<String>,
     /// Only the root session may acknowledge delivery into its own rollout.
     pub task_store: Option<Arc<Mutex<crate::store::Store>>>,
     pub delivery_receipts: Arc<Mutex<HashMap<String, super::notification::DeliveryReceipt>>>,
@@ -254,6 +260,7 @@ impl Clone for SessionToolState {
             tasks: self.tasks.clone(),
             task_notify: self.task_notify.clone(),
             session_id: self.session_id.clone(),
+            owner_agent_id: self.owner_agent_id.clone(),
             task_store: self.task_store.clone(),
             delivery_receipts: self.delivery_receipts.clone(),
             data_dir: self.data_dir.clone(),
@@ -287,6 +294,7 @@ impl SessionToolState {
             tasks: TaskRegistry::default(),
             task_notify,
             session_id,
+            owner_agent_id: None,
             task_store: None,
             delivery_receipts: Arc::new(Mutex::new(HashMap::new())),
             data_dir: None,
@@ -483,6 +491,7 @@ impl TaskRegistry {
                 spill: summary.spill_path.map(spill::Spill::restored),
                 cancel: None,
                 agent_id: summary.agent_id,
+                owner_agent_id: None,
                 record_path: task.record_path,
                 result_path: task.result_path,
                 turns: task.turns,
@@ -581,6 +590,7 @@ fn register_agent_task_with_status(
             spill: None,
             cancel: Some(cancel),
             agent_id: Some(agent_id),
+            owner_agent_id: state.owner_agent_id.clone(),
             record_path: None,
             result_path: None,
             turns: None,

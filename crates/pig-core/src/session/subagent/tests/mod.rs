@@ -415,10 +415,15 @@ fn child_local_state_has_its_own_todo_handle() {
             content: "parent item".into(),
             status: pig_protocol::TodoStatus::Pending,
         });
-    let child = child_local_state(&parent);
+    let child = child_local_state(&parent, "agent-test");
     assert!(
         child.todos.lock().expect("child todos").is_empty(),
         "a child starts from its own empty list, never the parent snapshot"
+    );
+    assert_eq!(
+        child.owner_agent_id.as_deref(),
+        Some("agent-test"),
+        "tasks the child spawns are owned by that child"
     );
     child
         .todos
@@ -451,7 +456,7 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
     std::fs::create_dir_all(&root).expect("temp workspace");
     let store = Arc::new(Mutex::new(crate::store::Store::open(&root).expect("store")));
     let parent = crate::task::SessionToolState::for_test();
-    let child_state = child_local_state(&parent);
+    let child_state = child_local_state(&parent, "agent-test");
     let tool = crate::tool::all()
         .into_iter()
         .find(|tool| tool.name() == "TodoList")

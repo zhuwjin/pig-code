@@ -57,6 +57,7 @@ fn task_snapshot_carries_the_session_data_dir_spill_path() {
             spill: Some(super::spill::Spill::new(path.clone())),
             cancel: None,
             agent_id: None,
+            owner_agent_id: None,
             record_path: None,
             result_path: None,
             turns: None,

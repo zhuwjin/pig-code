@@ -21,6 +21,7 @@ pub enum TaskChange {
     },
     Terminal {
         session_id: String,
+        owner_agent_id: Option<String>,
         task: Box<BackgroundTask>,
         notification: TaskNotification,
     },
@@ -36,6 +37,7 @@ pub fn snapshot_change(session_id: &str, entry: &TaskEntry) -> TaskChange {
 pub fn terminal_change(session_id: &str, entry: &TaskEntry) -> TaskChange {
     TaskChange::Terminal {
         session_id: session_id.to_string(),
+        owner_agent_id: entry.owner_agent_id.clone(),
         task: Box::new(entry.background()),
         notification: terminal_notification(session_id, entry),
     }

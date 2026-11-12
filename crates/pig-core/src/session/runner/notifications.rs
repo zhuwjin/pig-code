@@ -84,6 +84,7 @@ impl Manager {
             }
             crate::task::TaskChange::Terminal {
                 session_id,
+                owner_agent_id,
                 task,
                 notification,
             } => {
@@ -92,6 +93,46 @@ impl Manager {
                 }
                 let detached = task.detached;
                 let suppressed = task.terminal_notification_suppressed;
+                if let Some(owner) = owner_agent_id {
+                    // A background task spawned by a subagent belongs to that
+                    // child: keep the task row for the panel, but never queue a
+                    // parent notification or start a parent turn. A running
+                    // child gets the completion as a steer at its next step.
+                    let result = self
+                        .store
+                        .lock()
+                        .expect("store lock")
+                        .upsert_background_task(&session_id, task.as_ref());
+                    if let Err(error) = result {
+                        emit(
+                            &event_tx,
+                            Event::Error {
+                                session_id: Some(session_id),
+                                error,
+                                fatal: false,
+                            },
+                        );
+                        return;
+                    }
+                    self.emit_task_list(&event_tx, &session_id);
+                    if detached && !suppressed {
+                        if let Some(entry) = self.sessions.get(&session_id) {
+                            let text = crate::task::notification::render_notification_batch(
+                                std::slice::from_ref(&notification),
+                            );
+                            if let Some(queue) = entry
+                                .state
+                                .agent_steers
+                                .lock()
+                                .expect("agent steers lock")
+                                .get_mut(&owner)
+                            {
+                                queue.push_back(text);
+                            }
+                        }
+                    }
+                    return;
+                }
                 let result = self.store.lock().expect("store lock").record_terminal_task(
                     &session_id,
                     &task,
@@ -315,6 +356,54 @@ mod tests {
     }
 
     #[test]
+    fn a_subagent_owned_task_never_queues_a_parent_notification() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-terminal-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test data dir");
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "").expect("empty test config");
+        let (event_tx, _event_rx) = async_channel::unbounded();
+        let (_op_tx, op_rx) = async_channel::unbounded();
+        let mut manager = Manager::new(
+            &event_tx,
+            op_rx,
+            Some(config_path),
+            dir.clone(),
+            dir.clone(),
+            std::sync::Arc::new(crate::credentials::CredentialManager::mock()),
+        );
+        let (task, notification) = terminal_task();
+        manager.task_changed(
+            event_tx.clone(),
+            crate::task::TaskChange::Terminal {
+                session_id: "s1".into(),
+                owner_agent_id: Some("agent-1".into()),
+                task: Box::new(task),
+                notification,
+            },
+            &mut FuturesUnordered::new(),
+        );
+        let store = manager.store.lock().expect("store lock");
+        assert_eq!(
+            store.background_tasks("s1").expect("task rows").len(),
+            1,
+            "the panel still sees the child's completed task"
+        );
+        assert!(
+            store.pending_notifications("s1").expect("notifications").is_empty(),
+            "the parent must not be woken by a child-owned task"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn failed_terminal_writes_roll_back_and_retry_owned_facts() {
         let dir = std::env::temp_dir().join(format!("pig-terminal-retry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -340,6 +429,7 @@ mod tests {
             event_tx.clone(),
             crate::task::TaskChange::Terminal {
                 session_id: "s1".into(),
+                owner_agent_id: None,
                 task: Box::new(task),
                 notification,
             },

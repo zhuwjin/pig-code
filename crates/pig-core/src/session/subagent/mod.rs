@@ -21,10 +21,14 @@ use state::{ProgressSink, SubagentDrive, agent_card_model};
 /// Child-local tool state: tasks, steers, writers, read states and roots are
 /// shared with the session, but the todo list is a fresh per-child handle.
 /// Waiting in a child is a query, not delivery into the root model's history.
-fn child_local_state(state: &crate::task::SessionToolState) -> crate::task::SessionToolState {
+fn child_local_state(
+    state: &crate::task::SessionToolState,
+    agent_id: &str,
+) -> crate::task::SessionToolState {
     let mut state = state.clone();
     state.todos = Default::default();
     state.task_store = None;
+    state.owner_agent_id = Some(agent_id.to_string());
     state
 }
 
@@ -225,7 +229,7 @@ impl Session {
             parent_item_id: parent_item_id.to_string(),
         };
         let mut tracker = self.tracker.foreground_child();
-        let child_tool_state = child_local_state(&self.state);
+        let child_tool_state = child_local_state(&self.state, &drive.agent_id);
         let life_writer = drive
             .take_writer()
             .expect("foreground subagent writer was claimed");
@@ -444,7 +448,7 @@ impl Session {
             let mut permission_rules = self.permission_rules.clone();
             let mut always_allowed = self.always_allowed.clone();
             let state = self.state.clone();
-            let child_tool_state = child_local_state(&state);
+            let child_tool_state = child_local_state(&state, &drive.agent_id);
             let pending = self.pending.clone();
             let store = self.store.clone();
             let session_id = self.id.clone();
@@ -677,7 +681,7 @@ impl Session {
             );
             let queued = cards.len() >= slots_available;
             spawn_detached_child(
-                self.detached_gate_ctx(),
+                self.detached_gate_ctx(&drive.agent_id),
                 drive,
                 task_id.clone(),
                 child_cancel,
@@ -855,7 +859,7 @@ impl Session {
             "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\nThe subagent is running in the background; its terminal notification is delivered automatically.\nUse TaskWait to wait, TaskOutput for progress, TaskStop to stop it, and Agent(resume=\"{agent_id}\", prompt=\"...\") to resume it.{queue_hint}"
         );
         spawn_detached_child(
-            self.detached_gate_ctx(),
+            self.detached_gate_ctx(&drive.agent_id),
             drive,
             task_id.clone(),
             bg_cancel,
@@ -876,7 +880,7 @@ impl Session {
     /// Owned gate context for the background subagent drive (fully owned:
     /// shared Arc clones + value snapshots); spawn_subagent_background and the
     /// background swarm dispatch share the same list
-    fn detached_gate_ctx(&self) -> DetachedGateCtx {
+    fn detached_gate_ctx(&self, agent_id: &str) -> DetachedGateCtx {
         DetachedGateCtx {
             cwd: self.cwd.clone(),
             permissions: self.permissions,
@@ -884,7 +888,7 @@ impl Session {
             permission_rules: self.permission_rules.clone(),
             always_allowed: self.always_allowed.clone(),
             state: self.state.clone(),
-            tool_state: child_local_state(&self.state),
+            tool_state: child_local_state(&self.state, agent_id),
             pending: self.pending.clone(),
             store: self.store.clone(),
             session_id: self.id.clone(),
