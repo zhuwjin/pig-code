@@ -28,6 +28,14 @@ test("shows agent states and orders swarm by completion sequence", async () => {
   for (const row of ["01", "02", "03", "04"]) expect(app.texts()).toContain(row);
 });
 
+test("switches a tool row to an agent card when the card arrives", async () => {
+  const app = await openCards();
+  expect(app.shows("id:tool-late-agent")).toBe(true);
+  await app.press("id:attach-agent");
+  await app.waitFor("id:agent-late-agent-1");
+  expect(app.shows("id:tool-late-agent")).toBe(false);
+});
+
 test("shows plan status colors and a file chip", async () => {
   const app = await openCards();
   expect(app.spanStyle("text:计划已批准").color).toBe("#4ade80ff");

@@ -492,110 +492,116 @@ export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
     return collapsed.length > 200 ? `${collapsed.slice(0, 199).trimEnd()}…` : collapsed;
   };
   if (item().tool === "ExitPlanMode") return <PlanCard {...props} />;
-  if ((item().agents?.length ?? 0) > 0) return <AgentCards {...props} />;
   return (
     <View class="w-full">
-      <View
-        role="button"
-        testID={`tool-${item().id}`}
-        accessibilityState={{ expanded: open() }}
-        class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => toggleExpanded(props, item().id)}
-      >
-        <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
-        <If when={running()}>
-          <ShimmerText active baseOpacity={0.6} class="shrink-0" textClass="text-sm">
-            {toolLabel(item().tool, true)}
-          </ShimmerText>
-        </If>
-        <If when={!running()}>
-          <Text class="shrink-0 text-sm font-medium text-muted-foreground">
-            {toolLabel(item().tool, false)}
-          </Text>
-        </If>
-        <If when={item().tool === "Read"}>
-          <ContextMenu
-            class="min-w-0 shrink"
-            popupClass="w-48 rounded-xl border border-border bg-popover p-1 shadow-xl"
-            trigger={
-              <Button
-                testID="read-path"
-                class="w-full min-w-0"
-                onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
-              >
-                <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
-                  {summary()}
-                </Text>
-              </Button>
-            }
-          >
-            <MenuItem testID="read-copy-path" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent" onSelect={() => void Clipboard.writeText(item().summary)}>
-              <Icon name="copy" size={13} color={token("muted-foreground")} />
-              <Text class="flex-1 text-sm text-foreground">{t("sidebar.copy_path")}</Text>
-            </MenuItem>
-            <MenuItem testID="read-open-right" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent" onSelect={() => props.store.openFile(item().summary, readFirstLine(item().output))}>
-              <Icon name="eye" size={13} color={token("muted-foreground")} />
-              <Text class="flex-1 text-sm text-foreground">{t("tools.open_file_right")}</Text>
-            </MenuItem>
-          </ContextMenu>
-          <If when={readLineCount(item().output) > 0}>
-            <Text class="shrink-0 text-xs text-muted-foreground">{t("tools.lines", { count: readLineCount(item().output) })}</Text>
-          </If>
-        </If>
-        <If when={item().tool !== "Read"}>
-          <If when={fileChip()}>
-            {(chip) => (
-              <View class="min-w-0 shrink flex-row items-center gap-1">
-                <Text class="shrink-0 text-sm text-foreground">{chip().name}</Text>
-                <If when={chip().directory}>
-                  <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{chip().directory}</Text>
-                </If>
-              </View>
-            )}
-          </If>
-          <If when={!fileChip()}>
-            <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{summary()}</Text>
-          </If>
-        </If>
-        <If when={item().edit}>
-          <Text class="shrink-0 font-mono text-xs text-success">+{item().edit!.additions}</Text>
-          <Text class="shrink-0 font-mono text-xs text-destructive">-{item().edit!.deletions}</Text>
-        </If>
-        <If when={!item().edit && running() && streamAdditions() + streamDeletions() > 0}>
-          <If when={streamAdditions() > 0}>
-            <Text class="shrink-0 font-mono text-xs text-success">+{streamAdditions()}</Text>
-          </If>
-          <If when={streamDeletions() > 0}>
-            <Text class="shrink-0 font-mono text-xs text-destructive">-{streamDeletions()}</Text>
-          </If>
-        </If>
-        <If when={item().approvalPending}>
-          <Text class="shrink-0 text-xs text-warning">{t("tools.waiting_approval")}</Text>
-        </If>
-        <If when={item().status === "error"}>
-          <View
-            testID={`tool-error-${item().id}`}
-            class="h-5 w-5 shrink-0 items-center justify-center"
-            hitSlop={4}
-            tooltip={
-              <Tooltip delay={300} class="max-w-80 rounded-md border border-border bg-popover px-2 py-1 shadow-lg">
-                <Text class="text-xs text-foreground">{failureReason()}</Text>
-              </Tooltip>
-            }
-          >
-            <Icon name="x" size={13} color={token("destructive")} />
-          </View>
-        </If>
-        <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
-      </View>
-      <If when={item().liveNote && running()}>
-        <View class="flex-row items-center gap-2 pl-6">
-          <Icon name="loader-circle" size={12} class="animate-spin" color={token("muted-foreground")} />
-          <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{item().liveNote}</Text>
-        </View>
+      <If when={(item().agents?.length ?? 0) > 0}>
+        <AgentCards {...props} />
       </If>
-      <If when={open()}>
-        <ToolBody {...props} />
+      <If when={(item().agents?.length ?? 0) === 0}>
+        <View class="w-full">
+          <View
+            role="button"
+            testID={`tool-${item().id}`}
+            accessibilityState={{ expanded: open() }}
+            class="w-full min-w-0 flex-row items-center gap-2 py-1"
+            onPress={() => toggleExpanded(props, item().id)}
+          >
+            <Icon name={toolIcon(item().tool)} size={16} color={token("muted-foreground")} />
+            <If when={running()}>
+              <ShimmerText active baseOpacity={0.6} class="shrink-0" textClass="text-sm">
+                {toolLabel(item().tool, true)}
+              </ShimmerText>
+            </If>
+            <If when={!running()}>
+              <Text class="shrink-0 text-sm font-medium text-muted-foreground">
+                {toolLabel(item().tool, false)}
+              </Text>
+            </If>
+            <If when={item().tool === "Read"}>
+              <ContextMenu
+                class="min-w-0 shrink"
+                popupClass="w-48 rounded-xl border border-border bg-popover p-1 shadow-xl"
+                trigger={
+                  <Button
+                    testID="read-path"
+                    class="w-full min-w-0"
+                    onPress={() => props.store.openFile(item().summary, readFirstLine(item().output))}
+                  >
+                    <Text style={{ numberOfLines: 1 }} class="text-left text-sm text-muted-foreground hover:text-foreground hover:underline">
+                      {summary()}
+                    </Text>
+                  </Button>
+                }
+              >
+                <MenuItem testID="read-copy-path" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent" onSelect={() => void Clipboard.writeText(item().summary)}>
+                  <Icon name="copy" size={13} color={token("muted-foreground")} />
+                  <Text class="flex-1 text-sm text-foreground">{t("sidebar.copy_path")}</Text>
+                </MenuItem>
+                <MenuItem testID="read-open-right" class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-accent" onSelect={() => props.store.openFile(item().summary, readFirstLine(item().output))}>
+                  <Icon name="eye" size={13} color={token("muted-foreground")} />
+                  <Text class="flex-1 text-sm text-foreground">{t("tools.open_file_right")}</Text>
+                </MenuItem>
+              </ContextMenu>
+              <If when={readLineCount(item().output) > 0}>
+                <Text class="shrink-0 text-xs text-muted-foreground">{t("tools.lines", { count: readLineCount(item().output) })}</Text>
+              </If>
+            </If>
+            <If when={item().tool !== "Read"}>
+              <If when={fileChip()}>
+                {(chip) => (
+                  <View class="min-w-0 shrink flex-row items-center gap-1">
+                    <Text class="shrink-0 text-sm text-foreground">{chip().name}</Text>
+                    <If when={chip().directory}>
+                      <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{chip().directory}</Text>
+                    </If>
+                  </View>
+                )}
+              </If>
+              <If when={!fileChip()}>
+                <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">{summary()}</Text>
+              </If>
+            </If>
+            <If when={item().edit}>
+              <Text class="shrink-0 font-mono text-xs text-success">+{item().edit!.additions}</Text>
+              <Text class="shrink-0 font-mono text-xs text-destructive">-{item().edit!.deletions}</Text>
+            </If>
+            <If when={!item().edit && running() && streamAdditions() + streamDeletions() > 0}>
+              <If when={streamAdditions() > 0}>
+                <Text class="shrink-0 font-mono text-xs text-success">+{streamAdditions()}</Text>
+              </If>
+              <If when={streamDeletions() > 0}>
+                <Text class="shrink-0 font-mono text-xs text-destructive">-{streamDeletions()}</Text>
+              </If>
+            </If>
+            <If when={item().approvalPending}>
+              <Text class="shrink-0 text-xs text-warning">{t("tools.waiting_approval")}</Text>
+            </If>
+            <If when={item().status === "error"}>
+              <View
+                testID={`tool-error-${item().id}`}
+                class="h-5 w-5 shrink-0 items-center justify-center"
+                hitSlop={4}
+                tooltip={
+                  <Tooltip delay={300} class="max-w-80 rounded-md border border-border bg-popover px-2 py-1 shadow-lg">
+                    <Text class="text-xs text-foreground">{failureReason()}</Text>
+                  </Tooltip>
+                }
+              >
+                <Icon name="x" size={13} color={token("destructive")} />
+              </View>
+            </If>
+            <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
+          </View>
+          <If when={item().liveNote && running()}>
+            <View class="flex-row items-center gap-2 pl-6">
+              <Icon name="loader-circle" size={12} class="animate-spin" color={token("muted-foreground")} />
+              <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs text-muted-foreground">{item().liveNote}</Text>
+            </View>
+          </If>
+          <If when={open()}>
+            <ToolBody {...props} />
+          </If>
+        </View>
       </If>
     </View>
   );

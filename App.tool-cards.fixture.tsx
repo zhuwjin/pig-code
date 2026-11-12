@@ -45,6 +45,7 @@ const items: ChatItem[] = [
       agent("agent-4", "Agent four", false),
     ],
   }),
+  tool("late-agent", "Agent", "running", { summary: "late agent" }),
   tool("agent-failed", "Agent", "error", {
     agents: [agent("agent-failed", "Failed agent", true)],
   }),
@@ -90,6 +91,20 @@ mount(() => (
         }}
       >
         <Text class="text-xs text-foreground">Advance thinking</Text>
+      </Button>
+      <Button
+        testID="attach-agent"
+        class="rounded border border-border px-3 py-1"
+        onPress={() => {
+          store.items.update((all) => ({
+            ...all,
+            "tool-cards": all["tool-cards"].map((item) => item.kind === "tool" && item.id === "late-agent"
+              ? { ...item, agents: [agent("late-agent-1", "Late agent", false)] }
+              : item),
+          }));
+        }}
+      >
+        <Text class="text-xs text-foreground">Attach agent</Text>
       </Button>
     </View>
     <View class="min-w-0 flex-1">
