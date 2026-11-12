@@ -60,6 +60,7 @@ export type MessageProps = UiContext & {
   textFor: (item: MarkdownItem) => string;
   onImage: (source: string, label: string) => void;
   flat?: boolean;
+  activityPreview?: boolean;
 };
 
 function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
@@ -202,7 +203,7 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
 
 function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
   const item = () => props.item();
-  const open = () => props.store.isExpanded(item().id);
+  const open = () => !props.activityPreview && props.store.isExpanded(item().id);
   const roll = new ReasoningTicker();
   const tickerCurrent = signal(reasoningTickerLine(props.textFor(item()))?.text ?? "");
   const tickerPrevious = signal<{ text: string } | null>(null);
@@ -536,6 +537,27 @@ function NotificationRow(props: UiContext & { item: Accessor<NotificationItem> }
 function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationRow, { type: "activity" }>> }) {
   const row = () => props.row();
   const open = () => props.store.isExpanded(row().id);
+  const active = () => row().items.findLast((item) =>
+    (item.kind === "reasoning" && item.streaming)
+    || (item.kind === "tool" && (item.status === "input" || item.status === "running") && !item.approvalPending)
+  );
+  const preview = () => open() ? undefined : active();
+  const toggle = () => toggleExpanded(props, row().id);
+  const header = () => (
+    <View
+      role="button"
+      testID={row().id}
+      accessibilityState={{ expanded: open() }}
+      class="w-full min-w-0 flex-row items-center gap-2 py-1"
+      onPress={toggle}
+    >
+      <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
+      <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
+        {activitySummary(row().items)}
+      </Text>
+      <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
+    </View>
+  );
   const body = () => (
     <Scroll
       testID={`${row().id}-body`}
@@ -558,21 +580,28 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
   );
   return (
     <View class="w-full">
-      <View
-        role="button"
-        testID={row().id}
-        accessibilityState={{ expanded: open() }}
-        class="w-full min-w-0 flex-row items-center gap-2 py-1"
-        onPress={() => toggleExpanded(props, row().id)}
-      >
-        <Icon name="list-collapse" size={16} color={token("muted-foreground")} />
-        <Text style={{ numberOfLines: 1 }} class="min-w-0 shrink text-sm text-muted-foreground">
-          {activitySummary(row().items)}
-        </Text>
-        <Icon name={open() ? "chevron-down" : "chevron-right"} size={14} color={token("muted-foreground")} />
-      </View>
+      <If when={preview()} else={header()}>
+        {(item) => (
+          <View
+            role="button"
+            testID={row().id}
+            accessibilityState={{ expanded: false }}
+            class="w-full min-w-0"
+            onPress={toggle}
+          >
+            <View class="w-full min-w-0" style={{ pointerEvents: "none" }}>
+              <ItemMessageRow {...props} item={item} activityPreview />
+            </View>
+          </View>
+        )}
+      </If>
       <If when={open()}>
-        <View class="pt-2">{body()}</View>
+        <View
+          testID={`${row().id}-content`}
+          class="ml-2 mt-1 overflow-hidden border-l border-border pl-3.5 pt-1"
+        >
+          {body()}
+        </View>
       </If>
     </View>
   );

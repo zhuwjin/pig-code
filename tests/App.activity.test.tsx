@@ -12,9 +12,11 @@ test("collapses consecutive activity and preserves expansion when tools append",
   });
   expect(app.texts()).toContain(zhSummary);
   expect(app.shows("id:tool-grep-1")).toBe(false);
+  expect(app.shows("id:activity-r1-content")).toBe(false);
   expect(app.shows("id:tool-single")).toBe(true);
 
   await app.press("id:activity-r1");
+  await app.waitFor("id:activity-r1-content");
   await app.waitFor("id:tool-grep-1");
   await app.press("id:append-tool");
   await app.waitFor("id:tool-read-2");
@@ -34,6 +36,53 @@ test("renders the activity summary in English", async () => {
   });
   expect(app.texts()).toContain(enSummary);
   expect(app.shows("id:tool-grep-1")).toBe(false);
+});
+
+test("previews running reasoning without changing the activity click behavior", async () => {
+  const app = await open("./App.activity.fixture.tsx", {
+    platform: "macos",
+    locale: "zh-CN",
+    width: 1200,
+    height: 800,
+  });
+  await app.press("id:run-reasoning");
+  await app.waitFor("id:thinking-ticker-r1");
+  expect(app.count("label:思考中")).toBe(1);
+  expect(app.texts()).not.toContain(zhSummary);
+  expect(app.shows("id:thinking-r1-content")).toBe(false);
+
+  await app.press("id:activity-r1");
+  await app.waitFor("id:activity-r1-content");
+  expect(app.shows("id:thinking-r1-content")).toBe(false);
+
+  await app.press("id:activity-r1");
+  await app.waitFor("id:activity-r1-content", { state: "gone" });
+  await app.press("id:finish-activity");
+  await app.waitUntil(() => app.texts().includes(zhSummary));
+  expect(app.shows("id:thinking-ticker-r1")).toBe(false);
+});
+
+test("previews a running tool only while the activity is collapsed", async () => {
+  const app = await open("./App.activity.fixture.tsx", {
+    platform: "macos",
+    locale: "zh-CN",
+    width: 1200,
+    height: 800,
+  });
+  await app.press("id:run-tool");
+  await app.waitFor("id:tool-read-1");
+  expect(app.texts()).not.toContain(zhSummary);
+  expect(app.shows("id:activity-r1-content")).toBe(false);
+
+  await app.press("id:activity-r1");
+  await app.waitFor("id:activity-r1-content");
+  expect(app.texts()).toContain(zhSummary);
+
+  await app.press("id:activity-r1");
+  await app.waitFor("id:activity-r1-content", { state: "gone" });
+  await app.press("id:finish-activity");
+  await app.waitUntil(() => app.texts().includes(zhSummary));
+  expect(app.shows("id:tool-read-1")).toBe(false);
 });
 
 test("expands the last item in a large activity", async () => {

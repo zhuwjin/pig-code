@@ -19,6 +19,8 @@ import { Icon } from "./icon";
 import { CodeView, type CodeViewLine } from "./code-view";
 import { ShimmerText } from "./shimmer-text";
 
+type ToolContext = UiContext & { activityPreview?: boolean };
+
 function copyText(props: UiContext, id: string, text: string): void {
   void Clipboard.writeText(text).then(() => props.store.markCopied(id));
 }
@@ -273,7 +275,7 @@ function ToolBody(props: UiContext & { item: Accessor<ToolItem> }) {
   );
 }
 
-function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
+function AgentCards(props: ToolContext & { item: Accessor<ToolItem> }) {
   const agents = () => props.item().agents ?? [];
   const status = () => props.item().status;
   const complete = () => agents().filter((agent) =>
@@ -324,7 +326,7 @@ function AgentCards(props: UiContext & { item: Accessor<ToolItem> }) {
     </View>
   );
   if (props.item().tool === "AgentSwarm") {
-    const open = () => props.store.isExpanded(`swarm-${props.item().id}`);
+    const open = () => !props.activityPreview && props.store.isExpanded(`swarm-${props.item().id}`);
     return (
       <View class="w-full">
         <View
@@ -424,9 +426,9 @@ function AgentRow(props: UiContext & {
   );
 }
 
-function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
+function PlanCard(props: ToolContext & { item: Accessor<ToolItem> }) {
   const item = () => props.item();
-  const open = () => props.store.isExpanded(`plan-${item().id}`);
+  const open = () => !props.activityPreview && props.store.isExpanded(`plan-${item().id}`);
   const approved = () => item().output.includes("Plan approved");
   const statusLabel = () => item().status !== "done"
     ? t("tools.plan_pending")
@@ -463,9 +465,9 @@ function PlanCard(props: UiContext & { item: Accessor<ToolItem> }) {
   );
 }
 
-export function ToolRow(props: UiContext & { item: Accessor<ToolItem> }) {
+export function ToolRow(props: ToolContext & { item: Accessor<ToolItem> }) {
   const item = () => props.item();
-  const open = () => props.store.isExpanded(item().id);
+  const open = () => !props.activityPreview && props.store.isExpanded(item().id);
   const running = () => (item().status === "input" || item().status === "running") && !item().approvalPending;
   const streamRows = () => streamingDiffRows(item().tool, item().detail);
   const streamAdditions = () => streamRows().filter((row) => row.kind === "added").length;

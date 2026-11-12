@@ -28,6 +28,13 @@ function tool(id: string, name: string, status: ToolItem["status"] = "done"): To
   };
 }
 
+function updateItem(id: string, update: (item: ChatItem) => ChatItem): void {
+  store.items.update((all) => ({
+    ...all,
+    activity: (all.activity ?? []).map((item) => item.id === id ? update(item) : item),
+  }));
+}
+
 const items: ChatItem[] = [
   { kind: "user", id: "user-activity", text: "Inspect activity", files: [], imageNums: [], sentAtMs: 1 },
   { kind: "reasoning", id: "r1", text: "Analyze the request", streaming: false, turnId: turn.id },
@@ -60,6 +67,34 @@ mount(() => (
         }}
       >
         <Text class="text-xs text-foreground">Append tool</Text>
+      </Button>
+      <Button
+        testID="run-reasoning"
+        class="rounded border border-border px-3 py-1"
+        onPress={() => updateItem("r1", (item) => item.kind === "reasoning" ? {
+          ...item,
+          text: `${item.text}\nLatest running reasoning line with a longer preview`,
+          streaming: true,
+        } : item)}
+      >
+        <Text class="text-xs text-foreground">Run reasoning</Text>
+      </Button>
+      <Button
+        testID="run-tool"
+        class="rounded border border-border px-3 py-1"
+        onPress={() => updateItem("read-1", (item) => item.kind === "tool" ? { ...item, status: "running" } : item)}
+      >
+        <Text class="text-xs text-foreground">Run tool</Text>
+      </Button>
+      <Button
+        testID="finish-activity"
+        class="rounded border border-border px-3 py-1"
+        onPress={() => {
+          updateItem("r1", (item) => item.kind === "reasoning" ? { ...item, streaming: false } : item);
+          updateItem("read-1", (item) => item.kind === "tool" ? { ...item, status: "done" } : item);
+        }}
+      >
+        <Text class="text-xs text-foreground">Finish activity</Text>
       </Button>
     </View>
     <MessageList store={store} themeStore={themeStore} items={store.items().activity ?? []} />
