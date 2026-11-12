@@ -91,13 +91,19 @@ function CodeLine(props: {
   lineNumbers: boolean;
   gutterWidth: number;
   error: boolean;
+  top?: number;
 }) {
   const row = () => props.row();
   const content = () => segments(row(), props.spans());
   return (
     <View
       class={props.wrap ? "w-full flex-row items-start" : "flex-row items-start"}
-      style={{ minHeight: LINE_HEIGHT, cursor: props.wrap ? "default" : "text" }}
+      style={{
+        ...(props.top !== undefined
+          ? { position: "absolute", left: 0, right: 0, top: props.top, height: LINE_HEIGHT }
+          : { minHeight: LINE_HEIGHT }),
+        cursor: props.wrap ? "default" : "text",
+      }}
     >
       <If when={props.lineNumbers && row().number !== undefined}>
         <Text
@@ -145,6 +151,7 @@ export function CodeView(props: CodeViewProps) {
   const scrollY = signal(0);
   let horizontal: ScrollRef | undefined;
   let highlightRevision = 0;
+  let lastSlots: { slot: number; row: number }[] = [];
   effect(() => {
     const code = props.code();
     const language = props.language;
@@ -235,12 +242,29 @@ export function CodeView(props: CodeViewProps) {
   const visible = computed(() => {
     const first = Math.max(0, Math.floor(scrollY() / LINE_HEIGHT) - 6);
     const last = Math.min(rows().length, Math.ceil((scrollY() + height()) / LINE_HEIGHT) + 6);
-    return { first, last, items: rows().slice(first, last) };
+    return { first, last };
   });
-  const spacers = (after: boolean) => {
-    const count = after ? rows().length - visible().last : visible().first;
-    return <View style={{ height: count * LINE_HEIGHT }} />;
-  };
+  // Reuse each visible row's element slot while it stays in view, as the official Editor does.
+  const slots = computed(() => {
+    const { first, last } = visible();
+    const inView = Array.from({ length: Math.max(0, last - first) }, (_, index) => first + index);
+    const wanted = new Set(inView);
+    const kept = new Map<number, number>();
+    const free: number[] = [];
+    for (const entry of lastSlots) {
+      if (wanted.has(entry.row)) kept.set(entry.row, entry.slot);
+      else free.push(entry.slot);
+    }
+    free.sort((a, b) => a - b);
+    let next = lastSlots.reduce((max, entry) => Math.max(max, entry.slot + 1), 0);
+    const result = inView.map((row) => {
+      const slot = kept.get(row) ?? free.shift() ?? next++;
+      return { slot, row };
+    });
+    result.sort((a, b) => a.row - b.row);
+    lastSlots = result;
+    return result;
+  });
   const scrolling = () => (
     <View class="h-full w-full">
       <Scroll
@@ -255,19 +279,17 @@ export function CodeView(props: CodeViewProps) {
       >
         <View class="relative flex-row" style={{ height: contentHeight() }}>
           <If when={props.lineNumbers}>
-            <View class="shrink-0" style={{ width: gutterWidth(), height: contentHeight() }}>
-              {spacers(false)}
-              <Each of={visible().items} key={(row) => row.id}>
-                {(row) => (
+            <View class="relative shrink-0" style={{ width: gutterWidth(), height: contentHeight() }}>
+              <Each of={slots()} key={(entry) => entry.slot}>
+                {(entry) => (
                   <Text
-                    class="shrink-0 pr-2 font-mono text-xs text-muted-foreground"
-                    style={{ width: gutterWidth(), lineHeight: LINE_HEIGHT, textAlign: "right", userSelect: "text", cursor: "default" }}
+                    class="absolute left-0 pr-2 font-mono text-xs text-muted-foreground"
+                    style={{ top: entry().row * LINE_HEIGHT, width: gutterWidth(), lineHeight: LINE_HEIGHT, textAlign: "right", userSelect: "text", cursor: "default" }}
                   >
-                    {row().number}
+                    {rows()[entry().row]?.number}
                   </Text>
                 )}
               </Each>
-              {spacers(true)}
             </View>
           </If>
           <Scroll
@@ -280,11 +302,11 @@ export function CodeView(props: CodeViewProps) {
             onLayout={({ bounds }) => textViewportWidth.set(bounds.size.width)}
           >
             <View selectable class="relative" style={{ width: contentWidth(), height: contentHeight() }}>
-              {spacers(false)}
-              <Each of={visible().items} key={(row) => row.id}>
-                {(row) => (
+              <Each of={slots()} key={(entry) => entry.slot}>
+                {(entry) => (
                   <CodeLine
-                    row={row}
+                    row={() => rows()[entry().row]}
+                    top={entry().row * LINE_HEIGHT}
                     spans={spans}
                     wrap={false}
                     lineNumbers={false}
@@ -293,7 +315,6 @@ export function CodeView(props: CodeViewProps) {
                   />
                 )}
               </Each>
-              {spacers(true)}
             </View>
           </Scroll>
           <If when={contentHeight() > height()}>
