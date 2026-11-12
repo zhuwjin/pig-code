@@ -17,6 +17,16 @@ pub fn append_agent_message(
     msg: &mut ChatMsg,
     context_window: u64,
 ) -> Result<(), String> {
+    append_agent_message_meta(path, msg, context_window, super::AgentMsgMeta::default())
+}
+
+/// Append a message with display-only metadata (reasoning duration, tool edit).
+pub fn append_agent_message_meta(
+    path: &Path,
+    msg: &mut ChatMsg,
+    context_window: u64,
+    meta: super::AgentMsgMeta,
+) -> Result<(), String> {
     let media_dir = path.with_extension("media");
     let images = match crate::rollout::persist_chat_images(&media_dir, &msg.images) {
         Ok(images) => images,
@@ -71,6 +81,9 @@ pub fn append_agent_message(
             "reasoning": reasoning,
             "images": images,
             "documents": documents,
+            "ts_ms": crate::model_io::now_ms(),
+            "reasoning_ms": meta.reasoning_ms,
+            "edit": meta.edit,
         }),
     )
 }

@@ -8,7 +8,7 @@ use super::compact::{
     ChildAttemptOutput, MAX_CHILD_OVERFLOW_RECOVERIES, child_overflow_failure,
     compact_child_context,
 };
-use super::persist::{child_persist_stop, persist_child_message};
+use super::persist::{child_persist_stop, persist_child_message, persist_child_message_meta};
 
 /// Subagent progress reporting (routed per sink, see ProgressSink)
 fn report_progress(
@@ -88,9 +88,21 @@ fn emit_activity_since(
     tx: &async_channel::Sender<Event>,
     agent_id: &str,
     history: &[ChatMsg],
+    edits: &HashMap<String, pig_protocol::EditDiff>,
+    reasoning_ms: Option<u64>,
     emitted: &mut usize,
 ) {
-    for item in crate::agent::project_display_items(&history[*emitted..]) {
+    let mut items = crate::agent::project_display_items_with_edits(&history[*emitted..], edits);
+    if let Some(ms) = reasoning_ms {
+        if let Some(item) = items
+            .iter_mut()
+            .rev()
+            .find(|item| item.role == "reasoning" && item.duration_ms.is_none())
+        {
+            item.duration_ms = Some(ms);
+        }
+    }
+    for item in items {
         let agent_id = agent_id.to_string();
         emit_bg(ctx.session_id, tx, move |session_id| {
             Event::SubagentActivity {
@@ -160,6 +172,7 @@ async fn drive_subagent_loop(
     // as SubagentActivity (the initial system/user/resume history does not
     // count — LoadSubagent covers it with a full load)
     let mut emitted_up_to = run.history.len();
+    let mut tool_edits: HashMap<String, pig_protocol::EditDiff> = HashMap::new();
     // Unique per child: foreground swarm children share the parent tool card,
     // so approval/hook ids need the agent_id too.
     let ownership = progress.ownership_prefix(&run.agent_id);
@@ -198,7 +211,7 @@ async fn drive_subagent_loop(
                 return child_persist_stop(run, &error, steps_run, usage);
             }
             run.history.push(message);
-            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
+            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &tool_edits, None, &mut emitted_up_to);
         }
         report_progress(ctx, progress, tx, format!("Step {step} · thinking…"));
         run.select_plugin_tools(tx).await;
@@ -251,6 +264,8 @@ async fn drive_subagent_loop(
                                 tx,
                                 &run.agent_id,
                                 &run.history,
+                                &tool_edits,
+                                None,
                                 &mut emitted_up_to,
                             );
                             return SubagentDriveResult {
@@ -299,6 +314,8 @@ async fn drive_subagent_loop(
             ));
             let mut failed: Option<CoreError> = None;
             let mut first_token_at: Option<Instant> = None;
+            let mut reasoning_started: Option<Instant> = None;
+            let mut reasoning_ms: Option<u64> = None;
             // Provider tool-call id per streaming index (start events carry
             // the id; delta events only carry the index)
             let mut tool_input_ids: HashMap<usize, String> = HashMap::new();
@@ -318,6 +335,7 @@ async fn drive_subagent_loop(
                     // the parent timeline only gets progress status lines
                     Some(ProviderEvent::Reasoning(delta)) => {
                         first_token_at.get_or_insert_with(Instant::now);
+                        reasoning_started.get_or_insert_with(Instant::now);
                         forwarded_content = true;
                         reasoning.push_str(&delta);
                         let agent_id = run.agent_id.clone();
@@ -330,6 +348,9 @@ async fn drive_subagent_loop(
                     }
                     Some(ProviderEvent::Text(delta)) => {
                         first_token_at.get_or_insert_with(Instant::now);
+                        if let Some(started) = reasoning_started.take() {
+                            reasoning_ms = Some(started.elapsed().as_millis() as u64);
+                        }
                         forwarded_content = true;
                         text.push_str(&delta);
                         let agent_id = run.agent_id.clone();
@@ -345,12 +366,18 @@ async fn drive_subagent_loop(
                         replay = Some(snapshot);
                     }
                     Some(ProviderEvent::ToolCalls(calls)) => {
+                        if let Some(started) = reasoning_started.take() {
+                            reasoning_ms = Some(started.elapsed().as_millis() as u64);
+                        }
                         forwarded_content |= !calls.is_empty();
                         tool_calls = calls;
                     }
                     // Live tool-input streaming goes to the subagent panel as
                     // pending tool cards, not to the parent timeline
                     Some(ProviderEvent::ToolCallStart { index, id, name }) => {
+                        if let Some(started) = reasoning_started.take() {
+                            reasoning_ms = Some(started.elapsed().as_millis() as u64);
+                        }
                         forwarded_content = true;
                         tool_input_ids.insert(index, id.clone());
                         let agent_id = run.agent_id.clone();
@@ -452,7 +479,7 @@ async fn drive_subagent_loop(
                 provider_task.abort();
                 // Before wrapping up, report this step's already-recorded
                 // messages to the live panel (same below)
-                emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
+                emit_activity_since(ctx, tx, &run.agent_id, &run.history, &tool_edits, reasoning_ms, &mut emitted_up_to);
                 // A stop that raced the error wins: the child is cancelled,
                 // not reported as a failure, and no recovery/summary runs.
                 if cancel.is_cancelled() {
@@ -534,6 +561,8 @@ async fn drive_subagent_loop(
                                 tx,
                                 &run.agent_id,
                                 &run.history,
+                                &tool_edits,
+                                None,
                                 &mut emitted_up_to,
                             );
                             return SubagentDriveResult {
@@ -580,7 +609,7 @@ async fn drive_subagent_loop(
             }
             if cancel.is_cancelled() {
                 provider_task.abort();
-                emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
+                emit_activity_since(ctx, tx, &run.agent_id, &run.history, &tool_edits, reasoning_ms, &mut emitted_up_to);
                 return SubagentDriveResult {
                     status_line: "cancelled".to_string(),
                     result_text: String::new(),
@@ -592,10 +621,15 @@ async fn drive_subagent_loop(
                 };
             }
             let _ = provider_task.await;
-            attempt_output = Some((text, reasoning, replay, tool_calls, finish_reason));
+            if reasoning_ms.is_none()
+                && let Some(started) = reasoning_started.take()
+            {
+                reasoning_ms = Some(started.elapsed().as_millis() as u64);
+            }
+            attempt_output = Some((text, reasoning, replay, tool_calls, finish_reason, reasoning_ms));
             break 'attempt;
         }
-        let (mut text, reasoning, mut replay, mut tool_calls, finish_reason) =
+        let (mut text, reasoning, mut replay, mut tool_calls, finish_reason, reasoning_ms) =
             attempt_output.expect("a successful child attempt always crosses the retry loop");
         let paused = finish_reason == pig_protocol::FinishReason::Pause;
         if finish_reason.is_incomplete() {
@@ -626,7 +660,14 @@ async fn drive_subagent_loop(
             replay,
         );
         last_text = assistant.content.clone().unwrap_or_default();
-        if let Err(error) = persist_child_message(run, &mut assistant) {
+        if let Err(error) = persist_child_message_meta(
+            run,
+            &mut assistant,
+            crate::agent::AgentMsgMeta {
+                reasoning_ms,
+                edit: None,
+            },
+        ) {
             return child_persist_stop(run, &error, steps_run, usage);
         }
         run.history.push(assistant);
@@ -641,7 +682,7 @@ async fn drive_subagent_loop(
         });
         if tool_calls.is_empty() {
             // This step has only the assistant message: report before wrap-up
-            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
+            emit_activity_since(ctx, tx, &run.agent_id, &run.history, &tool_edits, reasoning_ms, &mut emitted_up_to);
             if paused {
                 if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
                     return subagent_pause_limit(usage, steps_run);
@@ -703,7 +744,7 @@ async fn drive_subagent_loop(
                         }
                         run.history.push(message);
                     }
-                    emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
+                    emit_activity_since(ctx, tx, &run.agent_id, &run.history, &tool_edits, reasoning_ms, &mut emitted_up_to);
                     return SubagentDriveResult {
                         status_line: "cancelled".to_string(),
                         result_text: String::new(),
@@ -724,6 +765,7 @@ async fn drive_subagent_loop(
                 GatedToolOutcome::Executed {
                     output,
                     is_error,
+                    edit,
                     images,
                     documents,
                     ..
@@ -732,7 +774,17 @@ async fn drive_subagent_loop(
                         ChatMsg::tool_result_with_images(&child_call.id, output, images)
                             .with_error(is_error);
                     message.documents = documents;
-                    if let Err(error) = persist_child_message(run, &mut message) {
+                    if let Some(edit) = edit.clone() {
+                        tool_edits.insert(child_call.id.clone(), edit);
+                    }
+                    if let Err(error) = persist_child_message_meta(
+                        run,
+                        &mut message,
+                        crate::agent::AgentMsgMeta {
+                            reasoning_ms: None,
+                            edit,
+                        },
+                    ) {
                         return child_persist_stop(run, &error, steps_run, usage);
                     }
                     run.history.push(message);
@@ -742,7 +794,7 @@ async fn drive_subagent_loop(
         // End-of-step reporting: this step's assistant (with tool_calls) + all
         // tool results are projected in one batch, with output backfilled by
         // tool_call_id within the batch
-        emit_activity_since(ctx, tx, &run.agent_id, &run.history, &mut emitted_up_to);
+        emit_activity_since(ctx, tx, &run.agent_id, &run.history, &tool_edits, reasoning_ms, &mut emitted_up_to);
         if paused {
             if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
                 return subagent_pause_limit(usage, steps_run);

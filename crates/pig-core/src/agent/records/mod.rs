@@ -13,20 +13,34 @@ mod store;
 mod tests;
 
 pub use compact::AgentCompact;
+#[allow(unused_imports)]
 pub use display::{display_items, project_display_items};
+pub(crate) use display::project_display_items_with_edits;
+pub(crate) use display::display_stored_items;
 pub use jsonl::append_agent_record;
-pub use media::append_agent_message;
+pub use media::{append_agent_message, append_agent_message_meta};
 pub(crate) use media::fill_document_token_estimates;
 pub(crate) use media::project_history_media;
 pub use store::{AgentMeta, read_agent};
+pub(crate) use store::read_agent_stored;
+
+/// Display-only fields of a message line (timing and the edit a tool made).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AgentMsgMeta {
+    pub(crate) reasoning_ms: Option<u64>,
+    pub(crate) edit: Option<pig_protocol::EditDiff>,
+}
 
 /// One parsed message line before media rehydration. Compaction boundaries
 /// are applied on this structure so discarded history never reads media.
 #[derive(Clone)]
-struct StoredAgentMsg {
-    msg: pig_provider::ChatMsg,
-    images: Vec<crate::rollout::ImageRef>,
-    documents: Vec<crate::rollout::DocumentRef>,
+pub(crate) struct StoredAgentMsg {
+    pub(crate) msg: pig_provider::ChatMsg,
+    pub(crate) images: Vec<crate::rollout::ImageRef>,
+    pub(crate) documents: Vec<crate::rollout::DocumentRef>,
+    pub(crate) ts_ms: u64,
+    pub(crate) reasoning_ms: Option<u64>,
+    pub(crate) edit: Option<pig_protocol::EditDiff>,
 }
 
 /// Subagent context directory: {sessions_dir}/{session_id}.agents/ (one {agent_id}.jsonl per subagent)
@@ -173,11 +187,11 @@ fn missing_agent(agent_id: &str, sessions_dir: &Path, session_id: &str) -> Strin
 /// (a direct child, not a symlink) must all agree, and the first-line metadata
 /// must name the same agent id; a planted path or renamed file cannot redirect
 /// a resume to another context.
-pub(crate) fn read_agent_by_id(
+fn resolve_agent_path(
     sessions_dir: &Path,
     session_id: &str,
     agent_id: &str,
-) -> Result<(AgentMeta, Vec<ChatMsg>), String> {
+) -> Result<PathBuf, String> {
     validate_agent_id(agent_id)?;
     if !session_component_valid(session_id) {
         return Err("Invalid session id for a subagent context".to_string());
@@ -229,16 +243,41 @@ pub(crate) fn read_agent_by_id(
             raw_path.display()
         ));
     }
-    let (meta, history) = read_agent(&canonical)?;
+    Ok(canonical)
+}
+
+fn check_agent_meta(meta: &AgentMeta, agent_id: &str, path: &Path) -> Result<(), String> {
     if meta.agent_id != agent_id {
         return Err(format!(
-            "Subagent context {} belongs to agent_id \"{}\" (metadata), not \"{agent_id}\"; \
-             resume the id recorded in its meta line",
-            canonical.display(),
+            "Subagent context {} belongs to agent_id \"{}\" (metadata), not \"{agent_id}\"",
+            path.display(),
             meta.agent_id
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn read_agent_by_id(
+    sessions_dir: &Path,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<(AgentMeta, Vec<ChatMsg>), String> {
+    let canonical = resolve_agent_path(sessions_dir, session_id, agent_id)?;
+    let (meta, history) = read_agent(&canonical)?;
+    check_agent_meta(&meta, agent_id, &canonical)?;
     Ok((meta, history))
+}
+
+/// The history loader's variant: keeps each message's display metadata.
+pub(crate) fn read_agent_by_id_stored(
+    sessions_dir: &Path,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<(AgentMeta, Vec<StoredAgentMsg>), String> {
+    let canonical = resolve_agent_path(sessions_dir, session_id, agent_id)?;
+    let (meta, stored) = read_agent_stored(&canonical)?;
+    check_agent_meta(&meta, agent_id, &canonical)?;
+    Ok((meta, stored))
 }
 
 /// Claim the exclusive writer for a resume target. A Running registry entry or

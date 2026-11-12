@@ -23,6 +23,19 @@ pub struct AgentMeta {
 /// torn partial final line (a crash during append) keeps the last valid prefix
 /// and is repaired before the next append.
 pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>), String> {
+    let (meta, stored) = read_agent_stored(path)?;
+    let media_root = path.with_extension("media");
+    let mut history = Vec::with_capacity(stored.len());
+    for mut item in stored {
+        rehydrate_agent_media(&mut item, &media_root);
+        history.push(item.msg);
+    }
+    reconcile_tool_results(&mut history);
+    Ok((meta, history))
+}
+
+/// Read a subagent context with its display metadata, before media rehydration.
+pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAgentMsg>), String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("Failed to read subagent context {}: {e}", path.display()))?;
     let mut lines = crate::rollout::jsonl::lines(&bytes);
@@ -79,14 +92,7 @@ pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>)
             }
         }
     }
-    let media_root = path.with_extension("media");
-    let mut history = Vec::with_capacity(stored.len());
-    for mut item in stored {
-        rehydrate_agent_media(&mut item, &media_root);
-        history.push(item.msg);
-    }
-    reconcile_tool_results(&mut history);
-    Ok((meta, history))
+    Ok((meta, stored))
 }
 
 fn parse_agent_msg(value: &serde_json::Value, line_no: usize) -> Result<StoredAgentMsg, String> {
@@ -115,6 +121,12 @@ fn parse_agent_msg(value: &serde_json::Value, line_no: usize) -> Result<StoredAg
         msg,
         images,
         documents,
+        ts_ms: value["ts_ms"].as_u64().unwrap_or(0),
+        reasoning_ms: value["reasoning_ms"].as_u64(),
+        edit: value
+            .get("edit")
+            .filter(|edit| !edit.is_null())
+            .and_then(|edit| serde_json::from_value(edit.clone()).ok()),
     })
 }
 

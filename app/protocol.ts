@@ -285,6 +285,11 @@ export interface SubagentItem {
   text: string;
   tool?: string | null;
   output?: string | null;
+  detail?: string | null;
+  ts_ms?: number;
+  duration_ms?: number | null;
+  edit?: EditDiff | null;
+  sources?: Source[];
   is_error: boolean;
   stopped: boolean;
 }

@@ -4,7 +4,7 @@ import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
 import type { ChatItem, GitFileChange, RightPanelRequest, SubagentHistory, SubagentItem, TaskSummary, ToolItem, TurnState } from "../protocol";
 import { type UiContext } from "../ui-context";
-import { buildConversationRows, conversationRowsEqual, formatDuration, pathParts, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
+import { conversationRowsEqual, flattenConversationRows, formatDuration, pathParts, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
 import { Icon, type IconName } from "./icon";
 import { MessageRow, type MessageProps } from "./messages";
 import { CodeCard } from "./tool-card";
@@ -236,8 +236,9 @@ function subagentToolItem(item: SubagentItem, agentId: string, index: number): T
     id: `subagent-${agentId}-${index}`,
     tool: item.tool ?? "",
     summary: item.text,
-    detail: item.text,
+    detail: item.detail ?? item.text,
     output: item.output ?? "",
+    edit: item.edit ?? undefined,
     status: item.is_error ? "error" : item.stopped ? "stopped" : "done",
   };
 }
@@ -248,12 +249,15 @@ function subagentRows(
   task: TaskSummary | undefined,
   fallbackDuration: number | undefined,
   turnCache: Map<string, TurnState>,
+  isTurnExpanded: (id: string) => boolean,
+  isItemExpanded: (id: string) => boolean,
 ): ConversationRow[] {
   if (!history) return [];
   const items: ChatItem[] = [];
   const turns: TurnState[] = [];
   let turnIndex = -1;
   let currentTurnId: string | undefined;
+  let firstUser = true;
   const startTurn = () => {
     turnIndex += 1;
     currentTurnId = `subagent-${agentId}-turn-${turnIndex}`;
@@ -270,17 +274,43 @@ function subagentRows(
   history.items.forEach((item, index) => {
     const id = `subagent-${agentId}-${index}`;
     if (item.role === "user") {
-      items.push({ kind: "user", id, text: item.text, files: [], imageNums: [], sentAtMs: 0 });
+      items.push({
+        kind: "user",
+        id,
+        text: item.text,
+        files: [],
+        imageNums: [],
+        sentAtMs: item.ts_ms && item.ts_ms > 0
+          ? item.ts_ms
+          : firstUser
+            ? (task?.started_at_ms ?? 0)
+            : 0,
+      });
+      firstUser = false;
       currentTurnId = undefined;
       return;
     }
     const turnId = turnForItem();
     if (item.role === "reasoning") {
-      items.push({ kind: "reasoning", id, text: item.text, streaming: false, turnId });
+      items.push({
+        kind: "reasoning",
+        id,
+        text: item.text,
+        streaming: false,
+        durationMs: item.duration_ms ?? undefined,
+        turnId,
+      });
     } else if (item.role === "tool") {
       items.push({ ...subagentToolItem(item, agentId, index), turnId });
     } else {
-      items.push({ kind: "markdown", id, text: item.text, streaming: false, turnId });
+      items.push({
+        kind: "markdown",
+        id,
+        text: item.text,
+        streaming: false,
+        sources: item.sources?.length ? item.sources : undefined,
+        turnId,
+      });
     }
   });
   const stream = history.stream;
@@ -313,9 +343,8 @@ function subagentRows(
       : fallbackDuration;
     last.durationMs = duration;
   }
-  // `buildConversationRows` reuses a work row only while its turn keeps its
-  // identity; the panel builds turns itself, so keep one object per unchanged
-  // turn instead of making the rows (and their nested lists) new every time.
+  // The panel builds its turns itself, so keep one object per unchanged turn
+  // instead of making the rows new every time.
   for (let index = 0; index < turns.length; index += 1) {
     const turn = turns[index];
     const cached = turnCache.get(turn.id);
@@ -330,7 +359,8 @@ function subagentRows(
       turnCache.set(turn.id, turn);
     }
   }
-  return buildConversationRows(items, turns).filter((row) => row.type !== "actions" && row.type !== "changes");
+  return flattenConversationRows(items, turns, isTurnExpanded, isItemExpanded)
+    .filter((row) => row.type !== "actions" && row.type !== "changes");
 }
 
 function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest, { kind: "subagent" }> }) {
@@ -355,7 +385,15 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         cachedTurns = new Map();
         cachedTurnsKey = key;
       }
-      return subagentRows(props.request.agentId, history(), task(), parentTurnDuration(), cachedTurns);
+      return subagentRows(
+        props.request.agentId,
+        history(),
+        task(),
+        parentTurnDuration(),
+        cachedTurns,
+        (id) => props.store.isTurnExpanded(id),
+        (id) => props.store.isExpanded(id),
+      );
     },
     { equals: conversationRowsEqual },
   );
@@ -376,7 +414,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
     return () => clearTimeout(timer);
   });
   return (
-    <View class="relative min-h-0 flex-1">
+    <View class="relative min-h-0 min-w-0 flex-1">
       <View class="gap-1 border-b border-border px-3 py-2">
         <View class="flex-row items-center gap-2">
           <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-xs font-medium text-foreground">
@@ -395,8 +433,8 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
         each={rows()}
         keyExtractor={(row) => row.id}
         estimatedItemSize={28}
-        class="min-h-0 flex-1"
-        contentClass="gap-3"
+        class="min-h-0 min-w-0 w-full flex-1"
+        contentClass="gap-4"
         alignment="bottom"
         maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 24 }}
         header={<View class="h-4" />}
@@ -407,7 +445,7 @@ function SubagentContent(props: UiContext & { request: Extract<RightPanelRequest
           latestVisible.set(distance > 24);
         }}
       >
-        {(row) => <MessageRow {...messageProps} row={row} active={false} navEligible={false} />}
+        {(row) => <MessageRow {...messageProps} row={row} active={false} navEligible={false} flat />}
       </List>
       <If when={latestVisible()}>
         <View class="absolute inset-x-0 bottom-3 items-center" style={{ pointerEvents: "box-none" }}>

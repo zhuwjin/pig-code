@@ -157,12 +157,12 @@ impl Manager {
         let read_agent = agent_id.clone();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                crate::agent::read_agent_by_id(&sessions_dir, &read_session, &read_agent)
+                crate::agent::read_agent_by_id_stored(&sessions_dir, &read_session, &read_agent)
             })
             .await;
             match result {
-                Ok(Ok((meta, msgs))) => {
-                    let (title, subtitle, items) = crate::agent::display_items(&meta, &msgs);
+                Ok(Ok((meta, stored))) => {
+                    let (title, subtitle, items) = crate::agent::display_stored_items(&meta, &stored);
                     let _ = tx
                         .send(Event::SubagentHistory {
                             session_id,

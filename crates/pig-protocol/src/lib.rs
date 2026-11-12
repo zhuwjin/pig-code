@@ -142,7 +142,7 @@ impl ExecMode {
 }
 
 /// File diff produced by a single edit (Write/Edit): for inline rendering in UI tool cards.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditDiff {
     pub path: String,
     pub unified_diff: String,
@@ -361,6 +361,21 @@ pub struct SubagentItem {
     pub tool: Option<String>,
     /// Tool row output (truncated to 2000 chars on the core side, at character boundaries)
     pub output: Option<String>,
+    /// Tool row arguments (the raw call's JSON)
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// When the message was recorded, for the user row's time
+    #[serde(default)]
+    pub ts_ms: u64,
+    /// How long the step's reasoning streamed, for the reasoning row's label
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// The edit a tool row made (Edit/Write calls), for its diff card
+    #[serde(default)]
+    pub edit: Option<EditDiff>,
+    /// Hosted-search citations of an assistant row
+    #[serde(default)]
+    pub sources: Vec<Source>,
     pub is_error: bool,
     #[serde(default)]
     pub stopped: bool,

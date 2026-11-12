@@ -106,6 +106,9 @@ pub(super) fn apply_agent_compact(
         msg: crate::rollout::compaction_note_message(record.note.clone()),
         images: Vec::new(),
         documents: Vec::new(),
+        ts_ms: 0,
+        reasoning_ms: None,
+        edit: None,
     });
     if let Some(user) = preserved {
         history.push(user);

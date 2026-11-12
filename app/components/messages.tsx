@@ -171,7 +171,9 @@ function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
         </If>
       </View>
       <View class="flex-row items-center gap-1 opacity-0 group-hover:opacity-100">
-        <Text class="mr-1 text-xs text-muted-foreground">{formatClock(item().sentAtMs)}</Text>
+        <If when={item().sentAtMs > 0}>
+          <Text class="mr-1 text-xs text-muted-foreground">{formatClock(item().sentAtMs)}</Text>
+        </If>
         <Button
           testID={`copy-user-${item().id}`}
           accessibilityLabel={t("messages.copy_user")}

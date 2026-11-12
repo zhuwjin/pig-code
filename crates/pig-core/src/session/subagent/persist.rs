@@ -27,10 +27,24 @@ pub(super) fn persist_child_message(
     run: &mut SubagentDrive,
     msg: &mut ChatMsg,
 ) -> Result<(), String> {
+    persist_child_message_meta(run, msg, crate::agent::AgentMsgMeta::default())
+}
+
+/// Persist a child message with its display metadata (reasoning duration, tool edit).
+pub(super) fn persist_child_message_meta(
+    run: &mut SubagentDrive,
+    msg: &mut ChatMsg,
+    meta: crate::agent::AgentMsgMeta,
+) -> Result<(), String> {
     if let Some(error) = &run.persist_failure {
         return Err(error.clone());
     }
-    match crate::agent::append_agent_message(&run.jsonl, msg, run.child_config.context_window) {
+    match crate::agent::append_agent_message_meta(
+        &run.jsonl,
+        msg,
+        run.child_config.context_window,
+        meta,
+    ) {
         Ok(()) => Ok(()),
         Err(error) => {
             run.persist_failure = Some(error.clone());

@@ -20,6 +20,7 @@ pub(super) type ChildAttemptOutput = (
     Option<pig_provider::AssistantReplay>,
     Vec<ToolCall>,
     pig_protocol::FinishReason,
+    Option<u64>,
 );
 
 /// One child compaction attempt's result. `pin_after` remaps a paused

@@ -49,6 +49,73 @@ fn display_items_keep_reasoning_before_the_assistant_body() {
 }
 
 #[test]
+fn display_items_keep_recorded_timing_and_tool_edit() {
+    let dir = std::env::temp_dir().join(format!(
+        "pig-agent-display-meta-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let path = dir.join("a1.jsonl");
+    write_meta(&path);
+    let call = pig_provider::ToolCall {
+        id: "call-edit".into(),
+        name: "Edit".into(),
+        arguments: "{}".into(),
+    };
+    let mut assistant = pig_provider::ChatMsg::assistant(
+        "answer".into(),
+        vec![call],
+        Some("thinking".into()),
+    );
+    append_agent_message_meta(
+        &path,
+        &mut assistant,
+        TEST_CONTEXT_WINDOW,
+        AgentMsgMeta {
+            reasoning_ms: Some(1234),
+            edit: None,
+        },
+    )
+    .expect("append assistant");
+    let edit = pig_protocol::EditDiff {
+        path: "a.ts".into(),
+        unified_diff: "@@".into(),
+        additions: 1,
+        deletions: 0,
+    };
+    let mut tool = pig_provider::ChatMsg::tool_result("call-edit", "edited".into());
+    append_agent_message_meta(
+        &path,
+        &mut tool,
+        TEST_CONTEXT_WINDOW,
+        AgentMsgMeta {
+            reasoning_ms: None,
+            edit: Some(edit.clone()),
+        },
+    )
+    .expect("append tool");
+    let (meta, stored) = read_agent_stored(&path).expect("read stored records");
+    let (_, _, items) = display_stored_items(&meta, &stored);
+    let reasoning = items
+        .iter()
+        .find(|item| item.role == "reasoning")
+        .expect("reasoning row");
+    assert_eq!(reasoning.duration_ms, Some(1234));
+    assert!(reasoning.ts_ms > 0);
+    let tool_row = items
+        .iter()
+        .find(|item| item.role == "tool")
+        .expect("tool row");
+    assert_eq!(tool_row.edit, Some(edit));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn stopped_tool_status_survives_jsonl_and_display() {
     let dir = std::env::temp_dir().join(format!("pig-agent-stopped-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
