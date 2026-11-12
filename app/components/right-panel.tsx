@@ -494,7 +494,7 @@ export function RightPanel(props: UiContext & { onClose: () => void; maximized: 
   };
   return (
     <View testID="right-panel" class="w-full flex-1 bg-background">
-      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: platform.os === "windows" ? WINDOW_CONTROLS_WIDTH + 8 : titleBar().right, borderBottomWidth: 0.5 }} desktop={{ windowDrag: true }}>
+      <View class="shrink-0 flex-row items-center border-b border-border" style={{ height: titleBar().height || 44, paddingRight: platform.os === "windows" ? WINDOW_CONTROLS_WIDTH + 4 : titleBar().right, borderBottomWidth: 0.5 }} desktop={{ windowDrag: true }}>
         <Popover
           open={tabListOpen()}
           onOpenChange={({ open }) => {
@@ -604,52 +604,54 @@ export function RightPanel(props: UiContext & { onClose: () => void; maximized: 
             </Each>
           </Tabs>
         </Scroll>
-        <Menu
-          open={addOpen()}
-          onOpenChange={({ open }) => addOpen.set(open)}
-          placement="bottom"
-          align="end"
-          popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
-          trigger={
-            <View
-              role="button"
-              testID="right-tab-add"
-              accessibilityLabel={t("right_panel.add_tab")}
-              class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
-              desktop={{ windowDrag: false }}
-            >
-              <Icon name="plus" size={14} color={token("muted-foreground")} />
-            </View>
-          }
-        >
-          <MenuItem
-            testID="right-tab-add-changes"
-            class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-accent"
-            onSelect={() => {
-              addOpen.set(false);
-              props.store.openChanges();
-            }}
+        <View class="shrink-0 flex-row items-center gap-1">
+          <Menu
+            open={addOpen()}
+            onOpenChange={({ open }) => addOpen.set(open)}
+            placement="bottom"
+            align="end"
+            popupClass="w-44 rounded-xl border border-border bg-popover p-1 shadow-xl"
+            trigger={
+              <View
+                role="button"
+                testID="right-tab-add"
+                accessibilityLabel={t("right_panel.add_tab")}
+                class="h-8 w-8 shrink-0 items-center justify-center rounded-(--radius) hover:bg-muted active:bg-accent"
+                desktop={{ windowDrag: false }}
+              >
+                <Icon name="plus" size={14} color={token("secondary-foreground")} />
+              </View>
+            }
           >
-            <Icon name="git-branch" size={14} color={token("muted-foreground")} />
-            <Text class="flex-1 text-sm text-foreground">{t("right_panel.tab.changes")}</Text>
-          </MenuItem>
-        </Menu>
-        <Button
-          testID="right-panel-maximize"
-          accessibilityLabel={t(props.maximized ? "right_panel.restore" : "right_panel.fullscreen")}
-          class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
-          onPress={props.onToggleMaximize}
-        >
-          <Icon name={props.maximized ? "minimize-2" : "maximize-2"} size={14} color={token("muted-foreground")} />
-        </Button>
-        <Button
-          testID="right-panel-close"
-          accessibilityLabel={t("right_panel.close_panel")}
-          class="h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-accent"
-          onPress={props.onClose}
-        >
-          <Icon name="panel-right-close" size={14} color={token("muted-foreground")} />
-        </Button>
+            <MenuItem
+              testID="right-tab-add-changes"
+              class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-accent"
+              onSelect={() => {
+                addOpen.set(false);
+                props.store.openChanges();
+              }}
+            >
+              <Icon name="git-branch" size={14} color={token("muted-foreground")} />
+              <Text class="flex-1 text-sm text-foreground">{t("right_panel.tab.changes")}</Text>
+            </MenuItem>
+          </Menu>
+          <Button
+            testID="right-panel-maximize"
+            accessibilityLabel={t(props.maximized ? "right_panel.restore" : "right_panel.fullscreen")}
+            class="h-8 w-8 shrink-0 items-center justify-center rounded-(--radius) hover:bg-muted active:bg-accent"
+            onPress={props.onToggleMaximize}
+          >
+            <Icon name={props.maximized ? "minimize-2" : "maximize-2"} size={14} color={token("secondary-foreground")} />
+          </Button>
+          <Button
+            testID="right-panel-close"
+            accessibilityLabel={t("right_panel.close_panel")}
+            class="h-8 w-8 shrink-0 items-center justify-center rounded-(--radius) hover:bg-muted active:bg-accent"
+            onPress={props.onClose}
+          >
+            <Icon name="panel-right-close" size={14} color={token("secondary-foreground")} />
+          </Button>
+        </View>
       </View>
       <If when={active()}>
         {(request) => <ActiveContent {...props} request={request()} />}

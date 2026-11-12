@@ -27,7 +27,7 @@ export function TitleBar(props: UiContext & {
         paddingLeft: props.sidebarVisible ? 8 : titleBar().left + 8,
         paddingRight: props.rightPanelShown
           ? 8
-          : (platform.os === "windows" ? WINDOW_CONTROLS_WIDTH : titleBar().right) + 8,
+          : (platform.os === "windows" ? WINDOW_CONTROLS_WIDTH + 4 : titleBar().right + 8),
         borderBottomWidth: 0.5,
       })}
       class={themeStore.classes(

@@ -3,15 +3,15 @@ import { currentWindow } from "nsh/desktop";
 import { t } from "../i18n";
 import { Icon } from "./icon";
 
-export const WINDOW_CONTROLS_WIDTH = 138;
+export const WINDOW_CONTROLS_WIDTH = 112;
 
 export function WindowControls() {
   if (platform.os !== "windows") return null;
   const window = currentWindow();
   const maximized = () => window.state()?.mode === "maximized";
-  const control = "h-11 w-[46px] items-center justify-center";
+  const control = "h-8 w-8 items-center justify-center rounded-(--radius)";
   return (
-    <View testID="window-controls" class="absolute right-0 top-0 z-50 h-11 flex-row items-center">
+    <View testID="window-controls" class="absolute right-0 top-0 z-50 h-11 flex-row items-center gap-1 pr-2">
       <View
         testID="window-minimize"
         role="button"
@@ -19,7 +19,7 @@ export function WindowControls() {
         desktop={{ windowControl: "minimize" }}
         class={`${control} hover:bg-muted active:bg-accent`}
       >
-        <Icon name="minimize" size={14} color={token("secondary-foreground")} />
+        <Icon name="minus" size={14} color={token("secondary-foreground")} />
       </View>
       <View
         testID="window-maximize"
@@ -28,7 +28,7 @@ export function WindowControls() {
         desktop={{ windowControl: "maximize" }}
         class={`${control} hover:bg-muted active:bg-accent`}
       >
-        <Icon name={maximized() ? "copy" : "maximize"} size={14} color={token("secondary-foreground")} />
+        <Icon name={maximized() ? "minimize" : "maximize"} size={14} color={token("secondary-foreground")} />
       </View>
       <View
         testID="window-close"
