@@ -40,10 +40,10 @@ NSH 0.3.0 的 macOS 后端在滚动时先通过 `sublayerTransform` 移动图层
 
 **复现**
 
-项目根目录保留了依据官方 API 编写的独立场景 `InputScrollRepro.tsx`（不是官方示例原文件）：
+`examples/repros/` 保留了依据官方 API 编写的独立场景 `InputScrollRepro.tsx`（不是官方示例原文件）：
 
 ```sh
-nsh run InputScrollRepro.tsx --target macos --window-size 900x700
+nsh run examples/repros/InputScrollRepro.tsx --target macos --window-size 900x700
 ```
 
 在第一个输入框输入 `e`，滚到列表底部，停留几秒后快速滚回顶部，观察文字是否短暂空白。两个输入框都是普通 `List` 行，离屏后会被回收；多行 JSON 输入框固定为官方示例使用的 `height: 110`。

@@ -1,7 +1,8 @@
 # pig-code-ts
 
 Pig Code's NSH + TSX desktop app. `App.tsx` is the entry point; `app/view.tsx` composes the interface from the
-region components in `app/components/`. Shared state lives in `app/store.ts` and `app/theme.ts`. The directory is
+region components in `app/components/`. Shared state lives in `app/store.ts` and `app/theme.ts`. Tests and their
+fixture entries live in `tests/`; standalone reproduction entries live in `examples/repros/`. The directory is
 also a crate (`Cargo.toml`, `src/lib.rs`; `nsh.json` `"rust": "."`) whose `#[native_module("pig-code-ts/native")]`
 exports the native `Agent` connection. The existing agent engine lives in `crates/pig-core`, with `pig-protocol`,
 `pig-provider` and `pig-utils` alongside it. TSX sends commands and receives ordered event batches through this
@@ -13,7 +14,7 @@ hero's particle canvas.
 ```sh
 nsh run                      # this machine's native backend, no target needed
 nsh check                    # cargo check of the crate, then type checks App.tsx against the declarations generated from it
-nsh test                     # cargo test, then App.test.tsx, headless; --target to run it on a platform
+nsh test                     # cargo test, then the TSX tests in tests/, headless; --target to run them on a platform
 nsh package --target web     # or ios, android, macos, linux, windows
 ```
 
