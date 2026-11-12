@@ -42,6 +42,7 @@ import {
 } from "../conversation";
 import { Icon } from "./icon";
 import { ImageViewer } from "./image-viewer";
+import { ReasoningView } from "./reasoning-view";
 import {
   REASONING_TICKER_INTERVAL_MS,
   REASONING_TICKER_ROLL_MS,
@@ -343,14 +344,6 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
     : item().durationMs != null
       ? formatDuration(item().durationMs!, t("messages.thought_for"))
       : t("messages.thought_process");
-  const reasoningParagraphs = computed(() =>
-    props.textFor(item()).split("\n").map((text, index) => ({ id: index, text: text || " " })),
-  );
-  const reasoningMeasured = signal(0);
-  const reasoningHeight = () => {
-    const estimate = Math.max(24, reasoningParagraphs().length * 24);
-    return Math.max(24, Math.min(reasoningMeasured() || estimate, 320));
-  };
   return (
     <View class="w-full">
       <View
@@ -376,26 +369,8 @@ function ReasoningRow(props: MessageProps & { item: Accessor<MarkdownItem> }) {
         <View
           testID={`thinking-${item().id}-content`}
           class="ml-2 mt-1 overflow-hidden border-l border-border pl-3.5"
-          style={{ height: reasoningHeight() }}
         >
-          <List
-            each={reasoningParagraphs()}
-            keyExtractor={(paragraph) => String(paragraph.id)}
-            estimatedItemSize={24}
-            class="h-full w-full"
-            scrollbar
-            bounces={false}
-            onScroll={(event) => {
-              const next = Math.ceil(event.contentSize.height);
-              if (reasoningMeasured() !== next) reasoningMeasured.set(next);
-            }}
-          >
-            {(paragraph) => (
-              <Text class="w-full text-sm leading-6 text-muted-foreground" style={{ userSelect: "text" }}>
-                {paragraph().text}
-              </Text>
-            )}
-          </List>
+          <ReasoningView text={() => props.textFor(item())} accessibilityLabel={label()} />
         </View>
       </If>
     </View>
