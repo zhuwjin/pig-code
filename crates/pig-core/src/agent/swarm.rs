@@ -694,25 +694,24 @@ mod tests {
         let parent = parent_model();
         let agents = agents_dir(&tmp.0.join("sessions"), "s-test");
         std::fs::create_dir_all(&agents).unwrap();
-        // Valid context: meta + one user message
-        append_agent_record(
-            &agents.join("a9-1.jsonl"),
-            &serde_json::json!({
-                "type": "meta",
-                "agent_id": "a9-1",
-                "profile": "general-purpose",
-                "description": "old task",
-                "model": "m",
-                "provider": "p",
-                "created_at": 1,
-            }),
+        // Valid context: canonical meta + one user message
+        let path = agents.join("a9-1.jsonl");
+        append_agent_conversation_record(
+            &path,
+            &crate::rollout::RolloutRecord::subagent_meta(
+                "a9-1".into(),
+                "s-test".into(),
+                tmp.0.clone(),
+                "old task".into(),
+                "general-purpose".into(),
+                "p".into(),
+                "m".into(),
+                1,
+            ),
         )
         .unwrap();
-        append_agent_record(
-            &agents.join("a9-1.jsonl"),
-            &serde_json::json!({ "type": "msg", "msg": ChatMsg::user("old prompt".to_string()) }),
-        )
-        .unwrap();
+        let mut user = ChatMsg::user("old prompt".to_string());
+        append_agent_message(&path, &mut user, 128_000).unwrap();
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
             "prompt_template": "",
             "resume_agent_ids": {"a9-1": "continue finding callers"}
@@ -744,17 +743,18 @@ mod tests {
         let agents = agents_dir(&tmp.0.join("sessions"), "s-test");
         std::fs::create_dir_all(&agents).unwrap();
         let path = agents.join("a9-1.jsonl");
-        append_agent_record(
+        append_agent_conversation_record(
             &path,
-            &serde_json::json!({
-                "type": "meta",
-                "agent_id": "a9-1",
-                "profile": "general-purpose",
-                "description": "pdf task",
-                "model": "m",
-                "provider": "p",
-                "created_at": 1,
-            }),
+            &crate::rollout::RolloutRecord::subagent_meta(
+                "a9-1".into(),
+                "s-test".into(),
+                tmp.0.clone(),
+                "pdf task".into(),
+                "general-purpose".into(),
+                "p".into(),
+                "m".into(),
+                1,
+            ),
         )
         .unwrap();
         let mut system = ChatMsg::system("subagent".into());
@@ -764,7 +764,7 @@ mod tests {
             name: "ReadMediaFile".into(),
             arguments: "{}".into(),
         };
-        let mut assistant = ChatMsg::assistant(String::new(), vec![call], None);
+        let mut assistant = ChatMsg::assistant(String::new(), vec![call.clone()], None);
         append_agent_message(&path, &mut assistant, 128_000).unwrap();
         let mut tool = ChatMsg::tool_result("call_pdf", "Read PDF doc.pdf".into());
         tool.documents = vec![pig_provider::ChatDocument {
@@ -774,7 +774,14 @@ mod tests {
             label: Some("doc.pdf".into()),
             token_estimate: None,
         }];
-        append_agent_message(&path, &mut tool, 128_000).unwrap();
+        append_agent_tool_result(
+            &path,
+            &call,
+            &mut tool,
+            128_000,
+            crate::agent::AgentMsgMeta::default(),
+        )
+        .unwrap();
 
         let plan = crate::tool::parse_swarm_args(&serde_json::json!({
             "prompt_template": "",

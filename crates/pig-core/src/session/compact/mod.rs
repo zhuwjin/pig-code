@@ -106,7 +106,7 @@ impl Session {
     ) -> u64 {
         project_context_tokens(
             self.usage_anchor.as_ref(),
-            &self.history,
+            &self.agent.history,
             self.last_total_tokens,
             config,
             tools_tokens,
@@ -182,7 +182,7 @@ impl Session {
         // Manual /compact must price and send the same tool set as a normal
         // step, so connect the lazy MCP snapshot before schemas are built.
         self.ensure_mcp_connected().await;
-        let leading_tokens = estimate_leading_system_tokens(&self.history);
+        let leading_tokens = estimate_leading_system_tokens(&self.agent.history);
         let schemas = config.map(|_| self.root_schemas());
         let tools_tokens = schemas
             .as_ref()
@@ -210,20 +210,20 @@ impl Session {
         // pinned range would silently restart the turn from a steer message.
         let target = compaction_target(
             budget,
-            compactable_tokens(&self.history),
+            compactable_tokens(&self.agent.history),
             trigger,
             preserve_latest,
         );
-        let active_user = active_real_user_ix(&self.history, &self.user_ixs);
+        let active_user = active_real_user_ix(&self.agent.history, &self.user_ixs);
         let pinned = pause_pin.filter(|_| preserve_latest);
         let Some(plan) = select_tail_plan(
-            &self.history,
+            &self.agent.history,
             CompactionSelection {
                 target_tokens: target,
                 pin: pinned,
                 keep_latest_segment: preserve_latest,
                 active_user,
-                active_run_start: active_run_start(&self.history, active_user),
+                active_run_start: active_run_start(&self.agent.history, active_user),
             },
         ) else {
             if preserve_latest {
@@ -269,21 +269,21 @@ impl Session {
             let mut summary_config = config.clone();
             if pig_provider::prompt_cache_key_supported(&config.base_url) {
                 summary_config.prompt_cache_key =
-                    Some(pig_provider::session_prompt_cache_key(&self.id));
+                    Some(pig_provider::session_prompt_cache_key(&self.agent.id));
             }
             let instruction = compaction_instruction(InstructionFlavor::Root, instruction);
             let empty = [];
             let summary_tools = schemas.as_deref().unwrap_or(&empty);
             summarize_history(
                 &SummaryCall {
-                    session_id: &self.id,
+                    session_id: &self.agent.id,
                     store: &self.store,
                     agent_id: None,
                     background: false,
                     step: None,
                 },
                 &summary_config,
-                &self.history,
+                &self.agent.history,
                 plan.tail_start,
                 &instruction,
                 summary_tools,
@@ -341,7 +341,7 @@ impl Session {
         // installed until the Compact marker has been appended: a marker
         // failure must leave the live context exactly on the pre-compaction
         // shape, never compacted live while the durable rollout is not.
-        let installed = match install_compaction(&self.history, plan, note, tools_tokens) {
+        let installed = match install_compaction(&self.agent.history, plan, note, tools_tokens) {
             Ok(installed) => installed,
             Err(error) => {
                 tracing::warn!(
@@ -399,6 +399,7 @@ impl Session {
             summary: summary.clone(),
             tail_len: Some(tail_len),
             preserved_user,
+            trigger: None,
         });
         if self.rollout_failure.is_some() {
             // The marker was not appended (or an earlier append already
@@ -417,7 +418,7 @@ impl Session {
         // installed context consistent with the file.
         self.sync_rollout();
         self.report_rollout_failure(tx);
-        self.history = next_history;
+        self.agent.history = next_history;
         self.user_ixs = next_user_ixs;
         // Reset the usage watermark to an estimate of the compacted history
         // (corrected by the next real sample): without the reset the watermark
@@ -427,7 +428,7 @@ impl Session {
         // The anchor describes a request shape that no longer exists.
         self.usage_anchor = None;
         // Composition of the rewritten surface (tools stay priced separately)
-        let breakdown = context_breakdown_with_tools(&self.history, tools_tokens);
+        let breakdown = context_breakdown_with_tools(&self.agent.history, tools_tokens);
         self.emit(
             |session_id| Event::ContextBreakdownChanged {
                 session_id,

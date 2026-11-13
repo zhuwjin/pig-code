@@ -3,37 +3,89 @@ import { Button } from "nsh/base";
 import { MessageList } from "../app/components/messages";
 import { AgentStore } from "../app/store";
 import { ThemeStore } from "../app/theme";
+import type { ChatItem } from "../app/protocol";
 
 const store = new AgentStore(true);
 const themeStore = new ThemeStore();
+const turnId = "turn";
 const reduce = (event: Record<string, unknown>) => {
   (store as unknown as { reduce(event: Record<string, unknown>): void }).reduce(event);
 };
 
+function updateItems(change: (items: ChatItem[]) => ChatItem[]): void {
+  store.items.update((all) => ({ ...all, durations: change(all.durations ?? []) }));
+}
+
+function upsert(item: ChatItem): void {
+  updateItems((items) => [...items.filter((current) => current.id !== item.id), item]);
+}
+
+function settleReasoning(): void {
+  const now = Date.now();
+  updateItems((items) => items.map((item) =>
+    item.kind === "reasoning" && item.streaming
+      ? {
+        ...item,
+        streaming: false,
+        durationMs: item.startedAtMs !== undefined ? Math.max(0, now - item.startedAtMs) : item.durationMs,
+      }
+      : item
+  ));
+}
+
 store.current.set("durations");
 store.expandedTurns.set({ turn: true });
 store.expandedItems.set({ "activity-reason-1": true });
-reduce({ TurnStarted: { session_id: "durations", turn_id: "turn" } });
-reduce({ ReasoningDelta: { session_id: "durations", item_id: "reason-1", delta: "First reasoning segment" } });
+reduce({ TurnStarted: { session_id: "durations", turn_id: turnId } });
+upsert({
+  kind: "reasoning",
+  id: "reason-1",
+  text: "First reasoning segment",
+  streaming: true,
+  turnId,
+  startedAtMs: Date.now(),
+});
 
 mount(() => (
   <View class="h-full w-full">
     <View class="flex-row flex-wrap gap-2 border-b border-border p-2">
       <Button testID="first-tool" class="rounded border border-border px-3 py-1" onPress={() => {
-        reduce({ ToolInputStart: { session_id: "durations", item_id: "tool", tool: "Read" } });
-        reduce({ ToolCallBegin: { session_id: "durations", item_id: "tool", tool: "Read", input_summary: "README.md", detail: "{}" } });
-        reduce({ ToolCallEnd: { session_id: "durations", item_id: "tool", output: "1\tReadme", is_error: false, stopped: false } });
+        settleReasoning();
+        upsert({
+          kind: "tool",
+          id: "tool",
+          tool: "Read",
+          summary: "README.md",
+          detail: "{}",
+          output: "1\tReadme",
+          status: "done",
+          turnId,
+        });
       }}>
         <Text class="text-xs text-foreground">First tool</Text>
       </Button>
       <Button testID="second-reasoning" class="rounded border border-border px-3 py-1" onPress={() => {
-        reduce({ ReasoningDelta: { session_id: "durations", item_id: "reason-2", delta: "Second reasoning segment" } });
+        settleReasoning();
+        upsert({
+          kind: "reasoning",
+          id: "reason-2",
+          text: "Second reasoning segment",
+          streaming: true,
+          turnId,
+          startedAtMs: Date.now(),
+        });
       }}>
         <Text class="text-xs text-foreground">Second reasoning</Text>
       </Button>
       <Button testID="answer" class="rounded border border-border px-3 py-1" onPress={() => {
-        reduce({ TextDelta: { session_id: "durations", item_id: "answer", delta: "Final answer" } });
-        reduce({ TextDone: { session_id: "durations", item_id: "answer", full_text: "Final answer" } });
+        settleReasoning();
+        upsert({
+          kind: "markdown",
+          id: "answer",
+          text: "Final answer",
+          streaming: false,
+          turnId,
+        });
       }}>
         <Text class="text-xs text-foreground">Answer</Text>
       </Button>

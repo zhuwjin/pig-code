@@ -1,0 +1,1105 @@
+//! Child-agent turn policy and loop.
+//!
+//! A child is a `Session` in its own right (`Session::subagent` holds the
+//! orchestration payload). The shared `session::engine::run_step` drives the
+//! exact same sequence as a root turn; this module implements the child half
+//! of the per-step policy and the outer loop (steering, step budget, pause and
+//! settlement).
+
+use super::*;
+
+use std::collections::HashMap;
+
+use pig_provider::ProviderEvent;
+
+use super::compact::{MAX_CHILD_OVERFLOW_RECOVERIES, child_overflow_failure};
+use super::persist::{
+    child_persist_stop, persist_child_message, persist_child_message_meta,
+    persist_child_tool_result,
+};
+use super::state::{ProgressSink, SubagentMode};
+use crate::session::engine::{
+    AttemptAction, AttemptOutcome, CommitAction, ProviderUsage, StepFailure, StepRuntime,
+};
+
+impl Session {
+    /// Build the child Session from the shared preparation result. The child
+    /// owns its agent context and a child-local tool state; approvals, policy
+    /// rules, store and lifecycle handles are shared with the parent session.
+    pub(super) fn new_subagent(
+        prep: crate::agent::ChildPrep,
+        parent: &Session,
+        progress: ProgressSink,
+        mode: SubagentMode,
+    ) -> Session {
+        let agent_id = prep.agent_id;
+        let state = Session::child_local_state(&parent.state, &agent_id);
+        let delivery_receipts = state.delivery_receipts.clone();
+        let tracker = match mode {
+            SubagentMode::Foreground => parent.tracker.foreground_child(),
+            SubagentMode::Background => parent.tracker.detached_child(),
+        };
+        let emitted_up_to = prep.history.len();
+        Session {
+            agent: crate::session::agent::Agent {
+                id: agent_id,
+                cwd: prep.cwd,
+                delegation_depth: parent.agent.delegation_depth + 1,
+                config: Some(prep.child_config),
+                history: prep.history,
+                tools: prep.tools,
+                schemas: prep.schemas,
+            },
+            subagent: Some(Box::new(super::state::SubagentState {
+                parent_session_id: parent.event_session_id().to_string(),
+                profile: prep.profile,
+                jsonl: prep.jsonl,
+                max_turns: prep.max_turns,
+                description: prep.description,
+                plugin_tool_filter: Default::default(),
+                mcp_inherits_all: prep.mcp_inherits_all,
+                trusted: prep.trusted,
+                persist_failure: None,
+                writer: Some(prep.writer),
+                progress,
+                preserve_latest: false,
+                pause_pin: None,
+                overflow_recoveries: 0,
+                emitted_up_to,
+                tool_edits: HashMap::new(),
+            })),
+            user_ixs: Vec::new(),
+            io_last_input: Vec::new(),
+            turn_counter: 0,
+            tracker,
+            state,
+            always_allowed: parent.always_allowed.clone(),
+            permission_rules: parent.permission_rules.clone(),
+            plan_enabled: false,
+            pending: parent.pending.clone(),
+            pending_questions: parent.pending_questions.clone(),
+            permissions: parent.permissions,
+            model_override: None,
+            rollout: None,
+            rollout_failure: None,
+            rollout_failure_reported: false,
+            delivery_receipts,
+            notification_delivery_failure: None,
+            notification_reconcile_required: false,
+            store: parent.store.clone(),
+            data_dir: parent.data_dir.clone(),
+            git_snapshot: parent.git_snapshot.clone(),
+            agents_prompt: String::new(),
+            skills_prompt: String::new(),
+            memory_prompt: String::new(),
+            memory_enabled: false,
+            date_frozen: parent.date_frozen.clone(),
+            date_reminded: String::new(),
+            agents_reminded: String::new(),
+            memory_reminded: String::new(),
+            permissions_reminded: None,
+            profiles_summary: String::new(),
+            prompt_text: None,
+            prompt_memory_enabled: None,
+            prompt_skills_state: None,
+            projected_input_image: None,
+            projected_input_pdf: None,
+            recorded_prompt: None,
+            last_total_tokens: None,
+            usage_turn_id: None,
+            usage_anchor: None,
+            overflow_recovered: false,
+            turn_input: 0,
+            turn_cache_read: 0,
+            turn_output: 0,
+            turn_reasoning_output: 0,
+            turn_api_ms: 0,
+            turn_ttft_ms: 0,
+            turn_ttft_steps: 0,
+            turn_api_steps: 0,
+            turn_tool_ms: 0,
+            stats_turns: Vec::new(),
+            turn_active: false,
+            rate_started_at: None,
+            rate_characters: 0,
+            input_total: 0,
+            cache_read_total: 0,
+            agent_seq: 0,
+            tool_item_seq: 0,
+            runtime: parent.runtime.clone(),
+            trust: parent.trust.clone(),
+            plugin_tools: prep.plugin_tools,
+            plugin_tool_filter: Default::default(),
+            mcp: prep.mcp,
+            hooks: parent.hooks.clone(),
+            hook_context_stash: Vec::new(),
+            session_start_hook_ran: true,
+            session_start_source: "subagent",
+        }
+    }
+
+    /// Subagent progress reporting (routed per sink).
+    pub(super) fn report_child_progress(&self, tx: &async_channel::Sender<Event>, note: String) {
+        let sub = self.subagent.as_ref().expect("child session");
+        match &sub.progress {
+            ProgressSink::Foreground { parent_item_id } => {
+                let item_id = parent_item_id.clone();
+                emit_bg(self.event_session_id(), tx, |session_id| {
+                    Event::SubagentProgress {
+                        session_id,
+                        item_id,
+                        note,
+                    }
+                });
+            }
+            ProgressSink::Background { task_id } => {
+                crate::task::note_output(&self.state.tasks, task_id, &format!("{note}\n"));
+            }
+        }
+    }
+
+    pub(super) async fn select_child_plugin_tools(&mut self, tx: &async_channel::Sender<Event>) {
+        let filter = self
+            .plugin_tools
+            .select(self.agent.config(), Some(&self.agent.id), tx)
+            .await;
+        let sub = self.subagent.as_mut().expect("child session");
+        sub.plugin_tool_filter = filter.clone();
+        let inherits_all = sub.mcp_inherits_all;
+        self.agent.tools.retain(|tool| !tool.is_plugin());
+        self.agent.tools.extend(
+            self.plugin_tools
+                .tools_filtered(&filter)
+                .into_iter()
+                .filter(|tool| inherits_all || tool.read_only()),
+        );
+        self.agent.schemas = self
+            .agent
+            .tools
+            .iter()
+            .map(|tool| crate::tool::schema_with_strict(tool.as_ref()))
+            .collect();
+    }
+
+    /// extra_tools for the gated execution segment: MCP/plugin tools narrowed
+    /// by the inheritance rule + Skill (not in the `all()` static table,
+    /// served via extra by name, under the same trust decision as the child
+    /// prompt).
+    pub(super) fn child_extra_tools(&self) -> Vec<Box<dyn tool::Tool>> {
+        let sub = self.subagent.as_ref().expect("child session");
+        let mut extra = self
+            .mcp
+            .as_ref()
+            .map(|mcp| mcp.child_tools(sub.mcp_inherits_all))
+            .unwrap_or_default();
+        extra.push(Box::new(tool::SkillTool::new_trusted(
+            &self.agent.cwd,
+            &self.plugin_tools.registry(),
+            sub.trusted,
+        )));
+        extra.extend(
+            self.plugin_tools
+                .tools_filtered(&sub.plugin_tool_filter)
+                .into_iter()
+                .filter(|tool| sub.mcp_inherits_all || tool.read_only()),
+        );
+        extra
+    }
+
+    pub(crate) async fn prepare_child_step(
+        &mut self,
+        rt: &mut StepRuntime,
+        _step: usize,
+        tx: &async_channel::Sender<Event>,
+        _cancel: &CancellationToken,
+    ) {
+        self.select_child_plugin_tools(tx).await;
+        rt.tools_tokens = crate::session::estimate::estimate_schemas_tokens(&self.agent.schemas);
+        rt.assistant_row = self.agent.history.len();
+        rt.ownership = self
+            .subagent
+            .as_ref()
+            .expect("child session")
+            .progress
+            .ownership_prefix(&self.agent.id);
+    }
+
+    pub(crate) async fn preflight_child_step(
+        &mut self,
+        rt: &mut StepRuntime,
+        step: usize,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let (preserve_latest, pause_pin, background) = {
+            let sub = self.subagent.as_ref().expect("child session");
+            (
+                sub.preserve_latest,
+                sub.pause_pin,
+                matches!(sub.progress, ProgressSink::Background { .. }),
+            )
+        };
+        let projected = crate::session::compact::project_context_tokens(
+            self.usage_anchor.as_ref(),
+            &self.agent.history,
+            self.last_total_tokens,
+            self.agent.config(),
+            rt.tools_tokens,
+        );
+        if projected > super::compact_trigger(self.agent.config()) && !rt.recovery_attempted {
+            self.report_child_progress(tx, format!("Step {step} · context compaction…"));
+            let report = self
+                .compact_child_context(
+                    CompactTrigger::Watermark,
+                    cancel,
+                    preserve_latest,
+                    pause_pin,
+                    background,
+                    step,
+                )
+                .await;
+            match report.outcome {
+                CompactOutcome::Cancelled => {
+                    self.emit_child_conversation(rt, tx, None);
+                    return true;
+                }
+                CompactOutcome::Completed => {
+                    self.last_total_tokens = report.used_after;
+                    let sub = self.subagent.as_mut().expect("child session");
+                    sub.pause_pin = report.pin_after;
+                    sub.emitted_up_to = sub.emitted_up_to.min(self.agent.history.len());
+                    rt.assistant_row = self.agent.history.len();
+                }
+                CompactOutcome::Skipped | CompactOutcome::Failed => {}
+            }
+        }
+        if rt.step_started.is_none() {
+            rt.step_started = Some(Instant::now());
+        }
+        false
+    }
+
+    pub(crate) fn begin_child_attempt(
+        &mut self,
+        _rt: &mut StepRuntime,
+        cancel: &CancellationToken,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut request_config = self.agent.config().clone();
+        if pig_provider::prompt_cache_key_supported(&self.agent.config().base_url) {
+            request_config.prompt_cache_key = Some(pig_provider::subagent_prompt_cache_key(
+                self.event_session_id(),
+                &self.agent.id,
+            ));
+        }
+        let (child_tx, child_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(pig_provider::stream_chat(
+            request_config,
+            self.agent.history.clone(),
+            self.agent.schemas.clone(),
+            child_tx,
+            pig_provider::CallControl::new(cancel.clone()),
+        ));
+        (child_rx, task)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_child_attempt(
+        &mut self,
+        rt: &mut StepRuntime,
+        attempt: &mut AttemptOutcome,
+        api_tracker: crate::api_usage::ApiCallTracker,
+        api_started: Instant,
+        api_started_ms: u64,
+        step: usize,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> AttemptAction {
+        let api_duration_ms = api_started.elapsed().as_millis() as u64;
+        let background = matches!(
+            self.subagent.as_ref().expect("child session").progress,
+            ProgressSink::Background { .. }
+        );
+        let mut api_record = crate::api_usage::ApiUsageRecord::new(
+            self.event_session_id(),
+            "subagent",
+            self.agent.config(),
+            api_started_ms,
+            api_duration_ms,
+        );
+        api_record.step = Some(step as u32);
+        api_record.agent_id = Some(self.agent.id.clone());
+        api_record.background = background;
+        api_record.ttft_ms = attempt
+            .first_token_at
+            .map(|at| at.duration_since(api_started).as_millis() as u64)
+            .map(|ttft| ttft.min(api_duration_ms));
+        api_record.finish = if attempt.failure.is_some() {
+            "error"
+        } else if cancel.is_cancelled() {
+            "cancelled"
+        } else {
+            attempt.finish_reason.as_str()
+        }
+        .to_string();
+        api_record.error = attempt.failure.as_ref().map(pig_provider::core_error_en);
+        api_tracker.apply_to(&mut api_record);
+        self.store
+            .lock()
+            .expect("store lock")
+            .record_api_usage(&api_record);
+
+        if let Some(reported) = attempt.usage {
+            let ProviderUsage {
+                input,
+                cache_read,
+                output,
+                used,
+                ..
+            } = reported;
+            self.turn_input += input;
+            self.turn_cache_read += cache_read;
+            self.turn_output += output;
+            self.last_total_tokens = Some(used);
+        }
+        if attempt.finish_reason.is_incomplete() {
+            attempt.tool_calls.clear();
+            if let Some(replay) = attempt.replay.as_mut() {
+                replay.remove_tool_calls();
+            }
+        }
+
+        if let Some(error) = attempt.failure.as_ref() {
+            let overflow = matches!(error, CoreError::ContextWindowExceeded { .. });
+            let overflow_recoveries = self
+                .subagent
+                .as_ref()
+                .expect("child session")
+                .overflow_recoveries;
+            if overflow
+                && !attempt.forwarded_content
+                && !rt.recovery_attempted
+                && overflow_recoveries < MAX_CHILD_OVERFLOW_RECOVERIES
+            {
+                tracing::warn!(
+                    agent_id = %self.agent.id,
+                    step,
+                    "subagent context window exceeded before any content was forwarded; compacting and retrying this step once"
+                );
+                let used_before =
+                    crate::session::estimate::estimate_history_tokens(&self.agent.history)
+                        + rt.tools_tokens;
+                self.report_child_progress(tx, format!("Step {step} · context compaction…"));
+                let (preserve_latest, pause_pin) = {
+                    let sub = self.subagent.as_ref().expect("child session");
+                    (sub.preserve_latest, sub.pause_pin)
+                };
+                let report = self
+                    .compact_child_context(
+                        CompactTrigger::Overflow,
+                        cancel,
+                        preserve_latest,
+                        pause_pin,
+                        background,
+                        step,
+                    )
+                    .await;
+                match report.outcome {
+                    CompactOutcome::Completed => {
+                        rt.assistant_row = self.agent.history.len();
+                        if let Some(used_after) = report.used_after
+                            && used_after < used_before
+                        {
+                            let sub = self.subagent.as_mut().expect("child session");
+                            sub.overflow_recoveries += 1;
+                            rt.recovery_attempted = true;
+                            self.usage_anchor = None;
+                            self.last_total_tokens = Some(used_after);
+                            sub.pause_pin = report.pin_after;
+                            sub.emitted_up_to = sub.emitted_up_to.min(self.agent.history.len());
+                            self.emit_child_conversation(rt, tx, attempt.reasoning_ms);
+                            self.report_child_progress(
+                                tx,
+                                format!("Step {step} · retrying after compaction…"),
+                            );
+                            return AttemptAction::Retry;
+                        }
+                        tracing::warn!(
+                            agent_id = %self.agent.id,
+                            used_before,
+                            used_after = ?report.used_after,
+                            "child overflow compaction did not shrink the context; surfacing the error"
+                        );
+                    }
+                    CompactOutcome::Cancelled => {
+                        self.emit_child_conversation(rt, tx, attempt.reasoning_ms);
+                        return AttemptAction::Terminal(
+                            crate::session::engine::StepOutcome::Cancelled,
+                        );
+                    }
+                    CompactOutcome::Skipped | CompactOutcome::Failed => {
+                        tracing::warn!(
+                            agent_id = %self.agent.id,
+                            step,
+                            "child context overflow cannot be compacted (no compactable prefix or the paused state does not fit); surfacing the error"
+                        );
+                    }
+                }
+            }
+            self.emit_child_conversation(rt, tx, attempt.reasoning_ms);
+            if overflow {
+                rt.failure = Some(StepFailure::Overflow(error.clone()));
+            } else {
+                rt.failure = Some(StepFailure::Message(format!(
+                    "Subagent model request failed: {}",
+                    pig_provider::core_error_en(error)
+                )));
+            }
+            return AttemptAction::Terminal(crate::session::engine::StepOutcome::Failed);
+        }
+        if cancel.is_cancelled() {
+            self.emit_child_conversation(rt, tx, attempt.reasoning_ms);
+            return AttemptAction::Terminal(crate::session::engine::StepOutcome::Cancelled);
+        }
+        AttemptAction::Continue
+    }
+
+    pub(crate) async fn commit_child_assistant(
+        &mut self,
+        rt: &mut StepRuntime,
+        attempt: AttemptOutcome,
+        _step: usize,
+        tx: &async_channel::Sender<Event>,
+    ) -> CommitAction {
+        let provider_usage = attempt.usage;
+        let finish_reason = attempt.finish_reason;
+        let incomplete = finish_reason.is_incomplete();
+        let reasoning_ms = attempt.reasoning_ms;
+        let tool_calls = attempt.tool_calls;
+        let mut assistant = ChatMsg::assistant_with_replay(
+            attempt.text,
+            tool_calls.clone(),
+            Some(attempt.reasoning).filter(|reasoning| !reasoning.is_empty()),
+            attempt.replay,
+        );
+        rt.last_text = assistant.content.clone().unwrap_or_default();
+        if let Err(error) = persist_child_message_meta(
+            self,
+            &mut assistant,
+            crate::agent::AgentMsgMeta {
+                reasoning_ms,
+                edit: None,
+            },
+        ) {
+            tracing::warn!(agent_id = %self.agent.id, "{error}");
+            return CommitAction::Terminal(crate::session::engine::StepOutcome::Failed);
+        }
+        self.agent.history.push(assistant);
+        self.usage_anchor = provider_usage.map(|usage| UsageAnchor {
+            model_key: model_key(self.agent.config()),
+            history_len: self.agent.history.len(),
+            tools_tokens: rt.tools_tokens,
+            used: usage.used,
+            system_fingerprint: system_fingerprint(&self.agent.history),
+        });
+        rt.incomplete_reason = incomplete.then_some(finish_reason);
+        rt.reasoning_ms = reasoning_ms;
+        let paused = finish_reason == pig_protocol::FinishReason::Pause;
+        if tool_calls.is_empty() {
+            self.emit_child_conversation(rt, tx, reasoning_ms);
+            if paused {
+                return CommitAction::Paused;
+            }
+            return CommitAction::TextOnly {
+                finish_reason: rt.incomplete_reason,
+            };
+        }
+        rt.paused = paused;
+        CommitAction::Tools(tool_calls)
+    }
+
+    pub(crate) async fn execute_child_tools(
+        &mut self,
+        rt: &mut StepRuntime,
+        calls: Vec<ToolCall>,
+        step: usize,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> crate::session::engine::StepOutcome {
+        for (call_ix, child_call) in calls.iter().enumerate() {
+            let summary = tool::summarize(child_call);
+            self.report_child_progress(tx, format!("Step {step} · {summary}"));
+            self.emit_child_item(
+                tx,
+                pig_protocol::ConversationItem::Tool {
+                    id: format!("t{}-{call_ix}", rt.assistant_row),
+                    tool: child_call.name.clone(),
+                    summary,
+                    detail: child_call.arguments.clone(),
+                    output: String::new(),
+                    status: pig_protocol::ConversationToolStatus::Running,
+                    turn_id: None,
+                    edit: None,
+                    live_note: None,
+                    agents: Vec::new(),
+                    approval_pending: false,
+                },
+            );
+            let child_item_id = format!("{}-c{step}-{call_ix}-{}", rt.ownership, child_call.id);
+            let Some(child_tool) = self
+                .agent
+                .tools
+                .iter()
+                .find(|t| t.name() == child_call.name.as_str())
+                .map(|t| t.as_ref())
+            else {
+                let note = format!(
+                    "Unknown tool {} (the subagent's tool set is narrowed)",
+                    child_call.name
+                );
+                let mut message = ChatMsg::tool_result(&child_call.id, note).with_error(true);
+                if let Err(error) = persist_child_tool_result(
+                    self,
+                    child_call,
+                    &mut message,
+                    crate::agent::AgentMsgMeta::default(),
+                ) {
+                    tracing::warn!(agent_id = %self.agent.id, "{error}");
+                    return crate::session::engine::StepOutcome::Failed;
+                }
+                self.agent.history.push(message);
+                continue;
+            };
+            let extra_tools = self.child_extra_tools();
+            let media = tool::MediaCapabilities::new(
+                self.agent.config().input_image,
+                self.agent.config().input_pdf,
+            );
+            let event_session_id = self.event_session_id().to_string();
+            let mut gate = GateCtx {
+                cwd: &self.agent.cwd,
+                permissions: self.permissions,
+                media,
+                tracker: &mut self.tracker,
+                state: &self.state,
+                owns_todo_state: false,
+                pending: &self.pending,
+                permission_rules: &self.permission_rules,
+                always_allowed: &self.always_allowed,
+                session_id: &event_session_id,
+                plan_enabled: false,
+                store: &self.store,
+                extra_tools: &extra_tools,
+                hooks: &self.hooks,
+                history: &self.agent.history,
+            };
+            let outcome = exec_tool_gated_ctx(
+                &mut gate,
+                child_call,
+                Some(child_tool),
+                &child_item_id,
+                &rt.ownership,
+                tx,
+                cancel,
+            )
+            .await;
+            match outcome {
+                GatedToolOutcome::Cancelled => {
+                    for stopped_call in &calls[call_ix..] {
+                        let mut message = Session::stopped_tool_result(&stopped_call.id);
+                        if let Err(error) = persist_child_tool_result(
+                            self,
+                            stopped_call,
+                            &mut message,
+                            crate::agent::AgentMsgMeta::default(),
+                        ) {
+                            tracing::warn!(agent_id = %self.agent.id, "{error}");
+                            return crate::session::engine::StepOutcome::Failed;
+                        }
+                        self.agent.history.push(message);
+                    }
+                    let reasoning_ms = rt.reasoning_ms;
+                    self.emit_child_conversation(rt, tx, reasoning_ms);
+                    return crate::session::engine::StepOutcome::Cancelled;
+                }
+                GatedToolOutcome::Rejected { note } => {
+                    let mut message = ChatMsg::tool_result(&child_call.id, note).with_error(true);
+                    if let Err(error) = persist_child_tool_result(
+                        self,
+                        child_call,
+                        &mut message,
+                        crate::agent::AgentMsgMeta::default(),
+                    ) {
+                        tracing::warn!(agent_id = %self.agent.id, "{error}");
+                        return crate::session::engine::StepOutcome::Failed;
+                    }
+                    self.agent.history.push(message);
+                }
+                GatedToolOutcome::Executed {
+                    output,
+                    is_error,
+                    edit,
+                    images,
+                    documents,
+                    ..
+                } => {
+                    let mut message =
+                        ChatMsg::tool_result_with_images(&child_call.id, output, images)
+                            .with_error(is_error);
+                    message.documents = documents;
+                    if let Some(edit) = edit.clone() {
+                        self.subagent
+                            .as_mut()
+                            .expect("child session")
+                            .tool_edits
+                            .insert(child_call.id.clone(), edit);
+                    }
+                    if let Err(error) = persist_child_tool_result(
+                        self,
+                        child_call,
+                        &mut message,
+                        crate::agent::AgentMsgMeta {
+                            reasoning_ms: None,
+                            edit,
+                        },
+                    ) {
+                        tracing::warn!(agent_id = %self.agent.id, "{error}");
+                        return crate::session::engine::StepOutcome::Failed;
+                    }
+                    self.agent.history.push(message);
+                }
+            }
+        }
+        let reasoning_ms = rt.reasoning_ms;
+        self.emit_child_conversation(rt, tx, reasoning_ms);
+        if rt.paused {
+            crate::session::engine::StepOutcome::Paused
+        } else {
+            crate::session::engine::StepOutcome::Continue
+        }
+    }
+
+    /// One child conversation item upsert.
+    pub(super) fn emit_child_item(
+        &self,
+        tx: &async_channel::Sender<Event>,
+        item: pig_protocol::ConversationItem,
+    ) {
+        let session_id = self.event_session_id().to_string();
+        let agent_id = self.agent.id.clone();
+        emit_bg(&session_id, tx, move |session_id| {
+            Event::ConversationUpdate {
+                session_id,
+                agent_id: Some(agent_id),
+                item,
+            }
+        });
+    }
+
+    /// One child conversation item removal.
+    fn emit_child_remove(&self, tx: &async_channel::Sender<Event>, item_ids: Vec<String>) {
+        if item_ids.is_empty() {
+            return;
+        }
+        let session_id = self.event_session_id().to_string();
+        let agent_id = self.agent.id.clone();
+        emit_bg(&session_id, tx, move |session_id| {
+            Event::ConversationRemove {
+                session_id,
+                agent_id: Some(agent_id),
+                item_ids,
+            }
+        });
+    }
+
+    /// A streamed live row: tracked once so the step's final projection can
+    /// remove it, and upserted by its stable id on every delta.
+    pub(crate) fn emit_child_live(
+        &self,
+        rt: &mut StepRuntime,
+        tx: &async_channel::Sender<Event>,
+        item: pig_protocol::ConversationItem,
+    ) {
+        if !rt.live_items.iter().any(|id| id == item.id()) {
+            rt.live_items.push(item.id().to_string());
+        }
+        self.emit_child_item(tx, item);
+    }
+
+    /// Project the new child history since the watermark into shared
+    /// conversation items, removing streamed rows the final projection
+    /// replaces.
+    pub(super) fn emit_child_conversation(
+        &mut self,
+        rt: &mut StepRuntime,
+        tx: &async_channel::Sender<Event>,
+        reasoning_ms: Option<u64>,
+    ) {
+        let history_len = self.agent.history.len();
+        let mut stale = Vec::new();
+        let items = {
+            let sub = self.subagent.as_mut().expect("child session");
+            let emitted = sub.emitted_up_to;
+            let mut items = crate::agent::project_display_items_with_edits(
+                &self.agent.history[emitted..],
+                &sub.tool_edits,
+                emitted,
+            );
+            if let Some(ms) = reasoning_ms
+                && let Some(pig_protocol::ConversationItem::Reasoning { duration_ms, .. }) =
+                    items.iter_mut().rev().find(|item| {
+                        matches!(
+                            item,
+                            pig_protocol::ConversationItem::Reasoning {
+                                duration_ms: None,
+                                ..
+                            }
+                        )
+                    })
+            {
+                *duration_ms = Some(ms);
+            }
+            if !rt.live_items.is_empty() {
+                stale = rt
+                    .live_items
+                    .drain(..)
+                    .filter(|id| !items.iter().any(|item| item.id() == id))
+                    .collect();
+            }
+            sub.emitted_up_to = history_len;
+            items
+        };
+        self.emit_child_remove(tx, stale);
+        for item in items {
+            self.emit_child_item(tx, item);
+        }
+    }
+
+    /// Project history since the watermark without touching streamed rows
+    /// (used between steps, where no live row exists).
+    pub(super) fn emit_child_history_since(
+        &mut self,
+        tx: &async_channel::Sender<Event>,
+        reasoning_ms: Option<u64>,
+    ) {
+        let mut rt = StepRuntime::child();
+        self.emit_child_conversation(&mut rt, tx, reasoning_ms);
+    }
+}
+
+/// Subagent result file path: {agents_dir}/{agent_id}.result.md (same
+/// directory as the context jsonl)
+pub(super) fn agent_result_path(jsonl: &Path, agent_id: &str) -> PathBuf {
+    jsonl.with_file_name(format!("{agent_id}.result.md"))
+}
+
+/// Subagent result budget: returned verbatim within 32K chars; beyond that,
+/// return the first 32K + truncation guidance. The full text is persisted
+/// first by the caller to {agents_dir}/{agent_id}.result.md (same as kimi's
+/// output.log), which result_path points to; None = persist failure.
+fn truncate_agent_result(result_path: Option<&Path>, result: String) -> String {
+    const MAX_RESULT_CHARS: usize = 32_000;
+    if result.chars().count() <= MAX_RESULT_CHARS {
+        return result;
+    }
+    let hint = match result_path {
+        Some(path) => format!(
+            "\n\n[Result too long; truncated. Full text: {}]",
+            path.display()
+        ),
+        None => "\n\n[Result too long; truncated. Failed to save the full text]".to_string(),
+    };
+    let head: String = result.chars().take(MAX_RESULT_CHARS).collect();
+    format!("{head}{hint}")
+}
+
+fn subagent_pause_limit(usage: (u64, u64, u64), turns: usize) -> SubagentResult {
+    let note = format!("Subagent model request failed: {}", pause_limit_detail());
+    SubagentResult {
+        status_line: format!("failed: {note}"),
+        result_text: note,
+        turns,
+        completed: false,
+        is_error: true,
+        usage,
+        cancelled: false,
+    }
+}
+
+pub(super) fn unexpected_subagent_result() -> SubagentResult {
+    SubagentResult {
+        status_line: "failed: driver terminated unexpectedly".to_string(),
+        result_text: "The subagent driver terminated unexpectedly before reporting a result"
+            .to_string(),
+        turns: 0,
+        completed: false,
+        is_error: true,
+        usage: (0, 0, 0),
+        cancelled: false,
+    }
+}
+
+impl Session {
+    /// Child drive entry: run the loop, persist the full result text to
+    /// {agents_dir}/{agent_id}.result.md (success and failure alike), then
+    /// truncate `result_text` to the 32K budget. Cancel/kill writes no
+    /// artifact.
+    pub(super) async fn run_subagent_task(
+        &mut self,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> SubagentResult {
+        self.plugin_tools.dispatcher().set_event_sender(tx.clone());
+        // The child conversation is running from this point; the lifecycle
+        // emits the matching running=false status when it settles (also on
+        // cancel/panic).
+        let agent_id = self.agent.id.clone();
+        let session_id = self.event_session_id().to_string();
+        emit_bg(&session_id, tx, move |session_id| {
+            Event::ConversationStatus {
+                session_id,
+                agent_id,
+                running: true,
+            }
+        });
+        let result_path = agent_result_path(
+            &self.subagent.as_ref().expect("child session").jsonl,
+            &self.agent.id,
+        );
+        let mut result = self.run_subagent_loop(tx, cancel).await;
+        if !result.cancelled {
+            let written = std::fs::write(&result_path, &result.result_text).is_ok();
+            result.result_text = truncate_agent_result(
+                written.then_some(result_path.as_path()),
+                std::mem::take(&mut result.result_text),
+            );
+        }
+        result
+    }
+
+    /// Outer child loop: steering, step budget, pause continuation and
+    /// settlement. The step sequence itself is the shared `engine::run_step`.
+    async fn run_subagent_loop(
+        &mut self,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> SubagentResult {
+        struct SteerUnregister(crate::task::SessionToolState, String);
+        impl Drop for SteerUnregister {
+            fn drop(&mut self) {
+                self.0
+                    .agent_steers
+                    .lock()
+                    .expect("agent steers lock")
+                    .remove(&self.1);
+            }
+        }
+        self.state
+            .agent_steers
+            .lock()
+            .expect("agent steers lock")
+            .insert(self.agent.id.clone(), Default::default());
+        let _steer_guard = SteerUnregister(self.state.clone(), self.agent.id.clone());
+
+        let mut steps_run = 0usize;
+        let mut completed = false;
+        let mut incomplete_reason = None;
+        let mut last_text = String::new();
+        let mut pause_continuations = 0usize;
+        let max_turns = self.subagent.as_ref().expect("child session").max_turns;
+        for step in 1..=max_turns {
+            steps_run = step;
+            if let Some(error) = self
+                .subagent
+                .as_ref()
+                .expect("child session")
+                .persist_failure
+                .clone()
+            {
+                let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                return child_persist_stop(self, &error, steps_run, usage);
+            }
+            let steered: Vec<String> = {
+                let mut registry = self.state.agent_steers.lock().expect("agent steers lock");
+                registry
+                    .get_mut(&self.agent.id)
+                    .map(|queue| queue.drain(..).collect())
+                    .unwrap_or_default()
+            };
+            for message in steered {
+                let wrapped = format!(
+                    "New message from the coordinating agent (delivered while you were working):\n\n{message}"
+                );
+                let mut message = ChatMsg::user(wrapped);
+                if let Err(error) = persist_child_message(self, &mut message) {
+                    let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                    return child_persist_stop(self, &error, steps_run, usage);
+                }
+                self.agent.history.push(message);
+                self.emit_child_history_since(tx, None);
+            }
+            self.report_child_progress(tx, format!("Step {step} · thinking…"));
+            let mut rt = StepRuntime::child();
+            let outcome = crate::session::engine::run_step(self, &mut rt, step, tx, cancel).await;
+            let paused = rt.paused;
+            let failure = rt.failure.take();
+            last_text = std::mem::take(&mut rt.last_text);
+            incomplete_reason = rt.incomplete_reason;
+            match outcome {
+                crate::session::engine::StepOutcome::Continue => {
+                    let sub = self.subagent.as_mut().expect("child session");
+                    if paused {
+                        if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
+                            let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                            return subagent_pause_limit(usage, steps_run);
+                        }
+                        pause_continuations += 1;
+                        sub.preserve_latest = true;
+                        sub.pause_pin = Some(self.agent.history.len().saturating_sub(1));
+                    } else {
+                        sub.preserve_latest = false;
+                        sub.pause_pin = None;
+                    }
+                }
+                crate::session::engine::StepOutcome::TextOnly { finish_reason } => {
+                    incomplete_reason = finish_reason.or(incomplete_reason);
+                    completed = true;
+                    break;
+                }
+                crate::session::engine::StepOutcome::Paused => {
+                    let sub = self.subagent.as_mut().expect("child session");
+                    if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
+                        let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                        return subagent_pause_limit(usage, steps_run);
+                    }
+                    pause_continuations += 1;
+                    sub.preserve_latest = true;
+                    sub.pause_pin = Some(self.agent.history.len().saturating_sub(1));
+                }
+                crate::session::engine::StepOutcome::Cancelled => {
+                    let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                    return SubagentResult {
+                        status_line: "cancelled".to_string(),
+                        result_text: String::new(),
+                        turns: steps_run,
+                        completed: false,
+                        is_error: false,
+                        usage,
+                        cancelled: true,
+                    };
+                }
+                crate::session::engine::StepOutcome::Failed => {
+                    let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                    if let Some(error) = self
+                        .subagent
+                        .as_ref()
+                        .expect("child session")
+                        .persist_failure
+                        .clone()
+                    {
+                        return child_persist_stop(self, &error, steps_run, usage);
+                    }
+                    match failure {
+                        Some(StepFailure::Overflow(error)) => {
+                            return child_overflow_failure(
+                                &self.agent.id,
+                                self.agent.config().context_window,
+                                &pig_provider::core_error_en(&error),
+                                usage,
+                                steps_run,
+                            );
+                        }
+                        Some(StepFailure::Message(note)) => {
+                            return SubagentResult {
+                                status_line: format!("failed: {note}"),
+                                result_text: note,
+                                turns: steps_run,
+                                completed: false,
+                                is_error: true,
+                                usage,
+                                cancelled: false,
+                            };
+                        }
+                        None => {
+                            return SubagentResult {
+                                status_line: "failed: subagent drive failed".to_string(),
+                                result_text: "The subagent drive failed".to_string(),
+                                turns: steps_run,
+                                completed: false,
+                                is_error: true,
+                                usage,
+                                cancelled: false,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+        if completed {
+            if last_text.is_empty() {
+                SubagentResult {
+                    status_line: "failed: subagent produced no final text".to_string(),
+                    result_text: "The subagent produced no final text".to_string(),
+                    turns: steps_run,
+                    completed: true,
+                    is_error: true,
+                    usage,
+                    cancelled: false,
+                }
+            } else if let Some(reason) = incomplete_reason {
+                SubagentResult {
+                    status_line: format!(
+                        "completed with incomplete model response ({})",
+                        reason.as_str()
+                    ),
+                    result_text: format!(
+                        "[Model response incomplete: {}]\n\n{last_text}",
+                        reason.as_str()
+                    ),
+                    turns: steps_run,
+                    completed: true,
+                    is_error: false,
+                    usage,
+                    cancelled: false,
+                }
+            } else {
+                SubagentResult {
+                    status_line: format!("completed ({steps_run} steps)"),
+                    result_text: last_text,
+                    turns: steps_run,
+                    completed: true,
+                    is_error: false,
+                    usage,
+                    cancelled: false,
+                }
+            }
+        } else if last_text.is_empty() {
+            SubagentResult {
+                status_line: format!(
+                    "failed: reached the maximum turn count ({max_turns}), subagent produced no conclusion"
+                ),
+                result_text: format!(
+                    "Reached the maximum turn count ({max_turns}). The subagent produced no conclusion"
+                ),
+                turns: steps_run,
+                completed: false,
+                is_error: true,
+                usage,
+                cancelled: false,
+            }
+        } else {
+            SubagentResult {
+                status_line: format!("failed: reached the maximum turn count {max_turns}"),
+                result_text: format!("Reached the maximum turn count ({max_turns}). {last_text}"),
+                turns: steps_run,
+                completed: false,
+                is_error: true,
+                usage,
+                cancelled: false,
+            }
+        }
+    }
+}

@@ -287,7 +287,7 @@ host's stores or mutable objects:
   Delegation is background-only; `background: false` is rejected rather than silently ignored, and
   `agent.wait` provides the bounded wait operation.
 - A delegated child uses the existing Agent card (`ToolCallBegin` + `SubagentCard`), task
-  registry, `SubagentActivity` and terminal notifications; late results and late steering are
+  registry, `ConversationStatus` and terminal notifications; late results and late steering are
   isolated exactly like a model-started child, and stopping it removes the pending approvals and
   releases the context writer.
 

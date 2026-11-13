@@ -472,7 +472,30 @@ export function ToolRow(props: ToolContext & { item: Accessor<ToolItem> }) {
   const streamRows = () => streamingDiffRows(item().tool, item().detail);
   const streamAdditions = () => streamRows().filter((row) => row.kind === "added").length;
   const streamDeletions = () => streamRows().filter((row) => row.kind === "deleted").length;
+  const taskWaitIds = (): string[] | null => {
+    const parse = (source: string): string[] | null => {
+      try {
+        const args = JSON.parse(source) as { task_ids?: unknown };
+        if (!Array.isArray(args.task_ids)) return [];
+        return args.task_ids
+          .filter((id): id is string => typeof id === "string")
+          .map((id) => id.trim())
+          .filter(Boolean);
+      } catch {
+        return null;
+      }
+    };
+    const fromDetail = parse(item().detail);
+    if (fromDetail?.length) return fromDetail;
+    return parse(item().summary) ?? fromDetail;
+  };
   const summary = () => {
+    if (item().tool === "TaskWait") {
+      if (item().status === "input") return "…";
+      const ids = taskWaitIds();
+      if (ids === null) return item().summary.split(/\s+/).join(" ");
+      return ids.length > 0 ? ids.join(", ") : t("tools.wait_any");
+    }
     if (item().summary) return item().summary.split(/\s+/).join(" ");
     if ((item().tool === "Write" || item().tool === "Edit") && !item().summary) {
       const path = partialJsonField(item().detail, "path");

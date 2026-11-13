@@ -3,7 +3,7 @@ import { Button } from "nsh/base";
 import { MessageList } from "../app/components/messages";
 import { AgentStore } from "../app/store";
 import { ThemeStore } from "../app/theme";
-import type { TurnState } from "../app/protocol";
+import type { ChatItem, TurnState } from "../app/protocol";
 
 const store = new AgentStore(true);
 const themeStore = new ThemeStore();
@@ -18,13 +18,31 @@ const firstLine = "First rolling line with enough content to inspect the reasoni
 const appendedLine = `${firstLine} and a longer suffix`;
 const fullText = `${appendedLine}\nSecond rolling line`;
 
+function updateItems(change: (items: ChatItem[]) => ChatItem[]): void {
+  store.items.update((all) => ({ ...all, reasoning: change(all.reasoning ?? []) }));
+}
+
+function upsert(item: ChatItem): void {
+  updateItems((items) => [...items.filter((current) => current.id !== item.id), item]);
+}
+
+function settleReasoning(): void {
+  const now = Date.now();
+  updateItems((items) => items.map((item) =>
+    item.kind === "reasoning" && item.streaming
+      ? {
+        ...item,
+        streaming: false,
+        durationMs: item.startedAtMs !== undefined ? Math.max(0, now - item.startedAtMs) : item.durationMs,
+      }
+      : item
+  ));
+}
+
 function setText(text: string): void {
-  store.items.update((all) => ({
-    ...all,
-    reasoning: (all.reasoning ?? []).map((item) => item.kind === "reasoning" && item.id === "thinking"
-      ? { ...item, text }
-      : item),
-  }));
+  updateItems((items) => items.map((item) => item.id === "thinking"
+    ? { ...item, text }
+    : item));
 }
 
 const reduce = (event: Record<string, unknown>) => {
@@ -40,13 +58,18 @@ function nextTool(): void {
   const tool = read ? "Read" : "Bash";
   const summary = read
     ? "README.md"
-    : `echo "=== settings-page sections ==="; grep -n "type SettingsPageId\\|id: \\"\\|label" app/components/settings && echo "=== a deliberately long command whose title must stay inside the message viewport ==="`;
-  reduce({ ToolInputStart: { session_id: "reasoning", item_id: id, tool } });
-  reduce({ ToolCallBegin: { session_id: "reasoning", item_id: id, tool, input_summary: summary, detail: "{}", output: "", is_error: false } });
-  if (read) {
-    const output = Array.from({ length: 44 }, (_, index) => `${index + 1}\tLine ${index + 1}`).join("\n");
-    reduce({ ToolCallEnd: { session_id: "reasoning", item_id: id, output, is_error: false, stopped: false } });
-  }
+    : `echo "=== settings-page sections ==="; grep -n "type SettingsPageId\|id: \\\"\|label" app/components/settings && echo "=== a deliberately long command whose title must stay inside the message viewport ==="`;
+  settleReasoning();
+  upsert({
+    kind: "tool",
+    id,
+    tool,
+    summary,
+    detail: "{}",
+    output: read ? Array.from({ length: 44 }, (_, index) => `${index + 1}\tLine ${index + 1}`).join("\n") : "",
+    status: read ? "done" : "running",
+    turnId: turn.id,
+  });
 }
 
 store.current.set("reasoning");
@@ -71,18 +94,34 @@ mount(() => (
       </Button>
       <Button testID="next-reasoning" class="rounded border border-border px-3 py-1" onPress={() => {
         reasoningSequence += 1;
-        reduce({ ReasoningDelta: { session_id: "reasoning", item_id: `thinking-next-${reasoningSequence}`, delta: `Next reasoning ${reasoningSequence}` } });
+        settleReasoning();
+        upsert({
+          kind: "reasoning",
+          id: `thinking-next-${reasoningSequence}`,
+          text: `Next reasoning ${reasoningSequence}`,
+          streaming: true,
+          turnId: turn.id,
+          startedAtMs: Date.now(),
+        });
       }}>
         <Text class="text-xs text-foreground">Next reasoning</Text>
       </Button>
       <Button testID="late-thinking" class="rounded border border-border px-3 py-1" onPress={() => {
-        reduce({ ReasoningDelta: { session_id: "reasoning", item_id: "thinking", delta: "\nLate delta after a tool" } });
+        updateItems((items) => items.map((item) => item.id === "thinking"
+          ? { ...item, text: `${item.kind === "reasoning" ? item.text : ""}\nLate delta after a tool` }
+          : item));
       }}>
         <Text class="text-xs text-foreground">Late thinking</Text>
       </Button>
       <Button testID="next-text" class="rounded border border-border px-3 py-1" onPress={() => {
-        reduce({ TextDelta: { session_id: "reasoning", item_id: "answer", delta: "Answer body" } });
-        reduce({ TextDone: { session_id: "reasoning", item_id: "answer", full_text: "Answer body" } });
+        settleReasoning();
+        upsert({
+          kind: "markdown",
+          id: "answer",
+          text: "Answer body",
+          streaming: false,
+          turnId: turn.id,
+        });
       }}>
         <Text class="text-xs text-foreground">Next text</Text>
       </Button>

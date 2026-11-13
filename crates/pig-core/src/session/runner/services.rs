@@ -135,22 +135,30 @@ impl Manager {
         // a non-symlink context file and meta-id equality. A UI-provided id
         // therefore cannot name a path outside its owning directory.
         let tx = event_tx.clone();
-        // A task still occupying or awaiting a driver slot has not finished;
-        // a session absent from memory is not active.
+        // An active driver holds a steer-registry entry for its whole run
+        // (foreground and background alike); a task still occupying or awaiting
+        // a driver slot has not finished either. A session absent from memory is
+        // not active.
         let running = sessions.get(&session_id).is_some_and(|entry| {
-            entry
-                .state
-                .tasks
-                .lock()
-                .expect("task registry lock")
-                .iter()
-                .any(|t| {
-                    t.agent_id.as_deref() == Some(agent_id.as_str())
-                        && matches!(
-                            t.status,
-                            pig_protocol::TaskStatus::Queued | pig_protocol::TaskStatus::Running
-                        )
-                })
+            let steering = {
+                let steers = entry.state.agent_steers.lock().expect("agent steers lock");
+                steers.contains_key(&agent_id)
+            };
+            steering
+                || entry
+                    .state
+                    .tasks
+                    .lock()
+                    .expect("task registry lock")
+                    .iter()
+                    .any(|t| {
+                        t.agent_id.as_deref() == Some(agent_id.as_str())
+                            && matches!(
+                                t.status,
+                                pig_protocol::TaskStatus::Queued
+                                    | pig_protocol::TaskStatus::Running
+                            )
+                    })
         });
         let sessions_dir = sessions_dir.clone();
         let read_session = session_id.clone();
@@ -162,13 +170,14 @@ impl Manager {
             .await;
             match result {
                 Ok(Ok((meta, stored))) => {
-                    let (title, subtitle, items) = crate::agent::display_stored_items(&meta, &stored);
+                    let (title, subtitle, items) =
+                        crate::agent::display_stored_items(&meta, &stored);
                     let _ = tx
-                        .send(Event::SubagentHistory {
+                        .send(Event::ConversationSnapshot {
                             session_id,
-                            agent_id,
-                            title,
-                            subtitle,
+                            agent_id: Some(agent_id),
+                            title: Some(title),
+                            subtitle: Some(subtitle),
                             items,
                             running,
                         })
@@ -387,7 +396,7 @@ impl Manager {
             .or_else(|| {
                 sessions
                     .get(&session_id)
-                    .and_then(|e| e.session.as_ref().map(|s| s.cwd.clone()))
+                    .and_then(|e| e.session.as_ref().map(|s| s.agent.cwd.clone()))
             })
             .unwrap_or_else(|| default_cwd.clone());
         let tx = event_tx.clone();

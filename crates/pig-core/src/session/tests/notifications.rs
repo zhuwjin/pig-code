@@ -84,9 +84,9 @@ fn automatic_delivery_syncs_once_and_survives_reopen() {
         )
     );
     assert!(pending.lock().expect("mailbox").is_empty());
-    let history_len = session.history.len();
+    let history_len = session.agent.history.len();
     assert_eq!(session.drain_ready_notifications(&pending, &tx), 0);
-    assert_eq!(session.history.len(), history_len);
+    assert_eq!(session.agent.history.len(), history_len);
     drop(session);
 
     let mut loaded = fixture.load(None);
@@ -200,7 +200,7 @@ fn scheduled_notification_is_retried_after_a_torn_rollout_tail() {
 
     let mut loaded = fixture.load(None);
     assert_eq!(
-        loaded.history.len(),
+        loaded.agent.history.len(),
         1,
         "the torn record is not a delivery receipt"
     );
@@ -225,7 +225,7 @@ fn a_failed_rollout_boundary_does_not_acknowledge_delivery() {
     let mailbox = mailbox(&note.id);
 
     assert_eq!(session.drain_ready_notifications(&mailbox, &tx), 0);
-    assert!(session.history.is_empty());
+    assert!(session.agent.history.is_empty());
     assert_eq!(
         delivery(&fixture, &note.id).0,
         pig_protocol::DeliveryState::Scheduled
@@ -400,7 +400,7 @@ fn recall_requeues_only_the_revoked_delivery() {
     let fixture = TrustFixture::new("notification-recall");
     let note = notification("b1");
     let mut session = fixture.create(None);
-    session.history = vec![ChatMsg::system("sys".into()), ChatMsg::user("hi".into())];
+    session.agent.history = vec![ChatMsg::system("sys".into()), ChatMsg::user("hi".into())];
     session.user_ixs = vec![Some(1)];
     session.record(&user());
     session.sync_rollout();
@@ -437,7 +437,7 @@ async fn compaction_preserves_delivery_and_reminds_about_active_tasks() {
     let fixture = TrustFixture::new("notification-compaction");
     let note = notification("b1");
     let mut session = fixture.create(None);
-    session.history = vec![
+    session.agent.history = vec![
         ChatMsg::system("sys".into()),
         ChatMsg::user("old".into()),
         ChatMsg::assistant("answer".into(), vec![], None),
@@ -473,6 +473,7 @@ async fn compaction_preserves_delivery_and_reminds_about_active_tasks() {
         .await;
     assert_eq!(outcome, CompactOutcome::Completed);
     let reminders = session
+        .agent
         .history
         .iter()
         .filter(|message| {
@@ -484,7 +485,7 @@ async fn compaction_preserves_delivery_and_reminds_about_active_tasks() {
         .count();
     assert_eq!(reminders, 1);
     assert!(
-        session.history[1]
+        session.agent.history[1]
             .content
             .as_deref()
             .is_some_and(|text| text.contains(&active_id))
@@ -506,7 +507,7 @@ async fn compaction_preserves_delivery_and_reminds_about_active_tasks() {
             .is_empty()
     );
     assert_eq!(loaded.drain_ready_notifications(&mailbox(&note.id), &tx), 0);
-    assert!(loaded.history.iter().any(|message| {
+    assert!(loaded.agent.history.iter().any(|message| {
         message
             .content
             .as_deref()

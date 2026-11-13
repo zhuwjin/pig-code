@@ -168,7 +168,7 @@ async fn foreground_swarm_writes_enter_parent_turn_changes_once() {
         .store
         .lock()
         .expect("store lock")
-        .file_originals(&session.id);
+        .file_originals(&session.agent.id);
     let matching: Vec<&(String, Option<String>)> = originals
         .iter()
         .filter(|(path, _)| path.ends_with("child_write.txt"))
@@ -182,7 +182,7 @@ async fn foreground_swarm_writes_enter_parent_turn_changes_once() {
     let rollout = std::fs::read_to_string(
         root.join("data")
             .join("sessions")
-            .join(format!("{}.jsonl", session.id)),
+            .join(format!("{}.jsonl", session.agent.id)),
     )
     .expect("rollout readable");
     let records: Vec<serde_json::Value> = rollout
@@ -279,7 +279,7 @@ async fn background_child_then_parent_write_preserves_original() {
             .store
             .lock()
             .expect("store lock")
-            .file_originals(&session.id);
+            .file_originals(&session.agent.id);
         if content == "x\n"
             && originals.iter().any(|(original_path, content)| {
                 original_path.ends_with("child_write.txt") && content.as_deref() == Some("before\n")
@@ -388,7 +388,7 @@ async fn background_child_then_parent_write_preserves_original() {
     let rollout = std::fs::read_to_string(
         root.join("data")
             .join("sessions")
-            .join(format!("{}.jsonl", session.id)),
+            .join(format!("{}.jsonl", session.agent.id)),
     )
     .expect("rollout readable");
     let records: Vec<serde_json::Value> = rollout
@@ -406,7 +406,7 @@ async fn background_child_then_parent_write_preserves_original() {
         .store
         .lock()
         .expect("store lock")
-        .file_originals(&session.id);
+        .file_originals(&session.agent.id);
     let matching: Vec<&(String, Option<String>)> = originals
         .iter()
         .filter(|(path, _)| path.ends_with("child_write.txt"))
@@ -428,7 +428,7 @@ async fn background_child_then_parent_write_preserves_original() {
             .store
             .lock()
             .expect("store lock")
-            .file_originals(&session.id)
+            .file_originals(&session.agent.id)
             .iter()
             .all(|(path, _)| !path.ends_with("child_write.txt")),
         "revert clears the baseline row"

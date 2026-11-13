@@ -14,10 +14,17 @@ impl Session {
             return 0;
         };
         let elapsed = started.elapsed().as_secs_f64().max(0.05);
-        (self.rate_characters as f64 / 4.0 / elapsed).round().max(0.0) as u64
+        (self.rate_characters as f64 / 4.0 / elapsed)
+            .round()
+            .max(0.0) as u64
     }
 
-    pub(crate) fn plugin_stats(&self) -> (pig_protocol::PluginSessionStats, Vec<pig_protocol::PluginTurnStats>) {
+    pub(crate) fn plugin_stats(
+        &self,
+    ) -> (
+        pig_protocol::PluginSessionStats,
+        Vec<pig_protocol::PluginTurnStats>,
+    ) {
         let mut turns = self.stats_turns.clone();
         if self.turn_active {
             turns.push(pig_protocol::PluginTurnStats {
@@ -60,10 +67,16 @@ impl Session {
                     .or_else(|| config.map(|config| config.default_model.as_str()));
                 let total = config
                     .and_then(|config| {
-                        config.providers.iter().find(|candidate| Some(candidate.id.as_str()) == provider)
+                        config
+                            .providers
+                            .iter()
+                            .find(|candidate| Some(candidate.id.as_str()) == provider)
                     })
                     .and_then(|provider| {
-                        provider.models.iter().find(|candidate| Some(candidate.id.as_str()) == model)
+                        provider
+                            .models
+                            .iter()
+                            .find(|candidate| Some(candidate.id.as_str()) == model)
                     })
                     .map(|model| model.context_window)
                     .unwrap_or(128_000);
@@ -75,7 +88,7 @@ impl Session {
                 }
             }),
             breakdown: Some(super::estimate::context_breakdown(
-                &self.history,
+                &self.agent.history,
                 &self.root_schemas(),
             )),
             ..Default::default()

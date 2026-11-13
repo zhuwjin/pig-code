@@ -1,9 +1,12 @@
 use super::*;
 
+use std::collections::VecDeque;
+
 use super::compact::{AgentCompact, apply_agent_compact};
 use super::media::rehydrate_agent_media;
+use crate::rollout::{ConversationKind, RolloutRecord};
 
-/// First-line meta record of the subagent context JSONL
+/// First-line meta record of a subagent context JSONL.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMeta {
     pub agent_id: String,
@@ -14,14 +17,14 @@ pub struct AgentMeta {
     pub created_at: u64,
 }
 
-/// Read a subagent context: first-line meta + the remaining msg/compact lines
-/// rebuild the history (for resume). Compaction markers rewrite the history at
-/// complete-boundary indexes, exactly like the root rollout rebuild. Media is
-/// rehydrated only for messages that survive every marker, through the owning
-/// child media directory (`{jsonl}.media`), so a tampered or corrupt ref cannot
-/// point the model at another file. Bad lines error with the line number; a
-/// torn partial final line (a crash during append) keeps the last valid prefix
-/// and is repaired before the next append.
+/// Read a subagent context: first-line meta + canonical conversation records.
+/// Compaction markers rewrite the history at complete-boundary indexes, exactly
+/// like the root rollout rebuild. Media is rehydrated only for messages that
+/// survive every marker, through the owning child media directory
+/// (`{jsonl}.media`), so a tampered or corrupt ref cannot point the model at
+/// another file. Bad lines error with the line number; a torn partial final
+/// line (a crash during append) keeps the last valid prefix and is repaired
+/// before the next append.
 pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>), String> {
     let (meta, stored) = read_agent_stored(path)?;
     let media_root = path.with_extension("media");
@@ -47,22 +50,42 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     };
     let first_line = std::str::from_utf8(first.body)
         .map_err(|e| format!("Failed to parse subagent context line 1 (meta): {e}"))?;
-    let first: serde_json::Value = serde_json::from_str(first_line)
+    let first: RolloutRecord = serde_json::from_str(first_line)
         .map_err(|e| format!("Failed to parse subagent context line 1 (meta): {e}"))?;
-    if first["type"].as_str() != Some("meta") {
+    let RolloutRecord::Meta {
+        id,
+        title,
+        created_at,
+        kind,
+        profile,
+        description,
+        provider,
+        model,
+        ..
+    } = first
+    else {
         return Err("Subagent context line 1 is not a meta record".to_string());
+    };
+    if kind != ConversationKind::Subagent {
+        return Err(format!(
+            "Subagent context {} is not a subagent conversation",
+            path.display()
+        ));
     }
-    let meta: AgentMeta = serde_json::from_value(first)
-        .map_err(|e| format!("Failed to parse subagent context meta record: {e}"))?;
+    let meta = AgentMeta {
+        agent_id: id,
+        profile: profile.unwrap_or_default(),
+        description: description.unwrap_or(title),
+        model: model.unwrap_or_default(),
+        provider: provider.unwrap_or_default(),
+        created_at,
+    };
     let mut stored: Vec<StoredAgentMsg> = Vec::new();
+    let mut pending_calls: VecDeque<String> = VecDeque::new();
     for line in lines {
         let line_no = line.number;
-        let value: serde_json::Value = match serde_json::from_slice(line.body) {
+        let value: RolloutRecord = match serde_json::from_slice(line.body) {
             Ok(value) => value,
-            // A crash during an append can leave a partial final line without
-            // its newline. Keep the last valid prefix instead of discarding
-            // the whole child context; a malformed line before EOF is still a
-            // hard error (it cannot be told apart from real corruption).
             Err(_) if !line.terminated => {
                 tracing::warn!(
                     path = %path.display(),
@@ -77,57 +100,160 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
                 ));
             }
         };
-        match value["type"].as_str() {
-            Some("msg") => stored.push(parse_agent_msg(&value, line_no)?),
-            Some("compact") => {
-                let record: AgentCompact = serde_json::from_value(value).map_err(|e| {
-                    format!("Failed to parse subagent context line {line_no} compact: {e}")
-                })?;
-                apply_agent_compact(&mut stored, &record, line_no);
-            }
-            _ => {
-                return Err(format!(
-                    "Subagent context line {line_no} is not a msg or compact record"
+        match value {
+            RolloutRecord::Meta { .. } => {}
+            RolloutRecord::System { text } => stored.push(message(
+                ChatMsg::system(text),
+                Vec::new(),
+                Vec::new(),
+                0,
+                None,
+                None,
+            )),
+            RolloutRecord::PromptSnapshot { snapshot } => stored.push(message(
+                ChatMsg::system(snapshot.text),
+                Vec::new(),
+                Vec::new(),
+                0,
+                None,
+                None,
+            )),
+            RolloutRecord::User {
+                text,
+                images,
+                sent_at_ms,
+                ..
+            } => stored.push(message(
+                ChatMsg::user(text),
+                images,
+                Vec::new(),
+                sent_at_ms,
+                None,
+                None,
+            )),
+            RolloutRecord::TaskNotificationBatch {
+                model_text,
+                sent_at_ms,
+                ..
+            } => stored.push(message(
+                ChatMsg::user(model_text),
+                Vec::new(),
+                Vec::new(),
+                sent_at_ms,
+                None,
+                None,
+            )),
+            RolloutRecord::Assistant {
+                text,
+                reasoning,
+                replay,
+                tool_calls,
+                ts_ms,
+                reasoning_ms,
+            } => {
+                let calls: Vec<pig_provider::ToolCall> = tool_calls
+                    .iter()
+                    .map(|wire| pig_provider::ToolCall {
+                        id: wire.id.clone(),
+                        name: wire.function.name.clone(),
+                        arguments: wire.function.arguments.clone(),
+                    })
+                    .collect();
+                pending_calls.extend(calls.iter().map(|call| call.id.clone()));
+                stored.push(message(
+                    ChatMsg::assistant_with_replay(text, calls, reasoning, replay),
+                    Vec::new(),
+                    Vec::new(),
+                    ts_ms,
+                    reasoning_ms,
+                    None,
                 ));
             }
+            RolloutRecord::ToolCall {
+                tool: _,
+                arguments: _,
+                output,
+                is_error,
+                stopped,
+                edit,
+                images,
+                documents,
+                ..
+            } => {
+                let call_id = pending_calls
+                    .pop_front()
+                    .unwrap_or_else(|| format!("replay-{}", stored.len()));
+                let mut msg = ChatMsg::tool_result(&call_id, output).with_error(is_error);
+                msg.stopped = stopped;
+                stored.push(message(msg, images, documents, 0, None, edit));
+            }
+            RolloutRecord::Compact {
+                note,
+                omitted,
+                automatic,
+                used_after,
+                used_before,
+                summary,
+                tail_len,
+                preserved_user,
+                trigger,
+            } => {
+                let compact = AgentCompact {
+                    note,
+                    omitted,
+                    automatic,
+                    summary,
+                    tail_len: tail_len.unwrap_or(0),
+                    preserved_user,
+                    trigger,
+                    used_before,
+                    used_after,
+                };
+                apply_agent_compact(&mut stored, &compact, line_no);
+                pending_calls.clear();
+            }
+            RolloutRecord::Reasoning { text, replay } => stored.push(message(
+                ChatMsg::assistant_with_replay(String::new(), Vec::new(), Some(text), replay),
+                Vec::new(),
+                Vec::new(),
+                0,
+                None,
+                None,
+            )),
+            RolloutRecord::Text { text } => stored.push(message(
+                ChatMsg::assistant(text, Vec::new(), None),
+                Vec::new(),
+                Vec::new(),
+                0,
+                None,
+                None,
+            )),
+            RolloutRecord::TurnChanges { .. }
+            | RolloutRecord::HookContext { .. }
+            | RolloutRecord::TurnStats { .. }
+            | RolloutRecord::StepUsage { .. }
+            | RolloutRecord::Recall => {}
         }
     }
     Ok((meta, stored))
 }
 
-fn parse_agent_msg(value: &serde_json::Value, line_no: usize) -> Result<StoredAgentMsg, String> {
-    let mut msg: pig_provider::ChatMsg = serde_json::from_value(value["msg"].clone())
-        .map_err(|e| format!("Failed to parse subagent context line {line_no} message: {e}"))?;
-    msg.replay = serde_json::from_value(value["replay"].clone())
-        .map_err(|e| format!("Failed to parse subagent context line {line_no} replay: {e}"))?;
-    if !value["reasoning"].is_null() {
-        msg.reasoning = serde_json::from_value(value["reasoning"].clone()).map_err(|e| {
-            format!("Failed to parse subagent context line {line_no} reasoning: {e}")
-        })?;
-    }
-    let images = if value["images"].is_null() {
-        Vec::new()
-    } else {
-        serde_json::from_value(value["images"].clone())
-            .map_err(|e| format!("Failed to parse subagent context line {line_no} images: {e}"))?
-    };
-    let documents = match value.get("documents").filter(|value| !value.is_null()) {
-        Some(documents) => serde_json::from_value(documents.clone()).map_err(|e| {
-            format!("Failed to parse subagent context line {line_no} documents: {e}")
-        })?,
-        None => Vec::new(),
-    };
-    Ok(StoredAgentMsg {
+fn message(
+    msg: pig_provider::ChatMsg,
+    images: Vec<crate::rollout::ImageRef>,
+    documents: Vec<crate::rollout::DocumentRef>,
+    ts_ms: u64,
+    reasoning_ms: Option<u64>,
+    edit: Option<pig_protocol::EditDiff>,
+) -> StoredAgentMsg {
+    StoredAgentMsg {
         msg,
         images,
         documents,
-        ts_ms: value["ts_ms"].as_u64().unwrap_or(0),
-        reasoning_ms: value["reasoning_ms"].as_u64(),
-        edit: value
-            .get("edit")
-            .filter(|edit| !edit.is_null())
-            .and_then(|edit| serde_json::from_value(edit.clone()).ok()),
-    })
+        ts_ms,
+        reasoning_ms,
+        edit,
+    }
 }
 
 fn reconcile_tool_results(history: &mut [pig_provider::ChatMsg]) {

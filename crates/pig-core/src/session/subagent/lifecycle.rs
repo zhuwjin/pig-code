@@ -2,8 +2,8 @@ use super::*;
 
 use crate::task::AgentWriterGuard;
 
-use super::drive::{agent_result_path, unexpected_drive_result};
-use super::state::{ProgressSink, SubagentDrive, agent_card_model};
+use super::state::agent_card_model;
+use super::turn::{agent_result_path, unexpected_subagent_result};
 
 /// One child's terminal lifecycle: exclusive JSONL writer, registry entry,
 /// live panel indicator, approvals and (for background children) the one
@@ -32,9 +32,8 @@ impl ChildLifecycle {
         pending: &PendingApprovals,
         session_id: &str,
         tx: async_channel::Sender<Event>,
-        drive: &SubagentDrive,
+        child: &Session,
         writer: AgentWriterGuard,
-        progress: &ProgressSink,
         task_id: Option<String>,
     ) -> Self {
         if let Some(task_id) = &task_id {
@@ -43,9 +42,19 @@ impl ChildLifecycle {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(entry) = tasks.iter_mut().find(|entry| &entry.id == task_id) {
-                entry.record_path = Some(drive.jsonl.clone());
-                entry.result_path = Some(agent_result_path(&drive.jsonl, &drive.agent_id));
-                entry.model = Some(agent_card_model(drive));
+                entry.record_path = Some(
+                    child
+                        .subagent
+                        .as_ref()
+                        .expect("child session")
+                        .jsonl
+                        .clone(),
+                );
+                entry.result_path = Some(agent_result_path(
+                    &child.subagent.as_ref().expect("child session").jsonl,
+                    &child.agent.id,
+                ));
+                entry.model = Some(agent_card_model(child));
             }
         }
         Self {
@@ -54,8 +63,13 @@ impl ChildLifecycle {
             session_id: session_id.to_string(),
             tx,
             task_id,
-            agent_id: drive.agent_id.clone(),
-            ownership: progress.ownership_prefix(&drive.agent_id),
+            agent_id: child.agent.id.clone(),
+            ownership: child
+                .subagent
+                .as_ref()
+                .expect("child session")
+                .progress
+                .ownership_prefix(&child.agent.id),
             writer: Some(writer),
             finished_emitted: false,
             registry_settled: false,
@@ -88,7 +102,7 @@ impl ChildLifecycle {
             });
     }
 
-    fn settle_registry(&mut self, result: &SubagentDriveResult) {
+    fn settle_registry(&mut self, result: &SubagentResult) {
         if self.registry_settled {
             return;
         }
@@ -128,7 +142,7 @@ impl ChildLifecycle {
         }
     }
 
-    fn note_output(&self, result: &SubagentDriveResult) {
+    fn note_output(&self, result: &SubagentResult) {
         if let Some(task_id) = &self.task_id {
             crate::task::note_output(
                 &self.state.tasks,
@@ -145,11 +159,10 @@ impl ChildLifecycle {
         self.finished_emitted = true;
         let agent_id = self.agent_id.clone();
         emit_bg(&self.session_id, &self.tx, |session_id| {
-            Event::SubagentActivity {
+            Event::ConversationStatus {
                 session_id,
                 agent_id,
-                item: None,
-                finished: true,
+                running: false,
             }
         });
     }
@@ -160,7 +173,7 @@ impl ChildLifecycle {
         }
     }
 
-    pub(super) fn settle(&mut self, result: &SubagentDriveResult) {
+    pub(super) fn settle(&mut self, result: &SubagentResult) {
         self.release_writer();
         self.release_approvals();
         self.settle_registry(result);
@@ -178,7 +191,7 @@ impl Drop for ChildLifecycle {
         }
         self.release_writer();
         self.release_approvals();
-        let result = unexpected_drive_result();
+        let result = unexpected_subagent_result();
         self.settle_registry(&result);
         self.emit_finished();
         self.task_changed();

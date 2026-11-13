@@ -2,7 +2,7 @@ import { List, Scroll, Text, View, computed, effect, platform, signal, token, ty
 import { Button, DiffView, Editor, Input, Menu, MenuItem, Popover, Tab, Tabs, TextView, type EditorRef } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { t } from "../i18n";
-import type { ChatItem, GitFileChange, RightPanelRequest, SubagentHistory, SubagentItem, TaskSummary, ToolItem, TurnState } from "../protocol";
+import type { ChatItem, GitFileChange, RightPanelRequest, SubagentView, TaskSummary, TurnState } from "../protocol";
 import { type UiContext } from "../ui-context";
 import { conversationRowsEqual, flattenConversationRows, formatDuration, pathParts, taskStatusLabel, turnDurationMs, type ConversationRow } from "../conversation";
 import { Icon, type IconName } from "./icon";
@@ -230,22 +230,9 @@ function TaskContent(props: UiContext & { request: Extract<RightPanelRequest, { 
   );
 }
 
-function subagentToolItem(item: SubagentItem, agentId: string, index: number): ToolItem {
-  return {
-    kind: "tool",
-    id: `subagent-${agentId}-${index}`,
-    tool: item.tool ?? "",
-    summary: item.text,
-    detail: item.detail ?? item.text,
-    output: item.output ?? "",
-    edit: item.edit ?? undefined,
-    status: item.is_error ? "error" : item.stopped ? "stopped" : "done",
-  };
-}
-
 function subagentRows(
   agentId: string,
-  history: SubagentHistory | undefined,
+  history: SubagentView | undefined,
   task: TaskSummary | undefined,
   fallbackDuration: number | undefined,
   turnCache: Map<string, TurnState>,
@@ -270,17 +257,12 @@ function subagentRows(
     return currentTurnId;
   };
   const turnForItem = () => currentTurnId ?? startTurn();
-  history.items.forEach((item, index) => {
-    const id = `subagent-${agentId}-${index}`;
-    if (item.role === "user") {
+  history.items.forEach((item) => {
+    if (item.kind === "user") {
       items.push({
-        kind: "user",
-        id,
-        text: item.text,
-        files: [],
-        imageNums: [],
-        sentAtMs: item.ts_ms && item.ts_ms > 0
-          ? item.ts_ms
+        ...item,
+        sentAtMs: item.sentAtMs > 0
+          ? item.sentAtMs
           : firstUser
             ? (task?.started_at_ms ?? 0)
             : 0,
@@ -290,50 +272,14 @@ function subagentRows(
       return;
     }
     const turnId = turnForItem();
-    if (item.role === "reasoning") {
-      items.push({
-        kind: "reasoning",
-        id,
-        text: item.text,
-        streaming: false,
-        durationMs: item.duration_ms ?? undefined,
-        turnId,
-      });
-    } else if (item.role === "tool") {
-      items.push({ ...subagentToolItem(item, agentId, index), turnId });
+    if (item.kind === "markdown" || item.kind === "reasoning") {
+      items.push({ ...item, turnId });
+    } else if (item.kind === "tool") {
+      items.push({ ...item, turnId });
     } else {
-      items.push({
-        kind: "markdown",
-        id,
-        text: item.text,
-        streaming: false,
-        sources: item.sources?.length ? item.sources : undefined,
-        turnId,
-      });
+      items.push(item);
     }
   });
-  const stream = history.stream;
-  if (stream && (stream.reasoning || stream.assistant || Object.keys(stream.tools ?? {}).length > 0)) {
-    const turnId = turnForItem();
-    if (stream.reasoning) {
-      items.push({ kind: "reasoning", id: `subagent-${agentId}-live-reasoning`, text: stream.reasoning, streaming: true, turnId });
-    }
-    if (stream.assistant) {
-      items.push({ kind: "markdown", id: `subagent-${agentId}-live-assistant`, text: stream.assistant, streaming: true, turnId });
-    }
-    for (const [id, tool] of Object.entries(stream.tools ?? {})) {
-      items.push({
-        kind: "tool",
-        id: `subagent-live-${id}`,
-        tool: tool.tool,
-        summary: tool.detail,
-        detail: tool.detail,
-        output: "",
-        status: "input",
-        turnId,
-      });
-    }
-  }
   if (turns.length > 0) {
     const last = turns[turns.length - 1];
     last.status = history.running ? "running" : "done";

@@ -9,7 +9,9 @@ impl Session {
         let mut replay_bg_agents: Vec<String> = vec![];
         for (record_ix, record) in records.iter().enumerate() {
             match record {
-                RolloutRecord::Meta { .. } | RolloutRecord::PromptSnapshot { .. } => {}
+                RolloutRecord::Meta { .. }
+                | RolloutRecord::System { .. }
+                | RolloutRecord::PromptSnapshot { .. } => {}
                 RolloutRecord::Assistant {
                     text,
                     reasoning,
@@ -370,7 +372,10 @@ impl Session {
         // - file_changes table -> re-emit FileChanged per path (the UI upserts to rebuild the change list)
         let (todos_json, db_changes) = {
             let store = self.store.lock().expect("store lock");
-            (store.get_todos(&self.id), store.file_changes(&self.id))
+            (
+                store.get_todos(&self.agent.id),
+                store.file_changes(&self.agent.id),
+            )
         };
         if let Some(json) = todos_json
             && let Ok(items) = serde_json::from_str::<Vec<pig_protocol::TodoItem>>(&json)
@@ -412,11 +417,10 @@ impl Session {
         // (emitted after the closing TurnComplete, when the UI is already non-streaming)
         for agent_id in replay_bg_agents {
             self.emit(
-                |session_id| Event::SubagentActivity {
+                |session_id| Event::ConversationStatus {
                     session_id,
                     agent_id,
-                    item: None,
-                    finished: true,
+                    running: false,
                 },
                 tx,
             );

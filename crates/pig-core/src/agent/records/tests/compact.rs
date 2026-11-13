@@ -18,18 +18,17 @@ fn compact_record_replays_identically_and_preserves_the_active_user() {
     ] {
         append_test_message(&path, &mut msg).expect("seed message");
     }
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": "[Earlier context compacted (automatic)] 1 messages omitted.",
-            "omitted": 1,
-            "automatic": true,
-            "summary": "old work summary",
-            "tail_len": 1,
-            "preserved_user": 1,
-            "trigger": "watermark",
-        }),
+        "[Earlier context compacted (automatic)] 1 messages omitted.",
+        1,
+        true,
+        Some("old work summary"),
+        Some(1),
+        Some(1),
+        Some("watermark"),
+        None,
+        None,
     )
     .expect("compact record");
     let (_, first) = read_agent(&path).expect("read compacted context");
@@ -122,16 +121,17 @@ fn marked_user_handoff_and_checkpoint_cut_keep_the_active_request() {
             crate::rollout::COMPACTION_HANDOFF_MARKER
         )
     };
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": note(1),
-            "omitted": 1,
-            "automatic": true,
-            "tail_len": 0,
-            "preserved_user": 1,
-        }),
+        note(1),
+        1,
+        true,
+        None,
+        Some(0),
+        Some(1),
+        None,
+        None,
+        None,
     )
     .expect("first compact");
     let (_, first) = read_agent(&path).expect("read first handoff");
@@ -150,16 +150,17 @@ fn marked_user_handoff_and_checkpoint_cut_keep_the_active_request() {
     ] {
         append_test_message(&path, &mut msg).expect("grow");
     }
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": note(2),
-            "omitted": 2,
-            "automatic": true,
-            "tail_len": 2,
-            "preserved_user": serde_json::Value::Null,
-        }),
+        note(2),
+        2,
+        true,
+        None,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
     )
     .expect("checkpoint cut");
     let (_, history) = read_agent(&path).expect("read checkpoint cut");
@@ -186,16 +187,17 @@ fn marked_user_handoff_and_checkpoint_cut_keep_the_active_request() {
     ] {
         append_test_message(&second, &mut msg).expect("seed second");
     }
-    append_agent_record(
+    append_test_compact(
         &second,
-        &serde_json::json!({
-            "type": "compact",
-            "note": note(1),
-            "omitted": 1,
-            "automatic": true,
-            "tail_len": 0,
-            "preserved_user": 1,
-        }),
+        note(1),
+        1,
+        true,
+        None,
+        Some(0),
+        Some(1),
+        None,
+        None,
+        None,
     )
     .expect("first compact second");
     for mut msg in [
@@ -204,16 +206,17 @@ fn marked_user_handoff_and_checkpoint_cut_keep_the_active_request() {
     ] {
         append_test_message(&second, &mut msg).expect("grow second");
     }
-    append_agent_record(
+    append_test_compact(
         &second,
-        &serde_json::json!({
-            "type": "compact",
-            "note": note(2),
-            "omitted": 2,
-            "automatic": true,
-            "tail_len": 1,
-            "preserved_user": 3,
-        }),
+        note(2),
+        2,
+        true,
+        None,
+        Some(1),
+        Some(3),
+        None,
+        None,
+        None,
     )
     .expect("preserved checkpoint cut");
     let (_, history) = read_agent(&second).expect("read preserved checkpoint cut");
@@ -248,16 +251,17 @@ fn repeated_compaction_markers_replay_sequentially() {
     ] {
         append_test_message(&path, &mut msg).expect("seed first");
     }
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": "first note",
-            "omitted": 1,
-            "automatic": true,
-            "tail_len": 1,
-            "preserved_user": 1,
-        }),
+        "first note",
+        1,
+        true,
+        None,
+        Some(1),
+        Some(1),
+        None,
+        None,
+        None,
     )
     .expect("first compact");
     for mut msg in [
@@ -270,16 +274,17 @@ fn repeated_compaction_markers_replay_sequentially() {
     // At this point the rebuilt history is:
     // [system, first note, first task, first tail, second task, old
     //  second work, second tail]; cut=6 preserves the second task.
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": "second note",
-            "omitted": 4,
-            "automatic": true,
-            "tail_len": 1,
-            "preserved_user": 4,
-        }),
+        "second note",
+        4,
+        true,
+        None,
+        Some(1),
+        Some(4),
+        None,
+        None,
+        None,
     )
     .expect("second compact");
     let (_, history) = read_agent(&path).expect("read twice-compacted context");
@@ -333,16 +338,17 @@ fn compact_replay_rehydrates_preserved_media_and_degrades_corrupt_bytes() {
     ] {
         append_test_message(&path, &mut msg).expect("seed tail");
     }
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": "[Earlier context compacted (automatic)] 1 messages omitted.",
-            "omitted": 1,
-            "automatic": true,
-            "tail_len": 1,
-            "preserved_user": 1,
-        }),
+        "[Earlier context compacted (automatic)] 1 messages omitted.",
+        1,
+        true,
+        None,
+        Some(1),
+        Some(1),
+        None,
+        None,
+        None,
     )
     .expect("compact record");
     let raw = std::fs::read_to_string(&path).expect("raw jsonl");
@@ -415,16 +421,21 @@ fn compact_replay_refuses_media_outside_the_child_root() {
     // The owning media root exists, so the refusal is specifically the
     // resolved-path containment check (not a missing root).
     std::fs::create_dir_all(path.with_extension("media")).expect("media root");
-    append_agent_record(
+    append_agent_conversation_record(
         &path,
-        &serde_json::json!({
-            "type": "msg",
-            "msg": ChatMsg::user("outside ref".into()),
-            "replay": null,
-            "reasoning": null,
-            "images": [image_ref(&outside, "outside.png")],
-            "documents": [],
-        }),
+        &crate::rollout::RolloutRecord::User {
+            text: "outside ref".into(),
+            files: Vec::new(),
+            images: vec![
+                serde_json::from_value(image_ref(&outside, "outside.png"))
+                    .expect("outside image ref"),
+            ],
+            sent_at_ms: 1,
+            sent_text: None,
+            sent_images: Vec::new(),
+            model_text: None,
+            sent_input_image: None,
+        },
     )
     .expect("outside image ref");
     let (_, history) = read_agent(&path).expect("read outside ref");
@@ -457,15 +468,17 @@ fn an_invalid_compact_record_keeps_the_previous_context() {
     ] {
         append_test_message(&path, &mut msg).expect("seed");
     }
-    append_agent_record(
+    append_test_compact(
         &path,
-        &serde_json::json!({
-            "type": "compact",
-            "note": "bad marker",
-            "omitted": 1,
-            "tail_len": 99,
-            "preserved_user": 1,
-        }),
+        "bad marker",
+        1,
+        false,
+        None,
+        Some(99),
+        Some(1),
+        None,
+        None,
+        None,
     )
     .expect("invalid compact record");
     let mut resume = ChatMsg::user("continue".into());

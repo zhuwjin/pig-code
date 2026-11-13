@@ -69,6 +69,10 @@ const items: ChatItem[] = [
     output: "1\tone",
   }),
   tool("failed", "Grep", "error", { output: "Search backend timed out" }),
+  tool("wait", "TaskWait", "done", {
+    summary: '{"task_ids":["b1"],"timeout_ms":30000}',
+    detail: '{"task_ids":["b1"],"timeout_ms":30000}',
+  }),
 ];
 store.current.set("tool-cards");
 store.items.set({ "tool-cards": items });

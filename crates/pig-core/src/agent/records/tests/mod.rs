@@ -6,17 +6,18 @@ mod media;
 mod store;
 
 fn write_meta(path: &Path) {
-    append_agent_record(
+    append_agent_conversation_record(
         path,
-        &serde_json::json!({
-            "type": "meta",
-            "agent_id": "a1",
-            "profile": "general-purpose",
-            "description": "roundtrip",
-            "model": "m",
-            "provider": "p",
-            "created_at": 1,
-        }),
+        &crate::rollout::RolloutRecord::subagent_meta(
+            "a1".into(),
+            "s-test".into(),
+            PathBuf::from("/tmp"),
+            "roundtrip".into(),
+            "general-purpose".into(),
+            "p".into(),
+            "m".into(),
+            1,
+        ),
     )
     .expect("write meta");
 }
@@ -59,6 +60,49 @@ fn append_test_message(path: &Path, msg: &mut ChatMsg) -> Result<(), String> {
     append_agent_message(path, msg, TEST_CONTEXT_WINDOW)
 }
 
+fn append_test_tool_result(
+    path: &Path,
+    call: &pig_provider::ToolCall,
+    msg: &mut ChatMsg,
+) -> Result<(), String> {
+    append_agent_tool_result(
+        path,
+        call,
+        msg,
+        TEST_CONTEXT_WINDOW,
+        AgentMsgMeta::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_test_compact(
+    path: &Path,
+    note: impl Into<String>,
+    omitted: usize,
+    automatic: bool,
+    summary: Option<&str>,
+    tail_len: Option<usize>,
+    preserved_user: Option<usize>,
+    trigger: Option<&str>,
+    used_before: Option<u64>,
+    used_after: Option<u64>,
+) -> Result<(), String> {
+    append_agent_conversation_record(
+        path,
+        &crate::rollout::RolloutRecord::Compact {
+            note: note.into(),
+            omitted,
+            automatic,
+            summary: summary.map(str::to_string),
+            tail_len,
+            preserved_user,
+            trigger: trigger.map(str::to_string),
+            used_before,
+            used_after,
+        },
+    )
+}
+
 fn identity_temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pig-agent-identity-{tag}-{}-{}",
@@ -74,25 +118,21 @@ fn identity_temp_dir(tag: &str) -> PathBuf {
 
 fn seed_context(dir: &Path, file_id: &str, meta_id: &str) {
     std::fs::create_dir_all(dir).expect("agents dir");
-    append_agent_record(
-        &dir.join(format!("{file_id}.jsonl")),
-        &serde_json::json!({
-            "type": "meta",
-            "agent_id": meta_id,
-            "profile": "general-purpose",
-            "description": "identity fixture",
-            "model": "m",
-            "provider": "p",
-            "created_at": 1,
-        }),
+    let path = dir.join(format!("{file_id}.jsonl"));
+    append_agent_conversation_record(
+        &path,
+        &crate::rollout::RolloutRecord::subagent_meta(
+            meta_id.into(),
+            "s-test".into(),
+            PathBuf::from("/tmp"),
+            "identity fixture".into(),
+            "general-purpose".into(),
+            "p".into(),
+            "m".into(),
+            1,
+        ),
     )
     .expect("meta");
-    append_agent_record(
-        &dir.join(format!("{file_id}.jsonl")),
-        &serde_json::json!({
-            "type": "msg",
-            "msg": ChatMsg::user("hello".into()),
-        }),
-    )
-    .expect("user");
+    let mut user = ChatMsg::user("hello".into());
+    append_agent_message(&path, &mut user, TEST_CONTEXT_WINDOW).expect("user");
 }

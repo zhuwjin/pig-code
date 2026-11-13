@@ -1325,7 +1325,7 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
         None,
     )
     .expect("session");
-    session.history = vec![
+    session.agent.history = vec![
         ChatMsg::system("frozen".into()),
         user("old request"),
         assistant_text("old answer"),
@@ -1333,7 +1333,12 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
     ];
     session.user_ixs = vec![Some(1), Some(3)];
     session.last_total_tokens = Some(42);
-    let before: Vec<Option<String>> = session.history.iter().map(|m| m.content.clone()).collect();
+    let before: Vec<Option<String>> = session
+        .agent
+        .history
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
     let before_ixs = session.user_ixs.clone();
 
     // The same sticky state a failed append leaves behind; `record` refuses to
@@ -1359,7 +1364,12 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
         )
         .await;
     assert_eq!(outcome, CompactOutcome::Failed);
-    let after: Vec<Option<String>> = session.history.iter().map(|m| m.content.clone()).collect();
+    let after: Vec<Option<String>> = session
+        .agent
+        .history
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
     assert_eq!(after, before, "live history stays pre-compaction");
     assert_eq!(session.user_ixs, before_ixs, "recall stack is unchanged");
     assert_eq!(

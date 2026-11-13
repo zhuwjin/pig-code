@@ -8,7 +8,7 @@ use super::state::*;
 
 mod compaction;
 mod compaction_pause;
-mod drive;
+mod orchestration;
 mod swarm;
 
 fn test_model() -> ResolvedModel {
@@ -34,16 +34,16 @@ fn test_model() -> ResolvedModel {
     }
 }
 
-fn test_drive(agent_id: &str) -> SubagentDrive {
+fn test_child_session(agent_id: &str) -> Session {
     let jsonl = std::env::temp_dir().join(format!(
         "pig-managed-{agent_id}-{}-{}.jsonl",
         std::process::id(),
         crate::rollout::now_secs()
     ));
-    SubagentDrive {
-        agent_id: agent_id.to_string(),
-        cwd: std::env::temp_dir(),
-        profile: crate::agent::AgentProfile {
+    make_child_session(
+        agent_id,
+        std::env::temp_dir(),
+        crate::agent::AgentProfile {
             name: "explore".into(),
             description: "test child".into(),
             tools: None,
@@ -54,25 +54,144 @@ fn test_drive(agent_id: &str) -> SubagentDrive {
             system_prompt: "test".into(),
             source: crate::agent::AgentSource::BuiltIn,
         },
-        child_config: test_model(),
-        tools: vec![],
-        schemas: vec![],
-        history: vec![],
+        test_model(),
+        vec![],
         jsonl,
-        max_turns: 1,
-        description: "managed child".into(),
-        mcp: None,
-        plugin_tools: crate::plugins::PluginToolset::new(
+        1,
+        "managed child",
+        crate::plugins::PluginToolset::new(
             &crate::plugins::PluginRegistry::shared(std::env::temp_dir()),
             &crate::config::WorkspaceTrust::untrusted(&std::env::temp_dir()),
             None,
             "s-test",
         ),
+    )
+}
+
+/// Minimal child Session for orchestration unit tests: the same concrete type
+/// the real pipeline builds, without a parent/store setup.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn make_child_session(
+    agent_id: &str,
+    cwd: PathBuf,
+    profile: crate::agent::AgentProfile,
+    config: ResolvedModel,
+    history: Vec<ChatMsg>,
+    jsonl: PathBuf,
+    max_turns: usize,
+    description: &str,
+    plugin_tools: crate::plugins::PluginToolset,
+) -> Session {
+    let state = crate::task::SessionToolState::for_test();
+    let delivery_receipts = state.delivery_receipts.clone();
+    let store_dir = std::env::temp_dir().join(format!(
+        "pig-managed-store-{agent_id}-{}-{}",
+        std::process::id(),
+        crate::rollout::now_secs()
+    ));
+    std::fs::create_dir_all(&store_dir).expect("test store dir");
+    let store = Arc::new(Mutex::new(
+        crate::store::Store::open(&store_dir).expect("test store"),
+    ));
+    let trust = crate::config::WorkspaceTrust::untrusted(&cwd);
+    let emitted_up_to = history.len();
+    Session {
+        agent: crate::session::agent::Agent {
+            id: agent_id.to_string(),
+            cwd: cwd.clone(),
+            delegation_depth: 1,
+            config: Some(config),
+            history,
+            tools: vec![],
+            schemas: vec![],
+        },
+        subagent: Some(Box::new(super::state::SubagentState {
+            parent_session_id: "s-test".into(),
+            profile,
+            jsonl,
+            max_turns,
+            description: description.to_string(),
+            plugin_tool_filter: Default::default(),
+            mcp_inherits_all: false,
+            trusted: true,
+            persist_failure: None,
+            writer: None,
+            progress: ProgressSink::Foreground {
+                parent_item_id: "parent-item".into(),
+            },
+            preserve_latest: false,
+            pause_pin: None,
+            overflow_recoveries: 0,
+            emitted_up_to,
+            tool_edits: HashMap::new(),
+        })),
+        user_ixs: Vec::new(),
+        io_last_input: Vec::new(),
+        turn_counter: 0,
+        tracker: crate::tool::ChangeTracker::default(),
+        state,
+        always_allowed: Arc::new(Mutex::new(HashSet::new())),
+        permission_rules: Arc::new(Mutex::new(crate::permissions::PermissionRules::default())),
+        plan_enabled: false,
+        pending: test_pending(),
+        pending_questions: Arc::new(Mutex::new(HashMap::new())),
+        permissions: pig_protocol::PermissionSettings::default(),
+        model_override: None,
+        rollout: None,
+        rollout_failure: None,
+        rollout_failure_reported: false,
+        delivery_receipts,
+        notification_delivery_failure: None,
+        notification_reconcile_required: false,
+        store,
+        data_dir: cwd.clone(),
+        git_snapshot: None,
+        agents_prompt: String::new(),
+        skills_prompt: String::new(),
+        memory_prompt: String::new(),
+        memory_enabled: false,
+        date_frozen: "2026-01-01".into(),
+        date_reminded: String::new(),
+        agents_reminded: String::new(),
+        memory_reminded: String::new(),
+        permissions_reminded: None,
+        profiles_summary: String::new(),
+        prompt_text: None,
+        prompt_memory_enabled: None,
+        prompt_skills_state: None,
+        projected_input_image: None,
+        projected_input_pdf: None,
+        recorded_prompt: None,
+        last_total_tokens: None,
+        usage_turn_id: None,
+        usage_anchor: None,
+        overflow_recovered: false,
+        turn_input: 0,
+        turn_cache_read: 0,
+        turn_output: 0,
+        turn_reasoning_output: 0,
+        turn_api_ms: 0,
+        turn_ttft_ms: 0,
+        turn_ttft_steps: 0,
+        turn_api_steps: 0,
+        turn_tool_ms: 0,
+        stats_turns: Vec::new(),
+        turn_active: false,
+        rate_started_at: None,
+        rate_characters: 0,
+        input_total: 0,
+        cache_read_total: 0,
+        agent_seq: 0,
+        tool_item_seq: 0,
+        runtime: None,
+        trust,
+        plugin_tools,
         plugin_tool_filter: Default::default(),
-        mcp_inherits_all: false,
-        trusted: true,
-        persist_failure: None,
-        writer: None,
+        mcp: None,
+        hooks: crate::hooks::HookSet::load(&cwd, None),
+        hook_context_stash: Vec::new(),
+        session_start_hook_ran: true,
+        session_start_source: "subagent",
     }
 }
 
@@ -83,13 +202,10 @@ fn test_pending() -> PendingApprovals {
 fn test_lifecycle(
     state: &crate::task::SessionToolState,
     pending: &PendingApprovals,
-    drive: &SubagentDrive,
+    child: &mut Session,
     task_id: Option<String>,
 ) -> ChildLifecycle {
-    let writer = state
-        .try_claim_agent_writer(&drive.agent_id)
-        .expect("test writer claim");
-    let progress = match &task_id {
+    child.subagent.as_mut().expect("child session").progress = match &task_id {
         Some(task_id) => ProgressSink::Background {
             task_id: task_id.clone(),
         },
@@ -97,14 +213,16 @@ fn test_lifecycle(
             parent_item_id: "parent-item".into(),
         },
     };
+    let writer = state
+        .try_claim_agent_writer(&child.agent.id)
+        .expect("test writer claim");
     ChildLifecycle::new(
         state,
         pending,
         "s-test",
         async_channel::unbounded().0,
-        drive,
+        child,
         writer,
-        &progress,
         task_id,
     )
 }
@@ -262,23 +380,27 @@ fn long_child_messages(
 
 fn seed_child_context(session: &Session, agent_id: &str, history: &mut [ChatMsg]) -> PathBuf {
     let agents_dir =
-        crate::agent::prepared_agent_dir(&session.data_dir.join("sessions"), &session.id)
+        crate::agent::prepared_agent_dir(&session.data_dir.join("sessions"), &session.agent.id)
             .expect("agents dir");
     let jsonl = agents_dir.join(format!("{agent_id}.jsonl"));
-    persist_agent_line(
+    persist_agent_meta(
         &jsonl,
-        &serde_json::json!({
-            "type": "meta",
-            "agent_id": agent_id,
-            "profile": "explore",
-            "description": "long child compaction fixture",
-            "model": "mock-model",
-            "provider": "Mock Provider",
-            "created_at": 1,
-        }),
+        agent_id,
+        "s-test",
+        "explore",
+        "long child compaction fixture",
     );
     for message in history {
-        persist_agent_msg(&jsonl, message);
+        if message.role == "tool" {
+            let call = ToolCall {
+                id: message.tool_call_id.clone().unwrap_or_default(),
+                name: "tool".into(),
+                arguments: "{}".into(),
+            };
+            persist_agent_tool(&jsonl, &call, message);
+        } else {
+            persist_agent_msg(&jsonl, message);
+        }
     }
     jsonl
 }
@@ -415,7 +537,7 @@ fn child_local_state_has_its_own_todo_handle() {
             content: "parent item".into(),
             status: pig_protocol::TodoStatus::Pending,
         });
-    let child = child_local_state(&parent, "agent-test");
+    let child = Session::child_local_state(&parent, "agent-test");
     assert!(
         child.todos.lock().expect("child todos").is_empty(),
         "a child starts from its own empty list, never the parent snapshot"
@@ -456,15 +578,15 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
     std::fs::create_dir_all(&root).expect("temp workspace");
     let store = Arc::new(Mutex::new(crate::store::Store::open(&root).expect("store")));
     let parent = crate::task::SessionToolState::for_test();
-    let child_state = child_local_state(&parent, "agent-test");
+    let child_state = Session::child_local_state(&parent, "agent-test");
     let tool = crate::tool::all()
         .into_iter()
         .find(|tool| tool.name() == "TodoList")
         .expect("TodoList tool");
     let mut tracker = crate::tool::ChangeTracker::default();
     let pending = test_pending();
-    let mut rules = crate::permissions::PermissionRules::default();
-    let mut always_allowed = HashSet::new();
+    let rules = Arc::new(Mutex::new(crate::permissions::PermissionRules::default()));
+    let always_allowed = Arc::new(Mutex::new(HashSet::new()));
     let hooks = crate::hooks::HookSet::load(&root, None);
     let (tx, rx) = async_channel::unbounded();
     let cancel = CancellationToken::new();
@@ -484,8 +606,8 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
         state: &child_state,
         owns_todo_state: false,
         pending: &pending,
-        permission_rules: &mut rules,
-        always_allowed: &mut always_allowed,
+        permission_rules: &rules,
+        always_allowed: &always_allowed,
         session_id: "s-child-todo",
         plan_enabled: false,
         store: &store,

@@ -19,7 +19,12 @@ pub(super) fn remember_project_rule(
     call: &ToolCall,
     subject: &str,
 ) -> Option<String> {
-    if !ctx.permission_rules.project_allows_are_trusted() {
+    if !ctx
+        .permission_rules
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .project_allows_are_trusted()
+    {
         return Some(
             "Note: this workspace is not trusted, so no project rule was saved; this call was \
              approved once. Trust the workspace to persist approval rules."
@@ -37,8 +42,12 @@ pub(super) fn remember_project_rule(
     };
     match crate::permissions::append_project_allow(ctx.cwd, &rules) {
         Ok(()) => {
+            let mut live = ctx
+                .permission_rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             for rule in &rules {
-                ctx.permission_rules.add_allow(rule);
+                live.add_allow(rule);
             }
             Some(format!(
                 "Note: approved for this workspace — added {} to {}.",

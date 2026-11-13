@@ -442,13 +442,13 @@ pub struct PluginAgentOutcome {
 }
 
 /// A read-only projection of a delegated subagent's conversation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginAgentConversation {
     pub agent_id: String,
     pub title: String,
     pub running: bool,
-    pub items: Vec<crate::SubagentItem>,
+    pub items: Vec<crate::ConversationItem>,
 }
 
 /// A controlled one-shot model request from a plugin.

@@ -1,6 +1,14 @@
 use std::path::Path;
 
-/// Append one line to the subagent context JSONL (a meta / msg record); creates
+use crate::rollout::RolloutRecord;
+
+/// Append one canonical conversation record to a subagent context JSONL.
+pub fn append_agent_conversation_record(path: &Path, record: &RolloutRecord) -> Result<(), String> {
+    let line = serde_json::to_value(record).map_err(|error| error.to_string())?;
+    append_agent_record(path, &line)
+}
+
+/// Append one raw JSONL line to the subagent context; creates
 /// the directory when missing. The shared tail repair keeps a crash-torn final
 /// line from gluing the next record onto it; the child's exclusive writer
 /// claim makes that single-writer repair safe. Returns Err on failure. Callers

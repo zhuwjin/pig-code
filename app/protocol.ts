@@ -280,38 +280,14 @@ export interface ProjectHooksNotice {
   count: number;
 }
 
-export interface SubagentItem {
-  role: string;
-  text: string;
-  tool?: string | null;
-  output?: string | null;
-  detail?: string | null;
-  ts_ms?: number;
-  duration_ms?: number | null;
-  edit?: EditDiff | null;
-  sources?: Source[];
-  is_error: boolean;
-  stopped: boolean;
-}
-
-export interface SubagentLiveTool {
-  tool: string;
-  detail: string;
-}
-
-export interface SubagentStream {
-  reasoning: string;
-  assistant: string;
-  tools?: Record<string, SubagentLiveTool>;
-}
-
-export interface SubagentHistory {
+/** UI view of a subagent conversation, built from the shared Conversation
+ * snapshot/update wire; rendering uses the same ChatItem model as the root. */
+export interface SubagentView {
   sessionId: string;
   agentId: string;
   title: string;
   subtitle: string;
-  items: SubagentItem[];
-  stream?: SubagentStream | null;
+  items: ChatItem[];
   running: boolean;
 }
 

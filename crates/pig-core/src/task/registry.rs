@@ -201,6 +201,103 @@ impl Drop for AgentWriterGuard {
     }
 }
 
+/// Registration of one subagent's explicit TaskWait interest. The ids stay in
+/// the shared set after a successful wait so the runner does not queue the
+/// same terminal notification as a steer; timeout/error drops the registration.
+pub(crate) struct TaskWaitInterest {
+    waits: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+    steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
+    owner: String,
+    task_ids: Vec<String>,
+    delivered: bool,
+}
+
+impl TaskWaitInterest {
+    pub(crate) fn register(
+        state: &SessionToolState,
+        owner: &str,
+        task_ids: &HashSet<String>,
+    ) -> Self {
+        let task_ids: Vec<String> = task_ids.iter().cloned().collect();
+        if !task_ids.is_empty() {
+            state
+                .agent_task_waits
+                .lock()
+                .expect("agent task waits lock")
+                .entry(owner.to_string())
+                .or_default()
+                .extend(task_ids.iter().cloned());
+        }
+        Self {
+            waits: state.agent_task_waits.clone(),
+            steers: state.agent_steers.clone(),
+            owner: owner.to_string(),
+            task_ids,
+            delivered: false,
+        }
+    }
+
+    /// The wait returned these terminal notifications: keep suppression for
+    /// exactly those tasks. Tasks still running lose their registration so a
+    /// later terminal notification can still reach the child as a steer.
+    pub(crate) fn delivered(&mut self, notifications: &[pig_protocol::TaskNotification]) {
+        let delivered: HashSet<String> = notifications
+            .iter()
+            .map(|notification| notification.task_id.clone())
+            .collect();
+        let mut waits = self.waits.lock().expect("agent task waits lock");
+        if let Some(ids) = waits.get_mut(&self.owner) {
+            ids.retain(|id| delivered.contains(id));
+            if ids.is_empty() {
+                waits.remove(&self.owner);
+            }
+        }
+        drop(waits);
+        // A terminal notification may already have been queued before this
+        // wait registered. It is the same fact the TaskWait result now
+        // carries, so remove that queued steer instead of delivering twice.
+        if !notifications.is_empty() {
+            let mut steers = self.steers.lock().expect("agent steers lock");
+            if let Some(queue) = steers.get_mut(&self.owner) {
+                queue.retain(|text| {
+                    !notifications
+                        .iter()
+                        .any(|notification| text.contains(&notification.id))
+                });
+            }
+        }
+        self.delivered = true;
+    }
+}
+
+impl Drop for TaskWaitInterest {
+    fn drop(&mut self) {
+        if self.delivered {
+            return;
+        }
+        let mut waits = self.waits.lock().expect("agent task waits lock");
+        if let Some(ids) = waits.get_mut(&self.owner) {
+            for id in &self.task_ids {
+                ids.remove(id);
+            }
+            if ids.is_empty() {
+                waits.remove(&self.owner);
+            }
+        }
+    }
+}
+
+/// Whether `owner` successfully received `task_id` through TaskWait; the
+/// terminal notification must not be queued as a steer a second time.
+pub(crate) fn task_wait_delivered(state: &SessionToolState, owner: &str, task_id: &str) -> bool {
+    state
+        .agent_task_waits
+        .lock()
+        .expect("agent task waits lock")
+        .get(owner)
+        .is_some_and(|ids| ids.contains(task_id))
+}
+
 /// Session-scoped shared tool state: todo list + task registry + TaskChange
 /// channel + task sequence + file freshness. All fields are
 /// Clone-able (Arc/atomic/sender); Session and agent_loop's SessionEntry each
@@ -246,6 +343,10 @@ pub struct SessionToolState {
     /// path (including panic), so a resume cannot open a second writer while
     /// a stopped driver is still closing.
     pub agent_writers: Arc<Mutex<HashSet<String>>>,
+    /// Tasks a subagent is waiting for, keyed by owner agent id. A successful
+    /// TaskWait keeps the id so the terminal notification is not also queued
+    /// as a steer; a timeout or error removes it.
+    pub agent_task_waits: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// The workspace's own sandbox layer (`<workspace>/.pigcode/config.toml`),
     /// applied over the user-level settings at launch time. Shared rather than
     /// copied, so a trust decision made mid-session reaches every clone of the
@@ -268,6 +369,7 @@ impl Clone for SessionToolState {
             read_states: self.read_states.clone(),
             agent_steers: self.agent_steers.clone(),
             agent_writers: self.agent_writers.clone(),
+            agent_task_waits: self.agent_task_waits.clone(),
             extra_read_roots: self.extra_read_roots.clone(),
             extra_rw_roots: self.extra_rw_roots.clone(),
             sandbox_project: self.sandbox_project.clone(),
@@ -301,6 +403,7 @@ impl SessionToolState {
             task_seq: Arc::new(AtomicUsize::new(0)),
             agent_steers: Arc::new(Mutex::new(HashMap::new())),
             agent_writers: Arc::new(Mutex::new(HashSet::new())),
+            agent_task_waits: Arc::new(Mutex::new(HashMap::new())),
             read_states: Arc::new(Mutex::new(HashMap::new())),
             extra_read_roots: canon(extra_read_roots),
             extra_rw_roots: canon(extra_rw_roots),

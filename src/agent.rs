@@ -425,6 +425,7 @@ default_reasoning_level = "low"
     pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
         let events = this.with(|agent| agent.handle.events.clone());
         let plugins = this.with(|agent| agent.plugins.clone());
+        let mut projection = crate::conversation_projection::ConversationProjection::new();
         while let Ok(first) = events.recv().await {
             let mut batch = vec![first];
             while batch.len() < 128 {
@@ -436,7 +437,17 @@ default_reasoning_level = "low"
             for event in &batch {
                 plugins.handle_core_event(event);
             }
-            listener.post(encode_batch(&batch));
+            let mut ui_batch = Vec::with_capacity(batch.len());
+            for event in &batch {
+                let projected = projection.project(event);
+                ui_batch.extend(projected.events);
+                if projected.pass {
+                    ui_batch.push(event.clone());
+                }
+            }
+            if !ui_batch.is_empty() {
+                listener.post(encode_batch(&ui_batch));
+            }
         }
     }
 }

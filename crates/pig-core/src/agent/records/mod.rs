@@ -12,26 +12,27 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use compact::AgentCompact;
+pub(crate) use display::display_stored_items;
+pub(crate) use display::project_display_items_with_edits;
 #[allow(unused_imports)]
 pub use display::{display_items, project_display_items};
-pub(crate) use display::project_display_items_with_edits;
-pub(crate) use display::display_stored_items;
-pub use jsonl::append_agent_record;
-pub use media::{append_agent_message, append_agent_message_meta};
+pub use jsonl::append_agent_conversation_record;
+#[cfg(test)]
+pub(crate) use jsonl::append_agent_record;
 pub(crate) use media::fill_document_token_estimates;
 pub(crate) use media::project_history_media;
-pub use store::{AgentMeta, read_agent};
+pub use media::{append_agent_message, append_agent_message_meta, append_agent_tool_result};
 pub(crate) use store::read_agent_stored;
+pub use store::{AgentMeta, read_agent};
 
-/// Display-only fields of a message line (timing and the edit a tool made).
+/// Display-only fields of a canonical message record (timing and the edit a tool made).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentMsgMeta {
     pub(crate) reasoning_ms: Option<u64>,
     pub(crate) edit: Option<pig_protocol::EditDiff>,
 }
 
-/// One parsed message line before media rehydration. Compaction boundaries
+/// One canonical message before media rehydration. Compaction boundaries
 /// are applied on this structure so discarded history never reads media.
 #[derive(Clone)]
 pub(crate) struct StoredAgentMsg {

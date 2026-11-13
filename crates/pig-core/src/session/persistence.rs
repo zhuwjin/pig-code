@@ -6,7 +6,7 @@ impl Session {
         build: impl FnOnce(String) -> Event,
         tx: &async_channel::Sender<Event>,
     ) {
-        emit_bg(&self.id, tx, build);
+        emit_bg(self.event_session_id(), tx, build);
     }
 
     pub(super) fn record(&mut self, record: &RolloutRecord) {
@@ -21,7 +21,7 @@ impl Session {
         if let Err(error) = rollout.append(record) {
             let structured = error.into_core(rollout.path());
             tracing::error!(
-                session_id = %self.id,
+                session_id = %self.agent.id,
                 error = ?structured,
                 "rollout append failed; later records for this session are not persisted"
             );
@@ -42,7 +42,7 @@ impl Session {
         if let Err(error) = rollout.sync() {
             let structured = error.into_core(rollout.path());
             tracing::error!(
-                session_id = %self.id,
+                session_id = %self.agent.id,
                 error = ?structured,
                 "rollout sync failed at a durable boundary"
             );
@@ -124,7 +124,7 @@ impl Session {
             agents_prompt: self.agents_prompt.clone(),
             skills_prompt: self.skills_prompt.clone(),
             skills_state: self.prompt_skills_state.clone().unwrap_or_else(|| {
-                skills_state_with_trust(&self.data_dir, self.trust.admits(&self.cwd))
+                skills_state_with_trust(&self.data_dir, self.trust.admits(&self.agent.cwd))
             }),
             memory_prompt: self.memory_prompt.clone(),
             memory_enabled: self.memory_enabled,
@@ -147,7 +147,7 @@ impl Session {
     }
 
     pub(super) fn touch_index(&mut self) {
-        let id = self.id.clone();
+        let id = self.agent.id.clone();
         self.store
             .lock()
             .expect("store lock")

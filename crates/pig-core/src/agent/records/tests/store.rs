@@ -11,41 +11,45 @@ fn display_items_keep_tool_error_status() {
     };
     let msgs = vec![
         pig_provider::ChatMsg::user("do it".into()),
-        pig_provider::ChatMsg::assistant(String::new(), vec![call], None),
+        pig_provider::ChatMsg::assistant(String::new(), vec![call.clone()], None),
         pig_provider::ChatMsg::tool_result("call-err", "failed".into()).with_error(true),
     ];
     let items = project_display_items(&msgs);
-    let row = items
+    let (output, status) = items
         .iter()
-        .find(|item| item.role == "tool")
+        .find_map(|item| match item {
+            pig_protocol::ConversationItem::Tool { output, status, .. } => Some((output, status)),
+            _ => None,
+        })
         .expect("tool row");
-    assert_eq!(row.output.as_deref(), Some("failed"));
-    assert!(row.is_error, "tool row reflects the result status");
+    assert_eq!(output, "failed");
+    assert_eq!(*status, pig_protocol::ConversationToolStatus::Error);
 }
 
 /// The subagent panel renders reasoning before the assistant body, like the
 /// main conversation.
 #[test]
 fn display_items_keep_reasoning_before_the_assistant_body() {
-    let assistant = pig_provider::ChatMsg::assistant(
-        "answer".into(),
-        vec![],
-        Some("thinking".into()),
-    );
-    let msgs = vec![
-        pig_provider::ChatMsg::user("do it".into()),
-        assistant,
-    ];
+    let assistant =
+        pig_provider::ChatMsg::assistant("answer".into(), vec![], Some("thinking".into()));
+    let msgs = vec![pig_provider::ChatMsg::user("do it".into()), assistant];
     let items = project_display_items(&msgs);
-    assert_eq!(
-        items
-            .iter()
-            .map(|item| item.role.as_str())
-            .collect::<Vec<_>>(),
-        vec!["user", "reasoning", "assistant"]
+    let kinds: Vec<&str> = items
+        .iter()
+        .map(|item| match item {
+            pig_protocol::ConversationItem::User { .. } => "user",
+            pig_protocol::ConversationItem::Reasoning { .. } => "reasoning",
+            pig_protocol::ConversationItem::Markdown { .. } => "assistant",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["user", "reasoning", "assistant"]);
+    assert!(
+        matches!(&items[1], pig_protocol::ConversationItem::Reasoning { text, .. } if text == "thinking")
     );
-    assert_eq!(items[1].text, "thinking");
-    assert_eq!(items[2].text, "answer");
+    assert!(
+        matches!(&items[2], pig_protocol::ConversationItem::Markdown { text, .. } if text == "answer")
+    );
 }
 
 #[test]
@@ -69,7 +73,7 @@ fn display_items_keep_recorded_timing_and_tool_edit() {
     };
     let mut assistant = pig_provider::ChatMsg::assistant(
         "answer".into(),
-        vec![call],
+        vec![call.clone()],
         Some("thinking".into()),
     );
     append_agent_message_meta(
@@ -89,8 +93,9 @@ fn display_items_keep_recorded_timing_and_tool_edit() {
         deletions: 0,
     };
     let mut tool = pig_provider::ChatMsg::tool_result("call-edit", "edited".into());
-    append_agent_message_meta(
+    append_agent_tool_result(
         &path,
+        &call,
         &mut tool,
         TEST_CONTEXT_WINDOW,
         AgentMsgMeta {
@@ -103,15 +108,23 @@ fn display_items_keep_recorded_timing_and_tool_edit() {
     let (_, _, items) = display_stored_items(&meta, &stored);
     let reasoning = items
         .iter()
-        .find(|item| item.role == "reasoning")
+        .find_map(|item| match item {
+            pig_protocol::ConversationItem::Reasoning {
+                text, duration_ms, ..
+            } => Some((text, duration_ms)),
+            _ => None,
+        })
         .expect("reasoning row");
-    assert_eq!(reasoning.duration_ms, Some(1234));
-    assert!(reasoning.ts_ms > 0);
-    let tool_row = items
+    assert_eq!(reasoning.0, "thinking");
+    assert_eq!(*reasoning.1, Some(1234));
+    let tool_edit = items
         .iter()
-        .find(|item| item.role == "tool")
+        .find_map(|item| match item {
+            pig_protocol::ConversationItem::Tool { edit, .. } => Some(edit.clone()),
+            _ => None,
+        })
         .expect("tool row");
-    assert_eq!(tool_row.edit, Some(edit));
+    assert_eq!(tool_edit, Some(edit));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -127,44 +140,39 @@ fn stopped_tool_status_survives_jsonl_and_display() {
         name: "ExecCommand".into(),
         arguments: "{}".into(),
     };
-    let mut assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call], None);
+    let mut assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call.clone()], None);
     append_test_message(&path, &mut assistant).expect("append assistant");
     let mut stopped =
         pig_provider::ChatMsg::tool_result("call-stop", "Stopped".into()).with_error(true);
     stopped.stopped = true;
-    append_test_message(&path, &mut stopped).expect("append stopped result");
+    append_test_tool_result(&path, &call, &mut stopped).expect("append stopped result");
 
     let (_, history) = read_agent(&path).expect("read stopped result");
     assert!(history[1].is_error);
     assert!(history[1].stopped);
     let items = project_display_items(&history);
-    let row = items
+    let status = items
         .iter()
-        .find(|item| item.role == "tool")
+        .find_map(|item| match item {
+            pig_protocol::ConversationItem::Tool { status, .. } => Some(*status),
+            _ => None,
+        })
         .expect("tool row");
-    assert!(row.is_error);
-    assert!(row.stopped);
+    assert_eq!(status, pig_protocol::ConversationToolStatus::Stopped);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn legacy_message_without_reasoning_or_image_refs_stays_readable() {
+fn canonical_assistant_without_reasoning_or_image_refs_stays_readable() {
     let dir = std::env::temp_dir().join(format!("pig-agent-legacy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create test dir");
     let path = dir.join("a1.jsonl");
     write_meta(&path);
-    append_agent_record(
-        &path,
-        &serde_json::json!({
-            "type": "msg",
-            "msg": {"role": "assistant", "content": "legacy"},
-            "replay": null,
-        }),
-    )
-    .expect("append legacy");
-    let (_, history) = read_agent(&path).expect("read legacy");
-    assert_eq!(history[0].content.as_deref(), Some("legacy"));
+    let mut msg = ChatMsg::assistant("plain".into(), Vec::new(), None);
+    append_test_message(&path, &mut msg).expect("append assistant");
+    let (_, history) = read_agent(&path).expect("read assistant");
+    assert_eq!(history[0].content.as_deref(), Some("plain"));
     assert!(history[0].reasoning.is_none());
     assert!(history[0].images.is_empty());
     let _ = std::fs::remove_dir_all(&dir);

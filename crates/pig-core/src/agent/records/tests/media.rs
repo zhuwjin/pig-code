@@ -14,7 +14,7 @@ fn message_roundtrip_preserves_reasoning_calls_and_images() {
     };
     let mut assistant = pig_provider::ChatMsg::assistant(
         "read the image".into(),
-        vec![call],
+        vec![call.clone()],
         Some("plain reasoning".into()),
     );
     append_test_message(&path, &mut assistant).expect("append assistant");
@@ -28,7 +28,7 @@ fn message_roundtrip_preserves_reasoning_calls_and_images() {
             label: Some("pic.png".into()),
         }],
     );
-    append_test_message(&path, &mut result).expect("append tool result");
+    append_test_tool_result(&path, &call, &mut result).expect("append tool result");
 
     let (_, history) = read_agent(&path).expect("read agent");
     assert_eq!(history[0].reasoning.as_deref(), Some("plain reasoning"));
@@ -51,6 +51,11 @@ fn document_roundtrip_keeps_refs_out_of_jsonl() {
     write_meta(&path);
     let bytes = b"%PDF-1.4\n%%EOF\n";
     let payload = pig_utils::image::base64_encode(bytes);
+    let call = pig_provider::ToolCall {
+        id: "call-doc".into(),
+        name: "ReadMediaFile".into(),
+        arguments: "{}".into(),
+    };
     let mut result = pig_provider::ChatMsg::tool_result("call-doc", "Read PDF doc.pdf".into());
     result.documents = vec![pig_provider::ChatDocument {
         media_type: "application/pdf".into(),
@@ -59,7 +64,7 @@ fn document_roundtrip_keeps_refs_out_of_jsonl() {
         label: Some("doc.pdf".into()),
         token_estimate: None,
     }];
-    append_test_message(&path, &mut result).expect("append tool result");
+    append_test_tool_result(&path, &call, &mut result).expect("append tool result");
 
     let (_, history) = read_agent(&path).expect("read agent");
     assert_eq!(history[0].documents.len(), 1);
@@ -95,7 +100,7 @@ fn image_persistence_failure_still_writes_the_tool_result() {
         name: "ReadMediaFile".into(),
         arguments: "{}".into(),
     };
-    let mut assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call], None);
+    let mut assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call.clone()], None);
     append_test_message(&path, &mut assistant).expect("append assistant");
     std::fs::write(path.with_extension("media"), b"not a directory")
         .expect("force media-dir failure");
@@ -108,7 +113,7 @@ fn image_persistence_failure_still_writes_the_tool_result() {
             label: Some("pic.png".into()),
         }],
     );
-    append_test_message(&path, &mut result).expect("tool result degrades to text");
+    append_test_tool_result(&path, &call, &mut result).expect("tool result degrades to text");
     assert!(result.images.is_empty(), "the live message was degraded");
     assert!(
         result
@@ -140,9 +145,14 @@ fn document_persistence_failure_degrades_live_and_jsonl() {
     write_meta(&path);
     std::fs::write(path.with_extension("media"), b"not a directory")
         .expect("force media-dir failure");
+    let call = pig_provider::ToolCall {
+        id: "call-doc".into(),
+        name: "ReadMediaFile".into(),
+        arguments: "{}".into(),
+    };
     let mut result = ChatMsg::tool_result("call-doc", "Read PDF doc.pdf".into());
     result.documents = vec![pdf_document("doc.pdf")];
-    append_test_message(&path, &mut result).expect("tool result degrades to text");
+    append_test_tool_result(&path, &call, &mut result).expect("tool result degrades to text");
     assert!(result.documents.is_empty(), "the live message was degraded");
     assert!(
         result
@@ -165,9 +175,14 @@ fn missing_or_corrupt_documents_append_the_replay_note() {
     std::fs::create_dir_all(&dir).expect("create test dir");
     let path = dir.join("a1.jsonl");
     write_meta(&path);
+    let call = pig_provider::ToolCall {
+        id: "call-doc".into(),
+        name: "ReadMediaFile".into(),
+        arguments: "{}".into(),
+    };
     let mut result = ChatMsg::tool_result("call-doc", "Read PDF doc.pdf".into());
     result.documents = vec![pdf_document("doc.pdf")];
-    append_test_message(&path, &mut result).expect("append document");
+    append_test_tool_result(&path, &call, &mut result).expect("append document");
     let media = path.with_extension("media").join("1.pdf");
     assert!(media.is_file());
 

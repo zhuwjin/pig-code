@@ -1,9 +1,9 @@
 use super::*;
 
 /// Context for gated execution (the argument bundle of exec_tool_gated_ctx):
-/// the Session wrapper assembles it by borrowing fields, background subagent
-/// tasks assemble it from owned snapshots/Arc clones — the same gate runs in
-/// foreground and background.
+/// a root or child Session assembles it from its own fields. Policy state that
+/// must be shared across agents (pending approvals, permission rules, the
+/// always-allowed set) is Arc-backed in the Session.
 pub(crate) struct GateCtx<'a> {
     pub cwd: &'a Path,
     /// Canonical permission state for this turn (sandbox + approval + reviewer)
@@ -19,9 +19,10 @@ pub(crate) struct GateCtx<'a> {
     pub owns_todo_state: bool,
     pub pending: &'a PendingApprovals,
     /// User/project allow+deny rules (Codex's execpolicy analogue), separate
-    /// from the permission state above
-    pub permission_rules: &'a mut crate::permissions::PermissionRules,
-    pub always_allowed: &'a mut HashSet<(String, String)>,
+    /// from the permission state above. Shared through the session so a rule
+    /// learned by one agent governs the root and every other child.
+    pub permission_rules: &'a Mutex<crate::permissions::PermissionRules>,
+    pub always_allowed: &'a Mutex<HashSet<(String, String)>>,
     pub session_id: &'a str,
     /// Plan mode toggle: when Write/Edit writes the plan file (kimi
     /// writesOnlyPlanFile), the approval gate passes it through approval-free

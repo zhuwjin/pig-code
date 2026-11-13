@@ -1,24 +1,18 @@
 use super::*;
 
-use super::super::compact::*;
-
 /// A paused server round that cannot fit is skipped, never dropped: the
 /// child keeps its complete paused state and writes no marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn child_compaction_skips_when_the_paused_pin_cannot_fit() {
     let (session, _parent, root, _log, runtime) =
         compaction_test_session("pin-skip", 16_000, 2_000);
-    let data_dir = root.join("data");
-    let store = Arc::new(Mutex::new(
-        crate::store::Store::open(&data_dir).expect("store"),
-    ));
     let mut history = long_child_messages(None, None, None);
     let paused = history.len() - 1;
     let jsonl = seed_child_context(&session, "a9-6", &mut history);
-    let mut drive = SubagentDrive {
-        agent_id: "a9-6".into(),
-        cwd: root.join("ws"),
-        profile: crate::agent::AgentProfile {
+    let mut drive = make_child_session(
+        "a9-6".into(),
+        root.join("ws"),
+        crate::agent::AgentProfile {
             name: "explore".into(),
             description: "pin skip".into(),
             tools: None,
@@ -29,38 +23,28 @@ async fn child_compaction_skips_when_the_paused_pin_cannot_fit() {
             system_prompt: "test".into(),
             source: crate::agent::AgentSource::BuiltIn,
         },
-        child_config: runtime.resolve_model(None, None).expect("model"),
-        tools: vec![],
-        schemas: vec![],
-        history: history.clone(),
-        jsonl: jsonl.clone(),
-        max_turns: 1,
-        description: "pin skip".into(),
-        mcp: None,
-        plugin_tools: session.plugin_tools.clone(),
-        plugin_tool_filter: Default::default(),
-        mcp_inherits_all: false,
-        trusted: true,
-        persist_failure: None,
-        writer: None,
-    };
-    let before = drive.history.clone();
-    let cancel = CancellationToken::new();
-    let report = compact_child_context(
-        &session.id,
-        &store,
-        CompactTrigger::Watermark,
-        &mut drive,
-        &cancel,
-        true,
-        Some(paused),
-        false,
+        runtime.resolve_model(None, None).expect("model"),
+        history.clone(),
+        jsonl.clone(),
         1,
-    )
-    .await;
+        "pin skip".into(),
+        session.plugin_tools.clone(),
+    );
+    let before = drive.agent.history.clone();
+    let cancel = CancellationToken::new();
+    let report = drive
+        .compact_child_context(
+            CompactTrigger::Watermark,
+            &cancel,
+            true,
+            Some(paused),
+            false,
+            1,
+        )
+        .await;
     assert!(matches!(report.outcome, CompactOutcome::Skipped));
     assert_eq!(
-        drive.history.len(),
+        drive.agent.history.len(),
         before.len(),
         "a pinned paused segment must never be dropped"
     );
@@ -79,10 +63,6 @@ async fn child_compaction_skips_when_the_paused_pin_cannot_fit() {
 async fn child_compaction_preserves_an_omitted_active_task_by_index() {
     let (session, _parent, root, _log, runtime) =
         compaction_test_session("preserved-user", 30_000, 2_000);
-    let data_dir = root.join("data");
-    let store = Arc::new(Mutex::new(
-        crate::store::Store::open(&data_dir).expect("store"),
-    ));
     let call = ToolCall {
         id: "call_huge".into(),
         name: "Read".into(),
@@ -97,10 +77,10 @@ async fn child_compaction_preserves_an_omitted_active_task_by_index() {
     ];
     let mut seeded = history.clone();
     let jsonl = seed_child_context(&session, "a9-9", &mut seeded);
-    let mut drive = SubagentDrive {
-        agent_id: "a9-9".into(),
-        cwd: root.join("ws"),
-        profile: crate::agent::AgentProfile {
+    let mut drive = make_child_session(
+        "a9-9".into(),
+        root.join("ws"),
+        crate::agent::AgentProfile {
             name: "explore".into(),
             description: "preserved user".into(),
             tools: None,
@@ -111,37 +91,21 @@ async fn child_compaction_preserves_an_omitted_active_task_by_index() {
             system_prompt: "test".into(),
             source: crate::agent::AgentSource::BuiltIn,
         },
-        child_config: runtime.resolve_model(None, None).expect("model"),
-        tools: vec![],
-        schemas: vec![],
+        runtime.resolve_model(None, None).expect("model"),
         history,
-        jsonl: jsonl.clone(),
-        max_turns: 1,
-        description: "preserved user".into(),
-        mcp: None,
-        plugin_tools: session.plugin_tools.clone(),
-        plugin_tool_filter: Default::default(),
-        mcp_inherits_all: false,
-        trusted: true,
-        persist_failure: None,
-        writer: None,
-    };
-    let cancel = CancellationToken::new();
-    let report = compact_child_context(
-        &session.id,
-        &store,
-        CompactTrigger::Watermark,
-        &mut drive,
-        &cancel,
-        false,
-        None,
-        false,
+        jsonl.clone(),
         1,
-    )
-    .await;
+        "preserved user".into(),
+        session.plugin_tools.clone(),
+    );
+    let cancel = CancellationToken::new();
+    let report = drive
+        .compact_child_context(CompactTrigger::Watermark, &cancel, false, None, false, 1)
+        .await;
     assert!(matches!(report.outcome, CompactOutcome::Completed));
     assert_eq!(
         drive
+            .agent
             .history
             .iter()
             .map(|message| message.role.as_str())
@@ -150,11 +114,11 @@ async fn child_compaction_preserves_an_omitted_active_task_by_index() {
         "the active user is installed after the note, then the assistant tail"
     );
     assert_eq!(
-        drive.history[2].content.as_deref(),
+        drive.agent.history[2].content.as_deref(),
         Some("active task brief")
     );
     assert_eq!(
-        drive.history[3].content.as_deref(),
+        drive.agent.history[3].content.as_deref(),
         Some("later small round")
     );
     let compacts = compact_lines(&jsonl);
@@ -182,10 +146,6 @@ async fn child_compaction_preserves_an_omitted_active_task_by_index() {
 async fn child_compaction_preserves_the_task_with_a_zero_length_tail() {
     let (session, _parent, root, _log, runtime) =
         compaction_test_session("zero-tail", 30_000, 2_000);
-    let data_dir = root.join("data");
-    let store = Arc::new(Mutex::new(
-        crate::store::Store::open(&data_dir).expect("store"),
-    ));
     let history = vec![
         ChatMsg::system("child system".into()),
         ChatMsg::user("active task brief".into()),
@@ -197,10 +157,10 @@ async fn child_compaction_preserves_the_task_with_a_zero_length_tail() {
     ];
     let mut seeded = history.clone();
     let jsonl = seed_child_context(&session, "a9-10", &mut seeded);
-    let mut drive = SubagentDrive {
-        agent_id: "a9-10".into(),
-        cwd: root.join("ws"),
-        profile: crate::agent::AgentProfile {
+    let mut drive = make_child_session(
+        "a9-10".into(),
+        root.join("ws"),
+        crate::agent::AgentProfile {
             name: "explore".into(),
             description: "zero tail".into(),
             tools: None,
@@ -211,37 +171,21 @@ async fn child_compaction_preserves_the_task_with_a_zero_length_tail() {
             system_prompt: "test".into(),
             source: crate::agent::AgentSource::BuiltIn,
         },
-        child_config: runtime.resolve_model(None, None).expect("model"),
-        tools: vec![],
-        schemas: vec![],
+        runtime.resolve_model(None, None).expect("model"),
         history,
-        jsonl: jsonl.clone(),
-        max_turns: 1,
-        description: "zero tail".into(),
-        mcp: None,
-        plugin_tools: session.plugin_tools.clone(),
-        plugin_tool_filter: Default::default(),
-        mcp_inherits_all: false,
-        trusted: true,
-        persist_failure: None,
-        writer: None,
-    };
-    let cancel = CancellationToken::new();
-    let report = compact_child_context(
-        &session.id,
-        &store,
-        CompactTrigger::Overflow,
-        &mut drive,
-        &cancel,
-        false,
-        None,
-        false,
+        jsonl.clone(),
         1,
-    )
-    .await;
+        "zero tail".into(),
+        session.plugin_tools.clone(),
+    );
+    let cancel = CancellationToken::new();
+    let report = drive
+        .compact_child_context(CompactTrigger::Overflow, &cancel, false, None, false, 1)
+        .await;
     assert!(matches!(report.outcome, CompactOutcome::Completed));
     assert_eq!(
         drive
+            .agent
             .history
             .iter()
             .map(|message| message.role.as_str())
@@ -249,7 +193,7 @@ async fn child_compaction_preserves_the_task_with_a_zero_length_tail() {
         vec!["system", "user", "user"]
     );
     assert_eq!(
-        drive.history[2].content.as_deref(),
+        drive.agent.history[2].content.as_deref(),
         Some("active task brief")
     );
     let compacts = compact_lines(&jsonl);
@@ -276,10 +220,6 @@ async fn child_compaction_preserves_the_task_with_a_zero_length_tail() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn child_compaction_summary_sidecar_supports_all_api_formats() {
     let (session, _parent, root, _log, runtime) = compaction_test_session("formats", 30_000, 2_000);
-    let data_dir = root.join("data");
-    let store = Arc::new(Mutex::new(
-        crate::store::Store::open(&data_dir).expect("store"),
-    ));
     let base = runtime.resolve_model(None, None).expect("model");
     let call = ToolCall {
         id: "call_format".into(),
@@ -306,10 +246,10 @@ async fn child_compaction_summary_sidecar_supports_all_api_formats() {
         let jsonl = seed_child_context(&session, &agent_id, &mut seeded);
         let mut child_config = base.clone();
         child_config.api_format = format;
-        let mut drive = SubagentDrive {
-            agent_id: agent_id.clone(),
-            cwd: root.join("ws"),
-            profile: crate::agent::AgentProfile {
+        let mut drive = make_child_session(
+            &agent_id,
+            root.join("ws"),
+            crate::agent::AgentProfile {
                 name: "explore".into(),
                 description: "formats".into(),
                 tools: None,
@@ -321,33 +261,16 @@ async fn child_compaction_summary_sidecar_supports_all_api_formats() {
                 source: crate::agent::AgentSource::BuiltIn,
             },
             child_config,
-            tools: vec![],
-            schemas: vec![],
-            history: history.clone(),
-            jsonl: jsonl.clone(),
-            max_turns: 1,
-            description: "formats".into(),
-            mcp: None,
-            plugin_tools: session.plugin_tools.clone(),
-            plugin_tool_filter: Default::default(),
-            mcp_inherits_all: false,
-            trusted: true,
-            persist_failure: None,
-            writer: None,
-        };
-        let cancel = CancellationToken::new();
-        let report = compact_child_context(
-            &session.id,
-            &store,
-            CompactTrigger::Watermark,
-            &mut drive,
-            &cancel,
-            false,
-            None,
-            false,
+            history.clone(),
+            jsonl.clone(),
             1,
-        )
-        .await;
+            "formats".into(),
+            session.plugin_tools.clone(),
+        );
+        let cancel = CancellationToken::new();
+        let report = drive
+            .compact_child_context(CompactTrigger::Watermark, &cancel, false, None, false, 1)
+            .await;
         assert!(
             matches!(report.outcome, CompactOutcome::Completed),
             "{format:?} compaction should complete"
@@ -363,6 +286,7 @@ async fn child_compaction_summary_sidecar_supports_all_api_formats() {
         );
         assert_eq!(
             drive
+                .agent
                 .history
                 .iter()
                 .map(|message| message.role.as_str())
@@ -381,10 +305,6 @@ async fn child_compaction_summary_sidecar_supports_all_api_formats() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
     let (session, _parent, root, _log, runtime) = compaction_test_session("pin-fit", 30_000, 2_000);
-    let data_dir = root.join("data");
-    let store = Arc::new(Mutex::new(
-        crate::store::Store::open(&data_dir).expect("store"),
-    ));
     let paused_call = ToolCall {
         id: "call_paused".into(),
         name: "Read".into(),
@@ -404,10 +324,10 @@ async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
     let pin = 5;
     let mut seeded = history.clone();
     let jsonl = seed_child_context(&session, "a9-8", &mut seeded);
-    let mut drive = SubagentDrive {
-        agent_id: "a9-8".into(),
-        cwd: root.join("ws"),
-        profile: crate::agent::AgentProfile {
+    let mut drive = make_child_session(
+        "a9-8".into(),
+        root.join("ws"),
+        crate::agent::AgentProfile {
             name: "explore".into(),
             description: "pin fit".into(),
             tools: None,
@@ -418,34 +338,24 @@ async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
             system_prompt: "test".into(),
             source: crate::agent::AgentSource::BuiltIn,
         },
-        child_config: runtime.resolve_model(None, None).expect("model"),
-        tools: vec![],
-        schemas: vec![],
+        runtime.resolve_model(None, None).expect("model"),
         history,
-        jsonl: jsonl.clone(),
-        max_turns: 1,
-        description: "pin fit".into(),
-        mcp: None,
-        plugin_tools: session.plugin_tools.clone(),
-        plugin_tool_filter: Default::default(),
-        mcp_inherits_all: false,
-        trusted: true,
-        persist_failure: None,
-        writer: None,
-    };
-    let cancel = CancellationToken::new();
-    let report = compact_child_context(
-        &session.id,
-        &store,
-        CompactTrigger::Watermark,
-        &mut drive,
-        &cancel,
-        true,
-        Some(pin),
-        false,
+        jsonl.clone(),
         1,
-    )
-    .await;
+        "pin fit".into(),
+        session.plugin_tools.clone(),
+    );
+    let cancel = CancellationToken::new();
+    let report = drive
+        .compact_child_context(
+            CompactTrigger::Watermark,
+            &cancel,
+            true,
+            Some(pin),
+            false,
+            1,
+        )
+        .await;
     assert!(matches!(report.outcome, CompactOutcome::Completed));
     assert_eq!(
         report.pin_after,
@@ -454,15 +364,19 @@ async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
     );
     assert_eq!(
         drive
+            .agent
             .history
             .iter()
             .map(|message| message.role.as_str())
             .collect::<Vec<_>>(),
         vec!["system", "user", "user", "assistant", "tool", "user"]
     );
-    assert_eq!(drive.history[2].content.as_deref(), Some("paused task"));
     assert_eq!(
-        drive.history[3]
+        drive.agent.history[2].content.as_deref(),
+        Some("paused task")
+    );
+    assert_eq!(
+        drive.agent.history[3]
             .tool_calls
             .as_ref()
             .expect("the paused assistant tool call survives")
@@ -470,20 +384,20 @@ async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
         1
     );
     assert_eq!(
-        drive.history[3].tool_calls.as_ref().unwrap()[0].id,
+        drive.agent.history[3].tool_calls.as_ref().unwrap()[0].id,
         "call_paused"
     );
     assert_eq!(
-        drive.history[4].tool_call_id.as_deref(),
+        drive.agent.history[4].tool_call_id.as_deref(),
         Some("call_paused"),
         "the tool pair stays complete and adjacent"
     );
     assert_eq!(
-        drive.history[4].content.as_deref(),
+        drive.agent.history[4].content.as_deref(),
         Some("paused tool output")
     );
     assert_eq!(
-        drive.history[5].content.as_deref(),
+        drive.agent.history[5].content.as_deref(),
         Some("steer after pause"),
         "the steer drained after the pause stays in context"
     );
@@ -505,20 +419,16 @@ async fn child_compaction_keeps_a_pinned_paused_round_and_steer() {
 async fn cancelled_child_compaction_does_not_install_a_late_summary() {
     let (session, _parent, root, _log, runtime) =
         compaction_test_session("cancel-summary", 36_000, 2_000);
-    let data_dir = root.join("data");
-    let store = Arc::new(Mutex::new(
-        crate::store::Store::open(&data_dir).expect("store"),
-    ));
     let mut history = long_child_messages(
         None,
         None,
         Some(pig_provider::mock::SIDECAR_STALL_BODY_TRIGGER),
     );
     let jsonl = seed_child_context(&session, "a9-7", &mut history);
-    let mut drive = SubagentDrive {
-        agent_id: "a9-7".into(),
-        cwd: root.join("ws"),
-        profile: crate::agent::AgentProfile {
+    let mut drive = make_child_session(
+        "a9-7".into(),
+        root.join("ws"),
+        crate::agent::AgentProfile {
             name: "explore".into(),
             description: "cancel summary".into(),
             tools: None,
@@ -529,39 +439,28 @@ async fn cancelled_child_compaction_does_not_install_a_late_summary() {
             system_prompt: "test".into(),
             source: crate::agent::AgentSource::BuiltIn,
         },
-        child_config: runtime.resolve_model(None, None).expect("model"),
-        tools: vec![],
-        schemas: vec![],
-        history: history.clone(),
-        jsonl: jsonl.clone(),
-        max_turns: 1,
-        description: "cancel summary".into(),
-        mcp: None,
-        plugin_tools: session.plugin_tools.clone(),
-        plugin_tool_filter: Default::default(),
-        mcp_inherits_all: false,
-        trusted: true,
-        persist_failure: None,
-        writer: None,
-    };
-    let before = drive.history.clone();
-    let session_id = session.id.clone();
+        runtime.resolve_model(None, None).expect("model"),
+        history.clone(),
+        jsonl.clone(),
+        1,
+        "cancel summary".into(),
+        session.plugin_tools.clone(),
+    );
+    let before = drive.agent.history.clone();
     let cancel = CancellationToken::new();
     let cancel_task = cancel.clone();
     let handle = tokio::spawn(async move {
-        let report = compact_child_context(
-            &session_id,
-            &store,
-            CompactTrigger::Watermark,
-            &mut drive,
-            &cancel_task,
-            false,
-            None,
-            false,
-            1,
-        )
-        .await;
-        (report, drive.history)
+        let report = drive
+            .compact_child_context(
+                CompactTrigger::Watermark,
+                &cancel_task,
+                false,
+                None,
+                false,
+                1,
+            )
+            .await;
+        (report, drive.agent.history)
     });
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     cancel.cancel();

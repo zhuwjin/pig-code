@@ -123,10 +123,12 @@ test("summarizes activity categories and failures in both locales", () => {
   const call = items[2] as Extract<ChatItem, { kind: "tool" }>;
   const activityItems: ChatItem[] = [
     items[1],
+    { kind: "reasoning", id: "r-live", text: "think", streaming: true },
     { ...call, id: "grep-1", tool: "Grep" },
     { ...call, id: "grep-2", tool: "Grep", status: "error" },
     { ...call, id: "glob-1", tool: "Glob" },
     { ...call, id: "bash-1", tool: "Bash" },
+    { ...call, id: "pending-1", tool: "Bash", status: "input" },
     { ...call, id: "web-1", tool: "WebSearch", status: "error" },
     call,
   ];

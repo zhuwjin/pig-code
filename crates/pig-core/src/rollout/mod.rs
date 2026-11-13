@@ -183,6 +183,14 @@ pub struct PromptSnapshot {
 // The persistence format favors readability/evolvability: the ToolCall variant (with the
 // batch agent-card list) being several hundred bytes larger than the other variants is
 // expected; records are transient serialization units, no Box split just to save memory
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationKind {
+    #[default]
+    Root,
+    Subagent,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -192,6 +200,24 @@ pub enum RolloutRecord {
         cwd: PathBuf,
         title: String,
         created_at: u64,
+        #[serde(default)]
+        kind: ConversationKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    /// The system/developer instructions for a subagent conversation. Root
+    /// sessions keep their prompt in `PromptSnapshot`; both rebuild paths use
+    /// the latest one.
+    System {
+        text: String,
     },
     PromptSnapshot {
         snapshot: PromptSnapshot,
@@ -204,6 +230,10 @@ pub enum RolloutRecord {
         replay: Option<pig_provider::AssistantReplay>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallWire>,
+        #[serde(default)]
+        ts_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_ms: Option<u64>,
     },
     User {
         text: String,
@@ -352,6 +382,9 @@ pub enum RolloutRecord {
         /// it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preserved_user: Option<usize>,
+        /// "watermark" or "overflow" for subagent compaction diagnostics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
     },
     /// Recall marker (tombstone, append-only): excludes the last User record and
     /// everything after it — the whole turn that user message triggered — from the
@@ -360,6 +393,47 @@ pub enum RolloutRecord {
     /// statistics; multiple Recall records stack, each recalling one more preceding
     /// user message
     Recall,
+}
+
+impl RolloutRecord {
+    pub fn root_meta(meta: &SessionMeta) -> Self {
+        Self::Meta {
+            id: meta.id.clone(),
+            cwd: meta.cwd.clone(),
+            title: meta.title.clone(),
+            created_at: meta.created_at,
+            kind: ConversationKind::Root,
+            parent_id: None,
+            profile: None,
+            description: None,
+            provider: None,
+            model: None,
+        }
+    }
+
+    pub fn subagent_meta(
+        id: String,
+        parent_id: String,
+        cwd: PathBuf,
+        description: String,
+        profile: String,
+        provider: String,
+        model: String,
+        created_at: u64,
+    ) -> Self {
+        Self::Meta {
+            id,
+            cwd,
+            title: description.clone(),
+            created_at,
+            kind: ConversationKind::Subagent,
+            parent_id: Some(parent_id),
+            profile: Some(profile),
+            description: Some(description),
+            provider: Some(provider),
+            model: Some(model),
+        }
+    }
 }
 
 /// Agent-card metadata for the Agent tool card (persisted with RolloutRecord::ToolCall, for replay rebuild)
@@ -371,7 +445,7 @@ pub struct AgentCardRecord {
     /// "{provider_name} · {model}" (may carry a reasoning-level suffix)
     pub model: String,
     /// This run is background: the background card's running state is driven by the subagent
-    /// lifecycle; after replay, core re-emits SubagentActivity finished to settle the final
+    /// lifecycle; after replay, core re-emits ConversationStatus to settle the final
     /// state (tasks do not outlive the process)
     pub background: bool,
 }
@@ -442,12 +516,7 @@ impl Rollout {
             path: path.display().to_string(),
             detail: e.to_string(),
         })?;
-        let record = RolloutRecord::Meta {
-            id: meta.id.clone(),
-            cwd: meta.cwd.clone(),
-            title: meta.title.clone(),
-            created_at: meta.created_at,
-        };
+        let record = RolloutRecord::root_meta(meta);
         let mut rollout = Self {
             path,
             file,
@@ -1275,6 +1344,8 @@ mod tests {
             reasoning: None,
             replay: None,
             tool_calls: vec![],
+            ts_ms: 0,
+            reasoning_ms: None,
         };
         let line = serde_json::to_string(&record).expect("serialize");
         std::fs::write(dir.join("a.jsonl"), format!("{line}\n")).expect("write record");
@@ -1298,6 +1369,8 @@ mod tests {
             reasoning: Some("reasoning mentions Kiwi-Fruit".into()),
             replay: None,
             tool_calls: vec![],
+            ts_ms: 0,
+            reasoning_ms: None,
         };
         let line = serde_json::to_string(&record).expect("serialize");
         std::fs::write(dir.join("a.jsonl"), format!("{line}\n")).expect("write record");

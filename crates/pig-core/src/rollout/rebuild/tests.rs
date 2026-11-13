@@ -28,6 +28,8 @@ fn assistant(text: &str, tool_calls: Vec<ToolCall>) -> RolloutRecord {
         reasoning: Some("plain reasoning".into()),
         replay: None,
         tool_calls: tool_calls.iter().map(ToolCall::to_wire).collect(),
+        ts_ms: 0,
+        reasoning_ms: None,
     }
 }
 
@@ -58,6 +60,7 @@ fn compact(note: &str, omitted: usize) -> RolloutRecord {
         summary: None,
         tail_len: Some(2),
         preserved_user: None,
+        trigger: None,
     }
 }
 
@@ -76,6 +79,7 @@ fn compact_with(
         summary: None,
         tail_len: Some(tail_len),
         preserved_user,
+        trigger: None,
     }
 }
 
@@ -266,6 +270,8 @@ fn empty_canonical_assistant_is_not_dropped() {
         reasoning: None,
         replay: None,
         tool_calls: vec![],
+        ts_ms: 0,
+        reasoning_ms: None,
     }];
     let (history, _) = rebuild_history(&records, "sys".into());
     assert_eq!(history.len(), 2);
@@ -294,6 +300,7 @@ fn legacy_compact_and_canonical_records_can_be_mixed() {
         summary: None,
         tail_len: None,
         preserved_user: None,
+        trigger: None,
     };
     let records = vec![
         legacy_user,
@@ -348,6 +355,8 @@ fn canonical_crash_tail_drops_unanswered_calls_and_native_replay_items() {
             reasoning: None,
             replay: Some(replay),
             tool_calls: calls.iter().map(ToolCall::to_wire).collect(),
+            ts_ms: 0,
+            reasoning_ms: None,
         },
         result("Read", "{}", "only first"),
     ];
@@ -804,6 +813,7 @@ fn corrupt_tail_boundaries_fall_back_conservatively() {
             summary: None,
             tail_len: None,
             preserved_user: None,
+            trigger: None,
         },
         assistant("a2", vec![]),
         compact_with("note-2", 3, 1, None),

@@ -133,6 +133,7 @@ fn rebuild_records(
         .iter()
         .rev()
         .find_map(|record| match record {
+            RolloutRecord::System { text } => Some(text.clone()),
             RolloutRecord::PromptSnapshot { snapshot } => Some(snapshot.text.clone()),
             _ => None,
         })
@@ -153,6 +154,7 @@ fn rebuild_records(
         let load_media = options.load_media && record_ix >= options.skip_media_before;
         match record {
             RolloutRecord::Meta { .. }
+            | RolloutRecord::System { .. }
             | RolloutRecord::PromptSnapshot { .. }
             | RolloutRecord::TurnStats { .. }
             | RolloutRecord::StepUsage { .. }
@@ -257,6 +259,7 @@ fn rebuild_records(
                 reasoning,
                 replay,
                 tool_calls,
+                ..
             } => {
                 finalize_active_replay(&mut history, &mut active_replay);
                 if pending_replay.is_some() {

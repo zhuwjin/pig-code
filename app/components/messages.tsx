@@ -572,7 +572,7 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         contentClass="gap-2"
         each={row().items}
         keyExtractor={(item) => item.id}
-        estimatedItemSize={32}
+        estimatedItemSize={28}
       >
         {(item) => <ItemMessageRow {...props} item={item} />}
       </List>

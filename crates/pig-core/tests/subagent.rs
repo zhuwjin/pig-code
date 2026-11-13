@@ -148,59 +148,70 @@ fn seed_pdf_agent(data_dir: &Path, sid: &str, agent_id: &str, pdf: &[u8]) -> Pat
     std::fs::create_dir_all(&media_dir).unwrap();
     let media_path = media_dir.join("1.pdf");
     std::fs::write(&media_path, pdf).unwrap();
-    let meta = serde_json::json!({
-        "type": "meta",
-        "agent_id": agent_id,
-        "profile": "explore",
-        "description": "pdf resume fixture",
-        "model": "mock-model",
-        "provider": "mock",
-        "created_at": 1,
-    });
-    let system = pig_provider::ChatMsg::system("You are a subagent.".into());
     let call = pig_provider::ToolCall {
         id: "call_pdf".into(),
         name: "ReadMediaFile".into(),
         arguments: "{\"path\":\"doc.pdf\"}".into(),
     };
-    let assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call], None);
-    let tool = pig_provider::ChatMsg::tool_result("call_pdf", "Read PDF doc.pdf".into());
-    let lines = [
-        serde_json::to_string(&meta).unwrap(),
-        serde_json::to_string(&serde_json::json!({
-            "type": "msg",
-            "msg": system,
-            "replay": null,
-            "reasoning": null,
-            "images": [],
-            "documents": [],
-        }))
-        .unwrap(),
-        serde_json::to_string(&serde_json::json!({
-            "type": "msg",
-            "msg": assistant,
-            "replay": null,
-            "reasoning": null,
-            "images": [],
-            "documents": [],
-        }))
-        .unwrap(),
-        serde_json::to_string(&serde_json::json!({
-            "type": "msg",
-            "msg": tool,
-            "replay": null,
-            "reasoning": null,
-            "images": [],
-            "documents": [{
-                "path": media_path,
-                "media_type": "application/pdf",
-                "bytes": pdf.len(),
-                "label": "doc.pdf",
+    let records = [
+        pig_core::rollout::RolloutRecord::subagent_meta(
+            agent_id.into(),
+            sid.into(),
+            data_dir.to_path_buf(),
+            "pdf resume fixture".into(),
+            "explore".into(),
+            "mock".into(),
+            "mock-model".into(),
+            1,
+        ),
+        pig_core::rollout::RolloutRecord::System {
+            text: "You are a subagent.".into(),
+        },
+        pig_core::rollout::RolloutRecord::Assistant {
+            text: String::new(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![call.to_wire()],
+            ts_ms: 1,
+            reasoning_ms: None,
+        },
+        pig_core::rollout::RolloutRecord::ToolCall {
+            tool: call.name.clone(),
+            summary: "Read PDF doc.pdf".into(),
+            arguments: call.arguments.clone(),
+            output: "Read PDF doc.pdf".into(),
+            is_error: false,
+            stopped: false,
+            edit: None,
+            agent_card: None,
+            agent_cards: Vec::new(),
+            images: Vec::new(),
+            documents: vec![pig_core::rollout::DocumentRef {
+                path: media_path.clone(),
+                media_type: "application/pdf".into(),
+                bytes: pdf.len() as u64,
+                token_estimate: None,
+                label: Some("doc.pdf".into()),
             }],
-        }))
-        .unwrap(),
+            delivered_notification_ids: Vec::new(),
+        },
     ];
-    std::fs::write(&jsonl, format!("{}\n", lines.join("\n"))).unwrap();
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect();
+    std::fs::write(
+        &jsonl,
+        format!(
+            "{}
+",
+            lines.join(
+                "
+"
+            )
+        ),
+    )
+    .unwrap();
     media_path
 }
 
@@ -213,64 +224,73 @@ fn seed_image_agent(data_dir: &Path, sid: &str, agent_id: &str) -> PathBuf {
     std::fs::create_dir_all(&media_dir).unwrap();
     let media_path = media_dir.join("1.png");
     std::fs::write(&media_path, png_fixture()).unwrap();
-    let meta = serde_json::json!({
-        "type": "meta",
-        "agent_id": agent_id,
-        "profile": "explore",
-        "description": "image resume fixture",
-        "model": "mock-model",
-        "provider": "mock",
-        "created_at": 1,
-    });
-    let system = pig_provider::ChatMsg::system("You are a subagent.".into());
     let call = pig_provider::ToolCall {
         id: "call_image".into(),
         name: "ReadMediaFile".into(),
         arguments: "{\"path\":\"pic.png\"}".into(),
     };
-    let assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call], None);
-    let tool = pig_provider::ChatMsg::tool_result("call_image", "Read image pic.png".into());
-    let lines = [
-        serde_json::to_string(&meta).unwrap(),
-        serde_json::to_string(&serde_json::json!({
-            "type": "msg",
-            "msg": system,
-            "replay": null,
-            "reasoning": null,
-            "images": [],
-            "documents": [],
-        }))
-        .unwrap(),
-        serde_json::to_string(&serde_json::json!({
-            "type": "msg",
-            "msg": assistant,
-            "replay": null,
-            "reasoning": null,
-            "images": [],
-            "documents": [],
-        }))
-        .unwrap(),
-        serde_json::to_string(&serde_json::json!({
-            "type": "msg",
-            "msg": tool,
-            "replay": null,
-            "reasoning": null,
-            "images": [{
-                "path": media_path,
-                "media_type": "image/png",
-                "width": 1,
-                "height": 1,
-                "label": "pic.png",
+    let records = [
+        pig_core::rollout::RolloutRecord::subagent_meta(
+            agent_id.into(),
+            sid.into(),
+            data_dir.to_path_buf(),
+            "image resume fixture".into(),
+            "explore".into(),
+            "mock".into(),
+            "mock-model".into(),
+            1,
+        ),
+        pig_core::rollout::RolloutRecord::System {
+            text: "You are a subagent.".into(),
+        },
+        pig_core::rollout::RolloutRecord::Assistant {
+            text: String::new(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![call.to_wire()],
+            ts_ms: 1,
+            reasoning_ms: None,
+        },
+        pig_core::rollout::RolloutRecord::ToolCall {
+            tool: call.name.clone(),
+            summary: "Read image pic.png".into(),
+            arguments: call.arguments.clone(),
+            output: "Read image pic.png".into(),
+            is_error: false,
+            stopped: false,
+            edit: None,
+            agent_card: None,
+            agent_cards: Vec::new(),
+            images: vec![pig_core::rollout::ImageRef {
+                path: media_path.clone(),
+                media_type: "image/png".into(),
+                width: 1,
+                height: 1,
+                label: Some("pic.png".into()),
             }],
-            "documents": [],
-        }))
-        .unwrap(),
+            documents: Vec::new(),
+            delivered_notification_ids: Vec::new(),
+        },
     ];
-    std::fs::write(&jsonl, format!("{}\n", lines.join("\n"))).unwrap();
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect();
+    std::fs::write(
+        &jsonl,
+        format!(
+            "{}
+",
+            lines.join(
+                "
+"
+            )
+        ),
+    )
+    .unwrap();
     media_path
 }
 
-/// Child requests for the seeded resume (the resumed prompt carries RESUMED).
 fn resumed_child_requests(log: &pig_provider::mock::RequestLog) -> Vec<serde_json::Value> {
     log.lock()
         .expect("request log")
@@ -328,6 +348,38 @@ async fn subagent_happy_path() {
     );
     let agent_id = parse_agent_id(output).to_string();
 
+    // Live rows reuse the final projection ids (`u/r/a/t…`), so a step updates
+    // its row in place instead of leaving a transient live-*/input-* duplicate
+    // that is later retracted.
+    let live_items: Vec<&str> = collected
+        .iter()
+        .filter_map(|event| match event {
+            Event::ConversationUpdate {
+                agent_id: Some(id),
+                item,
+                ..
+            } if id == &agent_id => Some(item.id()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !live_items.is_empty(),
+        "the child conversation should stream live items"
+    );
+    assert!(
+        live_items.iter().all(|id| {
+            id.starts_with('u') || id.starts_with('r') || id.starts_with('a') || id.starts_with('t')
+        }),
+        "live rows must use final projection ids: {live_items:?}"
+    );
+    assert!(
+        !collected.iter().any(|event| matches!(
+            event,
+            Event::ConversationRemove { agent_id: Some(id), .. } if id == &agent_id
+        )),
+        "a clean child run should not retract streamed rows"
+    );
+
     // The parent rollout has a single Agent tool record (child tool calls do not enter the parent rollout)
     let rollout =
         std::fs::read_to_string(data_dir.join("sessions").join(format!("{sid}.jsonl"))).unwrap();
@@ -346,7 +398,8 @@ async fn subagent_happy_path() {
         "child tools should not enter the parent rollout: {rollout}"
     );
 
-    // Subagent context JSONL: first line meta, ≥3 msg entries (system/user/assistant(Grep)/tool/assistant = 5)
+    // Subagent context JSONL uses the root conversation schema: first line
+    // meta, then system/user/assistant(Grep)/tool/assistant records.
     let log_path = agent_log_path(&data_dir, &sid, &agent_id);
     let log = std::fs::read_to_string(&log_path).unwrap_or_else(|e| {
         panic!(
@@ -355,18 +408,24 @@ async fn subagent_happy_path() {
         )
     });
     let lines: Vec<&str> = log.lines().collect();
-    assert!(lines.len() >= 4, "meta + at least 3 msgs: {log}");
+    assert!(lines.len() >= 5, "meta + at least 4 records: {log}");
     assert!(
         lines[0].contains("\"type\":\"meta\""),
         "first line is meta: {log}"
     );
     assert!(lines[0].contains(&agent_id));
     assert!(lines[0].contains("\"profile\":\"explore\""));
-    let msg_count = lines
-        .iter()
-        .filter(|line| line.contains("\"type\":\"msg\""))
-        .count();
-    assert!(msg_count >= 3, "at least 3 msgs: {log}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("\"type\":\"system\""))
+    );
+    assert!(lines.iter().any(|line| line.contains("\"type\":\"user\"")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("\"type\":\"tool_call\""))
+    );
 
     // Full result persisted (written in foreground mode too): {agents_dir}/{agent_id}.result.md
     let result_path = log_path.with_file_name(format!("{agent_id}.result.md"));
@@ -1016,7 +1075,7 @@ fn agent_end_with<'a>(events: &'a [Event], call_id: &str) -> Option<(&'a str, bo
 fn agent_log_msg_count(data_dir: &Path, sid: &str, agent_id: &str) -> usize {
     let log = std::fs::read_to_string(agent_log_path(data_dir, sid, agent_id)).unwrap();
     log.lines()
-        .filter(|line| line.contains("\"type\":\"msg\""))
+        .filter(|line| !line.contains("\"type\":\"meta\""))
         .count()
 }
 
@@ -1707,7 +1766,7 @@ async fn subagent_background_taskstop_notifies_killed() {
 
 /// Stop → resume: after TaskStop, the driver must terminate and release the
 /// JSONL writer before the next turn resumes the same agent. The terminal
-/// SubagentActivity event is the closing signal; resume then succeeds on the
+/// ConversationStatus event is the closing signal; resume then succeeds on the
 /// same context instead of being rejected or appending concurrently.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subagent_stop_then_resume_succeeds_after_driver_settles() {
@@ -1735,9 +1794,9 @@ async fn subagent_stop_then_resume_succeeds_after_driver_settles() {
     let mut settled = collected.iter().any(|event| {
         matches!(
             event,
-            Event::SubagentActivity {
+            Event::ConversationStatus {
                 agent_id: settled_id,
-                finished: true,
+                running: false,
                 ..
             } if settled_id == &agent_id
         )
@@ -1749,9 +1808,9 @@ async fn subagent_stop_then_resume_succeeds_after_driver_settles() {
         };
         if matches!(
             &event,
-            Event::SubagentActivity {
+            Event::ConversationStatus {
                 agent_id: settled_id,
-                finished: true,
+                running: false,
                 ..
             } if settled_id == &agent_id
         ) {
@@ -2022,9 +2081,9 @@ async fn swarm_background_receipt_and_cards_replayed() {
         else {
             continue;
         };
-        if let Event::SubagentActivity {
+        if let Event::ConversationStatus {
             agent_id,
-            finished: true,
+            running: false,
             ..
         } = &event
         {
@@ -2074,7 +2133,7 @@ async fn swarm_background_receipt_and_cards_replayed() {
 /// Subagent card metadata persisted with the rollout and rebuilt on replay
 /// (A3e): run one background subagent → simulate a restart OpenSession replay
 /// → the event stream should have SubagentCard (full meta, background=true),
-/// followed by a SubagentActivity finished for that agent_id (background tasks
+/// followed by a ConversationStatus settled for that agent_id (background tasks
 /// do not outlive the process, so replay settles the terminal state, keeping
 /// the replayed card from spinning forever).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2130,7 +2189,7 @@ async fn subagent_background_card_replayed() {
         .unwrap();
     // The last event of the replay sequence is that agent's finished (after the closing TurnComplete)
     let collected = recv_until(&events2, Duration::from_secs(20), |e| {
-        matches!(e, Event::SubagentActivity { finished: true, .. })
+        matches!(e, Event::ConversationStatus { running: false, .. })
     })
     .await;
 
@@ -2167,7 +2226,7 @@ async fn subagent_background_card_replayed() {
     let has_finished = collected.iter().skip(card_pos).any(|e| {
         matches!(
             e,
-            Event::SubagentActivity { agent_id, item: None, finished: true, .. }
+            Event::ConversationStatus { agent_id, running: false, .. }
                 if *agent_id == card.0
         )
     });

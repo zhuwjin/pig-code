@@ -1,6 +1,8 @@
 use super::*;
 
-use super::jsonl::append_agent_record;
+use crate::rollout::RolloutRecord;
+
+use super::jsonl::append_agent_conversation_record;
 
 /// Append a deterministic degradation note to a message's model-facing text.
 fn append_note(msg: &mut ChatMsg, note: &str) {
@@ -20,13 +22,17 @@ pub fn append_agent_message(
     append_agent_message_meta(path, msg, context_window, super::AgentMsgMeta::default())
 }
 
-/// Append a message with display-only metadata (reasoning duration, tool edit).
-pub fn append_agent_message_meta(
+/// Persist a message's media bytes and return the references stored in the
+/// canonical record. A media-write failure mutates `msg` in place, so callers
+/// persist first and then push the returned live message.
+fn persist_message_media(
     path: &Path,
     msg: &mut ChatMsg,
     context_window: u64,
-    meta: super::AgentMsgMeta,
-) -> Result<(), String> {
+) -> (
+    Vec<crate::rollout::ImageRef>,
+    Vec<crate::rollout::DocumentRef>,
+) {
     let media_dir = path.with_extension("media");
     let images = match crate::rollout::persist_chat_images(&media_dir, &msg.images) {
         Ok(images) => images,
@@ -66,26 +72,76 @@ pub fn append_agent_message_meta(
             Vec::new()
         }
     };
-    // The live message keeps its payload; the JSONL copy carries only refs.
-    let mut stored = msg.clone();
-    stored.images.clear();
-    stored.documents.clear();
-    let replay = stored.replay.clone();
-    let reasoning = stored.reasoning.clone();
-    append_agent_record(
-        path,
-        &serde_json::json!({
-            "type": "msg",
-            "msg": stored,
-            "replay": replay,
-            "reasoning": reasoning,
-            "images": images,
-            "documents": documents,
-            "ts_ms": crate::model_io::now_ms(),
-            "reasoning_ms": meta.reasoning_ms,
-            "edit": meta.edit,
-        }),
-    )
+    (images, documents)
+}
+
+/// Append a message with display-only metadata (reasoning duration, tool edit).
+pub fn append_agent_message_meta(
+    path: &Path,
+    msg: &mut ChatMsg,
+    context_window: u64,
+    meta: super::AgentMsgMeta,
+) -> Result<(), String> {
+    let ts_ms = crate::model_io::now_ms();
+    let text = msg.content.clone().unwrap_or_default();
+    let record = match msg.role.as_str() {
+        "system" => RolloutRecord::System { text },
+        "user" => {
+            let (images, _) = persist_message_media(path, msg, context_window);
+            RolloutRecord::User {
+                text: text.clone(),
+                files: Vec::new(),
+                images: images.clone(),
+                sent_at_ms: ts_ms,
+                sent_text: Some(text),
+                sent_images: images,
+                model_text: None,
+                sent_input_image: None,
+            }
+        }
+        "assistant" => RolloutRecord::Assistant {
+            text,
+            reasoning: msg.reasoning.clone(),
+            replay: msg.replay.clone(),
+            tool_calls: msg.tool_calls.clone().unwrap_or_default(),
+            ts_ms,
+            reasoning_ms: meta.reasoning_ms,
+        },
+        "tool" => {
+            return Err(
+                "a tool result needs its ToolCall; use append_agent_tool_result".to_string(),
+            );
+        }
+        role => return Err(format!("unsupported subagent message role {role}")),
+    };
+    append_agent_conversation_record(path, &record)
+}
+
+/// Append a tool result as the canonical `tool_call` record, pairing it with
+/// the assistant call that produced it.
+pub fn append_agent_tool_result(
+    path: &Path,
+    call: &pig_provider::ToolCall,
+    msg: &mut ChatMsg,
+    context_window: u64,
+    meta: super::AgentMsgMeta,
+) -> Result<(), String> {
+    let (images, documents) = persist_message_media(path, msg, context_window);
+    let record = RolloutRecord::ToolCall {
+        tool: call.name.clone(),
+        summary: crate::tool::summarize(call),
+        arguments: call.arguments.clone(),
+        output: msg.content.clone().unwrap_or_default(),
+        is_error: msg.is_error,
+        stopped: msg.stopped,
+        edit: meta.edit,
+        agent_card: None,
+        agent_cards: Vec::new(),
+        images,
+        documents,
+        delivered_notification_ids: Vec::new(),
+    };
+    append_agent_conversation_record(path, &record)
 }
 
 /// Apply the current child model's media capabilities to an already-rehydrated

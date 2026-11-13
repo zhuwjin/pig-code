@@ -14,7 +14,6 @@ import {
   HeldDisposition,
   GitDiffSnapshot,
   GitStatusSnapshot,
-  MarkdownItem,
   MessageDelivery,
   ModelRegistryInfo,
   NoteItem,
@@ -45,7 +44,7 @@ import {
   SessionContentHit,
   SessionMeta,
   WorkspaceMeta,
-  SubagentHistory,
+  SubagentView,
   TaskSummary,
   TodoItem,
   ToolItem,
@@ -68,13 +67,6 @@ type PendingSubmission = {
   files: string[];
   images: PendingImage[];
   delivery: MessageDelivery;
-};
-
-type PendingMarkdownDelta = {
-  id: string;
-  kind: "markdown" | "reasoning";
-  text: string;
-  turnId?: string;
 };
 
 export class AgentStore {
@@ -118,7 +110,7 @@ export class AgentStore {
   readonly retrying = signal<Record<string, RetryStatus | null>>({});
   readonly hookRunning = signal<Record<string, { event: string; label: string } | null>>({});
   readonly projectHooks = signal<Record<string, ProjectHooksNotice | null>>({});
-  readonly subagents = signal<Record<string, SubagentHistory>>({});
+  readonly subagents = signal<Record<string, SubagentView>>({});
   private agentFinishSeq = 0;
   readonly rightPanelRequest = signal<RightPanelRequest | null>(null);
   readonly config = signal<AppConfig | null>(null);
@@ -168,8 +160,6 @@ export class AgentStore {
   private rateStartedAt = 0;
   private rateCharacters = 0;
   private rateRenderedAt = 0;
-  private pendingMarkdownDeltas = new Map<string, PendingMarkdownDelta[]>();
-  private markdownFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(selftest = false) {
     this.agent = new Agent(null, selftest);
@@ -1274,7 +1264,6 @@ export class AgentStore {
     const kind = eventKind(event);
     const data = event[kind] ?? {};
     const sessionId = typeof data.session_id === "string" ? data.session_id : null;
-    if (kind !== "ReasoningDelta" && kind !== "TextDelta") this.flushMarkdownDeltas();
     switch (kind) {
       case "WorkspaceList":
         this.workspaces.set(data.workspaces as WorkspaceMeta[]);
@@ -1286,6 +1275,84 @@ export class AgentStore {
           this.autoOpen = false;
           this.agent.openSession(sessions[0].id);
         }
+        break;
+      }
+      case "ConversationSnapshot": {
+        const agentId = typeof data.agent_id === "string" ? data.agent_id : null;
+        const items = (data.items ?? []) as ChatItem[];
+        if (agentId) {
+          const key = `${sessionId!}:${agentId}`;
+          this.subagents.update((all) => {
+            const previous = all[key];
+            return {
+              ...all,
+              [key]: {
+                sessionId: sessionId!,
+                agentId,
+                title: data.title ?? previous?.title ?? "",
+                subtitle: data.subtitle ?? previous?.subtitle ?? "",
+                items: previous ? this.mergeConversationSnapshot(items, previous.items) : items,
+                running: data.running ?? previous?.running ?? false,
+              },
+            };
+          });
+        } else {
+          this.items.update((all) => ({ ...all, [sessionId!]: items }));
+        }
+        break;
+      }
+      case "ConversationUpdate": {
+        const agentId = typeof data.agent_id === "string" ? data.agent_id : null;
+        const item = data.item as ChatItem;
+        if (agentId) {
+          const key = `${sessionId!}:${agentId}`;
+          this.subagents.update((all) => {
+            const previous = all[key] ?? {
+              sessionId: sessionId!,
+              agentId,
+              title: "",
+              subtitle: "",
+              items: [],
+              running: true,
+            };
+            return {
+              ...all,
+              [key]: {
+                ...previous,
+                items: this.upsertConversationItems(previous.items, item),
+              },
+            };
+          });
+        } else {
+          this.updateItems(sessionId!, (items) => this.upsertConversationItems(items, item));
+        }
+        break;
+      }
+      case "ConversationRemove": {
+        const agentId = typeof data.agent_id === "string" ? data.agent_id : null;
+        const ids = new Set<string>((data.item_ids ?? []) as string[]);
+        if (agentId) {
+          const key = `${sessionId!}:${agentId}`;
+          this.subagents.update((all) => {
+            const previous = all[key];
+            if (!previous) return all;
+            return {
+              ...all,
+              [key]: { ...previous, items: previous.items.filter((item) => !ids.has(item.id)) },
+            };
+          });
+        } else {
+          this.updateItems(sessionId!, (items) => items.filter((item) => !ids.has(item.id)));
+        }
+        break;
+      }
+      case "ConversationStatus": {
+        const key = `${sessionId!}:${data.agent_id}`;
+        this.subagents.update((all) => {
+          const previous = all[key];
+          if (!previous) return all;
+          return { ...all, [key]: { ...previous, running: data.running === true } };
+        });
         break;
       }
       case "SessionConfigured": {
@@ -1407,201 +1474,9 @@ export class AgentStore {
       case "ModelInfo":
         this.modelInfo.update((all) => ({ ...all, [data.id]: data.info ?? null }));
         break;
-      case "UserMessage":
-        this.updateItems(sessionId!, (items) => [
-          ...items,
-          {
-            kind: "user",
-            id: `user-${++generatedId}`,
-            text: data.text,
-            files: data.files ?? [],
-            imageNums: data.image_nums ?? [],
-            sentAtMs: data.sent_at_ms ?? 0,
-          },
-        ]);
-        break;
       case "MessageRecalled":
-        this.updateItems(sessionId!, (items) => {
-          const index = items.map((item) => item.kind).lastIndexOf("user");
-          return index < 0 ? items : items.slice(0, index);
-        });
         this.turns.update((all) => ({ ...all, [sessionId!]: (all[sessionId!] ?? []).slice(0, -1) }));
         break;
-      case "ReasoningDelta":
-        this.clearRetry(sessionId!);
-        this.recordRateDelta(sessionId!, String(data.delta ?? ""));
-        this.queueMarkdownDelta(sessionId!, data.item_id, "reasoning", String(data.delta ?? ""));
-        break;
-      case "TextDelta":
-        this.clearRetry(sessionId!);
-        this.recordRateDelta(sessionId!, String(data.delta ?? ""));
-        this.queueMarkdownDelta(sessionId!, data.item_id, "markdown", String(data.delta ?? ""));
-        break;
-      case "TextDone":
-        this.finishStreamingReasoning(sessionId!);
-        this.upsertMarkdown(sessionId!, data.item_id, "markdown", data.full_text, false, false);
-        break;
-      case "Sources":
-        this.updateItems(sessionId!, (items) => items.map((item) =>
-          item.kind === "markdown" && item.id === data.item_id
-            ? { ...item, sources: data.sources ?? [] }
-            : item
-        ));
-        break;
-      case "ToolInputStart":
-        this.clearRetry(sessionId!);
-        this.finishStreamingReasoning(sessionId!);
-        this.upsertTool(sessionId!, data.item_id, { tool: data.tool, status: "input" });
-        break;
-      case "ToolInputDelta":
-        this.upsertTool(sessionId!, data.item_id, { detail: data.delta }, true);
-        break;
-      case "ToolInputDiscard":
-        this.updateItems(sessionId!, (items) => items.filter((item) => item.id !== data.item_id));
-        break;
-      case "ToolCallBegin":
-        this.clearRetry(sessionId!);
-        this.finishStreamingReasoning(sessionId!);
-        this.upsertTool(sessionId!, data.item_id, {
-          tool: data.tool,
-          summary: data.input_summary,
-          detail: data.detail,
-          status: "running",
-          approvalPending: false,
-        });
-        break;
-      case "ToolCallEnd":
-        this.upsertTool(sessionId!, data.item_id, {
-          output: data.output,
-          status: data.stopped ? "stopped" : data.is_error ? "error" : "done",
-          edit: data.edit,
-          liveNote: null,
-          approvalPending: false,
-        });
-        break;
-      case "SubagentProgress":
-        this.upsertTool(sessionId!, data.item_id, { liveNote: data.note });
-        break;
-      case "SubagentCard":
-        this.updateItems(sessionId!, (items) => items.map((item) => {
-          if (item.kind !== "tool" || item.id !== data.item_id) return item;
-          const agents = [...(item.agents ?? []), {
-            agent_id: data.agent_id,
-            profile: data.profile,
-            description: data.description,
-            model: data.model,
-            background: data.background,
-            finished: false,
-          }];
-          return { ...item, agents };
-        }));
-        break;
-      case "SubagentActivity": {
-        const key = `${sessionId!}:${data.agent_id}`;
-        this.subagents.update((all) => {
-          const previous = all[key];
-          if (!previous) return all;
-          return {
-            ...all,
-            [key]: {
-              ...previous,
-              running: !data.finished,
-              items: data.item ? [...previous.items, data.item] : previous.items,
-              stream: data.item || data.finished ? null : previous.stream,
-            },
-          };
-        });
-        this.updateItems(sessionId!, (items) => items.map((item) => {
-          if (item.kind !== "tool" || !item.agents?.some((agent) => agent.agent_id === data.agent_id)) return item;
-          return {
-            ...item,
-            agents: item.agents.map((agent) => {
-              if (agent.agent_id !== data.agent_id) return agent;
-              const finished = agent.finished || data.finished;
-              const finishedSeq = data.finished && !agent.finished
-                ? (agent.finishedSeq ?? ++this.agentFinishSeq)
-                : agent.finishedSeq;
-              return {
-                ...agent,
-                finished,
-                finishedSeq,
-                live_note: data.finished ? null : (data.item?.text ?? agent.live_note),
-              };
-            }),
-          };
-        }));
-        break;
-      }
-      case "SubagentDelta": {
-        const key = `${sessionId!}:${data.agent_id}`;
-        const delta = typeof data.delta === "string" ? data.delta : "";
-        if (!delta) break;
-        this.subagents.update((all) => {
-          const previous = all[key];
-          if (!previous) return all;
-          const stream = previous.stream ?? { reasoning: "", assistant: "" };
-          return {
-            ...all,
-            [key]: {
-              ...previous,
-              stream: data.role === "reasoning"
-                ? { ...stream, reasoning: stream.reasoning + delta }
-                : { ...stream, assistant: stream.assistant + delta },
-            },
-          };
-        });
-        break;
-      }
-      case "SubagentToolInputStart": {
-        const key = `${sessionId!}:${data.agent_id}`;
-        const itemId = typeof data.item_id === "string" ? data.item_id : "";
-        if (!itemId) break;
-        this.subagents.update((all) => {
-          const previous = all[key];
-          if (!previous) return all;
-          const stream = previous.stream ?? { reasoning: "", assistant: "" };
-          const tools = stream.tools ?? {};
-          return {
-            ...all,
-            [key]: {
-              ...previous,
-              stream: {
-                ...stream,
-                tools: {
-                  ...tools,
-                  [itemId]: { tool: data.tool ?? "", detail: tools[itemId]?.detail ?? "" },
-                },
-              },
-            },
-          };
-        });
-        break;
-      }
-      case "SubagentToolInputDelta": {
-        const key = `${sessionId!}:${data.agent_id}`;
-        const itemId = typeof data.item_id === "string" ? data.item_id : "";
-        const delta = typeof data.delta === "string" ? data.delta : "";
-        if (!itemId || !delta) break;
-        this.subagents.update((all) => {
-          const previous = all[key];
-          if (!previous) return all;
-          const stream = previous.stream ?? { reasoning: "", assistant: "" };
-          const tools = stream.tools ?? {};
-          const tool = tools[itemId];
-          if (!tool) return all;
-          return {
-            ...all,
-            [key]: {
-              ...previous,
-              stream: {
-                ...stream,
-                tools: { ...tools, [itemId]: { ...tool, detail: tool.detail + delta } },
-              },
-            },
-          };
-        });
-        break;
-      }
       case "QueueChanged":
         this.updateQueue(sessionId!, { pending: data.items });
         break;
@@ -1723,14 +1598,6 @@ export class AgentStore {
       case "TaskListChanged":
         this.tasks.update((all) => ({ ...all, [sessionId!]: data.tasks ?? [] }));
         break;
-      case "TaskNotificationBatch":
-        this.updateItems(sessionId!, (items) => [...items, {
-          kind: "notification",
-          id: `notification-${++generatedId}`,
-          notifications: data.notifications ?? [],
-          sentAtMs: data.sent_at_ms ?? 0,
-        }]);
-        break;
       case "RetryStatus":
         this.retrying.update((all) => ({ ...all, [sessionId!]: data.status }));
         break;
@@ -1764,34 +1631,6 @@ export class AgentStore {
         break;
       case "FileSearchResults":
         this.fileSearchResults.set({ query: data.query, results: data.results ?? [] });
-        break;
-      case "SubagentHistory": {
-        const key = `${sessionId!}:${data.agent_id}`;
-        this.subagents.update((all) => ({
-          ...all,
-          [key]: {
-            sessionId: sessionId!,
-            agentId: data.agent_id,
-            title: data.title,
-            subtitle: data.subtitle,
-            items: data.items ?? [],
-            stream: null,
-            running: data.running ?? false,
-          },
-        }));
-        break;
-      }
-      case "CompactStarted":
-        this.addNote(sessionId!, t("store.compacting"), false, { noteKind: "compacting" });
-        break;
-      case "ContextCompacted":
-        this.updateItems(sessionId!, (items) => items.filter((item) => item.kind !== "note" || item.noteKind !== "compacting"));
-        this.addNote(sessionId!, data.note, false, {
-          noteKind: "compacted",
-          usedBefore: data.used_before,
-          usedAfter: data.used_after,
-          summary: data.summary,
-        });
         break;
       case "Error":
         if (sessionId) {
@@ -1894,129 +1733,64 @@ export class AgentStore {
     return changed ? next : items;
   }
 
-  private finishStreamingReasoning(sessionId: string): void {
-    this.updateItems(sessionId, AgentStore.settleStreamingReasoning);
+  private upsertConversationItems(items: ChatItem[], next: ChatItem): ChatItem[] {
+    const index = items.findIndex((item) => item.id === next.id);
+    if (index < 0) return [...items, next];
+    const merged = [...items];
+    merged[index] = this.mergeConversationItem(items[index], next);
+    return merged;
   }
 
-  private queueMarkdownDelta(
-    sessionId: string,
-    id: string,
-    kind: PendingMarkdownDelta["kind"],
-    text: string,
-  ): void {
-    if (!text) return;
-    const deltas = this.pendingMarkdownDeltas.get(sessionId) ?? [];
-    const turnId = this.activeTurns.get(sessionId);
-    const previous = deltas[deltas.length - 1];
-    if (previous?.id === id && previous.kind === kind && previous.turnId === turnId) {
-      previous.text += text;
-    } else {
-      deltas.push({ id, kind, text, turnId });
+  private mergeConversationSnapshot(snapshot: ChatItem[], live: ChatItem[]): ChatItem[] {
+    const liveById = new Map(live.map((item) => [item.id, item]));
+    const snapshotIds = new Set(snapshot.map((item) => item.id));
+    const merged = snapshot.map((item) => {
+      const current = liveById.get(item.id);
+      return current ? this.mergeConversationItem(current, item) : item;
+    });
+    for (const item of live) {
+      if (!snapshotIds.has(item.id)) merged.push(item);
     }
-    this.pendingMarkdownDeltas.set(sessionId, deltas);
-    if (this.markdownFlushTimer !== null) return;
-    this.markdownFlushTimer = setTimeout(() => this.flushMarkdownDeltas(), 32);
+    return merged;
   }
 
-  private flushMarkdownDeltas(): void {
-    if (this.markdownFlushTimer !== null) clearTimeout(this.markdownFlushTimer);
-    this.markdownFlushTimer = null;
-    if (this.pendingMarkdownDeltas.size === 0) return;
-    const pending = [...this.pendingMarkdownDeltas];
-    this.pendingMarkdownDeltas.clear();
-    batch(() => {
-      for (const [sessionId, deltas] of pending) {
-        this.updateItems(sessionId, (items) => {
-          let next = [...items];
-          for (const delta of deltas) {
-            if (delta.kind === "markdown" || (delta.kind === "reasoning" && !next.some((item) => item.id === delta.id))) {
-              next = AgentStore.settleStreamingReasoning(next);
-            }
-            const index = next.findIndex((item) => item.id === delta.id);
-            if (index < 0) {
-              next.push({
-                kind: delta.kind,
-                id: delta.id,
-                text: delta.text,
-                streaming: true,
-                turnId: delta.turnId,
-                startedAtMs: delta.kind === "reasoning" ? Date.now() : undefined,
-              });
-              continue;
-            }
-            const previous = next[index] as MarkdownItem;
-            next[index] = {
-              ...previous,
-              text: previous.text + delta.text,
-              streaming: previous.kind === "reasoning" && !previous.streaming ? false : true,
-              turnId: previous.turnId ?? delta.turnId,
-            };
-          }
-          return next;
-        });
-      }
-    });
-  }
-
-  private upsertMarkdown(
-    sessionId: string,
-    id: string,
-    kind: "markdown" | "reasoning",
-    text: string,
-    append: boolean,
-    streaming: boolean,
-  ): void {
-    this.updateItems(sessionId, (items) => {
-      const index = items.findIndex((item) => item.id === id);
-      const turnId = this.activeTurns.get(sessionId);
-      if (index < 0) return [...items, { kind, id, text, streaming, turnId }];
-      const next = [...items];
-      const previous = next[index] as MarkdownItem;
-      next[index] = {
+  private mergeConversationItem(previous: ChatItem, next: ChatItem): ChatItem {
+    if (previous.kind === "tool" && next.kind === "tool") {
+      return {
         ...previous,
-        text: append ? previous.text + text : text,
-        streaming,
-        turnId: previous.turnId ?? turnId,
+        ...next,
+        summary: next.summary.length >= previous.summary.length ? next.summary : previous.summary,
+        output: next.output || previous.output,
+        detail: next.detail || previous.detail,
+        edit: next.edit ?? previous.edit,
+        // A terminal row never regresses; otherwise the real transition wins
+        // (an input card becomes the executing card, then done).
+        status: previous.status === "done" || previous.status === "error" || previous.status === "stopped"
+          ? previous.status
+          : next.status,
       };
-      return next;
-    });
-  }
-
-  private upsertTool(
-    sessionId: string,
-    id: string,
-    changes: Partial<Omit<ToolItem, "kind" | "id">>,
-    appendDetail = false,
-  ): void {
-    this.updateItems(sessionId, (items) => {
-      const index = items.findIndex((item) => item.id === id);
-      const turnId = this.activeTurns.get(sessionId);
-      if (index < 0) {
-        return [
-          ...items,
-          {
-            kind: "tool",
-            id,
-            tool: changes.tool ?? "Tool",
-            summary: changes.summary ?? "",
-            detail: changes.detail ?? "",
-            output: changes.output ?? "",
-            status: changes.status ?? "running",
-            turnId,
-            edit: changes.edit,
-          } satisfies ToolItem,
-        ];
-      }
-      const next = [...items];
-      const previous = next[index] as ToolItem;
-      next[index] = {
+    }
+    if (
+      (previous.kind === "markdown" || previous.kind === "reasoning")
+      && previous.kind === next.kind
+    ) {
+      return {
         ...previous,
-        ...changes,
-        turnId: previous.turnId ?? turnId,
-        detail: appendDetail ? previous.detail + (changes.detail ?? "") : (changes.detail ?? previous.detail),
+        ...next,
+        text: next.text.length >= previous.text.length ? next.text : previous.text,
+        sources: (next.sources?.length ?? 0) > 0 ? next.sources : previous.sources,
+        durationMs: next.durationMs ?? previous.durationMs,
       };
-      return next;
-    });
+    }
+    if (previous.kind === "user" && next.kind === "user") {
+      return {
+        ...previous,
+        ...next,
+        text: next.text.length >= previous.text.length ? next.text : previous.text,
+        sentAtMs: next.sentAtMs || previous.sentAtMs,
+      };
+    }
+    return { ...previous, ...next } as ChatItem;
   }
 
   private startRate(sessionId: string): void {
@@ -2025,17 +1799,6 @@ export class AgentStore {
     this.rateCharacters = 0;
     this.rateRenderedAt = 0;
     this.outputRate.update((all) => ({ ...all, [sessionId]: 0 }));
-  }
-
-  private recordRateDelta(sessionId: string, delta: string): void {
-    if (this.rateSession !== sessionId) this.startRate(sessionId);
-    this.rateCharacters += delta.length;
-    const now = Date.now();
-    if (now - this.rateRenderedAt < 200) return;
-    this.rateRenderedAt = now;
-    const elapsed = Math.max((now - this.rateStartedAt) / 1000, 0.05);
-    const tokensPerSecond = Math.max(0, Math.round(this.rateCharacters / 4 / elapsed));
-    this.outputRate.update((all) => ({ ...all, [sessionId]: tokensPerSecond }));
   }
 
   private addNote(sessionId: string, text: string, error: boolean, extra: Partial<NoteItem> = {}): void {

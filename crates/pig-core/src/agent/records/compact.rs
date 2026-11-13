@@ -1,13 +1,13 @@
 use super::*;
 
-/// Canonical child compaction marker (one `"type":"compact"` line in the
-/// child JSONL). It owns the same replay authority as the root
-/// `RolloutRecord::Compact`: the note replaces the omitted work, `tail_len`
-/// counts the retained messages at the cut, and `preserved_user` names the
-/// active real user that was installed separately after the note. Message
-/// content and media stay in their own `msg` lines (never base64 here), so a
-/// restart rebuilds the exact context and the current model's capability
-/// projection decides what media is sent.
+/// In-memory view of the canonical `RolloutRecord::Compact` marker used by the
+/// child replay code. It owns the same replay authority as the root marker: the
+/// note replaces the omitted work, `tail_len` counts the retained messages at
+/// the cut, and `preserved_user` names the active real user that was installed
+/// separately after the note. Message content and media stay in their own
+/// canonical records (never base64 here), so a restart rebuilds the exact
+/// context and the current model's capability projection decides what media is
+/// sent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCompact {
     pub note: String,

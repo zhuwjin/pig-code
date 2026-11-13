@@ -636,11 +636,30 @@ export interface PluginAgentOutcome {
   resultPath?: string | null;
 }
 
+export type PluginConversationItem =
+  | { kind: "user"; id: string; text: string; files: string[]; imageNums: number[]; sentAtMs: number }
+  | { kind: "markdown"; id: string; text: string; streaming: boolean }
+  | { kind: "reasoning"; id: string; text: string; streaming: boolean; durationMs?: number | null }
+  | {
+      kind: "tool";
+      id: string;
+      tool: string;
+      summary: string;
+      detail: string;
+      output: string;
+      status: "input" | "running" | "done" | "error" | "stopped";
+      edit?: { path: string; unified_diff: string; additions: number; deletions: number } | null;
+      liveNote?: string | null;
+      approvalPending: boolean;
+    }
+  | { kind: "note"; id: string; text: string; error: boolean }
+  | { kind: "notification"; id: string; notifications: unknown[]; sentAtMs: number };
+
 export interface PluginAgentConversation {
   agentId: string;
   title: string;
   running: boolean;
-  items: { role: string; text: string; tool?: string | null; output?: string | null; is_error: boolean }[];
+  items: PluginConversationItem[];
 }
 
 export interface PluginAgentsApi {

@@ -12,18 +12,22 @@ fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
     std::fs::create_dir_all(path.parent().expect("context parent")).expect("agents dir");
     let meta = serde_json::json!({
         "type": "meta",
-        "agent_id": meta_id,
+        "id": meta_id,
+        "cwd": "/tmp",
+        "title": "fixture context",
+        "created_at": 1,
+        "kind": "subagent",
+        "parent_id": "s1",
         "profile": "general-purpose",
         "description": "fixture context",
         "model": "m",
         "provider": "p",
-        "created_at": 1,
     });
     let msg = serde_json::json!({
-        "type": "msg",
-        "msg": { "role": "user", "content": text },
-        "replay": null,
-        "images": null,
+        "type": "user",
+        "text": text,
+        "files": [],
+        "images": [],
     });
     std::fs::write(path, format!("{meta}\n{msg}\n")).expect("write context");
 }
@@ -1528,13 +1532,13 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
     let got = recv_until(
         &events,
         Duration::from_secs(5),
-        |e| matches!(e, Event::SubagentHistory { agent_id, .. } if agent_id == "a1-1"),
+        |e| matches!(e, Event::ConversationSnapshot { agent_id: Some(id), .. } if id == "a1-1"),
     )
     .await;
     assert!(
         got.iter().any(|e| matches!(
             e,
-            Event::SubagentHistory { agent_id, items, .. } if agent_id == "a1-1" && !items.is_empty()
+            Event::ConversationSnapshot { agent_id: Some(id), items, .. } if id == "a1-1" && !items.is_empty()
         )),
         "{got:#?}"
     );
@@ -1554,8 +1558,13 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
     })
     .await;
     assert!(
-        got.iter()
-            .all(|e| !matches!(e, Event::SubagentHistory { .. })),
+        got.iter().all(|e| !matches!(
+            e,
+            Event::ConversationSnapshot {
+                agent_id: Some(_),
+                ..
+            }
+        )),
         "{got:#?}"
     );
 
@@ -1579,8 +1588,13 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
     })
     .await;
     assert!(
-        got.iter()
-            .all(|e| !matches!(e, Event::SubagentHistory { .. })),
+        got.iter().all(|e| !matches!(
+            e,
+            Event::ConversationSnapshot {
+                agent_id: Some(_),
+                ..
+            }
+        )),
         "{got:#?}"
     );
 
@@ -1610,8 +1624,13 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
         })
         .await;
         assert!(
-            got.iter()
-                .all(|e| !matches!(e, Event::SubagentHistory { .. })),
+            got.iter().all(|e| !matches!(
+                e,
+                Event::ConversationSnapshot {
+                    agent_id: Some(_),
+                    ..
+                }
+            )),
             "{got:#?}"
         );
     }
@@ -1635,8 +1654,13 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
         })
         .await;
         assert!(
-            got.iter()
-                .all(|e| !matches!(e, Event::SubagentHistory { .. })),
+            got.iter().all(|e| !matches!(
+                e,
+                Event::ConversationSnapshot {
+                    agent_id: Some(_),
+                    ..
+                }
+            )),
             "{got:#?}"
         );
 
@@ -1661,8 +1685,13 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
         })
         .await;
         assert!(
-            got.iter()
-                .all(|e| !matches!(e, Event::SubagentHistory { .. })),
+            got.iter().all(|e| !matches!(
+                e,
+                Event::ConversationSnapshot {
+                    agent_id: Some(_),
+                    ..
+                }
+            )),
             "{got:#?}"
         );
         let _ = std::fs::remove_dir_all(&other);

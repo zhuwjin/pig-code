@@ -374,13 +374,22 @@ impl Tool for TaskWait {
             .clamp(1, 300_000);
             let deadline =
                 tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            let mut wait_interest =
+                ctx.state.owner_agent_id.as_deref().map(|owner| {
+                    crate::task::TaskWaitInterest::register(ctx.state, owner, &task_ids)
+                });
             let mut revision = ctx.state.tasks.subscribe();
             loop {
                 let batch = task_wait_batch(ctx.state, &task_ids)?;
                 if !batch.notifications.is_empty() {
+                    if let Some(interest) = wait_interest.as_mut() {
+                        interest.delivered(&batch.notifications);
+                    }
                     let mut output =
                         crate::task::notification::render_notification_batch(&batch.notifications);
-                    if batch.delivered_notification_ids.is_empty() {
+                    if ctx.state.owner_agent_id.is_none()
+                        && batch.delivered_notification_ids.is_empty()
+                    {
                         output = format!(
                             "No new notification delivery is acknowledged by this result.\n\n{output}"
                         );
@@ -1440,6 +1449,96 @@ mod task_wait_tests {
             .await
             .expect("child query");
         assert!(child.delivered_notification_ids.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn child_wait_marks_the_notification_as_delivered() {
+        let (mut state, _store, root) = fixture("child-wait-delivered");
+        state.task_store = None;
+        state.owner_agent_id = Some("a1".into());
+        let task_id = register(&state, false);
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            let root = root.clone();
+            let task_id = task_id.clone();
+            async move {
+                let mut tracker = ChangeTracker::default();
+                TaskWait
+                    .execute(
+                        serde_json::json!({"task_ids": [task_id], "timeout_ms": 2_000}),
+                        context(&state, &mut tracker, &root),
+                    )
+                    .await
+                    .expect("wait")
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        finish(&state, &task_id);
+        let effect = waiting.await.expect("join");
+        assert!(effect.output.contains("task:test:b1:completed"));
+        assert!(
+            crate::task::task_wait_delivered(&state, "a1", &task_id),
+            "a successful child wait suppresses the duplicate steer"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn child_wait_removes_an_already_queued_duplicate_steer() {
+        let (mut state, _store, root) = fixture("child-wait-queued");
+        state.task_store = None;
+        state.owner_agent_id = Some("a1".into());
+        let task_id = register(&state, false);
+        finish(&state, &task_id);
+        let queued = "<notification id=\"task:test:b1:completed\">done</notification>".to_string();
+        state
+            .agent_steers
+            .lock()
+            .expect("steers")
+            .entry("a1".into())
+            .or_default()
+            .push_back(queued);
+        let mut tracker = ChangeTracker::default();
+        let effect = TaskWait
+            .execute(
+                serde_json::json!({"task_ids": [task_id], "timeout_ms": 1_000}),
+                context(&state, &mut tracker, &root),
+            )
+            .await
+            .expect("wait");
+        assert!(effect.output.contains("task:test:b1:completed"));
+        assert!(
+            state
+                .agent_steers
+                .lock()
+                .expect("steers")
+                .get("a1")
+                .is_none_or(|queue| queue.is_empty()),
+            "the queued duplicate steer is removed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn child_wait_timeout_releases_the_suppression() {
+        let (mut state, _store, root) = fixture("child-wait-timeout");
+        state.task_store = None;
+        state.owner_agent_id = Some("a1".into());
+        let task_id = register(&state, false);
+        let mut tracker = ChangeTracker::default();
+        let effect = TaskWait
+            .execute(
+                serde_json::json!({"task_ids": [task_id.clone()], "timeout_ms": 5}),
+                context(&state, &mut tracker, &root),
+            )
+            .await
+            .expect("timeout");
+        assert!(effect.output.contains("Wait timed out"));
+        assert!(
+            !crate::task::task_wait_delivered(&state, "a1", &task_id),
+            "a timed-out wait must leave the steer path open"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

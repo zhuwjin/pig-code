@@ -14,7 +14,7 @@ impl Session {
     /// read-only rule. Dynamic plugin tools use the current request's selection.
     pub(crate) fn root_tools(&self) -> Vec<Box<dyn tool::Tool>> {
         let mut tools = tool::all_root_with_summary(
-            &self.cwd,
+            &self.agent.cwd,
             &self.profiles_summary,
             &self.plugin_tools.registry(),
         );
@@ -62,6 +62,7 @@ impl Session {
     /// structure is recomputed from its tag, without reading document bytes.
     pub(super) fn reprice_document_estimates(&mut self, context_window: u64) {
         for document in self
+            .agent
             .history
             .iter_mut()
             .flat_map(|message| &mut message.documents)
@@ -84,19 +85,21 @@ impl Session {
         media: tool::MediaCapabilities,
         context_window: u64,
     ) -> Result<(), CoreError> {
-        if self.history.is_empty() {
+        if self.agent.history.is_empty() {
             self.projected_input_image = Some(media.input_image);
             self.projected_input_pdf = Some(media.input_pdf);
             return Ok(());
         }
-        let media_dir = pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.id);
+        let media_dir =
+            pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.agent.id);
         let records = Rollout::load(
             &self
                 .data_dir
                 .join("sessions")
-                .join(format!("{}.jsonl", self.id)),
+                .join(format!("{}.jsonl", self.agent.id)),
         )?;
         let system = self
+            .agent
             .history
             .first()
             .and_then(|message| message.content.clone())
@@ -108,7 +111,7 @@ impl Session {
             &media_dir,
             Some(context_window),
         );
-        self.history = history;
+        self.agent.history = history;
         self.user_ixs = user_ixs;
         self.io_last_input = Vec::new();
         self.usage_anchor = None;
@@ -128,7 +131,8 @@ impl Session {
         if images.is_empty() {
             return Vec::new();
         }
-        let media_dir = pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.id);
+        let media_dir =
+            pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.agent.id);
         match crate::rollout::persist_chat_images(&media_dir, images) {
             Ok(refs) if refs.len() == images.len() => refs,
             Ok(_) => {
@@ -164,7 +168,8 @@ impl Session {
         if documents.is_empty() {
             return Vec::new();
         }
-        let media_dir = pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.id);
+        let media_dir =
+            pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.agent.id);
         match crate::rollout::persist_chat_documents(&media_dir, documents, context_window) {
             Ok(refs) if refs.len() == documents.len() => refs,
             Ok(_) => {
@@ -211,7 +216,7 @@ impl Session {
         // note that exposes the work it summarized). The tombstone alone keeps
         // the file/reload consistent.
         if let Some(ix) = entry {
-            self.history.truncate(ix);
+            self.agent.history.truncate(ix);
             // The model-io trace's delta baseline no longer matches the
             // history; reset it so the next trace falls back to a full
             // snapshot (the same self-healing as after resume)
@@ -222,7 +227,7 @@ impl Session {
             // preflight compact solely because of the recalled turn. The
             // next real Usage replaces this estimate.
             self.last_total_tokens = Some(crate::session::estimate::estimate_history_tokens(
-                &self.history,
+                &self.agent.history,
             ));
         }
         // The anchor measured a history that no longer exists.
@@ -260,7 +265,8 @@ impl Session {
         tx: &async_channel::Sender<Event>,
     ) {
         let rest = cancelled.rest;
-        self.history
+        self.agent
+            .history
             .push(Self::stopped_tool_result(&cancelled.call.id));
         self.record(&RolloutRecord::ToolCall {
             tool: cancelled.call.name.clone(),
@@ -293,7 +299,7 @@ impl Session {
             let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .map(|value| serde_json::to_string_pretty(&value).unwrap_or_default())
                 .unwrap_or_else(|_| call.arguments.clone());
-            self.history.push(Self::stopped_tool_result(&call.id));
+            self.agent.history.push(Self::stopped_tool_result(&call.id));
             self.record(&RolloutRecord::ToolCall {
                 tool: call.name.clone(),
                 summary: summary.clone(),
@@ -345,8 +351,8 @@ impl Session {
         // example a cancelled tool or a background child's final write); the
         // shared dirty queue makes this exactly-once regardless of which
         // driver gets here.
-        persist_tracker_originals(&mut self.tracker, &self.store, &self.id);
-        let changes = self.tracker.take_turn_changes(&self.cwd);
+        persist_tracker_originals(&mut self.tracker, &self.store, &self.agent.id);
+        let changes = self.tracker.take_turn_changes(&self.agent.cwd);
         if changes.is_empty() {
             return;
         }
@@ -399,7 +405,7 @@ impl Session {
     pub fn revert_file(&mut self, path: &str, tx: &async_channel::Sender<Event>) {
         // Path resolution errors (original English) and revert errors
         // uniformly go through the CoreError channel
-        let result = tool::resolve_checked(&self.cwd, path, false)
+        let result = tool::resolve_checked(&self.agent.cwd, path, false)
             .map_err(|e| CoreError::Internal { detail: e })
             .and_then(|full| self.tracker.revert(&full).map(|()| full));
         match result {
@@ -409,8 +415,8 @@ impl Session {
                 // row)
                 {
                     let store = self.store.lock().expect("store lock");
-                    store.delete_file_change(&self.id, path);
-                    store.delete_file_original(&self.id, &full.to_string_lossy());
+                    store.delete_file_change(&self.agent.id, path);
+                    store.delete_file_original(&self.agent.id, &full.to_string_lossy());
                 }
                 self.emit(
                     |session_id| Event::FileReverted {

@@ -189,33 +189,38 @@ fn fresh_history(ctx: &ChildPrepCtx<'_>, profile: &AgentProfile, prompt: &str) -
 
 fn child_meta(
     agent_id: &str,
+    parent_session_id: &str,
+    cwd: &Path,
     profile: &AgentProfile,
     child_config: &ResolvedModel,
     description: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "type": "meta",
-        "agent_id": agent_id,
-        "profile": &profile.name,
-        "description": description,
-        "model": &child_config.model,
-        "provider": &child_config.provider_name,
-        "created_at": crate::rollout::now_secs(),
-    })
+) -> crate::rollout::RolloutRecord {
+    crate::rollout::RolloutRecord::subagent_meta(
+        agent_id.to_string(),
+        parent_session_id.to_string(),
+        cwd.to_path_buf(),
+        description.to_string(),
+        profile.name.clone(),
+        child_config.provider_name.clone(),
+        child_config.model.clone(),
+        crate::rollout::now_secs(),
+    )
 }
 
 fn agents_directory(ctx: &ChildPrepCtx<'_>) -> Result<PathBuf, String> {
     prepared_agent_dir(&ctx.data_dir.join("sessions"), ctx.session_id)
 }
 
-fn persist_fresh_context(prep: &mut ChildPrep) -> Result<(), String> {
+fn persist_fresh_context(prep: &mut ChildPrep, parent_session_id: &str) -> Result<(), String> {
     let meta = child_meta(
         &prep.agent_id,
+        parent_session_id,
+        &prep.cwd,
         &prep.profile,
         &prep.child_config,
         &prep.description,
     );
-    if let Err(error) = append_agent_record(&prep.jsonl, &meta) {
+    if let Err(error) = append_agent_conversation_record(&prep.jsonl, &meta) {
         return Err(child_persist_failure_note(
             &prep.agent_id,
             &error,
@@ -276,7 +281,7 @@ pub(crate) fn prepare_fresh_child(
         trusted: tools.trusted,
         writer,
     };
-    persist_fresh_context(&mut prep).map_err(ChildPrepError::ItemLevel)?;
+    persist_fresh_context(&mut prep, ctx.session_id).map_err(ChildPrepError::ItemLevel)?;
     Ok(prep)
 }
 

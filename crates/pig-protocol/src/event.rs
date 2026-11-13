@@ -143,6 +143,132 @@ pub struct Source {
     pub end_index: Option<u32>,
 }
 
+/// One conversation item in the shared UI wire protocol. Field names match the
+/// TypeScript `ChatItem` union, so the UI can render root and subagent items
+/// without a second view DTO.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ConversationItem {
+    User {
+        id: String,
+        text: String,
+        files: Vec<String>,
+        image_nums: Vec<u32>,
+        sent_at_ms: u64,
+    },
+    Markdown {
+        id: String,
+        text: String,
+        streaming: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<Source>,
+    },
+    Reasoning {
+        id: String,
+        text: String,
+        streaming: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<Source>,
+    },
+    Tool {
+        id: String,
+        tool: String,
+        summary: String,
+        detail: String,
+        output: String,
+        status: ConversationToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edit: Option<EditDiff>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        live_note: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        agents: Vec<ConversationAgentCard>,
+        #[serde(default)]
+        approval_pending: bool,
+    },
+    Note {
+        id: String,
+        text: String,
+        error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        used_before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        used_after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    Notification {
+        id: String,
+        notifications: Vec<TaskNotification>,
+        sent_at_ms: u64,
+    },
+}
+
+impl ConversationItem {
+    /// Stable identity used to upsert and remove items in a conversation.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::User { id, .. }
+            | Self::Markdown { id, .. }
+            | Self::Reasoning { id, .. }
+            | Self::Tool { id, .. }
+            | Self::Note { id, .. }
+            | Self::Notification { id, .. } => id,
+        }
+    }
+}
+
+/// Tool row status in the shared conversation wire (`ToolItem.status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationToolStatus {
+    Input,
+    Running,
+    Done,
+    Error,
+    Stopped,
+}
+
+/// Agent card metadata carried on an `Agent`/`AgentSwarm` tool row. Field names
+/// match the TypeScript `AgentCard` shape.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConversationAgentCard {
+    pub agent_id: String,
+    pub profile: String,
+    pub description: String,
+    pub model: String,
+    pub background: bool,
+    pub finished: bool,
+    #[serde(
+        default,
+        rename = "finishedSeq",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub finished_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_note: Option<String>,
+}
+
 /// core → UI events
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -390,7 +516,7 @@ pub enum Event {
         model: String,
         /// Whether this run is in the background (run_in_background): a background
         /// card's running state is driven by the subagent's real lifecycle
-        /// (SubagentActivity), not the tool call's done
+        /// (ConversationStatus), not the tool call's done
         background: bool,
     },
     ContextUsage {
@@ -542,55 +668,42 @@ pub enum Event {
         session_id: String,
         files: Vec<EditDiff>,
     },
-    /// Reply to Op::LoadSubagent: a read-only projection of the subagent's full
-    /// conversation (the right-side "subagent" tab)
-    SubagentHistory {
+    /// Opening snapshot for one conversation. `agent_id` is None for the root
+    /// session and Some for a subagent child. A root session normally rebuilds
+    /// from its replay updates; a subagent history load uses this snapshot.
+    ConversationSnapshot {
         session_id: String,
-        agent_id: String,
-        /// meta.description (for the tab title/card title)
-        title: String,
-        /// "{provider} · {model}"
-        subtitle: String,
-        items: Vec<SubagentItem>,
-        /// The subagent was still running at load time (per the task registry):
-        /// the panel shows a "running" indicator
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtitle: Option<String>,
+        items: Vec<ConversationItem>,
         #[serde(default)]
         running: bool,
     },
-    /// Subagent live display items (live-only): emitted one by one as the subagent
-    /// finishes each batch of messages; item=None + finished=true means the
-    /// subagent ended (including cancel/kill), and the panel turns off "running"
-    SubagentActivity {
+    /// One item upsert in a conversation. Root and subagent item streams use
+    /// this event; the UI applies it by stable item id. Delivery order is the
+    /// channel order, so no sequence number is carried.
+    ConversationUpdate {
         session_id: String,
-        agent_id: String,
-        item: Option<SubagentItem>,
-        finished: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        item: ConversationItem,
     },
-    /// Live-only: an in-progress subagent model output delta while it streams;
-    /// the panel shows it until the step's final display items arrive
-    SubagentDelta {
+    /// One item removal in a conversation.
+    ConversationRemove {
         session_id: String,
-        agent_id: String,
-        /// "assistant" | "reasoning"
-        role: String,
-        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        item_ids: Vec<String>,
     },
-    /// Live-only: a subagent tool call started streaming its arguments; the
-    /// panel shows a pending tool card until the step's final display items
-    /// arrive
-    SubagentToolInputStart {
+    /// A subagent conversation's running flag changed.
+    ConversationStatus {
         session_id: String,
         agent_id: String,
-        item_id: String,
-        tool: String,
-    },
-    /// Live-only: one incremental raw-JSON argument fragment for a pending
-    /// subagent tool call
-    SubagentToolInputDelta {
-        session_id: String,
-        agent_id: String,
-        item_id: String,
-        delta: String,
+        running: bool,
     },
     /// Live-only: the session's model call entered a retry wait (transient,
     /// never persisted; superseded by the next delta or the turn's end)

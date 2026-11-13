@@ -28,7 +28,7 @@ impl Session {
         if self.mcp.is_none() {
             self.mcp = Some(Arc::new(
                 crate::mcp::McpManager::connect_all_with_trust(
-                    &self.cwd,
+                    &self.agent.cwd,
                     &self.data_dir,
                     &self.trust,
                     &self.plugin_tools.registry(),
@@ -60,7 +60,8 @@ impl Session {
             vec![list.remove(pos).expect("position checked")]
         };
         for message in drained {
-            let history_text = pointer_file_references(&self.cwd, &message.text, &message.files);
+            let history_text =
+                pointer_file_references(&self.agent.cwd, &message.text, &message.files);
             // The steered message is admitted now: its send time is this instant
             // (the queue arrival is not recorded, the same as an immediate send)
             let sent_at_ms = crate::model_io::now_ms();
@@ -74,8 +75,8 @@ impl Session {
                 model_text: None,
                 sent_input_image: None,
             });
-            self.history.push(ChatMsg::user(history_text.clone()));
-            self.user_ixs.push(Some(self.history.len() - 1));
+            self.agent.history.push(ChatMsg::user(history_text.clone()));
+            self.user_ixs.push(Some(self.agent.history.len() - 1));
             self.emit(
                 |session_id| Event::UserMessage {
                     session_id,
@@ -101,7 +102,7 @@ impl Session {
             })
             .collect();
         self.emit(|session_id| Event::SteerChanged { session_id, items }, tx);
-        super::persist_pending(&self.store, &self.id, pending);
+        super::persist_pending(&self.store, &self.agent.id, pending);
         1
     }
 
@@ -127,12 +128,12 @@ impl Session {
             self.session_start_hook_ran = true;
             if self.hooks.is_active() {
                 let payload = crate::hooks::HookPayload::session_start(
-                    &self.id,
-                    &self.cwd,
+                    &self.agent.id,
+                    &self.agent.cwd,
                     self.permissions,
                     self.session_start_source,
                 )
-                .with_transcript(&self.history);
+                .with_transcript(&self.agent.history);
                 let run = self.hook_run_ctx(tx, cancel);
                 let effects = crate::hooks::run_event(
                     &self.hooks,
@@ -154,12 +155,12 @@ impl Session {
         // message is never delivered ----
         if self.hooks.is_active() && !notification_only {
             let payload = crate::hooks::HookPayload::user_prompt(
-                &self.id,
-                &self.cwd,
+                &self.agent.id,
+                &self.agent.cwd,
                 self.permissions,
                 &content,
             )
-            .with_transcript(&self.history);
+            .with_transcript(&self.agent.history);
             let run = self.hook_run_ctx(tx, cancel);
             let effects = crate::hooks::run_event(
                 &self.hooks,
@@ -245,7 +246,8 @@ impl Session {
             );
             return TurnOutcome::Failed;
         }
-        let skills_state = skills_state_with_trust(&self.data_dir, self.trust.admits(&self.cwd));
+        let skills_state =
+            skills_state_with_trust(&self.data_dir, self.trust.admits(&self.agent.cwd));
         let memory_enabled = self.memory_enabled;
         let prompt_text = match (
             &self.prompt_text,
@@ -260,13 +262,13 @@ impl Session {
             _ => {
                 if self.prompt_skills_state.as_deref() != Some(&skills_state) {
                     self.skills_prompt = crate::plugins::skills_section_with_trust(
-                        &self.cwd,
+                        &self.agent.cwd,
                         &self.plugin_tools.registry(),
-                        self.trust.admits(&self.cwd),
+                        self.trust.admits(&self.agent.cwd),
                     );
                 }
                 let text = prompt::system_prompt(
-                    &self.cwd,
+                    &self.agent.cwd,
                     true,
                     self.git_snapshot.as_deref(),
                     &self.date_frozen,
@@ -282,13 +284,14 @@ impl Session {
         };
         let system = ChatMsg::system(prompt_text.clone());
         let system_changed = self
+            .agent
             .history
             .first()
             .is_some_and(|message| message.content.as_deref() != Some(prompt_text.as_str()));
-        if self.history.is_empty() {
-            self.history.push(system);
-        } else if self.history[0].role == "system" {
-            self.history[0] = system;
+        if self.agent.history.is_empty() {
+            self.agent.history.push(system);
+        } else if self.agent.history[0].role == "system" {
+            self.agent.history[0] = system;
         }
         if system_changed {
             // The old usage baseline described the previous rendered system
@@ -301,7 +304,7 @@ impl Session {
         // system+history prefix cache, nor can it land between a
         // tool_use/tool_result pair; the actual user text and reminder state are
         // persisted below so resume does not have to reconstruct them.
-        let fresh_agents = prompt::agents_md(&self.data_dir, &self.cwd);
+        let fresh_agents = prompt::agents_md(&self.data_dir, &self.agent.cwd);
         // The memory fresh copy is computed whenever memory was enabled at
         // session start (the frozen flag, not the frozen section — the
         // /remember-mid-session case needs the reminder exactly when the
@@ -309,7 +312,7 @@ impl Session {
         // off never computes one: no injection, even after a stray
         // /remember wrote the file
         let fresh_memory = if self.memory_enabled {
-            let root = crate::memory::workspace_memory_dir(&self.data_dir, &self.cwd);
+            let root = crate::memory::workspace_memory_dir(&self.data_dir, &self.agent.cwd);
             crate::memory::memory_section_raw(
                 &root,
                 &crate::memory::read_index(&root.join("MEMORY.md")),
@@ -323,8 +326,8 @@ impl Session {
             prompt::turn_reminder(
                 self.permissions,
                 self.plan_enabled,
-                &self.id,
-                &self.cwd,
+                &self.agent.id,
+                &self.agent.cwd,
                 &self.state,
                 &mut self.permissions_reminded,
                 &self.date_frozen,
@@ -342,16 +345,16 @@ impl Session {
         // reads the content on demand with Read — always fresh, a constant one
         // line, no prefix-cache damage
         if !notification_only {
-            let mut user_text = pointer_file_references(&self.cwd, &content, &files);
+            let mut user_text = pointer_file_references(&self.agent.cwd, &content, &files);
             if let Some(reminder) = reminder {
                 user_text = format!("{reminder}\n\n{user_text}");
             }
-            if self.history.len() == 1 {
+            if self.agent.history.len() == 1 {
                 // First message: seed the title (first 30 chars as fallback) and
                 // generate a model title async; if manually renamed (title_custom),
                 // neither overwrites
                 let title = seed_title(&content);
-                let id = self.id.clone();
+                let id = self.agent.id.clone();
                 self.store
                     .lock()
                     .expect("store lock")
@@ -361,7 +364,7 @@ impl Session {
                         }
                         meta.updated_at = now_secs();
                     });
-                spawn_title_generation(&self.store, &self.id, &content, config, tx);
+                spawn_title_generation(&self.store, &self.agent.id, &content, config, tx);
             }
             // Rollout stores the original text only (files go in a separate field;
             // the "referenced files" suffix is gone — the UI renders inline chips
@@ -377,7 +380,7 @@ impl Session {
             let mut chat_images: Vec<pig_provider::ChatImage> = Vec::new();
             if !images.is_empty() {
                 let media_dir =
-                    pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.id);
+                    pig_utils::paths::media_dir(&self.data_dir.join("sessions"), &self.agent.id);
                 let mut next = crate::rollout::next_media_index(&media_dir);
                 for (ix, pending) in images.iter().enumerate() {
                     match crate::tool::compress_image_for_model(&pending.bytes, &pending.mime) {
@@ -448,8 +451,8 @@ impl Session {
             } else {
                 image_refs.clone()
             };
-            self.history.push(user_msg);
-            self.user_ixs.push(Some(self.history.len() - 1));
+            self.agent.history.push(user_msg);
+            self.user_ixs.push(Some(self.agent.history.len() - 1));
             // The event and the clean rollout fields carry display text; sent_* preserves the model-facing form.
             let nums = crate::rollout::image_nums(&image_refs);
             // The turn's first user message was accepted just before this point;
@@ -484,7 +487,7 @@ impl Session {
             self.record(&RolloutRecord::HookContext {
                 text: context.clone(),
             });
-            self.history.push(ChatMsg::user(context));
+            self.agent.history.push(ChatMsg::user(context));
         }
         // The user message, prompt snapshot and hook contexts must be durable
         // (real sync, not flush) before any model request sees them.
@@ -540,6 +543,7 @@ impl Session {
                     }
                     if finish_reason.is_none() && self.hooks.is_active() {
                         let last_assistant = self
+                            .agent
                             .history
                             .iter()
                             .rev()
@@ -547,13 +551,13 @@ impl Session {
                             .and_then(|msg| msg.content.clone())
                             .unwrap_or_default();
                         let payload = crate::hooks::HookPayload::stop(
-                            &self.id,
-                            &self.cwd,
+                            &self.agent.id,
+                            &self.agent.cwd,
                             self.permissions,
                             &last_assistant,
                             stop_continuations > 0,
                         )
-                        .with_transcript(&self.history);
+                        .with_transcript(&self.agent.history);
                         let run = self.hook_run_ctx(tx, cancel);
                         let effects = crate::hooks::run_event(
                             &self.hooks,
@@ -569,7 +573,7 @@ impl Session {
                                 self.record(&RolloutRecord::HookContext {
                                     text: context.clone(),
                                 });
-                                self.history.push(ChatMsg::user(context));
+                                self.agent.history.push(ChatMsg::user(context));
                             }
                             continue;
                         }
@@ -621,7 +625,7 @@ impl Session {
                     // paused assistant, or its completed local tool round
                     // when the pause also requested tools. Compaction retains
                     // the whole containing segment (server replay included).
-                    pause_pin = Some(self.history.len().saturating_sub(1));
+                    pause_pin = Some(self.agent.history.len().saturating_sub(1));
                     continue;
                 }
                 StepOutcome::ToolsExecuted => {
@@ -655,7 +659,7 @@ impl Session {
     /// diagnostics, but the monotonic sequence (and the turn id) make the id
     /// unique even when the provider repeats a call id in one response.
     /// Approval/request ids derive from this value, so duplicates cannot alias.
-    fn next_tool_item_id(&mut self, turn_id: &str, call_id: &str) -> String {
+    pub(super) fn next_tool_item_id(&mut self, turn_id: &str, call_id: &str) -> String {
         self.tool_item_seq += 1;
         format!("{turn_id}-tool-{}-{call_id}", self.tool_item_seq)
     }
@@ -665,7 +669,7 @@ impl Session {
     /// (FIFO, so duplicate ids keep their own preview); calls without a
     /// preview get a fresh id. Claimed previews are removed from `live` so the
     /// discard pass only sees broken/never-final calls.
-    fn claim_tool_item_ids(
+    pub(super) fn claim_tool_item_ids(
         &mut self,
         turn_id: &str,
         calls: &[ToolCall],
@@ -707,7 +711,7 @@ impl Session {
     /// totals. Called exactly once per step on every exit that opened a request
     /// cycle — success, failure and cancellation alike, so an interrupted step
     /// still shows up in the turn's model time, TTFT and speed.
-    fn charge_step_time(&mut self, started: Instant, first_token: Option<Instant>) {
+    pub(super) fn charge_step_time(&mut self, started: Instant, first_token: Option<Instant>) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         self.turn_api_ms += elapsed_ms;
         self.turn_ttft_ms += first_token
@@ -719,6 +723,9 @@ impl Session {
         }
     }
 
+    /// Run one model step. The provider request/stream is the shared
+    /// `engine::stream_attempt`; this method owns the root policy around it
+    /// (MCP/plugins, preflight compaction, rollout/events, tool execution).
     #[allow(clippy::too_many_arguments)]
     async fn run_step(
         &mut self,
@@ -730,577 +737,39 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         control: &pig_provider::CallControl,
     ) -> StepOutcome {
-        let cancel = control.cancel_token();
-        let media = tool::MediaCapabilities::new(config.input_image, config.input_pdf);
-        // Root session tool set = built-in + Agent/AgentSwarm + MCP + plugins.
-        // Schemas are built before preflight because they are part of the
-        // request budget.
-        self.ensure_mcp_connected().await;
-        self.select_plugin_tools(config, tx).await;
-        let schemas = self.root_schemas();
-        // Tool schemas are priced separately from the history (they are not
-        // surface nodes); the figure stays cached for the post-reply refresh
-        let tools_tokens = super::estimate::estimate_schemas_tokens(&schemas);
-        // Context preflight: project the next request from the latest usage
-        // anchor (plus messages/schema growth) and compact before sampling.
-        let projected = self.projected_context_tokens(config, tools_tokens);
-        let trigger = compact_trigger(config);
-        if projected > trigger {
-            match self
-                .run_compact_with_current_tools(
-                    Some(config),
-                    CompactTrigger::Watermark,
-                    None,
-                    preserve_latest,
-                    pause_pin,
-                    tx,
-                    cancel,
-                )
-                .await
-            {
-                CompactOutcome::Cancelled => return StepOutcome::Ended { aborted: true },
-                CompactOutcome::Completed | CompactOutcome::Skipped | CompactOutcome::Failed => {}
-            }
-        }
-
-        let text_item = format!("{turn_id}-text-{step}");
-        let reasoning_item = format!("{turn_id}-reason-{step}");
-        let mut text = String::new();
-        let mut reasoning = String::new();
-        let mut replay;
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut finish_reason;
-        let mut incomplete;
-        // Live pending-tool cards keyed by the provider's stream slot. Chat
-        // slots are logical call IDs; Anthropic/Responses retain wire indices.
-        let mut live_tool_inputs: std::collections::HashMap<usize, (String, String)> =
-            std::collections::HashMap::new();
-        // The current attempt's real usage. A stale previous value must never
-        // be attached to the new history length.
-        let attempt_usage: Option<u64>;
-        // Internal tool ids of the successful attempt's calls, in call order.
-        // Allocated before the streaming-input map is drained so an executed
-        // card keeps the id of its live input preview.
-        let mut step_item_ids: Vec<String> = Vec::new();
-        // The step's request-cycle clock: TTFT and model time both run from
-        // here (the harness's `step/start` basis). Pre-request maintenance —
-        // MCP connect, schema building, a preflight compaction — happens above
-        // and is not model time.
-        let step_started = Instant::now();
-        // At most one reactive recovery per turn: a durable overflow
-        // compaction plus a retry of this same step.
-        // Earliest first token across the step's attempts: a retry keeps the
-        // first attempt's token time (the harness's rule); the per-attempt
-        // value inside the loop only feeds the wire trace.
-        let mut step_first_token_at: Option<Instant> = None;
-        'attempt: loop {
-            text.clear();
-            reasoning.clear();
-            replay = None;
-            tool_calls.clear();
-            finish_reason = pig_protocol::FinishReason::Stop;
-            live_tool_inputs.clear();
-            // Whether any text/reasoning/tool/replay content reached the UI or
-            // history for this attempt. A retry is only safe when false.
-            let mut forwarded_content = false;
-            let mut failure: Option<CoreError> = None;
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-            let api_started = Instant::now();
-            let api_started_ms = crate::model_io::now_ms();
-            // Model-io trace input projection: snapshot before the request
-            // (media recorded as counts; only tool-result content is capped
-            // unless full retention is on). Persisting stores only the delta:
-            // take the common prefix against the previous full projection,
-            // offset + delta (aligned with ZCode model-io)
-            let io_full_retention = self
-                .config_snapshot()
-                .is_some_and(|c| c.model_io_full_retention);
-            let io_input_full = crate::model_io::project_input(
-                &self.history,
-                (!io_full_retention).then_some(crate::model_io::TOOL_RESULT_MAX_CHARS),
-            );
-            let io_offset = crate::model_io::common_prefix_len(&io_input_full, &self.io_last_input);
-            let io_input: Vec<_> = io_input_full[io_offset..].to_vec();
-            // Composition of the prompt this request is about to send (the
-            // context panel's rows)
-            let breakdown =
-                super::estimate::context_breakdown_with_tools(&self.history, tools_tokens);
-            self.emit(
-                |session_id| Event::ContextBreakdownChanged {
-                    session_id,
-                    breakdown,
-                },
-                tx,
-            );
-            let mut request_config = config.clone();
-            // Stable session-routing key; retries and restarts reuse it because
-            // it depends only on the session id.
-            if pig_provider::prompt_cache_key_supported(&config.base_url) {
-                request_config.prompt_cache_key =
-                    Some(pig_provider::session_prompt_cache_key(&self.id));
-            }
-            let provider_task = tokio::spawn(pig_provider::stream_chat(
-                request_config,
-                self.history.clone(),
-                schemas.clone(),
-                event_tx,
-                control.clone(),
-            ));
-
-            // When the first output token (reasoning/text delta) arrives: TTFT
-            // = that moment - request sent
-            let mut first_token_at: Option<Instant> = None;
-            // This attempt's usage and failure reason (for the persisted trace)
-            let mut step_usage = crate::model_io::ModelIoUsage::default();
-            let mut step_error: Option<String> = None;
-            let mut api_tracker = crate::api_usage::ApiCallTracker::default();
-
-            loop {
-                let event = tokio::select! {
-                    event = event_rx.recv() => event,
-                    _ = cancel.cancelled() => None,
-                };
-                if let Some(event) = &event {
-                    api_tracker.observe(event);
-                }
-                match event {
-                    Some(ProviderEvent::Reasoning(delta)) => {
-                        let at = Instant::now();
-                        first_token_at.get_or_insert(at);
-                        step_first_token_at.get_or_insert(at);
-                        forwarded_content = true;
-                        reasoning.push_str(&delta);
-                        self.record_output_delta(&delta);
-                        self.emit(
-                            |session_id| Event::ReasoningDelta {
-                                session_id,
-                                item_id: reasoning_item.clone(),
-                                delta,
-                            },
-                            tx,
-                        );
-                    }
-                    Some(ProviderEvent::Text(delta)) => {
-                        let at = Instant::now();
-                        first_token_at.get_or_insert(at);
-                        step_first_token_at.get_or_insert(at);
-                        forwarded_content = true;
-                        text.push_str(&delta);
-                        self.record_output_delta(&delta);
-                        self.emit(
-                            |session_id| Event::TextDelta {
-                                session_id,
-                                item_id: text_item.clone(),
-                                delta,
-                            },
-                            tx,
-                        );
-                    }
-                    // Live pending-tool cards (arguments still streaming):
-                    // forward as live-only ToolInput events under a unique
-                    // per-invocation item id. The execution pass claims the
-                    // same id back by provider id, so the UI's pending card
-                    // becomes the executing card in place even when the
-                    // provider repeats a call id.
-                    Some(ProviderEvent::ToolCallStart { index, id, name }) => {
-                        // A streamed tool call is model output like any other:
-                        // its name/first arguments settle the first-token time
-                        // (harness parity — a pure tool-call step still has a
-                        // TTFT).
-                        let at = Instant::now();
-                        first_token_at.get_or_insert(at);
-                        step_first_token_at.get_or_insert(at);
-                        forwarded_content = true;
-                        let item_id = live_tool_inputs
-                            .get(&index)
-                            .map(|(_, item_id)| item_id.clone())
-                            .unwrap_or_else(|| self.next_tool_item_id(&turn_id, &id));
-                        self.emit(
-                            |session_id| Event::ToolInputStart {
-                                session_id,
-                                item_id: item_id.clone(),
-                                tool: name,
-                            },
-                            tx,
-                        );
-                        live_tool_inputs.insert(index, (id, item_id));
-                    }
-                    Some(ProviderEvent::ToolCallDelta { index, delta }) => {
-                        if !delta.is_empty() {
-                            let at = Instant::now();
-                            first_token_at.get_or_insert(at);
-                            step_first_token_at.get_or_insert(at);
-                        }
-                        if let Some((_, item_id)) = live_tool_inputs.get(&index) {
-                            let item_id = item_id.clone();
-                            self.emit(
-                                |session_id| Event::ToolInputDelta {
-                                    session_id,
-                                    item_id,
-                                    delta,
-                                },
-                                tx,
-                            );
-                        }
-                    }
-                    Some(ProviderEvent::AssistantReplay(snapshot)) => {
-                        if !snapshot.items.is_empty() {
-                            forwarded_content = true;
-                        }
-                        replay = Some(snapshot);
-                    }
-                    Some(ProviderEvent::ToolCalls(calls)) => {
-                        forwarded_content = true;
-                        tool_calls = calls;
-                    }
-                    Some(ProviderEvent::ResponseMetadata(_)) => {}
-                    // Retry status is live-rendered; api_tracker independently
-                    // counts it and drops the previous attempt's response metadata.
-                    Some(ProviderEvent::Retrying(notice)) => {
-                        let status = retry_status(&notice);
-                        self.emit(|session_id| Event::RetryStatus { session_id, status }, tx);
-                    }
-                    Some(ProviderEvent::Usage {
-                        input,
-                        cache_read,
-                        output,
-                        used,
-                        total,
-                        reasoning_output,
-                    }) => {
-                        self.turn_input += input;
-                        self.turn_cache_read += cache_read;
-                        self.turn_output += output;
-                        self.turn_reasoning_output += reasoning_output;
-                        self.input_total += input;
-                        self.cache_read_total += cache_read;
-                        self.last_total_tokens = Some(used);
-                        step_usage = crate::model_io::ModelIoUsage {
-                            input,
-                            cache_read,
-                            output,
-                            used,
-                            total,
-                            reasoning_output,
-                        };
-                        // Per-request usage is persisted immediately (durable before
-                        // events); replay restores the watermark from the last
-                        // record
-                        self.record(&RolloutRecord::StepUsage {
-                            input,
-                            cache_read,
-                            output,
-                            used,
-                            turn_id: self.usage_turn_id.clone(),
-                        });
-                        let (input_total, cache_read_total) =
-                            (self.input_total, self.cache_read_total);
-                        self.emit(
-                            |session_id| Event::ContextUsage {
-                                session_id,
-                                used,
-                                total,
-                                cache_read_total,
-                                input_total,
-                            },
-                            tx,
-                        );
-                    }
-                    Some(ProviderEvent::Finished(reason)) => {
-                        finish_reason = reason;
-                        break;
-                    }
-                    None => {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        let error = pig_protocol::CoreError::Internal {
-                            detail: "Provider event stream ended without a finish reason"
-                                .to_string(),
-                        };
-                        step_error = Some(pig_provider::core_error_en(&error));
-                        // The typed error only reaches the UI after the reactive
-                        // overflow decision (retry or final failure).
-                        failure = Some(error);
-                        break;
-                    }
-                    Some(ProviderEvent::Failed(error)) => {
-                        step_error = Some(pig_provider::core_error_en(&error));
-                        failure = Some(error);
-                        break;
-                    }
-                }
-            }
-            // Request-scoped span for the wire trace (an attempt is one
-            // request); the step-scoped figures are added once after the
-            // attempt loop so a retry cannot count the step twice.
-            let api_elapsed = api_started.elapsed();
-            self.turn_api_steps += 1;
-            let request_ttft_ms = first_token_at
-                .map(|at| at.duration_since(api_started).as_millis() as u64)
-                .unwrap_or(0)
-                .min(api_elapsed.as_millis() as u64);
-
-            // Persist the model-io trace (failures/cancellations recorded too): the
-            // UI's "view model io" reads this file directly. This debug trace is
-            // best-effort; unlike the durable rollout, its write failures only
-            // warn and do not stop the turn.
-            incomplete = finish_reason.is_incomplete();
-            let io_finish = if failure.is_some() {
-                "error"
-            } else if cancel.is_cancelled() {
-                "cancelled"
-            } else {
-                finish_reason.as_str()
-            };
-            let mut api_record = crate::api_usage::ApiUsageRecord::new(
-                &self.id,
-                "main",
-                config,
-                api_started_ms,
-                api_elapsed.as_millis() as u64,
-            );
-            api_record.turn_id = Some(turn_id.clone());
-            api_record.step = Some(step as u32);
-            api_record.ttft_ms = first_token_at.is_some().then_some(request_ttft_ms);
-            api_record.finish = io_finish.to_string();
-            api_record.error = step_error.clone();
-            api_tracker.apply_to(&mut api_record);
-            self.store
-                .lock()
-                .expect("store lock")
-                .record_api_usage(&api_record);
-            let attempt_used = step_usage.used;
-
-            // A successful attempt owns the final calls: claim one internal
-            // item id per invocation, reusing the streaming preview's id by
-            // provider call id (FIFO) so the card does not split. Failed,
-            // cancelled and incomplete attempts leave the previews to the
-            // discard pass below.
-            if failure.is_none() && !cancel.is_cancelled() && !incomplete {
-                step_item_ids =
-                    self.claim_tool_item_ids(&turn_id, &tool_calls, &mut live_tool_inputs);
-            }
-
-            let mut io_record = crate::model_io::ModelIoRecord {
-                ts_ms: crate::model_io::now_ms(),
-                turn: format!("{turn_id}-s{step}"),
-                source: "main".into(),
-                provider: config.provider_name.clone(),
-                model: config.model.clone(),
-                duration_ms: api_elapsed.as_millis() as u64,
-                ttft_ms: request_ttft_ms,
-                usage: step_usage,
-                finish: io_finish.into(),
-                error: step_error,
-                reasoning: reasoning.clone(),
-                text: text.clone(),
-                tool_calls: crate::model_io::project_tool_calls(&tool_calls),
-                input_offset: io_offset,
-                input: io_input,
-                file_reset: false,
-            };
-            if let Err(e) = crate::model_io::append(
-                &self.data_dir.join("sessions"),
-                &self.id,
-                &mut io_record,
-                &io_input_full,
-                crate::model_io::MAX_SESSION_BYTES,
-                io_full_retention,
-            ) {
-                tracing::warn!("Failed to write model io trace (ignored): {e}");
-            }
-            // This entry's full projection becomes the delta baseline for the next
-            // one
-            self.io_last_input = io_input_full;
-
-            for (_, (id, item_id)) in live_tool_inputs.drain() {
-                let discard = failure.is_some()
-                    || incomplete
-                    || cancel.is_cancelled()
-                    || !tool_calls.iter().any(|call| call.id == id);
-                if discard {
-                    self.emit(
-                        |session_id| Event::ToolInputDiscard {
-                            session_id,
-                            item_id,
-                        },
-                        tx,
-                    );
-                }
-            }
-            if incomplete {
-                tool_calls.clear();
-                if let Some(replay) = replay.as_mut() {
-                    replay.remove_tool_calls();
-                }
-            }
-
-            if let Some(error) = failure.as_ref() {
-                provider_task.abort();
-                let overflow = matches!(error, CoreError::ContextWindowExceeded { .. });
-                if overflow && !forwarded_content && !self.overflow_recovered {
-                    tracing::warn!(
-                        step,
-                        "context window exceeded before any content was forwarded; compacting and retrying this step once"
-                    );
-                    // Compare the same estimate before and after: the provider's
-                    // reported usage can be lower than the conservative estimate,
-                    // so it cannot prove that this rewrite actually freed room.
-                    let used_before =
-                        super::estimate::estimate_history_tokens(&self.history) + tools_tokens;
-                    match self
-                        .run_compact_with_current_tools(
-                            Some(config),
-                            CompactTrigger::Overflow,
-                            None,
-                            preserve_latest,
-                            pause_pin,
-                            tx,
-                            cancel,
-                        )
-                        .await
-                    {
-                        CompactOutcome::Completed => {
-                            let used_after = self.last_total_tokens.unwrap_or(u64::MAX);
-                            if used_after < used_before {
-                                self.overflow_recovered = true;
-                                continue 'attempt;
-                            }
-                            tracing::warn!(
-                                used_before,
-                                used_after,
-                                "overflow compaction did not shrink the context; surfacing the error"
-                            );
-                        }
-                        CompactOutcome::Cancelled => {
-                            self.charge_step_time(step_started, step_first_token_at);
-                            return StepOutcome::Ended { aborted: true };
-                        }
-                        CompactOutcome::Skipped | CompactOutcome::Failed => {
-                            tracing::warn!(
-                                "context overflow cannot be compacted (no compactable prefix); surfacing the error"
-                            );
-                        }
-                    }
-                }
-                self.emit(
-                    |session_id| Event::Error {
-                        session_id: Some(session_id),
-                        error: error.clone(),
-                        fatal: true,
-                    },
-                    tx,
-                );
-                self.charge_step_time(step_started, step_first_token_at);
-                return StepOutcome::Ended { aborted: false };
-            }
-            if cancel.is_cancelled() {
-                provider_task.abort();
-                self.emit(|session_id| Event::TurnAborted { session_id }, tx);
-                self.charge_step_time(step_started, step_first_token_at);
-                return StepOutcome::Ended { aborted: true };
-            }
-            let _ = provider_task.await;
-            attempt_usage = (attempt_used > 0).then_some(attempt_used);
-            break 'attempt;
-        }
-
-        // Step-scoped model time and TTFT, added once per step (a retry cannot
-        // double count; failed and cancelled exits charge from their own
-        // branches).
-        self.charge_step_time(step_started, step_first_token_at);
-
-        // Some Responses streams deliver the assistant message only as the
-        // authoritative `output_item.done` item (no text deltas). The durable
-        // replay already carries that text; use it so the live answer, the
-        // TextDone boundary and its sources are not lost.
-        if text.is_empty()
-            && let Some(replay) = replay.as_ref()
-        {
-            text = replay
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    pig_provider::AssistantReplayItem::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-        }
-        let reasoning = Some(reasoning).filter(|reasoning| !reasoning.is_empty());
-        // The durable assistant record is written before the TextDone boundary:
-        // a crash after TextDone can never lose a reply the UI already showed.
-        self.record(&RolloutRecord::Assistant {
-            text: text.clone(),
-            reasoning: reasoning.clone(),
-            replay: replay.clone(),
-            tool_calls: tool_calls.iter().map(ToolCall::to_wire).collect(),
-        });
-        if !text.is_empty() {
-            self.emit(
-                |session_id| Event::TextDone {
-                    session_id,
-                    item_id: text_item.clone(),
-                    full_text: text.clone(),
-                },
-                tx,
-            );
-        }
-        // Normalized hosted-search sources come from the durable replay, after
-        // the assistant record is written. The text item id is the same one
-        // already carried by TextDone.
-        let sources = replay
-            .as_ref()
-            .map(pig_provider::replay_sources)
-            .unwrap_or_default();
-        if !text.is_empty() && !sources.is_empty() {
-            self.emit(
-                |session_id| Event::Sources {
-                    session_id,
-                    item_id: text_item.clone(),
-                    sources,
-                },
-                tx,
-            );
-        }
-        self.history.push(ChatMsg::assistant_with_replay(
-            text,
-            tool_calls.clone(),
-            reasoning,
-            replay,
-        ));
-        // The next request's preflight baseline is this persisted reply step.
-        // Only this attempt's real Usage may be attached to the new history
-        // length; a missing/zero Usage clears the anchor and preflight falls
-        // back to the conservative estimate.
-        self.usage_anchor = attempt_usage.map(|used| UsageAnchor {
-            model_key: model_key(config),
-            history_len: self.history.len(),
-            tools_tokens,
-            used,
-            system_fingerprint: system_fingerprint(&self.history),
-        });
-        // The reply is part of the surface the next request will send: refresh
-        // the composition now (the provider sample cannot see it yet)
-        let breakdown = super::estimate::context_breakdown_with_tools(&self.history, tools_tokens);
-        self.emit(
-            |session_id| Event::ContextBreakdownChanged {
-                session_id,
-                breakdown,
-            },
-            tx,
+        let mut runtime = super::engine::StepRuntime::root(
+            turn_id,
+            config.clone(),
+            control.clone(),
+            preserve_latest,
+            pause_pin,
         );
-        let paused = finish_reason == pig_protocol::FinishReason::Pause;
-        if tool_calls.is_empty() {
-            if paused {
-                return StepOutcome::Paused;
+        match super::engine::run_step(self, &mut runtime, step, tx, control.cancel_token()).await {
+            super::engine::StepOutcome::Continue => StepOutcome::ToolsExecuted,
+            super::engine::StepOutcome::TextOnly { finish_reason } => {
+                StepOutcome::TextOnly { finish_reason }
             }
-            return StepOutcome::TextOnly {
-                finish_reason: incomplete.then_some(finish_reason),
-            };
+            super::engine::StepOutcome::Paused => StepOutcome::Paused,
+            super::engine::StepOutcome::Cancelled => StepOutcome::Ended { aborted: true },
+            super::engine::StepOutcome::Failed => StepOutcome::Ended { aborted: false },
         }
+    }
 
-        let item_ids = step_item_ids;
+    /// Execute one step's root tool calls. Kept on Session (not on the host
+    /// struct) because it reads session policy: permissions, hooks, plan mode,
+    /// approvals, turn changes and the parallel mask.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn execute_root_tools(
+        &mut self,
+        tool_calls: &[ToolCall],
+        item_ids: &[String],
+        turn_id: &str,
+        paused: bool,
+        media: tool::MediaCapabilities,
+        config: &ResolvedModel,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> engine::StepOutcome {
         debug_assert_eq!(
             item_ids.len(),
             tool_calls.len(),
@@ -1312,16 +781,22 @@ impl Session {
         // concurrentable calls are sync points — after the preceding group
         // drains, they take the original serial path below (interception
         // semantics unchanged)
-        let mask = parallel_mask(
-            &tool_calls,
-            &tools,
-            self.permissions,
-            media,
-            &self.permission_rules,
-            &self.state,
-            &self.cwd,
-            self.hooks.is_active(),
-        );
+        let mask = {
+            let rules = self
+                .permission_rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            parallel_mask(
+                &tool_calls,
+                &tools,
+                self.permissions,
+                media,
+                &rules,
+                &self.state,
+                &self.agent.cwd,
+                self.hooks.is_active(),
+            )
+        };
         let mut next_ix = 0usize;
         for (call_ix, call) in tool_calls.iter().enumerate() {
             if call_ix < next_ix {
@@ -1341,16 +816,16 @@ impl Session {
                         &item_ids,
                         call_ix,
                         group_end,
-                        &turn_id,
+                        turn_id,
                         media,
                         config.context_window,
-                        self.trust.admits(&self.cwd),
+                        self.trust.admits(&self.agent.cwd),
                         tx,
                         cancel,
                     )
                     .await
                 {
-                    return StepOutcome::Ended { aborted: true };
+                    return engine::StepOutcome::Cancelled;
                 }
                 continue;
             }
@@ -1389,7 +864,7 @@ impl Session {
                     serde_json::from_str(&call.arguments).unwrap_or_default();
                 let mut plan = args["plan"].as_str().unwrap_or("").to_string();
                 if plan.trim().is_empty() {
-                    plan = read_plan_file(&self.cwd, &self.id).unwrap_or_default();
+                    plan = read_plan_file(&self.agent.cwd, &self.agent.id).unwrap_or_default();
                 }
                 // begin is rewritten with the effective plan (replay restores
                 // the same full text via the rollout arguments)
@@ -1418,11 +893,11 @@ impl Session {
                     // the plan file first
                     note = format!(
                         "The plan file is empty or missing: write the plan to `.pigcode/plans/plan-{}.md` with Write first, then call ExitPlanMode.",
-                        self.id
+                        self.agent.id
                     );
                     is_error = true;
                 } else {
-                    let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.id);
+                    let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.agent.id);
                     let (reply_tx, reply_rx) = oneshot::channel();
                     // Plan confirmation is a one-shot per-request popup; it is
                     // never coalesced with another approval
@@ -1434,7 +909,7 @@ impl Session {
                     // approval (rewriting the same content on approval is
                     // idempotent; after rejection the file stays, and the next
                     // ExitPlanMode overwrites it once revised)
-                    write_plan_file(&self.cwd, &self.id, &plan);
+                    write_plan_file(&self.agent.cwd, &self.agent.id, &plan);
                     // The full plan goes into the popup (the kimi plan approval
                     // panel has its own title; detail = the plain plan full
                     // text — truncation would hide the full text from the user
@@ -1463,7 +938,7 @@ impl Session {
                                         call,
                                         summary,
                                         item_id: &item_id,
-                                        turn_id: &turn_id,
+                                        turn_id: turn_id,
                                         rest: &tool_calls[call_ix + 1..],
                                         rest_item_ids: &item_ids[call_ix + 1..],
                                         card: None,
@@ -1472,7 +947,7 @@ impl Session {
                                     tx,
                                 );
                                 self.emit(|session_id| Event::TurnAborted { session_id }, tx);
-                    return StepOutcome::Ended { aborted: true };
+                    return engine::StepOutcome::Cancelled;
                             }
                         };
                     match decision {
@@ -1484,9 +959,9 @@ impl Session {
                             // overwrite here). Exiting only flips the plan
                             // toggle — the exec mode is an independent dimension
                             // and stays as-is
-                            write_plan_file(&self.cwd, &self.id, &plan);
+                            write_plan_file(&self.agent.cwd, &self.agent.id, &plan);
                             self.plan_enabled = false;
-                            let session_id = self.id.clone();
+                            let session_id = self.agent.id.clone();
                             self.store.lock().expect("store lock").update_session(
                                 &session_id,
                                 |m| {
@@ -1521,7 +996,8 @@ impl Session {
                         }
                     }
                 }
-                self.history
+                self.agent
+                    .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
@@ -1567,7 +1043,7 @@ impl Session {
                     )
                 } else {
                     self.plan_enabled = true;
-                    let session_id = self.id.clone();
+                    let session_id = self.agent.id.clone();
                     self.store
                         .lock()
                         .expect("store lock")
@@ -1585,12 +1061,13 @@ impl Session {
                     (
                         format!(
                             "Plan mode is on. Research with read-only tools from here; when the plan is ready, write it with Write to the plan file `.pigcode/plans/plan-{}.md` (the only writable path), then call ExitPlanMode to ask the user to confirm execution.",
-                            self.id
+                            self.agent.id
                         ),
                         false,
                     )
                 };
-                self.history
+                self.agent
+                    .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
@@ -1630,7 +1107,7 @@ impl Session {
             // pass the approval gate themselves).
             if call.name == "Agent" {
                 match self
-                    .run_subagent(call, &turn_id, &item_id, config, tx, cancel)
+                    .run_subagent(call, turn_id, &item_id, config, tx, cancel)
                     .await
                 {
                     SubagentOutcome::Finished {
@@ -1639,7 +1116,7 @@ impl Session {
                         card,
                         cards,
                     } => {
-                        self.history.push(
+                        self.agent.history.push(
                             ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error),
                         );
                         self.record(&RolloutRecord::ToolCall {
@@ -1677,7 +1154,7 @@ impl Session {
                                 call,
                                 summary,
                                 item_id: &item_id,
-                                turn_id: &turn_id,
+                                turn_id: turn_id,
                                 rest: &tool_calls[call_ix + 1..],
                                 rest_item_ids: &item_ids[call_ix + 1..],
                                 card,
@@ -1686,7 +1163,7 @@ impl Session {
                             tx,
                         );
                         self.emit(|session_id| Event::TurnAborted { session_id }, tx);
-                        return StepOutcome::Ended { aborted: true };
+                        return engine::StepOutcome::Cancelled;
                     }
                 }
             }
@@ -1706,7 +1183,7 @@ impl Session {
                         card,
                         cards,
                     } => {
-                        self.history.push(
+                        self.agent.history.push(
                             ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error),
                         );
                         self.record(&RolloutRecord::ToolCall {
@@ -1742,7 +1219,7 @@ impl Session {
                                 call,
                                 summary,
                                 item_id: &item_id,
-                                turn_id: &turn_id,
+                                turn_id: turn_id,
                                 rest: &tool_calls[call_ix + 1..],
                                 rest_item_ids: &item_ids[call_ix + 1..],
                                 card,
@@ -1751,7 +1228,7 @@ impl Session {
                             tx,
                         );
                         self.emit(|session_id| Event::TurnAborted { session_id }, tx);
-                        return StepOutcome::Ended { aborted: true };
+                        return engine::StepOutcome::Cancelled;
                     }
                 }
             }
@@ -1764,7 +1241,8 @@ impl Session {
             if call.name == "ReadMediaFile" && !media.any() {
                 let note =
                     "The current model supports neither image nor PDF input; switch the model or enable the media-input capability in Settings.".to_string();
-                self.history
+                self.agent
+                    .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
@@ -1801,13 +1279,14 @@ impl Session {
             // plan" is rejected too
             if self.plan_enabled
                 && !read_only
-                && !tool::is_plan_file_write(&self.cwd, &call.arguments)
+                && !tool::is_plan_file_write(&self.agent.cwd, &call.arguments)
             {
                 let note = format!(
                     "Plan mode: modifying tools are disabled (the only exception is writing the plan file `.pigcode/plans/plan-{}.md`). Research with read-only tools, write the plan into the plan file, then call ExitPlanMode to ask the user for confirmation.",
-                    self.id
+                    self.agent.id
                 );
-                self.history
+                self.agent
+                    .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
@@ -1848,7 +1327,8 @@ impl Session {
                     Ok(questions) => questions,
                     Err(error) => {
                         let note = format!("Invalid AskUserQuestion arguments: {error}");
-                        self.history
+                        self.agent
+                            .history
                             .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                         self.record(&RolloutRecord::ToolCall {
                             tool: call.name.clone(),
@@ -1878,7 +1358,7 @@ impl Session {
                         continue;
                     }
                 };
-                let request_id = format!("{}-{turn_id}-question-{item_id}", self.id);
+                let request_id = format!("{}-{turn_id}-question-{item_id}", self.agent.id);
                 let (reply_tx, reply_rx) = oneshot::channel();
                 self.pending_questions
                     .lock()
@@ -1905,7 +1385,7 @@ impl Session {
                                 call,
                                 summary,
                                 item_id: &item_id,
-                                turn_id: &turn_id,
+                                turn_id: turn_id,
                                         rest: &tool_calls[call_ix + 1..],
                                         rest_item_ids: &item_ids[call_ix + 1..],
                                 card: None,
@@ -1914,7 +1394,7 @@ impl Session {
                             tx,
                         );
                         self.emit(|session_id| Event::TurnAborted { session_id }, tx);
-                return StepOutcome::Ended { aborted: true };
+                return engine::StepOutcome::Cancelled;
                     }
                 };
                 let note = match &reply {
@@ -1938,7 +1418,8 @@ impl Session {
                     None => "The user chose not to answer; decide from context and continue."
                         .to_string(),
                 };
-                self.history
+                self.agent
+                    .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
                     tool: call.name.clone(),
@@ -1981,7 +1462,7 @@ impl Session {
                     call,
                     tool_ref.map(|t| t.as_ref()),
                     &item_id,
-                    &turn_id,
+                    turn_id,
                     tx,
                     cancel,
                 )
@@ -1989,7 +1470,8 @@ impl Session {
             self.turn_tool_ms += tool_started.elapsed().as_millis() as u64;
             match gated {
                 GatedToolOutcome::Rejected { note } => {
-                    self.history
+                    self.agent
+                        .history
                         .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                     self.record(&RolloutRecord::ToolCall {
                         tool: call.name.clone(),
@@ -2023,7 +1505,7 @@ impl Session {
                             call,
                             summary,
                             item_id: &item_id,
-                            turn_id: &turn_id,
+                            turn_id: turn_id,
                             rest: &tool_calls[call_ix + 1..],
                             rest_item_ids: &item_ids[call_ix + 1..],
                             card: None,
@@ -2032,7 +1514,7 @@ impl Session {
                         tx,
                     );
                     self.emit(|session_id| Event::TurnAborted { session_id }, tx);
-                    return StepOutcome::Ended { aborted: true };
+                    return engine::StepOutcome::Cancelled;
                 }
                 GatedToolOutcome::Executed {
                     mut output,
@@ -2052,7 +1534,7 @@ impl Session {
                         ChatMsg::tool_result_with_images(&call.id, output.clone(), images)
                             .with_error(is_error);
                     message.documents = documents;
-                    self.history.push(message);
+                    self.agent.history.push(message);
                     self.delivery_receipts
                         .lock()
                         .expect("notification receipt lock")
@@ -2094,26 +1576,12 @@ impl Session {
             }
         }
         if paused {
-            StepOutcome::Paused
+            engine::StepOutcome::Paused
         } else {
-            StepOutcome::ToolsExecuted
+            engine::StepOutcome::Continue
         }
     }
 
-    /// Executes a parallel read-only group (P0): calls in the group are judged
-    /// read-only by parallel_mask, approval-free in the current mode, and free
-    /// of session-layer interception (sync points such as Agent/AskUserQuestion/
-    /// plan mode toggles all live on the serial path). ToolCallBegin is emitted
-    /// first in original order (card order = original order); ToolCallEnd
-    /// arrives as each call completes (addressed by item_id; the TUI's
-    /// find_or_create tolerates out-of-order arrival, and replay rebuilds from
-    /// the rollout record order); history/rollout are backfilled by original
-    /// index once the group drains, so tool_result pairing order is preserved.
-    /// Returns false = cancelled: running tasks have been aborted and drained,
-    /// unfinished calls have received "Stopped" receipts, calls after the group
-    /// have history receipts, and TurnAborted has been sent (the caller goes
-    /// straight to Ended).
-    #[allow(clippy::too_many_arguments)]
     async fn run_parallel_group(
         &mut self,
         tool_calls: &[ToolCall],
@@ -2177,7 +1645,7 @@ impl Session {
             while next < cards.len() && set.len() < MAX_PARALLEL {
                 let index = next;
                 let call = cards[index].call.clone();
-                let cwd = self.cwd.clone();
+                let cwd = self.agent.cwd.clone();
                 let state = self.state.clone();
                 let mcp = self.mcp.clone();
                 let plugin_tools = self.plugin_tools.clone();
@@ -2339,7 +1807,7 @@ impl Session {
                         ChatMsg::tool_result_with_images(&card.call.id, output.clone(), images)
                             .with_error(is_error);
                     message.documents = documents;
-                    self.history.push(message);
+                    self.agent.history.push(message);
                     self.record(&RolloutRecord::ToolCall {
                         tool: card.call.name.clone(),
                         summary: card.summary.clone(),
@@ -2361,10 +1829,10 @@ impl Session {
                         {
                             let store = self.store.lock().expect("store lock");
                             if change.additions == 0 && change.deletions == 0 {
-                                store.delete_file_change(&self.id, &change.path);
+                                store.delete_file_change(&self.agent.id, &change.path);
                             } else {
                                 store.upsert_file_change(
-                                    &self.id,
+                                    &self.agent.id,
                                     &change.path,
                                     &change.unified_diff,
                                     change.additions,
@@ -2407,7 +1875,8 @@ impl Session {
                     // error receipt to keep tool_use pairing complete
                     let note = "Internal tool execution error (the task terminated unexpectedly)"
                         .to_string();
-                    self.history
+                    self.agent
+                        .history
                         .push(ChatMsg::tool_result(&card.call.id, note.clone()).with_error(true));
                     self.record(&RolloutRecord::ToolCall {
                         tool: card.call.name.clone(),

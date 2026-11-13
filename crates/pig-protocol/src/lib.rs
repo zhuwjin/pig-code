@@ -350,43 +350,12 @@ pub struct QuestionItem {
     pub options: Vec<QuestionOption>,
 }
 
-/// Read-only display row of a subagent conversation (Event::SubagentHistory payload)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SubagentItem {
-    /// "user" | "assistant" | "reasoning" | "tool"
-    pub role: String,
-    /// user/assistant/reasoning body text; for tool rows, the call summary
-    pub text: String,
-    /// Tool name of a tool row
-    pub tool: Option<String>,
-    /// Tool row output (truncated to 2000 chars on the core side, at character boundaries)
-    pub output: Option<String>,
-    /// Tool row arguments (the raw call's JSON)
-    #[serde(default)]
-    pub detail: Option<String>,
-    /// When the message was recorded, for the user row's time
-    #[serde(default)]
-    pub ts_ms: u64,
-    /// How long the step's reasoning streamed, for the reasoning row's label
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    /// The edit a tool row made (Edit/Write calls), for its diff card
-    #[serde(default)]
-    pub edit: Option<EditDiff>,
-    /// Hosted-search citations of an assistant row
-    #[serde(default)]
-    pub sources: Vec<Source>,
-    pub is_error: bool,
-    #[serde(default)]
-    pub stopped: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn stopped_fields_default_for_legacy_data_and_round_trip() {
+    fn stopped_fields_default_for_legacy_data() {
         let legacy_event: Event = serde_json::from_value(serde_json::json!({
             "ToolCallEnd": {
                 "session_id": "s",
@@ -400,25 +369,6 @@ mod tests {
             legacy_event,
             Event::ToolCallEnd { stopped: false, .. }
         ));
-
-        let legacy_item: SubagentItem = serde_json::from_value(serde_json::json!({
-            "role": "tool",
-            "text": "run a tool",
-            "tool": "Read",
-            "output": "Stopped",
-            "is_error": true,
-        }))
-        .expect("legacy subagent item");
-        assert!(!legacy_item.stopped);
-
-        let stopped_item = SubagentItem {
-            stopped: true,
-            ..legacy_item
-        };
-        let json = serde_json::to_value(&stopped_item).expect("serialize subagent item");
-        assert_eq!(json["stopped"], true);
-        let back: SubagentItem = serde_json::from_value(json).expect("deserialize subagent item");
-        assert!(back.stopped);
     }
 
     #[test]

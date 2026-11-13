@@ -450,6 +450,8 @@
     "grep": "Search contents",
     "todo": "To-do list",
     "fetch_url": "Read webpage",
+    "wait_for": "Wait for",
+    "wait_any": "any task",
     "background_task": "Background task",
     "ask_user": "Ask user",
     "exit_plan": "Implement plan",

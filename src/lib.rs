@@ -1,6 +1,7 @@
 mod agent;
 mod code_highlight;
 mod composer_chips;
+mod conversation_projection;
 mod plugin_system;
 mod terminal;
 mod theme;

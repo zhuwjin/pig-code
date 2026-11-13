@@ -27,7 +27,7 @@ impl Session {
             .store
             .lock()
             .expect("store lock")
-            .pending_notifications(&self.id);
+            .pending_notifications(&self.agent.id);
         let mut notifications = match pending {
             Ok(notifications) => notifications,
             Err(error) => {
@@ -68,7 +68,7 @@ impl Session {
             self.refresh_notification_queue(mailbox, tx);
             return 0;
         }
-        self.history.push(ChatMsg::user(model_text.clone()));
+        self.agent.history.push(ChatMsg::user(model_text.clone()));
         self.delivery_receipts
             .lock()
             .expect("notification receipt lock")
@@ -133,14 +133,14 @@ impl Session {
             &self
                 .data_dir
                 .join("sessions")
-                .join(format!("{}.jsonl", self.id)),
+                .join(format!("{}.jsonl", self.agent.id)),
         )?;
         let receipts = crate::rollout::notification_delivery_receipts(&records);
         self.store
             .lock()
             .expect("store lock")
             .reconcile_with_history(
-                &self.id,
+                &self.agent.id,
                 &receipts
                     .iter()
                     .map(|(id, channel)| (id.clone(), *channel))
@@ -160,7 +160,7 @@ impl Session {
             .store
             .lock()
             .expect("store lock")
-            .pending_notifications(&self.id);
+            .pending_notifications(&self.agent.id);
         let mut notifications = match pending {
             Ok(notifications) => notifications,
             Err(error) => {

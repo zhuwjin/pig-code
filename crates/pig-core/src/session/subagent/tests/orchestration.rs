@@ -8,16 +8,7 @@ fn agent_context_native_replay_roundtrip() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("agent.jsonl");
-    let meta = serde_json::json!({
-        "type": "meta",
-        "agent_id": "a1",
-        "profile": "general-purpose",
-        "description": "test",
-        "model": "m",
-        "provider": "p",
-        "created_at": 1,
-    });
-    persist_agent_line(&path, &meta);
+    persist_agent_meta(&path, "a1", "s-test", "general-purpose", "test");
     let replay = pig_provider::AssistantReplay {
         origin: pig_provider::ReplayOrigin {
             api_format: pig_protocol::ApiFormat::AnthropicMessages,
@@ -51,14 +42,12 @@ fn agent_context_native_replay_roundtrip() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].replay, Some(replay));
 
-    let legacy_path = dir.join("legacy.jsonl");
-    persist_agent_line(&legacy_path, &meta);
-    persist_agent_line(
-        &legacy_path,
-        &serde_json::json!({"type": "msg", "msg": ChatMsg::assistant("legacy".into(), vec![], None)}),
-    );
-    let (_, legacy) = crate::agent::read_agent(&legacy_path).expect("read legacy context");
-    assert!(legacy[0].replay.is_none());
+    let plain_path = dir.join("plain.jsonl");
+    persist_agent_meta(&plain_path, "a1", "s-test", "general-purpose", "test");
+    let mut plain = ChatMsg::assistant("plain".into(), vec![], None);
+    persist_agent_msg(&plain_path, &mut plain);
+    let (_, plain) = crate::agent::read_agent(&plain_path).expect("read plain context");
+    assert!(plain[0].replay.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -68,13 +57,7 @@ fn agent_context_reconcile_drops_unanswered_calls() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("agent.jsonl");
-    persist_agent_line(
-        &path,
-        &serde_json::json!({
-            "type": "meta", "agent_id": "a1", "profile": "general-purpose",
-            "description": "test", "model": "m", "provider": "p", "created_at": 1,
-        }),
-    );
+    persist_agent_meta(&path, "a1", "s-test", "general-purpose", "test");
     let first = ToolCall {
         id: "call_1".into(),
         name: "Read".into(),
@@ -105,7 +88,12 @@ fn agent_context_reconcile_drops_unanswered_calls() {
         ChatMsg::assistant_with_replay(String::new(), vec![first, second], None, Some(replay));
     persist_agent_msg(&path, &mut assistant);
     let mut result = ChatMsg::tool_result("call_1", "done".into());
-    persist_agent_msg(&path, &mut result);
+    let result_call = ToolCall {
+        id: "call_1".into(),
+        name: "Read".into(),
+        arguments: "{}".into(),
+    };
+    persist_agent_tool(&path, &result_call, &mut result);
     let mut user = ChatMsg::user("continue".into());
     persist_agent_msg(&path, &mut user);
 
@@ -128,14 +116,7 @@ fn media_write_failure_degrades_live_message_and_jsonl() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("agent.jsonl");
-    persist_agent_line(
-        &path,
-        &serde_json::json!({
-            "type": "meta", "agent_id": "a1", "profile": "explore",
-            "description": "media failure", "model": "m", "provider": "p",
-            "created_at": 1,
-        }),
-    );
+    persist_agent_meta(&path, "a1", "s-test", "explore", "media failure");
     std::fs::write(path.with_extension("media"), b"not a directory").unwrap();
     let mut message = ChatMsg::tool_result("call_pdf", "Read PDF doc.pdf".into());
     message.documents = vec![pig_provider::ChatDocument {
@@ -145,7 +126,12 @@ fn media_write_failure_degrades_live_message_and_jsonl() {
         label: Some("doc.pdf".into()),
         token_estimate: None,
     }];
-    persist_agent_msg(&path, &mut message);
+    let call = ToolCall {
+        id: "call_pdf".into(),
+        name: "ReadMediaFile".into(),
+        arguments: "{}".into(),
+    };
+    persist_agent_tool(&path, &call, &mut message);
     assert!(message.documents.is_empty(), "live message degraded");
     assert!(
         message
@@ -173,13 +159,19 @@ fn child_context_write_failure_is_sticky_and_carries_resume_guidance() {
     // A directory at the context path makes every append fail.
     std::fs::create_dir_all(&jsonl).expect("occupy the context path");
 
-    let mut drive = test_drive("a1-1");
-    drive.jsonl = jsonl.clone();
+    let mut drive = test_child_session("a1-1");
+    drive.subagent.as_mut().expect("child").jsonl = jsonl.clone();
     let mut first_message = ChatMsg::user("first".into());
     let first = persist_child_message(&mut drive, &mut first_message)
         .expect_err("a directory cannot be appended to");
     assert!(
-        drive.persist_failure.as_deref() == Some(first.as_str()),
+        drive
+            .subagent
+            .as_ref()
+            .expect("child")
+            .persist_failure
+            .as_deref()
+            == Some(first.as_str()),
         "the failure is remembered"
     );
     let second = persist_child_message(&mut drive, &mut ChatMsg::user("second".into()))
@@ -217,20 +209,20 @@ async fn child_skill_tool_honors_workspace_trust() {
     )
     .expect("skill file");
 
-    let mut drive = test_drive("a1-1");
-    drive.cwd = dir.clone();
+    let mut drive = test_child_session("a1-1");
+    drive.agent.cwd = dir.clone();
     drive.plugin_tools = crate::plugins::PluginToolset::new(
         &crate::plugins::PluginRegistry::shared(dir.clone()),
         &crate::config::WorkspaceTrust::untrusted(&dir),
         None,
         "s-test",
     );
-    drive.trusted = true;
+    drive.subagent.as_mut().expect("child").trusted = true;
     let (output, is_error) = run_child_skill(&drive).await;
     assert!(!is_error, "a trusted project skill must load: {output}");
     assert!(output.contains("PROJECT_SKILL_BODY"), "{output}");
 
-    drive.trusted = false;
+    drive.subagent.as_mut().expect("child").trusted = false;
     let (output, is_error) = run_child_skill(&drive).await;
     assert!(
         is_error,
@@ -245,7 +237,7 @@ async fn child_skill_tool_honors_workspace_trust() {
 
 /// Execute the child's Skill tool for the project skill "demo" under the
 /// drive's constructed tool set.
-async fn run_child_skill(drive: &SubagentDrive) -> (String, bool) {
+async fn run_child_skill(drive: &Session) -> (String, bool) {
     let state = crate::task::SessionToolState::for_test();
     let mut tracker = ChangeTracker::default();
     let call = ToolCall {
@@ -253,9 +245,9 @@ async fn run_child_skill(drive: &SubagentDrive) -> (String, bool) {
         name: "Skill".into(),
         arguments: serde_json::json!({"skill": "demo"}).to_string(),
     };
-    let extra = drive.extra_tools();
+    let extra = drive.child_extra_tools();
     let ctx = ToolContext {
-        cwd: &drive.cwd,
+        cwd: &drive.agent.cwd,
         tracker: &mut tracker,
         state: &state,
         fs_grant: None,
@@ -315,7 +307,7 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
     registry
         .set_enabled("demo", &snapshot.packages[0].digest, true)
         .expect("enable package");
-    let mut drive = test_drive("a-dynamic");
+    let mut drive = test_child_session("a-dynamic");
     drive.plugin_tools = crate::plugins::PluginToolset::new(
         &registry.into_shared(),
         &crate::config::WorkspaceTrust::untrusted(&root),
@@ -325,7 +317,7 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
     let dispatcher = drive.plugin_tools.dispatcher();
     let (events_tx, events_rx) = async_channel::unbounded();
     let selecting = tokio::spawn(async move {
-        drive.select_plugin_tools(&events_tx).await;
+        drive.select_child_plugin_tools(&events_tx).await;
         drive
     });
     let query = match events_rx.recv().await.expect("selection query") {
@@ -341,9 +333,9 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
         result: Ok(vec!["DynamicRead".into()]),
     });
     let drive = selecting.await.expect("selection task");
-    assert_eq!(drive.tools.len(), 1);
-    assert_eq!(drive.tools[0].name(), "DynamicRead");
-    assert_eq!(drive.schemas.len(), 1);
+    assert_eq!(drive.agent.tools.len(), 1);
+    assert_eq!(drive.agent.tools[0].name(), "DynamicRead");
+    assert_eq!(drive.agent.schemas.len(), 1);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -351,20 +343,17 @@ async fn child_dynamic_tools_use_the_child_model_and_agent_identity() {
 async fn managed_driver_catches_panic_and_settles_registry() {
     let state = crate::task::SessionToolState::for_test();
     let pending = test_pending();
-    let drive = test_drive("a1-1");
+    let drive = test_child_session("a1-1");
     let task_id = crate::task::register_agent_task(
         &state,
         "subagent explore: panic".into(),
         CancellationToken::new(),
-        drive.agent_id.clone(),
+        drive.agent.id.clone(),
     );
     let (tx, rx) = async_channel::unbounded();
     let writer = state
-        .try_claim_agent_writer(&drive.agent_id)
+        .try_claim_agent_writer(&drive.agent.id)
         .expect("writer");
-    let progress = ProgressSink::Background {
-        task_id: task_id.clone(),
-    };
     let life = ChildLifecycle::new(
         &state,
         &pending,
@@ -372,7 +361,6 @@ async fn managed_driver_catches_panic_and_settles_registry() {
         tx,
         &drive,
         writer,
-        &progress,
         Some(task_id.clone()),
     );
     let cancel = CancellationToken::new();
@@ -401,11 +389,11 @@ async fn managed_driver_catches_panic_and_settles_registry() {
         !matches!(status, pig_protocol::TaskStatus::Running),
         "a panicking driver must not leave a Running task: {status:?}"
     );
-    assert!(!state.agent_writer_active(&drive.agent_id));
+    assert!(!state.agent_writer_active(&drive.agent.id));
     let finished = rx
         .try_recv()
         .ok()
-        .is_some_and(|event| matches!(event, Event::SubagentActivity { finished: true, .. }));
+        .is_some_and(|event| matches!(event, Event::ConversationStatus { running: false, .. }));
     assert!(finished, "the live panel must settle on panic");
 }
 
@@ -422,19 +410,16 @@ async fn background_driver_panic_before_run_notifies_once() {
         vec![],
     );
     let pending = test_pending();
-    let drive = test_drive("a2-3");
+    let drive = test_child_session("a2-3");
     let task_id = crate::task::register_agent_task(
         &state,
         "subagent explore: panic before run".into(),
         CancellationToken::new(),
-        drive.agent_id.clone(),
+        drive.agent.id.clone(),
     );
     let writer = state
-        .try_claim_agent_writer(&drive.agent_id)
+        .try_claim_agent_writer(&drive.agent.id)
         .expect("writer");
-    let progress = ProgressSink::Background {
-        task_id: task_id.clone(),
-    };
     let (tx, _rx) = async_channel::unbounded();
     let life = ChildLifecycle::new(
         &state,
@@ -443,7 +428,6 @@ async fn background_driver_panic_before_run_notifies_once() {
         tx,
         &drive,
         writer,
-        &progress,
         Some(task_id.clone()),
     );
     let cancel = CancellationToken::new();
@@ -451,7 +435,7 @@ async fn background_driver_panic_before_run_notifies_once() {
         life,
         &cancel,
         async { panic!("acquire boom") },
-        std::future::ready(SubagentDriveResult {
+        std::future::ready(SubagentResult {
             status_line: "completed (1 steps)".into(),
             result_text: "done".into(),
             turns: 1,
@@ -501,27 +485,27 @@ async fn background_driver_panic_before_run_notifies_once() {
         1,
         "a panic must not produce duplicate notifications"
     );
-    assert!(!state.agent_writer_active(&drive.agent_id));
+    assert!(!state.agent_writer_active(&drive.agent.id));
 }
 
 #[tokio::test]
 async fn queued_cancellation_settles_as_killed_not_running() {
     let state = crate::task::SessionToolState::for_test();
     let pending = test_pending();
-    let drive = test_drive("a2-2");
+    let mut drive = test_child_session("a2-2");
     let task_id = crate::task::register_agent_task_queued(
         &state,
         "subagent explore: queued".into(),
         CancellationToken::new(),
-        drive.agent_id.clone(),
+        drive.agent.id.clone(),
     );
-    let life = test_lifecycle(&state, &pending, &drive, Some(task_id.clone()));
+    let life = test_lifecycle(&state, &pending, &mut drive, Some(task_id.clone()));
     let cancel = CancellationToken::new();
     let outcome = drive_managed(
         life,
         &cancel,
         std::future::ready(None),
-        std::future::ready(cancelled_drive_result()),
+        std::future::ready(cancelled_subagent_result()),
     )
     .await;
     assert!(outcome.result.cancelled);
@@ -538,7 +522,7 @@ async fn queued_cancellation_settles_as_killed_not_running() {
         "queued cancellation must settle Killed, not Running: {status:?}"
     );
     assert!(ended_at.is_some());
-    assert!(!state.agent_writer_active(&drive.agent_id));
+    assert!(!state.agent_writer_active(&drive.agent.id));
 }
 
 /// Foreground swarm beyond the slot cap: the running children see the
@@ -557,14 +541,14 @@ async fn swarm_beyond_slot_count_cancellation_settles_every_child() {
     let started = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
     for index in 0..(limit + 2) {
-        let drive = test_drive(&format!("a{index}-1"));
+        let mut drive = test_child_session(&format!("a{index}-1"));
         let task_id = crate::task::register_agent_task(
             &state,
             format!("subagent explore: child {index}"),
             CancellationToken::new(),
-            drive.agent_id.clone(),
+            drive.agent.id.clone(),
         );
-        let life = test_lifecycle(&state, &pending, &drive, Some(task_id.clone()));
+        let life = test_lifecycle(&state, &pending, &mut drive, Some(task_id.clone()));
         let semaphore = semaphore.clone();
         let acquire_cancel = cancel.clone();
         let drive_cancel = cancel.clone();
@@ -583,7 +567,7 @@ async fn swarm_beyond_slot_count_cancellation_settles_every_child() {
             let outcome = drive_managed(life, &drive_cancel, acquire, async move {
                 started.fetch_add(1, Ordering::SeqCst);
                 run_cancel.cancelled().await;
-                cancelled_drive_result()
+                cancelled_subagent_result()
             })
             .await;
             (outcome, task_id)
@@ -624,12 +608,12 @@ async fn swarm_beyond_slot_count_cancellation_settles_every_child() {
 async fn child_termination_drops_only_its_approvals() {
     let state = crate::task::SessionToolState::for_test();
     let pending = test_pending();
-    let drive = test_drive("a3-3");
+    let mut drive = test_child_session("a3-3");
     let task_id = crate::task::register_agent_task(
         &state,
         "subagent explore: approvals".into(),
         CancellationToken::new(),
-        drive.agent_id.clone(),
+        drive.agent.id.clone(),
     );
     let own_id = format!("s-test-{task_id}-approval-{task_id}-c1-call");
     let other_id = "s-test-other-approval-other-c1-call".to_string();
@@ -640,13 +624,13 @@ async fn child_termination_drops_only_its_approvals() {
         pending.insert(own_id.clone(), own_tx);
         pending.insert(other_id.clone(), other_tx);
     }
-    let life = test_lifecycle(&state, &pending, &drive, Some(task_id));
+    let life = test_lifecycle(&state, &pending, &mut drive, Some(task_id));
     let cancel = CancellationToken::new();
     let outcome = drive_managed(
         life,
         &cancel,
         std::future::ready(Some(SubagentSlot::Test)),
-        std::future::ready(SubagentDriveResult {
+        std::future::ready(SubagentResult {
             status_line: "failed: test".into(),
             result_text: "test".into(),
             turns: 1,
@@ -671,7 +655,7 @@ async fn child_termination_drops_only_its_approvals() {
 
 #[test]
 fn failure_receipts_keep_agent_id_and_resume_guidance() {
-    let result = SubagentDriveResult {
+    let result = SubagentResult {
         status_line: "failed: reached the maximum turn count 20".into(),
         result_text: "Reached the maximum turn count (20). partial".into(),
         turns: 20,
@@ -689,7 +673,7 @@ fn failure_receipts_keep_agent_id_and_resume_guidance() {
     );
     assert!(note.contains("Reached the maximum turn count"), "{note}");
 
-    let no_text = SubagentDriveResult {
+    let no_text = SubagentResult {
         status_line: "failed: subagent produced no final text".into(),
         result_text: "The subagent produced no final text".into(),
         turns: 3,
@@ -708,15 +692,15 @@ fn failure_receipts_keep_agent_id_and_resume_guidance() {
 fn max_turn_background_notification_is_failed_with_resume_guidance() {
     let state = crate::task::SessionToolState::for_test();
     let pending = test_pending();
-    let drive = test_drive("a8-8");
+    let mut drive = test_child_session("a8-8");
     let task_id = crate::task::register_agent_task(
         &state,
         "subagent explore: max turns".into(),
         CancellationToken::new(),
-        drive.agent_id.clone(),
+        drive.agent.id.clone(),
     );
-    let mut life = test_lifecycle(&state, &pending, &drive, Some(task_id.clone()));
-    let result = SubagentDriveResult {
+    let mut life = test_lifecycle(&state, &pending, &mut drive, Some(task_id.clone()));
+    let result = SubagentResult {
         status_line: "failed: reached the maximum turn count 20".into(),
         result_text: "Reached the maximum turn count (20). partial".into(),
         turns: 20,

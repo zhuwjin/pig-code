@@ -67,7 +67,7 @@ impl Session {
         if has_usage {
             self.store.lock().expect("store lock").record_usage_at(
                 ended_at_ms,
-                &self.id,
+                &self.agent.id,
                 &config.provider_name,
                 &config.model,
                 self.turn_input,

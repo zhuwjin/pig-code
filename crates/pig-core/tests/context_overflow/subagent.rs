@@ -69,36 +69,69 @@ fn long_child_history() -> Vec<pig_provider::ChatMsg> {
 }
 
 fn seed_child(data_dir: &Path, session_id: &str) -> PathBuf {
+    use pig_core::rollout::{ConversationKind, RolloutRecord};
+
     let jsonl = data_dir
         .join("sessions")
         .join(format!("{session_id}.agents"))
         .join(format!("{CHILD_ID}.jsonl"));
     std::fs::create_dir_all(jsonl.parent().expect("agent dir")).unwrap();
-    let mut lines = vec![
-        serde_json::json!({
-            "type": "meta",
-            "agent_id": CHILD_ID,
-            "profile": "overflow",
-            "description": "long child compaction fixture",
-            "model": "small-model",
-            "provider": "Mock",
-            "created_at": 1,
-        })
-        .to_string(),
-    ];
+    let mut records = vec![RolloutRecord::Meta {
+        id: CHILD_ID.into(),
+        cwd: PathBuf::from("."),
+        title: "long child compaction fixture".into(),
+        created_at: 1,
+        kind: ConversationKind::Subagent,
+        parent_id: None,
+        profile: Some("overflow".into()),
+        description: Some("long child compaction fixture".into()),
+        provider: Some("Mock".into()),
+        model: Some("small-model".into()),
+    }];
     for msg in long_child_history() {
-        lines.push(
-            serde_json::json!({
-                "type": "msg",
-                "msg": msg,
-                "replay": null,
-                "reasoning": null,
-                "images": [],
-                "documents": [],
-            })
-            .to_string(),
-        );
+        match msg.role.as_str() {
+            "system" => records.push(RolloutRecord::System {
+                text: msg.content.unwrap_or_default(),
+            }),
+            "user" => records.push(RolloutRecord::User {
+                text: msg.content.unwrap_or_default(),
+                files: Vec::new(),
+                images: Vec::new(),
+                sent_at_ms: 0,
+                sent_text: None,
+                sent_images: Vec::new(),
+                model_text: None,
+                sent_input_image: None,
+            }),
+            "assistant" => records.push(RolloutRecord::Assistant {
+                text: msg.content.unwrap_or_default(),
+                reasoning: msg.reasoning,
+                replay: msg.replay,
+                tool_calls: msg.tool_calls.unwrap_or_default(),
+                ts_ms: 0,
+                reasoning_ms: None,
+            }),
+            "tool" => records.push(RolloutRecord::ToolCall {
+                tool: "Read".into(),
+                summary: String::new(),
+                arguments: String::new(),
+                output: msg.content.unwrap_or_default(),
+                is_error: msg.is_error,
+                stopped: msg.stopped,
+                edit: None,
+                agent_card: None,
+                agent_cards: Vec::new(),
+                images: Vec::new(),
+                documents: Vec::new(),
+                delivered_notification_ids: Vec::new(),
+            }),
+            _ => {}
+        }
     }
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| serde_json::to_string(record).expect("serialize child record"))
+        .collect();
     std::fs::write(&jsonl, format!("{}\n", lines.join("\n"))).unwrap();
     jsonl
 }
@@ -301,19 +334,32 @@ async fn subagent_compacts_a_long_task_and_continues_across_restart() {
     let loaded = common::recv_until(
         &agent2.events,
         std::time::Duration::from_secs(10),
-        |event| matches!(event, Event::SubagentHistory { .. } | Event::Error { .. }),
+        |event| {
+            matches!(
+                event,
+                Event::ConversationSnapshot {
+                    agent_id: Some(_),
+                    ..
+                } | Event::Error { .. }
+            )
+        },
     )
     .await;
     let items = loaded
         .iter()
         .find_map(|event| match event {
-            Event::SubagentHistory { items, .. } => Some(items.clone()),
+            Event::ConversationSnapshot { items, .. } => Some(items.clone()),
             _ => None,
         })
         .unwrap_or_else(|| panic!("restart should load the child context: {loaded:#?}"));
     let text = items
         .iter()
-        .map(|item| item.text.as_str())
+        .filter_map(|item| match item {
+            pig_protocol::ConversationItem::User { text, .. }
+            | pig_protocol::ConversationItem::Markdown { text, .. }
+            | pig_protocol::ConversationItem::Reasoning { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(

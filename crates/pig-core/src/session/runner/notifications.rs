@@ -115,7 +115,10 @@ impl Manager {
                         return;
                     }
                     self.emit_task_list(&event_tx, &session_id);
-                    if detached && !suppressed {
+                    let wait_delivered = self.sessions.get(&session_id).is_some_and(|entry| {
+                        crate::task::task_wait_delivered(&entry.state, &owner, &task.summary.id)
+                    });
+                    if detached && !suppressed && !wait_delivered {
                         if let Some(entry) = self.sessions.get(&session_id) {
                             let text = crate::task::notification::render_notification_batch(
                                 std::slice::from_ref(&notification),
@@ -397,7 +400,10 @@ mod tests {
             "the panel still sees the child's completed task"
         );
         assert!(
-            store.pending_notifications("s1").expect("notifications").is_empty(),
+            store
+                .pending_notifications("s1")
+                .expect("notifications")
+                .is_empty(),
             "the parent must not be woken by a child-owned task"
         );
         let _ = std::fs::remove_dir_all(&dir);

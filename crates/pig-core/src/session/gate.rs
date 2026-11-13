@@ -95,16 +95,22 @@ pub(crate) async fn exec_tool_gated_ctx(
         name if name.starts_with("mcp__") || plugin_tool => Some(call.name.clone()),
         _ => None,
     };
-    if let Some(subject) = perm_subject.as_deref()
-        && let Some(hit) = ctx.permission_rules.deny_hit(&call.name, subject)
-    {
-        return GatedToolOutcome::Rejected { note: hit.note() };
-    }
-    // An allow hit skips approval (except dangerous commands — the danger
-    // check below takes priority with its popup)
-    let allowed_by_rules = perm_subject
-        .as_deref()
-        .is_some_and(|subject| ctx.permission_rules.allow_hit(&call.name, subject));
+    let allowed_by_rules = {
+        let rules = ctx
+            .permission_rules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(subject) = perm_subject.as_deref()
+            && let Some(hit) = rules.deny_hit(&call.name, subject)
+        {
+            return GatedToolOutcome::Rejected { note: hit.note() };
+        }
+        // An allow hit skips approval (except dangerous commands — the danger
+        // check below takes priority with its popup)
+        perm_subject
+            .as_deref()
+            .is_some_and(|subject| rules.allow_hit(&call.name, subject))
+    };
 
     let danger_reason = bash_command.as_deref().and_then(tool::is_dangerous_command);
     if ctx.permissions.sandbox.mode == SandboxMode::DangerFullAccess
@@ -455,7 +461,11 @@ pub(crate) async fn exec_tool_gated_ctx(
         && file_tool_target.is_some();
 
     let mut needs_normal = tool.is_some_and(|t| tool::requires_approval(t, ctx.permissions))
-        && !ctx.always_allowed.contains(&approval_key)
+        && !ctx
+            .always_allowed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&approval_key)
         && !allowed_by_rules
         // kimi writesOnlyPlanFile: in plan mode, writing the plan file
         // passes through approval-free
@@ -712,7 +722,11 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             && !credential_file_grant
             && fs_outside.is_none()
             && perm_subject.is_some()
-            && ctx.permission_rules.project_allows_are_trusted()
+            && ctx
+                .permission_rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .project_allows_are_trusted()
             && (crate::tool::is_exec_command(&call.name)
                 || matches!(call.name.as_str(), "Write" | "Edit"));
         let mut available_decisions = vec![ApprovalDecision::Allow];
@@ -763,7 +777,10 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
                     // allowed this time only, equivalent to Allow. Outside
                     // writes never reach this arm (the tier is not offered):
                     // their grant is per call, by design.
-                    ctx.always_allowed.insert(approval_key);
+                    ctx.always_allowed
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(approval_key);
                 }
             }
             ApprovalDecision::ApprovedForProject => {

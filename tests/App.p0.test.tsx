@@ -185,3 +185,16 @@ test("validates backend envelopes and independent stream sequences", () => {
     body: { request_id: "request-1", result: { echo: "hello" } },
   })).toBe(true);
 });
+
+test("opens a subagent conversation from the shared conversation wire", async () => {
+  const app = await openApp();
+  await app.type("id:composer-input", "SUBAGENT_SCENARIO");
+  await app.press("id:send-button");
+  await app.waitFor("text:/MOCK_SUBAGENT_PARENT_DONE/", { timeout: 30000 });
+  if (!app.texts().some((text) => text.includes("subagent selftest delegation"))) {
+    await app.press("text:/执行了 1 次工具调用/");
+  }
+  await app.waitFor("text:/subagent selftest delegation/", { timeout: 10000 });
+  await app.press("text:/subagent selftest delegation/");
+  await app.waitFor("text:/MOCK_SUBAGENT_CHILD_DONE/", { timeout: 20000 });
+});

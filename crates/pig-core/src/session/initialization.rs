@@ -114,7 +114,11 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
     let session = Session {
         delivery_receipts: state.delivery_receipts.clone(),
         state,
-        permission_rules: load_permissions(&parts.cwd, &parts.data_dir, &trust),
+        permission_rules: Arc::new(Mutex::new(load_permissions(
+            &parts.cwd,
+            &parts.data_dir,
+            &trust,
+        ))),
         git_snapshot: prompt::git_snapshot(&parts.cwd),
         hooks: crate::hooks::HookSet::load_with_plugins(
             &parts.cwd,
@@ -122,14 +126,21 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
             &plugin_tools.registry(),
             &trust,
         ),
-        id: parts.id,
-        cwd: parts.cwd,
-        history: parts.history,
+        agent: Agent {
+            id: parts.id,
+            cwd: parts.cwd,
+            delegation_depth: 0,
+            config: None,
+            history: parts.history,
+            tools: Vec::new(),
+            schemas: Vec::new(),
+        },
+        subagent: None,
         user_ixs: parts.user_ixs,
         io_last_input: Vec::new(),
         turn_counter: 0,
         tracker: parts.tracker,
-        always_allowed: HashSet::new(),
+        always_allowed: Arc::new(Mutex::new(HashSet::new())),
         plan_enabled: false,
         pending: parts.pending,
         pending_questions: parts.pending_questions,
@@ -426,7 +437,7 @@ impl Session {
         session.restore_delivery_receipts(delivery_receipts);
         session.state.restore_tasks(tasks);
         if let Some(snapshot) = prompt_snapshot {
-            let trusted = session.trust.admits(&session.cwd);
+            let trusted = session.trust.admits(&session.agent.cwd);
             let same_trust = snapshot_trusted(&snapshot.skills_state) == Some(trusted);
             session.git_snapshot = snapshot.git_snapshot.clone();
             session.agents_prompt = snapshot.agents_prompt.clone();

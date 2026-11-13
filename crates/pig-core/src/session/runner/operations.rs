@@ -299,8 +299,10 @@ impl Manager {
                         // The composition panel's rows belong to the
                         // same snapshot: recompute them from the loaded
                         // history instead of waiting for the next turn
-                        let breakdown =
-                            estimate::context_breakdown(&session.history, &session.root_schemas());
+                        let breakdown = estimate::context_breakdown(
+                            &session.agent.history,
+                            &session.root_schemas(),
+                        );
                         emit(
                             &event_tx,
                             Event::ContextBreakdownChanged {
@@ -345,7 +347,7 @@ impl Manager {
                     session.set_permissions(meta.permissions);
                     session.set_plan_mode(meta.plan_enabled);
                 }
-                let cwd = session.cwd.clone();
+                let cwd = session.agent.cwd.clone();
                 let state = session.state.clone();
                 let entry_runtime = session.runtime_config_cloned();
                 let plugin_dispatcher = session.plugin_tools.dispatcher();
@@ -520,8 +522,10 @@ impl Manager {
                             input_total: session.input_total,
                         },
                     );
-                    let breakdown =
-                        estimate::context_breakdown(&session.history, &session.root_schemas());
+                    let breakdown = estimate::context_breakdown(
+                        &session.agent.history,
+                        &session.root_schemas(),
+                    );
                     emit(
                         &event_tx,
                         Event::ContextBreakdownChanged {

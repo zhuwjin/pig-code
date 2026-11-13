@@ -1,36 +1,35 @@
+//! Subagent orchestration.
+//!
+//! A child is a full `Session`: the shared engine drives its steps exactly
+//! like a root turn. This module owns the lifecycle around that Session —
+//! preparation, concurrency slots, context persistence, tool narrowing,
+//! delegation depth and settlement.
+
 use super::*;
 
 mod compact;
-mod drive;
 mod lifecycle;
 mod managed;
 mod persist;
 mod state;
+mod turn;
 
 #[cfg(test)]
 mod tests;
 
-use drive::{agent_result_path, drive_subagent};
 use lifecycle::ChildLifecycle;
 use managed::{
-    DetachedGateCtx, SubagentSlot, SwarmChildIdentity, aborted_swarm_child, drive_managed,
-    spawn_detached_child, subagent_receipt, swarm_child_result, DelegatedUi,
+    DelegatedUi, SubagentSlot, SwarmChildIdentity, aborted_swarm_child, drive_managed,
+    spawn_detached_child, subagent_receipt, swarm_child_result,
 };
-use state::{ProgressSink, SubagentDrive, agent_card_model};
+pub(super) use state::SubagentState;
+use state::{ProgressSink, SubagentMode, agent_card_model};
+use turn::agent_result_path;
 
-/// Child-local tool state: tasks, steers, writers, read states and roots are
-/// shared with the session, but the todo list is a fresh per-child handle.
-/// Waiting in a child is a query, not delivery into the root model's history.
-fn child_local_state(
-    state: &crate::task::SessionToolState,
-    agent_id: &str,
-) -> crate::task::SessionToolState {
-    let mut state = state.clone();
-    state.todos = Default::default();
-    state.task_store = None;
-    state.owner_agent_id = Some(agent_id.to_string());
-    state
-}
+/// Child tool sets exclude Agent/AgentSwarm, so the current orchestration
+/// admits exactly one delegation level. The depth lives on the agent context
+/// and is checked at every entry point (a future nested mode lifts this).
+const MAX_DELEGATION_DEPTH: u32 = 1;
 
 /// The immediate answer of a plugin-delegated child.
 pub(crate) struct DelegatedAgentStarted {
@@ -41,8 +40,8 @@ pub(crate) struct DelegatedAgentStarted {
     pub background: bool,
 }
 
-/// Result of drive_subagent
-struct SubagentDriveResult {
+/// Result of running one child agent
+struct SubagentResult {
     /// One-line status (for the registry output wrap-up)
     status_line: String,
     /// Result text (completed has been truncated to the 32K budget +
@@ -65,16 +64,38 @@ struct SubagentDriveResult {
 impl Session {
     /// Agent tool entry: argument gating → the shared child preparation
     /// builder (profile/model/tool/MCP/media/JSONL, identical to every swarm
-    /// item) → the one managed child driver (global slot, exclusive context
-    /// writer, panic/cancel settlement); foreground borrows Session fields,
-    /// background owns them and reports terminal state through the task outbox. resume reuses
-    /// the original agent id and re-resolves profile/model from current state.
-    pub(crate) async fn run_subagent(
-        &mut self,
-        call: &ToolCall,
+    /// item) → a child `Session` driven by the shared engine under the managed
+    /// lifecycle (global slot, exclusive context writer, panic/cancel
+    /// settlement). Foreground, background, resume, swarm and plugin
+    /// delegation all take this path.
+    pub(crate) fn run_subagent<'a>(
+        &'a mut self,
+        call: &'a ToolCall,
         // Child-tool approval request_ids are prefixed with the foreground
         // card's item_id / the background task_id (which embed turn info);
         // unused on its own since this sank into GateCtx
+        _parent_turn_id: &'a str,
+        parent_item_id: &'a str,
+        parent_config: &'a ResolvedModel,
+        tx: &'a async_channel::Sender<Event>,
+        cancel: &'a CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SubagentOutcome> + Send + 'a>> {
+        // Boxed at the public boundary: a root tool batch can start a child,
+        // whose own loop re-enters the same engine. Erasing this future keeps
+        // that cycle out of the type checker.
+        Box::pin(self.run_subagent_inner(
+            call,
+            _parent_turn_id,
+            parent_item_id,
+            parent_config,
+            tx,
+            cancel,
+        ))
+    }
+
+    async fn run_subagent_inner(
+        &mut self,
+        call: &ToolCall,
         _parent_turn_id: &str,
         parent_item_id: &str,
         parent_config: &ResolvedModel,
@@ -121,6 +142,12 @@ impl Session {
                     .to_string(),
             );
         }
+        if self.agent.delegation_depth >= MAX_DELEGATION_DEPTH {
+            return fail(
+                "Nested subagents are not supported: this agent is already a delegated child."
+                    .to_string(),
+            );
+        }
 
         // ---- one shared child preparation pipeline for single Agent and
         // swarm: trust, profile/model resolution, tool narrowing, MCP
@@ -131,22 +158,22 @@ impl Session {
         let trust = runtime
             .as_ref()
             .map(|runtime| runtime.trust().clone())
-            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.cwd));
+            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.agent.cwd));
         let profiles = crate::agent::load_profiles_with_plugins(
-            &self.cwd,
+            &self.agent.cwd,
             &self.data_dir,
             &trust,
             &self.plugin_tools.registry(),
         );
         let ctx = crate::agent::ChildPrepCtx {
-            cwd: &self.cwd,
+            cwd: &self.agent.cwd,
             data_dir: &self.data_dir,
             git_snapshot: self.git_snapshot.as_deref(),
             skills_prompt: &self.skills_prompt,
             agents_prompt: &self.agents_prompt,
             runtime: runtime.as_deref(),
             parent_config,
-            session_id: &self.id,
+            session_id: &self.agent.id,
             state: &self.state,
             mcp: self.mcp.as_ref(),
             plugin_tools: self.plugin_tools.clone(),
@@ -188,37 +215,44 @@ impl Session {
                 Err(error) => return fail(error.message()),
             }
         };
-        let mut drive = SubagentDrive::from(prep);
-
-        // Agent card metadata: assembled once agent_id is allocated and
-        // child_config resolved — sent live via the SubagentCard event and
-        // persisted with RolloutRecord::ToolCall (replay rebuilds from the
-        // record); foreground/background/resume share one path (profile/model
-        // per this run's re-resolution)
-        let card_record = crate::rollout::AgentCardRecord {
-            agent_id: drive.agent_id.clone(),
-            profile: drive.profile.name.clone(),
-            description: drive.description.clone(),
-            model: agent_card_model(&drive),
-            background,
-        };
-        self.emit(
-            |session_id| Event::SubagentCard {
-                session_id,
-                item_id: parent_item_id.to_string(),
-                agent_id: card_record.agent_id.clone(),
-                profile: card_record.profile.clone(),
-                description: card_record.description.clone(),
-                model: card_record.model.clone(),
-                background: card_record.background,
-            },
-            tx,
-        );
-
-        // ---- background: register a task + spawn the drive, return running
-        // immediately ----
+        // ---- background: register a task first (its id is the child's
+        // progress/ownership prefix), then spawn the detached child ----
         if background {
-            return self.spawn_subagent_background(drive, tx, card_record);
+            let agent_id = prep.agent_id.clone();
+            let profile = prep.profile.name.clone();
+            let description = prep.description.clone();
+            let bg_cancel = CancellationToken::new();
+            let command = format!("Subagent {profile}: {description}");
+            let task_id = crate::task::register_agent_task_queued(
+                &self.state,
+                command,
+                bg_cancel.clone(),
+                agent_id.clone(),
+            );
+            let progress = ProgressSink::Background {
+                task_id: task_id.clone(),
+            };
+            let child = Session::new_subagent(prep, self, progress, SubagentMode::Background);
+            let card_record = self.emit_child_card(&child, parent_item_id, tx, true);
+            let queue_hint = if crate::task::subagent_slots_available() == 0 {
+                format!(
+                    "\nThe global subagent concurrency limit ({}) is reached; this task is queued \
+                     for a free slot and will notify as usual when done.",
+                    crate::task::MAX_CONCURRENT_SUBAGENTS
+                )
+            } else {
+                String::new()
+            };
+            let running_note = format!(
+                "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\nThe subagent is running in the background; its terminal notification is delivered automatically.\nUse TaskWait to wait, TaskOutput for progress, TaskStop to stop it, and Agent(resume=\"{agent_id}\", prompt=\"...\") to resume it.{queue_hint}"
+            );
+            spawn_detached_child(child, task_id, bg_cancel, tx.clone(), None);
+            return SubagentOutcome::Finished {
+                note: running_note,
+                is_error: false,
+                card: Some(card_record),
+                cards: vec![],
+            };
         }
 
         // ---- foreground: the same managed driver as every other child
@@ -228,21 +262,34 @@ impl Session {
         let progress = ProgressSink::Foreground {
             parent_item_id: parent_item_id.to_string(),
         };
-        let mut tracker = self.tracker.foreground_child();
-        let child_tool_state = child_local_state(&self.state, &drive.agent_id);
-        let life_writer = drive
+        let mut child = Session::new_subagent(prep, self, progress, SubagentMode::Foreground);
+        let card_record = self.emit_child_card(&child, parent_item_id, tx, false);
+        let agent_id = child.agent.id.clone();
+        let profile = child
+            .subagent
+            .as_ref()
+            .expect("child session")
+            .profile
+            .name
+            .clone();
+        let life_writer = child
+            .subagent
+            .as_mut()
+            .expect("child session")
             .take_writer()
             .expect("foreground subagent writer was claimed");
         let life = ChildLifecycle::new(
-            &self.state,
-            &self.pending,
-            &self.id,
+            &child.state,
+            &child.pending,
+            child.event_session_id(),
             tx.clone(),
-            &drive,
+            &child,
             life_writer,
-            &progress,
             None,
         );
+        let child_task: std::pin::Pin<
+            Box<dyn std::future::Future<Output = SubagentResult> + Send + '_>,
+        > = Box::pin(async move { child.run_subagent_task(tx, cancel).await });
         let managed = drive_managed(
             life,
             cancel,
@@ -251,30 +298,7 @@ impl Session {
                     .await
                     .map(SubagentSlot::Global)
             },
-            async {
-                let mcp_extra = drive.extra_tools();
-                let mut gate = GateCtx {
-                    cwd: &self.cwd,
-                    permissions: self.permissions,
-                    media: tool::MediaCapabilities::new(
-                        drive.child_config.input_image,
-                        drive.child_config.input_pdf,
-                    ),
-                    tracker: &mut tracker,
-                    state: &child_tool_state,
-                    owns_todo_state: false,
-                    pending: &self.pending,
-                    permission_rules: &mut self.permission_rules,
-                    always_allowed: &mut self.always_allowed,
-                    session_id: &self.id,
-                    plan_enabled: false,
-                    store: &self.store,
-                    extra_tools: &mcp_extra,
-                    hooks: &self.hooks,
-                    history: &self.history,
-                };
-                drive_subagent(&mut gate, &mut drive, &progress, tx, cancel).await
-            },
+            child_task,
         )
         .await;
         let result = managed.result;
@@ -289,13 +313,44 @@ impl Session {
         self.turn_input += result.usage.0;
         self.turn_cache_read += result.usage.1;
         self.turn_output += result.usage.2;
-        let note = subagent_receipt(&drive.agent_id, &drive.profile.name, &result);
+        let note = subagent_receipt(&agent_id, &profile, &result);
         SubagentOutcome::Finished {
             note,
             is_error: result.is_error,
             card: Some(card_record),
             cards: vec![],
         }
+    }
+
+    /// Emit one Agent card for a child and return its durable record.
+    fn emit_child_card(
+        &mut self,
+        child: &Session,
+        parent_item_id: &str,
+        tx: &async_channel::Sender<Event>,
+        background: bool,
+    ) -> crate::rollout::AgentCardRecord {
+        let sub = child.subagent.as_ref().expect("child session");
+        let card = crate::rollout::AgentCardRecord {
+            agent_id: child.agent.id.clone(),
+            profile: sub.profile.name.clone(),
+            description: sub.description.clone(),
+            model: agent_card_model(child),
+            background,
+        };
+        self.emit(
+            |session_id| Event::SubagentCard {
+                session_id,
+                item_id: parent_item_id.to_string(),
+                agent_id: card.agent_id.clone(),
+                profile: card.profile.clone(),
+                description: card.description.clone(),
+                model: card.model.clone(),
+                background: card.background,
+            },
+            tx,
+        );
+        card
     }
     /// AgentSwarm tool entry: parse_swarm_args validation →
     /// prepare_swarm_children batch preparation through the shared child
@@ -307,7 +362,18 @@ impl Session {
     /// and spawn independent drives (same lifecycle as background Agent:
     /// stoppable via TaskStop, completions wake the parent one by one via the
     /// task outbox), returning per-item receipts immediately.
-    pub(crate) async fn run_swarm(
+    pub(crate) fn run_swarm<'a>(
+        &'a mut self,
+        call: &'a ToolCall,
+        parent_item_id: &'a str,
+        parent_config: &'a ResolvedModel,
+        tx: &'a async_channel::Sender<Event>,
+        cancel: &'a CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SubagentOutcome> + Send + 'a>> {
+        Box::pin(self.run_swarm_inner(call, parent_item_id, parent_config, tx, cancel))
+    }
+
+    async fn run_swarm_inner(
         &mut self,
         call: &ToolCall,
         parent_item_id: &str,
@@ -336,18 +402,24 @@ impl Session {
                     .to_string(),
             );
         }
+        if self.agent.delegation_depth >= MAX_DELEGATION_DEPTH {
+            return fail(
+                "Nested subagents are not supported: this agent is already a delegated child."
+                    .to_string(),
+            );
+        }
         let background = args["run_in_background"].as_bool().unwrap_or(false);
         let runtime = self.runtime_config_cloned();
         let preps = match crate::agent::prepare_swarm_children(
             &crate::agent::ChildPrepCtx {
-                cwd: &self.cwd,
+                cwd: &self.agent.cwd,
                 data_dir: &self.data_dir,
                 git_snapshot: self.git_snapshot.as_deref(),
                 skills_prompt: &self.skills_prompt,
                 agents_prompt: &self.agents_prompt,
                 runtime: runtime.as_deref(),
                 parent_config,
-                session_id: &self.id,
+                session_id: &self.agent.id,
                 state: &self.state,
                 mcp: self.mcp.as_ref(),
                 plugin_tools: self.plugin_tools.clone(),
@@ -400,84 +472,59 @@ impl Session {
                     continue;
                 }
             };
-            let mut drive = SubagentDrive::from(*prep);
-            // Agent card (same policy as run_subagent; batch foreground has
-            // background=false)
-            let card = crate::rollout::AgentCardRecord {
-                agent_id: drive.agent_id.clone(),
-                profile: drive.profile.name.clone(),
-                description: drive.description.clone(),
-                model: agent_card_model(&drive),
-                background: false,
-            };
-            self.emit(
-                |session_id| Event::SubagentCard {
-                    session_id,
-                    item_id: parent_item_id.to_string(),
-                    agent_id: card.agent_id.clone(),
-                    profile: card.profile.clone(),
-                    description: card.description.clone(),
-                    model: card.model.clone(),
-                    background: card.background,
-                },
-                tx,
-            );
-            cards.push(card);
-            let identity = SwarmChildIdentity {
-                description: drive.description.clone(),
-                agent_id: drive.agent_id.clone(),
-                result_path: agent_result_path(&drive.jsonl, &drive.agent_id),
-            };
-            identities[ix] = Some(identity.clone());
+            let description = prep.description.clone();
+            let profile = prep.profile.name.clone();
+            let agent_id = prep.agent_id.clone();
+            let jsonl = prep.jsonl.clone();
             // Registered in the Queued state; visible and stoppable in TaskList/panel
             let child_cancel = CancellationToken::new();
-            let command = format!("Subagent {}: {}", drive.profile.name, drive.description);
+            let command = format!("Subagent {profile}: {description}");
             let task_id = crate::task::register_agent_task_queued(
                 &self.state,
                 command,
                 child_cancel.clone(),
-                drive.agent_id.clone(),
+                agent_id.clone(),
             );
-            let writer = drive
-                .take_writer()
-                .expect("swarm subagent writer was claimed");
-            // Fully owned context (same list as spawn_subagent_background)
-            let cwd = self.cwd.clone();
-            let permissions = self.permissions;
-            let hooks = self.hooks.clone();
-            let mut permission_rules = self.permission_rules.clone();
-            let mut always_allowed = self.always_allowed.clone();
-            let state = self.state.clone();
-            let child_tool_state = child_local_state(&state, &drive.agent_id);
-            let pending = self.pending.clone();
-            let store = self.store.clone();
-            let session_id = self.id.clone();
-            // Transcript snapshot for the hook gates (the child drives its own
-            // loop; the snapshot is the conversation at dispatch time)
-            let history = self.history.clone();
-            let tx_bg = tx.clone();
             let progress = ProgressSink::Foreground {
                 parent_item_id: parent_item_id.to_string(),
             };
-            let task_id_bg = task_id.clone();
-            let mut tracker = self.tracker.foreground_child();
+            let mut child = Session::new_subagent(*prep, self, progress, SubagentMode::Foreground);
+            // Agent card (same policy as run_subagent; batch foreground has
+            // background=false)
+            let card = self.emit_child_card(&child, parent_item_id, tx, false);
+            cards.push(card);
+            let identity = SwarmChildIdentity {
+                description,
+                agent_id,
+                result_path: agent_result_path(&jsonl, &child.agent.id),
+            };
+            identities[ix] = Some(identity.clone());
+            let writer = child
+                .subagent
+                .as_mut()
+                .expect("child session")
+                .take_writer()
+                .expect("swarm subagent writer was claimed");
             // Construct the lifecycle before spawning: if the runtime drops the
             // task before its first poll, the captured lifecycle's Drop still
             // releases the writer and settles the registry entry.
             let life = ChildLifecycle::new(
-                &state,
-                &pending,
-                &session_id,
-                tx_bg.clone(),
-                &drive,
+                &child.state,
+                &child.pending,
+                child.event_session_id(),
+                tx.clone(),
+                &child,
                 writer,
-                &progress,
-                Some(task_id_bg),
+                Some(task_id),
             );
             tokens.push(child_cancel.clone());
             handle_ixs.push(ix);
+            let tx_bg = tx.clone();
+            let task_cancel = child_cancel.clone();
             handles.push(tokio::spawn(async move {
-                let mut drive = drive;
+                let child_task: std::pin::Pin<
+                    Box<dyn std::future::Future<Output = SubagentResult> + Send + 'static>,
+                > = Box::pin(async move { child.run_subagent_task(&tx_bg, &task_cancel).await });
                 let managed = drive_managed(
                     life,
                     &child_cancel,
@@ -486,31 +533,7 @@ impl Session {
                             .await
                             .map(SubagentSlot::Global)
                     },
-                    async {
-                        let mcp_extra = drive.extra_tools();
-                        let mut gate = GateCtx {
-                            cwd: &cwd,
-                            permissions,
-                            media: tool::MediaCapabilities::new(
-                                drive.child_config.input_image,
-                                drive.child_config.input_pdf,
-                            ),
-                            tracker: &mut tracker,
-                            state: &child_tool_state,
-                            owns_todo_state: false,
-                            pending: &pending,
-                            permission_rules: &mut permission_rules,
-                            always_allowed: &mut always_allowed,
-                            session_id: &session_id,
-                            plan_enabled: false,
-                            store: &store,
-                            extra_tools: &mcp_extra,
-                            hooks: &hooks,
-                            history: &history,
-                        };
-                        drive_subagent(&mut gate, &mut drive, &progress, &tx_bg, &child_cancel)
-                            .await
-                    },
+                    child_task,
                 )
                 .await;
                 (ix, managed)
@@ -646,48 +669,27 @@ impl Session {
                     continue;
                 }
             };
-            let drive = SubagentDrive::from(*prep);
-            // Agent card (same policy as run_subagent; background batch has
-            // background=true)
-            let card = crate::rollout::AgentCardRecord {
-                agent_id: drive.agent_id.clone(),
-                profile: drive.profile.name.clone(),
-                description: drive.description.clone(),
-                model: agent_card_model(&drive),
-                background: true,
-            };
-            self.emit(
-                |session_id| Event::SubagentCard {
-                    session_id,
-                    item_id: parent_item_id.to_string(),
-                    agent_id: card.agent_id.clone(),
-                    profile: card.profile.clone(),
-                    description: card.description.clone(),
-                    model: card.model.clone(),
-                    background: card.background,
-                },
-                tx,
-            );
-            let description = drive.description.clone();
-            let agent_id = drive.agent_id.clone();
+            let description = prep.description.clone();
+            let profile = prep.profile.name.clone();
+            let agent_id = prep.agent_id.clone();
             // Registered in the Queued state; visible and stoppable in TaskList/panel
             let child_cancel = CancellationToken::new();
-            let command = format!("Subagent {}: {}", drive.profile.name, drive.description);
+            let command = format!("Subagent {profile}: {description}");
             let task_id = crate::task::register_agent_task_queued(
                 &self.state,
                 command,
                 child_cancel.clone(),
                 agent_id.clone(),
             );
+            let progress = ProgressSink::Background {
+                task_id: task_id.clone(),
+            };
+            let child = Session::new_subagent(*prep, self, progress, SubagentMode::Background);
+            // Agent card (same policy as run_subagent; background batch has
+            // background=true)
+            let card = self.emit_child_card(&child, parent_item_id, tx, true);
             let queued = cards.len() >= slots_available;
-            spawn_detached_child(
-                self.detached_gate_ctx(&drive.agent_id),
-                drive,
-                task_id.clone(),
-                child_cancel,
-                tx.clone(),
-                None,
-            );
+            spawn_detached_child(child, task_id.clone(), child_cancel, tx.clone(), None);
             cards.push(card);
             receipt.push(crate::agent::SwarmReceiptChild {
                 description,
@@ -724,7 +726,12 @@ impl Session {
     ) -> Result<crate::session::DelegatedAgentStarted, String> {
         if self.plan_enabled {
             return Err(
-                "Subagents cannot be delegated in plan mode (a subagent may modify files)."
+                "Subagents cannot be delegated in plan mode (a subagent may modify files).".into(),
+            );
+        }
+        if self.agent.delegation_depth >= MAX_DELEGATION_DEPTH {
+            return Err(
+                "Nested subagents are not supported: this agent is already a delegated child."
                     .into(),
             );
         }
@@ -737,23 +744,23 @@ impl Session {
         let trust = runtime
             .as_ref()
             .map(|runtime| runtime.trust().clone())
-            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.cwd));
+            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.agent.cwd));
         let profiles = crate::agent::load_profiles_with_plugins(
-            &self.cwd,
+            &self.agent.cwd,
             &self.data_dir,
             &trust,
             &self.plugin_tools.registry(),
         );
         let profile = crate::agent::find_profile(&profiles, profile_name)?.clone();
         let ctx = crate::agent::ChildPrepCtx {
-            cwd: &self.cwd,
+            cwd: &self.agent.cwd,
             data_dir: &self.data_dir,
             git_snapshot: self.git_snapshot.as_deref(),
             skills_prompt: &self.skills_prompt,
             agents_prompt: &self.agents_prompt,
             runtime: runtime.as_deref(),
             parent_config,
-            session_id: &self.id,
+            session_id: &self.agent.id,
             state: &self.state,
             mcp: self.mcp.as_ref(),
             plugin_tools: self.plugin_tools.clone(),
@@ -768,18 +775,22 @@ impl Session {
             &mut self.agent_seq,
         )
         .map_err(|error| error.message())?;
-        let drive = SubagentDrive::from(prep);
-        let agent_id = drive.agent_id.clone();
-        let profile_name = drive.profile.name.clone();
-        let model = agent_card_model(&drive);
-        let item_id = format!("plugin-agent-{agent_id}");
-        let card = crate::rollout::AgentCardRecord {
-            agent_id: agent_id.clone(),
-            profile: profile_name.clone(),
-            description: description.to_owned(),
-            model: model.clone(),
-            background: true,
+        let agent_id = prep.agent_id.clone();
+        let profile_name = prep.profile.name.clone();
+        let bg_cancel = CancellationToken::new();
+        let command = format!("Subagent {profile_name}: {description}");
+        let task_id = crate::task::register_agent_task_queued(
+            &self.state,
+            command,
+            bg_cancel.clone(),
+            agent_id.clone(),
+        );
+        let progress = ProgressSink::Background {
+            task_id: task_id.clone(),
         };
+        let child = Session::new_subagent(prep, self, progress, SubagentMode::Background);
+        let model = agent_card_model(&child);
+        let item_id = format!("plugin-agent-{agent_id}");
         // The synthetic Agent row and its card use the existing tool-card UI;
         // the task notification path covers completion.
         self.emit(
@@ -804,10 +815,11 @@ impl Session {
             },
             tx,
         );
-        let (_, task_id) = self.register_background_drive(
-            drive,
-            tx,
-            card,
+        spawn_detached_child(
+            child,
+            task_id.clone(),
+            bg_cancel,
+            tx.clone(),
             Some(DelegatedUi { item_id }),
         );
         Ok(crate::session::DelegatedAgentStarted {
@@ -817,88 +829,5 @@ impl Session {
             model,
             background: true,
         })
-    }
-
-    fn spawn_subagent_background(
-        &self,
-        drive: SubagentDrive,
-        tx: &async_channel::Sender<Event>,
-        card: crate::rollout::AgentCardRecord,
-    ) -> SubagentOutcome {
-        self.register_background_drive(drive, tx, card, None).0
-    }
-
-    /// Shared registration + detached spawn of one background child; the
-    /// caller gets its task id back for plugin delegation.
-    fn register_background_drive(
-        &self,
-        drive: SubagentDrive,
-        tx: &async_channel::Sender<Event>,
-        card: crate::rollout::AgentCardRecord,
-        ui: Option<DelegatedUi>,
-    ) -> (SubagentOutcome, String) {
-        let bg_cancel = CancellationToken::new();
-        let command = format!("Subagent {}: {}", drive.profile.name, drive.description);
-        let task_id = crate::task::register_agent_task_queued(
-            &self.state,
-            command,
-            bg_cancel.clone(),
-            drive.agent_id.clone(),
-        );
-        let agent_id = drive.agent_id.clone();
-        let queue_hint = if crate::task::subagent_slots_available() == 0 {
-            format!(
-                "\nThe global subagent concurrency limit ({}) is reached; this task is queued \
-                 for a free slot and will notify as usual when done.",
-                crate::task::MAX_CONCURRENT_SUBAGENTS
-            )
-        } else {
-            String::new()
-        };
-        let running_note = format!(
-            "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\nThe subagent is running in the background; its terminal notification is delivered automatically.\nUse TaskWait to wait, TaskOutput for progress, TaskStop to stop it, and Agent(resume=\"{agent_id}\", prompt=\"...\") to resume it.{queue_hint}"
-        );
-        spawn_detached_child(
-            self.detached_gate_ctx(&drive.agent_id),
-            drive,
-            task_id.clone(),
-            bg_cancel,
-            tx.clone(),
-            ui,
-        );
-        (
-            SubagentOutcome::Finished {
-                note: running_note,
-                is_error: false,
-                card: Some(card),
-                cards: vec![],
-            },
-            task_id,
-        )
-    }
-
-    /// Owned gate context for the background subagent drive (fully owned:
-    /// shared Arc clones + value snapshots); spawn_subagent_background and the
-    /// background swarm dispatch share the same list
-    fn detached_gate_ctx(&self, agent_id: &str) -> DetachedGateCtx {
-        DetachedGateCtx {
-            cwd: self.cwd.clone(),
-            permissions: self.permissions,
-            hooks: self.hooks.clone(),
-            permission_rules: self.permission_rules.clone(),
-            always_allowed: self.always_allowed.clone(),
-            state: self.state.clone(),
-            tool_state: child_local_state(&self.state, agent_id),
-            pending: self.pending.clone(),
-            store: self.store.clone(),
-            session_id: self.id.clone(),
-            // Transcript snapshot for the hook gates (dispatch-time view of
-            // the conversation)
-            history: self.history.clone(),
-            // Shares the session's first-seen originals (so a background write
-            // never replaces the persisted pre-change baseline) but keeps an
-            // isolated turn scope.
-            tracker: self.tracker.detached_child(),
-        }
     }
 }

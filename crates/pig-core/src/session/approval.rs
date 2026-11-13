@@ -16,9 +16,9 @@ impl Session {
         // MCP and plugin tool lists are held by the session; subagent gating does not go through this wrapper.
         // Skills go through the extra channel (not in the all() static table, looked up by name as a fallback)
         let mut extra = self.mcp.as_ref().map(|mcp| mcp.tools()).unwrap_or_default();
-        let trusted = self.trust.admits(&self.cwd);
+        let trusted = self.trust.admits(&self.agent.cwd);
         extra.push(Box::new(tool::SkillTool::new_trusted(
-            &self.cwd,
+            &self.agent.cwd,
             &self.plugin_tools.registry(),
             trusted,
         )));
@@ -27,8 +27,9 @@ impl Session {
         extra.push(Box::new(tool::SendMessageTool));
         extra.extend(self.plugin_tools.tools_filtered(&self.plugin_tool_filter));
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
+        let event_session_id = self.event_session_id().to_string();
         let mut gate = GateCtx {
-            cwd: &self.cwd,
+            cwd: &self.agent.cwd,
             permissions: self.permissions,
             media: tool::MediaCapabilities::new(
                 self.projected_input_image.unwrap_or(false),
@@ -38,14 +39,14 @@ impl Session {
             state: &self.state,
             owns_todo_state: true,
             pending: &self.pending,
-            permission_rules: &mut self.permission_rules,
-            always_allowed: &mut self.always_allowed,
-            session_id: &self.id,
+            permission_rules: &self.permission_rules,
+            always_allowed: &self.always_allowed,
+            session_id: &event_session_id,
             plan_enabled: self.plan_enabled,
             store: &self.store,
             extra_tools: &extra,
             hooks: &self.hooks,
-            history: &self.history,
+            history: &self.agent.history,
         };
         exec_tool_gated_ctx(&mut gate, call, tool, item_id, turn_id, tx, cancel).await
     }
@@ -78,13 +79,24 @@ impl Session {
             .map(|runtime| runtime.config().clone());
         let plugins = self.plugin_tools.registry();
         self.plugin_tools.reload(&trust, config.clone());
-        self.hooks =
-            crate::hooks::HookSet::load_with_plugins(&self.cwd, config.as_ref(), &plugins, &trust);
-        self.skills_prompt =
-            crate::plugins::skills_section_with_trust(&self.cwd, &plugins, trust.admits(&self.cwd));
-        self.profiles_summary = crate::agent::agent_description_list(
-            &crate::agent::load_profiles_with_plugins(&self.cwd, &self.data_dir, &trust, &plugins),
+        self.hooks = crate::hooks::HookSet::load_with_plugins(
+            &self.agent.cwd,
+            config.as_ref(),
+            &plugins,
+            &trust,
         );
+        self.skills_prompt = crate::plugins::skills_section_with_trust(
+            &self.agent.cwd,
+            &plugins,
+            trust.admits(&self.agent.cwd),
+        );
+        self.profiles_summary =
+            crate::agent::agent_description_list(&crate::agent::load_profiles_with_plugins(
+                &self.agent.cwd,
+                &self.data_dir,
+                &trust,
+                &plugins,
+            ));
         self.mcp = None;
         self.prompt_text = None;
         self.prompt_memory_enabled = None;
@@ -95,17 +107,20 @@ impl Session {
         let trust = runtime
             .as_ref()
             .map(|runtime| runtime.trust().clone())
-            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.cwd));
-        let trusted = trust.admits(&self.cwd);
+            .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&self.agent.cwd));
+        let trusted = trust.admits(&self.agent.cwd);
         let project_sandbox = runtime
             .as_ref()
             .map(|runtime| runtime.project_sandbox().clone())
             .unwrap_or_default();
         let config = runtime.as_deref().map(|runtime| runtime.config());
-        self.permission_rules =
-            super::initialization::load_permissions(&self.cwd, &self.data_dir, &trust);
+        *self
+            .permission_rules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            super::initialization::load_permissions(&self.agent.cwd, &self.data_dir, &trust);
         self.hooks = crate::hooks::HookSet::load_with_plugins(
-            &self.cwd,
+            &self.agent.cwd,
             config,
             &self.plugin_tools.registry(),
             &trust,
@@ -113,13 +128,13 @@ impl Session {
         self.plugin_tools.reload(&trust, config.cloned());
         self.trust = trust;
         self.skills_prompt = crate::plugins::skills_section_with_trust(
-            &self.cwd,
+            &self.agent.cwd,
             &self.plugin_tools.registry(),
             trusted,
         );
         self.profiles_summary =
             crate::agent::agent_description_list(&crate::agent::load_profiles_with_plugins(
-                &self.cwd,
+                &self.agent.cwd,
                 &self.data_dir,
                 &self.trust,
                 &self.plugin_tools.registry(),
@@ -141,8 +156,8 @@ impl Session {
     pub(crate) fn set_runtime(&mut self, runtime: Option<Arc<crate::config::RuntimeConfig>>) {
         let trusted = runtime
             .as_ref()
-            .is_some_and(|runtime| runtime.trust().admits(&self.cwd));
-        if trusted != self.trust.admits(&self.cwd) {
+            .is_some_and(|runtime| runtime.trust().admits(&self.agent.cwd));
+        if trusted != self.trust.admits(&self.agent.cwd) {
             self.apply_trust(runtime);
             return;
         }
@@ -165,7 +180,10 @@ impl Session {
             .as_ref()
             .map(|runtime| runtime.project_sandbox().clone())
             .unwrap_or_else(|| {
-                crate::config::project_sandbox_layer(&self.cwd, self.trust.admits(&self.cwd))
+                crate::config::project_sandbox_layer(
+                    &self.agent.cwd,
+                    self.trust.admits(&self.agent.cwd),
+                )
             });
         self.install_project_sandbox(layer);
     }
@@ -182,20 +200,20 @@ impl Session {
     /// project-authored surface this decision would admit, not only hooks.
     /// Returns the canonical workspace and how many items await the decision.
     pub(crate) fn pending_project_trust(&self) -> Option<(String, usize)> {
-        if self.trust.admits(&self.cwd) {
+        if self.trust.admits(&self.agent.cwd) {
             return None;
         }
-        let project_dir = self.cwd.join(".pigcode");
+        let project_dir = self.agent.cwd.join(".pigcode");
         let mut count = self.hooks.project_count;
         count += pig_utils::skills::discover_root(
-            &pig_utils::skills::project_root(&self.cwd),
+            &pig_utils::skills::project_root(&self.agent.cwd),
             pig_utils::skills::SkillSource::Project,
         )
         .len();
         count += crate::agent::load_profiles_with_trust(
-            &self.cwd,
+            &self.agent.cwd,
             &self.data_dir,
-            &crate::config::WorkspaceTrust::new(&self.cwd, true),
+            &crate::config::WorkspaceTrust::new(&self.agent.cwd, true),
         )
         .iter()
         .filter(|profile| profile.source == crate::agent::AgentSource::Project)
@@ -205,7 +223,7 @@ impl Session {
                 count += 1;
             }
         }
-        (count > 0).then(|| (self.cwd.display().to_string(), count))
+        (count > 0).then(|| (self.agent.cwd.display().to_string(), count))
     }
 
     /// Hook run context bound to this session (turn-side hook chains)
@@ -215,8 +233,8 @@ impl Session {
         cancel: &CancellationToken,
     ) -> crate::hooks::HookRunCtx {
         crate::hooks::HookRunCtx {
-            session_id: self.id.clone(),
-            cwd: self.cwd.clone(),
+            session_id: self.agent.id.clone(),
+            cwd: self.agent.cwd.clone(),
             tx: tx.clone(),
             cancel: cancel.clone(),
         }

@@ -18,12 +18,15 @@ use crate::tool::{ChangeTracker, ToolContext};
 use crate::{prompt, tool};
 use pig_protocol::AppConfig;
 use pig_provider::ResolvedModel;
-use pig_provider::{ChatMsg, ProviderEvent, ToolCall};
+use pig_provider::{ChatMsg, ToolCall};
 use pig_utils::paths::normalize_workspace_path;
 
+mod agent;
+use agent::Agent;
 mod approval;
 mod compact;
 mod effects;
+mod engine;
 mod estimate;
 mod fork;
 mod gate;
@@ -41,11 +44,12 @@ mod replay;
 mod runner;
 mod subagent;
 pub(crate) use subagent::DelegatedAgentStarted;
+mod stats;
+mod step;
 #[cfg(test)]
 mod tests;
 mod title;
 mod turn;
-mod stats;
 mod usage;
 
 pub use approval::approval_detail;
@@ -63,7 +67,7 @@ pub(crate) use media::project_tool_media;
 use media::{tool_documents_to_chat, tool_images_to_chat};
 pub use model::ModelSelection;
 pub(crate) use model::resolve_runtime_model;
-use model::{meta_to_selection, retry_status, skills_state_with_trust, snapshot_trusted};
+use model::{meta_to_selection, skills_state_with_trust, snapshot_trusted};
 use operations::CancelledTool;
 use outcome::StepOutcome;
 pub(crate) use outcome::{
@@ -84,9 +88,13 @@ pub(crate) use turn::pointer_file_references;
 pub(crate) use usage::{UsageAnchor, model_key, system_fingerprint};
 
 pub struct Session {
-    pub id: String,
-    pub cwd: PathBuf,
-    history: Vec<ChatMsg>,
+    /// Shared agent context: identity, model, history and tool surface. Root
+    /// and child agents both carry one; orchestration keeps the lifecycle.
+    pub(crate) agent: Agent,
+    /// Present when this Session is a child agent. Root sessions have none;
+    /// the orchestration layer creates a child Session and drives the same
+    /// turn engine over it.
+    pub(super) subagent: Option<Box<subagent::SubagentState>>,
     /// Recallable user-message indices into `history`, in order (a stack:
     /// `recall_last_message` pops and truncates at the popped index). Only real
     /// User-record messages are tracked — hook contexts share the user role but
@@ -108,14 +116,17 @@ pub struct Session {
     /// Memory of "always allowed in this session": (tool name, subject) —
     /// ExecCommand = command first word, Write/Edit = path. Ordinary approvals only:
     /// a sandbox widening and a high-risk command are never remembered here.
-    always_allowed: HashSet<(String, String)>,
+    /// Shared by the root session and every child agent it owns: an approval
+    /// answered in a child applies to the whole session, and vice versa.
+    always_allowed: Arc<Mutex<HashSet<(String, String)>>>,
     /// Allow/deny rules: the user level (`{data_dir}/permissions.toml`) unioned
     /// with the project level (`.pigcode/permissions.toml`), loaded at session
     /// creation/replay and reloaded on a trust change. An
     /// `ApprovedForProject` decision under trust appends to the project file
     /// and extends this set live; an untrusted workspace does not offer that
-    /// tier, because the next session would ignore the rule.
-    permission_rules: crate::permissions::PermissionRules,
+    /// tier, because the next session would ignore the rule. Shared with child
+    /// agents so a rule learned by one agent immediately governs the others.
+    permission_rules: Arc<Mutex<crate::permissions::PermissionRules>>,
     /// Plan mode toggle (orthogonal to mode; flipped by the
     /// EnterPlanMode/ExitPlanMode tools and Op::SetPlanMode, persisted
     /// write-through to the store)
@@ -270,4 +281,21 @@ pub struct Session {
     /// "startup" | "resume": the SessionStart hook payload's source, set by
     /// the constructor that built this Session
     session_start_source: &'static str,
+}
+
+impl Session {
+    /// The session id events, approvals and durable session rows belong to.
+    /// A child agent identifies itself by `agent.id` but reports into its
+    /// parent conversation.
+    pub(super) fn event_session_id(&self) -> &str {
+        self.subagent
+            .as_ref()
+            .map_or(self.agent.id.as_str(), |subagent| {
+                subagent.parent_session_id.as_str()
+            })
+    }
+
+    pub(super) fn is_subagent(&self) -> bool {
+        self.subagent.is_some()
+    }
 }

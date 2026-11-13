@@ -1,6 +1,6 @@
 import { expect, open, test } from "nsh/test";
 import { AgentStore } from "../app/store";
-import type { ToolItem } from "../app/protocol";
+import type { ChatItem } from "../app/protocol";
 
 async function openCards() {
   const app = await open("./App.tool-cards.fixture.tsx", {
@@ -58,6 +58,13 @@ test("copies and opens a Read path through the context menu", async () => {
   await app.waitFor("id:right-tab-file:README.mock.md");
 });
 
+test("shows a TaskWait as the task it waits for", async () => {
+  const app = await openCards();
+  expect(app.texts()).toContain("等待");
+  expect(app.texts()).toContain("b1");
+  expect(app.texts()).not.toContain('{"task_ids":["b1"],"timeout_ms":30000}');
+});
+
 test("advances the reasoning ticker", async () => {
   const app = await openCards();
   await app.press("id:advance-thinking");
@@ -66,32 +73,77 @@ test("advances the reasoning ticker", async () => {
   expect(app.shows("First rolling line")).toBe(false);
 });
 
-test("assigns completion sequence once for each agent", () => {
+test("upserts subagent conversation snapshots and updates by stable item id", () => {
   const store = new AgentStore(true);
-  const agent = (id: string): NonNullable<ToolItem["agents"]>[number] => ({
-    agent_id: id,
-    profile: "coder",
-    description: id,
-    model: "mock-model",
-    background: false,
-    finished: false,
-  });
-  const swarm: ToolItem = {
-    kind: "tool",
-    id: "swarm",
-    tool: "AgentSwarm",
-    summary: "Build",
-    detail: "{}",
-    output: "",
-    status: "running",
-    agents: [agent("a"), agent("b")],
-  };
-  store.current.set("session");
-  store.items.set({ session: [swarm] });
   const reducer = store as unknown as { reduce(event: Record<string, unknown>): void };
-  reducer.reduce({ SubagentActivity: { session_id: "session", agent_id: "a", finished: true, item: null } });
-  reducer.reduce({ SubagentActivity: { session_id: "session", agent_id: "a", finished: true, item: null } });
-  reducer.reduce({ SubagentActivity: { session_id: "session", agent_id: "b", finished: true, item: null } });
-  const agents = store.items()["session"][0] as ToolItem;
-  expect(agents.agents?.map((item) => item.finishedSeq)).toEqual([1, 2]);
+  const call: ChatItem = {
+    kind: "tool",
+    id: "t1-0",
+    tool: "TaskWait",
+    summary: "wait for b1",
+    detail: '{"task_ids":["b1"]}',
+    output: "",
+    status: "done",
+    turnId: "turn-1",
+  };
+  const snapshot = {
+    ConversationSnapshot: {
+      session_id: "session",
+      agent_id: "a1",
+      title: "child",
+      subtitle: "test · model",
+      items: [call],
+      running: true,
+    },
+  };
+  reducer.reduce(snapshot);
+  reducer.reduce({
+    ConversationUpdate: {
+      session_id: "session",
+      agent_id: "a1",
+      item: { ...call, output: "done" },
+    },
+  });
+  expect(store.subagents()["session:a1"].items).toHaveLength(1);
+  const first = store.subagents()["session:a1"].items[0];
+  expect(first.kind).toBe("tool");
+  if (first.kind !== "tool") throw new Error("expected tool row");
+  expect(first.output).toBe("done");
+
+  reducer.reduce(snapshot);
+  expect(store.subagents()["session:a1"].items).toHaveLength(1);
+  const merged = store.subagents()["session:a1"].items[0];
+  expect(merged.kind).toBe("tool");
+  if (merged.kind !== "tool") throw new Error("expected tool row");
+  expect(merged.output).toBe("done");
+});
+
+test("promotes a pending tool to running without regressing a finished row", () => {
+  const store = new AgentStore(true);
+  const reducer = store as unknown as { reduce(event: Record<string, unknown>): void };
+  const update = (item: ChatItem) => reducer.reduce({
+    ConversationUpdate: { session_id: "session", agent_id: "a1", item },
+  });
+  const row = (id: string) => {
+    const item = store.subagents()["session:a1"].items.find((entry) => entry.id === id);
+    if (!item || item.kind !== "tool") throw new Error(`expected tool ${id}`);
+    return item;
+  };
+  const base: Extract<ChatItem, { kind: "tool" }> = {
+    kind: "tool",
+    id: "t1-0",
+    tool: "Bash",
+    summary: "",
+    detail: "",
+    output: "",
+    status: "input",
+  };
+  update(base);
+  update({ ...base, status: "running", summary: "Start-Sleep", detail: '{"command":"sleep 1"}' });
+  expect(row("t1-0").status).toBe("running");
+  update({ ...base, status: "done", summary: "Start-Sleep", detail: '{"command":"sleep 1"}', output: "slept" });
+  expect(row("t1-0").status).toBe("done");
+  // A delayed live update must not reopen the finished row.
+  update(base);
+  expect(row("t1-0").status).toBe("done");
 });

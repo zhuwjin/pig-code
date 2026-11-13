@@ -4,27 +4,7 @@ use std::future::Future;
 
 use futures_util::FutureExt as _;
 
-use super::drive::drive_subagent;
 use super::lifecycle::ChildLifecycle;
-use super::state::{ProgressSink, SubagentDrive};
-
-pub(super) struct DetachedGateCtx {
-    pub(super) cwd: PathBuf,
-    pub(super) permissions: PermissionSettings,
-    pub(super) hooks: crate::hooks::HookSet,
-    pub(super) permission_rules: crate::permissions::PermissionRules,
-    pub(super) always_allowed: HashSet<(String, String)>,
-    pub(super) state: crate::task::SessionToolState,
-    /// Child-local tool state: shared task/steer/writer handles, own TodoHandle.
-    pub(super) tool_state: crate::task::SessionToolState,
-    pub(super) pending: PendingApprovals,
-    pub(super) store: Arc<Mutex<Store>>,
-    pub(super) session_id: String,
-    pub(super) history: Vec<ChatMsg>,
-    /// Detached child tracker: shared session baselines/dirty queue, isolated
-    /// turn summary.
-    pub(super) tracker: ChangeTracker,
-}
 
 /// UI row a delegated child owns: the synthetic Agent tool card the client
 /// renders, closed when the drive settles.
@@ -36,55 +16,73 @@ pub(super) struct DelegatedUi {
 /// children (global slot, writer claim, panic/cancel settlement, one
 /// completion notification). The parent turn is not blocked.
 pub(super) fn spawn_detached_child(
-    ctx: DetachedGateCtx,
-    mut drive: SubagentDrive,
+    mut child: Session,
     task_id: String,
     cancel: CancellationToken,
     tx: async_channel::Sender<Event>,
     ui: Option<DelegatedUi>,
 ) {
-    let progress = ProgressSink::Background {
-        task_id: task_id.clone(),
-    };
-    let Some(writer) = drive.take_writer() else {
-        // Defensive: a drive without a claim cannot write safely; settle the
-        // registered task instead of leaving it Running forever.
-        if let Some(entry) = ctx
-            .state
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter_mut()
-            .find(|entry| entry.id == task_id)
-            && matches!(
-                entry.status,
-                pig_protocol::TaskStatus::Running | pig_protocol::TaskStatus::Queued
-            )
-        {
-            entry.status = pig_protocol::TaskStatus::Failed;
-            entry.exit_code = Some(-1);
-            entry.reason = Some("Subagent writer was unavailable".to_string());
-            entry.ended_at = Some(crate::rollout::now_secs());
-        }
-        ctx.state.notify_terminal(&task_id);
+    let Some(writer) = child
+        .subagent
+        .as_mut()
+        .expect("child session")
+        .take_writer()
+    else {
+        // A drive without a claim cannot write safely; settle the registered
+        // task instead of leaving it Running forever.
+        settle_unclaimed(&child, &task_id);
         return;
     };
+    spawn_with_writer(child, writer, task_id, cancel, tx, ui);
+}
+
+fn settle_unclaimed(child: &Session, task_id: &str) {
+    if let Some(entry) = child
+        .state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter_mut()
+        .find(|entry| entry.id == task_id)
+        && matches!(
+            entry.status,
+            pig_protocol::TaskStatus::Running | pig_protocol::TaskStatus::Queued
+        )
+    {
+        entry.status = pig_protocol::TaskStatus::Failed;
+        entry.exit_code = Some(-1);
+        entry.reason = Some("Subagent writer was unavailable".to_string());
+        entry.ended_at = Some(crate::rollout::now_secs());
+    }
+    child.state.notify_terminal(task_id);
+}
+
+fn spawn_with_writer(
+    mut child: Session,
+    writer: crate::task::AgentWriterGuard,
+    task_id: String,
+    cancel: CancellationToken,
+    tx: async_channel::Sender<Event>,
+    ui: Option<DelegatedUi>,
+) {
     // Build the lifecycle before spawning: an unpolled/dropped task still
     // releases the writer and settles the registry entry via Drop.
     let life = ChildLifecycle::new(
-        &ctx.state,
-        &ctx.pending,
-        &ctx.session_id,
+        &child.state,
+        &child.pending,
+        child.event_session_id(),
         tx.clone(),
-        &drive,
+        &child,
         writer,
-        &progress,
         Some(task_id),
     );
+    let session_id = child.event_session_id().to_string();
+    let child_cancel = cancel.clone();
+    let child_tx = tx.clone();
+    let child_task: std::pin::Pin<
+        Box<dyn std::future::Future<Output = SubagentResult> + Send + 'static>,
+    > = Box::pin(async move { child.run_subagent_task(&child_tx, &child_cancel).await });
     tokio::spawn(async move {
-        let mut ctx = ctx;
-        let mut drive = drive;
-        let mut tracker = std::mem::take(&mut ctx.tracker);
         let managed = drive_managed(
             life,
             &cancel,
@@ -93,35 +91,12 @@ pub(super) fn spawn_detached_child(
                     .await
                     .map(SubagentSlot::Global)
             },
-            async {
-                let mcp_extra = drive.extra_tools();
-                let mut gate = GateCtx {
-                    cwd: &ctx.cwd,
-                    permissions: ctx.permissions,
-                    media: tool::MediaCapabilities::new(
-                        drive.child_config.input_image,
-                        drive.child_config.input_pdf,
-                    ),
-                    tracker: &mut tracker,
-                    state: &ctx.tool_state,
-                    owns_todo_state: false,
-                    pending: &ctx.pending,
-                    permission_rules: &mut ctx.permission_rules,
-                    always_allowed: &mut ctx.always_allowed,
-                    session_id: &ctx.session_id,
-                    plan_enabled: false,
-                    store: &ctx.store,
-                    extra_tools: &mcp_extra,
-                    hooks: &ctx.hooks,
-                    history: &ctx.history,
-                };
-                drive_subagent(&mut gate, &mut drive, &progress, &tx, &cancel).await
-            },
+            child_task,
         )
         .await;
         if let Some(ui) = ui {
             let result = &managed.result;
-            crate::session::emit_bg(&ctx.session_id, &tx, |session_id| Event::ToolCallEnd {
+            crate::session::emit_bg(&session_id, &tx, |session_id| Event::ToolCallEnd {
                 session_id,
                 item_id: ui.item_id,
                 output: result.result_text.clone(),
@@ -149,7 +124,7 @@ pub(super) enum SubagentSlot {
 
 /// Managed child result plus whether it waited for a global slot.
 pub(super) struct ManagedOutcome {
-    pub(super) result: SubagentDriveResult,
+    pub(super) result: SubagentResult,
     pub(super) queued: bool,
 }
 
@@ -173,7 +148,7 @@ pub(super) async fn drive_managed<F>(
     run: F,
 ) -> ManagedOutcome
 where
-    F: Future<Output = SubagentDriveResult>,
+    F: Future<Output = SubagentResult>,
 {
     match std::panic::AssertUnwindSafe(drive_managed_inner(life, cancel, acquire, run))
         .catch_unwind()
@@ -181,7 +156,7 @@ where
     {
         Ok(outcome) => outcome,
         Err(payload) => ManagedOutcome {
-            result: panic_drive_result(payload),
+            result: panic_subagent_result(payload),
             queued: false,
         },
     }
@@ -194,7 +169,7 @@ async fn drive_managed_inner<F>(
     run: F,
 ) -> ManagedOutcome
 where
-    F: Future<Output = SubagentDriveResult>,
+    F: Future<Output = SubagentResult>,
 {
     let queued = life.task_id.is_some() && crate::task::subagent_slots_available() == 0;
     if queued && let Some(task_id) = &life.task_id {
@@ -205,7 +180,7 @@ where
         );
     }
     let Some(_slot) = acquire.await else {
-        let result = cancelled_drive_result();
+        let result = cancelled_subagent_result();
         life.settle(&result);
         return ManagedOutcome { result, queued };
     };
@@ -214,14 +189,14 @@ where
     }
     let result = match std::panic::AssertUnwindSafe(run).catch_unwind().await {
         Ok(result) => result,
-        Err(payload) => panic_drive_result(payload),
+        Err(payload) => panic_subagent_result(payload),
     };
     life.settle(&result);
     ManagedOutcome { result, queued }
 }
 
-pub(super) fn cancelled_drive_result() -> SubagentDriveResult {
-    SubagentDriveResult {
+pub(super) fn cancelled_subagent_result() -> SubagentResult {
+    SubagentResult {
         status_line: "cancelled".to_string(),
         result_text: String::new(),
         turns: 0,
@@ -232,14 +207,14 @@ pub(super) fn cancelled_drive_result() -> SubagentDriveResult {
     }
 }
 
-pub(super) fn panic_drive_result(payload: Box<dyn std::any::Any + Send>) -> SubagentDriveResult {
+pub(super) fn panic_subagent_result(payload: Box<dyn std::any::Any + Send>) -> SubagentResult {
     let message = payload
         .downcast_ref::<&str>()
         .map(|message| message.to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string());
     let note = format!("Subagent driver panicked: {message}");
-    SubagentDriveResult {
+    SubagentResult {
         status_line: format!("failed: {note}"),
         result_text: note,
         turns: 0,
@@ -253,11 +228,7 @@ pub(super) fn panic_drive_result(payload: Box<dyn std::any::Any + Send>) -> Suba
 /// Model-facing single-Agent receipt. Completion, failure and max-turn
 /// exhaustion keep the agent_id and a resume path; the parent can always
 /// continue the same contextual child.
-pub(super) fn subagent_receipt(
-    agent_id: &str,
-    profile: &str,
-    result: &SubagentDriveResult,
-) -> String {
+pub(super) fn subagent_receipt(agent_id: &str, profile: &str, result: &SubagentResult) -> String {
     let succeeded = result.completed && !result.is_error;
     let status = if succeeded { "completed" } else { "failed" };
     let heading = if succeeded { "[summary]" } else { "[failure]" };

@@ -450,6 +450,8 @@
     "grep": "搜索内容",
     "todo": "待办事项",
     "fetch_url": "读取网页",
+    "wait_for": "等待",
+    "wait_any": "任意任务",
     "background_task": "后台任务",
     "ask_user": "询问用户",
     "exit_plan": "实施计划",

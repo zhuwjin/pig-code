@@ -452,6 +452,8 @@ impl TrustFixture {
         assert!(
             session
                 .permission_rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .allow_hit("Write", "project-allowed.txt"),
             "the project allow rule applies under trust"
         );
@@ -488,6 +490,8 @@ impl TrustFixture {
         assert!(
             !session
                 .permission_rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .allow_hit("Write", "project-allowed.txt"),
             "an untrusted project allow must not apply"
         );
@@ -632,17 +636,17 @@ fn reprice_document_estimates_only_touches_window_fallbacks() {
         ))),
         document(Some(pig_provider::DocumentTokenEstimate::measured(3_000))),
     ];
-    session.history = vec![ChatMsg::system("sys".into()), user];
+    session.agent.history = vec![ChatMsg::system("sys".into()), user];
 
     session.reprice_document_estimates(8_000);
 
     assert_eq!(
-        session.history[1].documents[0].token_estimate,
+        session.agent.history[1].documents[0].token_estimate,
         Some(pig_provider::DocumentTokenEstimate::measured(6_000)),
         "a measured cost never changes with the window"
     );
     assert_eq!(
-        session.history[1].documents[1].token_estimate,
+        session.agent.history[1].documents[1].token_estimate,
         Some(pig_provider::DocumentTokenEstimate::window_fallback(
             pig_utils::pdf::unknown_document_token_reserve(8_000),
             8_000
@@ -650,7 +654,7 @@ fn reprice_document_estimates_only_touches_window_fallbacks() {
         "the fallback is repriced from its tag"
     );
     assert_eq!(
-        session.history[1].documents[2].token_estimate,
+        session.agent.history[1].documents[2].token_estimate,
         Some(pig_provider::DocumentTokenEstimate::measured(3_000)),
         "every measured cost is preserved"
     );

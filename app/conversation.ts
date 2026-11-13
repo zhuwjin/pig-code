@@ -47,6 +47,11 @@ function activityCategory(item: ChatItem): ActivityCategory | null {
 export function activitySummary(items: ChatItem[]): string {
   const counts = new Map<ActivityCategory, { count: number; failures: number }>();
   for (const item of items) {
+    // A pending input card has not run yet: it streams in before execution and
+    // is claimed by the same row once the call starts.
+    if (item.kind === "tool" && item.status === "input") continue;
+    // A thought in progress is not a completed "thought N times" entry.
+    if (item.kind === "reasoning" && item.streaming) continue;
     const category = activityCategory(item);
     if (!category) continue;
     const current = counts.get(category) ?? { count: 0, failures: 0 };
@@ -329,6 +334,7 @@ export function toolLabel(tool: string, running: boolean): string {
     case "Grep": return t("tools.grep");
     case "TodoList": return t("tools.todo");
     case "FetchURL": return t("tools.fetch_url");
+    case "TaskWait": return t("tools.wait_for");
     case "TaskList":
     case "TaskOutput":
     case "TaskStop": return t("tools.background_task");
