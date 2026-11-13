@@ -612,7 +612,7 @@
     "tool_time": "工具累计耗时",
     "first_token": "首 Token 平均延迟",
     "decode_speed": "加权解码速度",
-    "cache_suffix": "缓存 {percent}%",
+    "cache_suffix": "缓存命中 {percent}%",
     "token_usage": "会话 Token 用量",
     "input": "输入",
     "cache_read": "缓存读取",

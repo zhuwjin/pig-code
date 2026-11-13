@@ -3,8 +3,9 @@ import { Button } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
 import { toggleExpanded, type UiContext } from "../ui-context";
-import { changeTotals, formatClock, formatCompactDuration } from "../conversation";
+import { changeTotals, formatClock, formatCompactDuration, turnDurationMs, turnSpeed } from "../conversation";
 import { Icon } from "./icon";
+import { formatSpeedReading, formatStatDuration, formatTokenReading, StatsPopover } from "./stats";
 
 export function TurnChangesRow(props: UiContext & { turn: Accessor<TurnState> }) {
   const turn = () => props.turn();
@@ -127,6 +128,50 @@ export function TurnActionsRow(props: UiContext & {
           >
             <Icon name="anchor" size={12} color={token("muted-foreground")} />
           </Button>
+        </If>
+        <If when={stats()}>
+          {(value) => {
+            const current = value();
+            const speed = turnSpeed(current);
+            const prompt = current.input + current.cache_read;
+            const total = prompt + current.output;
+            return (
+              <>
+                <StatsPopover
+                  id={`turn-speed-${turn().id}`}
+                  icon="gauge"
+                  label={formatSpeedReading(speed)}
+                  title={t("turn.speed_title")}
+                  rows={[
+                    { label: t("turn.duration"), value: formatStatDuration(turnDurationMs(turn()) ?? current.duration_ms) },
+                    { label: t("turn.model_time"), value: formatStatDuration(current.api_ms) },
+                    ...(current.tool_ms > 0 ? [{ label: t("turn.tool_time"), value: formatStatDuration(current.tool_ms) }] : []),
+                    ...(current.ttft_ms > 0 && current.ttft_steps > 0 ? [{
+                      label: t("turn.first_token"),
+                      value: formatStatDuration(current.ttft_ms / current.ttft_steps),
+                    }] : []),
+                    { label: t("turn.decode_speed"), value: formatSpeedReading(speed) },
+                  ]}
+                />
+                <StatsPopover
+                  id={`turn-usage-${turn().id}`}
+                  icon="database"
+                  label={formatTokenReading(total)}
+                  title={t("turn.usage_title")}
+                  total={formatTokenReading(total)}
+                  rows={[
+                    ...(prompt > 0 ? [{
+                      label: t("turn.cache_hit"),
+                      value: `${(current.cache_read / prompt * 100).toFixed(1)}%`,
+                    }] : []),
+                    { label: t("turn.input"), value: formatTokenReading(current.input) },
+                    { label: t("turn.cache_read"), value: formatTokenReading(current.cache_read) },
+                    { label: t("turn.output"), value: formatTokenReading(current.output) },
+                  ]}
+                />
+              </>
+            );
+          }}
         </If>
         <If when={stats()}>
           <Text class="ml-1 text-xs text-muted-foreground">{formatClock(stats()!.ended_at_ms)}</Text>

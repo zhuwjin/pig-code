@@ -193,8 +193,11 @@ test("formats compact tokens and wall-clock stamps like the original turn action
   expect(formatTokens(999)).toBe("999");
   expect(formatTokens(1000)).toBe("1K");
   expect(formatTokens(12400)).toBe("12.4K");
+  expect(formatTokens(42500)).toBe("42.5K");
   expect(formatTokens(1000000)).toBe("1M");
   expect(formatTokens(1250000)).toBe("1.3M");
+  expect(formatTokens(1000000000)).toBe("1B");
+  expect(formatTokens(1250000000)).toBe("1.3B");
   const now = new Date(2026, 10, 2, 13, 15).getTime();
   expect(formatClock(now, now)).toBe("13:15");
   expect(formatClock(new Date(2026, 9, 29, 16, 27).getTime(), now)).toBe("10-29 16:27");

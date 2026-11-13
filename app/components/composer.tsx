@@ -22,6 +22,7 @@ import { Icon } from "./icon";
 import { ImageViewer } from "./image-viewer";
 import { QuestionCard } from "./question-card";
 import { QueuePanel } from "./queue-panel";
+import { SessionStatusBar } from "./stats";
 
 function WorkspaceSelector(props: UiContext) {
   const open = signal(false);
@@ -503,6 +504,7 @@ export function Composer(props: UiContext & { hero?: boolean; onHeightChange?: (
             </View>
           </If>
         </View>
+        <SessionStatusBar {...props} />
       </View>
       <ImageViewer
         images={store.draftImages().map((image, index) => ({

@@ -612,7 +612,7 @@
     "tool_time": "Tool time",
     "first_token": "Avg first token",
     "decode_speed": "Weighted decode speed",
-    "cache_suffix": "Cache {percent}%",
+    "cache_suffix": "Cache hit {percent}%",
     "token_usage": "Session token usage",
     "input": "Input",
     "cache_read": "Cache read",
