@@ -1,6 +1,6 @@
 # NSH 新版本待办
 
-当前项目的 `nsh-core`、`nsh-base`、`nsh-engine` 和 `nsh-testing` 均使用 `0.5.0`（见 `Cargo.toml`）。
+当前项目的 `nsh-core`、`nsh-base`、`nsh-engine` 和 `nsh-testing` 均使用 `0.5.1`（见 `Cargo.toml`）。
 
 本文只记录尚未完成的、依赖 NSH 新版本的事项，不记录 Pig Code 自己的功能 TODO，也不记录已经接入的历史。已完成的历史记录见 [NSH_UPSTREAM_HISTORY.md](./NSH_UPSTREAM_HISTORY.md)。NSH main 中存在某项实现，不代表它已经发布，也不代表可以直接替换当前版本；升级时必须重新检查公开 API 和兼容性。
 
