@@ -158,7 +158,8 @@ fn rebuild_records(
             | RolloutRecord::PromptSnapshot { .. }
             | RolloutRecord::TurnStats { .. }
             | RolloutRecord::StepUsage { .. }
-            | RolloutRecord::TurnChanges { .. } => {}
+            | RolloutRecord::TurnChanges { .. }
+            | RolloutRecord::AgentRun { .. } => {}
             RolloutRecord::TaskNotificationBatch {
                 notifications,
                 model_text,

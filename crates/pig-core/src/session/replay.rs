@@ -11,7 +11,8 @@ impl Session {
             match record {
                 RolloutRecord::Meta { .. }
                 | RolloutRecord::System { .. }
-                | RolloutRecord::PromptSnapshot { .. } => {}
+                | RolloutRecord::PromptSnapshot { .. }
+                | RolloutRecord::AgentRun { .. } => {}
                 RolloutRecord::Assistant {
                     text,
                     reasoning,

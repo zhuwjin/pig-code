@@ -679,6 +679,16 @@ pub enum Event {
         session_id: String,
         tasks: Vec<TaskSummary>,
     },
+    AgentCatalogChanged {
+        session_id: String,
+        agents: Vec<AgentCatalogEntry>,
+    },
+    AgentOutput {
+        session_id: String,
+        agent_id: String,
+        run_id: Option<String>,
+        text: String,
+    },
     TaskNotificationBatch {
         session_id: String,
         notifications: Vec<TaskNotification>,

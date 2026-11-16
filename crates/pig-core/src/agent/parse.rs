@@ -47,6 +47,7 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
     let mut description: Option<String> = None;
     let mut tools: Option<Vec<String>> = None;
     let mut model: Option<String> = None;
+    let mut subagents: Option<Vec<String>> = None;
     let mut thought_level: Option<String> = None;
     let mut max_turns: Option<usize> = None;
     let mut inject_agents_md = true;
@@ -110,6 +111,9 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
                 tools = list.or_else(|| (!scalar.is_empty()).then(|| vec![scalar.clone()]));
             }
             "model" => model = parse_model_value(&scalar),
+            "subagents" => {
+                subagents = Some(list.unwrap_or_default());
+            }
             "thoughtLevel" | "thought_level" => {
                 thought_level = (!scalar.is_empty()).then_some(scalar);
             }
@@ -166,6 +170,7 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentProfile, String> {
         name,
         description,
         tools,
+        subagents,
         model,
         thought_level,
         max_turns,

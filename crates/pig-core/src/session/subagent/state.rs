@@ -24,6 +24,7 @@ pub(crate) struct SubagentState {
     pub(in crate::session) jsonl: PathBuf,
     pub(in crate::session) max_turns: usize,
     pub(in crate::session) description: String,
+    pub(in crate::session) output_schema: Option<serde_json::Value>,
     /// Child plugin-tool selection (updated once per step).
     pub(in crate::session) plugin_tool_filter: crate::plugins::PluginToolFilter,
     /// Inheritance rule snapshot (decided from the profile-narrowed result at

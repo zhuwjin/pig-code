@@ -102,6 +102,13 @@ pub enum Op {
         session_id: String,
     },
     ListSessions,
+    ListAgents {
+        session_id: String,
+    },
+    AgentOutput {
+        session_id: String,
+        agent_id: String,
+    },
     ListWorkspaces,
     AddWorkspace {
         path: PathBuf,

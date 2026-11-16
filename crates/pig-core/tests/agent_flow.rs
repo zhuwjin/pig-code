@@ -153,6 +153,59 @@ async fn full_turn_with_tool_call() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_reports_the_running_root_during_a_turn() {
+    let (config_path, cwd, data_dir) = setup("agent-catalog-running");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::SCENARIO_SLOW_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .unwrap();
+    recv_until(
+        &events,
+        Duration::from_secs(10),
+        |event| matches!(event, Event::ToolCallBegin { tool, .. } if tool == "ExecCommand"),
+    )
+    .await;
+    agent
+        .ops
+        .send(Op::ListAgents {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let catalog = recv_until(&events, Duration::from_secs(5), |event| {
+        matches!(event, Event::AgentCatalogChanged { .. })
+    })
+    .await;
+    let Some(Event::AgentCatalogChanged { agents, .. }) = catalog.last() else {
+        panic!("expected agent catalog")
+    };
+    let root = agents
+        .iter()
+        .find(|agent| agent.agent_id == session_id)
+        .expect("root entry");
+    assert_eq!(root.status, Some(pig_protocol::AgentRunStatus::Running));
+    assert_eq!(root.turn_kind, Some(pig_protocol::TurnKind::Regular));
+    assert!(root.run_id.is_some());
+    agent.ops.send(Op::Interrupt { session_id }).await.unwrap();
+    recv_until(&events, Duration::from_secs(10), |event| {
+        matches!(event, Event::TurnAborted { .. })
+    })
+    .await;
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_during_stream() {
     let (config_path, cwd, data_dir) = setup("m2-interrupt");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);

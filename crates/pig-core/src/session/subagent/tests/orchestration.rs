@@ -711,6 +711,196 @@ fn max_turn_background_notification_is_failed_with_resume_guidance() {
 }
 
 #[tokio::test]
+async fn child_parallel_tools_preserve_call_order() {
+    let (session, parent, root) = swarm_test_session("parallel-tools");
+    let profile = crate::agent::builtin_profiles()
+        .into_iter()
+        .find(|profile| profile.name == "general-purpose")
+        .expect("general profile");
+    let prep = crate::agent::prepare_fresh_child(
+        &crate::agent::ChildPrepCtx {
+            cwd: &session.agent.cwd,
+            data_dir: &session.data_dir,
+            git_snapshot: None,
+            skills_prompt: "",
+            agents_prompt: "",
+            runtime: None,
+            parent_config: &parent,
+            session_id: &session.agent.id,
+            parent_agent_id: &session.agent.id,
+            parent_delegation_depth: 0,
+            max_delegation_depth: 1,
+            max_agents_per_session: 64,
+            allowed_subagents: None,
+            child_cwd: None,
+            worktree: false,
+            parent_permissions: session.permissions,
+            parent_history: &[],
+            profiles_summary: "",
+            state: &session.state,
+            mcp: None,
+            plugin_tools: session.plugin_tools.clone(),
+        },
+        profile,
+        parent.clone(),
+        pig_provider::mock::PREFIX_PARALLEL_SCENARIO,
+        "parallel child",
+        &mut 0,
+    )
+    .expect("parallel child preparation");
+    let mut child = Session::new_subagent(
+        prep,
+        &session,
+        ProgressSink::Foreground {
+            parent_item_id: "parent".into(),
+        },
+        SubagentMode::Foreground,
+    );
+    let writer = child
+        .subagent
+        .as_mut()
+        .expect("child")
+        .take_writer()
+        .expect("writer");
+    let (tx, _rx) = async_channel::unbounded();
+    let mut life = ChildLifecycle::new(
+        &child.state,
+        &test_pending(),
+        child.event_session_id(),
+        tx.clone(),
+        &child,
+        writer,
+        None,
+    );
+    let result = child
+        .run_subagent_task(&tx, &CancellationToken::new())
+        .await;
+    assert_eq!(result.status, crate::session::AgentRunStatus::Completed);
+    assert!(result.text().contains("MOCK_PREFIX_PARALLEL_DONE"));
+    let calls = child
+        .agent
+        .history
+        .iter()
+        .find_map(|message| message.tool_calls.as_ref())
+        .expect("assistant tool calls");
+    assert_eq!(calls.len(), 2);
+    let results: Vec<_> = child
+        .agent
+        .history
+        .iter()
+        .filter(|message| message.role == "tool")
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].tool_call_id.as_deref(),
+        Some(calls[0].id.as_str())
+    );
+    assert_eq!(
+        results[1].tool_call_id.as_deref(),
+        Some(calls[1].id.as_str())
+    );
+    life.settle(&result);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn child_structured_output_uses_the_native_schema_and_current_run() {
+    let (session, mut parent, root, log, _) =
+        compaction_test_session("structured-output", 128_000, 8_192);
+    parent.cap_structured = true;
+    let profile = crate::agent::builtin_profiles()
+        .into_iter()
+        .find(|profile| profile.name == "general-purpose")
+        .expect("general profile");
+    let mut prep = crate::agent::prepare_fresh_child(
+        &crate::agent::ChildPrepCtx {
+            cwd: &session.agent.cwd,
+            data_dir: &session.data_dir,
+            git_snapshot: None,
+            skills_prompt: "",
+            agents_prompt: "",
+            runtime: None,
+            parent_config: &parent,
+            session_id: &session.agent.id,
+            parent_agent_id: &session.agent.id,
+            parent_delegation_depth: 0,
+            max_delegation_depth: 1,
+            max_agents_per_session: 64,
+            allowed_subagents: None,
+            child_cwd: None,
+            worktree: false,
+            parent_permissions: session.permissions,
+            parent_history: &[],
+            profiles_summary: "",
+            state: &session.state,
+            mcp: None,
+            plugin_tools: session.plugin_tools.clone(),
+        },
+        profile,
+        parent.clone(),
+        pig_provider::mock::STRUCTURED_OUTPUT_TRIGGER,
+        "structured child",
+        &mut 0,
+    )
+    .expect("structured child preparation");
+    prep.policy.output_schema = Some(serde_json::json!({
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"]
+    }));
+    let mut child = Session::new_subagent(
+        prep,
+        &session,
+        ProgressSink::Foreground {
+            parent_item_id: "parent".into(),
+        },
+        SubagentMode::Foreground,
+    );
+    let writer = child
+        .subagent
+        .as_mut()
+        .expect("child")
+        .take_writer()
+        .expect("writer");
+    let (tx, _rx) = async_channel::unbounded();
+    let mut life = ChildLifecycle::new(
+        &child.state,
+        &test_pending(),
+        child.event_session_id(),
+        tx.clone(),
+        &child,
+        writer,
+        None,
+    );
+    let result = child
+        .run_subagent_task(&tx, &CancellationToken::new())
+        .await;
+    assert_eq!(result.status, crate::session::AgentRunStatus::Completed);
+    assert_eq!(
+        result
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.structured.as_ref()),
+        Some(&serde_json::json!({"answer": "ok"}))
+    );
+    let partial = child
+        .state
+        .agent_partials
+        .lock()
+        .expect("partials")
+        .get(&child.agent.id)
+        .cloned()
+        .expect("partial output");
+    assert_eq!(partial.run_id, result.run_id.as_deref().expect("run id"));
+    assert_eq!(partial.text, "{\"answer\":\"ok\"}");
+    let requests = log.lock().expect("request log").join("\n");
+    assert!(requests.contains("response_format"), "{requests}");
+    assert!(requests.contains("agent_result"), "{requests}");
+    life.settle(&result);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn catalog_preserves_root_and_child_run_identities_across_resume() {
     let (mut session, parent_model, root, _log, runtime) =
         compaction_test_session("catalog", 128_000, 8_192);
@@ -738,6 +928,7 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
         name: "explore".into(),
         description: "catalog test".into(),
         tools: None,
+        subagents: None,
         model: None,
         thought_level: None,
         max_turns: None,
@@ -758,6 +949,10 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
             parent_agent_id: &session.agent.id,
             parent_delegation_depth: 0,
             max_delegation_depth: 1,
+            max_agents_per_session: 64,
+            allowed_subagents: None,
+            child_cwd: None,
+            worktree: false,
             parent_permissions: session.permissions,
             parent_history: &[],
             profiles_summary: "",
@@ -833,6 +1028,10 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
             parent_agent_id: &session.agent.id,
             parent_delegation_depth: 0,
             max_delegation_depth: 1,
+            max_agents_per_session: 64,
+            allowed_subagents: None,
+            child_cwd: None,
+            worktree: false,
             parent_permissions: session.permissions,
             parent_history: &[],
             profiles_summary: "",

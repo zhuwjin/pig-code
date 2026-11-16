@@ -24,6 +24,7 @@ use pig_utils::paths::normalize_workspace_path;
 mod agent;
 use agent::Agent;
 mod approval;
+mod batch;
 mod catalog;
 mod compact;
 mod effects;
@@ -54,7 +55,6 @@ mod turn;
 mod usage;
 
 pub use approval::approval_detail;
-pub use catalog::AgentCatalogEntry;
 pub use compact::COMPACTION_MARKER;
 pub(crate) use compact::{CompactOutcome, CompactTrigger, compact_trigger};
 pub(crate) use effects::emit_bg;
@@ -71,7 +71,6 @@ pub use model::ModelSelection;
 pub(crate) use model::resolve_runtime_model;
 use model::{meta_to_selection, skills_state_with_trust, snapshot_trusted};
 use operations::CancelledTool;
-pub use outcome::AgentRunStatus;
 use outcome::StepOutcome;
 pub(crate) use outcome::{
     AgentRunResult, GatedToolOutcome, MAX_PAUSE_CONTINUATIONS, SubagentOutcome, TurnOutcome,
@@ -84,6 +83,7 @@ pub use pending::{
 pub(crate) use pending::{
     PendingMailbox, PendingMessage, persist_pending, restore_pending, restored_queue_seq,
 };
+pub use pig_protocol::{AgentCatalogEntry, AgentRunStatus};
 pub use runner::agent_loop;
 pub use title::TITLE_PROMPT_MARKER;
 pub(crate) use title::spawn_title_generation;

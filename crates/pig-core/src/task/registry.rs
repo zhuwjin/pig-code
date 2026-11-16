@@ -36,10 +36,16 @@ const MAX_TASK_OUTPUT: usize = 64 * 1024;
 const SNAPSHOT_TAIL_CHARS: usize = 4000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentPartial {
+    pub run_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentRunMetadata {
     pub agent_id: String,
     pub run_id: String,
-    pub parent_agent_id: String,
+    pub parent_agent_id: Option<String>,
     pub delegation_depth: u32,
     pub profile: String,
     pub usage: (u64, u64, u64),
@@ -78,6 +84,40 @@ pub struct TaskEntry {
 }
 
 impl TaskEntry {
+    pub fn recovered_agent(
+        id: String,
+        command: String,
+        run: AgentRunMetadata,
+        record_path: PathBuf,
+        result_path: Option<PathBuf>,
+        model: String,
+        created_at: u64,
+    ) -> Self {
+        Self {
+            id,
+            kind: TaskKind::Subagent,
+            command,
+            status: TaskStatus::Lost,
+            exit_code: None,
+            reason: Some("The previous process ended before this child was registered".to_string()),
+            started_at: created_at,
+            ended_at: Some(now_secs()),
+            pid: None,
+            output: String::new(),
+            spill: None,
+            cancel: None,
+            agent_id: Some(run.agent_id.clone()),
+            run: Some(run),
+            owner_agent_id: None,
+            record_path: Some(record_path),
+            result_path,
+            turns: None,
+            model: Some(model),
+            terminal_notification_suppressed: false,
+            foreground: false,
+        }
+    }
+
     /// Spill path reported to the panel even before the file exists (the panel
     /// falls back to `output_tail` until the lazy file appears).
     pub(super) fn spill_path(&self) -> Option<&Path> {
@@ -355,6 +395,9 @@ pub struct SessionToolState {
     /// path (including panic), so a resume cannot open a second writer while
     /// a stopped driver is still closing.
     pub agent_writers: Arc<Mutex<HashSet<String>>>,
+    /// Serializes admission with ID/writer reservation, including swarm prep.
+    pub agent_spawn_lock: Arc<Mutex<()>>,
+    pub agent_partials: Arc<Mutex<HashMap<String, AgentPartial>>>,
     /// Tasks a subagent is waiting for, keyed by owner agent id. A successful
     /// TaskWait keeps the id so the terminal notification is not also queued
     /// as a steer; a timeout or error removes it.
@@ -381,6 +424,8 @@ impl Clone for SessionToolState {
             read_states: self.read_states.clone(),
             agent_steers: self.agent_steers.clone(),
             agent_writers: self.agent_writers.clone(),
+            agent_spawn_lock: self.agent_spawn_lock.clone(),
+            agent_partials: self.agent_partials.clone(),
             agent_task_waits: self.agent_task_waits.clone(),
             extra_read_roots: self.extra_read_roots.clone(),
             extra_rw_roots: self.extra_rw_roots.clone(),
@@ -415,6 +460,8 @@ impl SessionToolState {
             task_seq: Arc::new(AtomicUsize::new(0)),
             agent_steers: Arc::new(Mutex::new(HashMap::new())),
             agent_writers: Arc::new(Mutex::new(HashSet::new())),
+            agent_spawn_lock: Arc::new(Mutex::new(())),
+            agent_partials: Arc::new(Mutex::new(HashMap::new())),
             agent_task_waits: Arc::new(Mutex::new(HashMap::new())),
             read_states: Arc::new(Mutex::new(HashMap::new())),
             extra_read_roots: canon(extra_read_roots),

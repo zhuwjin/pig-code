@@ -409,6 +409,7 @@ impl Session {
             let mut store = store.lock().expect("store lock");
             store.reconcile_with_history(id, &receipt_list)?;
             store.recover_interrupted_tasks(id)?;
+            store.recover_tool_executions(id)?;
             store.recover_terminal_notifications(id)?;
             store.reconcile_delivered(&receipt_list)?;
             store.background_tasks(id)?
@@ -437,7 +438,9 @@ impl Session {
             frozen,
         );
         session.restore_delivery_receipts(delivery_receipts);
+        session.restore_root_run(&records);
         session.state.restore_tasks(tasks);
+        session.restore_agent_catalog();
         if let Some(snapshot) = prompt_snapshot {
             let trusted = session.trust.admits(&session.agent.cwd);
             let same_trust = snapshot_trusted(&snapshot.skills_state) == Some(trusted);

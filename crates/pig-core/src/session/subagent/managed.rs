@@ -237,8 +237,14 @@ pub(super) fn subagent_receipt(agent_id: &str, profile: &str, result: &SubagentR
     let succeeded = result.is_completed() && !result.is_error();
     let status = if succeeded { "completed" } else { "failed" };
     let heading = if succeeded { "[summary]" } else { "[failure]" };
+    let cwd = result
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.cwd.as_ref())
+        .map(|cwd| format!("\ncwd: {}", cwd.display()))
+        .unwrap_or_default();
     format!(
-        "agent_id: {agent_id}\nsubagent_type: {profile}\nstatus: {status}\nturns: {}\n{heading}\n{}\nresume_hint: continue this subagent with Agent(resume=\"{agent_id}\", prompt=\"...\")",
+        "agent_id: {agent_id}\nsubagent_type: {profile}\nstatus: {status}\nturns: {}\n{heading}\n{}\nresume_hint: continue this subagent with Agent(resume=\"{agent_id}\", prompt=\"...\"){cwd}",
         result.turns,
         result.text().to_string()
     )
@@ -268,7 +274,16 @@ pub(super) fn swarm_child_result(
         status,
         turns: result.turns,
         result_path,
-        result_text: result.text().to_string(),
+        result_text: format!(
+            "{}{}",
+            result.text(),
+            result
+                .artifact
+                .as_ref()
+                .and_then(|artifact| artifact.cwd.as_ref())
+                .map(|cwd| format!("\ncwd: {}", cwd.display()))
+                .unwrap_or_default()
+        ),
         queued: managed.queued,
         usage: result.usage,
     }

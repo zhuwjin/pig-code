@@ -1225,6 +1225,7 @@ pub(super) fn media_scenario_response(tool_results: usize) -> Vec<String> {
 
 /// Two Reads in one assistant response, followed by text after both results.
 pub const PREFIX_PARALLEL_SCENARIO: &str = "PREFIX_PARALLEL_SCENARIO";
+pub const STRUCTURED_OUTPUT_TRIGGER: &str = "STRUCTURED_AGENT_OUTPUT";
 
 pub(super) const PREFIX_PARALLEL_MARKER: &str = "MOCK_PREFIX_PARALLEL_DONE";
 

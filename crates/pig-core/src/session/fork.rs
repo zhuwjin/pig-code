@@ -79,7 +79,10 @@ pub fn fork_session(
     let mut rollout = Rollout::create(sessions_dir, &meta)?;
     for record in &kept {
         // Old Meta lines are skipped: Rollout::create already wrote the new meta
-        if matches!(record, RolloutRecord::Meta { .. }) {
+        if matches!(
+            record,
+            RolloutRecord::Meta { .. } | RolloutRecord::AgentRun { .. }
+        ) {
             continue;
         }
         rollout

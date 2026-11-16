@@ -16,7 +16,11 @@ use crate::task::{AgentWriterGuard, SessionToolState};
 
 /// Immutable session-level inputs for child preparation.
 pub(crate) struct ChildPrepCtx<'a> {
+    /// Parent workspace used for trust, profiles and delegation policy.
     pub(crate) cwd: &'a Path,
+    /// Optional explicit child workspace; worktree takes precedence over none.
+    pub(crate) child_cwd: Option<PathBuf>,
+    pub(crate) worktree: bool,
     pub(crate) data_dir: &'a Path,
     pub(crate) git_snapshot: Option<&'a str>,
     /// Skills/AGENTS.md sections frozen for the session (injected into the
@@ -33,6 +37,9 @@ pub(crate) struct ChildPrepCtx<'a> {
     pub(crate) parent_agent_id: &'a str,
     pub(crate) parent_delegation_depth: u32,
     pub(crate) max_delegation_depth: u32,
+    pub(crate) max_agents_per_session: usize,
+    /// The direct parent's profile allowlist; None means unrestricted.
+    pub(crate) allowed_subagents: Option<&'a [String]>,
     /// Permission state captured from the parent for this activation. Known
     /// approvals remain shared separately; this is the child's fixed scope.
     pub(crate) parent_permissions: pig_protocol::PermissionSettings,
@@ -59,6 +66,7 @@ pub(crate) struct ResolvedChildPolicy {
     pub(crate) max_turns: usize,
     pub(crate) delegation_depth: u32,
     pub(crate) context_mode: crate::rollout::ChildContextMode,
+    pub(crate) output_schema: Option<serde_json::Value>,
     pub(crate) inherited_record_count: Option<usize>,
     pub(crate) permissions: pig_protocol::PermissionSettings,
     /// Inheritance-rule snapshot (same policy for every child kind).
@@ -96,7 +104,7 @@ impl ChildPrep {
         crate::task::AgentRunMetadata {
             agent_id: self.agent_id.clone(),
             run_id: self.run_id.clone(),
-            parent_agent_id: self.parent_agent_id.clone(),
+            parent_agent_id: Some(self.parent_agent_id.clone()),
             delegation_depth: self.policy.delegation_depth,
             profile: self.policy.profile.name.clone(),
             usage: (0, 0, 0),
@@ -152,6 +160,7 @@ impl ResolvedChildPolicy {
             model,
             delegation_depth,
             context_mode,
+            output_schema: None,
             inherited_record_count,
             permissions: ctx.parent_permissions,
             mcp_inherits_all: tools.mcp_inherits_all,
@@ -191,6 +200,55 @@ fn profile_allows(profile: &AgentProfile, name: &str) -> bool {
     }
 }
 
+fn validate_child_profile(ctx: &ChildPrepCtx<'_>, profile: &AgentProfile) -> Result<(), String> {
+    let Some(allowed) = ctx.allowed_subagents else {
+        return Ok(());
+    };
+    if allowed
+        .iter()
+        .any(|candidate| candidate == "*" || candidate == &profile.name)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "Subagent type \"{}\" is not allowed by the parent profile. Allowed subagent types: {}",
+        profile.name,
+        if allowed.is_empty() {
+            "(none)".to_string()
+        } else {
+            allowed.join(", ")
+        }
+    ))
+}
+
+fn check_agent_budget(ctx: &ChildPrepCtx<'_>) -> Result<(), String> {
+    let tasks = ctx
+        .state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut agents: std::collections::HashSet<String> = tasks
+        .iter()
+        .filter_map(|task| task.run.as_ref().map(|run| run.agent_id.clone()))
+        .collect();
+    agents.extend(
+        ctx.state
+            .agent_writers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned(),
+    );
+    let max = ctx.max_agents_per_session;
+    if agents.len() >= max {
+        return Err(format!(
+            "The session already has {} child agents, reaching [agents].max_agents_per_session={max}. Resume an existing agent instead of creating another one.",
+            agents.len()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_child_depth(ctx: &ChildPrepCtx<'_>, depth: u32) -> Result<(), String> {
     if depth > ctx.max_delegation_depth {
         return Err(format!(
@@ -211,6 +269,7 @@ fn child_tools(
     profile: &AgentProfile,
     child_config: &ResolvedModel,
     delegation_depth: u32,
+    cwd: &Path,
 ) -> Result<ChildTools, String> {
     let all_tools: Vec<Box<dyn crate::tool::Tool>> = crate::tool::all();
     let all_names: Vec<String> = all_tools.iter().map(|t| t.name().to_string()).collect();
@@ -240,7 +299,7 @@ fn child_tools(
     // bodies load on demand and the child prompt lists the same skills. The
     // trust decision must match the listing that made a skill visible.
     tools.push(Box::new(crate::tool::SkillTool::new_trusted(
-        ctx.cwd,
+        cwd,
         &ctx.plugin_tools.registry(),
         trusted,
     )));
@@ -272,11 +331,16 @@ fn child_tools(
     })
 }
 
-fn fresh_history(ctx: &ChildPrepCtx<'_>, profile: &AgentProfile, prompt: &str) -> Vec<ChatMsg> {
+fn fresh_history(
+    ctx: &ChildPrepCtx<'_>,
+    profile: &AgentProfile,
+    prompt: &str,
+    cwd: &Path,
+) -> Vec<ChatMsg> {
     vec![
         ChatMsg::system(crate::prompt::subagent_system_prompt(
             profile,
-            ctx.cwd,
+            cwd,
             ctx.git_snapshot,
             ctx.agents_prompt,
             ctx.skills_prompt,
@@ -285,10 +349,15 @@ fn fresh_history(ctx: &ChildPrepCtx<'_>, profile: &AgentProfile, prompt: &str) -
     ]
 }
 
-fn fork_history(ctx: &ChildPrepCtx<'_>, profile: &AgentProfile, prompt: &str) -> Vec<ChatMsg> {
+fn fork_history(
+    ctx: &ChildPrepCtx<'_>,
+    profile: &AgentProfile,
+    prompt: &str,
+    cwd: &Path,
+) -> Vec<ChatMsg> {
     let mut history = vec![ChatMsg::system(crate::prompt::subagent_system_prompt(
         profile,
-        ctx.cwd,
+        cwd,
         ctx.git_snapshot,
         ctx.agents_prompt,
         ctx.skills_prompt,
@@ -332,6 +401,64 @@ fn child_meta(
 
 fn agents_directory(ctx: &ChildPrepCtx<'_>) -> Result<PathBuf, String> {
     prepared_agent_dir(&ctx.data_dir.join("sessions"), ctx.session_id)
+}
+
+fn prepare_child_cwd(ctx: &ChildPrepCtx<'_>, agent_id: &str) -> Result<PathBuf, String> {
+    if ctx.worktree {
+        let path = ctx
+            .data_dir
+            .join("worktrees")
+            .join(ctx.session_id)
+            .join(agent_id);
+        if path.exists() {
+            return Err(format!("Child worktree already exists: {}", path.display()));
+        }
+        let parent = path
+            .parent()
+            .ok_or("Child worktree has no parent directory")?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create child worktree parent: {error}"))?;
+        let mut command = std::process::Command::new("git");
+        command
+            .arg("-C")
+            .arg(ctx.cwd)
+            .args(["worktree", "add", "--detach"])
+            .arg(&path)
+            .arg("HEAD");
+        crate::NoConsoleExt::no_console(&mut command);
+        let output = command
+            .output()
+            .map_err(|error| format!("Failed to start git worktree add: {error}"))?;
+        if !output.status.success() {
+            let _ = std::fs::remove_dir_all(&path);
+            let detail = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Failed to create child worktree from HEAD: {}",
+                detail.trim().chars().take(1_000).collect::<String>()
+            ));
+        }
+        return path
+            .canonicalize()
+            .map_err(|error| format!("Failed to resolve child worktree: {error}"));
+    }
+    let Some(cwd) = &ctx.child_cwd else {
+        return Ok(ctx.cwd.to_path_buf());
+    };
+    let candidate = if cwd.is_absolute() {
+        cwd.clone()
+    } else {
+        ctx.cwd.join(cwd)
+    };
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|error| format!("Child cwd {} is unavailable: {error}", candidate.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "Child cwd is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 fn persist_history(prep: &mut ChildPrep) -> Result<(), String> {
@@ -452,6 +579,12 @@ fn prepare_child(
     context_mode: crate::rollout::ChildContextMode,
     agent_seq: &mut u64,
 ) -> Result<ChildPrep, ChildPrepError> {
+    let _spawn_guard = ctx
+        .state
+        .agent_spawn_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    validate_child_profile(ctx, &profile).map_err(ChildPrepError::CallLevel)?;
     let delegation_depth = ctx
         .parent_delegation_depth
         .checked_add(1)
@@ -461,25 +594,27 @@ fn prepare_child(
                 .map(|()| depth)
                 .map_err(ChildPrepError::CallLevel)
         })?;
+    check_agent_budget(ctx).map_err(ChildPrepError::CallLevel)?;
+    let agents_dir = agents_directory(ctx).map_err(ChildPrepError::CallLevel)?;
+    let (agent_id, writer) =
+        allocate_agent_id(ctx.state, &agents_dir, agent_seq).map_err(ChildPrepError::CallLevel)?;
+    let child_cwd = prepare_child_cwd(ctx, &agent_id).map_err(ChildPrepError::ItemLevel)?;
     let history = match context_mode {
-        crate::rollout::ChildContextMode::Fresh => fresh_history(ctx, &profile, prompt),
-        crate::rollout::ChildContextMode::Fork => fork_history(ctx, &profile, prompt),
+        crate::rollout::ChildContextMode::Fresh => fresh_history(ctx, &profile, prompt, &child_cwd),
+        crate::rollout::ChildContextMode::Fork => fork_history(ctx, &profile, prompt, &child_cwd),
     };
     let inherited_record_count = match context_mode {
         crate::rollout::ChildContextMode::Fresh => None,
         crate::rollout::ChildContextMode::Fork => Some(history.len().saturating_sub(3)),
     };
-    let tools = child_tools(ctx, &profile, &child_config, delegation_depth)
+    let tools = child_tools(ctx, &profile, &child_config, delegation_depth, &child_cwd)
         .map_err(ChildPrepError::CallLevel)?;
-    let agents_dir = agents_directory(ctx).map_err(ChildPrepError::CallLevel)?;
-    let (agent_id, writer) =
-        allocate_agent_id(ctx.state, &agents_dir, agent_seq).map_err(ChildPrepError::CallLevel)?;
     let jsonl = agents_dir.join(format!("{agent_id}.jsonl"));
     let mut prep = ChildPrep {
         agent_id,
         run_id: crate::session::new_agent_run_id(),
         parent_agent_id: ctx.parent_agent_id.to_string(),
-        cwd: ctx.cwd.to_path_buf(),
+        cwd: child_cwd,
         policy: ResolvedChildPolicy::new(
             profile,
             child_config,
@@ -528,6 +663,7 @@ pub(crate) fn prepare_resume_child(
     let profile = find_profile(profiles, &meta.profile)
         .map_err(ChildPrepError::ItemLevel)?
         .clone();
+    validate_child_profile(ctx, &profile).map_err(ChildPrepError::ItemLevel)?;
     history.push(ChatMsg::user(prompt.to_string()));
     let child_config = resolve_child_config(ctx, &profile).map_err(ChildPrepError::ItemLevel)?;
     project_history_media(
@@ -535,14 +671,14 @@ pub(crate) fn prepare_resume_child(
         crate::tool::MediaCapabilities::new(child_config.input_image, child_config.input_pdf),
     );
     crate::agent::fill_document_token_estimates(&mut history, child_config.context_window);
-    let tools = child_tools(ctx, &profile, &child_config, delegation_depth)
+    let tools = child_tools(ctx, &profile, &child_config, delegation_depth, &meta.cwd)
         .map_err(ChildPrepError::ItemLevel)?;
     let jsonl = agents_dir.join(format!("{agent_id}.jsonl"));
     let mut prep = ChildPrep {
         agent_id: agent_id.to_string(),
         run_id: crate::session::new_agent_run_id(),
         parent_agent_id: ctx.parent_agent_id.to_string(),
-        cwd: ctx.cwd.to_path_buf(),
+        cwd: meta.cwd.clone(),
         policy: ResolvedChildPolicy::new(
             profile,
             child_config,
@@ -661,7 +797,10 @@ pub(crate) fn prepare_swarm_children(
                     &task.description,
                     agent_seq,
                 ) {
-                    Ok(prep) => preps.push(SwarmPrep::Ready(Box::new(prep))),
+                    Ok(mut prep) => {
+                        prep.policy.output_schema = plan.output_schema.clone();
+                        preps.push(SwarmPrep::Ready(Box::new(prep)));
+                    }
                     Err(ChildPrepError::CallLevel(error)) => return Err(error),
                     Err(ChildPrepError::ItemLevel(error)) => preps.push(SwarmPrep::Failed {
                         description: task.description.clone(),
@@ -676,7 +815,10 @@ pub(crate) fn prepare_swarm_children(
                 &task.prompt,
                 &task.description,
             ) {
-                Ok(prep) => preps.push(SwarmPrep::Ready(Box::new(prep))),
+                Ok(mut prep) => {
+                    prep.policy.output_schema = plan.output_schema.clone();
+                    preps.push(SwarmPrep::Ready(Box::new(prep)));
+                }
                 Err(ChildPrepError::CallLevel(error)) => return Err(error),
                 Err(ChildPrepError::ItemLevel(error)) => preps.push(SwarmPrep::Failed {
                     description: task.description.clone(),

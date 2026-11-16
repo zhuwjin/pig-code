@@ -119,6 +119,78 @@ impl Manager {
             }
         });
     }
+    pub(super) fn agent_output(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        session_id: String,
+        agent_id: String,
+    ) {
+        let Some(entry) = self.sessions.get(&session_id) else {
+            return;
+        };
+        let partial = entry
+            .state
+            .agent_partials
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&agent_id)
+            .cloned();
+        emit(
+            &event_tx,
+            Event::AgentOutput {
+                session_id,
+                agent_id,
+                run_id: partial.as_ref().map(|partial| partial.run_id.clone()),
+                text: partial.map_or(String::new(), |partial| partial.text),
+            },
+        );
+    }
+
+    pub(super) fn list_agents(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        session_id: String,
+    ) {
+        let sessions_dir = self.sessions_dir.clone();
+        let Some(entry) = self.sessions.get(&session_id) else {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error: CoreError::Internal {
+                        detail: "Cannot list agents for a session that is not open".to_string(),
+                    },
+                    fatal: false,
+                },
+            );
+            return;
+        };
+        let agents = if let Some(session) = entry.session.as_ref() {
+            session.agent_catalog()
+        } else {
+            let mut agents = Vec::new();
+            if let Some(run) = entry.active_run.clone() {
+                agents.push(pig_protocol::AgentCatalogEntry {
+                    agent_id: session_id.clone(),
+                    run_id: Some(run.run_id),
+                    turn_kind: Some(run.turn_kind),
+                    parent_id: None,
+                    depth: 0,
+                    profile: "main".to_string(),
+                    model: super::entry::model_label(entry).1,
+                    status: Some(pig_protocol::AgentRunStatus::Running),
+                    turns: 0,
+                    usage: (0, 0, 0),
+                    record_path: Some(sessions_dir.join(format!("{session_id}.jsonl"))),
+                    result_path: None,
+                });
+            }
+            agents.extend(crate::session::catalog::task_catalog(&entry.state));
+            agents
+        };
+        emit(&event_tx, Event::AgentCatalogChanged { session_id, agents });
+    }
+
     pub(super) fn load_subagent(
         &mut self,
         event_tx: async_channel::Sender<Event>,
@@ -518,9 +590,10 @@ impl Manager {
                 let sid = session_id.clone();
                 entry.cancel = Some(CancellationToken::new());
                 entry.steerable = false;
+                session.begin_root_run(pig_protocol::TurnKind::Compact);
+                entry.active_run = session.run_envelope();
                 let cancel = entry.cancel.clone().expect("cancel");
                 turns.push(Box::pin(async move {
-                    session.begin_root_run(pig_protocol::TurnKind::Compact);
                     // A manual /compact can arrive after a
                     // model switch without an intervening turn;
                     // align the history with the current media

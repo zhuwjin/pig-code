@@ -66,6 +66,7 @@ impl Session {
                 jsonl: prep.jsonl,
                 max_turns: prep.policy.max_turns,
                 description: prep.description,
+                output_schema: prep.policy.output_schema,
                 plugin_tool_filter: Default::default(),
                 mcp_inherits_all: prep.policy.mcp_inherits_all,
                 trusted: prep.policy.trusted,
@@ -149,6 +150,23 @@ impl Session {
         }
     }
 
+    pub(crate) fn record_child_partial(&self, text: &str) {
+        let Some(run_id) = self.agent.run_id() else {
+            return;
+        };
+        self.state
+            .agent_partials
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                self.agent.id.clone(),
+                crate::task::AgentPartial {
+                    run_id,
+                    text: text.to_string(),
+                },
+            );
+    }
+
     /// Subagent progress reporting (routed per sink).
     pub(super) fn report_child_progress(&self, tx: &async_channel::Sender<Event>, note: String) {
         let sub = self.subagent.as_ref().expect("child session");
@@ -200,23 +218,14 @@ impl Session {
     /// prompt).
     pub(super) fn child_extra_tools(&self) -> Vec<Box<dyn tool::Tool>> {
         let sub = self.subagent.as_ref().expect("child session");
-        let mut extra = self
-            .mcp
-            .as_ref()
-            .map(|mcp| mcp.child_tools(sub.mcp_inherits_all))
-            .unwrap_or_default();
-        extra.push(Box::new(tool::SkillTool::new_trusted(
+        child_extra_tools_for(
             &self.agent.cwd,
-            &self.plugin_tools.registry(),
+            self.mcp.as_ref(),
+            &self.plugin_tools,
+            &sub.plugin_tool_filter,
+            sub.mcp_inherits_all,
             sub.trusted,
-        )));
-        extra.extend(
-            self.plugin_tools
-                .tools_filtered(&sub.plugin_tool_filter)
-                .into_iter()
-                .filter(|tool| sub.mcp_inherits_all || tool.read_only()),
-        );
-        extra
+        )
     }
 
     pub(crate) async fn prepare_child_step(
@@ -307,13 +316,21 @@ impl Session {
                 &self.agent.id,
             ));
         }
+        let mut control = pig_provider::CallControl::new(cancel.clone());
+        if let Some(schema) = self
+            .subagent
+            .as_ref()
+            .and_then(|subagent| subagent.output_schema.clone())
+        {
+            control = control.with_structured_output(schema);
+        }
         let (child_tx, child_rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(pig_provider::stream_chat(
             request_config,
             self.agent.history.clone(),
             self.agent.schemas.clone(),
             child_tx,
-            pig_provider::CallControl::new(cancel.clone()),
+            control,
         ));
         (child_rx, task)
     }
@@ -533,6 +550,148 @@ impl Session {
         CommitAction::Tools(tool_calls)
     }
 
+    async fn execute_child_parallel_group(
+        &mut self,
+        rt: &mut StepRuntime,
+        calls: &[ToolCall],
+        start: usize,
+        end: usize,
+        step: usize,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> crate::session::engine::StepOutcome {
+        let sub = self.subagent.as_ref().expect("child session");
+        let context = ChildBatchContext {
+            cwd: self.agent.cwd.clone(),
+            config: self.agent.config().clone(),
+            permissions: self.permissions,
+            state: self.state.clone(),
+            pending: self.pending.clone(),
+            permission_rules: self.permission_rules.clone(),
+            always_allowed: self.always_allowed.clone(),
+            store: self.store.clone(),
+            mcp: self.mcp.clone(),
+            plugin_tools: self.plugin_tools.clone(),
+            plugin_filter: sub.plugin_tool_filter.clone(),
+            hooks: self.hooks.clone(),
+            history: Arc::new(self.agent.history.clone()),
+            session_id: self.event_session_id().to_string(),
+            ownership: rt.ownership.clone(),
+            mcp_inherits_all: sub.mcp_inherits_all,
+            trusted: sub.trusted,
+        };
+        for (offset, call) in calls[start..end].iter().enumerate() {
+            let call_ix = start + offset;
+            self.report_child_progress(tx, format!("Step {step} · {}", tool::summarize(call)));
+            self.emit_child_item(
+                tx,
+                pig_protocol::ConversationItem::Tool {
+                    id: format!("t{}-{call_ix}", rt.assistant_row),
+                    tool: call.name.clone(),
+                    summary: tool::summarize(call),
+                    detail: call.arguments.clone(),
+                    output: String::new(),
+                    status: pig_protocol::ConversationToolStatus::Running,
+                    turn_id: None,
+                    edit: None,
+                    live_note: None,
+                    agents: Vec::new(),
+                    approval_pending: false,
+                },
+            );
+        }
+        let mut slots: Vec<Option<GatedToolOutcome>> = (0..end - start).map(|_| None).collect();
+        let cancelled = super::super::batch::run_tool_batch(
+            end - start,
+            cancel,
+            |offset| {
+                let call_ix = start + offset;
+                let call = calls[call_ix].clone();
+                let item_id = format!("{}-c{step}-{call_ix}-{}", context.ownership, call.id);
+                let context = context.clone();
+                let tx = tx.clone();
+                let cancel = cancel.clone();
+                async move { execute_child_batch_tool(call, item_id, context, tx, cancel).await }
+            },
+            |offset, outcome| slots[offset] = Some(outcome),
+        )
+        .await;
+        let cancelled = cancelled
+            || slots
+                .iter()
+                .any(|outcome| matches!(outcome, Some(GatedToolOutcome::Cancelled)));
+        for offset in 0..end - start {
+            let call = &calls[start + offset];
+            let (mut message, edit) = match slots[offset].take() {
+                Some(GatedToolOutcome::Executed {
+                    output,
+                    is_error,
+                    edit,
+                    images,
+                    documents,
+                    ..
+                }) => {
+                    let mut message = ChatMsg::tool_result_with_images(&call.id, output, images)
+                        .with_error(is_error);
+                    message.documents = documents;
+                    (message, edit)
+                }
+                Some(GatedToolOutcome::Rejected { note }) => {
+                    (ChatMsg::tool_result(&call.id, note).with_error(true), None)
+                }
+                Some(GatedToolOutcome::Cancelled) => (Session::stopped_tool_result(&call.id), None),
+                None if cancelled => (Session::stopped_tool_result(&call.id), None),
+                None => (
+                    ChatMsg::tool_result(
+                        &call.id,
+                        "Internal tool execution error (the task terminated unexpectedly)"
+                            .to_string(),
+                    )
+                    .with_error(true),
+                    None,
+                ),
+            };
+            if let Some(edit) = edit.clone() {
+                self.subagent
+                    .as_mut()
+                    .expect("child session")
+                    .tool_edits
+                    .insert(call.id.clone(), edit);
+            }
+            if let Err(error) = persist_child_tool_result(
+                self,
+                call,
+                &mut message,
+                crate::agent::AgentMsgMeta {
+                    reasoning_ms: None,
+                    edit,
+                },
+            ) {
+                tracing::warn!(agent_id = %self.agent.id, "{error}");
+                return crate::session::engine::StepOutcome::Failed;
+            }
+            self.agent.history.push(message);
+        }
+        if cancelled {
+            for call in &calls[end..] {
+                let mut message = Session::stopped_tool_result(&call.id);
+                if let Err(error) = persist_child_tool_result(
+                    self,
+                    call,
+                    &mut message,
+                    crate::agent::AgentMsgMeta::default(),
+                ) {
+                    tracing::warn!(agent_id = %self.agent.id, "{error}");
+                    return crate::session::engine::StepOutcome::Failed;
+                }
+                self.agent.history.push(message);
+            }
+            self.emit_child_conversation(rt, tx, rt.reasoning_ms);
+            return crate::session::engine::StepOutcome::Cancelled;
+        }
+        crate::session::engine::StepOutcome::Continue
+    }
+
     pub(crate) async fn execute_child_tools(
         &mut self,
         rt: &mut StepRuntime,
@@ -541,7 +700,44 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> crate::session::engine::StepOutcome {
-        for (call_ix, child_call) in calls.iter().enumerate() {
+        let mask = {
+            let rules = self
+                .permission_rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            crate::session::turn::parallel_mask(
+                &calls,
+                &self.agent.tools,
+                self.permissions,
+                tool::MediaCapabilities::new(
+                    self.agent.config().input_image,
+                    self.agent.config().input_pdf,
+                ),
+                &rules,
+                &self.state,
+                &self.agent.cwd,
+                self.hooks.is_active(),
+            )
+        };
+        let mut call_ix = 0usize;
+        while call_ix < calls.len() {
+            if mask[call_ix] {
+                let mut end = call_ix + 1;
+                while end < calls.len() && mask[end] {
+                    end += 1;
+                }
+                match self
+                    .execute_child_parallel_group(rt, &calls, call_ix, end, step, tx, cancel)
+                    .await
+                {
+                    crate::session::engine::StepOutcome::Continue => {
+                        call_ix = end;
+                        continue;
+                    }
+                    outcome => return outcome,
+                }
+            }
+            let child_call = &calls[call_ix];
             let summary = tool::summarize(child_call);
             self.report_child_progress(tx, format!("Step {step} · {summary}"));
             self.emit_child_item(
@@ -583,6 +779,7 @@ impl Session {
                     return crate::session::engine::StepOutcome::Failed;
                 }
                 self.agent.history.push(message);
+                call_ix += 1;
                 continue;
             };
             let extra_tools = self.child_extra_tools();
@@ -685,6 +882,7 @@ impl Session {
                     self.agent.history.push(message);
                 }
             }
+            call_ix += 1;
         }
         let reasoning_ms = rt.reasoning_ms;
         self.emit_child_conversation(rt, tx, reasoning_ms);
@@ -870,6 +1068,24 @@ impl Session {
         // cancel/panic).
         let agent_id = self.agent.id.clone();
         let run_id = self.agent.run_id().expect("subagent run identity");
+        self.record_child_partial("");
+        if self
+            .subagent
+            .as_ref()
+            .is_some_and(|subagent| subagent.output_schema.is_some())
+            && !self.agent.config().cap_structured
+        {
+            let result = SubagentResult::child(
+                crate::session::AgentRunStatus::Failed,
+                "structured output is unsupported by the selected model".to_string(),
+                "The selected subagent model does not support structured output".to_string(),
+                0,
+                (0, 0, 0),
+            )
+            .with_identity(&agent_id, run_id);
+            self.agent.run = Some(result.clone());
+            return result;
+        }
         let session_id = self.event_session_id().to_string();
         let event_agent_id = agent_id.clone();
         let event_run_id = Some(run_id.clone());
@@ -889,6 +1105,31 @@ impl Session {
             &self.agent.id,
         );
         let mut result = self.run_subagent_loop(tx, cancel).await;
+        if result.is_completed()
+            && self
+                .subagent
+                .as_ref()
+                .is_some_and(|subagent| subagent.output_schema.is_some())
+        {
+            match serde_json::from_str::<serde_json::Value>(result.text().trim()) {
+                Ok(value) if value.is_object() => {
+                    if let Some(artifact) = result.artifact.as_mut() {
+                        artifact.structured = Some(value);
+                    }
+                }
+                _ => {
+                    let note = format!(
+                        "Subagent returned invalid structured output; expected a JSON object matching output_schema. Raw result: {}",
+                        result.text()
+                    );
+                    if let Some(artifact) = result.artifact.as_mut() {
+                        artifact.text = note;
+                    }
+                    result.status = crate::session::AgentRunStatus::Failed;
+                    result.stop_reason = "invalid structured output".to_string();
+                }
+            }
+        }
         if !result.is_cancelled() {
             let written = std::fs::write(&result_path, result.text()).is_ok();
             let text = truncate_agent_result(
@@ -898,6 +1139,7 @@ impl Session {
             if let Some(artifact) = result.artifact.as_mut() {
                 artifact.path = written.then_some(result_path);
                 artifact.text = text;
+                artifact.cwd = Some(self.agent.cwd.clone());
             }
         }
         let result = result.with_identity(&agent_id, run_id);
@@ -1109,4 +1351,97 @@ impl Session {
             )
         }
     }
+}
+
+#[derive(Clone)]
+struct ChildBatchContext {
+    cwd: PathBuf,
+    config: ResolvedModel,
+    permissions: pig_protocol::PermissionSettings,
+    state: crate::task::SessionToolState,
+    pending: PendingApprovals,
+    permission_rules: Arc<Mutex<crate::permissions::PermissionRules>>,
+    always_allowed: Arc<Mutex<HashSet<(String, String)>>>,
+    store: Arc<Mutex<crate::store::Store>>,
+    mcp: Option<Arc<crate::mcp::McpManager>>,
+    plugin_tools: crate::plugins::PluginToolset,
+    plugin_filter: crate::plugins::PluginToolFilter,
+    hooks: crate::hooks::HookSet,
+    history: Arc<Vec<ChatMsg>>,
+    session_id: String,
+    ownership: String,
+    mcp_inherits_all: bool,
+    trusted: bool,
+}
+
+fn child_extra_tools_for(
+    cwd: &Path,
+    mcp: Option<&Arc<crate::mcp::McpManager>>,
+    plugin_tools: &crate::plugins::PluginToolset,
+    plugin_filter: &crate::plugins::PluginToolFilter,
+    mcp_inherits_all: bool,
+    trusted: bool,
+) -> Vec<Box<dyn tool::Tool>> {
+    let mut extra = mcp
+        .map(|mcp| mcp.child_tools(mcp_inherits_all))
+        .unwrap_or_default();
+    extra.push(Box::new(tool::SkillTool::new_trusted(
+        cwd,
+        &plugin_tools.registry(),
+        trusted,
+    )));
+    extra.extend(
+        plugin_tools
+            .tools_filtered(plugin_filter)
+            .into_iter()
+            .filter(|tool| mcp_inherits_all || tool.read_only()),
+    );
+    extra
+}
+
+async fn execute_child_batch_tool(
+    call: ToolCall,
+    item_id: String,
+    context: ChildBatchContext,
+    tx: async_channel::Sender<Event>,
+    cancel: CancellationToken,
+) -> GatedToolOutcome {
+    let mut tracker = crate::tool::ChangeTracker::default();
+    let extra_tools = child_extra_tools_for(
+        &context.cwd,
+        context.mcp.as_ref(),
+        &context.plugin_tools,
+        &context.plugin_filter,
+        context.mcp_inherits_all,
+        context.trusted,
+    );
+    let media = tool::MediaCapabilities::new(context.config.input_image, context.config.input_pdf);
+    let mut gate = GateCtx {
+        cwd: &context.cwd,
+        permissions: context.permissions,
+        allow_scope_widening: false,
+        media,
+        tracker: &mut tracker,
+        state: &context.state,
+        owns_todo_state: false,
+        pending: &context.pending,
+        permission_rules: &context.permission_rules,
+        always_allowed: &context.always_allowed,
+        session_id: &context.session_id,
+        plan_enabled: false,
+        store: &context.store,
+        extra_tools: &extra_tools,
+        hooks: &context.hooks,
+        history: &context.history,
+    };
+    exec_tool_gated_ctx(
+        &mut gate,
+        &call,
+        None,
+        &item_id,
+        &context.ownership,
+        &tx,
+        &cancel,
+    )
+    .await
 }

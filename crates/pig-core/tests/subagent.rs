@@ -1217,6 +1217,23 @@ async fn subagent_background_full_link() {
         assert_eq!(row.1, 1, "background child");
         assert_eq!(row.2, 0, "this mock child does not report usage");
     }
+    agent
+        .ops
+        .send(Op::AgentOutput {
+            session_id: sid.clone(),
+            agent_id: agent_id.clone(),
+        })
+        .await
+        .unwrap();
+    let output = crate::common::recv_until(&agent.events, Duration::from_secs(5), |event| {
+        matches!(event, Event::AgentOutput { .. })
+    })
+    .await;
+    let Some(Event::AgentOutput { run_id, text, .. }) = output.last() else {
+        panic!("expected partial agent output")
+    };
+    assert!(run_id.is_some());
+    assert!(text.contains(mock::SUBAGENT_CHILD_DONE), "{text}");
     agent.shutdown();
 }
 

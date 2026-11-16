@@ -166,6 +166,12 @@ pub(super) fn start_turn_inner(
     if let Some(selection) = &entry.model_override {
         session.set_model(selection.clone());
     }
+    session.begin_root_run(if notification_only {
+        pig_protocol::TurnKind::Notification
+    } else {
+        pig_protocol::TurnKind::Regular
+    });
+    entry.active_run = session.run_envelope();
     let cancel = CancellationToken::new();
     let control = pig_provider::CallControl::new(cancel.clone());
     entry.cancel = Some(cancel);
@@ -982,6 +988,7 @@ mod tests {
             runtime: None,
             cancel: None,
             active_claim: None,
+            active_run: None,
             retry: None,
             model_override: None,
             reasoning_level: None,

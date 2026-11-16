@@ -86,8 +86,10 @@ mod layering_tests {
     #[test]
     fn agents_delegation_depth_loads_from_toml() {
         let fixture = Fixture::new("agents-depth");
-        fixture.write_user("[agents]\nmax_delegation_depth = 2\n");
-        assert_eq!(load(&fixture).agents.max_delegation_depth, 2);
+        fixture.write_user("[agents]\nmax_delegation_depth = 2\nmax_agents_per_session = 3\n");
+        let config = load(&fixture);
+        assert_eq!(config.agents.max_delegation_depth, 2);
+        assert_eq!(config.agents.max_agents_per_session, 3);
     }
 
     /// A project layer can never inject or replace a provider array: the

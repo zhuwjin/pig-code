@@ -671,6 +671,11 @@ async fn handle_connection(
         responses_chunks(&body, tool_results)
     } else if anthropic {
         anthropic_chunks(&body, tool_results)
+    } else if body.contains(STRUCTURED_OUTPUT_TRIGGER) {
+        vec![
+            sse_chunk(serde_json::json!({"content": "{\"answer\":\"ok\"}"}), None),
+            sse_chunk(serde_json::json!({}), Some("stop")),
+        ]
     } else if body.contains(UNKNOWN_FINISH_TRIGGER) {
         vec![
             sse_chunk(serde_json::json!({"content": UNKNOWN_TERMINAL_TEXT}), None),

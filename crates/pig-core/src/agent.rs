@@ -35,6 +35,8 @@ pub struct AgentProfile {
     pub description: String,
     /// None, or containing "*" = all tools
     pub tools: Option<Vec<String>>,
+    /// None allows every profile; an empty list forbids further delegation.
+    pub subagents: Option<Vec<String>>,
     /// None = inherit the parent session; "providerId/modelId" or bare "modelId" (looked up in the default provider)
     pub model: Option<String>,
     /// Reasoning level name; only effective together with an explicit model
@@ -247,6 +249,7 @@ mod tests {
             name: "tester".into(),
             description: "d".into(),
             tools: None,
+            subagents: None,
             model: model.map(str::to_string),
             thought_level: level.map(str::to_string),
             max_turns: None,
@@ -267,6 +270,7 @@ tools:
   - Read
   - Grep
   - "ExecCommand"
+subagents: [explore, general-purpose]
 model: deepseek/deepseek-chat
 thoughtLevel: high
 maxTurns: 30
@@ -290,6 +294,10 @@ You are a code reviewer; output only the issue list.
                 "ExecCommand".to_string()
             ])
         );
+        assert_eq!(
+            p.subagents,
+            Some(vec!["explore".to_string(), "general-purpose".to_string()])
+        );
         assert_eq!(p.model.as_deref(), Some("deepseek/deepseek-chat"));
         assert_eq!(p.thought_level.as_deref(), Some("high"));
         assert_eq!(p.max_turns, Some(30));
@@ -306,6 +314,7 @@ You are a code reviewer; output only the issue list.
         let md = "---\nname: helper\ndescription: simple helper\n---\nDo what needs to be done.";
         let p = parse_agent_markdown(md).expect("minimal frontmatter");
         assert_eq!(p.tools, None, "tools default = all");
+        assert_eq!(p.subagents, None, "subagent types are unrestricted");
         assert_eq!(p.model, None, "model default = inherit");
         assert_eq!(p.thought_level, None);
         assert_eq!(p.max_turns, None);

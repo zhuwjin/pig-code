@@ -34,35 +34,14 @@ pub(crate) fn pause_limit_error() -> CoreError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentRunStatus {
-    Queued,
-    Running,
-    Completed,
-    Cancelled,
-    Failed,
-    Lost,
-}
-
-impl AgentRunStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-            Self::Failed => "failed",
-            Self::Lost => "lost",
-        }
-    }
-}
-
 /// Text/result artifact captured by one agent run. Root turns project their
 /// response through existing turn events and do not need a second artifact.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentArtifact {
     pub(crate) text: String,
     pub(crate) path: Option<std::path::PathBuf>,
+    pub(crate) structured: Option<serde_json::Value>,
+    pub(crate) cwd: Option<std::path::PathBuf>,
 }
 
 /// One root or child run's authoritative outcome. Presentation strings and
@@ -108,7 +87,12 @@ impl AgentRunResult {
             stop_reason,
             turns,
             usage,
-            artifact: Some(AgentArtifact { text, path: None }),
+            artifact: Some(AgentArtifact {
+                text,
+                path: None,
+                structured: None,
+                cwd: None,
+            }),
         }
     }
 
@@ -203,8 +187,38 @@ impl Session {
         let mut result = AgentRunResult::root(status, turn_kind).with_identity(&agent_id, run_id);
         result.turns = self.run_turns;
         result.usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+        let run = self.run_envelope().expect("root run envelope");
+        self.record(&RolloutRecord::AgentRun {
+            run,
+            status,
+            turns: result.turns,
+            usage: result.usage,
+        });
+        self.sync_rollout();
         self.agent.run = Some(result.clone());
         result
+    }
+
+    pub(crate) fn restore_root_run(&mut self, records: &[RolloutRecord]) {
+        let Some((run, status, turns, usage)) = records.iter().rev().find_map(|record| {
+            let RolloutRecord::AgentRun {
+                run,
+                status,
+                turns,
+                usage,
+            } = record
+            else {
+                return None;
+            };
+            (run.agent_id == self.agent.id).then_some((run, *status, *turns, *usage))
+        }) else {
+            return;
+        };
+        let mut result = AgentRunResult::root(status, run.turn_kind)
+            .with_identity(&self.agent.id, run.run_id.clone());
+        result.turns = turns;
+        result.usage = usage;
+        self.agent.run = Some(result);
     }
 }
 

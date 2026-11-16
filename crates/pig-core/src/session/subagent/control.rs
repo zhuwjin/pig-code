@@ -97,6 +97,19 @@ impl Session {
         let fork = args["fork"].as_bool().unwrap_or(false);
         let resume = args["resume"].as_str().unwrap_or("").trim();
         let subagent_type = args["subagent_type"].as_str().unwrap_or("").trim();
+        let output_schema = match tool::parse_agent_output_schema(&args) {
+            Ok(schema) => schema,
+            Err(error) => return fail(error),
+        };
+        let (child_cwd, worktree) = match tool::parse_child_workspace(&args) {
+            Ok(workspace) => workspace,
+            Err(error) => return fail(error),
+        };
+        if !resume.is_empty() && (child_cwd.is_some() || worktree) {
+            return fail(
+                "cwd/worktree are used only when creating a child; resume uses its persisted working directory".to_string(),
+            );
+        }
         if fork && !resume.is_empty() {
             return fail(
                 "`fork` and `resume` are mutually exclusive: fork creates a new child from the parent's snapshot; resume continues an existing child"
@@ -150,6 +163,15 @@ impl Session {
             parent_agent_id: &self.agent.id,
             parent_delegation_depth: self.agent.delegation_depth,
             max_delegation_depth: self.max_delegation_depth(),
+            max_agents_per_session: runtime
+                .as_ref()
+                .map_or(64, |runtime| runtime.config().agents.max_agents_per_session),
+            allowed_subagents: self
+                .subagent
+                .as_ref()
+                .and_then(|subagent| subagent.profile.subagents.as_deref()),
+            child_cwd,
+            worktree,
             parent_permissions: self.permissions,
             parent_history: &self.agent.history,
             profiles_summary: &self.profiles_summary,
@@ -206,6 +228,8 @@ impl Session {
                 Err(error) => return fail(error.message()),
             }
         };
+        let mut prep = prep;
+        prep.policy.output_schema = output_schema;
         // ---- background: register a task first (its id is the child's
         // progress/ownership prefix), then spawn the detached child ----
         if background {

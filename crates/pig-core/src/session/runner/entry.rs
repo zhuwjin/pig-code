@@ -76,6 +76,8 @@ pub(super) struct SessionEntry {
     /// Durable claim owned by the active real-user turn; notification-only
     /// turns use the existing notification outbox instead.
     pub(super) active_claim: Option<String>,
+    /// Root identity available while the Session is owned by a turn future.
+    pub(super) active_run: Option<pig_protocol::AgentRunEnvelope>,
     /// The active turn's retry control (Op::RetryNow reaches the in-flight
     /// retry wait through it); same lifetime as `cancel`
     pub(super) retry: Option<pig_provider::CallControl>,

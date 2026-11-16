@@ -119,11 +119,16 @@ impl Session {
         notifications: super::runner::entry::NotificationMailbox,
         notification_only: bool,
     ) -> TurnOutcome {
-        self.begin_root_run(if notification_only {
-            pig_protocol::TurnKind::Notification
-        } else {
-            pig_protocol::TurnKind::Regular
-        });
+        if !matches!(
+            self.agent.run.as_ref().map(|run| run.status),
+            Some(AgentRunStatus::Running)
+        ) {
+            self.begin_root_run(if notification_only {
+                pig_protocol::TurnKind::Notification
+            } else {
+                pig_protocol::TurnKind::Regular
+            });
+        }
         let cancel = control.cancel_token();
         // ---- SessionStart hooks (once per Session instance, at the first
         // turn; the turn's cancel token covers the run). Nothing to block at
@@ -1605,9 +1610,6 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> bool {
-        /// Cap on calls executing simultaneously within a parallel group
-        const MAX_PARALLEL: usize = 8;
-
         // Emit Begin for all group members in original order and precompute
         // card info (summary is persisted with the rollout). Item ids were
         // claimed per invocation, so duplicate provider call ids stay distinct.
@@ -1647,30 +1649,31 @@ impl Session {
         // fetches by name (an McpTool clone is just an Arc clone, cheap),
         // executed via execute_with_extra
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
-        let mut set: tokio::task::JoinSet<(usize, ParallelOutput)> = tokio::task::JoinSet::new();
+        let cwd = self.agent.cwd.clone();
+        let state = self.state.clone();
+        let mcp = self.mcp.clone();
+        let plugin_tools = self.plugin_tools.clone();
+        let plugin_filter = self.plugin_tool_filter.clone();
+        let sandbox_profile = crate::task::sandbox_profile_for(self.permissions, self.plan_enabled);
         let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
         slots.resize_with(cards.len(), || None);
-        let mut next = 0usize;
-        let cancelled = loop {
-            while next < cards.len() && set.len() < MAX_PARALLEL {
-                let index = next;
+        let cancelled = super::batch::run_tool_batch(
+            cards.len(),
+            cancel,
+            |index| {
                 let call = cards[index].call.clone();
-                let cwd = self.agent.cwd.clone();
-                let state = self.state.clone();
-                let mcp = self.mcp.clone();
-                let plugin_tools = self.plugin_tools.clone();
-                let plugin_filter = self.plugin_tool_filter.clone();
-                let sandbox_profile =
-                    crate::task::sandbox_profile_for(self.permissions, self.plan_enabled);
-                set.spawn(async move {
+                let cwd = cwd.clone();
+                let state = state.clone();
+                let mcp = mcp.clone();
+                let plugin_tools = plugin_tools.clone();
+                let plugin_filter = plugin_filter.clone();
+                async move {
                     let caps = media;
                     let mut tracker = ChangeTracker::default();
                     let ctx = ToolContext {
                         cwd: &cwd,
                         tracker: &mut tracker,
                         state: &state,
-                        // Group members are fs_outside-free by the mask; the
-                        // grant lives on the serial gate path only
                         fs_grant: None,
                         sandbox_override: Default::default(),
                         sandbox_profile,
@@ -1683,9 +1686,6 @@ impl Session {
                         _ => vec![],
                     };
                     extra.extend(plugin_tools.tools_filtered(&plugin_filter));
-                    // Skill is read-only and concurrentable, served via the
-                    // extra channel (same as the serial gate); SendMessage is
-                    // root-only + stateless + registry-backed, same treatment
                     if call.name == "Skill" {
                         extra.push(Box::new(tool::SkillTool::new_trusted(
                             &cwd,
@@ -1708,93 +1708,41 @@ impl Session {
                     project_tool_media(&call.arguments, &mut output, &mut media, caps);
                     let images = tool_images_to_chat(&call.arguments, media.images);
                     let documents = tool_documents_to_chat(media.documents);
-                    (
-                        index,
-                        ParallelOutput {
-                            output,
-                            is_error,
-                            edit,
-                            images,
-                            image_refs: vec![],
-                            documents,
-                            document_refs: vec![],
-                            file_change,
-                            elapsed_ms,
-                        },
-                    )
-                });
-                next += 1;
-            }
-            if set.is_empty() {
-                break false;
-            }
-            tokio::select! {
-                joined = set.join_next() => {
-                    match joined {
-                        Some(Ok((index, mut out))) => {
-                            // Persist media before the completion event so the
-                            // live event and the rollout output never diverge
-                            out.image_refs =
-                                self.persist_tool_images(&mut out.output, &mut out.images);
-                            out.document_refs = self.persist_tool_documents(
-                                &mut out.output,
-                                &mut out.documents,
-                                context_window,
-                            );
-                            self.emit(
-                                |session_id| Event::ToolCallEnd {
-                                    session_id,
-                                    item_id: cards[index].item_id.clone(),
-                                    output: out.output.clone(),
-                                    is_error: out.is_error,
-                                    stopped: false,
-                                    edit: out.edit.clone(),
-                                },
-                                tx,
-                            );
-                            slots[index] = Some(out);
-                        }
-                        // panic/abort: leave the slot empty; the wrap-up below
-                        // backstops it
-                        Some(Err(_)) => {}
-                        None => break false,
+                    ParallelOutput {
+                        output,
+                        is_error,
+                        edit,
+                        images,
+                        image_refs: vec![],
+                        documents,
+                        document_refs: vec![],
+                        file_change,
+                        elapsed_ms,
                     }
                 }
-                _ = cancel.cancelled() => break true,
-            }
-        };
-
-        if cancelled {
-            // Abort running tasks and drain: a blocking read finishes the
-            // current fs call then exits at the next yield point; the JoinSet
-            // destructor backstops with abort so no orphans remain; those that
-            // happen to finish within the drain window settle as normal
-            // completions
-            set.abort_all();
-            while let Some(joined) = set.join_next().await {
-                if let Ok((index, mut out)) = joined {
-                    // Same ordering as the normal completion path
-                    out.image_refs = self.persist_tool_images(&mut out.output, &mut out.images);
-                    out.document_refs = self.persist_tool_documents(
-                        &mut out.output,
-                        &mut out.documents,
-                        context_window,
-                    );
-                    self.emit(
-                        |session_id| Event::ToolCallEnd {
-                            session_id,
-                            item_id: cards[index].item_id.clone(),
-                            output: out.output.clone(),
-                            is_error: out.is_error,
-                            stopped: false,
-                            edit: out.edit.clone(),
-                        },
-                        tx,
-                    );
-                    slots[index] = Some(out);
-                }
-            }
-        }
+            },
+            |index, mut out| {
+                out.image_refs = self.persist_tool_images(&mut out.output, &mut out.images);
+                out.document_refs = self.persist_tool_documents(
+                    &mut out.output,
+                    &mut out.documents,
+                    context_window,
+                );
+                self.emit(
+                    |session_id| Event::ToolCallEnd {
+                        session_id,
+                        item_id: cards[index].item_id.clone(),
+                        output: out.output.clone(),
+                        is_error: out.is_error,
+                        stopped: false,
+                        edit: out.edit.clone(),
+                    },
+                    tx,
+                );
+                slots[index] = Some(out);
+            },
+        )
+        .await;
 
         // Unified wrap-up (strictly original order): history and rollout are
         // backfilled by original index
@@ -2147,7 +2095,7 @@ fn parallel_safe(
 /// approval/session-layer interception/unknown tool/MCP deny hit/hooks
 /// active), executed serially on its own after the preceding group drains.
 #[allow(clippy::too_many_arguments)]
-fn parallel_mask(
+pub(super) fn parallel_mask(
     calls: &[ToolCall],
     tools: &[Box<dyn tool::Tool>],
     permissions: pig_protocol::PermissionSettings,

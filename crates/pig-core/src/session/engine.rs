@@ -305,6 +305,7 @@ impl AttemptSink for SessionAttemptSink<'_> {
 
     fn text(&mut self, delta: &str, full: &str) {
         if self.session.is_subagent() {
+            self.session.record_child_partial(full);
             self.session.emit_child_live(
                 self.runtime,
                 self.tx,

@@ -1,23 +1,5 @@
 use super::*;
 
-/// One current or recovered activation. Child entries project the existing task
-/// registry; the root entry projects its own latest `AgentRunResult`.
-#[derive(Clone, Debug)]
-pub struct AgentCatalogEntry {
-    pub agent_id: String,
-    pub run_id: Option<String>,
-    pub turn_kind: Option<pig_protocol::TurnKind>,
-    pub parent_id: Option<String>,
-    pub depth: u32,
-    pub profile: String,
-    pub model: String,
-    pub status: Option<AgentRunStatus>,
-    pub turns: usize,
-    pub usage: (u64, u64, u64),
-    pub record_path: Option<PathBuf>,
-    pub result_path: Option<PathBuf>,
-}
-
 fn run_status(status: pig_protocol::TaskStatus) -> AgentRunStatus {
     match status {
         pig_protocol::TaskStatus::Queued => AgentRunStatus::Queued,
@@ -29,6 +11,33 @@ fn run_status(status: pig_protocol::TaskStatus) -> AgentRunStatus {
         }
         pig_protocol::TaskStatus::Lost => AgentRunStatus::Lost,
     }
+}
+
+pub(crate) fn task_catalog(state: &crate::task::SessionToolState) -> Vec<AgentCatalogEntry> {
+    let tasks = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tasks
+        .iter()
+        .filter_map(|task| {
+            let run = task.run.as_ref()?;
+            Some(AgentCatalogEntry {
+                agent_id: run.agent_id.clone(),
+                run_id: Some(run.run_id.clone()),
+                turn_kind: Some(pig_protocol::TurnKind::Regular),
+                parent_id: run.parent_agent_id.clone(),
+                depth: run.delegation_depth,
+                profile: run.profile.clone(),
+                model: task.model.clone().unwrap_or_default(),
+                status: Some(run_status(task.status)),
+                turns: task.turns.unwrap_or(0) as usize,
+                usage: run.usage,
+                record_path: task.record_path.clone(),
+                result_path: task.result_path.clone(),
+            })
+        })
+        .collect()
 }
 
 impl Session {
@@ -83,28 +92,83 @@ impl Session {
                     .and_then(|artifact| artifact.path.clone())
             }),
         }];
-        let tasks = self
-            .state
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        catalog.extend(tasks.iter().filter_map(|task| {
-            let run = task.run.as_ref()?;
-            Some(AgentCatalogEntry {
-                agent_id: run.agent_id.clone(),
-                run_id: Some(run.run_id.clone()),
-                turn_kind: Some(pig_protocol::TurnKind::Regular),
-                parent_id: Some(run.parent_agent_id.clone()),
-                depth: run.delegation_depth,
-                profile: run.profile.clone(),
-                model: task.model.clone().unwrap_or_default(),
-                status: Some(run_status(task.status)),
-                turns: task.turns.unwrap_or(0) as usize,
-                usage: run.usage,
-                record_path: task.record_path.clone(),
-                result_path: task.result_path.clone(),
-            })
-        }));
+        catalog.extend(task_catalog(&self.state));
         catalog
+    }
+}
+
+impl Session {
+    pub(crate) fn restore_agent_catalog(&mut self) {
+        let sessions_dir = self.data_dir.join("sessions");
+        let agents_dir = crate::agent::agents_dir(&sessions_dir, &self.agent.id);
+        let Ok(entries) = std::fs::read_dir(agents_dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let Some(agent_id) = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if crate::agent::validate_agent_id(&agent_id).is_err() {
+                continue;
+            }
+            let (meta, _) = match crate::agent::read_agent(&path) {
+                Ok(context) => context,
+                Err(error) => {
+                    tracing::warn!(%agent_id, "cannot recover child catalog entry: {error}");
+                    continue;
+                }
+            };
+            if meta.parent_session_id != self.agent.id {
+                continue;
+            }
+            let mut tasks = self
+                .state
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if tasks
+                .iter()
+                .any(|task| task.agent_id.as_deref() == Some(agent_id.as_str()))
+            {
+                continue;
+            }
+            let task_id = format!(
+                "b{}",
+                self.state
+                    .task_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1
+            );
+            let result_path = path.with_file_name(format!("{agent_id}.result.md"));
+            tasks.push(crate::task::TaskEntry::recovered_agent(
+                task_id.clone(),
+                format!("Subagent {}: {}", meta.profile, meta.description),
+                crate::task::AgentRunMetadata {
+                    agent_id: agent_id.clone(),
+                    run_id: format!("recovered-{agent_id}-{}", meta.created_at),
+                    parent_agent_id: None,
+                    delegation_depth: meta.delegation_depth,
+                    profile: meta.profile,
+                    usage: (0, 0, 0),
+                },
+                path,
+                result_path.is_file().then_some(result_path),
+                meta.model,
+                meta.created_at,
+            ));
+            drop(tasks);
+            self.state.notify_terminal(&task_id);
+        }
     }
 }

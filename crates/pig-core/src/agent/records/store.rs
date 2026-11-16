@@ -11,6 +11,7 @@ use crate::rollout::{ConversationKind, RolloutRecord};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMeta {
     pub agent_id: String,
+    pub cwd: PathBuf,
     pub parent_session_id: String,
     pub delegation_depth: u32,
     pub context_mode: crate::rollout::ChildContextMode,
@@ -70,6 +71,7 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     };
     let RolloutRecord::Meta {
         id,
+        cwd,
         created_at,
         kind,
         parent_id,
@@ -93,6 +95,7 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     }
     let meta = AgentMeta {
         agent_id: id,
+        cwd,
         parent_session_id: required_meta(parent_id, "parent_id", path)?,
         delegation_depth: required_meta(delegation_depth, "delegation_depth", path)?,
         context_mode: required_meta(context_mode, "context_mode", path)?,
@@ -239,6 +242,7 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
             | RolloutRecord::HookContext { .. }
             | RolloutRecord::TurnStats { .. }
             | RolloutRecord::StepUsage { .. }
+            | RolloutRecord::AgentRun { .. }
             | RolloutRecord::Recall => {}
         }
     }

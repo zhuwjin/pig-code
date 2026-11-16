@@ -423,16 +423,25 @@ pub struct AgentsConfig {
     /// delegation; one preserves the original root → child-only behavior.
     #[serde(default = "default_max_delegation_depth")]
     pub max_delegation_depth: u32,
+    /// Maximum distinct child agents in one root session. Resuming an existing
+    /// child does not consume another slot; zero prevents new children.
+    #[serde(default = "default_max_agents_per_session")]
+    pub max_agents_per_session: usize,
 }
 
 const fn default_max_delegation_depth() -> u32 {
     1
 }
 
+const fn default_max_agents_per_session() -> usize {
+    64
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             max_delegation_depth: default_max_delegation_depth(),
+            max_agents_per_session: default_max_agents_per_session(),
         }
     }
 }
@@ -516,14 +525,16 @@ mod agents_config_tests {
     #[test]
     fn delegation_depth_defaults_to_one_and_deserializes() {
         assert_eq!(AppConfig::default().agents.max_delegation_depth, 1);
+        assert_eq!(AppConfig::default().agents.max_agents_per_session, 64);
         let config: AppConfig = serde_json::from_value(serde_json::json!({
             "providers": [],
             "default_provider": "",
             "default_model": "",
-            "agents": { "max_delegation_depth": 2 },
+            "agents": { "max_delegation_depth": 2, "max_agents_per_session": 32 },
         }))
         .expect("agents config");
         assert_eq!(config.agents.max_delegation_depth, 2);
+        assert_eq!(config.agents.max_agents_per_session, 32);
     }
 }
 

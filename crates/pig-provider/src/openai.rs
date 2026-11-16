@@ -213,7 +213,10 @@ pub(crate) async fn stream_openai(
     control: &CallControl,
 ) -> Result<(), CallError> {
     let client = http_client();
-    let body = build_chat_body(config, &messages, &tools, true).map_err(CallError::from)?;
+    let mut body = build_chat_body(config, &messages, &tools, true).map_err(CallError::from)?;
+    if let Some(output) = control.structured_output() {
+        crate::sidecar::apply_structured(&mut body, config.api_format, output);
+    }
 
     let url = crate::endpoint::chat_completions_url(&config.base_url);
     // API wire log (PIG_LOG_API): no-op accumulator when disabled

@@ -406,6 +406,12 @@ pub enum RolloutRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger: Option<String>,
     },
+    AgentRun {
+        run: pig_protocol::AgentRunEnvelope,
+        status: pig_protocol::AgentRunStatus,
+        turns: usize,
+        usage: (u64, u64, u64),
+    },
     /// Recall marker (tombstone, append-only): excludes the last User record and
     /// everything after it — the whole turn that user message triggered — from the
     /// rebuilt context and the replayed transcript. The recalled content records stay

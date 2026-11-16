@@ -618,7 +618,10 @@ impl Tool for AgentTool {
                         "subagent_type": { "type": "string", "description": "Subagent type; defaults to general-purpose when omitted; mutually exclusive with resume" },
                         "run_in_background": { "type": "boolean", "description": "true returns immediately (with a task_id) and runs the subagent in the background; you will be notified on completion and the full result is in the file the notification points to (read it with Read)" },
                         "resume": { "type": "string", "description": "An existing agent_id to continue in its context (mutually exclusive with subagent_type)" },
-                        "fork": { "type": "boolean", "description": "true creates a new child seeded with the parent's current effective-history snapshot; mutually exclusive with resume" }
+                        "fork": { "type": "boolean", "description": "true creates a new child seeded with the parent's current effective-history snapshot; mutually exclusive with resume" },
+                        "output_schema": { "type": "object", "description": "Optional object-rooted JSON Schema for the child's final structured result" },
+                        "cwd": { "type": "string", "description": "Optional existing child working directory; mutually exclusive with worktree and resume" },
+                        "worktree": { "type": "boolean", "description": "Create an isolated Git worktree from HEAD for a fresh or fork child; uncommitted changes are not copied" }
                     },
                     "required": ["description", "prompt"]
                 }
@@ -772,7 +775,10 @@ impl Tool for AgentSwarmTool {
                             "additionalProperties": { "type": "string" }
                         },
                         "subagent_type": { "type": "string", "description": "Subagent type; defaults to general-purpose when omitted; applies only to subagents newly launched from items" },
-                        "run_in_background": { "type": "boolean", "description": "true returns immediately (listing agent_id/task_id per item) and runs the swarm in the background; terminal notifications arrive automatically, TaskWait waits, and the full result is in the file the notification points to (read it with Read)" }
+                        "run_in_background": { "type": "boolean", "description": "true returns immediately (listing agent_id/task_id per item) and runs the swarm in the background; terminal notifications arrive automatically, TaskWait waits, and the full result is in the file the notification points to (read it with Read)" },
+                        "output_schema": { "type": "object", "description": "Optional object-rooted JSON Schema applied to every child's final structured result" },
+                        "cwd": { "type": "string", "description": "Optional existing working directory shared by newly launched items" },
+                        "worktree": { "type": "boolean", "description": "Create a separate Git worktree from HEAD for each newly launched item" }
                     },
                     "required": ["prompt_template"]
                 }
@@ -804,10 +810,53 @@ pub struct SwarmTask {
     pub prompt: String,
 }
 
+pub(crate) fn parse_child_workspace(
+    args: &serde_json::Value,
+) -> Result<(Option<std::path::PathBuf>, bool), String> {
+    let cwd = match args.get("cwd") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let path = value
+                .as_str()
+                .ok_or("cwd must be a directory path string")?
+                .trim();
+            if path.is_empty() {
+                return Err("cwd must not be empty".into());
+            }
+            Some(std::path::PathBuf::from(path))
+        }
+    };
+    let worktree = args["worktree"].as_bool().unwrap_or(false);
+    if cwd.is_some() && worktree {
+        return Err("cwd and worktree are mutually exclusive".into());
+    }
+    Ok((cwd, worktree))
+}
+
+pub(crate) fn parse_agent_output_schema(
+    args: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(schema) = args.get("output_schema") else {
+        return Ok(None);
+    };
+    if schema.is_null() {
+        return Ok(None);
+    }
+    if !schema.is_object() || schema.get("type").and_then(|kind| kind.as_str()) != Some("object") {
+        return Err(
+            "output_schema must be an object-rooted JSON Schema with type=\"object\"".into(),
+        );
+    }
+    Ok(Some(schema.clone()))
+}
+
 /// AgentSwarm parse result (the complete plan before execution)
 #[derive(Debug)]
 pub struct SwarmPlan {
     pub tasks: Vec<SwarmTask>,
+    pub output_schema: Option<serde_json::Value>,
+    pub cwd: Option<std::path::PathBuf>,
+    pub worktree: bool,
     /// Profile lookup name for freshly launched subagents (default general-purpose; meaningless for resume-only calls, rejected by validation)
     pub subagent_type: String,
 }
@@ -823,6 +872,8 @@ impl SwarmPlan {
 /// at least one of items / resume_agent_ids; items-only needs >= 2; items are capped at
 /// MAX_SWARM_ITEMS; the template must contain the {{item}} placeholder; expanded prompts must be pairwise distinct.
 pub fn parse_swarm_args(args: &serde_json::Value) -> Result<SwarmPlan, String> {
+    let output_schema = parse_agent_output_schema(args)?;
+    let (cwd, worktree) = parse_child_workspace(args)?;
     let template = args["prompt_template"]
         .as_str()
         .ok_or("Missing required parameter: prompt_template (the task template containing the {{item}} placeholder)")?
@@ -930,8 +981,14 @@ pub fn parse_swarm_args(args: &serde_json::Value) -> Result<SwarmPlan, String> {
             prompt,
         });
     }
+    if items.is_empty() && (cwd.is_some() || worktree) {
+        return Err("cwd/worktree apply only to newly launched swarm items".into());
+    }
     Ok(SwarmPlan {
         tasks,
+        output_schema,
+        cwd,
+        worktree,
         subagent_type: if subagent_type.is_empty() {
             "general-purpose".to_string()
         } else {

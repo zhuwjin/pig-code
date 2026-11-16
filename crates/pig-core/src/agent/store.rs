@@ -110,6 +110,7 @@ pub fn load_profiles_with_plugins(
                     name: agent.name,
                     description: agent.description,
                     tools: agent.tools,
+                    subagents: None,
                     model: agent.model,
                     thought_level: agent.thought_level,
                     max_turns: agent.max_turns,

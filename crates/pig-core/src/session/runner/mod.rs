@@ -242,6 +242,11 @@ impl Manager {
             Op::CheckoutBranch { cwd, branch } => self.checkout_branch(event_tx, cwd, branch),
             Op::GitStatus { cwd } => self.git_status(event_tx, cwd),
             Op::GitDiff { cwd, path, staged } => self.git_diff(event_tx, cwd, path, staged),
+            Op::ListAgents { session_id } => self.list_agents(event_tx, session_id),
+            Op::AgentOutput {
+                session_id,
+                agent_id,
+            } => self.agent_output(event_tx, session_id, agent_id),
             Op::LoadSubagent {
                 session_id,
                 agent_id,
@@ -419,8 +424,8 @@ impl Manager {
         let store = self.store.clone();
         let sessions_dir = self.sessions_dir.clone();
         if deleted_sessions.contains(&session_id) {
-            // Turn wrap-up for a deleted session: the Session drops here; delete the file after the handle closes
-            let _ = std::fs::remove_file(sessions_dir.join(format!("{session_id}.jsonl")));
+            drop(session);
+            operations::delete_session_artifacts(&sessions_dir, &session_id, true);
             return;
         }
         self.refresh_notification_queue(&event_tx, &session_id);
@@ -429,6 +434,7 @@ impl Manager {
         if let Some(entry) = sessions.get_mut(&session_id) {
             // Refresh the MCP status cache at turn wrap-up (lazy connection happens inside the turn)
             entry.mcp_status = session.mcp.as_ref().map(|mcp| mcp.statuses());
+            entry.active_run = None;
             entry.session = Some(session);
             entry.cancel = None;
             entry.retry = None;

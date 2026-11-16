@@ -130,6 +130,7 @@ impl Manager {
                         runtime: entry_runtime,
                         cancel: None,
                         active_claim: None,
+                        active_run: None,
                         retry: None,
                         model_override: selection.clone(),
                         reasoning_level: meta.reasoning_level.clone(),
@@ -363,6 +364,7 @@ impl Manager {
                         runtime: entry_runtime,
                         cancel: None,
                         active_claim: None,
+                        active_run: None,
                         retry: None,
                         model_override: selection.clone(),
                         reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
@@ -378,6 +380,37 @@ impl Manager {
                         plugin_surfaces_stale: false,
                     },
                 );
+                let unknown = store
+                    .lock()
+                    .expect("store lock")
+                    .unknown_tool_executions(&session_id);
+                match unknown {
+                    Ok(unknown) => {
+                        for execution in unknown {
+                            emit(
+                                &event_tx,
+                                Event::Error {
+                                    session_id: Some(session_id.clone()),
+                                    error: CoreError::Internal {
+                                        detail: format!(
+                                            "Tool {} ({}) has an unknown outcome after restart; verify its side effects before retrying",
+                                            execution.tool, execution.execution_id
+                                        ),
+                                    },
+                                    fatal: false,
+                                },
+                            );
+                        }
+                    }
+                    Err(error) => emit(
+                        &event_tx,
+                        Event::Error {
+                            session_id: Some(session_id.clone()),
+                            error,
+                            fatal: false,
+                        },
+                    ),
+                }
                 // Switching back to an already-open session: re-emit
                 // both pending lanes so the UI rebuilds its queue view
                 let queue_items = queue_snapshot(&pending);
@@ -697,24 +730,34 @@ impl Manager {
             store_guard.delete_session(&session_id);
             store_guard.delete_pending(&session_id);
         }
-        // Spill artifacts are session-private and never needed after deletion;
-        // remove only that subtree (the session directory also holds other
-        // subsystems' files). A malformed id must not turn this into a
-        // traversal delete, so only a plain single path component is accepted.
-        let mut components = std::path::Path::new(&session_id).components();
-        let plain_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
-            && components.next().is_none();
-        if plain_id {
-            let _ = std::fs::remove_dir_all(sessions_dir.join(&session_id).join("tool-results"));
-        }
-        if !turn_in_flight {
-            let _ = std::fs::remove_file(sessions_dir.join(format!("{session_id}.jsonl")));
-        }
+        delete_session_artifacts(&sessions_dir, &session_id, !turn_in_flight);
         emit(
             &event_tx,
             Event::SessionList {
                 sessions: store.lock().expect("store lock").sorted_sessions(),
             },
         );
+    }
+}
+
+pub(super) fn delete_session_artifacts(
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+    include_rollout: bool,
+) {
+    let mut components = std::path::Path::new(session_id).components();
+    let plain_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !plain_id {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(sessions_dir.join(session_id).join("tool-results"));
+    let _ = std::fs::remove_dir_all(pig_utils::paths::media_dir(sessions_dir, session_id));
+    let _ = std::fs::remove_dir_all(crate::agent::agents_dir(sessions_dir, session_id));
+    if let Some(data_dir) = sessions_dir.parent() {
+        let _ = std::fs::remove_dir_all(data_dir.join("worktrees").join(session_id));
+    }
+    if include_rollout {
+        let _ = std::fs::remove_file(sessions_dir.join(format!("{session_id}.jsonl")));
     }
 }

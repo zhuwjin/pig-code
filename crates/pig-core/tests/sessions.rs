@@ -10,6 +10,12 @@ use std::time::Duration;
 /// metadata/id mismatch.
 fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
     std::fs::create_dir_all(path.parent().expect("context parent")).expect("agents dir");
+    let parent_id = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".agents"))
+        .unwrap_or("s1");
     let meta = serde_json::json!({
         "type": "meta",
         "id": meta_id,
@@ -17,7 +23,7 @@ fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
         "title": "fixture context",
         "created_at": 1,
         "kind": "subagent",
-        "parent_id": "s1",
+        "parent_id": parent_id,
         "delegation_depth": 1,
         "context_mode": "fresh",
         "profile": "general-purpose",
@@ -123,6 +129,28 @@ async fn resume_rebuilds_history() {
         .await
         .is_ok()
     {}
+
+    agent2
+        .ops
+        .send(Op::ListAgents {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let catalog = recv_until(&events2, Duration::from_secs(5), |event| {
+        matches!(event, Event::AgentCatalogChanged { .. })
+    })
+    .await;
+    let Some(Event::AgentCatalogChanged { agents, .. }) = catalog.last() else {
+        panic!("expected agent catalog")
+    };
+    let root = agents
+        .iter()
+        .find(|agent| agent.agent_id == session_id)
+        .expect("root catalog entry");
+    assert_eq!(root.status, Some(pig_protocol::AgentRunStatus::Completed));
+    assert_eq!(root.turn_kind, Some(pig_protocol::TurnKind::Regular));
+    assert!(root.run_id.is_some());
 
     // Continue the conversation: the model should receive the rebuilt history (system+user+assistant+tool_call+tool_result+new user = 6 entries)
     agent2
@@ -396,13 +424,20 @@ async fn deleting_a_session_with_a_pending_approval_is_clean() {
     };
     let request_id = request_id.clone();
 
-    // A finished task's spill plus an unrelated file in the session directory:
-    // deletion removes the tool-results subtree only.
+    // Private tool/agent/media artifacts are removed; unrelated files in the
+    // shared session directory remain intact.
     let session_dir = data_dir.join("sessions").join(&sid);
     let spill_dir = session_dir.join("tool-results");
     std::fs::create_dir_all(&spill_dir).unwrap();
     std::fs::write(spill_dir.join("b1.log"), "spill").unwrap();
     std::fs::write(session_dir.join("keep.txt"), "keep").unwrap();
+    let sessions_dir = data_dir.join("sessions");
+    let media_dir = pig_utils::paths::media_dir(&sessions_dir, &sid);
+    let agents_dir = sessions_dir.join(format!("{sid}.agents"));
+    std::fs::create_dir_all(&media_dir).unwrap();
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(media_dir.join("image.png"), b"image").unwrap();
+    std::fs::write(agents_dir.join("a1-1.result.md"), "child result").unwrap();
 
     agent
         .ops
@@ -458,7 +493,12 @@ async fn deleting_a_session_with_a_pending_approval_is_clean() {
     );
     assert!(
         session_dir.join("keep.txt").is_file(),
-        "only the spill subtree is removed"
+        "unrelated subsystem files stay intact"
+    );
+    assert!(!media_dir.exists(), "session media must be removed");
+    assert!(
+        !agents_dir.exists(),
+        "child contexts, media and results must be removed"
     );
 
     // The manager is still healthy: a fresh session completes a turn.
@@ -1513,14 +1553,51 @@ async fn assistant_record_precedes_text_done() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_subagent_rejects_paths_and_containment_escapes() {
     let (config_path, cwd, data_dir) = setup("load-subagent-containment");
-    let agent =
-        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
-    let events = agent.events.clone();
-    let session_id = new_session(&agent, cwd).await;
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
     let agents = data_dir
         .join("sessions")
         .join(format!("{session_id}.agents"));
     write_agent_context(&agents.join("a1-1.jsonl"), "a1-1", "contained context");
+
+    agent.shutdown();
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    let events = agent.events.clone();
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::ListAgents {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let catalog = recv_until(&events, Duration::from_secs(5), |event| {
+        matches!(event, Event::AgentCatalogChanged { .. })
+    })
+    .await;
+    let Some(Event::AgentCatalogChanged {
+        agents: entries, ..
+    }) = catalog.last()
+    else {
+        panic!("expected agent catalog")
+    };
+    let recovered = entries
+        .iter()
+        .find(|agent| agent.agent_id == "a1-1")
+        .expect("orphan child recovered into the catalog");
+    assert_eq!(recovered.status, Some(pig_protocol::AgentRunStatus::Lost));
+    assert_eq!(recovered.parent_id, None);
+    assert!(recovered.record_path.is_some());
 
     // The valid generated id still serves the right-side history.
     agent

@@ -872,6 +872,32 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             additional_permissions.extend_write_roots([target.clone()]);
         }
     }
+    match ctx.store.lock().expect("store lock").begin_tool_execution(
+        ctx.session_id,
+        item_id,
+        &call.name,
+        &call.arguments,
+    ) {
+        Ok(crate::store::ToolExecutionStart::Started) => {}
+        Ok(crate::store::ToolExecutionStart::Completed(saved)) => {
+            return GatedToolOutcome::Executed {
+                output: saved.output,
+                is_error: saved.is_error,
+                edit: saved.edit,
+                images: saved.images,
+                documents: saved.documents,
+                delivered_notification_ids: Vec::new(),
+            };
+        }
+        Ok(crate::store::ToolExecutionStart::Blocked(note)) => {
+            return GatedToolOutcome::Rejected { note };
+        }
+        Err(error) => {
+            return GatedToolOutcome::Rejected {
+                note: format!("Failed to claim the tool execution: {error:?}"),
+            };
+        }
+    }
     let result = {
         let tool_ctx = ToolContext {
             cwd: ctx.cwd,
@@ -1008,6 +1034,24 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
     // over 4MB are not persisted (the baseline falls back to process memory,
     // consistent with kimi-code).
     persist_tracker_originals(ctx.tracker, ctx.store, ctx.session_id);
+    let journal_result = crate::store::ToolExecutionResult {
+        output: output.clone(),
+        is_error,
+        edit: edit.clone(),
+        images: chat_images.clone(),
+        documents: chat_documents.clone(),
+    };
+    if let Err(error) = ctx.store.lock().expect("store lock").finish_tool_execution(
+        ctx.session_id,
+        item_id,
+        &journal_result,
+    ) {
+        emit_bg(ctx.session_id, tx, |session_id| Event::Error {
+            session_id: Some(session_id),
+            error,
+            fatal: false,
+        });
+    }
     GatedToolOutcome::Executed {
         output,
         is_error,

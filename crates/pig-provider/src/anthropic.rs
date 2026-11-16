@@ -744,8 +744,11 @@ pub(crate) async fn stream_anthropic(
     control: &CallControl,
 ) -> Result<(), CallError> {
     let pdf = messages.iter().any(|message| !message.documents.is_empty());
-    let body = build_anthropic_body(config, &messages, &tools, true, CachePolicy::Main)
+    let mut body = build_anthropic_body(config, &messages, &tools, true, CachePolicy::Main)
         .map_err(CallError::from)?;
+    if let Some(output) = control.structured_output() {
+        crate::sidecar::apply_structured(&mut body, config.api_format, output);
+    }
 
     let url = crate::endpoint::anthropic_messages_url(&config.base_url);
     // The interleaved-thinking beta header rides along when reasoning params enabled

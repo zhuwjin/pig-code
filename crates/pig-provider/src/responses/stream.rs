@@ -328,7 +328,11 @@ pub(crate) async fn stream_responses(
     tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
     control: &CallControl,
 ) -> Result<(), CallError> {
-    let body = build_responses_body(config, &messages, &tools, true).map_err(CallError::from)?;
+    let mut body =
+        build_responses_body(config, &messages, &tools, true).map_err(CallError::from)?;
+    if let Some(output) = control.structured_output() {
+        crate::sidecar::apply_structured(&mut body, config.api_format, output);
+    }
 
     let url = crate::endpoint::responses_url(&config.base_url);
     let mut api = api_log::ApiCall::new("openai.responses", &config.provider_name, &config.model);

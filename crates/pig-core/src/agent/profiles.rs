@@ -18,6 +18,7 @@ pub fn builtin_profiles() -> Vec<AgentProfile> {
                           only the final result comes back."
                 .into(),
             tools: None,
+            subagents: None,
             model: None,
             thought_level: None,
             max_turns: None,
@@ -65,6 +66,7 @@ pub fn builtin_profiles() -> Vec<AgentProfile> {
                 .map(|s| s.to_string())
                 .collect(),
             ),
+            subagents: None,
             model: None,
             thought_level: None,
             max_turns: None,

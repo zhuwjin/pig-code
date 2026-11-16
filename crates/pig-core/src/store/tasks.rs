@@ -108,7 +108,9 @@ fn write_background_task(
             task.turns,
             task.model,
             task.run.as_ref().map(|run| run.run_id.as_str()),
-            task.run.as_ref().map(|run| run.parent_agent_id.as_str()),
+            task.run
+                .as_ref()
+                .and_then(|run| run.parent_agent_id.as_deref()),
             task.run.as_ref().map(|run| run.delegation_depth),
             task.run.as_ref().map(|run| run.profile.as_str()),
             task.run.as_ref().map(|run| run.usage.0 as i64),
@@ -190,7 +192,7 @@ impl Store {
                     (Some(agent_id), Some(run_id)) => Some(crate::task::AgentRunMetadata {
                         agent_id,
                         run_id,
-                        parent_agent_id: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
+                        parent_agent_id: row.get::<_, Option<String>>(17)?,
                         delegation_depth: row
                             .get::<_, Option<i64>>(18)?
                             .unwrap_or(0)
@@ -679,7 +681,7 @@ mod tests {
         let run = crate::task::AgentRunMetadata {
             agent_id: "a1-1".into(),
             run_id: "run-1".into(),
-            parent_agent_id: "a-parent".into(),
+            parent_agent_id: Some("a-parent".into()),
             delegation_depth: 2,
             profile: "explore".into(),
             usage: (11, 12, 13),

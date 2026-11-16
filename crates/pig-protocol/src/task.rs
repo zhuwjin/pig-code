@@ -48,6 +48,46 @@ impl TaskStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunStatus {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+    Lost,
+}
+
+impl AgentRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentCatalogEntry {
+    pub agent_id: String,
+    pub run_id: Option<String>,
+    pub turn_kind: Option<crate::TurnKind>,
+    pub parent_id: Option<String>,
+    pub depth: u32,
+    pub profile: String,
+    pub model: String,
+    pub status: Option<AgentRunStatus>,
+    pub turns: usize,
+    pub usage: (u64, u64, u64),
+    pub record_path: Option<PathBuf>,
+    pub result_path: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub id: String,

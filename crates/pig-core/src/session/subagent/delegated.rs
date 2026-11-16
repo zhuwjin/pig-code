@@ -51,6 +51,15 @@ impl Session {
             parent_agent_id: &self.agent.id,
             parent_delegation_depth: self.agent.delegation_depth,
             max_delegation_depth: self.max_delegation_depth(),
+            max_agents_per_session: runtime
+                .as_ref()
+                .map_or(64, |runtime| runtime.config().agents.max_agents_per_session),
+            allowed_subagents: self
+                .subagent
+                .as_ref()
+                .and_then(|subagent| subagent.profile.subagents.as_deref()),
+            child_cwd: None,
+            worktree: false,
             parent_permissions: self.permissions,
             parent_history: &self.agent.history,
             profiles_summary: &self.profiles_summary,

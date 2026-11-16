@@ -86,6 +86,7 @@ pub struct CallControl {
     cancel: tokio_util::sync::CancellationToken,
     retry_now: Arc<tokio::sync::Notify>,
     idle_timeout: Duration,
+    structured: Option<crate::StructuredOutput<'static>>,
 }
 
 impl CallControl {
@@ -94,6 +95,7 @@ impl CallControl {
             cancel,
             retry_now: Arc::new(tokio::sync::Notify::new()),
             idle_timeout: crate::transport::DEFAULT_IDLE_TIMEOUT,
+            structured: None,
         }
     }
 
@@ -106,6 +108,18 @@ impl CallControl {
 
     pub(crate) fn idle_timeout(&self) -> Duration {
         self.idle_timeout
+    }
+
+    pub fn with_structured_output(mut self, schema: serde_json::Value) -> Self {
+        self.structured = Some(crate::StructuredOutput {
+            name: "agent_result",
+            schema,
+        });
+        self
+    }
+
+    pub(crate) fn structured_output(&self) -> Option<&crate::StructuredOutput<'static>> {
+        self.structured.as_ref()
     }
 
     pub fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {

@@ -300,6 +300,10 @@ mod tests {
             parent_agent_id: "s-test",
             parent_delegation_depth: 0,
             max_delegation_depth: 1,
+            max_agents_per_session: 64,
+            allowed_subagents: None,
+            child_cwd: None,
+            worktree: false,
             parent_permissions: pig_protocol::PermissionSettings::default(),
             parent_history: &[],
             profiles_summary: "",
@@ -449,6 +453,138 @@ mod tests {
             !prep.tools.iter().any(|tool| tool.name() == "Agent"),
             "a read-only profile cannot acquire delegation through the global depth setting"
         );
+    }
+
+    #[test]
+    fn child_budget_counts_batch_reservations_but_not_resume() {
+        let tmp = TempDir::new("child-budget");
+        let state = crate::task::SessionToolState::for_test();
+        let parent = parent_model();
+        let plan = crate::tool::parse_swarm_args(&serde_json::json!({
+            "prompt_template": "Review {{item}}",
+            "items": ["a.rs", "b.rs"]
+        }))
+        .expect("valid args");
+        let mut ctx = prep_ctx(&tmp, &state, &parent);
+        ctx.max_agents_per_session = 1;
+        let mut seq = 0u64;
+        let error = prepare_swarm_children(&ctx, &plan, &mut seq)
+            .err()
+            .expect("the second batch reservation exceeds the budget");
+        assert!(error.contains("max_agents_per_session=1"), "{error}");
+
+        let profiles = load_profiles_with_trust(&tmp.0, &tmp.0, &WorkspaceTrust::untrusted(&tmp.0));
+        let prep = prepare_fresh_child(
+            &ctx,
+            find_profile(&profiles, "general-purpose").unwrap().clone(),
+            parent.clone(),
+            "one child",
+            "one child",
+            &mut seq,
+        )
+        .expect("first child");
+        let agent_id = prep.agent_id.clone();
+        drop(prep);
+        prepare_resume_child(&ctx, &profiles, &agent_id, "continue", "one child")
+            .expect("resume does not consume another agent slot");
+    }
+
+    #[test]
+    fn parent_profile_allowlist_applies_to_fresh_and_resume() {
+        let tmp = TempDir::new("child-allowlist");
+        let state = crate::task::SessionToolState::for_test();
+        let parent = parent_model();
+        let profiles = load_profiles_with_trust(&tmp.0, &tmp.0, &WorkspaceTrust::untrusted(&tmp.0));
+        let allowed = vec!["explore".to_string()];
+        let mut ctx = prep_ctx(&tmp, &state, &parent);
+        ctx.allowed_subagents = Some(&allowed);
+        let mut seq = 0u64;
+        let error = prepare_fresh_child(
+            &ctx,
+            find_profile(&profiles, "general-purpose").unwrap().clone(),
+            parent.clone(),
+            "not allowed",
+            "not allowed",
+            &mut seq,
+        )
+        .err()
+        .expect("parent profile rejects the type")
+        .message();
+        assert!(error.contains("not allowed"), "{error}");
+
+        let prep = prepare_fresh_child(
+            &ctx,
+            find_profile(&profiles, "explore").unwrap().clone(),
+            parent.clone(),
+            "allowed",
+            "allowed",
+            &mut seq,
+        )
+        .expect("allowed child");
+        let agent_id = prep.agent_id.clone();
+        drop(prep);
+        ctx.allowed_subagents = Some(&[]);
+        let error = prepare_resume_child(&ctx, &profiles, &agent_id, "continue", "allowed")
+            .err()
+            .expect("resume cannot bypass the allowlist")
+            .message();
+        assert!(error.contains("not allowed"), "{error}");
+    }
+
+    #[test]
+    fn worktree_child_creates_an_isolated_cwd_and_resume_reuses_it() {
+        let tmp = TempDir::new("child-worktree");
+        let workspace = tmp.0.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let git = |args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            command.arg("-C").arg(&workspace).args(args);
+            crate::NoConsoleExt::no_console(&mut command);
+            let status = command.status().expect("git process");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init"]);
+        std::fs::write(workspace.join("tracked.txt"), "tracked").expect("tracked file");
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "init",
+        ]);
+        let state = crate::task::SessionToolState::for_test();
+        let parent = parent_model();
+        let profiles = load_profiles_with_trust(&tmp.0, &tmp.0, &WorkspaceTrust::untrusted(&tmp.0));
+        let mut ctx = prep_ctx(&tmp, &state, &parent);
+        ctx.cwd = &workspace;
+        ctx.worktree = true;
+        let prep = prepare_fresh_child(
+            &ctx,
+            find_profile(&profiles, "general-purpose").unwrap().clone(),
+            parent.clone(),
+            "worktree task",
+            "worktree child",
+            &mut 0,
+        )
+        .expect("worktree child");
+        let worktree = prep.cwd.clone();
+        assert_ne!(worktree, workspace);
+        assert!(worktree.join("tracked.txt").is_file());
+        let (meta, _) = read_agent(&prep.jsonl).expect("worktree metadata");
+        assert_eq!(meta.cwd, worktree);
+        drop(prep);
+        let resumed = prepare_resume_child(
+            &ctx,
+            &profiles,
+            &meta.agent_id,
+            "continue in the existing worktree",
+            "worktree child",
+        )
+        .expect("resume worktree");
+        assert_eq!(resumed.cwd, worktree);
     }
 
     #[test]

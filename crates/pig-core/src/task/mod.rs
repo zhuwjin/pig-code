@@ -31,10 +31,10 @@ pub use process::{ForegroundOutcome, run_foreground, spawn_background, stop_task
 #[cfg(test)]
 pub(crate) use registry::SUBAGENT_SLOT_TEST_LOCK;
 pub use registry::{
-    AgentRunMetadata, AgentWriterGuard, MAX_CONCURRENT_SUBAGENTS, ReadState, SessionToolState,
-    TaskEntry, TaskRegistry, acquire_subagent_slot, mark_agent_task_started, note_output,
-    register_agent_run_queued, register_agent_task, register_agent_task_queued, snapshot,
-    subagent_slots_available, tail_chars,
+    AgentPartial, AgentRunMetadata, AgentWriterGuard, MAX_CONCURRENT_SUBAGENTS, ReadState,
+    SessionToolState, TaskEntry, TaskRegistry, acquire_subagent_slot, mark_agent_task_started,
+    note_output, register_agent_run_queued, register_agent_task, register_agent_task_queued,
+    snapshot, subagent_slots_available, tail_chars,
 };
 
 pub(crate) use output::kill_process_tree;
