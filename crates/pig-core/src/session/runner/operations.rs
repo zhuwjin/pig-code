@@ -380,37 +380,6 @@ impl Manager {
                         plugin_surfaces_stale: false,
                     },
                 );
-                let unknown = store
-                    .lock()
-                    .expect("store lock")
-                    .unknown_tool_executions(&session_id);
-                match unknown {
-                    Ok(unknown) => {
-                        for execution in unknown {
-                            emit(
-                                &event_tx,
-                                Event::Error {
-                                    session_id: Some(session_id.clone()),
-                                    error: CoreError::Internal {
-                                        detail: format!(
-                                            "Tool {} ({}) has an unknown outcome after restart; verify its side effects before retrying",
-                                            execution.tool, execution.execution_id
-                                        ),
-                                    },
-                                    fatal: false,
-                                },
-                            );
-                        }
-                    }
-                    Err(error) => emit(
-                        &event_tx,
-                        Event::Error {
-                            session_id: Some(session_id.clone()),
-                            error,
-                            fatal: false,
-                        },
-                    ),
-                }
                 // Switching back to an already-open session: re-emit
                 // both pending lanes so the UI rebuilds its queue view
                 let queue_items = queue_snapshot(&pending);

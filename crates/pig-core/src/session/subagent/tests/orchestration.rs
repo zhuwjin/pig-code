@@ -52,7 +52,7 @@ fn agent_context_native_replay_roundtrip() {
 }
 
 #[test]
-fn agent_context_reconcile_drops_unanswered_calls() {
+fn agent_context_rejects_boundary_after_unanswered_calls() {
     let dir = std::env::temp_dir().join(format!("pig-agent-reconcile-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -97,13 +97,8 @@ fn agent_context_reconcile_drops_unanswered_calls() {
     let mut user = ChatMsg::user("continue".into());
     persist_agent_msg(&path, &mut user);
 
-    let (_, history) = crate::agent::read_agent(&path).expect("read agent context");
-    let calls = history[0].tool_calls.as_ref().expect("answered call");
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_1");
-    let replay = history[0].replay.as_ref().expect("native replay");
-    assert_eq!(replay.items.len(), 1);
-    assert_eq!(history[2].role, "user");
+    let error = crate::agent::read_agent(&path).expect_err("unfinished round before user");
+    assert!(error.contains("unfinished tool round"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -131,6 +126,8 @@ fn media_write_failure_degrades_live_message_and_jsonl() {
         name: "ReadMediaFile".into(),
         arguments: "{}".into(),
     };
+    let mut assistant = ChatMsg::assistant(String::new(), vec![call.clone()], None);
+    persist_agent_msg(&path, &mut assistant);
     persist_agent_tool(&path, &call, &mut message);
     assert!(message.documents.is_empty(), "live message degraded");
     assert!(
@@ -142,8 +139,8 @@ fn media_write_failure_degrades_live_message_and_jsonl() {
         message.content
     );
     let (_, history) = crate::agent::read_agent(&path).expect("read agent context");
-    assert_eq!(history[0].content, message.content);
-    assert!(history[0].documents.is_empty());
+    assert_eq!(history[1].content, message.content);
+    assert!(history[1].documents.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -799,6 +796,10 @@ async fn child_parallel_tools_preserve_call_order() {
         results[1].tool_call_id.as_deref(),
         Some(calls[1].id.as_str())
     );
+    let raw = std::fs::read_to_string(&child.subagent.as_ref().expect("child").jsonl)
+        .expect("child JSONL");
+    assert_eq!(raw.matches("\"type\":\"tool_execution_start\"").count(), 2);
+    assert_eq!(raw.matches("\"type\":\"tool_call\"").count(), 2);
     life.settle(&result);
     let _ = std::fs::remove_dir_all(root);
 }

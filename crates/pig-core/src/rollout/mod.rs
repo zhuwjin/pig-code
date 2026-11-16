@@ -18,8 +18,10 @@ mod conversation;
 pub(crate) mod jsonl;
 mod media;
 mod rebuild;
+mod recovery;
 
 pub(crate) use conversation::ConversationStore;
+pub(crate) use recovery::{tool_execution_recoveries, tool_execution_start_records};
 
 /// Prefix of the marked user-role message that hands a compaction summary to
 /// the next model request. Replay uses it to distinguish a compaction handoff
@@ -202,6 +204,13 @@ pub enum ChildContextMode {
     Fork,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionRecovery {
+    NotStarted,
+    OutcomeUnknown,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -250,6 +259,8 @@ pub enum RolloutRecord {
         replay: Option<pig_provider::AssistantReplay>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallWire>,
+        /// Internal execution ids parallel to `tool_calls`; provider call ids may repeat.
+        tool_execution_ids: Vec<String>,
         #[serde(default)]
         ts_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,7 +302,16 @@ pub enum RolloutRecord {
     Text {
         text: String,
     },
+    /// Durable admission marker, synced before the tool body can produce side effects.
+    ToolExecutionStart {
+        execution_id: String,
+        call_id: String,
+        call_index: usize,
+        tool: String,
+        started_at_ms: u64,
+    },
     ToolCall {
+        execution_id: String,
         tool: String,
         summary: String,
         /// Raw arguments JSON (for history rebuild)
@@ -315,6 +335,8 @@ pub enum RolloutRecord {
         documents: Vec<DocumentRef>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         delivered_notification_ids: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recovery: Option<ToolExecutionRecovery>,
     },
     /// A turn's file changes (replay restores the per-turn changes panel in the message stream)
     TurnChanges {
@@ -1065,6 +1087,7 @@ mod tests {
             background: true,
         };
         let record = RolloutRecord::ToolCall {
+            execution_id: "execution-test".into(),
             tool: "AgentSwarm".into(),
             summary: "subagent batch (2 items)".into(),
             arguments: "{}".into(),
@@ -1077,6 +1100,7 @@ mod tests {
             images: vec![],
             documents: vec![],
             delivered_notification_ids: vec![],
+            recovery: None,
         };
         let line = serde_json::to_string(&record).expect("serialize");
         let back: RolloutRecord = serde_json::from_str(&line).expect("read back");
@@ -1132,6 +1156,7 @@ mod tests {
 
     fn tool_record(output: &str) -> RolloutRecord {
         RolloutRecord::ToolCall {
+            execution_id: "execution-test".into(),
             tool: "Read".into(),
             summary: "Read".into(),
             arguments: "{}".into(),
@@ -1144,6 +1169,7 @@ mod tests {
             images: vec![],
             documents: vec![],
             delivered_notification_ids: vec![],
+            recovery: None,
         }
     }
 
@@ -1267,7 +1293,7 @@ mod tests {
         // Tool-call output mentions the needle but is not conversation
         std::fs::write(
             dir.join("b.jsonl"),
-            "{\"type\":\"tool_call\",\"tool\":\"ExecCommand\",\"summary\":\"s\",\"arguments\":\"{}\",\"output\":\"Kiwi-Fruit here\",\"is_error\":false,\"edit\":null,\"agent_card\":null,\"agent_cards\":[]}\n",
+            "{\"type\":\"tool_call\",\"execution_id\":\"execution-search\",\"tool\":\"ExecCommand\",\"summary\":\"s\",\"arguments\":\"{}\",\"output\":\"Kiwi-Fruit here\",\"is_error\":false,\"edit\":null,\"agent_card\":null,\"agent_cards\":[]}\n",
         )
         .expect("write b");
         // The model-io debug trace is not a conversation either
@@ -1325,14 +1351,6 @@ mod tests {
                 sent_images,
                 ..
             } if sent_images.is_empty()
-        ));
-        let tool: RolloutRecord = serde_json::from_str(
-            r#"{"type":"tool_call","tool":"Read","summary":"s","arguments":"{}","output":"ok","is_error":false,"edit":null,"agent_card":null,"agent_cards":[]}"#,
-        )
-        .expect("legacy tool");
-        assert!(matches!(
-            tool,
-            RolloutRecord::ToolCall { images, .. } if images.is_empty()
         ));
         let compact: RolloutRecord = serde_json::from_str(
             r#"{"type":"compact","note":"n","omitted":2,"automatic":false,"used_after":null,"used_before":null,"summary":null}"#,
@@ -1408,6 +1426,7 @@ mod tests {
             reasoning: None,
             replay: None,
             tool_calls: vec![],
+            tool_execution_ids: vec![],
             ts_ms: 0,
             reasoning_ms: None,
         };
@@ -1433,6 +1452,7 @@ mod tests {
             reasoning: Some("reasoning mentions Kiwi-Fruit".into()),
             replay: None,
             tool_calls: vec![],
+            tool_execution_ids: vec![],
             ts_ms: 0,
             reasoning_ms: None,
         };

@@ -1087,7 +1087,16 @@ mod tests {
             arguments: "{}".into(),
         };
         let mut assistant = ChatMsg::assistant(String::new(), vec![call.clone()], None);
-        append_agent_message(&path, &mut assistant, 128_000).unwrap();
+        append_agent_message_meta(
+            &path,
+            &mut assistant,
+            128_000,
+            crate::agent::AgentMsgMeta {
+                tool_execution_ids: vec!["execution-pdf".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut tool = ChatMsg::tool_result("call_pdf", "Read PDF doc.pdf".into());
         tool.documents = vec![pig_provider::ChatDocument {
             media_type: "application/pdf".into(),
@@ -1099,6 +1108,7 @@ mod tests {
         append_agent_tool_result(
             &path,
             &call,
+            "execution-pdf",
             &mut tool,
             128_000,
             crate::agent::AgentMsgMeta::default(),

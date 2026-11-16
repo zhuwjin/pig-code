@@ -1868,3 +1868,82 @@ async fn execution_claim_recovers_paused_input_and_clears_after_completion() {
     assert!(rollout.contains("Read the mock file and summarize it"));
     agent2.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn started_tool_without_result_recovers_as_model_visible_unknown() {
+    let (config_path, cwd, data_dir) = setup("tool-outcome-unknown-recovery");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.shutdown();
+
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let call = pig_provider::ToolCall {
+        id: "call-crash".into(),
+        name: "Read".into(),
+        arguments: "{}".into(),
+    };
+    let records = [
+        pig_core::rollout::RolloutRecord::Assistant {
+            text: String::new(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![call.to_wire()],
+            tool_execution_ids: vec!["run-crash-tool-1".into()],
+            ts_ms: 0,
+            reasoning_ms: None,
+        },
+        pig_core::rollout::RolloutRecord::ToolExecutionStart {
+            execution_id: "run-crash-tool-1".into(),
+            call_id: call.id,
+            call_index: 0,
+            tool: call.name,
+            started_at_ms: 1,
+        },
+    ];
+    let mut raw = std::fs::read_to_string(&rollout_path).expect("existing rollout");
+    for record in records {
+        raw.push_str(&serde_json::to_string(&record).expect("serialize recovery fixture"));
+        raw.push('\n');
+    }
+    std::fs::write(&rollout_path, raw).expect("append interrupted tool");
+
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    let events = agent.events.clone();
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let replay = recv_until(&events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::ToolCallEnd { output, .. } if output.contains("outcome is unknown")
+        )
+    })
+    .await;
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::ToolCallEnd { is_error: true, output, .. } if output.contains("verify external state")
+    )));
+    let raw = std::fs::read_to_string(&rollout_path).expect("recovered rollout");
+    assert_eq!(raw.matches("\"recovery\":\"outcome_unknown\"").count(), 1);
+
+    let connection = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tool_executions'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("table query");
+    assert_eq!(table_count, 0);
+    agent.shutdown();
+}

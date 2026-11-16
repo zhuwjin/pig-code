@@ -463,33 +463,55 @@ fn prepare_child_cwd(ctx: &ChildPrepCtx<'_>, agent_id: &str) -> Result<PathBuf, 
 
 fn persist_history(prep: &mut ChildPrep) -> Result<(), String> {
     let mut calls = std::collections::HashMap::new();
-    for message in &mut prep.history {
+    for (message_index, message) in prep.history.iter_mut().enumerate() {
+        let mut tool_execution_ids = Vec::new();
         if message.role == "assistant" {
-            for call in message.tool_calls.clone().unwrap_or_default() {
+            for (call_index, call) in message
+                .tool_calls
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+            {
+                let execution_id =
+                    format!("inherited-{}-{message_index}-{call_index}", prep.agent_id);
                 calls.insert(
                     call.id.clone(),
-                    pig_provider::ToolCall {
-                        id: call.id,
-                        name: call.function.name,
-                        arguments: call.function.arguments,
-                    },
+                    (
+                        pig_provider::ToolCall {
+                            id: call.id,
+                            name: call.function.name,
+                            arguments: call.function.arguments,
+                        },
+                        execution_id.clone(),
+                    ),
                 );
+                tool_execution_ids.push(execution_id);
             }
         }
         let result = if message.role == "tool" {
             let call_id = message.tool_call_id.clone().unwrap_or_default();
-            let call = calls.get(&call_id).cloned().ok_or_else(|| {
+            let (call, execution_id) = calls.get(&call_id).cloned().ok_or_else(|| {
                 format!("Cannot fork a tool result without its assistant call: {call_id}")
             })?;
             append_agent_tool_result(
                 &prep.jsonl,
                 &call,
+                &execution_id,
                 message,
                 prep.policy.model.context_window,
                 crate::agent::AgentMsgMeta::default(),
             )
         } else {
-            append_agent_message(&prep.jsonl, message, prep.policy.model.context_window)
+            append_agent_message_meta(
+                &prep.jsonl,
+                message,
+                prep.policy.model.context_window,
+                crate::agent::AgentMsgMeta {
+                    tool_execution_ids,
+                    ..Default::default()
+                },
+            )
         };
         result?;
     }
@@ -652,6 +674,8 @@ pub(crate) fn prepare_resume_child(
     let agents_dir = agents_directory(ctx).map_err(ChildPrepError::CallLevel)?;
     let writer = claim_resume_writer(ctx.state, agent_id).map_err(ChildPrepError::ItemLevel)?;
     let sessions_dir = ctx.data_dir.join("sessions");
+    crate::agent::recover_agent_by_id(&sessions_dir, ctx.session_id, agent_id)
+        .map_err(ChildPrepError::ItemLevel)?;
     let (meta, mut history) = read_agent_by_id(&sessions_dir, ctx.session_id, agent_id)
         .map_err(ChildPrepError::ItemLevel)?;
     let parent_depth = ctx.parent_delegation_depth.saturating_add(1);

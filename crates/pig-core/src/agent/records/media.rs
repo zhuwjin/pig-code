@@ -19,7 +19,21 @@ pub fn append_agent_message(
     msg: &mut ChatMsg,
     context_window: u64,
 ) -> Result<(), String> {
-    append_agent_message_meta(path, msg, context_window, super::AgentMsgMeta::default())
+    let tool_execution_ids = msg.tool_calls.as_ref().map_or_else(Vec::new, |calls| {
+        calls
+            .iter()
+            .map(|call| format!("execution-{}", call.id))
+            .collect()
+    });
+    append_agent_message_meta(
+        path,
+        msg,
+        context_window,
+        super::AgentMsgMeta {
+            tool_execution_ids,
+            ..Default::default()
+        },
+    )
 }
 
 /// Persist a message's media bytes and return the references stored in the
@@ -75,7 +89,8 @@ fn persist_message_media(
     (images, documents)
 }
 
-/// Append a message with display-only metadata (reasoning duration, tool edit).
+/// Append one message with its display metadata and, for an assistant, the
+/// execution ids parallel to its tool calls.
 pub fn append_agent_message_meta(
     path: &Path,
     msg: &mut ChatMsg,
@@ -104,6 +119,7 @@ pub fn append_agent_message_meta(
             reasoning: msg.reasoning.clone(),
             replay: msg.replay.clone(),
             tool_calls: msg.tool_calls.clone().unwrap_or_default(),
+            tool_execution_ids: meta.tool_execution_ids,
             ts_ms,
             reasoning_ms: meta.reasoning_ms,
         },
@@ -122,12 +138,14 @@ pub fn append_agent_message_meta(
 pub fn append_agent_tool_result(
     path: &Path,
     call: &pig_provider::ToolCall,
+    execution_id: &str,
     msg: &mut ChatMsg,
     context_window: u64,
     meta: super::AgentMsgMeta,
 ) -> Result<(), String> {
     let (images, documents) = persist_message_media(path, msg, context_window);
     let record = RolloutRecord::ToolCall {
+        execution_id: execution_id.to_string(),
         tool: call.name.clone(),
         summary: crate::tool::summarize(call),
         arguments: call.arguments.clone(),
@@ -140,6 +158,7 @@ pub fn append_agent_tool_result(
         images,
         documents,
         delivered_notification_ids: Vec::new(),
+        recovery: None,
     };
     append_agent_conversation_record(path, &record)
 }

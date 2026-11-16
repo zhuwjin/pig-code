@@ -147,9 +147,27 @@ fn task_wait_receipt_repairs_missing_sqlite_confirmation() {
     let session = fixture.create(None);
     schedule(&fixture, &note);
     drop(session);
+    let call = pig_provider::ToolCall {
+        id: "call-wait".into(),
+        name: "TaskWait".into(),
+        arguments: "{\"task_ids\":[\"b1\"]}".into(),
+    };
+    append_record(
+        &fixture,
+        RolloutRecord::Assistant {
+            text: String::new(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![call.to_wire()],
+            tool_execution_ids: vec!["execution-test".into()],
+            ts_ms: 0,
+            reasoning_ms: None,
+        },
+    );
     append_record(
         &fixture,
         RolloutRecord::ToolCall {
+            execution_id: "execution-test".into(),
             tool: "TaskWait".into(),
             summary: "wait".into(),
             arguments: "{\"task_ids\":[\"b1\"]}".into(),
@@ -162,6 +180,7 @@ fn task_wait_receipt_repairs_missing_sqlite_confirmation() {
             images: vec![],
             documents: vec![],
             delivered_notification_ids: vec![note.id.clone()],
+            recovery: None,
         },
     );
 

@@ -79,9 +79,11 @@ pub(crate) fn seed_old_segment(
             "type": "function",
             "function": {"name": "Read", "arguments": "{\"path\":\"old.txt\"}"},
         }],
+        "tool_execution_ids": ["execution-seed"],
     });
     let tool = serde_json::json!({
         "type": "tool_call",
+        "execution_id": "execution-seed",
         "tool": "Read",
         "summary": "old.txt",
         "arguments": "{\"path\":\"old.txt\"}",

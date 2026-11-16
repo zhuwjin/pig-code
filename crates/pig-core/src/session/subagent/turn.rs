@@ -15,7 +15,7 @@ use pig_provider::ProviderEvent;
 use super::compact::{MAX_CHILD_OVERFLOW_RECOVERIES, child_overflow_failure};
 use super::persist::{
     child_persist_stop, persist_child_message, persist_child_message_meta,
-    persist_child_tool_result,
+    persist_child_tool_result, persist_child_tool_starts,
 };
 use super::state::{ProgressSink, SubagentMode};
 use crate::session::engine::{
@@ -514,6 +514,12 @@ impl Session {
             Some(attempt.reasoning).filter(|reasoning| !reasoning.is_empty()),
             attempt.replay,
         );
+        let run_id = self.agent.run_id().expect("child run identity");
+        rt.step_item_ids = tool_calls
+            .iter()
+            .enumerate()
+            .map(|(call_index, call)| child_tool_execution_id(&run_id, _step, call_index, &call.id))
+            .collect();
         rt.last_text = assistant.content.clone().unwrap_or_default();
         if let Err(error) = persist_child_message_meta(
             self,
@@ -521,6 +527,7 @@ impl Session {
             crate::agent::AgentMsgMeta {
                 reasoning_ms,
                 edit: None,
+                tool_execution_ids: rt.step_item_ids.clone(),
             },
         ) {
             tracing::warn!(agent_id = %self.agent.id, "{error}");
@@ -607,7 +614,7 @@ impl Session {
             |offset| {
                 let call_ix = start + offset;
                 let call = calls[call_ix].clone();
-                let item_id = format!("{}-c{step}-{call_ix}-{}", context.ownership, call.id);
+                let item_id = rt.step_item_ids[call_ix].clone();
                 let context = context.clone();
                 let tx = tx.clone();
                 let cancel = cancel.clone();
@@ -661,10 +668,12 @@ impl Session {
             if let Err(error) = persist_child_tool_result(
                 self,
                 call,
+                &rt.step_item_ids[start + offset],
                 &mut message,
                 crate::agent::AgentMsgMeta {
                     reasoning_ms: None,
                     edit,
+                    ..Default::default()
                 },
             ) {
                 tracing::warn!(agent_id = %self.agent.id, "{error}");
@@ -673,11 +682,12 @@ impl Session {
             self.agent.history.push(message);
         }
         if cancelled {
-            for call in &calls[end..] {
+            for (call_index, call) in calls.iter().enumerate().skip(end) {
                 let mut message = Session::stopped_tool_result(&call.id);
                 if let Err(error) = persist_child_tool_result(
                     self,
                     call,
+                    &rt.step_item_ids[call_index],
                     &mut message,
                     crate::agent::AgentMsgMeta::default(),
                 ) {
@@ -726,6 +736,12 @@ impl Session {
                 while end < calls.len() && mask[end] {
                     end += 1;
                 }
+                if let Err(error) =
+                    persist_child_tool_starts(self, &calls, &rt.step_item_ids, call_ix, end)
+                {
+                    tracing::warn!(agent_id = %self.agent.id, "{error}");
+                    return crate::session::engine::StepOutcome::Failed;
+                }
                 match self
                     .execute_child_parallel_group(rt, &calls, call_ix, end, step, tx, cancel)
                     .await
@@ -738,6 +754,12 @@ impl Session {
                 }
             }
             let child_call = &calls[call_ix];
+            if let Err(error) =
+                persist_child_tool_starts(self, &calls, &rt.step_item_ids, call_ix, call_ix + 1)
+            {
+                tracing::warn!(agent_id = %self.agent.id, "{error}");
+                return crate::session::engine::StepOutcome::Failed;
+            }
             let summary = tool::summarize(child_call);
             self.report_child_progress(tx, format!("Step {step} · {summary}"));
             self.emit_child_item(
@@ -756,7 +778,7 @@ impl Session {
                     approval_pending: false,
                 },
             );
-            let child_item_id = format!("{}-c{step}-{call_ix}-{}", rt.ownership, child_call.id);
+            let child_item_id = rt.step_item_ids[call_ix].clone();
             let Some(child_tool) = self
                 .agent
                 .tools
@@ -772,6 +794,7 @@ impl Session {
                 if let Err(error) = persist_child_tool_result(
                     self,
                     child_call,
+                    &rt.step_item_ids[call_ix],
                     &mut message,
                     crate::agent::AgentMsgMeta::default(),
                 ) {
@@ -818,11 +841,12 @@ impl Session {
             .await;
             match outcome {
                 GatedToolOutcome::Cancelled => {
-                    for stopped_call in &calls[call_ix..] {
+                    for (stopped_index, stopped_call) in calls.iter().enumerate().skip(call_ix) {
                         let mut message = Session::stopped_tool_result(&stopped_call.id);
                         if let Err(error) = persist_child_tool_result(
                             self,
                             stopped_call,
+                            &rt.step_item_ids[stopped_index],
                             &mut message,
                             crate::agent::AgentMsgMeta::default(),
                         ) {
@@ -840,6 +864,7 @@ impl Session {
                     if let Err(error) = persist_child_tool_result(
                         self,
                         child_call,
+                        &rt.step_item_ids[call_ix],
                         &mut message,
                         crate::agent::AgentMsgMeta::default(),
                     ) {
@@ -870,10 +895,12 @@ impl Session {
                     if let Err(error) = persist_child_tool_result(
                         self,
                         child_call,
+                        &rt.step_item_ids[call_ix],
                         &mut message,
                         crate::agent::AgentMsgMeta {
                             reasoning_ms: None,
                             edit,
+                            ..Default::default()
                         },
                     ) {
                         tracing::warn!(agent_id = %self.agent.id, "{error}");
@@ -1003,6 +1030,10 @@ impl Session {
         let mut rt = StepRuntime::child();
         self.emit_child_conversation(&mut rt, tx, reasoning_ms);
     }
+}
+
+fn child_tool_execution_id(run_id: &str, step: usize, call_index: usize, call_id: &str) -> String {
+    format!("{run_id}-c{step}-{call_index}-{call_id}")
 }
 
 /// Subagent result file path: {agents_dir}/{agent_id}.result.md (same

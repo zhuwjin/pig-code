@@ -107,6 +107,7 @@ fn display_items_keep_recorded_timing_and_tool_edit() {
         AgentMsgMeta {
             reasoning_ms: Some(1234),
             edit: None,
+            tool_execution_ids: vec!["execution-edit".into()],
         },
     )
     .expect("append assistant");
@@ -120,11 +121,13 @@ fn display_items_keep_recorded_timing_and_tool_edit() {
     append_agent_tool_result(
         &path,
         &call,
+        "execution-edit",
         &mut tool,
         TEST_CONTEXT_WINDOW,
         AgentMsgMeta {
             reasoning_ms: None,
             edit: Some(edit.clone()),
+            ..Default::default()
         },
     )
     .expect("append tool");
@@ -415,6 +418,47 @@ fn a_torn_final_child_line_is_ignored_on_replay() {
     assert!(
         error.contains("line 5") || error.contains("line 6"),
         "the error names the malformed line: {error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn child_recovery_persists_unknown_result_exactly_once() {
+    let dir = std::env::temp_dir().join(format!("pig-agent-tool-recovery-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let path = dir.join("a1.jsonl");
+    write_meta(&path);
+    let call = pig_provider::ToolCall {
+        id: "call-interrupted".into(),
+        name: "Write".into(),
+        arguments: "{}".into(),
+    };
+    let mut assistant = ChatMsg::assistant(String::new(), vec![call.clone()], None);
+    append_test_message(&path, &mut assistant).expect("assistant");
+    append_agent_conversation_record(
+        &path,
+        &crate::rollout::RolloutRecord::ToolExecutionStart {
+            execution_id: "execution-call-interrupted".into(),
+            call_id: call.id,
+            call_index: 0,
+            tool: call.name,
+            started_at_ms: 1,
+        },
+    )
+    .expect("start");
+
+    recover_agent_context(&path).expect("recover child");
+    recover_agent_context(&path).expect("idempotent recovery");
+    let raw = std::fs::read_to_string(&path).expect("raw child context");
+    assert_eq!(raw.matches("\"recovery\":\"outcome_unknown\"").count(), 1);
+    let (_, history) = read_agent(&path).expect("recovered history");
+    assert_eq!(history.len(), 2);
+    assert!(
+        history[1]
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("outcome is unknown"))
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

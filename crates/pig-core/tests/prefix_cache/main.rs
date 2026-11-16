@@ -715,6 +715,14 @@ async fn assert_parallel_restart(format: Format) {
         .expect("parallel-call request before restart")
         .clone();
     assert_parallel_shape(before[format.history_key()].as_array().unwrap(), format);
+    let raw = std::fs::read_to_string(
+        fixture
+            .data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .expect("parallel rollout");
+    assert_eq!(raw.matches("\"type\":\"tool_execution_start\"").count(), 2);
     shutdown(agent).await;
 
     let agent = fixture.spawn();

@@ -4,9 +4,27 @@ use crate::rollout::RolloutRecord;
 
 /// Append one canonical conversation record to a subagent context JSONL.
 pub fn append_agent_conversation_record(path: &Path, record: &RolloutRecord) -> Result<(), String> {
+    let tool_result = matches!(record, RolloutRecord::ToolCall { .. });
     let mut store = super::AgentConversationStore::new(path);
     crate::rollout::ConversationStore::append(&mut store, record)
-        .map_err(|error| pig_provider::core_error_en(&error))
+        .map_err(|error| pig_provider::core_error_en(&error))?;
+    if tool_result {
+        sync_agent_context(path)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn sync_agent_context(path: &Path) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "Failed to sync subagent context {}: {error}",
+                path.display()
+            )
+        })
 }
 
 /// Append one raw JSONL line to the subagent context; creates

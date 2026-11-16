@@ -269,6 +269,7 @@ impl Session {
             .history
             .push(Self::stopped_tool_result(&cancelled.call.id));
         self.record(&RolloutRecord::ToolCall {
+            execution_id: cancelled.item_id.to_string(),
             tool: cancelled.call.name.clone(),
             summary: cancelled.summary,
             arguments: cancelled.call.arguments.clone(),
@@ -281,6 +282,7 @@ impl Session {
             images: vec![],
             documents: vec![],
             delivered_notification_ids: vec![],
+            recovery: None,
         });
         let item_id = cancelled.item_id.to_string();
         self.emit(
@@ -301,6 +303,11 @@ impl Session {
                 .unwrap_or_else(|_| call.arguments.clone());
             self.agent.history.push(Self::stopped_tool_result(&call.id));
             self.record(&RolloutRecord::ToolCall {
+                execution_id: cancelled
+                    .rest_item_ids
+                    .get(rest_ix)
+                    .expect("every cancelled call owns an execution id")
+                    .clone(),
                 tool: call.name.clone(),
                 summary: summary.clone(),
                 arguments: call.arguments.clone(),
@@ -313,6 +320,7 @@ impl Session {
                 images: vec![],
                 documents: vec![],
                 delivered_notification_ids: vec![],
+                recovery: None,
             });
             let item_id = cancelled
                 .rest_item_ids

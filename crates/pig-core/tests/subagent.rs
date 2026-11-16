@@ -173,10 +173,12 @@ fn seed_pdf_agent(data_dir: &Path, sid: &str, agent_id: &str, pdf: &[u8]) -> Pat
             reasoning: None,
             replay: None,
             tool_calls: vec![call.to_wire()],
+            tool_execution_ids: vec!["execution-test".into()],
             ts_ms: 1,
             reasoning_ms: None,
         },
         pig_core::rollout::RolloutRecord::ToolCall {
+            execution_id: "execution-test".into(),
             tool: call.name.clone(),
             summary: "Read PDF doc.pdf".into(),
             arguments: call.arguments.clone(),
@@ -195,6 +197,7 @@ fn seed_pdf_agent(data_dir: &Path, sid: &str, agent_id: &str, pdf: &[u8]) -> Pat
                 label: Some("doc.pdf".into()),
             }],
             delivered_notification_ids: Vec::new(),
+            recovery: None,
         },
     ];
     let lines: Vec<String> = records
@@ -250,10 +253,12 @@ fn seed_image_agent(data_dir: &Path, sid: &str, agent_id: &str) -> PathBuf {
             reasoning: None,
             replay: None,
             tool_calls: vec![call.to_wire()],
+            tool_execution_ids: vec!["execution-test".into()],
             ts_ms: 1,
             reasoning_ms: None,
         },
         pig_core::rollout::RolloutRecord::ToolCall {
+            execution_id: "execution-test".into(),
             tool: call.name.clone(),
             summary: "Read image pic.png".into(),
             arguments: call.arguments.clone(),
@@ -272,6 +277,7 @@ fn seed_image_agent(data_dir: &Path, sid: &str, agent_id: &str) -> PathBuf {
             }],
             documents: Vec::new(),
             delivered_notification_ids: Vec::new(),
+            recovery: None,
         },
     ];
     let lines: Vec<String> = records

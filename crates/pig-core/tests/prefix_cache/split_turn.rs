@@ -72,11 +72,13 @@ fn seed_split_turn(fixture: &Fixture, session_id: &str, format: Format) {
             "reasoning": null,
             "replay": replay(id),
             "tool_calls": [call(id)],
+            "tool_execution_ids": [format!("execution-{id}")],
         })
     };
-    let tool = |output: String| {
+    let tool = |id: &str, output: String| {
         serde_json::json!({
             "type": "tool_call",
+            "execution_id": format!("execution-{id}"),
             "tool": "Read",
             "summary": "README.mock.md",
             "arguments": "{\"path\":\"README.mock.md\"}",
@@ -107,11 +109,19 @@ fn seed_split_turn(fixture: &Fixture, session_id: &str, format: Format) {
     writeln!(
         file,
         "{}",
-        tool(format!("SPLIT_OMITTED_TOOL_OUTPUT {}", "o".repeat(8_000)))
+        tool(
+            "split_call_1",
+            format!("SPLIT_OMITTED_TOOL_OUTPUT {}", "o".repeat(8_000)),
+        )
     )
     .unwrap();
     writeln!(file, "{}", assistant("split_call_2")).unwrap();
-    writeln!(file, "{}", tool("SPLIT_KEPT_TOOL_OUTPUT".into())).unwrap();
+    writeln!(
+        file,
+        "{}",
+        tool("split_call_2", "SPLIT_KEPT_TOOL_OUTPUT".into())
+    )
+    .unwrap();
     writeln!(
         file,
         "{}",
@@ -120,6 +130,7 @@ fn seed_split_turn(fixture: &Fixture, session_id: &str, format: Format) {
             "text": "SPLIT_FINAL_ANSWER",
             "reasoning": null,
             "tool_calls": [],
+            "tool_execution_ids": [],
         })
     )
     .unwrap();

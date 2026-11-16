@@ -670,13 +670,14 @@ impl Session {
         }
     }
 
-    /// Mint a unique internal tool item id. The provider's call id is kept for
-    /// diagnostics, but the monotonic sequence (and the turn id) make the id
-    /// unique even when the provider repeats a call id in one response.
+    /// Mint a unique internal tool execution id. The provider's call id is kept
+    /// for diagnostics, but the run id and monotonic sequence make the id unique
+    /// even when the provider repeats a call id or the process restarts.
     /// Approval/request ids derive from this value, so duplicates cannot alias.
     pub(super) fn next_tool_item_id(&mut self, turn_id: &str, call_id: &str) -> String {
         self.tool_item_seq += 1;
-        format!("{turn_id}-tool-{}-{call_id}", self.tool_item_seq)
+        let run_id = self.agent.run_id().unwrap_or_else(|| turn_id.to_string());
+        format!("{run_id}-tool-{}-{call_id}", self.tool_item_seq)
     }
 
     /// Claim one item id per call in execution order. Streaming input cards
@@ -823,6 +824,19 @@ impl Session {
                     group_end += 1;
                 }
                 next_ix = group_end;
+                if let Err(error) =
+                    self.persist_root_tool_starts(tool_calls, item_ids, call_ix, group_end)
+                {
+                    self.emit(
+                        |session_id| Event::Error {
+                            session_id: Some(session_id),
+                            error,
+                            fatal: false,
+                        },
+                        tx,
+                    );
+                    return engine::StepOutcome::Failed;
+                }
                 // Cancellation wrap-up (receipts + TurnAborted) happens inside
                 // the group; false means the turn ends
                 if !self
@@ -845,6 +859,19 @@ impl Session {
                 continue;
             }
             let item_id = item_ids[call_ix].clone();
+            if let Err(error) =
+                self.persist_root_tool_starts(tool_calls, item_ids, call_ix, call_ix + 1)
+            {
+                self.emit(
+                    |session_id| Event::Error {
+                        session_id: Some(session_id),
+                        error,
+                        fatal: false,
+                    },
+                    tx,
+                );
+                return engine::StepOutcome::Failed;
+            }
             let summary = tool::summarize(call);
             // ExitPlanMode's begin is emitted inside the interception block
             // (detail rewritten with the effective plan — when the argument is
@@ -1015,6 +1042,7 @@ impl Session {
                     .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error));
                 self.record(&RolloutRecord::ToolCall {
+                    execution_id: item_id.clone(),
                     tool: call.name.clone(),
                     summary,
                     // Persist the effective plan (file content when the
@@ -1030,6 +1058,7 @@ impl Session {
                     images: vec![],
                     documents: vec![],
                     delivered_notification_ids: vec![],
+                    recovery: None,
                 });
                 self.emit(
                     |session_id| Event::ToolCallEnd {
@@ -1085,6 +1114,7 @@ impl Session {
                     .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error));
                 self.record(&RolloutRecord::ToolCall {
+                    execution_id: item_id.clone(),
                     tool: call.name.clone(),
                     summary,
                     arguments: call.arguments.clone(),
@@ -1097,6 +1127,7 @@ impl Session {
                     images: vec![],
                     documents: vec![],
                     delivered_notification_ids: vec![],
+                    recovery: None,
                 });
                 self.emit(
                     |session_id| Event::ToolCallEnd {
@@ -1135,6 +1166,7 @@ impl Session {
                             ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error),
                         );
                         self.record(&RolloutRecord::ToolCall {
+                            execution_id: item_id.clone(),
                             tool: call.name.clone(),
                             summary,
                             arguments: call.arguments.clone(),
@@ -1149,6 +1181,7 @@ impl Session {
                             images: vec![],
                             documents: vec![],
                             delivered_notification_ids: vec![],
+                            recovery: None,
                         });
                         self.emit(
                             |session_id| Event::ToolCallEnd {
@@ -1202,6 +1235,7 @@ impl Session {
                             ChatMsg::tool_result(&call.id, note.clone()).with_error(is_error),
                         );
                         self.record(&RolloutRecord::ToolCall {
+                            execution_id: item_id.clone(),
                             tool: call.name.clone(),
                             summary,
                             arguments: call.arguments.clone(),
@@ -1214,6 +1248,7 @@ impl Session {
                             images: vec![],
                             documents: vec![],
                             delivered_notification_ids: vec![],
+                            recovery: None,
                         });
                         self.emit(
                             |session_id| Event::ToolCallEnd {
@@ -1260,6 +1295,7 @@ impl Session {
                     .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                 self.record(&RolloutRecord::ToolCall {
+                    execution_id: item_id.clone(),
                     tool: call.name.clone(),
                     summary,
                     arguments: call.arguments.clone(),
@@ -1272,6 +1308,7 @@ impl Session {
                     images: vec![],
                     documents: vec![],
                     delivered_notification_ids: vec![],
+                    recovery: None,
                 });
                 self.emit(
                     |session_id| Event::ToolCallEnd {
@@ -1304,6 +1341,7 @@ impl Session {
                     .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                 self.record(&RolloutRecord::ToolCall {
+                    execution_id: item_id.clone(),
                     tool: call.name.clone(),
                     summary,
                     arguments: call.arguments.clone(),
@@ -1316,6 +1354,7 @@ impl Session {
                     images: vec![],
                     documents: vec![],
                     delivered_notification_ids: vec![],
+                    recovery: None,
                 });
                 self.emit(
                     |session_id| Event::ToolCallEnd {
@@ -1346,6 +1385,7 @@ impl Session {
                             .history
                             .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                         self.record(&RolloutRecord::ToolCall {
+                            execution_id: item_id.clone(),
                             tool: call.name.clone(),
                             summary,
                             arguments: call.arguments.clone(),
@@ -1358,6 +1398,7 @@ impl Session {
                             images: vec![],
                             documents: vec![],
                             delivered_notification_ids: vec![],
+                            recovery: None,
                         });
                         self.emit(
                             |session_id| Event::ToolCallEnd {
@@ -1437,6 +1478,7 @@ impl Session {
                     .history
                     .push(ChatMsg::tool_result(&call.id, note.clone()));
                 self.record(&RolloutRecord::ToolCall {
+                    execution_id: item_id.clone(),
                     tool: call.name.clone(),
                     summary,
                     arguments: call.arguments.clone(),
@@ -1449,6 +1491,7 @@ impl Session {
                     images: vec![],
                     documents: vec![],
                     delivered_notification_ids: vec![],
+                    recovery: None,
                 });
                 self.emit(
                     |session_id| Event::ToolCallEnd {
@@ -1489,6 +1532,7 @@ impl Session {
                         .history
                         .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
                     self.record(&RolloutRecord::ToolCall {
+                        execution_id: item_id.clone(),
                         tool: call.name.clone(),
                         summary,
                         arguments: call.arguments.clone(),
@@ -1501,6 +1545,7 @@ impl Session {
                         images: vec![],
                         documents: vec![],
                         delivered_notification_ids: vec![],
+                        recovery: None,
                     });
                     self.emit(
                         |session_id| Event::ToolCallEnd {
@@ -1563,6 +1608,7 @@ impl Session {
                             )
                         }));
                     self.record(&RolloutRecord::ToolCall {
+                        execution_id: item_id.clone(),
                         tool: call.name.clone(),
                         summary,
                         arguments: call.arguments.clone(),
@@ -1575,6 +1621,7 @@ impl Session {
                         images: image_refs,
                         documents: document_refs,
                         delivered_notification_ids,
+                        recovery: None,
                     });
                     self.emit(
                         |session_id| Event::ToolCallEnd {
@@ -1767,6 +1814,7 @@ impl Session {
                     message.documents = documents;
                     self.agent.history.push(message);
                     self.record(&RolloutRecord::ToolCall {
+                        execution_id: card.item_id.clone(),
                         tool: card.call.name.clone(),
                         summary: card.summary.clone(),
                         arguments: card.call.arguments.clone(),
@@ -1779,6 +1827,7 @@ impl Session {
                         images: image_refs,
                         documents: document_refs,
                         delivered_notification_ids: vec![],
+                        recovery: None,
                     });
                     // Defense in depth: classification guarantees read-only
                     // means no changes; a future mutating tool mislabeled
@@ -1837,6 +1886,7 @@ impl Session {
                         .history
                         .push(ChatMsg::tool_result(&card.call.id, note.clone()).with_error(true));
                     self.record(&RolloutRecord::ToolCall {
+                        execution_id: card.item_id.clone(),
                         tool: card.call.name.clone(),
                         summary: card.summary.clone(),
                         arguments: card.call.arguments.clone(),
@@ -1849,6 +1899,7 @@ impl Session {
                         images: vec![],
                         documents: vec![],
                         delivered_notification_ids: vec![],
+                        recovery: None,
                     });
                     self.emit(
                         |session_id| Event::ToolCallEnd {

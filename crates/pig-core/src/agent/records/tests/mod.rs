@@ -69,6 +69,7 @@ fn append_test_tool_result(
     append_agent_tool_result(
         path,
         call,
+        &format!("execution-{}", call.id),
         msg,
         TEST_CONTEXT_WINDOW,
         AgentMsgMeta::default(),

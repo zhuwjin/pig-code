@@ -21,18 +21,22 @@ pub use display::{display_items, project_display_items};
 pub use jsonl::append_agent_conversation_record;
 #[cfg(test)]
 pub(crate) use jsonl::append_agent_record;
+pub(crate) use jsonl::sync_agent_context;
 pub(crate) use media::fill_document_token_estimates;
 pub(crate) use media::project_history_media;
 pub use media::{append_agent_message, append_agent_message_meta, append_agent_tool_result};
 pub(crate) use store::read_agent_stored;
 pub(crate) use store::reconcile_tool_results;
+pub(crate) use store::recover_agent_context;
 pub use store::{AgentMeta, read_agent};
 
-/// Display-only fields of a canonical message record (timing and the edit a tool made).
+/// Canonical message metadata: display timing/edit fields and the assistant's
+/// tool execution ids.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentMsgMeta {
     pub(crate) reasoning_ms: Option<u64>,
     pub(crate) edit: Option<pig_protocol::EditDiff>,
+    pub(crate) tool_execution_ids: Vec<String>,
 }
 
 /// One canonical message before media rehydration. Compaction boundaries
@@ -259,6 +263,15 @@ fn check_agent_meta(meta: &AgentMeta, agent_id: &str, path: &Path) -> Result<(),
         ));
     }
     Ok(())
+}
+
+pub(crate) fn recover_agent_by_id(
+    sessions_dir: &Path,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    let canonical = resolve_agent_path(sessions_dir, session_id, agent_id)?;
+    recover_agent_context(&canonical)
 }
 
 pub(crate) fn read_agent_by_id(

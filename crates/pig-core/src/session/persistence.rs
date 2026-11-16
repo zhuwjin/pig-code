@@ -10,6 +10,7 @@ impl Session {
     }
 
     pub(super) fn record(&mut self, record: &RolloutRecord) {
+        let tool_result = matches!(record, RolloutRecord::ToolCall { .. });
         if self.rollout_failure.is_some() {
             // A previous durable append failed; appending more units would
             // leave the file diverging from memory with no way to repair it.
@@ -26,11 +27,29 @@ impl Session {
             );
             self.rollout_failure = Some(structured);
         }
+        if tool_result && self.rollout_failure.is_none() {
+            self.sync_rollout();
+        }
+    }
+
+    pub(super) fn persist_root_tool_starts(
+        &mut self,
+        calls: &[pig_provider::ToolCall],
+        execution_ids: &[String],
+        start: usize,
+        end: usize,
+    ) -> Result<(), CoreError> {
+        for record in crate::rollout::tool_execution_start_records(calls, execution_ids, start, end)
+        {
+            self.record(&record);
+        }
+        self.sync_rollout();
+        self.rollout_failure.clone().map_or(Ok(()), Err)
     }
 
     /// Request real durability (`sync_data`) for the records written so far.
-    /// Called at turn/compaction/recall boundaries, never per token or per
-    /// stream event.
+    /// Called at tool-result, turn, compaction and recall boundaries, never per
+    /// token or per stream event.
     pub(super) fn sync_rollout(&mut self) {
         if self.rollout_failure.is_some() {
             return;

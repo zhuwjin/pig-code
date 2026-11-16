@@ -44,6 +44,13 @@ pub fn fork_session(
 
     let turns = turns.max(1);
     let mut kept = truncate_after_turns(&records, turns).to_vec();
+    let recoveries = crate::rollout::tool_execution_recoveries(&kept).map_err(|detail| {
+        CoreError::RolloutRead {
+            path: src_path.display().to_string(),
+            detail,
+        }
+    })?;
+    kept.extend(recoveries);
 
     *id_counter += 1;
     let new_id = format!("s{}-{}", now_secs(), id_counter);
@@ -378,6 +385,7 @@ mod tests {
                 sent_input_image: None,
             },
             RolloutRecord::ToolCall {
+                execution_id: "execution-test".into(),
                 tool: "ReadMediaFile".into(),
                 summary: "image".into(),
                 arguments: "{}".into(),
@@ -390,6 +398,7 @@ mod tests {
                 images: vec![image("2.png")],
                 documents: vec![],
                 delivered_notification_ids: vec![],
+                recovery: None,
             },
         ];
         let mut records = records;
@@ -440,6 +449,7 @@ mod tests {
         std::fs::create_dir_all(&src_media).unwrap();
         std::fs::write(src_media.join("1.pdf"), b"%PDF-1.4\n%%EOF\n").unwrap();
         let mut records = vec![RolloutRecord::ToolCall {
+            execution_id: "execution-test".into(),
             tool: "ReadMediaFile".into(),
             summary: "doc.pdf".into(),
             arguments: "{}".into(),
@@ -458,6 +468,7 @@ mod tests {
                 label: Some("doc.pdf".into()),
             }],
             delivered_notification_ids: vec![],
+            recovery: None,
         }];
         copy_referenced_media(&src_media, &new_media, &mut records).unwrap();
         let RolloutRecord::ToolCall { documents, .. } = &records[0] else {

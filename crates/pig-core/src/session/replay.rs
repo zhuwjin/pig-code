@@ -12,6 +12,7 @@ impl Session {
                 RolloutRecord::Meta { .. }
                 | RolloutRecord::System { .. }
                 | RolloutRecord::PromptSnapshot { .. }
+                | RolloutRecord::ToolExecutionStart { .. }
                 | RolloutRecord::AgentRun { .. } => {}
                 RolloutRecord::Assistant {
                     text,

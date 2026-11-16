@@ -156,6 +156,7 @@ fn rebuild_records(
             RolloutRecord::Meta { .. }
             | RolloutRecord::System { .. }
             | RolloutRecord::PromptSnapshot { .. }
+            | RolloutRecord::ToolExecutionStart { .. }
             | RolloutRecord::TurnStats { .. }
             | RolloutRecord::StepUsage { .. }
             | RolloutRecord::TurnChanges { .. }

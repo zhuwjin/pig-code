@@ -106,11 +106,18 @@ fn seed_child(data_dir: &Path, session_id: &str) -> PathBuf {
                 text: msg.content.unwrap_or_default(),
                 reasoning: msg.reasoning,
                 replay: msg.replay,
+                tool_execution_ids: msg.tool_calls.as_ref().map_or_else(Vec::new, |calls| {
+                    calls
+                        .iter()
+                        .map(|call| format!("execution-{}", call.id))
+                        .collect()
+                }),
                 tool_calls: msg.tool_calls.unwrap_or_default(),
                 ts_ms: 0,
                 reasoning_ms: None,
             }),
             "tool" => records.push(RolloutRecord::ToolCall {
+                execution_id: format!("execution-{}", msg.tool_call_id.clone().unwrap_or_default()),
                 tool: "Read".into(),
                 summary: String::new(),
                 arguments: String::new(),
@@ -123,6 +130,7 @@ fn seed_child(data_dir: &Path, session_id: &str) -> PathBuf {
                 images: Vec::new(),
                 documents: Vec::new(),
                 delivered_notification_ids: Vec::new(),
+                recovery: None,
             }),
             _ => {}
         }

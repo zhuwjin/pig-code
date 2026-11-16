@@ -56,6 +56,8 @@ fn document_roundtrip_keeps_refs_out_of_jsonl() {
         name: "ReadMediaFile".into(),
         arguments: "{}".into(),
     };
+    let mut assistant = pig_provider::ChatMsg::assistant(String::new(), vec![call.clone()], None);
+    append_test_message(&path, &mut assistant).expect("append assistant");
     let mut result = pig_provider::ChatMsg::tool_result("call-doc", "Read PDF doc.pdf".into());
     result.documents = vec![pig_provider::ChatDocument {
         media_type: "application/pdf".into(),
@@ -67,11 +69,11 @@ fn document_roundtrip_keeps_refs_out_of_jsonl() {
     append_test_tool_result(&path, &call, &mut result).expect("append tool result");
 
     let (_, history) = read_agent(&path).expect("read agent");
-    assert_eq!(history[0].documents.len(), 1);
-    assert_eq!(history[0].documents[0].data_base64, payload);
-    assert_eq!(history[0].documents[0].filename, "doc.pdf");
+    assert_eq!(history[1].documents.len(), 1);
+    assert_eq!(history[1].documents[0].data_base64, payload);
+    assert_eq!(history[1].documents[0].filename, "doc.pdf");
     assert_eq!(
-        history[0].documents[0].token_estimate,
+        history[1].documents[0].token_estimate,
         Some(pig_provider::DocumentTokenEstimate::window_fallback(
             pig_utils::pdf::unknown_document_token_reserve(TEST_CONTEXT_WINDOW),
             TEST_CONTEXT_WINDOW
@@ -150,6 +152,8 @@ fn document_persistence_failure_degrades_live_and_jsonl() {
         name: "ReadMediaFile".into(),
         arguments: "{}".into(),
     };
+    let mut assistant = ChatMsg::assistant(String::new(), vec![call.clone()], None);
+    append_test_message(&path, &mut assistant).expect("append assistant");
     let mut result = ChatMsg::tool_result("call-doc", "Read PDF doc.pdf".into());
     result.documents = vec![pdf_document("doc.pdf")];
     append_test_tool_result(&path, &call, &mut result).expect("tool result degrades to text");
@@ -163,8 +167,8 @@ fn document_persistence_failure_degrades_live_and_jsonl() {
         result.content
     );
     let (_, history) = read_agent(&path).expect("read degraded context");
-    assert_eq!(history[0].content, result.content);
-    assert!(history[0].documents.is_empty());
+    assert_eq!(history[1].content, result.content);
+    assert!(history[1].documents.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -180,6 +184,8 @@ fn missing_or_corrupt_documents_append_the_replay_note() {
         name: "ReadMediaFile".into(),
         arguments: "{}".into(),
     };
+    let mut assistant = ChatMsg::assistant(String::new(), vec![call.clone()], None);
+    append_test_message(&path, &mut assistant).expect("append assistant");
     let mut result = ChatMsg::tool_result("call-doc", "Read PDF doc.pdf".into());
     result.documents = vec![pdf_document("doc.pdf")];
     append_test_tool_result(&path, &call, &mut result).expect("append document");
@@ -188,26 +194,26 @@ fn missing_or_corrupt_documents_append_the_replay_note() {
 
     std::fs::remove_file(&media).expect("remove media");
     let (_, missing) = read_agent(&path).expect("read missing document");
-    assert!(missing[0].documents.is_empty());
+    assert!(missing[1].documents.is_empty());
     assert!(
-        missing[0]
+        missing[1]
             .content
             .as_deref()
             .is_some_and(|text| text.contains("[1 PDF document(s) no longer available]")),
         "{:?}",
-        missing[0].content
+        missing[1].content
     );
 
     std::fs::write(&media, b"%PDF-1.4\ntruncated without eof").expect("corrupt media");
     let (_, corrupt) = read_agent(&path).expect("read corrupt document");
-    assert!(corrupt[0].documents.is_empty());
+    assert!(corrupt[1].documents.is_empty());
     assert!(
-        corrupt[0]
+        corrupt[1]
             .content
             .as_deref()
             .is_some_and(|text| text.contains("[1 PDF document(s) no longer available]")),
         "{:?}",
-        corrupt[0].content
+        corrupt[1].content
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -28,6 +28,10 @@ fn assistant(text: &str, tool_calls: Vec<ToolCall>) -> RolloutRecord {
         reasoning: Some("plain reasoning".into()),
         replay: None,
         tool_calls: tool_calls.iter().map(ToolCall::to_wire).collect(),
+        tool_execution_ids: tool_calls
+            .iter()
+            .map(|call| format!("execution-{}", call.id))
+            .collect(),
         ts_ms: 0,
         reasoning_ms: None,
     }
@@ -35,6 +39,7 @@ fn assistant(text: &str, tool_calls: Vec<ToolCall>) -> RolloutRecord {
 
 fn result(tool: &str, arguments: &str, output: &str) -> RolloutRecord {
     RolloutRecord::ToolCall {
+        execution_id: "execution-test".into(),
         tool: tool.into(),
         summary: tool.into(),
         arguments: arguments.into(),
@@ -47,6 +52,7 @@ fn result(tool: &str, arguments: &str, output: &str) -> RolloutRecord {
         images: vec![],
         documents: vec![],
         delivered_notification_ids: vec![],
+        recovery: None,
     }
 }
 
@@ -270,6 +276,7 @@ fn empty_canonical_assistant_is_not_dropped() {
         reasoning: None,
         replay: None,
         tool_calls: vec![],
+        tool_execution_ids: vec![],
         ts_ms: 0,
         reasoning_ms: None,
     }];
@@ -355,6 +362,10 @@ fn canonical_crash_tail_drops_unanswered_calls_and_native_replay_items() {
             reasoning: None,
             replay: Some(replay),
             tool_calls: calls.iter().map(ToolCall::to_wire).collect(),
+            tool_execution_ids: calls
+                .iter()
+                .map(|call| format!("execution-{}", call.id))
+                .collect(),
             ts_ms: 0,
             reasoning_ms: None,
         },
@@ -384,6 +395,7 @@ fn canonical_tool_error_marker_survives_rebuild() {
     let records = vec![
         assistant("", vec![call]),
         RolloutRecord::ToolCall {
+            execution_id: "execution-call-err".into(),
             tool: "Read".into(),
             summary: "Read".into(),
             arguments: "{}".into(),
@@ -396,6 +408,7 @@ fn canonical_tool_error_marker_survives_rebuild() {
             images: vec![],
             documents: vec![],
             delivered_notification_ids: vec![],
+            recovery: None,
         },
     ];
     let (history, _) = rebuild_history(&records, "sys".into());

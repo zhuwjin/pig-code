@@ -52,8 +52,7 @@ pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>)
     Ok((meta, history))
 }
 
-/// Read a subagent context with its display metadata, before media rehydration.
-pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAgentMsg>), String> {
+pub(crate) fn recover_agent_context(path: &Path) -> Result<(), String> {
     let store = AgentConversationStore::new(path);
     let records = store.load().map_err(|error| {
         format!(
@@ -62,6 +61,24 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
             pig_provider::core_error_en(&error)
         )
     })?;
+    for record in crate::rollout::tool_execution_recoveries(&records)? {
+        super::append_agent_conversation_record(path, &record)?;
+    }
+    Ok(())
+}
+
+/// Read a subagent context with its display metadata, before media rehydration.
+pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAgentMsg>), String> {
+    let store = AgentConversationStore::new(path);
+    let mut records = store.load().map_err(|error| {
+        format!(
+            "Failed to read subagent context {}: {}",
+            path.display(),
+            pig_provider::core_error_en(&error)
+        )
+    })?;
+    let recoveries = crate::rollout::tool_execution_recoveries(&records)?;
+    records.extend(recoveries);
     let mut records = records.into_iter();
     let Some(first) = records.next() else {
         return Err(format!(
@@ -111,7 +128,7 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     for (index, value) in records.enumerate() {
         let line_no = index + 2;
         match value {
-            RolloutRecord::Meta { .. } => {}
+            RolloutRecord::Meta { .. } | RolloutRecord::ToolExecutionStart { .. } => {}
             RolloutRecord::System { text } => stored.push(message(
                 ChatMsg::system(text),
                 Vec::new(),
@@ -158,6 +175,7 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
                 reasoning,
                 replay,
                 tool_calls,
+                tool_execution_ids: _,
                 ts_ms,
                 reasoning_ms,
             } => {

@@ -263,6 +263,25 @@ impl Session {
             return Err(CoreError::RolloutNoMeta { id: id.to_string() });
         };
         let cwd = cwd.clone();
+        let rollout_path = sessions_dir.join(format!("{id}.jsonl"));
+        let mut rollout = Rollout::open_append(sessions_dir, id)?;
+        let recoveries = crate::rollout::tool_execution_recoveries(&records).map_err(|detail| {
+            CoreError::RolloutRead {
+                path: rollout_path.display().to_string(),
+                detail,
+            }
+        })?;
+        if !recoveries.is_empty() {
+            for record in &recoveries {
+                rollout
+                    .append(record)
+                    .map_err(|error| error.into_core(&rollout_path))?;
+            }
+            rollout
+                .sync()
+                .map_err(|error| error.into_core(&rollout_path))?;
+            records.extend(recoveries);
+        }
         // Freeze the same inputs as create; the canonical PromptSnapshot below
         // replaces the last-sent values (older sessions fall back to these).
         let frozen = SessionFrozen::capture(id, &cwd, &data_dir, plugins, runtime.as_deref());
@@ -317,8 +336,7 @@ impl Session {
         tracker.restore(originals);
         // After resume, take over the same JSONL and keep appending; failure
         // must be loud (setting None would silently drop all subsequent
-        // records)
-        let mut rollout = Rollout::open_append(sessions_dir, id)?;
+        // records). The handle was opened above before tool recovery.
         // Crash recovery: a hard kill runs no wrap-up, so the tail turn's
         // usage never reached turn_usage/TurnStats (the live interrupt path
         // writes it at cancel time, so this only fires for uncounted tails).
@@ -409,7 +427,6 @@ impl Session {
             let mut store = store.lock().expect("store lock");
             store.reconcile_with_history(id, &receipt_list)?;
             store.recover_interrupted_tasks(id)?;
-            store.recover_tool_executions(id)?;
             store.recover_terminal_notifications(id)?;
             store.reconcile_delivered(&receipt_list)?;
             store.background_tasks(id)?

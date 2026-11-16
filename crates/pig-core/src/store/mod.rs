@@ -15,9 +15,7 @@ use rusqlite::{Connection, params};
 use crate::rollout::now_secs;
 
 mod execution;
-pub use execution::{
-    ExecutionClaim, ToolExecutionResult, ToolExecutionStart, UnknownToolExecution,
-};
+pub use execution::ExecutionClaim;
 mod tasks;
 pub use tasks::BackgroundTask;
 
@@ -120,17 +118,6 @@ impl Store {
                 request_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS tool_executions (
-                session_id TEXT NOT NULL,
-                execution_id TEXT NOT NULL,
-                tool TEXT NOT NULL,
-                arguments TEXT NOT NULL,
-                state TEXT NOT NULL,
-                payload TEXT,
-                created_at_ms INTEGER NOT NULL,
-                ended_at_ms INTEGER,
-                PRIMARY KEY (session_id, execution_id)
             );
             CREATE TABLE IF NOT EXISTS todos (
                 session_id TEXT PRIMARY KEY,
@@ -297,7 +284,6 @@ impl Store {
             "file_originals",
             "pending_queue",
             "execution_claims",
-            "tool_executions",
         ] {
             let _ = self.conn.execute(
                 &format!("DELETE FROM {table} WHERE session_id = ?1"),

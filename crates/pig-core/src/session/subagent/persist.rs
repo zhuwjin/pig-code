@@ -39,6 +39,7 @@ pub(super) fn persist_agent_tool(jsonl: &Path, call: &pig_provider::ToolCall, ms
     if let Err(error) = crate::agent::append_agent_tool_result(
         jsonl,
         call,
+        &format!("execution-{}", call.id),
         msg,
         TEST_CONTEXT_WINDOW,
         crate::agent::AgentMsgMeta::default(),
@@ -57,7 +58,7 @@ pub(super) fn persist_child_message(
     persist_child_message_meta(session, msg, crate::agent::AgentMsgMeta::default())
 }
 
-/// Persist a child message with its display metadata (reasoning duration, tool edit).
+/// Persist a child message with display metadata and assistant execution ids.
 pub(super) fn persist_child_message_meta(
     session: &mut Session,
     msg: &mut ChatMsg,
@@ -87,10 +88,43 @@ pub(super) fn persist_child_message_meta(
     }
 }
 
+pub(super) fn persist_child_tool_starts(
+    session: &mut Session,
+    calls: &[pig_provider::ToolCall],
+    execution_ids: &[String],
+    start: usize,
+    end: usize,
+) -> Result<(), String> {
+    let (jsonl, previous) = {
+        let sub = session.subagent.as_ref().expect("child session");
+        (sub.jsonl.clone(), sub.persist_failure.clone())
+    };
+    if let Some(error) = previous {
+        return Err(error);
+    }
+    let result = (|| {
+        for record in crate::rollout::tool_execution_start_records(calls, execution_ids, start, end)
+        {
+            crate::agent::append_agent_conversation_record(&jsonl, &record)?;
+        }
+        crate::agent::sync_agent_context(&jsonl)
+    })();
+    if let Err(error) = result {
+        session
+            .subagent
+            .as_mut()
+            .expect("child session")
+            .persist_failure = Some(error.clone());
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Persist one tool result with the call that produced it.
 pub(super) fn persist_child_tool_result(
     session: &mut Session,
     call: &pig_provider::ToolCall,
+    execution_id: &str,
     msg: &mut ChatMsg,
     meta: crate::agent::AgentMsgMeta,
 ) -> Result<(), String> {
@@ -105,7 +139,14 @@ pub(super) fn persist_child_tool_result(
     if let Some(error) = previous {
         return Err(error);
     }
-    match crate::agent::append_agent_tool_result(&jsonl, call, msg, context_window, meta) {
+    match crate::agent::append_agent_tool_result(
+        &jsonl,
+        call,
+        execution_id,
+        msg,
+        context_window,
+        meta,
+    ) {
         Ok(()) => Ok(()),
         Err(error) => {
             session

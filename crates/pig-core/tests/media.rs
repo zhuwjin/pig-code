@@ -3080,6 +3080,7 @@ fn document_paths_stay_in_the_session_media_root() {
         label: Some("doc.pdf".into()),
     };
     let records = vec![pig_core::rollout::RolloutRecord::ToolCall {
+        execution_id: "execution-document".into(),
         tool: "ReadMediaFile".into(),
         summary: "doc".into(),
         arguments: "{}".into(),
@@ -3095,6 +3096,7 @@ fn document_paths_stay_in_the_session_media_root() {
             document(outside.join("2.pdf")),
         ],
         delivered_notification_ids: vec![],
+        recovery: None,
     }];
     let (history, _) = pig_core::rollout::rebuild_history_with_media_root(
         &records,

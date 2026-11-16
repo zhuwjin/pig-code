@@ -403,6 +403,7 @@ impl Session {
             reasoning: reasoning.clone(),
             replay: replay.clone(),
             tool_calls: tool_calls.iter().map(ToolCall::to_wire).collect(),
+            tool_execution_ids: rt.step_item_ids.clone(),
             ts_ms: 0,
             reasoning_ms: None,
         });
