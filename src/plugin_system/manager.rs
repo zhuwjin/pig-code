@@ -2077,7 +2077,7 @@ fn projected_session_id(event: &Event) -> Option<&str> {
         | Event::ToolCallBegin { session_id, .. }
         | Event::ToolCallEnd { session_id, .. }
         | Event::TurnComplete { session_id, .. }
-        | Event::TurnAborted { session_id }
+        | Event::TurnAborted { session_id, .. }
         | Event::ContextCompacted { session_id, .. }
         | Event::SubagentCard { session_id, .. }
         | Event::PermissionsChanged { session_id, .. }
@@ -2376,6 +2376,7 @@ mod tests {
         let started = Event::TurnStarted {
             session_id: "s1".into(),
             turn_id: "turn-1".into(),
+            run: None,
         };
         assert_eq!(projected_session_id(&started), Some("s1"));
         assert!(matches!(

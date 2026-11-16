@@ -176,6 +176,63 @@ impl SummaryResult {
     }
 }
 
+/// Shared summary and candidate-install boundary. Callers retain their own
+/// failure policy and durable marker transaction.
+pub(crate) struct CompactService;
+
+impl CompactService {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn summarize(
+        call: &SummaryCall<'_>,
+        config: &ResolvedModel,
+        history: &[ChatMsg],
+        tail_start: usize,
+        flavor: InstructionFlavor,
+        instruction: Option<&str>,
+        tools: &[serde_json::Value],
+        cancel: &CancellationToken,
+    ) -> SummaryResult {
+        let mut summary_config = config.clone();
+        if pig_provider::prompt_cache_key_supported(&config.base_url) {
+            summary_config.prompt_cache_key = Some(match call.agent_id {
+                Some(agent_id) => {
+                    pig_provider::subagent_prompt_cache_key(call.session_id, agent_id)
+                }
+                None => pig_provider::session_prompt_cache_key(call.session_id),
+            });
+        }
+        let instruction = compaction_instruction(flavor, instruction);
+        summarize_history(
+            call,
+            &summary_config,
+            history,
+            tail_start,
+            &instruction,
+            tools,
+            cancel,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn install(
+        history: &[ChatMsg],
+        plan: TailPlan,
+        automatic: bool,
+        summary: Option<&str>,
+        changed_note: Option<&str>,
+        note_suffix: Option<&str>,
+        tools_tokens: u64,
+    ) -> Result<CompactionInstall, String> {
+        let mut note = compaction_note(plan.omitted, automatic, summary, changed_note);
+        if let Some(suffix) = note_suffix {
+            note.push_str("\n\n");
+            note.push_str(suffix);
+        }
+        install_compaction(history, plan, note, tools_tokens)
+    }
+}
+
 async fn request_summary(
     call: &SummaryCall<'_>,
     config: &ResolvedModel,

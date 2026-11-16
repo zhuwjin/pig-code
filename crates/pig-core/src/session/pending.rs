@@ -113,7 +113,6 @@ pub(crate) struct PendingPersist {
     pub steer: bool,
     #[serde(default)]
     pub held: bool,
-    #[serde(default)]
     pub recovered: bool,
 }
 

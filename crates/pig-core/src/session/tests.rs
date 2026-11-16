@@ -101,11 +101,12 @@ fn restore_pending_keeps_valid_items_and_degrades_corrupt_images() {
             "images": images,
             "permissions": permissions,
             "steer": false,
+            "recovered": false,
         })
     };
     let pending = serde_json::json!([
         item("q1", "first survives", vec![]),
-        // Truncated/legacy row: no text, files or permissions.
+        // A malformed row without the required input fields is skipped.
         {"id": "q9"},
         item(
             "q2",

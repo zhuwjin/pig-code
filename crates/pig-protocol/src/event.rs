@@ -32,6 +32,21 @@ pub struct ContextBreakdown {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TurnKind {
+    Regular,
+    Compact,
+    Notification,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunEnvelope {
+    pub agent_id: String,
+    pub run_id: String,
+    pub turn_kind: TurnKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     Stop,
     ToolCalls,
@@ -102,12 +117,28 @@ mod tests {
         let event = super::Event::TurnStarted {
             session_id: "s".into(),
             turn_id: "t".into(),
+            run: None,
         };
         let json = serde_json::to_value(&event).expect("serialize");
         assert!(
             json["TurnStarted"].get("seq").is_none(),
             "Event ordering is channel order; there is no replay cursor: {json}"
         );
+    }
+
+    #[test]
+    fn root_run_envelope_is_typed() {
+        let event = super::Event::TurnStarted {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            run: Some(super::AgentRunEnvelope {
+                agent_id: "s".into(),
+                run_id: "run-1".into(),
+                turn_kind: super::TurnKind::Compact,
+            }),
+        };
+        let json = serde_json::to_value(&event).expect("serialize run envelope");
+        assert_eq!(json["TurnStarted"]["run"]["turn_kind"], "compact");
     }
 
     #[test]
@@ -424,6 +455,8 @@ pub enum Event {
     TurnStarted {
         session_id: String,
         turn_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<AgentRunEnvelope>,
     },
     /// Reasoning deltas (GLM/DeepSeek's reasoning_content), live-only
     ReasoningDelta {
@@ -552,9 +585,13 @@ pub enum Event {
         session_id: String,
         /// true = triggered automatically pre-sampling; false = the user's manual /compact
         automatic: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<AgentRunEnvelope>,
     },
     ContextCompacted {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<AgentRunEnvelope>,
         omitted: usize,
         note: String,
         /// true = triggered automatically pre-sampling; false = the user's manual /compact
@@ -655,6 +692,8 @@ pub enum Event {
     TurnComplete {
         session_id: String,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<AgentRunEnvelope>,
         /// Turn token stats (None for aborted turns or turns without usage data)
         #[serde(default)]
         stats: Option<TurnUsageStats>,
@@ -664,6 +703,8 @@ pub enum Event {
     },
     TurnAborted {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<AgentRunEnvelope>,
     },
     /// End of a turn: the agent's file changes this turn (per file, the net diff
     /// from just before its first write this turn to now, matching ZCode's turn

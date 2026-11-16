@@ -1,8 +1,8 @@
 use super::*;
 
 use crate::session::compact::{
-    CompactOutcome, CompactTrigger, InstructionFlavor, SummaryCall, child_compaction_plan,
-    compaction_instruction, compaction_note, install_compaction, summarize_history,
+    CompactOutcome, CompactService, CompactTrigger, InstructionFlavor, SummaryCall,
+    child_compaction_plan,
 };
 
 /// Reactive typed-overflow recoveries per child drive. Preflight compaction is
@@ -104,15 +104,7 @@ pub(super) async fn compact_child_context(
         return ChildCompactReport::skipped(pause_pin);
     };
 
-    let mut summary_config = session.agent.config().clone();
-    if pig_provider::prompt_cache_key_supported(&session.agent.config().base_url) {
-        summary_config.prompt_cache_key = Some(pig_provider::subagent_prompt_cache_key(
-            session.event_session_id(),
-            &session.agent.id,
-        ));
-    }
-    let instruction = compaction_instruction(InstructionFlavor::Child, None);
-    let summary_result = summarize_history(
+    let summary_result = CompactService::summarize(
         &SummaryCall {
             session_id: session.event_session_id(),
             store: &session.store,
@@ -120,10 +112,11 @@ pub(super) async fn compact_child_context(
             background,
             step: Some(step),
         },
-        &summary_config,
+        session.agent.config(),
         &session.agent.history,
         plan.tail_start,
-        &instruction,
+        InstructionFlavor::Child,
+        None,
         &session.agent.schemas,
         cancel,
     )
@@ -142,8 +135,15 @@ pub(super) async fn compact_child_context(
     }
     let summary = summary_result.summary;
 
-    let note = compaction_note(plan.omitted, true, summary.as_deref(), None);
-    let installed = match install_compaction(&session.agent.history, plan, note, tools_tokens) {
+    let installed = match CompactService::install(
+        &session.agent.history,
+        plan,
+        true,
+        summary.as_deref(),
+        None,
+        None,
+        tools_tokens,
+    ) {
         Ok(installed) => installed,
         Err(error) => {
             tracing::warn!(

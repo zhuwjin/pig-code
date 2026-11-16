@@ -6,6 +6,7 @@ use super::*;
 pub struct AgentCatalogEntry {
     pub agent_id: String,
     pub run_id: Option<String>,
+    pub turn_kind: Option<pig_protocol::TurnKind>,
     pub parent_id: Option<String>,
     pub depth: u32,
     pub profile: String,
@@ -50,6 +51,7 @@ impl Session {
         let mut catalog = vec![AgentCatalogEntry {
             agent_id: self.agent.id.clone(),
             run_id: root_run.and_then(|run| run.run_id.clone()),
+            turn_kind: root_run.map(|run| run.turn_kind),
             parent_id: self
                 .subagent
                 .as_ref()
@@ -91,6 +93,7 @@ impl Session {
             Some(AgentCatalogEntry {
                 agent_id: run.agent_id.clone(),
                 run_id: Some(run.run_id.clone()),
+                turn_kind: Some(pig_protocol::TurnKind::Regular),
                 parent_id: Some(run.parent_agent_id.clone()),
                 depth: run.delegation_depth,
                 profile: run.profile.clone(),

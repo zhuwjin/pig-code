@@ -237,9 +237,11 @@ impl Session {
             // steps do not stack "nothing to compact" dividers.
             if trigger == CompactTrigger::Manual {
                 let used_before = self.last_total_tokens;
+                let run = self.run_envelope();
                 self.emit(
                     |session_id| Event::ContextCompacted {
                         session_id,
+                        run,
                         omitted: 0,
                         note: "The current conversation has no earlier completed work that compaction can omit; keeping it intact.".to_string(),
                         automatic,
@@ -254,10 +256,12 @@ impl Session {
         };
         // Composition is reported before the sidecar request so the panel
         // reflects the request that is about to be summarized.
+        let run = self.run_envelope();
         self.emit(
             |session_id| Event::CompactStarted {
                 session_id,
                 automatic,
+                run,
             },
             tx,
         );
@@ -266,15 +270,9 @@ impl Session {
         // Manual failure keeps the exact history; automatic failure falls back
         // to the note-only truncation after those bounded attempts.
         let summary_result = if let Some(config) = config {
-            let mut summary_config = config.clone();
-            if pig_provider::prompt_cache_key_supported(&config.base_url) {
-                summary_config.prompt_cache_key =
-                    Some(pig_provider::session_prompt_cache_key(&self.agent.id));
-            }
-            let instruction = compaction_instruction(InstructionFlavor::Root, instruction);
             let empty = [];
             let summary_tools = schemas.as_deref().unwrap_or(&empty);
-            summarize_history(
+            CompactService::summarize(
                 &SummaryCall {
                     session_id: &self.agent.id,
                     store: &self.store,
@@ -282,10 +280,11 @@ impl Session {
                     background: false,
                     step: None,
                 },
-                &summary_config,
+                config,
                 &self.agent.history,
                 plan.tail_start,
-                &instruction,
+                InstructionFlavor::Root,
+                instruction,
                 summary_tools,
                 cancel,
             )
@@ -298,7 +297,7 @@ impl Session {
             }
         };
         if summary_result.cancelled || cancel.is_cancelled() {
-            self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+            self.emit_turn_aborted(tx);
             return CompactOutcome::Cancelled;
         }
         if let Some(error) = &summary_result.error {
@@ -318,7 +317,7 @@ impl Session {
                     },
                     tx,
                 );
-                self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                self.emit_turn_aborted(tx);
                 return CompactOutcome::Failed;
             }
             tracing::warn!(
@@ -327,30 +326,30 @@ impl Session {
         }
         let summary = summary_result.summary;
 
-        let mut note = compaction_note(
-            plan.omitted,
-            automatic,
-            summary.as_deref(),
-            Some(&changed_note),
-        );
-        if let Some(reminder) = active_reminder {
-            note.push_str("\n\n");
-            note.push_str(&reminder);
-        }
         // Build the candidate history and recall stack first. Nothing is
         // installed until the Compact marker has been appended: a marker
         // failure must leave the live context exactly on the pre-compaction
         // shape, never compacted live while the durable rollout is not.
-        let installed = match install_compaction(&self.agent.history, plan, note, tools_tokens) {
+        let installed = match CompactService::install(
+            &self.agent.history,
+            plan,
+            automatic,
+            summary.as_deref(),
+            Some(&changed_note),
+            active_reminder.as_deref(),
+            tools_tokens,
+        ) {
             Ok(installed) => installed,
             Err(error) => {
                 tracing::warn!(
                     "compaction plan does not match the live history: {error}; skipping"
                 );
                 let used_before = self.last_total_tokens;
+                let run = self.run_envelope();
                 self.emit(
                     |session_id| Event::ContextCompacted {
                         session_id,
+                        run,
                         omitted: 0,
                         note: "The compaction plan no longer matched the conversation; keeping the current context intact.".to_string(),
                         automatic,
@@ -408,7 +407,7 @@ impl Session {
             // terminal event so its in-progress UI state clears.
             self.report_rollout_failure(tx);
             if trigger == CompactTrigger::Manual {
-                self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                self.emit_turn_aborted(tx);
             }
             return CompactOutcome::Failed;
         }
@@ -451,9 +450,11 @@ impl Session {
                 tx,
             );
         }
+        let run = self.run_envelope();
         self.emit(
             |session_id| Event::ContextCompacted {
                 session_id,
+                run,
                 omitted,
                 note,
                 automatic,
@@ -481,8 +482,10 @@ pub(crate) use self::select::{
     project_context_tokens, segments, select_tail_plan, tail_budget,
 };
 pub(crate) use self::service::{
-    SummaryCall, SummaryResult, child_compaction_plan, compaction_note, compaction_note_reserve,
-    compaction_target, install_compaction, summarize_history,
+    CompactService, SummaryCall, SummaryResult, child_compaction_plan, compaction_note_reserve,
+    compaction_target,
 };
+#[cfg(test)]
+pub(crate) use self::service::{compaction_note, install_compaction};
 pub use self::summary::COMPACTION_MARKER;
 pub(crate) use self::summary::{InstructionFlavor, compaction_instruction};

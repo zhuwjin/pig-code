@@ -18,6 +18,8 @@ fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
         "created_at": 1,
         "kind": "subagent",
         "parent_id": "s1",
+        "delegation_depth": 1,
+        "context_mode": "fresh",
         "profile": "general-purpose",
         "description": "fixture context",
         "model": "m",
@@ -1721,6 +1723,7 @@ async fn execution_claim_recovers_paused_input_and_clears_after_completion() {
         "permissions": ExecMode::Auto.permissions(),
         "steer": false,
         "held": false,
+        "recovered": false,
     }))
     .expect("claim payload");
     store

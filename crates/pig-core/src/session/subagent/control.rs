@@ -337,7 +337,7 @@ impl Session {
         let sub = child.subagent.as_ref().expect("child session");
         let card = crate::rollout::AgentCardRecord {
             agent_id: child.agent.id.clone(),
-            run_id: child.agent.run_id(),
+            run_id: child.agent.run_id().expect("child run identity"),
             profile: sub.profile.name.clone(),
             description: sub.description.clone(),
             model: agent_card_model(child),
@@ -348,7 +348,7 @@ impl Session {
                 session_id,
                 item_id: parent_item_id.to_string(),
                 agent_id: card.agent_id.clone(),
-                run_id: card.run_id.clone(),
+                run_id: Some(card.run_id.clone()),
                 profile: card.profile.clone(),
                 description: card.description.clone(),
                 model: card.model.clone(),

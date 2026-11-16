@@ -714,7 +714,7 @@ fn max_turn_background_notification_is_failed_with_resume_guidance() {
 async fn catalog_preserves_root_and_child_run_identities_across_resume() {
     let (mut session, parent_model, root, _log, runtime) =
         compaction_test_session("catalog", 128_000, 8_192);
-    session.begin_root_run();
+    session.begin_root_run(pig_protocol::TurnKind::Regular);
     session.run_turns = 2;
     session.turn_input = 7;
     session.turn_output = 3;
@@ -726,9 +726,13 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
     assert_eq!(first_root.turns, 2);
     assert_eq!(first_root.usage, (7, 0, 3));
     let first_root_id = first_root.run_id.clone().expect("root run id");
-    session.begin_root_run();
+    session.begin_root_run(pig_protocol::TurnKind::Regular);
     let second_root = session.root_result(crate::session::AgentRunStatus::Completed);
     assert_ne!(second_root.run_id.as_deref(), Some(first_root_id.as_str()));
+    session.begin_root_run(pig_protocol::TurnKind::Notification);
+    let notification = session.root_result(crate::session::AgentRunStatus::Completed);
+    assert_eq!(notification.turn_kind, pig_protocol::TurnKind::Notification);
+    let notification_run_id = notification.run_id.clone();
 
     let profile = crate::agent::AgentProfile {
         name: "explore".into(),
@@ -893,7 +897,11 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
     let catalog = session.agent_catalog();
     assert_eq!(catalog.len(), 3);
     assert_eq!(catalog[0].agent_id, session.agent.id);
-    assert_eq!(catalog[0].run_id, second_root.run_id);
+    assert_eq!(catalog[0].run_id, notification_run_id);
+    assert_eq!(
+        catalog[0].turn_kind,
+        Some(pig_protocol::TurnKind::Notification)
+    );
     assert_eq!(catalog[0].profile, "main");
     assert!(catalog[0].record_path.is_some());
     for run_id in [first_run_id, second_run_id] {

@@ -61,11 +61,12 @@ impl ConversationProjection {
             Event::TurnStarted {
                 session_id,
                 turn_id,
+                ..
             } => {
                 self.state(session_id).active_turn = Some(turn_id.clone());
                 Projected::pass(event)
             }
-            Event::TurnComplete { session_id, .. } | Event::TurnAborted { session_id } => {
+            Event::TurnComplete { session_id, .. } | Event::TurnAborted { session_id, .. } => {
                 let mut events = Vec::new();
                 if let Some(state) = self.sessions.get_mut(session_id) {
                     state.active_turn = None;
@@ -602,6 +603,7 @@ mod tests {
         projection.project(&Event::TurnStarted {
             session_id: "s1".into(),
             turn_id: "t1".into(),
+            run: None,
         });
         let events = projection
             .project(&Event::UserMessage {

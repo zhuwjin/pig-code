@@ -71,6 +71,7 @@ pub(crate) struct AgentArtifact {
 pub(crate) struct AgentRunResult {
     pub(crate) agent_id: Option<String>,
     pub(crate) run_id: Option<String>,
+    pub(crate) turn_kind: pig_protocol::TurnKind,
     pub(crate) status: AgentRunStatus,
     pub(crate) stop_reason: String,
     pub(crate) turns: usize,
@@ -79,10 +80,11 @@ pub(crate) struct AgentRunResult {
 }
 
 impl AgentRunResult {
-    pub(crate) fn root(status: AgentRunStatus) -> Self {
+    pub(crate) fn root(status: AgentRunStatus, turn_kind: pig_protocol::TurnKind) -> Self {
         Self {
             agent_id: None,
             run_id: None,
+            turn_kind,
             status,
             stop_reason: status.as_str().to_string(),
             turns: 0,
@@ -101,6 +103,7 @@ impl AgentRunResult {
         Self {
             agent_id: None,
             run_id: None,
+            turn_kind: pig_protocol::TurnKind::Regular,
             status,
             stop_reason,
             turns,
@@ -160,13 +163,27 @@ pub(crate) fn new_agent_run_id() -> String {
 }
 
 impl Session {
-    pub(crate) fn begin_root_run(&mut self) {
+    pub(crate) fn begin_root_run(&mut self, turn_kind: pig_protocol::TurnKind) {
         self.run_turns = 0;
         let agent_id = self.agent.id.clone();
         self.agent.run = Some(
-            AgentRunResult::root(AgentRunStatus::Running)
+            AgentRunResult::root(AgentRunStatus::Running, turn_kind)
                 .with_identity(&agent_id, new_agent_run_id()),
         );
+    }
+
+    pub(crate) fn run_envelope(&self) -> Option<pig_protocol::AgentRunEnvelope> {
+        let run = self.agent.run.as_ref()?;
+        Some(pig_protocol::AgentRunEnvelope {
+            agent_id: self.agent.id.clone(),
+            run_id: run.run_id.clone()?,
+            turn_kind: run.turn_kind,
+        })
+    }
+
+    pub(crate) fn emit_turn_aborted(&mut self, tx: &async_channel::Sender<Event>) {
+        let run = self.run_envelope();
+        self.emit(|session_id| Event::TurnAborted { session_id, run }, tx);
     }
 
     pub(crate) fn root_result(&mut self, status: AgentRunStatus) -> AgentRunResult {
@@ -174,16 +191,16 @@ impl Session {
             self.agent.run.as_ref().map(|run| run.status),
             Some(AgentRunStatus::Running)
         ) {
-            self.begin_root_run();
+            self.begin_root_run(pig_protocol::TurnKind::Regular);
         }
         let agent_id = self.agent.id.clone();
-        let run_id = self
+        let (run_id, turn_kind) = self
             .agent
             .run
             .as_ref()
-            .and_then(|run| run.run_id.clone())
+            .and_then(|run| run.run_id.clone().map(|run_id| (run_id, run.turn_kind)))
             .expect("root run identity");
-        let mut result = AgentRunResult::root(status).with_identity(&agent_id, run_id);
+        let mut result = AgentRunResult::root(status, turn_kind).with_identity(&agent_id, run_id);
         result.turns = self.run_turns;
         result.usage = (self.turn_input, self.turn_cache_read, self.turn_output);
         self.agent.run = Some(result.clone());

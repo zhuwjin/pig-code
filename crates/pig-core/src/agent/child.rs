@@ -520,9 +520,7 @@ pub(crate) fn prepare_resume_child(
     let (meta, mut history) = read_agent_by_id(&sessions_dir, ctx.session_id, agent_id)
         .map_err(ChildPrepError::ItemLevel)?;
     let parent_depth = ctx.parent_delegation_depth.saturating_add(1);
-    let delegation_depth = meta
-        .delegation_depth
-        .map_or(parent_depth, |persisted| persisted.max(parent_depth));
+    let delegation_depth = meta.delegation_depth.max(parent_depth);
     validate_child_depth(ctx, delegation_depth).map_err(ChildPrepError::ItemLevel)?;
     // Re-find the profile from current state (deleted → error); the model is
     // likewise re-resolved from the profile's current state (meta.model is

@@ -31,6 +31,21 @@ async fn full_turn_with_tool_call() {
     })
     .await;
 
+    let run = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnStarted { run: Some(run), .. } => Some(run),
+            _ => None,
+        })
+        .expect("regular turn envelope");
+    assert_eq!(run.agent_id, session_id);
+    assert_eq!(run.turn_kind, pig_protocol::TurnKind::Regular);
+    assert!(!run.run_id.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::TurnComplete { run: Some(completed), .. }
+            if completed.run_id == run.run_id && completed.turn_kind == pig_protocol::TurnKind::Regular
+    )));
     assert!(
         events
             .iter()

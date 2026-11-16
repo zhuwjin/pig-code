@@ -69,28 +69,24 @@ fn long_child_history() -> Vec<pig_provider::ChatMsg> {
 }
 
 fn seed_child(data_dir: &Path, session_id: &str) -> PathBuf {
-    use pig_core::rollout::{ConversationKind, RolloutRecord};
+    use pig_core::rollout::RolloutRecord;
 
     let jsonl = data_dir
         .join("sessions")
         .join(format!("{session_id}.agents"))
         .join(format!("{CHILD_ID}.jsonl"));
     std::fs::create_dir_all(jsonl.parent().expect("agent dir")).unwrap();
-    let mut records = vec![RolloutRecord::Meta {
-        id: CHILD_ID.into(),
-        cwd: PathBuf::from("."),
-        title: "long child compaction fixture".into(),
-        created_at: 1,
-        kind: ConversationKind::Subagent,
-        parent_id: None,
-        delegation_depth: None,
-        context_mode: None,
-        inherited_record_count: None,
-        profile: Some("overflow".into()),
-        description: Some("long child compaction fixture".into()),
-        provider: Some("Mock".into()),
-        model: Some("small-model".into()),
-    }];
+    let mut records = vec![RolloutRecord::subagent_meta(
+        CHILD_ID.into(),
+        session_id.into(),
+        PathBuf::from("."),
+        "long child compaction fixture".into(),
+        "overflow".into(),
+        "Mock".into(),
+        "small-model".into(),
+        1,
+        1,
+    )];
     for msg in long_child_history() {
         match msg.role.as_str() {
             "system" => records.push(RolloutRecord::System {

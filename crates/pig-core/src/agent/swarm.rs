@@ -378,8 +378,8 @@ mod tests {
             // JSONL persisted: meta line + two messages, readable back
             let (meta, history) = read_agent(&prep.jsonl).expect("persisted context reads back");
             assert_eq!(meta.profile, "general-purpose");
-            assert_eq!(meta.parent_session_id.as_deref(), Some("s-test"));
-            assert_eq!(meta.delegation_depth, Some(1));
+            assert_eq!(meta.parent_session_id, "s-test");
+            assert_eq!(meta.delegation_depth, 1);
             assert_eq!(history.len(), 2);
         }
         assert_ne!(agent_ids[0], agent_ids[1], "agent_id must be unique");

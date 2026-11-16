@@ -119,7 +119,11 @@ impl Session {
         notifications: super::runner::entry::NotificationMailbox,
         notification_only: bool,
     ) -> TurnOutcome {
-        self.begin_root_run();
+        self.begin_root_run(if notification_only {
+            pig_protocol::TurnKind::Notification
+        } else {
+            pig_protocol::TurnKind::Regular
+        });
         let cancel = control.cancel_token();
         // ---- SessionStart hooks (once per Session instance, at the first
         // turn; the turn's cancel token covers the run). Nothing to block at
@@ -219,10 +223,12 @@ impl Session {
         }
         let turn_id = format!("turn-{}", self.turn_counter);
         let started = Instant::now();
+        let run = self.run_envelope();
         self.emit(
             |session_id| Event::TurnStarted {
                 session_id,
                 turn_id: turn_id.clone(),
+                run,
             },
             tx,
         );
@@ -587,10 +593,12 @@ impl Session {
                     self.flush_turn_changes(tx);
                     self.sync_rollout();
                     self.report_rollout_failure(tx);
+                    let run = self.run_envelope();
                     self.emit(
                         |session_id| Event::TurnComplete {
                             session_id,
                             duration_ms,
+                            run,
                             stats,
                             finish_reason,
                         },
@@ -948,7 +956,7 @@ impl Session {
                                     },
                                     tx,
                                 );
-                                self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                                self.emit_turn_aborted(tx);
                     return engine::StepOutcome::Cancelled;
                             }
                         };
@@ -1164,7 +1172,7 @@ impl Session {
                             },
                             tx,
                         );
-                        self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                        self.emit_turn_aborted(tx);
                         return engine::StepOutcome::Cancelled;
                     }
                 }
@@ -1229,7 +1237,7 @@ impl Session {
                             },
                             tx,
                         );
-                        self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                        self.emit_turn_aborted(tx);
                         return engine::StepOutcome::Cancelled;
                     }
                 }
@@ -1395,7 +1403,7 @@ impl Session {
                             },
                             tx,
                         );
-                        self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                        self.emit_turn_aborted(tx);
                 return engine::StepOutcome::Cancelled;
                     }
                 };
@@ -1515,7 +1523,7 @@ impl Session {
                         },
                         tx,
                     );
-                    self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+                    self.emit_turn_aborted(tx);
                     return engine::StepOutcome::Cancelled;
                 }
                 GatedToolOutcome::Executed {
@@ -1940,7 +1948,7 @@ impl Session {
                     tx,
                 );
             }
-            self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+            self.emit_turn_aborted(tx);
         }
         !cancelled
     }

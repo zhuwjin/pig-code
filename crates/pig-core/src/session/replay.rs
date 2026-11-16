@@ -25,6 +25,7 @@ impl Session {
                             |session_id| Event::TurnStarted {
                                 session_id,
                                 turn_id,
+                                run: None,
                             },
                             tx,
                         );
@@ -123,6 +124,7 @@ impl Session {
                             |session_id| Event::TurnStarted {
                                 session_id,
                                 turn_id,
+                                run: None,
                             },
                             tx,
                         );
@@ -147,6 +149,7 @@ impl Session {
                             |session_id| Event::TurnStarted {
                                 session_id,
                                 turn_id,
+                                run: None,
                             },
                             tx,
                         );
@@ -182,6 +185,7 @@ impl Session {
                             |session_id| Event::TurnStarted {
                                 session_id,
                                 turn_id,
+                                run: None,
                             },
                             tx,
                         );
@@ -229,7 +233,7 @@ impl Session {
                                 session_id,
                                 item_id: item.clone(),
                                 agent_id: card.agent_id.clone(),
-                                run_id: card.run_id.clone(),
+                                run_id: Some(card.run_id.clone()),
                                 profile: card.profile.clone(),
                                 description: card.description.clone(),
                                 model: card.model.clone(),
@@ -275,6 +279,7 @@ impl Session {
                     self.emit(
                         |session_id| Event::ContextCompacted {
                             session_id,
+                            run: None,
                             omitted,
                             note,
                             automatic,
@@ -307,6 +312,7 @@ impl Session {
                             |session_id| Event::TurnStarted {
                                 session_id,
                                 turn_id,
+                                run: None,
                             },
                             tx,
                         );
@@ -339,6 +345,7 @@ impl Session {
                         |session_id| Event::TurnComplete {
                             session_id,
                             duration_ms: 0,
+                            run: None,
                             stats,
                             finish_reason: *finish_reason,
                         },
@@ -407,6 +414,7 @@ impl Session {
                 |session_id| Event::TurnComplete {
                     session_id,
                     duration_ms: 0,
+                    run: None,
                     stats: None,
                     finish_reason: None,
                 },

@@ -11,8 +11,8 @@ use crate::rollout::{ConversationKind, RolloutRecord};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMeta {
     pub agent_id: String,
-    pub parent_session_id: Option<String>,
-    pub delegation_depth: Option<u32>,
+    pub parent_session_id: String,
+    pub delegation_depth: u32,
     pub context_mode: crate::rollout::ChildContextMode,
     pub inherited_record_count: Option<usize>,
     pub profile: String,
@@ -20,6 +20,15 @@ pub struct AgentMeta {
     pub model: String,
     pub provider: String,
     pub created_at: u64,
+}
+
+fn required_meta<T>(value: Option<T>, field: &str, path: &Path) -> Result<T, String> {
+    value.ok_or_else(|| {
+        format!(
+            "Subagent context {} is missing required meta field {field}",
+            path.display()
+        )
+    })
 }
 
 /// Read a subagent context: first-line meta + canonical conversation records.
@@ -61,7 +70,6 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     };
     let RolloutRecord::Meta {
         id,
-        title,
         created_at,
         kind,
         parent_id,
@@ -85,14 +93,14 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     }
     let meta = AgentMeta {
         agent_id: id,
-        parent_session_id: parent_id,
-        delegation_depth,
-        context_mode: context_mode.unwrap_or_default(),
+        parent_session_id: required_meta(parent_id, "parent_id", path)?,
+        delegation_depth: required_meta(delegation_depth, "delegation_depth", path)?,
+        context_mode: required_meta(context_mode, "context_mode", path)?,
         inherited_record_count,
-        profile: profile.unwrap_or_default(),
-        description: description.unwrap_or(title),
-        model: model.unwrap_or_default(),
-        provider: provider.unwrap_or_default(),
+        profile: required_meta(profile, "profile", path)?,
+        description: required_meta(description, "description", path)?,
+        model: required_meta(model, "model", path)?,
+        provider: required_meta(provider, "provider", path)?,
         created_at,
     };
     let mut stored: Vec<StoredAgentMsg> = Vec::new();

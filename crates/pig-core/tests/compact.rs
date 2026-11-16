@@ -82,6 +82,18 @@ async fn model_summary_compact() {
         started_pos.is_some() && started_pos < collected.len().checked_sub(1),
         "CompactStarted must arrive before ContextCompacted: {collected:#?}"
     );
+    assert!(collected.iter().any(|event| matches!(
+        event,
+        Event::CompactStarted { run: Some(run), .. }
+            if run.turn_kind == pig_protocol::TurnKind::Compact
+    )));
+    assert!(collected.iter().all(|event| match event {
+        Event::CompactStarted { run: Some(run), .. }
+        | Event::ContextCompacted { run: Some(run), .. } => {
+            run.agent_id == sid && run.turn_kind == pig_protocol::TurnKind::Compact
+        }
+        _ => true,
+    }));
     let Some(Event::ContextCompacted {
         omitted,
         note,

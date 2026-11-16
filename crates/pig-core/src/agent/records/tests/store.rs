@@ -187,6 +187,27 @@ fn stopped_tool_status_survives_jsonl_and_display() {
 }
 
 #[test]
+fn missing_current_child_meta_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("pig-agent-required-meta-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let path = dir.join("a1.jsonl");
+    write_meta(&path);
+    let raw = std::fs::read_to_string(&path).expect("meta");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(raw.lines().next().expect("meta line")).expect("meta json");
+    meta.as_object_mut()
+        .expect("meta object")
+        .remove("delegation_depth");
+    std::fs::write(&path, format!("{meta}\n")).expect("incomplete meta");
+    let error = read_agent(&path)
+        .map(|_| ())
+        .expect_err("missing depth must not fall back to the parent");
+    assert!(error.contains("delegation_depth"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn canonical_assistant_without_reasoning_or_image_refs_stays_readable() {
     let dir = std::env::temp_dir().join(format!("pig-agent-legacy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

@@ -215,8 +215,7 @@ pub enum RolloutRecord {
         kind: ConversationKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
-        /// Durable lower bound for this agent's depth below the root. Missing
-        /// on root sessions and child contexts written before depth persistence.
+        /// Durable lower bound below the root; None on a root session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegation_depth: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,8 +496,7 @@ impl RolloutRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCardRecord {
     pub agent_id: String,
-    #[serde(default)]
-    pub run_id: Option<String>,
+    pub run_id: String,
     pub profile: String,
     pub description: String,
     /// "{provider_name} · {model}" (may carry a reasoning-level suffix)
@@ -1054,7 +1052,7 @@ mod tests {
     fn tool_call_agent_cards_roundtrip() {
         let card = |n: u32| AgentCardRecord {
             agent_id: format!("a1-{n}"),
-            run_id: None,
+            run_id: format!("run-{n}"),
             profile: "explore".into(),
             description: format!("task {n}"),
             model: "p · m".into(),

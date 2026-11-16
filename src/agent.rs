@@ -510,6 +510,7 @@ mod tests {
             Event::TurnStarted {
                 session_id: "s1".into(),
                 turn_id: "t1".into(),
+                run: None,
             },
             Event::TextDelta {
                 session_id: "s1".into(),

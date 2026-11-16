@@ -361,7 +361,7 @@ impl Session {
             return AttemptAction::Terminal(engine::StepOutcome::Failed);
         }
         if cancel.is_cancelled() {
-            self.emit(|session_id| Event::TurnAborted { session_id }, tx);
+            self.emit_turn_aborted(tx);
             self.charge_step_time(
                 rt.step_started.unwrap_or_else(Instant::now),
                 rt.step_first_token_at,

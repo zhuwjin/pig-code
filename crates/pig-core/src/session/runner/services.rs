@@ -520,7 +520,7 @@ impl Manager {
                 entry.steerable = false;
                 let cancel = entry.cancel.clone().expect("cancel");
                 turns.push(Box::pin(async move {
-                    session.begin_root_run();
+                    session.begin_root_run(pig_protocol::TurnKind::Compact);
                     // A manual /compact can arrive after a
                     // model switch without an intervening turn;
                     // align the history with the current media

@@ -183,23 +183,6 @@ impl Store {
             );",
         )
         .map_err(|e| format!("store.sqlite create-table failed: {e}"))?;
-        for column in [
-            "run_id TEXT",
-            "parent_agent_id TEXT",
-            "delegation_depth INTEGER",
-            "profile TEXT",
-            "run_input_tokens INTEGER",
-            "run_cache_read_tokens INTEGER",
-            "run_output_tokens INTEGER",
-        ] {
-            if let Err(error) = conn.execute(
-                &format!("ALTER TABLE background_tasks ADD COLUMN {column}"),
-                [],
-            ) && !error.to_string().contains("duplicate column name")
-            {
-                return Err(format!("store.sqlite task-run migration failed: {error}"));
-            }
-        }
         Ok(Self { conn })
     }
 
