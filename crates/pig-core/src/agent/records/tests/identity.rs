@@ -50,6 +50,8 @@ fn read_agent_by_id_enforces_containment_and_metadata_equality() {
 
     let (meta, history) = read_agent_by_id(&sessions, "s1", "a1-1").expect("valid context");
     assert_eq!(meta.agent_id, "a1-1");
+    assert_eq!(meta.parent_session_id.as_deref(), Some("s-test"));
+    assert_eq!(meta.delegation_depth, Some(1));
     assert_eq!(history.len(), 1);
 
     // Future UUID-like ids are safe path components and read like generated

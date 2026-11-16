@@ -24,6 +24,7 @@ use pig_utils::paths::normalize_workspace_path;
 mod agent;
 use agent::Agent;
 mod approval;
+mod catalog;
 mod compact;
 mod effects;
 mod engine;
@@ -53,6 +54,7 @@ mod turn;
 mod usage;
 
 pub use approval::approval_detail;
+pub use catalog::AgentCatalogEntry;
 pub use compact::COMPACTION_MARKER;
 pub(crate) use compact::{CompactOutcome, CompactTrigger, compact_trigger};
 pub(crate) use effects::emit_bg;
@@ -69,10 +71,11 @@ pub use model::ModelSelection;
 pub(crate) use model::resolve_runtime_model;
 use model::{meta_to_selection, skills_state_with_trust, snapshot_trusted};
 use operations::CancelledTool;
+pub use outcome::AgentRunStatus;
 use outcome::StepOutcome;
 pub(crate) use outcome::{
-    GatedToolOutcome, MAX_PAUSE_CONTINUATIONS, SubagentOutcome, TurnOutcome, pause_limit_detail,
-    pause_limit_error,
+    AgentRunResult, GatedToolOutcome, MAX_PAUSE_CONTINUATIONS, SubagentOutcome, TurnOutcome,
+    new_agent_run_id, pause_limit_detail, pause_limit_error,
 };
 pub use pending::{
     PendingApprovals, PendingQuestions, drop_session_questions, reject_session_approvals,
@@ -111,6 +114,7 @@ pub struct Session {
     /// automatically falls back to full, self-healing)
     io_last_input: Vec<crate::model_io::ModelIoMessage>,
     turn_counter: u64,
+    run_turns: usize,
     tracker: ChangeTracker,
     state: crate::task::SessionToolState,
     /// Memory of "always allowed in this session": (tool name, subject) —
@@ -187,8 +191,8 @@ pub struct Session {
     /// Reminder state is persisted with the prompt snapshot so resume does not
     /// either duplicate old reminders or rewrite the messages that carried them.
     permissions_reminded: Option<(PermissionSettings, bool, String)>,
-    /// Only the profile description used by root tool schemas; subagent
-    /// spawning still resolves fresh profiles by name.
+    /// Profile description used by this agent's delegation tool schemas;
+    /// spawning still resolves the current profiles by name.
     profiles_summary: String,
     prompt_text: Option<String>,
     prompt_memory_enabled: Option<bool>,

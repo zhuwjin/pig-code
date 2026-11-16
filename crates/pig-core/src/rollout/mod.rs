@@ -14,9 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use pig_provider::{ChatMsg, ToolCallWire};
 
+mod conversation;
 pub(crate) mod jsonl;
 mod media;
 mod rebuild;
+
+pub(crate) use conversation::ConversationStore;
 
 /// Prefix of the marked user-role message that hands a compaction summary to
 /// the next model request. Replay uses it to distinguish a compaction handoff
@@ -191,6 +194,14 @@ pub enum ConversationKind {
     Subagent,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildContextMode {
+    #[default]
+    Fresh,
+    Fork,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -204,6 +215,16 @@ pub enum RolloutRecord {
         kind: ConversationKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Durable lower bound for this agent's depth below the root. Missing
+        /// on root sessions and child contexts written before depth persistence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegation_depth: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_mode: Option<ChildContextMode>,
+        /// Number of inherited message records before the fork notice and new
+        /// task. The copied records themselves remain the replay authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inherited_record_count: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -404,6 +425,9 @@ impl RolloutRecord {
             created_at: meta.created_at,
             kind: ConversationKind::Root,
             parent_id: None,
+            delegation_depth: None,
+            context_mode: None,
+            inherited_record_count: None,
             profile: None,
             description: None,
             provider: None,
@@ -419,6 +443,36 @@ impl RolloutRecord {
         profile: String,
         provider: String,
         model: String,
+        delegation_depth: u32,
+        created_at: u64,
+    ) -> Self {
+        Self::subagent_meta_with_context(
+            id,
+            parent_id,
+            cwd,
+            description,
+            profile,
+            provider,
+            model,
+            delegation_depth,
+            ChildContextMode::Fresh,
+            None,
+            created_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn subagent_meta_with_context(
+        id: String,
+        parent_id: String,
+        cwd: PathBuf,
+        description: String,
+        profile: String,
+        provider: String,
+        model: String,
+        delegation_depth: u32,
+        context_mode: ChildContextMode,
+        inherited_record_count: Option<usize>,
         created_at: u64,
     ) -> Self {
         Self::Meta {
@@ -428,6 +482,9 @@ impl RolloutRecord {
             created_at,
             kind: ConversationKind::Subagent,
             parent_id: Some(parent_id),
+            delegation_depth: Some(delegation_depth),
+            context_mode: Some(context_mode),
+            inherited_record_count,
             profile: Some(profile),
             description: Some(description),
             provider: Some(provider),
@@ -440,6 +497,8 @@ impl RolloutRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCardRecord {
     pub agent_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub profile: String,
     pub description: String,
     /// "{provider_name} · {model}" (may carry a reasoning-level suffix)
@@ -995,6 +1054,7 @@ mod tests {
     fn tool_call_agent_cards_roundtrip() {
         let card = |n: u32| AgentCardRecord {
             agent_id: format!("a1-{n}"),
+            run_id: None,
             profile: "explore".into(),
             description: format!("task {n}"),
             model: "p · m".into(),

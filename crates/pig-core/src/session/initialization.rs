@@ -128,6 +128,7 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         ),
         agent: Agent {
             id: parts.id,
+            run: None,
             cwd: parts.cwd,
             delegation_depth: 0,
             config: None,
@@ -139,6 +140,7 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         user_ixs: parts.user_ixs,
         io_last_input: Vec::new(),
         turn_counter: 0,
+        run_turns: 0,
         tracker: parts.tracker,
         always_allowed: Arc::new(Mutex::new(HashSet::new())),
         plan_enabled: false,

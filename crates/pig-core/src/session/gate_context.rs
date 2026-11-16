@@ -8,6 +8,10 @@ pub(crate) struct GateCtx<'a> {
     pub cwd: &'a Path,
     /// Canonical permission state for this turn (sandbox + approval + reviewer)
     pub permissions: PermissionSettings,
+    /// Root sessions may ask the user for a wider sandbox or credential grant.
+    /// A child's scope is fixed at launch; known ordinary approvals are still
+    /// shared through `always_allowed`, but new widening is refused here.
+    pub allow_scope_widening: bool,
     /// Input media capabilities of the model handling these calls; a tool
     /// result carrying an unsupported media kind is degraded to text.
     pub media: tool::MediaCapabilities,

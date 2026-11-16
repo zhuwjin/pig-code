@@ -109,6 +109,11 @@ fn pop_queue_head(entry: &mut SessionEntry) -> Option<PendingMessage> {
     pending.remove(index)
 }
 
+pub(super) struct StartTurnFailure {
+    pub message: PendingMessage,
+    pub error: CoreError,
+}
+
 /// Start a turn from one admitted message. Fallible by construction: the
 /// session must be idle (a stale held-queue resolution is the realistic race),
 /// and the message is returned intact on failure so the caller can persist it
@@ -120,7 +125,7 @@ pub(super) fn start_turn(
     config: &ResolvedModel,
     event_tx: &async_channel::Sender<Event>,
     turns: &mut FuturesUnordered<TurnFuture>,
-) -> Result<(), PendingMessage> {
+) -> Result<(), StartTurnFailure> {
     start_turn_inner(entry, session_id, message, config, false, event_tx, turns)
 }
 
@@ -133,10 +138,24 @@ pub(super) fn start_turn_inner(
     notification_only: bool,
     event_tx: &async_channel::Sender<Event>,
     turns: &mut FuturesUnordered<TurnFuture>,
-) -> Result<(), PendingMessage> {
+) -> Result<(), StartTurnFailure> {
     let Some(mut session) = entry.session.take() else {
-        return Err(message);
+        return Err(StartTurnFailure {
+            message,
+            error: CoreError::Internal {
+                detail: "The session is busy; the message stays queued.".to_string(),
+            },
+        });
     };
+    if !notification_only && let Some(store) = entry.state.task_store.clone() {
+        if let Err(error) =
+            crate::session::pending::claim_pending_execution(&store, &session_id, &message)
+        {
+            entry.session = Some(session);
+            return Err(StartTurnFailure { message, error });
+        }
+        entry.active_claim = Some(message.id.clone());
+    }
     // Enforce the single-source invariant before any resolution: the Session
     // and the entry share one `Arc<RuntimeConfig>`, so a refresh that happened
     // mid-turn is installed here (a trust change still goes through the one
@@ -159,7 +178,7 @@ pub(super) fn start_turn_inner(
     turns.push(Box::pin(async move {
         let outcome = session
             .run_turn(
-                message.text,
+                message.model_text(),
                 message.files,
                 message.images,
                 &config,
@@ -211,7 +230,7 @@ pub(super) fn start_queued_head(
         items,
     });
     persist_pending(store, session_id, &entry.pending);
-    if let Err(message) = start_turn(
+    if let Err(failure) = start_turn(
         entry,
         session_id.to_string(),
         item,
@@ -219,13 +238,14 @@ pub(super) fn start_queued_head(
         event_tx,
         turns,
     ) {
-        insert_queue_front(&mut entry.pending.lock().expect("pending lock"), message);
+        insert_queue_front(
+            &mut entry.pending.lock().expect("pending lock"),
+            failure.message,
+        );
         persist_pending(store, session_id, &entry.pending);
         let _ = event_tx.send_blocking(Event::Error {
             session_id: Some(session_id.to_string()),
-            error: CoreError::Internal {
-                detail: "The session was busy; the queued message stays queued.".to_string(),
-            },
+            error: failure.error,
             fatal: false,
         });
         return false;
@@ -312,6 +332,7 @@ impl Manager {
                     permissions,
                     steer,
                     held: false,
+                    recovered: false,
                 });
             let queue_items = queue_snapshot(&entry.pending);
             emit(
@@ -342,6 +363,7 @@ impl Manager {
             permissions,
             steer: false,
             held: false,
+            recovered: false,
         };
         // Paused queue + a new send: hold the message for the
         // confirmation flow (ZCode's held-queue disposition) —
@@ -371,7 +393,7 @@ impl Manager {
         }
         match resolve_entry(entry) {
             Ok(resolved) => {
-                if let Err(message) = start_turn(
+                if let Err(failure) = start_turn(
                     entry,
                     session_id.clone(),
                     message,
@@ -381,7 +403,10 @@ impl Manager {
                 ) {
                     // The message is never lost: it stays queued
                     // and persisted for the next idle boundary.
-                    push_queue_back(&mut entry.pending.lock().expect("pending lock"), message);
+                    push_queue_back(
+                        &mut entry.pending.lock().expect("pending lock"),
+                        failure.message,
+                    );
                     let items = queue_snapshot(&entry.pending);
                     emit(
                         &event_tx,
@@ -395,10 +420,7 @@ impl Manager {
                         &event_tx,
                         Event::Error {
                             session_id: Some(session_id),
-                            error: CoreError::Internal {
-                                detail: "The session was busy; the message was queued instead."
-                                    .to_string(),
-                            },
+                            error: failure.error,
                             fatal: false,
                         },
                     );
@@ -700,22 +722,18 @@ impl Manager {
                         item.steer = false;
                         item
                     };
-                    if let Err(message) =
+                    if let Err(failure) =
                         start_turn(entry, session_id.clone(), item, &resolved, &event_tx, turns)
                     {
                         insert_queue_front(
                             &mut entry.pending.lock().expect("pending lock"),
-                            message,
+                            failure.message,
                         );
                         emit(
                             &event_tx,
                             Event::Error {
                                 session_id: Some(session_id.clone()),
-                                error: CoreError::Internal {
-                                    detail:
-                                        "The session was busy; the queued message stays queued."
-                                            .to_string(),
-                                },
+                                error: failure.error,
                                 fatal: false,
                             },
                         );
@@ -841,7 +859,7 @@ impl Manager {
                                     reason: None,
                                 },
                             );
-                            if let Err(message) = start_turn(
+                            if let Err(failure) = start_turn(
                                 entry,
                                 session_id.clone(),
                                 held,
@@ -851,15 +869,16 @@ impl Manager {
                             ) {
                                 insert_queue_front(
                                     &mut entry.pending.lock().expect("pending lock"),
-                                    message,
+                                    failure.message,
                                 );
-                                emit(&event_tx, Event::Error {
-                                                    session_id: Some(session_id.clone()),
-                                                    error: CoreError::Internal {
-                                                        detail: "The session was busy; the held message stays queued.".to_string(),
-                                                    },
-                                                    fatal: false,
-                                                });
+                                emit(
+                                    &event_tx,
+                                    Event::Error {
+                                        session_id: Some(session_id.clone()),
+                                        error: failure.error,
+                                        fatal: false,
+                                    },
+                                );
                             }
                         }
                         Err(error) => {
@@ -962,6 +981,7 @@ mod tests {
             cwd: std::path::PathBuf::new(),
             runtime: None,
             cancel: None,
+            active_claim: None,
             retry: None,
             model_override: None,
             reasoning_level: None,

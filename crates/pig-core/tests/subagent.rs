@@ -163,6 +163,7 @@ fn seed_pdf_agent(data_dir: &Path, sid: &str, agent_id: &str, pdf: &[u8]) -> Pat
             "mock".into(),
             "mock-model".into(),
             1,
+            1,
         ),
         pig_core::rollout::RolloutRecord::System {
             text: "You are a subagent.".into(),
@@ -238,6 +239,7 @@ fn seed_image_agent(data_dir: &Path, sid: &str, agent_id: &str) -> PathBuf {
             "explore".into(),
             "mock".into(),
             "mock-model".into(),
+            1,
             1,
         ),
         pig_core::rollout::RolloutRecord::System {

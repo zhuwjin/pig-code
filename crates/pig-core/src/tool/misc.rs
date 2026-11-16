@@ -593,13 +593,14 @@ impl Tool for AgentTool {
 
     fn schema(&self) -> serde_json::Value {
         let description = format!(
-            "Launch a subagent to handle a task. The subagent runs independently with its own context — it cannot see any messages from this session, so the prompt must be self-contained (brief it like a colleague who just walked in: state the goal, what you already know, and exact file paths).\n\
+            "Launch a subagent to handle a task. The subagent runs independently with its own context — by default it cannot see any messages from this session, so the prompt must be self-contained (brief it like a colleague who just walked in: state the goal, what you already know, and exact file paths).\n\
              Benefit: the subagent's intermediate work (bulk file reads/searches) stays out of this context; you only receive its final conclusion.\n\
              - For lookups, give exact paths or commands; for investigations, give the question, not prescribed steps.\n\
              - Do not delegate trivial one-or-two-step tasks; while a subagent is running, do not redo its work in parallel, and do not abandon it midway to finish the job manually.\n\
              - To apply one task to many objects (fan-out of one template x N items), use AgentSwarm to run them concurrently in a single call.\n\
              - A subagent's result is visible only to you (the user cannot see it); relay it yourself when needed.\n\
              - run_in_background=true returns immediately (with a task_id); you will be notified on completion — **the full result is in the file the notification points to; read it with Read** — do not poll. Prefer resuming an existing subagent with resume over starting a fresh instance.\n\
+             - fork=true creates a new child with a snapshot of this session's current effective history; fork and resume are mutually exclusive.\n\
              Available subagent types (default when subagent_type is omitted: general-purpose):\n\
              {}",
             self.profiles_summary
@@ -616,7 +617,8 @@ impl Tool for AgentTool {
                         "prompt": { "type": "string", "description": "The complete self-contained task brief (the subagent cannot see any messages from this session)" },
                         "subagent_type": { "type": "string", "description": "Subagent type; defaults to general-purpose when omitted; mutually exclusive with resume" },
                         "run_in_background": { "type": "boolean", "description": "true returns immediately (with a task_id) and runs the subagent in the background; you will be notified on completion and the full result is in the file the notification points to (read it with Read)" },
-                        "resume": { "type": "string", "description": "An existing agent_id to continue in its context (mutually exclusive with subagent_type)" }
+                        "resume": { "type": "string", "description": "An existing agent_id to continue in its context (mutually exclusive with subagent_type)" },
+                        "fork": { "type": "boolean", "description": "true creates a new child seeded with the parent's current effective-history snapshot; mutually exclusive with resume" }
                     },
                     "required": ["description", "prompt"]
                 }

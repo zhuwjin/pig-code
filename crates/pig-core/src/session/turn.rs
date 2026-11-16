@@ -119,6 +119,7 @@ impl Session {
         notifications: super::runner::entry::NotificationMailbox,
         notification_only: bool,
     ) -> TurnOutcome {
+        self.begin_root_run();
         let cancel = control.cancel_token();
         // ---- SessionStart hooks (once per Session instance, at the first
         // turn; the turn's cancel token covers the run). Nothing to block at
@@ -179,7 +180,7 @@ impl Session {
                     tx,
                 );
                 // The turn never started: nothing failed, the queue may drain
-                return TurnOutcome::Completed;
+                return self.root_result(crate::session::AgentRunStatus::Completed);
             }
             self.hook_context_stash.extend(effects.additional_contexts);
         }
@@ -244,7 +245,7 @@ impl Session {
                 },
                 tx,
             );
-            return TurnOutcome::Failed;
+            return self.root_result(crate::session::AgentRunStatus::Failed);
         }
         let skills_state =
             skills_state_with_trust(&self.data_dir, self.trust.admits(&self.agent.cwd));
@@ -509,6 +510,7 @@ impl Session {
         // steer alone.
         let mut pause_pin: Option<usize> = None;
         loop {
+            self.run_turns = step + 1;
             // ---- Steer boundary: inject everything the pending list
             // collected during the previous step. The previous step's tool
             // results are all settled here, so a user message can never land
@@ -595,7 +597,7 @@ impl Session {
                         tx,
                     );
                     self.touch_index();
-                    return TurnOutcome::Completed;
+                    return self.root_result(crate::session::AgentRunStatus::Completed);
                 }
                 StepOutcome::Paused => {
                     if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
@@ -617,7 +619,7 @@ impl Session {
                         self.flush_turn_changes(tx);
                         self.sync_rollout();
                         self.report_rollout_failure(tx);
-                        return TurnOutcome::Failed;
+                        return self.root_result(crate::session::AgentRunStatus::Failed);
                     }
                     pause_continuations += 1;
                     pause_continuation = true;
@@ -646,9 +648,9 @@ impl Session {
                     self.sync_rollout();
                     self.report_rollout_failure(tx);
                     return if aborted {
-                        TurnOutcome::Aborted
+                        self.root_result(crate::session::AgentRunStatus::Cancelled)
                     } else {
-                        TurnOutcome::Failed
+                        self.root_result(crate::session::AgentRunStatus::Failed)
                     };
                 }
             }

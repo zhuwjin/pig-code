@@ -129,6 +129,7 @@ impl Manager {
                         cwd: meta.cwd.clone(),
                         runtime: entry_runtime,
                         cancel: None,
+                        active_claim: None,
                         retry: None,
                         model_override: selection.clone(),
                         reasoning_level: meta.reasoning_level.clone(),
@@ -361,6 +362,7 @@ impl Manager {
                         cwd: cwd.clone(),
                         runtime: entry_runtime,
                         cancel: None,
+                        active_claim: None,
                         retry: None,
                         model_override: selection.clone(),
                         reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
@@ -454,9 +456,30 @@ impl Manager {
                     // via the banner). Held items flatten into the
                     // queue lane too, so nothing is lost.
                     let restored = restore_pending(&store, &session_id);
-                    let has_user_queue = !restored.is_empty();
                     entry.queue_seq = entry.queue_seq.max(restored_queue_seq(&restored));
                     entry.pending.lock().expect("pending lock").extend(restored);
+                    match crate::session::pending::recovered_pending_execution(&store, &session_id)
+                    {
+                        Ok(Some(message)) => {
+                            entry.queue_seq = entry
+                                .queue_seq
+                                .max(restored_queue_seq(std::slice::from_ref(&message)));
+                            let mut pending = entry.pending.lock().expect("pending lock");
+                            if !pending.iter().any(|item| item.id == message.id) {
+                                pending.push_front(message);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => emit(
+                            &event_tx,
+                            Event::Error {
+                                session_id: Some(session_id.clone()),
+                                error,
+                                fatal: false,
+                            },
+                        ),
+                    }
+                    let has_user_queue = !entry.pending.lock().expect("pending lock").is_empty();
                     if has_user_queue {
                         let items = queue_snapshot(&entry.pending);
                         emit(

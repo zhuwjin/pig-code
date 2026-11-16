@@ -84,6 +84,21 @@ pub(crate) struct PendingMessage {
     /// and steer snapshots exclude them, and no drain may pop one until
     /// Op::ResolveHeldQueue decides its fate.
     pub held: bool,
+    /// This input came from a durable execution claim after a restart. The
+    /// queue displays the original text; the next run adds recovery guidance.
+    pub recovered: bool,
+}
+
+impl PendingMessage {
+    pub(crate) fn model_text(&self) -> String {
+        if !self.recovered {
+            return self.text.clone();
+        }
+        format!(
+            "The previous process ended before this request reached a durable terminal state. Continue from the saved history, inspect unknown tool outcomes instead of repeating completed side effects, and finish the original request below.\n\n{}",
+            self.text
+        )
+    }
 }
 
 /// Persisted form of one pending message (images ride as base64 — queue
@@ -98,12 +113,60 @@ pub(crate) struct PendingPersist {
     pub steer: bool,
     #[serde(default)]
     pub held: bool,
+    #[serde(default)]
+    pub recovered: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingImagePersist {
     pub bytes_base64: String,
     pub mime: String,
+}
+
+fn persistable(message: &PendingMessage) -> PendingPersist {
+    PendingPersist {
+        id: message.id.clone(),
+        text: message.text.clone(),
+        files: message.files.clone(),
+        images: message
+            .images
+            .iter()
+            .map(|image| PendingImagePersist {
+                bytes_base64: pig_utils::image::base64_encode(&image.bytes),
+                mime: image.mime.clone(),
+            })
+            .collect(),
+        permissions: message.permissions,
+        steer: message.steer,
+        held: message.held,
+        recovered: message.recovered,
+    }
+}
+
+fn restored_item(item: PendingPersist) -> PendingMessage {
+    let mut images = Vec::new();
+    for image in item.images {
+        match pig_utils::image::base64_decode(&image.bytes_base64) {
+            Ok(bytes) => images.push(pig_protocol::PendingImage {
+                bytes,
+                mime: image.mime,
+            }),
+            Err(error) => tracing::warn!(
+                %error,
+                "persisted queue image failed to decode; dropping this attachment"
+            ),
+        }
+    }
+    PendingMessage {
+        id: item.id,
+        text: item.text,
+        files: item.files,
+        images,
+        permissions: item.permissions,
+        steer: false,
+        held: false,
+        recovered: item.recovered,
+    }
 }
 
 /// Write the pending list to the store (empty list -> row deleted). Called
@@ -118,22 +181,7 @@ pub(crate) fn persist_pending(
         .lock()
         .expect("pending lock")
         .iter()
-        .map(|message| PendingPersist {
-            id: message.id.clone(),
-            text: message.text.clone(),
-            files: message.files.clone(),
-            images: message
-                .images
-                .iter()
-                .map(|image| PendingImagePersist {
-                    bytes_base64: pig_utils::image::base64_encode(&image.bytes),
-                    mime: image.mime.clone(),
-                })
-                .collect(),
-            permissions: message.permissions,
-            steer: message.steer,
-            held: message.held,
-        })
+        .map(persistable)
         .collect();
     let store = store.lock().expect("store lock");
     if items.is_empty() {
@@ -172,35 +220,49 @@ pub(crate) fn restore_pending(store: &Arc<Mutex<Store>>, session_id: &str) -> Ve
                 continue;
             }
         };
-        let mut images = Vec::new();
-        for image in item.images {
-            match pig_utils::image::base64_decode(&image.bytes_base64) {
-                Ok(bytes) => images.push(pig_protocol::PendingImage {
-                    bytes,
-                    mime: image.mime,
-                }),
-                // Degrade the corrupt attachment, keep the queued text: the
-                // user's message is still deliverable without the image.
-                Err(error) => tracing::warn!(
-                    session_id,
-                    %error,
-                    "persisted queue image failed to decode; dropping this attachment"
-                ),
-            }
-        }
-        restored.push(PendingMessage {
-            id: item.id,
-            text: item.text,
-            files: item.files,
-            images,
-            permissions: item.permissions,
-            steer: false,
-            // A restart has no live prompt owner: the held message flattens
-            // into the paused queue lane (nothing is lost).
-            held: false,
-        });
+        restored.push(restored_item(item));
     }
     restored
+}
+
+pub(crate) fn claim_pending_execution(
+    store: &Arc<Mutex<Store>>,
+    session_id: &str,
+    message: &PendingMessage,
+) -> Result<(), CoreError> {
+    let payload =
+        serde_json::to_string(&persistable(message)).map_err(|error| CoreError::Internal {
+            detail: format!("Failed to serialize execution input: {error}"),
+        })?;
+    store
+        .lock()
+        .expect("store lock")
+        .claim_execution(session_id, &message.id, &payload)
+}
+
+pub(crate) fn recovered_pending_execution(
+    store: &Arc<Mutex<Store>>,
+    session_id: &str,
+) -> Result<Option<PendingMessage>, CoreError> {
+    let claim = store
+        .lock()
+        .expect("store lock")
+        .execution_claim(session_id)?;
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
+    let item = serde_json::from_str::<PendingPersist>(&claim.payload).map_err(|error| {
+        CoreError::Internal {
+            detail: format!(
+                "Execution claim {} contains an invalid input payload: {error}",
+                claim.request_id
+            ),
+        }
+    })?;
+    let mut message = restored_item(item);
+    message.id = claim.request_id;
+    message.recovered = true;
+    Ok(Some(message))
 }
 
 /// Highest `qN` sequence among restored queue ids. Ids are minted as `q{n}`

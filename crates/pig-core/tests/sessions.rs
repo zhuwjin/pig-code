@@ -1700,3 +1700,91 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
     let _ = std::fs::remove_dir_all(&leak_dir);
     agent.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_claim_recovers_paused_input_and_clears_after_completion() {
+    let (config_path, cwd, data_dir) = setup("execution-claim-recovery");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.shutdown();
+
+    let store = pig_core::store::Store::open(&data_dir).expect("store");
+    let payload = serde_json::to_string(&serde_json::json!({
+        "id": "q41",
+        "text": "Read the mock file and summarize it",
+        "files": [],
+        "images": [],
+        "permissions": ExecMode::Auto.permissions(),
+        "steer": false,
+        "held": false,
+    }))
+    .expect("claim payload");
+    store
+        .claim_execution(&session_id, "q41", &payload)
+        .expect("durable claim");
+
+    let agent2 = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    let events = agent2.events.clone();
+    agent2
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let opened = recv_until(&events, Duration::from_secs(15), |event| {
+        matches!(
+            event,
+            Event::QueueDrainChanged {
+                reason: Some(pig_protocol::QueuePauseReason::Restarted),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        opened.iter().any(|event| matches!(
+            event,
+            Event::QueueChanged { items, .. }
+                if items.iter().any(|item| item.text == "Read the mock file and summarize it")
+        )),
+        "the claimed input must return to the paused queue: {opened:#?}"
+    );
+
+    agent2
+        .ops
+        .send(Op::ResumeQueue {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    recv_until(&events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnComplete { .. })
+    })
+    .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while store
+        .execution_claim(&session_id)
+        .expect("claim read")
+        .is_some()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "claim was not cleared"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let rollout = std::fs::read_to_string(
+        data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .expect("recovered rollout");
+    assert!(rollout.contains("The previous process ended before this request"));
+    assert!(rollout.contains("Read the mock file and summarize it"));
+    agent2.shutdown();
+}

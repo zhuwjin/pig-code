@@ -19,6 +19,7 @@ pub(crate) struct SubagentState {
     /// The root conversation id this child belongs to (events, store rows and
     /// approval dialogs). A child's own identity is `Session::agent.id`.
     pub(in crate::session) parent_session_id: String,
+    pub(in crate::session) parent_agent_id: String,
     pub(in crate::session) profile: crate::agent::AgentProfile,
     pub(in crate::session) jsonl: PathBuf,
     pub(in crate::session) max_turns: usize,

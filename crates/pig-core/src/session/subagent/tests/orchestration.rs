@@ -179,18 +179,14 @@ fn child_context_write_failure_is_sticky_and_carries_resume_guidance() {
     assert_eq!(second, first, "later appends return the same failure");
 
     let result = child_persist_stop(&drive, &first, 2, (1, 2, 3));
-    assert!(result.is_error && !result.cancelled && !result.completed);
-    assert!(
-        result.result_text.contains("Subagent a1-1"),
-        "{}",
-        result.result_text
-    );
+    assert!(result.is_error() && !result.is_cancelled() && !result.is_completed());
+    assert!(result.text().contains("Subagent a1-1"), "{}", result.text());
     assert!(
         result
-            .result_text
+            .text()
             .contains("Agent(resume=\"a1-1\", prompt=\"...\")"),
         "{}",
-        result.result_text
+        result.text()
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -371,11 +367,13 @@ async fn managed_driver_catches_panic_and_settles_registry() {
         async { panic!("driver boom") },
     )
     .await;
-    assert!(outcome.result.is_error && !outcome.result.cancelled);
+    assert!(outcome.result.is_error() && !outcome.result.is_cancelled());
+    assert_eq!(outcome.result.agent_id.as_deref(), Some("a1-1"));
+    assert!(outcome.result.run_id.is_some());
     assert!(
-        outcome.result.result_text.contains("panicked: driver boom"),
+        outcome.result.text().contains("panicked: driver boom"),
         "{}",
-        outcome.result.result_text
+        outcome.result.text()
     );
     let status = state
         .tasks
@@ -435,24 +433,19 @@ async fn background_driver_panic_before_run_notifies_once() {
         life,
         &cancel,
         async { panic!("acquire boom") },
-        std::future::ready(SubagentResult {
-            status_line: "completed (1 steps)".into(),
-            result_text: "done".into(),
-            turns: 1,
-            completed: true,
-            is_error: false,
-            usage: (0, 0, 0),
-            cancelled: false,
-        }),
+        std::future::ready(SubagentResult::child(
+            crate::session::AgentRunStatus::Completed,
+            "completed".into(),
+            "done".into(),
+            1,
+            (0, 0, 0),
+        )),
     )
     .await;
     assert!(
-        outcome
-            .result
-            .result_text
-            .contains("panicked: acquire boom"),
+        outcome.result.text().contains("panicked: acquire boom"),
         "{}",
-        outcome.result.result_text
+        outcome.result.text()
     );
     let status = state
         .tasks
@@ -508,7 +501,7 @@ async fn queued_cancellation_settles_as_killed_not_running() {
         std::future::ready(cancelled_subagent_result()),
     )
     .await;
-    assert!(outcome.result.cancelled);
+    assert!(outcome.result.is_cancelled());
     let (status, ended_at) = {
         let tasks = state.tasks.lock().expect("task registry lock");
         let entry = tasks
@@ -586,7 +579,7 @@ async fn swarm_beyond_slot_count_cancellation_settles_every_child() {
     let joined = futures_util::future::join_all(handles).await;
     for joined in joined {
         let (outcome, task_id) = joined.expect("child task");
-        assert!(outcome.result.cancelled);
+        assert!(outcome.result.is_cancelled());
         let status = state
             .tasks
             .lock()
@@ -630,18 +623,16 @@ async fn child_termination_drops_only_its_approvals() {
         life,
         &cancel,
         std::future::ready(Some(SubagentSlot::Test)),
-        std::future::ready(SubagentResult {
-            status_line: "failed: test".into(),
-            result_text: "test".into(),
-            turns: 1,
-            completed: false,
-            is_error: true,
-            usage: (0, 0, 0),
-            cancelled: false,
-        }),
+        std::future::ready(SubagentResult::child(
+            crate::session::AgentRunStatus::Failed,
+            "test".into(),
+            "test".into(),
+            1,
+            (0, 0, 0),
+        )),
     )
     .await;
-    assert!(outcome.result.is_error);
+    assert!(outcome.result.is_error());
     let pending = pending.lock().expect("pending lock");
     assert!(
         !pending.contains_key(&own_id),
@@ -655,15 +646,13 @@ async fn child_termination_drops_only_its_approvals() {
 
 #[test]
 fn failure_receipts_keep_agent_id_and_resume_guidance() {
-    let result = SubagentResult {
-        status_line: "failed: reached the maximum turn count 20".into(),
-        result_text: "Reached the maximum turn count (20). partial".into(),
-        turns: 20,
-        completed: false,
-        is_error: true,
-        usage: (1, 2, 3),
-        cancelled: false,
-    };
+    let result = SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        "reached the maximum turn count 20".into(),
+        "Reached the maximum turn count (20). partial".into(),
+        20,
+        (1, 2, 3),
+    );
     let note = subagent_receipt("a7-7", "explore", &result);
     assert!(note.contains("agent_id: a7-7"), "{note}");
     assert!(note.contains("status: failed"), "{note}");
@@ -673,15 +662,13 @@ fn failure_receipts_keep_agent_id_and_resume_guidance() {
     );
     assert!(note.contains("Reached the maximum turn count"), "{note}");
 
-    let no_text = SubagentResult {
-        status_line: "failed: subagent produced no final text".into(),
-        result_text: "The subagent produced no final text".into(),
-        turns: 3,
-        completed: true,
-        is_error: true,
-        usage: (0, 0, 0),
-        cancelled: false,
-    };
+    let no_text = SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        "subagent produced no final text".into(),
+        "The subagent produced no final text".into(),
+        3,
+        (0, 0, 0),
+    );
     assert!(
         subagent_receipt("a7-7", "explore", &no_text).contains("status: failed"),
         "an error result is failed even when the loop reached a natural stop"
@@ -700,15 +687,13 @@ fn max_turn_background_notification_is_failed_with_resume_guidance() {
         drive.agent.id.clone(),
     );
     let mut life = test_lifecycle(&state, &pending, &mut drive, Some(task_id.clone()));
-    let result = SubagentResult {
-        status_line: "failed: reached the maximum turn count 20".into(),
-        result_text: "Reached the maximum turn count (20). partial".into(),
-        turns: 20,
-        completed: false,
-        is_error: true,
-        usage: (0, 0, 0),
-        cancelled: false,
-    };
+    let result = SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        "reached the maximum turn count 20".into(),
+        "Reached the maximum turn count (20). partial".into(),
+        20,
+        (0, 0, 0),
+    );
     life.settle(&result);
     let tasks = state.tasks.lock().expect("task registry lock");
     let entry = tasks
@@ -723,4 +708,210 @@ fn max_turn_background_notification_is_failed_with_resume_guidance() {
         "{}",
         notification.body
     );
+}
+
+#[tokio::test]
+async fn catalog_preserves_root_and_child_run_identities_across_resume() {
+    let (mut session, parent_model, root, _log, runtime) =
+        compaction_test_session("catalog", 128_000, 8_192);
+    session.begin_root_run();
+    session.run_turns = 2;
+    session.turn_input = 7;
+    session.turn_output = 3;
+    let first_root = session.root_result(crate::session::AgentRunStatus::Completed);
+    assert_eq!(
+        first_root.agent_id.as_deref(),
+        Some(session.agent.id.as_str())
+    );
+    assert_eq!(first_root.turns, 2);
+    assert_eq!(first_root.usage, (7, 0, 3));
+    let first_root_id = first_root.run_id.clone().expect("root run id");
+    session.begin_root_run();
+    let second_root = session.root_result(crate::session::AgentRunStatus::Completed);
+    assert_ne!(second_root.run_id.as_deref(), Some(first_root_id.as_str()));
+
+    let profile = crate::agent::AgentProfile {
+        name: "explore".into(),
+        description: "catalog test".into(),
+        tools: None,
+        model: None,
+        thought_level: None,
+        max_turns: None,
+        inject_agents_md: true,
+        system_prompt: "test child".into(),
+        source: crate::agent::AgentSource::BuiltIn,
+    };
+    let prep = crate::agent::prepare_fresh_child(
+        &crate::agent::ChildPrepCtx {
+            cwd: &session.agent.cwd,
+            data_dir: &session.data_dir,
+            git_snapshot: None,
+            skills_prompt: "",
+            agents_prompt: "",
+            runtime: Some(runtime.as_ref()),
+            parent_config: &parent_model,
+            session_id: &session.agent.id,
+            parent_agent_id: &session.agent.id,
+            parent_delegation_depth: 0,
+            max_delegation_depth: 1,
+            parent_permissions: session.permissions,
+            parent_history: &[],
+            profiles_summary: "",
+            state: &session.state,
+            mcp: None,
+            plugin_tools: session.plugin_tools.clone(),
+        },
+        profile.clone(),
+        parent_model.clone(),
+        "Finish the catalog test",
+        "catalog child",
+        &mut session.agent_seq,
+    )
+    .expect("fresh child");
+    let agent_id = prep.agent_id.clone();
+    let first_run_id = prep.run_id.clone();
+    let task_id = crate::task::register_agent_run_queued(
+        &session.state,
+        format!("Subagent explore: {}", prep.description),
+        CancellationToken::new(),
+        prep.run_metadata(),
+        true,
+    );
+    let mut child = Session::new_subagent(
+        prep,
+        &session,
+        ProgressSink::Background {
+            task_id: task_id.clone(),
+        },
+        SubagentMode::Background,
+    );
+    let writer = child
+        .subagent
+        .as_mut()
+        .expect("child")
+        .take_writer()
+        .expect("writer");
+    let (tx, rx) = async_channel::unbounded();
+    let mut life = ChildLifecycle::new(
+        &session.state,
+        &test_pending(),
+        &session.agent.id,
+        tx.clone(),
+        &child,
+        writer,
+        Some(task_id),
+    );
+    let first = child
+        .run_subagent_task(&tx, &CancellationToken::new())
+        .await;
+    assert_eq!(first.status, crate::session::AgentRunStatus::Completed);
+    assert_eq!(first.agent_id.as_deref(), Some(agent_id.as_str()));
+    assert_eq!(first.run_id.as_deref(), Some(first_run_id.as_str()));
+    assert!(
+        first
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.path.as_ref())
+            .is_some()
+    );
+    life.settle(&first);
+
+    let resume = crate::agent::prepare_resume_child(
+        &crate::agent::ChildPrepCtx {
+            cwd: &session.agent.cwd,
+            data_dir: &session.data_dir,
+            git_snapshot: None,
+            skills_prompt: "",
+            agents_prompt: "",
+            runtime: Some(runtime.as_ref()),
+            parent_config: &parent_model,
+            session_id: &session.agent.id,
+            parent_agent_id: &session.agent.id,
+            parent_delegation_depth: 0,
+            max_delegation_depth: 1,
+            parent_permissions: session.permissions,
+            parent_history: &[],
+            profiles_summary: "",
+            state: &session.state,
+            mcp: None,
+            plugin_tools: session.plugin_tools.clone(),
+        },
+        &[profile],
+        &agent_id,
+        "Finish the resumed catalog test",
+        "catalog child resumed",
+    )
+    .expect("resume child");
+    assert_eq!(resume.agent_id, agent_id);
+    assert_ne!(resume.run_id, first_run_id);
+    let second_run_id = resume.run_id.clone();
+    let task_id = crate::task::register_agent_run_queued(
+        &session.state,
+        "Subagent explore: catalog child resumed".into(),
+        CancellationToken::new(),
+        resume.run_metadata(),
+        true,
+    );
+    let mut child = Session::new_subagent(
+        resume,
+        &session,
+        ProgressSink::Background {
+            task_id: task_id.clone(),
+        },
+        SubagentMode::Background,
+    );
+    let writer = child
+        .subagent
+        .as_mut()
+        .expect("child")
+        .take_writer()
+        .expect("writer");
+    let mut life = ChildLifecycle::new(
+        &session.state,
+        &test_pending(),
+        &session.agent.id,
+        tx.clone(),
+        &child,
+        writer,
+        Some(task_id),
+    );
+    let second = child
+        .run_subagent_task(&tx, &CancellationToken::new())
+        .await;
+    assert_eq!(second.status, crate::session::AgentRunStatus::Completed);
+    life.settle(&second);
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+            event,
+            Event::ConversationStatus {
+                run_id: Some(id),
+                ..
+            } if id == second_run_id
+        ))
+    );
+
+    let catalog = session.agent_catalog();
+    assert_eq!(catalog.len(), 3);
+    assert_eq!(catalog[0].agent_id, session.agent.id);
+    assert_eq!(catalog[0].run_id, second_root.run_id);
+    assert_eq!(catalog[0].profile, "main");
+    assert!(catalog[0].record_path.is_some());
+    for run_id in [first_run_id, second_run_id] {
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.run_id.as_deref() == Some(run_id.as_str()))
+            .expect("child catalog entry");
+        assert_eq!(entry.agent_id, agent_id);
+        assert_eq!(entry.parent_id.as_deref(), Some(session.agent.id.as_str()));
+        assert_eq!(entry.depth, 1);
+        assert_eq!(entry.profile, "explore");
+        assert_eq!(
+            entry.status,
+            Some(crate::session::AgentRunStatus::Completed)
+        );
+        assert!(entry.turns > 0);
+        assert!(entry.record_path.is_some());
+        assert!(entry.result_path.is_some());
+    }
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -297,6 +297,12 @@ mod tests {
             runtime: None,
             parent_config: parent,
             session_id: "s-test",
+            parent_agent_id: "s-test",
+            parent_delegation_depth: 0,
+            max_delegation_depth: 1,
+            parent_permissions: pig_protocol::PermissionSettings::default(),
+            parent_history: &[],
+            profiles_summary: "",
             state,
             mcp: None,
             plugin_tools: crate::plugins::PluginToolset::new(
@@ -344,9 +350,9 @@ mod tests {
                 panic!("item subtasks should all be Ready");
             };
             agent_ids.push(prep.agent_id.clone());
-            assert_eq!(prep.profile.name, "general-purpose");
+            assert_eq!(prep.policy.profile.name, "general-purpose");
             assert_eq!(
-                prep.child_config.model, "parent-model",
+                prep.policy.model.model, "parent-model",
                 "inherits parent model"
             );
             assert_eq!(prep.history.len(), 2, "system + user");
@@ -372,9 +378,168 @@ mod tests {
             // JSONL persisted: meta line + two messages, readable back
             let (meta, history) = read_agent(&prep.jsonl).expect("persisted context reads back");
             assert_eq!(meta.profile, "general-purpose");
+            assert_eq!(meta.parent_session_id.as_deref(), Some("s-test"));
+            assert_eq!(meta.delegation_depth, Some(1));
             assert_eq!(history.len(), 2);
         }
         assert_ne!(agent_ids[0], agent_ids[1], "agent_id must be unique");
+    }
+
+    #[test]
+    fn prepare_nested_delegation_respects_depth_and_profile() {
+        let tmp = TempDir::new("nested-depth");
+        let state = crate::task::SessionToolState::for_test();
+        let parent = parent_model();
+        let plan = crate::tool::parse_swarm_args(&serde_json::json!({
+            "prompt_template": "Review {{item}}",
+            "items": ["a.rs", "b.rs"]
+        }))
+        .expect("valid args");
+        let mut ctx = prep_ctx(&tmp, &state, &parent);
+        ctx.max_delegation_depth = 2;
+        ctx.parent_permissions = pig_protocol::ExecMode::Full.permissions();
+        let mut seq = 0u64;
+
+        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("depth one child");
+        let SwarmPrep::Ready(prep) = &preps[0] else {
+            panic!("child should be Ready");
+        };
+        assert_eq!(prep.policy.delegation_depth, 1);
+        assert_eq!(
+            prep.policy.permissions,
+            pig_protocol::ExecMode::Full.permissions(),
+            "the policy carries the parent's activation-time permission snapshot"
+        );
+        let names: Vec<&str> = prep.tools.iter().map(|tool| tool.name()).collect();
+        for expected in ["Agent", "AgentSwarm", "SendMessage"] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+
+        ctx.parent_delegation_depth = 1;
+        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("depth two child");
+        let SwarmPrep::Ready(prep) = &preps[0] else {
+            panic!("child should be Ready");
+        };
+        assert_eq!(prep.policy.delegation_depth, 2);
+        assert!(
+            !prep.tools.iter().any(|tool| tool.name() == "Agent"),
+            "the depth cap removes further delegation"
+        );
+
+        ctx.max_delegation_depth = 1;
+        let error = prepare_swarm_children(&ctx, &plan, &mut seq)
+            .err()
+            .expect("nested child above the cap is rejected");
+        assert!(error.contains("Delegation depth 2"), "{error}");
+        assert!(error.contains("max_delegation_depth=1"), "{error}");
+
+        ctx.parent_delegation_depth = 0;
+        ctx.max_delegation_depth = 2;
+        let plan = crate::tool::parse_swarm_args(&serde_json::json!({
+            "prompt_template": "Investigate {{item}}",
+            "items": ["a.rs", "b.rs"],
+            "subagent_type": "explore"
+        }))
+        .expect("explore args");
+        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).expect("read-only child");
+        let SwarmPrep::Ready(prep) = &preps[0] else {
+            panic!("child should be Ready");
+        };
+        assert!(
+            !prep.tools.iter().any(|tool| tool.name() == "Agent"),
+            "a read-only profile cannot acquire delegation through the global depth setting"
+        );
+    }
+
+    #[test]
+    fn prepare_fork_copies_an_independent_replayable_snapshot() {
+        let tmp = TempDir::new("fork-context");
+        let state = crate::task::SessionToolState::for_test();
+        let parent = parent_model();
+        let profiles = load_profiles_with_trust(&tmp.0, &tmp.0, &WorkspaceTrust::untrusted(&tmp.0));
+        let profile = find_profile(&profiles, "general-purpose")
+            .expect("general profile")
+            .clone();
+        let answered = pig_provider::ToolCall {
+            id: "call-answered".into(),
+            name: "Read".into(),
+            arguments: "{\"path\":\"old.txt\"}".into(),
+        };
+        let pending = pig_provider::ToolCall {
+            id: "call-pending".into(),
+            name: "Agent".into(),
+            arguments: "{}".into(),
+        };
+        let parent_history = vec![
+            ChatMsg::system("parent system".into()),
+            ChatMsg::user("inherited request".into()),
+            ChatMsg::assistant(String::new(), vec![answered], None),
+            ChatMsg::tool_result("call-answered", "old result".to_string()),
+            ChatMsg::assistant("current parent work".into(), vec![pending], None),
+        ];
+        let mut ctx = prep_ctx(&tmp, &state, &parent);
+        ctx.parent_history = &parent_history;
+        let mut seq = 0u64;
+        let prep = prepare_fork_child(
+            &ctx,
+            profile,
+            parent.clone(),
+            "new child task",
+            "fork child",
+            &mut seq,
+        )
+        .expect("fork preparation");
+        assert_eq!(
+            prep.policy.context_mode,
+            crate::rollout::ChildContextMode::Fork
+        );
+        assert_eq!(prep.policy.inherited_record_count, Some(4));
+        assert_eq!(prep.history.len(), 7);
+        assert_ne!(prep.history[0].content.as_deref(), Some("parent system"));
+        assert!(
+            prep.history[1]
+                .content
+                .as_deref()
+                .is_some_and(|text| text == "inherited request")
+        );
+        assert!(
+            prep.history[4]
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty()),
+            "the parent's unfinished call is not replayed into the child"
+        );
+        assert_eq!(prep.history[5].role, "user");
+        assert_eq!(prep.history[6].content.as_deref(), Some("new child task"));
+
+        let (meta, history) = read_agent(&prep.jsonl).expect("read fork context");
+        assert_eq!(meta.context_mode, crate::rollout::ChildContextMode::Fork);
+        assert_eq!(meta.inherited_record_count, Some(4));
+        assert_eq!(history.len(), 7, "the copied prefix replays in full");
+        let jsonl = prep.jsonl.clone();
+        drop(prep);
+        let resumed = prepare_resume_child(
+            &ctx,
+            &profiles,
+            &meta.agent_id,
+            "continue fork",
+            "fork child",
+        )
+        .expect("resume fork");
+        assert_eq!(
+            resumed.policy.context_mode,
+            crate::rollout::ChildContextMode::Fork
+        );
+        assert_eq!(resumed.policy.inherited_record_count, Some(4));
+        assert_eq!(
+            resumed
+                .history
+                .last()
+                .and_then(|message| message.content.as_deref()),
+            Some("continue fork")
+        );
+        let (_, persisted) = read_agent(&jsonl).expect("read resumed fork");
+        assert_eq!(persisted.len(), 8, "resume appends only to the child JSONL");
     }
 
     #[test]
@@ -421,7 +586,7 @@ mod tests {
         };
         let names: Vec<&str> = prep.tools.iter().map(|t| t.name()).collect();
         // general-purpose (full-tool profile): inherits all connected MCP tools, schemas in sync
-        assert!(prep.mcp_inherits_all);
+        assert!(prep.policy.mcp_inherits_all);
         assert!(names.contains(&"mcp__srv__read"), "{names:?}");
         assert!(names.contains(&"mcp__srv__write"), "{names:?}");
         let schema_names: Vec<&str> = prep
@@ -446,7 +611,7 @@ mod tests {
             panic!("should be Ready");
         };
         let names: Vec<&str> = prep.tools.iter().map(|t| t.name()).collect();
-        assert!(!prep.mcp_inherits_all);
+        assert!(!prep.policy.mcp_inherits_all);
         assert!(names.contains(&"mcp__srv__read"), "{names:?}");
         assert!(!names.contains(&"mcp__srv__write"), "{names:?}");
     }
@@ -551,7 +716,7 @@ mod tests {
         let SwarmPrep::Ready(untrusted) = &untrusted[0] else {
             panic!("should be Ready");
         };
-        assert!(!untrusted.trusted);
+        assert!(!untrusted.policy.trusted);
         let (output, is_error) = run_swarm_skill(untrusted).await;
         assert!(
             is_error,
@@ -577,7 +742,7 @@ mod tests {
         let SwarmPrep::Ready(trusted) = &trusted[0] else {
             panic!("should be Ready");
         };
-        assert!(trusted.trusted);
+        assert!(trusted.policy.trusted);
         let (output, is_error) = run_swarm_skill(trusted).await;
         assert!(!is_error, "a trusted project skill must load: {output}");
         assert!(output.contains("PROJECT_SKILL_BODY"), "{output}");
@@ -649,7 +814,7 @@ mod tests {
         let SwarmPrep::Ready(prep) = &preps[0] else {
             panic!("trusted project profile should be Ready");
         };
-        assert_eq!(prep.profile.name, "project-agent");
+        assert_eq!(prep.policy.profile.name, "project-agent");
     }
 
     #[test]
@@ -688,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_resume_appends_prompt() {
+    fn prepare_resume_preserves_depth_and_enforces_limit() {
         let tmp = TempDir::new("resume");
         let state = crate::task::SessionToolState::for_test();
         let parent = parent_model();
@@ -706,6 +871,7 @@ mod tests {
                 "general-purpose".into(),
                 "p".into(),
                 "m".into(),
+                2,
                 1,
             ),
         )
@@ -718,13 +884,18 @@ mod tests {
         }))
         .expect("pure resume");
         let mut seq = 0u64;
-        let preps =
-            prepare_swarm_children(&prep_ctx(&tmp, &state, &parent), &plan, &mut seq).unwrap();
+        let mut ctx = prep_ctx(&tmp, &state, &parent);
+        ctx.max_delegation_depth = 2;
+        let preps = prepare_swarm_children(&ctx, &plan, &mut seq).unwrap();
         assert_eq!(seq, 0, "resume consumes no seq number");
         let [SwarmPrep::Ready(prep)] = preps.as_slice() else {
             panic!("single resume should be Ready");
         };
         assert_eq!(prep.agent_id, "a9-1", "resume reuses the original agent_id");
+        assert_eq!(
+            prep.policy.delegation_depth, 2,
+            "persisted depth is a monotonic lower bound, not parent depth plus one"
+        );
         assert_eq!(prep.history.len(), 2, "old user + new user");
         assert_eq!(
             prep.history[1].content.as_deref(),
@@ -733,6 +904,20 @@ mod tests {
         );
         let (_, history) = read_agent(&prep.jsonl).unwrap();
         assert_eq!(history.len(), 2, "appended line persisted");
+
+        drop(preps);
+        ctx.max_delegation_depth = 1;
+        let rejected = prepare_swarm_children(&ctx, &plan, &mut seq).unwrap();
+        let SwarmPrep::Failed { error, .. } = &rejected[0] else {
+            panic!("a persisted depth above the current limit must be rejected");
+        };
+        assert!(error.contains("Delegation depth 2"), "{error}");
+        let (_, history) = read_agent(&path).unwrap();
+        assert_eq!(
+            history.len(),
+            2,
+            "a refused resume does not append another prompt"
+        );
     }
 
     #[test]
@@ -753,6 +938,7 @@ mod tests {
                 "general-purpose".into(),
                 "p".into(),
                 "m".into(),
+                1,
                 1,
             ),
         )

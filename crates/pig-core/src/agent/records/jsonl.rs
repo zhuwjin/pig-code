@@ -4,8 +4,9 @@ use crate::rollout::RolloutRecord;
 
 /// Append one canonical conversation record to a subagent context JSONL.
 pub fn append_agent_conversation_record(path: &Path, record: &RolloutRecord) -> Result<(), String> {
-    let line = serde_json::to_value(record).map_err(|error| error.to_string())?;
-    append_agent_record(path, &line)
+    let mut store = super::AgentConversationStore::new(path);
+    crate::rollout::ConversationStore::append(&mut store, record)
+        .map_err(|error| pig_provider::core_error_en(&error))
 }
 
 /// Append one raw JSONL line to the subagent context; creates

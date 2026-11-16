@@ -35,6 +35,16 @@ const MAX_TASK_OUTPUT: usize = 64 * 1024;
 /// Number of tail characters for output_tail in panel snapshots.
 const SNAPSHOT_TAIL_CHARS: usize = 4000;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRunMetadata {
+    pub agent_id: String,
+    pub run_id: String,
+    pub parent_agent_id: String,
+    pub delegation_depth: u32,
+    pub profile: String,
+    pub usage: (u64, u64, u64),
+}
+
 pub struct TaskEntry {
     pub id: String,
     pub kind: TaskKind,
@@ -52,6 +62,7 @@ pub struct TaskEntry {
     pub cancel: Option<tokio_util::sync::CancellationToken>,
     /// agent_id of subagent tasks (always None for shell commands); used for resume-while-running conflict detection
     pub agent_id: Option<String>,
+    pub run: Option<AgentRunMetadata>,
     /// The agent that spawned this task; None for the root session. A child's
     /// background task must not wake the parent.
     pub owner_agent_id: Option<String>,
@@ -97,6 +108,7 @@ impl TaskEntry {
             result_path: self.result_path.clone(),
             turns: self.turns,
             model: self.model.clone(),
+            run: self.run.clone(),
             terminal_notification_suppressed: self.terminal_notification_suppressed,
         }
     }
@@ -594,6 +606,7 @@ impl TaskRegistry {
                 spill: summary.spill_path.map(spill::Spill::restored),
                 cancel: None,
                 agent_id: summary.agent_id,
+                run: task.run,
                 owner_agent_id: None,
                 record_path: task.record_path,
                 result_path: task.result_path,
@@ -666,7 +679,15 @@ pub fn register_agent_task(
     cancel: tokio_util::sync::CancellationToken,
     agent_id: String,
 ) -> String {
-    register_agent_task_with_status(state, command, cancel, agent_id, TaskStatus::Running)
+    register_agent_task_with_status(
+        state,
+        command,
+        cancel,
+        agent_id,
+        TaskStatus::Running,
+        None,
+        false,
+    )
 }
 
 fn register_agent_task_with_status(
@@ -675,6 +696,8 @@ fn register_agent_task_with_status(
     cancel: tokio_util::sync::CancellationToken,
     agent_id: String,
     status: TaskStatus,
+    run: Option<AgentRunMetadata>,
+    terminal_notification_suppressed: bool,
 ) -> String {
     let id = {
         let mut tasks = state.tasks.lock().expect("task registry lock");
@@ -693,12 +716,13 @@ fn register_agent_task_with_status(
             spill: None,
             cancel: Some(cancel),
             agent_id: Some(agent_id),
+            run,
             owner_agent_id: state.owner_agent_id.clone(),
             record_path: None,
             result_path: None,
             turns: None,
             model: None,
-            terminal_notification_suppressed: false,
+            terminal_notification_suppressed,
             foreground: false,
         });
         id
@@ -751,7 +775,33 @@ pub fn register_agent_task_queued(
     cancel: tokio_util::sync::CancellationToken,
     agent_id: String,
 ) -> String {
-    register_agent_task_with_status(state, command, cancel, agent_id, TaskStatus::Queued)
+    register_agent_task_with_status(
+        state,
+        command,
+        cancel,
+        agent_id,
+        TaskStatus::Queued,
+        None,
+        false,
+    )
+}
+
+pub fn register_agent_run_queued(
+    state: &SessionToolState,
+    command: String,
+    cancel: tokio_util::sync::CancellationToken,
+    run: AgentRunMetadata,
+    background: bool,
+) -> String {
+    register_agent_task_with_status(
+        state,
+        command,
+        cancel,
+        run.agent_id.clone(),
+        TaskStatus::Queued,
+        Some(run),
+        !background,
+    )
 }
 
 /// Concurrency slot acquired: move the task to Running and refresh the panel.

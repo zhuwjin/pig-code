@@ -4,6 +4,7 @@ use pig_provider::ChatMsg;
 use crate::task::{AgentWriterGuard, SessionToolState};
 
 mod compact;
+mod conversation;
 mod display;
 mod jsonl;
 mod media;
@@ -12,6 +13,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use conversation::AgentConversationStore;
 pub(crate) use display::display_stored_items;
 pub(crate) use display::project_display_items_with_edits;
 #[allow(unused_imports)]
@@ -23,6 +25,7 @@ pub(crate) use media::fill_document_token_estimates;
 pub(crate) use media::project_history_media;
 pub use media::{append_agent_message, append_agent_message_meta, append_agent_tool_result};
 pub(crate) use store::read_agent_stored;
+pub(crate) use store::reconcile_tool_results;
 pub use store::{AgentMeta, read_agent};
 
 /// Display-only fields of a canonical message record (timing and the edit a tool made).

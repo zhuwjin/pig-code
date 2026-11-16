@@ -72,7 +72,10 @@ fn sources_path(data_dir: &Path) -> PathBuf {
 }
 
 fn root_path(data_dir: &Path, id: &str) -> PathBuf {
-    data_dir.join("plugin-marketplaces").join(id).join("root.pub")
+    data_dir
+        .join("plugin-marketplaces")
+        .join(id)
+        .join("root.pub")
 }
 
 fn read_custom_sources(data_dir: &Path) -> Result<Vec<MarketplaceSource>, String> {
@@ -80,7 +83,12 @@ fn read_custom_sources(data_dir: &Path) -> Result<Vec<MarketplaceSource>, String
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("read plugin marketplaces {}: {error}", path.display())),
+        Err(error) => {
+            return Err(format!(
+                "read plugin marketplaces {}: {error}",
+                path.display()
+            ));
+        }
     };
     let sources: Vec<MarketplaceSource> = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid plugin marketplaces {}: {error}", path.display()))?;
@@ -121,8 +129,16 @@ pub async fn preview(index_url: String) -> Result<MarketplacePreview, String> {
         return Err("official marketplace root key fingerprint mismatch".into());
     }
     Ok(MarketplacePreview {
-        id: if official { "official".into() } else { custom_id(&index_url) },
-        name: if official { official_source().name } else { source_name(&index_url) },
+        id: if official {
+            "official".into()
+        } else {
+            custom_id(&index_url)
+        },
+        name: if official {
+            official_source().name
+        } else {
+            source_name(&index_url)
+        },
         index_url,
         official,
         fingerprint,
@@ -145,7 +161,9 @@ pub fn add(data_dir: &Path, preview: MarketplacePreview) -> Result<Vec<Marketpla
     let mut custom = read_custom_sources(data_dir)?;
     if let Some(existing) = custom.iter().find(|source| source.id == expected_id) {
         if existing.fingerprint != fingerprint {
-            return Err("marketplace root key changed; remove and re-add it to trust a new key".into());
+            return Err(
+                "marketplace root key changed; remove and re-add it to trust a new key".into(),
+            );
         }
         return sources(data_dir);
     }
@@ -187,7 +205,9 @@ pub fn trusted_root(data_dir: &Path, index_url: &str) -> Result<PathBuf, String>
     let source = sources(data_dir)?
         .into_iter()
         .find(|source| source.index_url == index_url && !source.official)
-        .ok_or_else(|| "marketplace is not trusted; add and confirm its root key first".to_owned())?;
+        .ok_or_else(|| {
+            "marketplace is not trusted; add and confirm its root key first".to_owned()
+        })?;
     let path = root_path(data_dir, &source.id);
     let public_key = std::fs::read_to_string(&path)
         .map_err(|error| format!("read marketplace root public key: {error}"))?;
@@ -265,7 +285,10 @@ mod tests {
         assert_eq!(added.len(), 2);
         assert!(!added[1].official);
         assert_eq!(added[1].fingerprint, first.fingerprint);
-        assert_eq!(trusted_root(&temp.0, url).expect("trusted root"), root_path(&temp.0, &first.id));
+        assert_eq!(
+            trusted_root(&temp.0, url).expect("trusted root"),
+            root_path(&temp.0, &first.id)
+        );
         add(&temp.0, first).expect("idempotent add");
         let rotated = preview(url);
         let error = add(&temp.0, rotated).expect_err("rotation must be explicit");

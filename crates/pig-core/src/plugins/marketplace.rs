@@ -30,7 +30,8 @@ pub async fn fetch_root_public_key(index_url: &str) -> Result<String, CoreError>
     let client = client()?;
     let url = file_url(index_url, "root.pub")?;
     let bytes = download(&client, &url, 4096).await?;
-    String::from_utf8(bytes).map_err(|error| manifest(format!("invalid marketplace root key: {error}")))
+    String::from_utf8(bytes)
+        .map_err(|error| manifest(format!("invalid marketplace root key: {error}")))
 }
 
 fn validate_catalog(catalog: &PluginMarketplaceCatalog) -> Result<(), CoreError> {
@@ -154,7 +155,10 @@ pub async fn download_signed_package(
     let directory = data_dir.join("plugins/downloads");
     std::fs::create_dir_all(&directory).map_err(io)?;
     crate::config::ensure_real_directory(&directory).map_err(io)?;
-    let digest = package.digest.strip_prefix("sha256:").unwrap_or(&package.digest);
+    let digest = package
+        .digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&package.digest);
     let target = directory.join(format!("{}-{digest}.nshpkg", package.id));
     let unique = NEXT_INSTALL.fetch_add(1, Ordering::Relaxed);
     let staging = directory.join(format!(".download-{}-{unique}", package.id));
@@ -327,8 +331,13 @@ mod tests {
 
     #[tokio::test]
     async fn fetches_the_root_key_next_to_the_catalog() {
-        let (index_url, server) = server(vec![("/root.pub".into(), b"test-root-public-key\n".to_vec())]);
-        let root = fetch_root_public_key(&index_url).await.expect("download root key");
+        let (index_url, server) = server(vec![(
+            "/root.pub".into(),
+            b"test-root-public-key\n".to_vec(),
+        )]);
+        let root = fetch_root_public_key(&index_url)
+            .await
+            .expect("download root key");
         assert_eq!(root, "test-root-public-key\n");
         server.join().expect("marketplace mock shutdown");
     }

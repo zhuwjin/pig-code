@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::rollout::ConversationStore as _;
 use std::collections::VecDeque;
 
 use super::compact::{AgentCompact, apply_agent_compact};
@@ -10,6 +11,10 @@ use crate::rollout::{ConversationKind, RolloutRecord};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMeta {
     pub agent_id: String,
+    pub parent_session_id: Option<String>,
+    pub delegation_depth: Option<u32>,
+    pub context_mode: crate::rollout::ChildContextMode,
+    pub inherited_record_count: Option<usize>,
     pub profile: String,
     pub description: String,
     pub model: String,
@@ -27,7 +32,7 @@ pub struct AgentMeta {
 /// before the next append.
 pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>), String> {
     let (meta, stored) = read_agent_stored(path)?;
-    let media_root = path.with_extension("media");
+    let media_root = AgentConversationStore::new(path).media_root();
     let mut history = Vec::with_capacity(stored.len());
     for mut item in stored {
         rehydrate_agent_media(&mut item, &media_root);
@@ -39,24 +44,30 @@ pub fn read_agent(path: &Path) -> Result<(AgentMeta, Vec<pig_provider::ChatMsg>)
 
 /// Read a subagent context with its display metadata, before media rehydration.
 pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAgentMsg>), String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read subagent context {}: {e}", path.display()))?;
-    let mut lines = crate::rollout::jsonl::lines(&bytes);
-    let Some(first) = lines.next() else {
+    let store = AgentConversationStore::new(path);
+    let records = store.load().map_err(|error| {
+        format!(
+            "Failed to read subagent context {}: {}",
+            path.display(),
+            pig_provider::core_error_en(&error)
+        )
+    })?;
+    let mut records = records.into_iter();
+    let Some(first) = records.next() else {
         return Err(format!(
             "Subagent context {} is empty: missing meta line",
             path.display()
         ));
     };
-    let first_line = std::str::from_utf8(first.body)
-        .map_err(|e| format!("Failed to parse subagent context line 1 (meta): {e}"))?;
-    let first: RolloutRecord = serde_json::from_str(first_line)
-        .map_err(|e| format!("Failed to parse subagent context line 1 (meta): {e}"))?;
     let RolloutRecord::Meta {
         id,
         title,
         created_at,
         kind,
+        parent_id,
+        delegation_depth,
+        context_mode,
+        inherited_record_count,
         profile,
         description,
         provider,
@@ -74,6 +85,10 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     }
     let meta = AgentMeta {
         agent_id: id,
+        parent_session_id: parent_id,
+        delegation_depth,
+        context_mode: context_mode.unwrap_or_default(),
+        inherited_record_count,
         profile: profile.unwrap_or_default(),
         description: description.unwrap_or(title),
         model: model.unwrap_or_default(),
@@ -82,24 +97,8 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
     };
     let mut stored: Vec<StoredAgentMsg> = Vec::new();
     let mut pending_calls: VecDeque<String> = VecDeque::new();
-    for line in lines {
-        let line_no = line.number;
-        let value: RolloutRecord = match serde_json::from_slice(line.body) {
-            Ok(value) => value,
-            Err(_) if !line.terminated => {
-                tracing::warn!(
-                    path = %path.display(),
-                    line = line_no,
-                    "subagent context ends with a torn final line; ignoring it"
-                );
-                break;
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Failed to parse subagent context line {line_no}: {e}"
-                ));
-            }
-        };
+    for (index, value) in records.enumerate() {
+        let line_no = index + 2;
         match value {
             RolloutRecord::Meta { .. } => {}
             RolloutRecord::System { text } => stored.push(message(
@@ -256,7 +255,7 @@ fn message(
     }
 }
 
-fn reconcile_tool_results(history: &mut [pig_provider::ChatMsg]) {
+pub(crate) fn reconcile_tool_results(history: &mut [pig_provider::ChatMsg]) {
     let mut index = 0;
     while index < history.len() {
         if history[index].role != "assistant" {

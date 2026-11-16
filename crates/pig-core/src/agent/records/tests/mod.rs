@@ -17,6 +17,7 @@ fn write_meta(path: &Path) {
             "p".into(),
             "m".into(),
             1,
+            1,
         ),
     )
     .expect("write meta");
@@ -129,6 +130,7 @@ fn seed_context(dir: &Path, file_id: &str, meta_id: &str) {
             "general-purpose".into(),
             "p".into(),
             "m".into(),
+            1,
             1,
         ),
     )

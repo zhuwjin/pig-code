@@ -142,6 +142,12 @@ pub(crate) async fn exec_tool_gated_ctx(
     } else {
         tool::fs_outside_intent(ctx.state, ctx.cwd, &call.name, &call.arguments)
     };
+    if !ctx.allow_scope_widening && fs_outside.is_some() {
+        return GatedToolOutcome::Rejected {
+            note: "The subagent's permission scope was fixed at launch and cannot grow from inside. This write needs an out-of-scope grant; ask the coordinating parent agent to handle it instead."
+                .to_string(),
+        };
+    }
 
     // A Write/Edit into a protected credential directory: the same rules the
     // Bash widening path uses, applied to the file tools. One file is
@@ -200,6 +206,12 @@ pub(crate) async fn exec_tool_gated_ctx(
             crate::task::CredentialGrant::Outside => {}
         }
     }
+    if !ctx.allow_scope_widening && credential_file_grant {
+        return GatedToolOutcome::Rejected {
+            note: "The subagent's permission scope was fixed at launch and cannot grow from inside. This credential access needs a new grant; ask the coordinating parent agent to handle it instead."
+                .to_string(),
+        };
+    }
 
     // A doomed outside write: deny rules and the sensitive-name list are the
     // no-appeal layer for the file tools too, so the fs_grant dialog could not
@@ -245,6 +257,12 @@ pub(crate) async fn exec_tool_gated_ctx(
     let mut require_escalated = escalation
         .as_ref()
         .is_some_and(|request| request.require_escalated);
+    if escalation.is_some() && !ctx.allow_scope_widening {
+        return GatedToolOutcome::Rejected {
+            note: "The subagent's permission scope was fixed at launch and cannot grow from inside. Do not request sandbox escalation here; ask the coordinating parent agent to handle the operation."
+                .to_string(),
+        };
+    }
     // Plan mode forbids widening: the profile exists to keep research read-only.
     if escalation.is_some() && ctx.plan_enabled {
         return GatedToolOutcome::Rejected {

@@ -98,6 +98,16 @@ pub(super) fn make_child_session(
     Session {
         agent: crate::session::agent::Agent {
             id: agent_id.to_string(),
+            run: Some(
+                crate::session::AgentRunResult::child(
+                    crate::session::AgentRunStatus::Queued,
+                    "queued".into(),
+                    String::new(),
+                    0,
+                    (0, 0, 0),
+                )
+                .with_identity(agent_id, crate::session::new_agent_run_id()),
+            ),
             cwd: cwd.clone(),
             delegation_depth: 1,
             config: Some(config),
@@ -107,6 +117,7 @@ pub(super) fn make_child_session(
         },
         subagent: Some(Box::new(super::state::SubagentState {
             parent_session_id: "s-test".into(),
+            parent_agent_id: "s-test".into(),
             profile,
             jsonl,
             max_turns,
@@ -128,6 +139,7 @@ pub(super) fn make_child_session(
         user_ixs: Vec::new(),
         io_last_input: Vec::new(),
         turn_counter: 0,
+        run_turns: 0,
         tracker: crate::tool::ChangeTracker::default(),
         state,
         always_allowed: Arc::new(Mutex::new(HashSet::new())),
@@ -601,6 +613,7 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
     let mut gate = GateCtx {
         cwd: &root,
         permissions: pig_protocol::PermissionSettings::default(),
+        allow_scope_widening: false,
         media: crate::tool::MediaCapabilities::new(true, false),
         tracker: &mut tracker,
         state: &child_state,
@@ -650,6 +663,76 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
         rx.try_recv().is_err(),
         "a child never emits the root TodoListChanged event"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn child_gate_refuses_new_scope_widening() {
+    let root = std::env::temp_dir().join(format!(
+        "pig-child-fixed-scope-{}-{}",
+        std::process::id(),
+        crate::rollout::now_secs()
+    ));
+    std::fs::create_dir_all(&root).expect("temp workspace");
+    let store = Arc::new(Mutex::new(crate::store::Store::open(&root).expect("store")));
+    let state = crate::task::SessionToolState::for_test();
+    let tool = crate::tool::all()
+        .into_iter()
+        .find(|tool| tool.name() == "ExecCommand")
+        .expect("ExecCommand tool");
+    let mut tracker = crate::tool::ChangeTracker::default();
+    let pending = test_pending();
+    let rules = Arc::new(Mutex::new(crate::permissions::PermissionRules::default()));
+    let always_allowed = Arc::new(Mutex::new(HashSet::new()));
+    let hooks = crate::hooks::HookSet::load(&root, None);
+    let (tx, rx) = async_channel::unbounded();
+    let cancel = CancellationToken::new();
+    let call = pig_provider::ToolCall {
+        id: "widen-child".into(),
+        name: "ExecCommand".into(),
+        arguments: serde_json::json!({
+            "command": "echo should-not-run",
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": {
+                "file_system": { "write": [root.to_string_lossy()] }
+            }
+        })
+        .to_string(),
+    };
+    let mut gate = GateCtx {
+        cwd: &root,
+        permissions: pig_protocol::PermissionSettings::default(),
+        allow_scope_widening: false,
+        media: crate::tool::MediaCapabilities::new(false, false),
+        tracker: &mut tracker,
+        state: &state,
+        owns_todo_state: false,
+        pending: &pending,
+        permission_rules: &rules,
+        always_allowed: &always_allowed,
+        session_id: "s-child-fixed-scope",
+        plan_enabled: false,
+        store: &store,
+        extra_tools: &[],
+        hooks: &hooks,
+        history: &[],
+    };
+    let outcome = exec_tool_gated_ctx(
+        &mut gate,
+        &call,
+        Some(tool.as_ref()),
+        "item-widen",
+        "turn",
+        &tx,
+        &cancel,
+    )
+    .await;
+    let GatedToolOutcome::Rejected { note } = outcome else {
+        panic!("child widening must be rejected before execution");
+    };
+    assert!(note.contains("fixed at launch"), "{note}");
+    assert!(note.contains("parent agent"), "{note}");
+    assert!(rx.try_recv().is_err(), "a refused widening opens no dialog");
     let _ = std::fs::remove_dir_all(&root);
 }
 

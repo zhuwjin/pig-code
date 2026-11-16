@@ -34,14 +34,164 @@ pub(crate) fn pause_limit_error() -> CoreError {
     }
 }
 
-/// How a turn ended (carried out of the turn future so the manager's
-/// wrap-up can apply queue-drain policy)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TurnOutcome {
+pub enum AgentRunStatus {
+    Queued,
+    Running,
     Completed,
-    Aborted,
+    Cancelled,
     Failed,
+    Lost,
 }
+
+impl AgentRunStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+/// Text/result artifact captured by one agent run. Root turns project their
+/// response through existing turn events and do not need a second artifact.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AgentArtifact {
+    pub(crate) text: String,
+    pub(crate) path: Option<std::path::PathBuf>,
+}
+
+/// One root or child run's authoritative outcome. Presentation strings and
+/// registry states are derived from `status` rather than independent booleans.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentRunResult {
+    pub(crate) agent_id: Option<String>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) status: AgentRunStatus,
+    pub(crate) stop_reason: String,
+    pub(crate) turns: usize,
+    pub(crate) usage: (u64, u64, u64),
+    pub(crate) artifact: Option<AgentArtifact>,
+}
+
+impl AgentRunResult {
+    pub(crate) fn root(status: AgentRunStatus) -> Self {
+        Self {
+            agent_id: None,
+            run_id: None,
+            status,
+            stop_reason: status.as_str().to_string(),
+            turns: 0,
+            usage: (0, 0, 0),
+            artifact: None,
+        }
+    }
+
+    pub(crate) fn child(
+        status: AgentRunStatus,
+        stop_reason: String,
+        text: String,
+        turns: usize,
+        usage: (u64, u64, u64),
+    ) -> Self {
+        Self {
+            agent_id: None,
+            run_id: None,
+            status,
+            stop_reason,
+            turns,
+            usage,
+            artifact: Some(AgentArtifact { text, path: None }),
+        }
+    }
+
+    pub(crate) fn with_identity(mut self, agent_id: &str, run_id: String) -> Self {
+        self.agent_id = Some(agent_id.to_string());
+        self.run_id = Some(run_id);
+        self
+    }
+
+    pub(crate) fn is_completed(&self) -> bool {
+        self.status == AgentRunStatus::Completed
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.status == AgentRunStatus::Cancelled
+    }
+
+    pub(crate) fn is_error(&self) -> bool {
+        self.status == AgentRunStatus::Failed
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        self.artifact
+            .as_ref()
+            .map_or("", |artifact| artifact.text.as_str())
+    }
+
+    pub(crate) fn status_line(&self) -> String {
+        match self.status {
+            AgentRunStatus::Queued | AgentRunStatus::Running | AgentRunStatus::Lost => {
+                self.status.as_str().to_string()
+            }
+            AgentRunStatus::Cancelled => "cancelled".to_string(),
+            AgentRunStatus::Failed => format!("failed: {}", self.stop_reason),
+            AgentRunStatus::Completed if self.stop_reason == "completed" => {
+                format!("completed ({} steps)", self.turns)
+            }
+            AgentRunStatus::Completed if self.stop_reason.is_empty() => "completed".to_string(),
+            AgentRunStatus::Completed => format!("completed {}", self.stop_reason),
+        }
+    }
+}
+
+pub(crate) fn new_agent_run_id() -> String {
+    static NEXT_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let sequence = NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("run-{timestamp}-{sequence}")
+}
+
+impl Session {
+    pub(crate) fn begin_root_run(&mut self) {
+        self.run_turns = 0;
+        let agent_id = self.agent.id.clone();
+        self.agent.run = Some(
+            AgentRunResult::root(AgentRunStatus::Running)
+                .with_identity(&agent_id, new_agent_run_id()),
+        );
+    }
+
+    pub(crate) fn root_result(&mut self, status: AgentRunStatus) -> AgentRunResult {
+        if !matches!(
+            self.agent.run.as_ref().map(|run| run.status),
+            Some(AgentRunStatus::Running)
+        ) {
+            self.begin_root_run();
+        }
+        let agent_id = self.agent.id.clone();
+        let run_id = self
+            .agent
+            .run
+            .as_ref()
+            .and_then(|run| run.run_id.clone())
+            .expect("root run identity");
+        let mut result = AgentRunResult::root(status).with_identity(&agent_id, run_id);
+        result.turns = self.run_turns;
+        result.usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+        self.agent.run = Some(result.clone());
+        result
+    }
+}
+
+pub(crate) type TurnOutcome = AgentRunResult;
 
 /// Result of gated tool execution (exec_tool_gated)
 pub(crate) enum GatedToolOutcome {

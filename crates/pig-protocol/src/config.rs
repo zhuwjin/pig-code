@@ -417,6 +417,26 @@ pub struct DeveloperConfig {
     pub show_fps: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    /// Maximum number of delegation edges below a root session. Zero disables
+    /// delegation; one preserves the original root → child-only behavior.
+    #[serde(default = "default_max_delegation_depth")]
+    pub max_delegation_depth: u32,
+}
+
+const fn default_max_delegation_depth() -> u32 {
+    1
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            max_delegation_depth: default_max_delegation_depth(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub providers: Vec<ProviderConfig>,
@@ -461,6 +481,9 @@ pub struct AppConfig {
     /// boundary. Ctrl+Enter always uses the opposite intent
     #[serde(default)]
     pub default_delivery: crate::MessageDelivery,
+    /// Subagent delegation limits.
+    #[serde(default)]
+    pub agents: AgentsConfig,
     /// Lifecycle hooks (see HooksConfig); disabled/empty by default
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -483,6 +506,24 @@ impl AppConfig {
     /// The read-deny rules the sandbox enforces (`[sandbox] deny_read`).
     pub fn effective_deny_read(&self) -> Vec<String> {
         self.sandbox.deny_read.clone()
+    }
+}
+
+#[cfg(test)]
+mod agents_config_tests {
+    use super::*;
+
+    #[test]
+    fn delegation_depth_defaults_to_one_and_deserializes() {
+        assert_eq!(AppConfig::default().agents.max_delegation_depth, 1);
+        let config: AppConfig = serde_json::from_value(serde_json::json!({
+            "providers": [],
+            "default_provider": "",
+            "default_model": "",
+            "agents": { "max_delegation_depth": 2 },
+        }))
+        .expect("agents config");
+        assert_eq!(config.agents.max_delegation_depth, 2);
     }
 }
 

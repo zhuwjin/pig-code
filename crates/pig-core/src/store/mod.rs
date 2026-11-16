@@ -14,6 +14,8 @@ use rusqlite::{Connection, params};
 
 use crate::rollout::now_secs;
 
+mod execution;
+pub use execution::ExecutionClaim;
 mod tasks;
 pub use tasks::BackgroundTask;
 
@@ -111,6 +113,12 @@ impl Store {
                 session_id TEXT PRIMARY KEY,
                 items TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS execution_claims (
+                session_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS todos (
                 session_id TEXT PRIMARY KEY,
                 items TEXT NOT NULL
@@ -141,6 +149,13 @@ impl Store {
                 ended_at_ms INTEGER,
                 turns INTEGER,
                 model TEXT,
+                run_id TEXT,
+                parent_agent_id TEXT,
+                delegation_depth INTEGER,
+                profile TEXT,
+                run_input_tokens INTEGER,
+                run_cache_read_tokens INTEGER,
+                run_output_tokens INTEGER,
                 terminal_notification_suppressed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, task_id)
             );
@@ -168,6 +183,23 @@ impl Store {
             );",
         )
         .map_err(|e| format!("store.sqlite create-table failed: {e}"))?;
+        for column in [
+            "run_id TEXT",
+            "parent_agent_id TEXT",
+            "delegation_depth INTEGER",
+            "profile TEXT",
+            "run_input_tokens INTEGER",
+            "run_cache_read_tokens INTEGER",
+            "run_output_tokens INTEGER",
+        ] {
+            if let Err(error) = conn.execute(
+                &format!("ALTER TABLE background_tasks ADD COLUMN {column}"),
+                [],
+            ) && !error.to_string().contains("duplicate column name")
+            {
+                return Err(format!("store.sqlite task-run migration failed: {error}"));
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -268,6 +300,7 @@ impl Store {
             "file_changes",
             "file_originals",
             "pending_queue",
+            "execution_claims",
         ] {
             let _ = self.conn.execute(
                 &format!("DELETE FROM {table} WHERE session_id = ?1"),

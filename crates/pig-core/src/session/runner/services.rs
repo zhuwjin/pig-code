@@ -6,8 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config;
 use crate::session::{
-    CompactOutcome, CompactTrigger, ModelSelection, PermissionSettings, TurnOutcome,
-    resolve_approval,
+    CompactOutcome, CompactTrigger, ModelSelection, PermissionSettings, resolve_approval,
 };
 use crate::tool;
 
@@ -160,6 +159,17 @@ impl Manager {
                             )
                     })
         });
+        let run_id = sessions.get(&session_id).and_then(|entry| {
+            entry
+                .state
+                .tasks
+                .lock()
+                .expect("task registry lock")
+                .iter()
+                .filter(|task| task.agent_id.as_deref() == Some(agent_id.as_str()))
+                .max_by_key(|task| task.started_at)
+                .and_then(|task| task.run.as_ref().map(|run| run.run_id.clone()))
+        });
         let sessions_dir = sessions_dir.clone();
         let read_session = session_id.clone();
         let read_agent = agent_id.clone();
@@ -180,6 +190,7 @@ impl Manager {
                             subtitle: Some(subtitle),
                             items,
                             running,
+                            run_id,
                         })
                         .await;
                 }
@@ -509,6 +520,7 @@ impl Manager {
                 entry.steerable = false;
                 let cancel = entry.cancel.clone().expect("cancel");
                 turns.push(Box::pin(async move {
+                    session.begin_root_run();
                     // A manual /compact can arrive after a
                     // model switch without an intervening turn;
                     // align the history with the current media
@@ -528,7 +540,8 @@ impl Manager {
                                 fatal: true,
                             })
                             .await;
-                        return (sid, session, TurnOutcome::Failed);
+                        let outcome = session.root_result(crate::session::AgentRunStatus::Failed);
+                        return (sid, session, outcome);
                     }
                     let outcome = session
                         .run_compact(
@@ -549,10 +562,14 @@ impl Manager {
                     // failure is already surfaced as a
                     // nonfatal error and history is unchanged).
                     let turn_outcome = match outcome {
-                        CompactOutcome::Cancelled => TurnOutcome::Aborted,
+                        CompactOutcome::Cancelled => {
+                            session.root_result(crate::session::AgentRunStatus::Cancelled)
+                        }
                         CompactOutcome::Completed
                         | CompactOutcome::Skipped
-                        | CompactOutcome::Failed => TurnOutcome::Completed,
+                        | CompactOutcome::Failed => {
+                            session.root_result(crate::session::AgentRunStatus::Completed)
+                        }
                     };
                     (sid, session, turn_outcome)
                 }));

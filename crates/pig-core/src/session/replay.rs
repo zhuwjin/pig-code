@@ -229,6 +229,7 @@ impl Session {
                                 session_id,
                                 item_id: item.clone(),
                                 agent_id: card.agent_id.clone(),
+                                run_id: card.run_id.clone(),
                                 profile: card.profile.clone(),
                                 description: card.description.clone(),
                                 model: card.model.clone(),
@@ -421,6 +422,7 @@ impl Session {
                     session_id,
                     agent_id,
                     running: false,
+                    run_id: None,
                 },
                 tx,
             );

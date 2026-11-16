@@ -73,6 +73,9 @@ pub(super) struct SessionEntry {
     /// so updating it mid-turn is the same value the wrap-up installs.
     pub(super) runtime: Option<Arc<crate::config::RuntimeConfig>>,
     pub(super) cancel: Option<CancellationToken>,
+    /// Durable claim owned by the active real-user turn; notification-only
+    /// turns use the existing notification outbox instead.
+    pub(super) active_claim: Option<String>,
     /// The active turn's retry control (Op::RetryNow reaches the in-flight
     /// retry wait through it); same lifetime as `cancel`
     pub(super) retry: Option<pig_provider::CallControl>,

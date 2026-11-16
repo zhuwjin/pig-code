@@ -99,9 +99,9 @@ fn spawn_with_writer(
             crate::session::emit_bg(&session_id, &tx, |session_id| Event::ToolCallEnd {
                 session_id,
                 item_id: ui.item_id,
-                output: result.result_text.clone(),
-                is_error: result.is_error,
-                stopped: result.cancelled,
+                output: result.text().to_string(),
+                is_error: result.is_error(),
+                stopped: result.is_cancelled(),
                 edit: None,
             });
         }
@@ -150,15 +150,23 @@ pub(super) async fn drive_managed<F>(
 where
     F: Future<Output = SubagentResult>,
 {
+    let agent_id = life.agent_id.clone();
+    let run_id = life.run_id.clone();
     match std::panic::AssertUnwindSafe(drive_managed_inner(life, cancel, acquire, run))
         .catch_unwind()
         .await
     {
         Ok(outcome) => outcome,
-        Err(payload) => ManagedOutcome {
-            result: panic_subagent_result(payload),
-            queued: false,
-        },
+        Err(payload) => {
+            let result = panic_subagent_result(payload);
+            ManagedOutcome {
+                result: match run_id {
+                    Some(run_id) => result.with_identity(&agent_id, run_id),
+                    None => result,
+                },
+                queued: false,
+            }
+        }
     }
 }
 
@@ -180,7 +188,7 @@ where
         );
     }
     let Some(_slot) = acquire.await else {
-        let result = cancelled_subagent_result();
+        let result = life.identify_result(cancelled_subagent_result());
         life.settle(&result);
         return ManagedOutcome { result, queued };
     };
@@ -191,20 +199,19 @@ where
         Ok(result) => result,
         Err(payload) => panic_subagent_result(payload),
     };
+    let result = life.identify_result(result);
     life.settle(&result);
     ManagedOutcome { result, queued }
 }
 
 pub(super) fn cancelled_subagent_result() -> SubagentResult {
-    SubagentResult {
-        status_line: "cancelled".to_string(),
-        result_text: String::new(),
-        turns: 0,
-        completed: false,
-        is_error: false,
-        usage: (0, 0, 0),
-        cancelled: true,
-    }
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Cancelled,
+        "cancelled".to_string(),
+        String::new(),
+        0,
+        (0, 0, 0),
+    )
 }
 
 pub(super) fn panic_subagent_result(payload: Box<dyn std::any::Any + Send>) -> SubagentResult {
@@ -214,27 +221,26 @@ pub(super) fn panic_subagent_result(payload: Box<dyn std::any::Any + Send>) -> S
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string());
     let note = format!("Subagent driver panicked: {message}");
-    SubagentResult {
-        status_line: format!("failed: {note}"),
-        result_text: note,
-        turns: 0,
-        completed: false,
-        is_error: true,
-        usage: (0, 0, 0),
-        cancelled: false,
-    }
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        note.clone(),
+        note,
+        0,
+        (0, 0, 0),
+    )
 }
 
 /// Model-facing single-Agent receipt. Completion, failure and max-turn
 /// exhaustion keep the agent_id and a resume path; the parent can always
 /// continue the same contextual child.
 pub(super) fn subagent_receipt(agent_id: &str, profile: &str, result: &SubagentResult) -> String {
-    let succeeded = result.completed && !result.is_error;
+    let succeeded = result.is_completed() && !result.is_error();
     let status = if succeeded { "completed" } else { "failed" };
     let heading = if succeeded { "[summary]" } else { "[failure]" };
     format!(
         "agent_id: {agent_id}\nsubagent_type: {profile}\nstatus: {status}\nturns: {}\n{heading}\n{}\nresume_hint: continue this subagent with Agent(resume=\"{agent_id}\", prompt=\"...\")",
-        result.turns, result.result_text
+        result.turns,
+        result.text().to_string()
     )
 }
 
@@ -243,15 +249,15 @@ pub(super) fn swarm_child_result(
     managed: ManagedOutcome,
 ) -> crate::agent::SwarmChildResult {
     let result = managed.result;
-    let status = if result.cancelled {
+    let status = if result.is_cancelled() {
         crate::agent::SwarmChildStatus::Cancelled
-    } else if result.is_error || !result.completed {
+    } else if result.is_error() || !result.is_completed() {
         crate::agent::SwarmChildStatus::Failed
     } else {
         crate::agent::SwarmChildStatus::Completed
     };
     let result_path = identity.and_then(|identity| {
-        (!result.cancelled && std::fs::metadata(&identity.result_path).is_ok())
+        (!result.is_cancelled() && std::fs::metadata(&identity.result_path).is_ok())
             .then(|| identity.result_path.clone())
     });
     crate::agent::SwarmChildResult {
@@ -262,7 +268,7 @@ pub(super) fn swarm_child_result(
         status,
         turns: result.turns,
         result_path,
-        result_text: result.result_text,
+        result_text: result.text().to_string(),
         queued: managed.queued,
         usage: result.usage,
     }

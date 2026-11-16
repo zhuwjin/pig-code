@@ -18,8 +18,7 @@ impl Session {
         let Some(rollout) = &mut self.rollout else {
             return;
         };
-        if let Err(error) = rollout.append(record) {
-            let structured = error.into_core(rollout.path());
+        if let Err(structured) = crate::rollout::ConversationStore::append(rollout, record) {
             tracing::error!(
                 session_id = %self.agent.id,
                 error = ?structured,
@@ -39,8 +38,7 @@ impl Session {
         let Some(rollout) = &mut self.rollout else {
             return;
         };
-        if let Err(error) = rollout.sync() {
-            let structured = error.into_core(rollout.path());
+        if let Err(structured) = crate::rollout::ConversationStore::sync(rollout) {
             tracing::error!(
                 session_id = %self.agent.id,
                 error = ?structured,

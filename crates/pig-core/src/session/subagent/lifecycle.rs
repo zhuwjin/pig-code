@@ -17,6 +17,7 @@ pub(super) struct ChildLifecycle {
     pub(super) tx: async_channel::Sender<Event>,
     pub(super) task_id: Option<String>,
     pub(super) agent_id: String,
+    pub(super) run_id: Option<String>,
     pub(super) ownership: String,
     pub(super) writer: Option<AgentWriterGuard>,
     pub(super) finished_emitted: bool,
@@ -64,6 +65,7 @@ impl ChildLifecycle {
             tx,
             task_id,
             agent_id: child.agent.id.clone(),
+            run_id: child.agent.run_id(),
             ownership: child
                 .subagent
                 .as_ref()
@@ -75,6 +77,13 @@ impl ChildLifecycle {
             registry_settled: false,
             approvals_released: false,
             settled: false,
+        }
+    }
+
+    pub(super) fn identify_result(&self, result: SubagentResult) -> SubagentResult {
+        match &self.run_id {
+            Some(run_id) => result.with_identity(&self.agent_id, run_id.clone()),
+            None => result,
         }
     }
 
@@ -121,23 +130,26 @@ impl ChildLifecycle {
                 pig_protocol::TaskStatus::Running | pig_protocol::TaskStatus::Queued
             )
         {
-            entry.status = if result.cancelled {
+            entry.status = if result.is_cancelled() {
                 pig_protocol::TaskStatus::Killed
-            } else if result.is_error || !result.completed {
+            } else if result.is_error() || !result.is_completed() {
                 pig_protocol::TaskStatus::Failed
             } else {
                 pig_protocol::TaskStatus::Completed
             };
-            entry.exit_code = if result.cancelled {
+            entry.exit_code = if result.is_cancelled() {
                 None
-            } else if result.is_error || !result.completed {
+            } else if result.is_error() || !result.is_completed() {
                 Some(-1)
             } else {
                 Some(0)
             };
-            entry.reason = (result.is_error || !result.completed || result.cancelled)
-                .then(|| result.result_text.clone());
+            entry.reason = (result.is_error() || !result.is_completed() || result.is_cancelled())
+                .then(|| result.text().to_string());
             entry.turns = Some(u32::try_from(result.turns).unwrap_or(u32::MAX));
+            if let Some(run) = entry.run.as_mut() {
+                run.usage = result.usage;
+            }
             entry.ended_at = Some(crate::rollout::now_secs());
         }
     }
@@ -147,7 +159,7 @@ impl ChildLifecycle {
             crate::task::note_output(
                 &self.state.tasks,
                 task_id,
-                &format!("[{}]\n{}\n", result.status_line, result.result_text),
+                &format!("[{}]\n{}\n", result.status_line(), result.text()),
             );
         }
     }
@@ -158,11 +170,13 @@ impl ChildLifecycle {
         }
         self.finished_emitted = true;
         let agent_id = self.agent_id.clone();
+        let run_id = self.run_id.clone();
         emit_bg(&self.session_id, &self.tx, |session_id| {
             Event::ConversationStatus {
                 session_id,
                 agent_id,
                 running: false,
+                run_id,
             }
         });
     }

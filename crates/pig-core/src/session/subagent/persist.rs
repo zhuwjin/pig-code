@@ -27,6 +27,7 @@ pub(super) fn persist_agent_meta(
         "p".to_string(),
         "m".to_string(),
         1,
+        1,
     );
     if let Err(error) = crate::agent::append_agent_conversation_record(jsonl, &record) {
         tracing::error!("failed to persist subagent meta: {error}");
@@ -124,18 +125,16 @@ pub(super) fn child_persist_stop(
     turns: usize,
     usage: (u64, u64, u64),
 ) -> SubagentResult {
-    SubagentResult {
-        status_line: "failed: subagent context write failed".to_string(),
-        result_text: crate::agent::child_persist_failure_note(
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        "subagent context write failed".to_string(),
+        crate::agent::child_persist_failure_note(
             &session.agent.id,
             error,
             true,
             crate::agent::ChildPersistPhase::Stopped,
         ),
         turns,
-        completed: false,
-        is_error: true,
         usage,
-        cancelled: false,
-    }
+    )
 }

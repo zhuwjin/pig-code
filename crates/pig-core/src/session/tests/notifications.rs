@@ -278,6 +278,7 @@ fn interrupted_tasks_become_lost_once_and_keep_their_ids() {
                 result_path: None,
                 turns: None,
                 model: None,
+                run: None,
                 terminal_notification_suppressed: false,
             },
         )
@@ -354,6 +355,7 @@ fn terminal_fact_without_outbox_is_recovered_once() {
                 result_path: None,
                 turns: Some(4),
                 model: Some("mock".into()),
+                run: None,
                 terminal_notification_suppressed: false,
             },
         )

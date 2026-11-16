@@ -285,6 +285,7 @@ export interface ProjectHooksNotice {
 export interface SubagentView {
   sessionId: string;
   agentId: string;
+  runId?: string | null;
   title: string;
   subtitle: string;
   items: ChatItem[];
@@ -574,7 +575,12 @@ export interface ProcessSample {
   gpu?: number | null;
 }
 
+export interface AgentsConfig {
+  max_delegation_depth?: number;
+}
+
 export interface AppConfig {
+  agents?: AgentsConfig;
   default_provider?: string | null;
   default_model?: string | null;
   default_delivery?: MessageDelivery;

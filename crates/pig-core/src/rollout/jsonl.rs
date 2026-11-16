@@ -20,8 +20,6 @@ pub(crate) struct JsonlLine<'a> {
     pub chunk: &'a [u8],
     /// The line content without the trailing `\n`.
     pub body: &'a [u8],
-    /// Whether the source ended with a newline for this line.
-    pub terminated: bool,
 }
 
 /// Split a JSONL byte stream into lines. `split_inclusive` is used so a
@@ -35,8 +33,7 @@ pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = JsonlLine<'_>> {
         .map(move |(index, chunk)| {
             let start = offset;
             offset += chunk.len();
-            let terminated = chunk.ends_with(b"\n");
-            let body = if terminated {
+            let body = if chunk.ends_with(b"\n") {
                 &chunk[..chunk.len() - 1]
             } else {
                 chunk
@@ -46,7 +43,6 @@ pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = JsonlLine<'_>> {
                 start,
                 chunk,
                 body,
-                terminated,
             }
         })
 }

@@ -283,6 +283,7 @@ pub(super) fn start_notification_turn(
         permissions: entry.last_permissions,
         steer: false,
         held: false,
+        recovered: false,
     };
     if super::queue::start_turn_inner(
         entry,
@@ -336,6 +337,7 @@ mod tests {
             result_path: None,
             turns: None,
             model: None,
+            run: None,
             terminal_notification_suppressed: false,
         };
         let notification = pig_protocol::TaskNotification {

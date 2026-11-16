@@ -235,13 +235,11 @@ pub(super) fn child_overflow_failure(
         "Subagent {agent_id} exceeded its model context window ({context_window} tokens) and automatic compaction could not free enough room: {detail}\n\
          The full child context is saved. Continue with Agent(resume=\"{agent_id}\", prompt=\"...\") using a shorter prompt after reducing the task scope, or switch this subagent's profile/model to a larger context window and resume it."
     );
-    SubagentResult {
-        status_line: "failed: child context overflow".to_string(),
-        result_text: note,
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        "child context overflow".to_string(),
+        note,
         turns,
-        completed: false,
-        is_error: true,
         usage,
-        cancelled: false,
-    }
+    )
 }

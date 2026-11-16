@@ -31,6 +31,7 @@ impl Session {
         let mut gate = GateCtx {
             cwd: &self.agent.cwd,
             permissions: self.permissions,
+            allow_scope_widening: true,
             media: tool::MediaCapabilities::new(
                 self.projected_input_image.unwrap_or(false),
                 self.projected_input_pdf.unwrap_or(false),

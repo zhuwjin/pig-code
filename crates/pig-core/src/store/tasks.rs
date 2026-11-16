@@ -15,6 +15,7 @@ pub struct BackgroundTask {
     pub result_path: Option<PathBuf>,
     pub turns: Option<u32>,
     pub model: Option<String>,
+    pub run: Option<crate::task::AgentRunMetadata>,
     pub terminal_notification_suppressed: bool,
 }
 
@@ -61,8 +62,10 @@ fn write_background_task(
         "INSERT INTO background_tasks (
             session_id, task_id, kind, agent_id, command, state, exit_code, reason,
             detached, output_path, output_tail, record_path, result_path,
-            started_at_ms, ended_at_ms, turns, model, terminal_notification_suppressed
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            started_at_ms, ended_at_ms, turns, model, run_id, parent_agent_id,
+            delegation_depth, profile, run_input_tokens, run_cache_read_tokens,
+            run_output_tokens, terminal_notification_suppressed
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
         ON CONFLICT(session_id, task_id) DO UPDATE SET
             kind = excluded.kind, agent_id = excluded.agent_id,
             command = excluded.command, state = excluded.state,
@@ -71,6 +74,11 @@ fn write_background_task(
             output_tail = excluded.output_tail, record_path = excluded.record_path,
             result_path = excluded.result_path, started_at_ms = excluded.started_at_ms,
             ended_at_ms = excluded.ended_at_ms, turns = excluded.turns, model = excluded.model,
+            run_id = excluded.run_id, parent_agent_id = excluded.parent_agent_id,
+            delegation_depth = excluded.delegation_depth, profile = excluded.profile,
+            run_input_tokens = excluded.run_input_tokens,
+            run_cache_read_tokens = excluded.run_cache_read_tokens,
+            run_output_tokens = excluded.run_output_tokens,
             terminal_notification_suppressed = excluded.terminal_notification_suppressed
         WHERE background_tasks.state NOT IN ('completed', 'failed', 'timed_out', 'killed', 'lost')
             OR excluded.state NOT IN ('queued', 'running')",
@@ -99,6 +107,13 @@ fn write_background_task(
             summary.ended_at_ms.map(|value| value as i64),
             task.turns,
             task.model,
+            task.run.as_ref().map(|run| run.run_id.as_str()),
+            task.run.as_ref().map(|run| run.parent_agent_id.as_str()),
+            task.run.as_ref().map(|run| run.delegation_depth),
+            task.run.as_ref().map(|run| run.profile.as_str()),
+            task.run.as_ref().map(|run| run.usage.0 as i64),
+            task.run.as_ref().map(|run| run.usage.1 as i64),
+            task.run.as_ref().map(|run| run.usage.2 as i64),
             task.terminal_notification_suppressed,
         ],
     )
@@ -135,7 +150,9 @@ impl Store {
             .prepare(
                 "SELECT task_id, kind, agent_id, command, state, exit_code, reason, detached,
                         output_path, output_tail, record_path, result_path, started_at_ms,
-                        ended_at_ms, turns, model, terminal_notification_suppressed
+                        ended_at_ms, turns, model, run_id, parent_agent_id, delegation_depth,
+                        profile, run_input_tokens, run_cache_read_tokens, run_output_tokens,
+                        terminal_notification_suppressed
                  FROM background_tasks WHERE session_id = ?1 ORDER BY started_at_ms, task_id",
             )
             .map_err(task_error)?;
@@ -168,6 +185,26 @@ impl Store {
                         ));
                     }
                 };
+                let agent_id: Option<String> = row.get(2)?;
+                let run = match (agent_id.clone(), row.get::<_, Option<String>>(16)?) {
+                    (Some(agent_id), Some(run_id)) => Some(crate::task::AgentRunMetadata {
+                        agent_id,
+                        run_id,
+                        parent_agent_id: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
+                        delegation_depth: row
+                            .get::<_, Option<i64>>(18)?
+                            .unwrap_or(0)
+                            .clamp(0, u32::MAX as i64)
+                            as u32,
+                        profile: row.get::<_, Option<String>>(19)?.unwrap_or_default(),
+                        usage: (
+                            row.get::<_, Option<i64>>(20)?.unwrap_or(0).max(0) as u64,
+                            row.get::<_, Option<i64>>(21)?.unwrap_or(0).max(0) as u64,
+                            row.get::<_, Option<i64>>(22)?.unwrap_or(0).max(0) as u64,
+                        ),
+                    }),
+                    _ => None,
+                };
                 Ok(BackgroundTask {
                     summary: TaskSummary {
                         id: row.get(0)?,
@@ -179,7 +216,7 @@ impl Store {
                         started_at_ms: row.get::<_, i64>(12)? as u64,
                         ended_at_ms: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
                         output_tail: row.get(9)?,
-                        agent_id: row.get(2)?,
+                        agent_id,
                         spill_path: row.get::<_, Option<String>>(8)?.map(PathBuf::from),
                     },
                     detached: row.get(7)?,
@@ -187,7 +224,8 @@ impl Store {
                     result_path: row.get::<_, Option<String>>(11)?.map(PathBuf::from),
                     turns: row.get(14)?,
                     model: row.get(15)?,
-                    terminal_notification_suppressed: row.get(16)?,
+                    run,
+                    terminal_notification_suppressed: row.get(23)?,
                 })
             })
             .map_err(task_error)?;
@@ -559,6 +597,7 @@ mod tests {
             result_path: Some("/tmp/result.md".into()),
             turns: Some(3),
             model: Some("mock-model".into()),
+            run: None,
             terminal_notification_suppressed: false,
         };
         store
@@ -628,6 +667,66 @@ mod tests {
                 .pending_notifications("s1")
                 .expect("pending")
                 .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn agent_run_metadata_survives_reopen_and_marks_interrupted_work_lost() {
+        let dir = std::env::temp_dir().join(format!("pig-agent-run-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).expect("open store");
+        let run = crate::task::AgentRunMetadata {
+            agent_id: "a1-1".into(),
+            run_id: "run-1".into(),
+            parent_agent_id: "a-parent".into(),
+            delegation_depth: 2,
+            profile: "explore".into(),
+            usage: (11, 12, 13),
+        };
+        let task = BackgroundTask {
+            summary: TaskSummary {
+                id: "b1".into(),
+                kind: TaskKind::Subagent,
+                command: "Subagent explore: catalog".into(),
+                status: TaskStatus::Running,
+                exit_code: None,
+                reason: None,
+                started_at_ms: 10,
+                ended_at_ms: None,
+                output_tail: String::new(),
+                agent_id: Some(run.agent_id.clone()),
+                spill_path: None,
+            },
+            detached: true,
+            record_path: Some("agent.jsonl".into()),
+            result_path: Some("agent.result.md".into()),
+            turns: Some(3),
+            model: Some("mock-model".into()),
+            run: Some(run.clone()),
+            terminal_notification_suppressed: false,
+        };
+        store
+            .upsert_background_task("s1", &task)
+            .expect("persist run");
+        drop(store);
+
+        let mut store = Store::open(&dir).expect("reopen store");
+        store
+            .recover_interrupted_tasks("s1")
+            .expect("recover interrupted run");
+        let restored = store.background_tasks("s1").expect("task rows");
+        assert_eq!(restored[0].summary.status, TaskStatus::Lost);
+        assert_eq!(restored[0].run.as_ref(), Some(&run));
+        assert_eq!(restored[0].turns, Some(3));
+        assert_eq!(restored[0].model.as_deref(), Some("mock-model"));
+        assert_eq!(
+            restored[0].record_path.as_deref(),
+            Some(std::path::Path::new("agent.jsonl"))
+        );
+        assert_eq!(
+            restored[0].result_path.as_deref(),
+            Some(std::path::Path::new("agent.result.md"))
         );
         let _ = std::fs::remove_dir_all(dir);
     }

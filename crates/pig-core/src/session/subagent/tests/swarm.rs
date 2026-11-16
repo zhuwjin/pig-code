@@ -204,6 +204,70 @@ async fn foreground_swarm_writes_enter_parent_turn_changes_once() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_fork_runs_from_parent_snapshot_without_writing_parent() {
+    let (mut session, parent, root) = swarm_test_session("fork-run");
+    session
+        .agent
+        .history
+        .push(ChatMsg::user("PARENT_FORK_CONTEXT".into()));
+    session.agent.history.push(ChatMsg::assistant(
+        "PARENT_FORK_ANSWER".into(),
+        vec![],
+        None,
+    ));
+    let rollout_path = root
+        .join("data/sessions")
+        .join(format!("{}.jsonl", session.agent.id));
+    let before = std::fs::read(&rollout_path).expect("parent rollout before fork");
+    let call = ToolCall {
+        id: "call_fork_run".into(),
+        name: "Agent".into(),
+        arguments: serde_json::json!({
+            "description": "fork context run",
+            "prompt": "SUBAGENT_CHILD:FORK context",
+            "fork": true,
+        })
+        .to_string(),
+    };
+    let (tx, _rx) = async_channel::unbounded();
+    let cancel = CancellationToken::new();
+    let outcome = session
+        .run_subagent(&call, "turn-test", "item-agent", &parent, &tx, &cancel)
+        .await;
+    let SubagentOutcome::Finished { is_error, card, .. } = outcome else {
+        panic!("fork child should finish");
+    };
+    assert!(!is_error);
+    let agent_id = card.expect("child card").agent_id;
+    let jsonl = root
+        .join("data/sessions")
+        .join(format!("{}.agents/{agent_id}.jsonl", session.agent.id));
+    let (meta, history) = crate::agent::read_agent(&jsonl).expect("read completed fork");
+    assert_eq!(meta.context_mode, crate::rollout::ChildContextMode::Fork);
+    assert!(
+        history.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("PARENT_FORK_CONTEXT"))
+        }),
+        "the running child received the parent snapshot"
+    );
+    assert!(
+        history.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("SUBAGENT_CHILD:FORK context"))
+        }),
+        "the child completed its own new task"
+    );
+    let after = std::fs::read(&rollout_path).expect("parent rollout after fork");
+    assert_eq!(after, before, "fork writes never touch the parent rollout");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Background child vs parent write on the same existing path: the child
 /// snapshots the pre-child content, the parent's later Write sees that
 /// shared baseline (not the child's output), its turn summary diffs from

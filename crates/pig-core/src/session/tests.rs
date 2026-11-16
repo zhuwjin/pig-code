@@ -149,6 +149,7 @@ fn restored_queue_seq_ignores_malformed_ids() {
         permissions: PermissionSettings::default(),
         steer: false,
         held: false,
+        recovered: false,
     };
     let restored = vec![
         message("q7"),

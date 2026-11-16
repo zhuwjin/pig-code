@@ -321,6 +321,7 @@ impl ConversationProjection {
                 session_id,
                 item_id,
                 note,
+                ..
             } => {
                 let state = self.state(session_id);
                 let Some(item) = state.items.iter_mut().find(|item| item.id() == item_id) else {
@@ -340,6 +341,7 @@ impl ConversationProjection {
                 description,
                 model,
                 background,
+                ..
             } => {
                 let state = self.state(session_id);
                 let Some(item) = state.items.iter_mut().find(|item| item.id() == item_id) else {
@@ -443,6 +445,7 @@ impl ConversationProjection {
                 session_id,
                 agent_id,
                 running,
+                ..
             } => {
                 let mut projected = Projected::pass(event);
                 projected.events = if *running {
@@ -535,6 +538,7 @@ fn update(
     Event::ConversationUpdate {
         session_id: session_id.to_string(),
         agent_id: agent_id.map(str::to_string),
+        run_id: None,
         item,
     }
 }
@@ -551,6 +555,7 @@ fn remove(
     Event::ConversationRemove {
         session_id: session_id.to_string(),
         agent_id: agent_id.map(str::to_string),
+        run_id: None,
         item_ids,
     }
 }
@@ -658,6 +663,7 @@ mod tests {
             subtitle: Some("p · m".into()),
             items: vec![item.clone()],
             running: true,
+            run_id: None,
         });
         assert!(snapshot.pass);
         assert!(snapshot.events.is_empty());
@@ -665,6 +671,7 @@ mod tests {
         let update = projection.project(&Event::ConversationUpdate {
             session_id: "s1".into(),
             agent_id: Some("a1".into()),
+            run_id: None,
             item,
         });
         assert!(update.pass);
@@ -685,6 +692,7 @@ mod tests {
             session_id: "s1".into(),
             item_id: "agent-call".into(),
             agent_id: "a1".into(),
+            run_id: None,
             profile: "coder".into(),
             description: "child".into(),
             model: "m".into(),
@@ -694,6 +702,7 @@ mod tests {
             session_id: "s1".into(),
             agent_id: "a1".into(),
             running: false,
+            run_id: None,
         });
         let events = projected.events;
         assert!(projected.pass);
@@ -715,6 +724,7 @@ mod tests {
             session_id: "s1".into(),
             agent_id: "a1".into(),
             running: true,
+            run_id: None,
         });
         let row = resumed
             .events

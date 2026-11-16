@@ -33,6 +33,14 @@ impl Session {
         mode: SubagentMode,
     ) -> Session {
         let agent_id = prep.agent_id;
+        let run = SubagentResult::child(
+            crate::session::AgentRunStatus::Queued,
+            "queued".to_string(),
+            String::new(),
+            0,
+            (0, 0, 0),
+        )
+        .with_identity(&agent_id, prep.run_id.clone());
         let state = Session::child_local_state(&parent.state, &agent_id);
         let delivery_receipts = state.delivery_receipts.clone();
         let tracker = match mode {
@@ -43,22 +51,24 @@ impl Session {
         Session {
             agent: crate::session::agent::Agent {
                 id: agent_id,
+                run: Some(run),
                 cwd: prep.cwd,
-                delegation_depth: parent.agent.delegation_depth + 1,
-                config: Some(prep.child_config),
+                delegation_depth: prep.policy.delegation_depth,
+                config: Some(prep.policy.model),
                 history: prep.history,
                 tools: prep.tools,
                 schemas: prep.schemas,
             },
             subagent: Some(Box::new(super::state::SubagentState {
                 parent_session_id: parent.event_session_id().to_string(),
-                profile: prep.profile,
+                parent_agent_id: prep.parent_agent_id,
+                profile: prep.policy.profile,
                 jsonl: prep.jsonl,
-                max_turns: prep.max_turns,
+                max_turns: prep.policy.max_turns,
                 description: prep.description,
                 plugin_tool_filter: Default::default(),
-                mcp_inherits_all: prep.mcp_inherits_all,
-                trusted: prep.trusted,
+                mcp_inherits_all: prep.policy.mcp_inherits_all,
+                trusted: prep.policy.trusted,
                 persist_failure: None,
                 writer: Some(prep.writer),
                 progress,
@@ -71,6 +81,7 @@ impl Session {
             user_ixs: Vec::new(),
             io_last_input: Vec::new(),
             turn_counter: 0,
+            run_turns: 0,
             tracker,
             state,
             always_allowed: parent.always_allowed.clone(),
@@ -78,7 +89,7 @@ impl Session {
             plan_enabled: false,
             pending: parent.pending.clone(),
             pending_questions: parent.pending_questions.clone(),
-            permissions: parent.permissions,
+            permissions: prep.policy.permissions,
             model_override: None,
             rollout: None,
             rollout_failure: None,
@@ -98,7 +109,7 @@ impl Session {
             agents_reminded: String::new(),
             memory_reminded: String::new(),
             permissions_reminded: None,
-            profiles_summary: String::new(),
+            profiles_summary: prep.profiles_summary,
             prompt_text: None,
             prompt_memory_enabled: None,
             prompt_skills_state: None,
@@ -141,6 +152,7 @@ impl Session {
     /// Subagent progress reporting (routed per sink).
     pub(super) fn report_child_progress(&self, tx: &async_channel::Sender<Event>, note: String) {
         let sub = self.subagent.as_ref().expect("child session");
+        let run_id = self.agent.run_id();
         match &sub.progress {
             ProgressSink::Foreground { parent_item_id } => {
                 let item_id = parent_item_id.clone();
@@ -149,6 +161,7 @@ impl Session {
                         session_id,
                         item_id,
                         note,
+                        run_id,
                     }
                 });
             }
@@ -581,6 +594,7 @@ impl Session {
             let mut gate = GateCtx {
                 cwd: &self.agent.cwd,
                 permissions: self.permissions,
+                allow_scope_widening: false,
                 media,
                 tracker: &mut self.tracker,
                 state: &self.state,
@@ -689,10 +703,12 @@ impl Session {
     ) {
         let session_id = self.event_session_id().to_string();
         let agent_id = self.agent.id.clone();
+        let run_id = self.agent.run_id();
         emit_bg(&session_id, tx, move |session_id| {
             Event::ConversationUpdate {
                 session_id,
                 agent_id: Some(agent_id),
+                run_id,
                 item,
             }
         });
@@ -705,10 +721,12 @@ impl Session {
         }
         let session_id = self.event_session_id().to_string();
         let agent_id = self.agent.id.clone();
+        let run_id = self.agent.run_id();
         emit_bg(&session_id, tx, move |session_id| {
             Event::ConversationRemove {
                 session_id,
                 agent_id: Some(agent_id),
+                run_id,
                 item_ids,
             }
         });
@@ -817,28 +835,23 @@ fn truncate_agent_result(result_path: Option<&Path>, result: String) -> String {
 
 fn subagent_pause_limit(usage: (u64, u64, u64), turns: usize) -> SubagentResult {
     let note = format!("Subagent model request failed: {}", pause_limit_detail());
-    SubagentResult {
-        status_line: format!("failed: {note}"),
-        result_text: note,
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        note.clone(),
+        note,
         turns,
-        completed: false,
-        is_error: true,
         usage,
-        cancelled: false,
-    }
+    )
 }
 
 pub(super) fn unexpected_subagent_result() -> SubagentResult {
-    SubagentResult {
-        status_line: "failed: driver terminated unexpectedly".to_string(),
-        result_text: "The subagent driver terminated unexpectedly before reporting a result"
-            .to_string(),
-        turns: 0,
-        completed: false,
-        is_error: true,
-        usage: (0, 0, 0),
-        cancelled: false,
-    }
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        "driver terminated unexpectedly".to_string(),
+        "The subagent driver terminated unexpectedly before reporting a result".to_string(),
+        0,
+        (0, 0, 0),
+    )
 }
 
 impl Session {
@@ -856,26 +869,39 @@ impl Session {
         // emits the matching running=false status when it settles (also on
         // cancel/panic).
         let agent_id = self.agent.id.clone();
+        let run_id = self.agent.run_id().expect("subagent run identity");
         let session_id = self.event_session_id().to_string();
+        let event_agent_id = agent_id.clone();
+        let event_run_id = Some(run_id.clone());
         emit_bg(&session_id, tx, move |session_id| {
             Event::ConversationStatus {
                 session_id,
-                agent_id,
+                agent_id: event_agent_id,
                 running: true,
+                run_id: event_run_id,
             }
         });
+        if let Some(run) = self.agent.run.as_mut() {
+            run.status = crate::session::AgentRunStatus::Running;
+        }
         let result_path = agent_result_path(
             &self.subagent.as_ref().expect("child session").jsonl,
             &self.agent.id,
         );
         let mut result = self.run_subagent_loop(tx, cancel).await;
-        if !result.cancelled {
-            let written = std::fs::write(&result_path, &result.result_text).is_ok();
-            result.result_text = truncate_agent_result(
+        if !result.is_cancelled() {
+            let written = std::fs::write(&result_path, result.text()).is_ok();
+            let text = truncate_agent_result(
                 written.then_some(result_path.as_path()),
-                std::mem::take(&mut result.result_text),
+                result.text().to_string(),
             );
+            if let Some(artifact) = result.artifact.as_mut() {
+                artifact.path = written.then_some(result_path);
+                artifact.text = text;
+            }
         }
+        let result = result.with_identity(&agent_id, run_id);
+        self.agent.run = Some(result.clone());
         result
     }
 
@@ -980,15 +1006,13 @@ impl Session {
                 }
                 crate::session::engine::StepOutcome::Cancelled => {
                     let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
-                    return SubagentResult {
-                        status_line: "cancelled".to_string(),
-                        result_text: String::new(),
-                        turns: steps_run,
-                        completed: false,
-                        is_error: false,
+                    return SubagentResult::child(
+                        crate::session::AgentRunStatus::Cancelled,
+                        "cancelled".to_string(),
+                        String::new(),
+                        steps_run,
                         usage,
-                        cancelled: true,
-                    };
+                    );
                 }
                 crate::session::engine::StepOutcome::Failed => {
                     let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
@@ -1012,26 +1036,22 @@ impl Session {
                             );
                         }
                         Some(StepFailure::Message(note)) => {
-                            return SubagentResult {
-                                status_line: format!("failed: {note}"),
-                                result_text: note,
-                                turns: steps_run,
-                                completed: false,
-                                is_error: true,
+                            return SubagentResult::child(
+                                crate::session::AgentRunStatus::Failed,
+                                note.clone(),
+                                note,
+                                steps_run,
                                 usage,
-                                cancelled: false,
-                            };
+                            );
                         }
                         None => {
-                            return SubagentResult {
-                                status_line: "failed: subagent drive failed".to_string(),
-                                result_text: "The subagent drive failed".to_string(),
-                                turns: steps_run,
-                                completed: false,
-                                is_error: true,
+                            return SubagentResult::child(
+                                crate::session::AgentRunStatus::Failed,
+                                "subagent drive failed".to_string(),
+                                "The subagent drive failed".to_string(),
+                                steps_run,
                                 usage,
-                                cancelled: false,
-                            };
+                            );
                         }
                     }
                 }
@@ -1040,66 +1060,53 @@ impl Session {
         let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
         if completed {
             if last_text.is_empty() {
-                SubagentResult {
-                    status_line: "failed: subagent produced no final text".to_string(),
-                    result_text: "The subagent produced no final text".to_string(),
-                    turns: steps_run,
-                    completed: true,
-                    is_error: true,
+                SubagentResult::child(
+                    crate::session::AgentRunStatus::Failed,
+                    "subagent produced no final text".to_string(),
+                    "The subagent produced no final text".to_string(),
+                    steps_run,
                     usage,
-                    cancelled: false,
-                }
+                )
             } else if let Some(reason) = incomplete_reason {
-                SubagentResult {
-                    status_line: format!(
-                        "completed with incomplete model response ({})",
-                        reason.as_str()
-                    ),
-                    result_text: format!(
+                SubagentResult::child(
+                    crate::session::AgentRunStatus::Completed,
+                    format!("with incomplete model response ({})", reason.as_str()),
+                    format!(
                         "[Model response incomplete: {}]\n\n{last_text}",
                         reason.as_str()
                     ),
-                    turns: steps_run,
-                    completed: true,
-                    is_error: false,
+                    steps_run,
                     usage,
-                    cancelled: false,
-                }
+                )
             } else {
-                SubagentResult {
-                    status_line: format!("completed ({steps_run} steps)"),
-                    result_text: last_text,
-                    turns: steps_run,
-                    completed: true,
-                    is_error: false,
+                SubagentResult::child(
+                    crate::session::AgentRunStatus::Completed,
+                    "completed".to_string(),
+                    last_text,
+                    steps_run,
                     usage,
-                    cancelled: false,
-                }
+                )
             }
         } else if last_text.is_empty() {
-            SubagentResult {
-                status_line: format!(
-                    "failed: reached the maximum turn count ({max_turns}), subagent produced no conclusion"
+            SubagentResult::child(
+                crate::session::AgentRunStatus::Failed,
+                format!(
+                    "reached the maximum turn count ({max_turns}), subagent produced no conclusion"
                 ),
-                result_text: format!(
+                format!(
                     "Reached the maximum turn count ({max_turns}). The subagent produced no conclusion"
                 ),
-                turns: steps_run,
-                completed: false,
-                is_error: true,
+                steps_run,
                 usage,
-                cancelled: false,
-            }
+            )
         } else {
-            SubagentResult {
-                status_line: format!("failed: reached the maximum turn count {max_turns}"),
-                result_text: format!("Reached the maximum turn count ({max_turns}). {last_text}"),
-                turns: steps_run,
-                completed: false,
-                is_error: true,
+            SubagentResult::child(
+                crate::session::AgentRunStatus::Failed,
+                format!("reached the maximum turn count {max_turns}"),
+                format!("Reached the maximum turn count ({max_turns}). {last_text}"),
+                steps_run,
                 usage,
-                cancelled: false,
-            }
+            )
         }
     }
 }

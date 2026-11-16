@@ -83,6 +83,13 @@ mod layering_tests {
         assert!(config.memory.enabled, "project keys override");
     }
 
+    #[test]
+    fn agents_delegation_depth_loads_from_toml() {
+        let fixture = Fixture::new("agents-depth");
+        fixture.write_user("[agents]\nmax_delegation_depth = 2\n");
+        assert_eq!(load(&fixture).agents.max_delegation_depth, 2);
+    }
+
     /// A project layer can never inject or replace a provider array: the
     /// endpoint and the credential are user-level decisions. Other array keys
     /// keep Codex's ordinary replace rule.

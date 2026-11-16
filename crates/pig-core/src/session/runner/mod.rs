@@ -433,6 +433,22 @@ impl Manager {
             entry.cancel = None;
             entry.retry = None;
             entry.steerable = false;
+            if let Some(request_id) = entry.active_claim.take() {
+                let result = store
+                    .lock()
+                    .expect("store lock")
+                    .clear_execution_claim(&session_id, &request_id);
+                if let Err(error) = result {
+                    emit(
+                        &event_tx,
+                        Event::Error {
+                            session_id: Some(session_id.clone()),
+                            error,
+                            fatal: false,
+                        },
+                    );
+                }
+            }
             // A SaveConfig or trust decision that arrived mid-turn becomes
             // effective here, once, before any queued turn starts. The entry
             // and the Session share the runtime through an `Arc`, so this is
@@ -491,16 +507,26 @@ impl Manager {
                 .expect("notification lock")
                 .is_empty();
             let queued = queue_len(entry) + usize::from(notifications_pending);
-            let drain = match outcome {
-                TurnOutcome::Completed => entry.auto_drain,
-                TurnOutcome::Aborted => entry.auto_drain && entry.cancel_promote,
-                TurnOutcome::Failed => false,
+            let drain = match outcome.status {
+                crate::session::AgentRunStatus::Completed => entry.auto_drain,
+                crate::session::AgentRunStatus::Cancelled => {
+                    entry.auto_drain && entry.cancel_promote
+                }
+                crate::session::AgentRunStatus::Failed => false,
+                crate::session::AgentRunStatus::Queued
+                | crate::session::AgentRunStatus::Running
+                | crate::session::AgentRunStatus::Lost => {
+                    unreachable!("settled agent runs have terminal outcomes")
+                }
             };
             entry.cancel_promote = false;
-            if !drain && !matches!(outcome, TurnOutcome::Completed) && queued > 0 {
+            if !drain
+                && !matches!(outcome.status, crate::session::AgentRunStatus::Completed)
+                && queued > 0
+            {
                 entry.auto_drain = false;
-                let reason = match outcome {
-                    TurnOutcome::Failed => pig_protocol::QueuePauseReason::Error,
+                let reason = match outcome.status {
+                    crate::session::AgentRunStatus::Failed => pig_protocol::QueuePauseReason::Error,
                     _ => pig_protocol::QueuePauseReason::Stopped,
                 };
                 emit(

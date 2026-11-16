@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 /// Default max turns for a subagent (when max_turns is not configured)
 pub const DEFAULT_MAX_TURNS: usize = 20;
 
-/// Tools forcibly removed from subagents (prevents nested delegation / plan-mode deadlock / blocking the parent turn with questions)
+/// Tools forcibly removed from the static child set. Delegation tools are not
+/// in `tool::all()`; child preparation adds them separately only when both the
+/// profile and the remaining depth budget allow them. Plan/question tools stay
+/// forbidden to avoid plan-mode deadlocks and blocking the parent turn.
 pub const FORBIDDEN_CHILD_TOOLS: [&str; 5] = [
     "Agent",
     "AgentSwarm",

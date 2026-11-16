@@ -1279,16 +1279,19 @@ export class AgentStore {
       }
       case "ConversationSnapshot": {
         const agentId = typeof data.agent_id === "string" ? data.agent_id : null;
+        const runId = typeof data.run_id === "string" ? data.run_id : null;
         const items = (data.items ?? []) as ChatItem[];
         if (agentId) {
           const key = `${sessionId!}:${agentId}`;
           this.subagents.update((all) => {
             const previous = all[key];
+            if (runId && previous?.runId && previous.runId !== runId) return all;
             return {
               ...all,
               [key]: {
                 sessionId: sessionId!,
                 agentId,
+                runId: runId ?? previous?.runId ?? null,
                 title: data.title ?? previous?.title ?? "",
                 subtitle: data.subtitle ?? previous?.subtitle ?? "",
                 items: previous ? this.mergeConversationSnapshot(items, previous.items) : items,
@@ -1303,6 +1306,7 @@ export class AgentStore {
       }
       case "ConversationUpdate": {
         const agentId = typeof data.agent_id === "string" ? data.agent_id : null;
+        const runId = typeof data.run_id === "string" ? data.run_id : null;
         const item = data.item as ChatItem;
         if (agentId) {
           const key = `${sessionId!}:${agentId}`;
@@ -1314,11 +1318,14 @@ export class AgentStore {
               subtitle: "",
               items: [],
               running: true,
+              runId,
             };
+            if (runId && previous.runId && previous.runId !== runId) return all;
             return {
               ...all,
               [key]: {
                 ...previous,
+                runId: runId ?? previous.runId ?? null,
                 items: this.upsertConversationItems(previous.items, item),
               },
             };
@@ -1330,12 +1337,13 @@ export class AgentStore {
       }
       case "ConversationRemove": {
         const agentId = typeof data.agent_id === "string" ? data.agent_id : null;
+        const runId = typeof data.run_id === "string" ? data.run_id : null;
         const ids = new Set<string>((data.item_ids ?? []) as string[]);
         if (agentId) {
           const key = `${sessionId!}:${agentId}`;
           this.subagents.update((all) => {
             const previous = all[key];
-            if (!previous) return all;
+            if (!previous || (runId && previous.runId && previous.runId !== runId)) return all;
             return {
               ...all,
               [key]: { ...previous, items: previous.items.filter((item) => !ids.has(item.id)) },
@@ -1348,10 +1356,21 @@ export class AgentStore {
       }
       case "ConversationStatus": {
         const key = `${sessionId!}:${data.agent_id}`;
+        const runId = typeof data.run_id === "string" ? data.run_id : null;
+        const running = data.running === true;
         this.subagents.update((all) => {
           const previous = all[key];
-          if (!previous) return all;
-          return { ...all, [key]: { ...previous, running: data.running === true } };
+          if (!previous || (!running && runId && previous.runId && previous.runId !== runId)) {
+            return all;
+          }
+          return {
+            ...all,
+            [key]: {
+              ...previous,
+              runId: runId ?? previous.runId ?? null,
+              running,
+            },
+          };
         });
         break;
       }

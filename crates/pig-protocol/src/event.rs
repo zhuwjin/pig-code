@@ -499,6 +499,8 @@ pub enum Event {
         session_id: String,
         item_id: String,
         note: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     /// The "agent card" metadata of a subagent tool card (emitted live plus
     /// persisted to rollout, rebuilt from the record on replay):
@@ -509,6 +511,8 @@ pub enum Event {
         session_id: String,
         item_id: String,
         agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         profile: String,
         description: String,
         /// "{provider_name} · {model}" (appends " · {level}" when the profile
@@ -682,6 +686,8 @@ pub enum Event {
         items: Vec<ConversationItem>,
         #[serde(default)]
         running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     /// One item upsert in a conversation. Root and subagent item streams use
     /// this event; the UI applies it by stable item id. Delivery order is the
@@ -690,6 +696,8 @@ pub enum Event {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         item: ConversationItem,
     },
     /// One item removal in a conversation.
@@ -697,6 +705,8 @@ pub enum Event {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         item_ids: Vec<String>,
     },
     /// A subagent conversation's running flag changed.
@@ -704,6 +714,8 @@ pub enum Event {
         session_id: String,
         agent_id: String,
         running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     /// Live-only: the session's model call entered a retry wait (transient,
     /// never persisted; superseded by the next delta or the turn's end)

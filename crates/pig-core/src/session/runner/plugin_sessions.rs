@@ -808,10 +808,15 @@ impl Manager {
         session_id: &str,
         outcome: &TurnOutcome,
     ) {
-        let status = match outcome {
-            TurnOutcome::Completed => "completed",
-            TurnOutcome::Aborted => "aborted",
-            TurnOutcome::Failed => "failed",
+        let status = match outcome.status {
+            crate::session::AgentRunStatus::Completed => "completed",
+            crate::session::AgentRunStatus::Cancelled => "aborted",
+            crate::session::AgentRunStatus::Failed => "failed",
+            crate::session::AgentRunStatus::Queued
+            | crate::session::AgentRunStatus::Running
+            | crate::session::AgentRunStatus::Lost => {
+                unreachable!("settled agent runs have terminal outcomes")
+            }
         };
         let waiters: Vec<PluginTurnWaiter> = {
             let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.plugin_waiters)

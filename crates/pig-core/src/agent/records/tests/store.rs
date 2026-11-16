@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn conversation_store_loads_and_syncs_child_records() {
+    let dir = std::env::temp_dir().join(format!(
+        "pig-agent-conversation-store-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let path = dir.join("a1.jsonl");
+    write_meta(&path);
+    let mut store = AgentConversationStore::new(&path);
+    let records = crate::rollout::ConversationStore::load(&store).expect("load raw records");
+    assert!(matches!(
+        records.as_slice(),
+        [crate::rollout::RolloutRecord::Meta { .. }]
+    ));
+    crate::rollout::ConversationStore::sync(&mut store).expect("sync child store");
+    assert_eq!(
+        crate::rollout::ConversationStore::media_root(&store),
+        path.with_extension("media")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The read-only subagent view carries the real tool status instead of
 /// pretending every row succeeded.
 #[test]

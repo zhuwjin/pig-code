@@ -14,10 +14,12 @@ use crate::tool;
 /// Context shared by every agent instance.
 pub(crate) struct Agent {
     pub(crate) id: String,
+    /// Latest activation, including its stable identity and terminal result.
+    pub(crate) run: Option<crate::session::AgentRunResult>,
     pub(crate) cwd: PathBuf,
-    /// 0 for the root session; one more than the parent for every child
-    /// agent. Child tool sets do not include Agent/AgentSwarm, so the current
-    /// orchestration admits exactly one level.
+    /// 0 for the root session; one more than the parent for every child.
+    /// Resume keeps the persisted depth as a monotonic lower bound. The
+    /// session's resolved `[agents]` config controls further delegation.
     pub(crate) delegation_depth: u32,
     /// Resolved model for this agent. Root sessions set it at each step
     /// (model/provider can switch); child agents set it at preparation.
@@ -28,6 +30,10 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
+    pub(crate) fn run_id(&self) -> Option<String> {
+        self.run.as_ref().and_then(|run| run.run_id.clone())
+    }
+
     pub(crate) fn config(&self) -> &ResolvedModel {
         self.config
             .as_ref()
