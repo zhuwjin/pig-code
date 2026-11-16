@@ -24,6 +24,8 @@ fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
         "created_at": 1,
         "kind": "subagent",
         "parent_id": parent_id,
+        "parent_agent_id": parent_id,
+        "run_id": format!("run-{meta_id}"),
         "delegation_depth": 1,
         "context_mode": "fresh",
         "profile": "general-purpose",
@@ -1596,7 +1598,7 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
         .find(|agent| agent.agent_id == "a1-1")
         .expect("orphan child recovered into the catalog");
     assert_eq!(recovered.status, Some(pig_protocol::AgentRunStatus::Lost));
-    assert_eq!(recovered.parent_id, None);
+    assert_eq!(recovered.parent_id, Some(session_id.clone()));
     assert!(recovered.record_path.is_some());
 
     // The valid generated id still serves the right-side history.

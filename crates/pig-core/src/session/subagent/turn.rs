@@ -14,7 +14,7 @@ use pig_provider::ProviderEvent;
 
 use super::compact::{MAX_CHILD_OVERFLOW_RECOVERIES, child_overflow_failure};
 use super::persist::{
-    child_persist_stop, persist_child_message, persist_child_message_meta,
+    child_agent_result_meta, child_persist_stop, persist_child_message, persist_child_message_meta,
     persist_child_tool_result, persist_child_tool_starts,
 };
 use super::state::{ProgressSink, SubagentMode};
@@ -78,6 +78,7 @@ impl Session {
                 overflow_recoveries: 0,
                 emitted_up_to,
                 tool_edits: HashMap::new(),
+                tool_agents: HashMap::new(),
             })),
             user_ixs: Vec::new(),
             io_last_input: Vec::new(),
@@ -528,6 +529,7 @@ impl Session {
                 reasoning_ms,
                 edit: None,
                 tool_execution_ids: rt.step_item_ids.clone(),
+                ..Default::default()
             },
         ) {
             tracing::warn!(agent_id = %self.agent.id, "{error}");
@@ -805,6 +807,73 @@ impl Session {
                 call_ix += 1;
                 continue;
             };
+            if matches!(child_call.name.as_str(), "Agent" | "AgentSwarm") {
+                let parent_config = self.agent.config().clone();
+                let outcome = if child_call.name == "Agent" {
+                    self.run_subagent(
+                        child_call,
+                        &rt.ownership,
+                        &child_item_id,
+                        &parent_config,
+                        tx,
+                        cancel,
+                    )
+                    .await
+                } else {
+                    self.run_swarm(child_call, &child_item_id, &parent_config, tx, cancel)
+                        .await
+                };
+                match outcome {
+                    SubagentOutcome::Finished {
+                        note,
+                        is_error,
+                        card,
+                        cards,
+                    } => {
+                        let meta = child_agent_result_meta(self, &child_call.id, card, cards);
+                        let mut message =
+                            ChatMsg::tool_result(&child_call.id, note).with_error(is_error);
+                        if let Err(error) = persist_child_tool_result(
+                            self,
+                            child_call,
+                            &child_item_id,
+                            &mut message,
+                            meta,
+                        ) {
+                            tracing::warn!(agent_id = %self.agent.id, "{error}");
+                            return crate::session::engine::StepOutcome::Failed;
+                        }
+                        self.agent.history.push(message);
+                    }
+                    SubagentOutcome::Cancelled { card, cards } => {
+                        let meta = child_agent_result_meta(self, &child_call.id, card, cards);
+                        for (stopped_index, stopped_call) in calls.iter().enumerate().skip(call_ix)
+                        {
+                            let mut message = Session::stopped_tool_result(&stopped_call.id);
+                            let result_meta = if stopped_index == call_ix {
+                                meta.clone()
+                            } else {
+                                crate::agent::AgentMsgMeta::default()
+                            };
+                            if let Err(error) = persist_child_tool_result(
+                                self,
+                                stopped_call,
+                                &rt.step_item_ids[stopped_index],
+                                &mut message,
+                                result_meta,
+                            ) {
+                                tracing::warn!(agent_id = %self.agent.id, "{error}");
+                                return crate::session::engine::StepOutcome::Failed;
+                            }
+                            self.agent.history.push(message);
+                        }
+                        self.emit_child_conversation(rt, tx, rt.reasoning_ms);
+                        return crate::session::engine::StepOutcome::Cancelled;
+                    }
+                }
+                call_ix += 1;
+                continue;
+            }
             let extra_tools = self.child_extra_tools();
             let media = tool::MediaCapabilities::new(
                 self.agent.config().input_image,
@@ -985,9 +1054,10 @@ impl Session {
         let items = {
             let sub = self.subagent.as_mut().expect("child session");
             let emitted = sub.emitted_up_to;
-            let mut items = crate::agent::project_display_items_with_edits(
+            let mut items = crate::agent::project_display_items_with_metadata(
                 &self.agent.history[emitted..],
                 &sub.tool_edits,
+                &sub.tool_agents,
                 emitted,
             );
             if let Some(ms) = reasoning_ms

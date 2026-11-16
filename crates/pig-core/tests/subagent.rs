@@ -2328,3 +2328,194 @@ async fn send_message_steers_running_subagent() {
         .unwrap();
     agent.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_subagent_executes_and_restores_direct_lineage() {
+    let (config_path, cwd, data_dir) = setup("nested-subagent-lineage");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let sid = new_session(&agent, cwd.clone()).await;
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested delegation failed: {output}");
+    assert!(
+        output.contains(mock::SUBAGENT_NESTED_CHILD_DONE),
+        "{output}"
+    );
+    assert!(output.contains(mock::SUBAGENT_GRANDCHILD_DONE), "{output}");
+
+    let agents_dir = data_dir.join("sessions").join(format!("{sid}.agents"));
+    let mut child_id = None;
+    let mut child_run_id = None;
+    let mut grandchild_id = None;
+    let mut grandchild_run_id = None;
+    let mut child_raw = String::new();
+    for entry in std::fs::read_dir(&agents_dir).expect("agent contexts") {
+        let path = entry.expect("agent entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).expect("agent JSONL");
+        let meta: serde_json::Value =
+            serde_json::from_str(raw.lines().next().expect("agent meta line")).expect("agent meta");
+        if raw.contains("call_nested_agent") {
+            assert_eq!(meta["parent_agent_id"].as_str(), Some(sid.as_str()));
+            child_id = Some(meta["id"].as_str().expect("child id").to_string());
+            child_run_id = Some(meta["run_id"].as_str().expect("child run").to_string());
+            child_raw = raw;
+        } else {
+            grandchild_id = Some(meta["id"].as_str().expect("grandchild id").to_string());
+            grandchild_run_id = Some(meta["run_id"].as_str().expect("grandchild run").to_string());
+        }
+    }
+    let child_id = child_id.expect("direct child");
+    let child_run_id = child_run_id.expect("child run");
+    let grandchild_id = grandchild_id.expect("grandchild");
+    let grandchild_run_id = grandchild_run_id.expect("grandchild run");
+    assert_ne!(child_id, grandchild_id);
+    assert!(child_run_id.starts_with("run-"));
+    assert!(grandchild_run_id.starts_with("run-"));
+
+    let nested_result = child_raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["type"] == "tool_call" && record["tool"] == "Agent")
+        .expect("nested Agent result");
+    assert_eq!(
+        nested_result["agent_card"]["agent_id"].as_str(),
+        Some(grandchild_id.as_str())
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ConversationUpdate {
+            agent_id: Some(agent_id),
+            item: pig_protocol::ConversationItem::Tool { agents, .. },
+            ..
+        } if agent_id == &child_id && agents.iter().any(|card| card.agent_id == grandchild_id)
+    )));
+    agent.shutdown();
+
+    let connection = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    connection
+        .execute(
+            "DELETE FROM background_tasks WHERE session_id = ?1",
+            rusqlite::params![sid],
+        )
+        .expect("force orphan catalog recovery");
+    drop(connection);
+
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::ListAgents {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    let catalog = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::AgentCatalogChanged { agents, .. }
+                if agents.iter().any(|entry| entry.agent_id == child_id)
+                    && agents.iter().any(|entry| entry.agent_id == grandchild_id)
+        )
+    })
+    .await;
+    let entries = catalog
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentCatalogChanged { agents, .. }
+                if agents.iter().any(|entry| entry.agent_id == grandchild_id) =>
+            {
+                Some(agents)
+            }
+            _ => None,
+        })
+        .expect("nested catalog");
+    let child = entries
+        .iter()
+        .find(|entry| entry.agent_id == child_id)
+        .expect("child catalog entry");
+    assert_eq!(child.parent_id.as_deref(), Some(sid.as_str()));
+    assert_eq!(child.run_id.as_deref(), Some(child_run_id.as_str()));
+    assert_eq!(child.status, Some(pig_protocol::AgentRunStatus::Lost));
+    let grandchild = entries
+        .iter()
+        .find(|entry| entry.agent_id == grandchild_id)
+        .expect("grandchild catalog entry");
+    assert_eq!(grandchild.parent_id.as_deref(), Some(child_id.as_str()));
+    assert_eq!(
+        grandchild.run_id.as_deref(),
+        Some(grandchild_run_id.as_str())
+    );
+    assert_eq!(grandchild.status, Some(pig_protocol::AgentRunStatus::Lost));
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_swarm_executes_and_persists_all_cards() {
+    let (config_path, cwd, data_dir) = setup("nested-swarm");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_SWARM", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested swarm failed: {output}");
+    assert!(
+        output.contains(mock::SUBAGENT_NESTED_CHILD_DONE),
+        "{output}"
+    );
+    assert!(output.contains(mock::SUBAGENT_GRANDCHILD_DONE), "{output}");
+
+    let agents_dir = data_dir.join("sessions").join(format!("{sid}.agents"));
+    let contexts: Vec<_> = std::fs::read_dir(&agents_dir)
+        .expect("agent contexts")
+        .map(|entry| entry.expect("agent entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .collect();
+    assert_eq!(contexts.len(), 3, "one child and two grandchildren");
+    let child_raw = contexts
+        .iter()
+        .map(|path| std::fs::read_to_string(path).expect("agent JSONL"))
+        .find(|raw| raw.contains("call_nested_swarm"))
+        .expect("child swarm context");
+    let swarm_result = child_raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["type"] == "tool_call" && record["tool"] == "AgentSwarm")
+        .expect("nested AgentSwarm result");
+    let cards = swarm_result["agent_cards"].as_array().expect("swarm cards");
+    assert_eq!(cards.len(), 2);
+    assert!(cards.iter().all(|card| card["agent_id"].as_str().is_some()));
+    agent.shutdown();
+}

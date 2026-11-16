@@ -54,6 +54,8 @@ pub(crate) struct SubagentState {
     pub(in crate::session) emitted_up_to: usize,
     /// Tool-call id -> edit diff captured by the child gate (display only).
     pub(in crate::session) tool_edits: HashMap<String, pig_protocol::EditDiff>,
+    /// Tool-call id -> nested Agent cards captured by the session-layer driver.
+    pub(in crate::session) tool_agents: HashMap<String, Vec<crate::rollout::AgentCardRecord>>,
 }
 
 impl SubagentState {

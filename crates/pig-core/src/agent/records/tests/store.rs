@@ -108,6 +108,7 @@ fn display_items_keep_recorded_timing_and_tool_edit() {
             reasoning_ms: Some(1234),
             edit: None,
             tool_execution_ids: vec!["execution-edit".into()],
+            ..Default::default()
         },
     )
     .expect("append assistant");

@@ -224,6 +224,10 @@ pub enum RolloutRecord {
         kind: ConversationKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Direct creator for a child; distinct from the owning root `parent_id`.
+        parent_agent_id: Option<String>,
+        /// Creation run identity retained for orphan catalog recovery.
+        run_id: Option<String>,
         /// Durable lower bound below the root; None on a root session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegation_depth: Option<u32>,
@@ -452,6 +456,8 @@ impl RolloutRecord {
             created_at: meta.created_at,
             kind: ConversationKind::Root,
             parent_id: None,
+            parent_agent_id: None,
+            run_id: None,
             delegation_depth: None,
             context_mode: None,
             inherited_record_count: None,
@@ -473,9 +479,13 @@ impl RolloutRecord {
         delegation_depth: u32,
         created_at: u64,
     ) -> Self {
+        let parent_agent_id = parent_id.clone();
+        let run_id = format!("run-{id}");
         Self::subagent_meta_with_context(
             id,
             parent_id,
+            parent_agent_id,
+            run_id,
             cwd,
             description,
             profile,
@@ -492,6 +502,8 @@ impl RolloutRecord {
     pub fn subagent_meta_with_context(
         id: String,
         parent_id: String,
+        parent_agent_id: String,
+        run_id: String,
         cwd: PathBuf,
         description: String,
         profile: String,
@@ -509,6 +521,8 @@ impl RolloutRecord {
             created_at,
             kind: ConversationKind::Subagent,
             parent_id: Some(parent_id),
+            parent_agent_id: Some(parent_agent_id),
+            run_id: Some(run_id),
             delegation_depth: Some(delegation_depth),
             context_mode: Some(context_mode),
             inherited_record_count,
@@ -1286,7 +1300,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create sessions dir");
         std::fs::write(
             dir.join("a.jsonl"),
-            "{\"type\":\"meta\",\"id\":\"a\",\"cwd\":\"/tmp\",\"title\":\"t\",\"created_at\":1}\n\
+            "{\"type\":\"meta\",\"id\":\"a\",\"cwd\":\"/tmp\",\"title\":\"t\",\"created_at\":1,\"parent_agent_id\":null,\"run_id\":null}\n\
              {\"type\":\"user\",\"text\":\"deploy the Kiwi-Fruit service\",\"files\":[],\"images\":[]}\n",
         )
         .expect("write a");
@@ -1466,7 +1480,7 @@ mod tests {
 
     fn meta_line(id: &str) -> String {
         format!(
-            "{{\"type\":\"meta\",\"id\":\"{id}\",\"cwd\":\"/tmp\",\"title\":\"t\",\"created_at\":1}}\n"
+            "{{\"type\":\"meta\",\"id\":\"{id}\",\"cwd\":\"/tmp\",\"title\":\"t\",\"created_at\":1,\"parent_agent_id\":null,\"run_id\":null}}\n"
         )
     }
 

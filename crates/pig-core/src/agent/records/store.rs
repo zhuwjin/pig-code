@@ -13,6 +13,8 @@ pub struct AgentMeta {
     pub agent_id: String,
     pub cwd: PathBuf,
     pub parent_session_id: String,
+    pub parent_agent_id: String,
+    pub run_id: String,
     pub delegation_depth: u32,
     pub context_mode: crate::rollout::ChildContextMode,
     pub inherited_record_count: Option<usize>,
@@ -92,6 +94,8 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
         created_at,
         kind,
         parent_id,
+        parent_agent_id,
+        run_id,
         delegation_depth,
         context_mode,
         inherited_record_count,
@@ -114,6 +118,8 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
         agent_id: id,
         cwd,
         parent_session_id: required_meta(parent_id, "parent_id", path)?,
+        parent_agent_id: required_meta(parent_agent_id, "parent_agent_id", path)?,
+        run_id: required_meta(run_id, "run_id", path)?,
         delegation_depth: required_meta(delegation_depth, "delegation_depth", path)?,
         context_mode: required_meta(context_mode, "context_mode", path)?,
         inherited_record_count,
@@ -204,6 +210,8 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
                 is_error,
                 stopped,
                 edit,
+                agent_card,
+                agent_cards,
                 images,
                 documents,
                 ..
@@ -213,7 +221,10 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
                     .unwrap_or_else(|| format!("replay-{}", stored.len()));
                 let mut msg = ChatMsg::tool_result(&call_id, output).with_error(is_error);
                 msg.stopped = stopped;
-                stored.push(message(msg, images, documents, 0, None, edit));
+                let mut entry = message(msg, images, documents, 0, None, edit);
+                entry.agent_card = agent_card;
+                entry.agent_cards = agent_cards;
+                stored.push(entry);
             }
             RolloutRecord::Compact {
                 note,
@@ -282,6 +293,8 @@ fn message(
         ts_ms,
         reasoning_ms,
         edit,
+        agent_card: None,
+        agent_cards: Vec::new(),
     }
 }
 

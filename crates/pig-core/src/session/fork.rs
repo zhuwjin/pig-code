@@ -286,6 +286,8 @@ mod tests {
                 created_at: 1,
                 kind: crate::rollout::ConversationKind::Root,
                 parent_id: None,
+                parent_agent_id: None,
+                run_id: None,
                 delegation_depth: None,
                 context_mode: None,
                 inherited_record_count: None,

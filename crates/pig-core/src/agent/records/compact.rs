@@ -109,6 +109,8 @@ pub(super) fn apply_agent_compact(
         ts_ms: 0,
         reasoning_ms: None,
         edit: None,
+        agent_card: None,
+        agent_cards: Vec::new(),
     });
     if let Some(user) = preserved {
         history.push(user);

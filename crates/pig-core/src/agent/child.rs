@@ -380,6 +380,8 @@ fn fork_history(
 fn child_meta(
     agent_id: &str,
     parent_session_id: &str,
+    parent_agent_id: &str,
+    run_id: &str,
     cwd: &Path,
     description: &str,
     policy: &ResolvedChildPolicy,
@@ -387,6 +389,8 @@ fn child_meta(
     crate::rollout::RolloutRecord::subagent_meta_with_context(
         agent_id.to_string(),
         parent_session_id.to_string(),
+        parent_agent_id.to_string(),
+        run_id.to_string(),
         cwd.to_path_buf(),
         description.to_string(),
         policy.profile.name.clone(),
@@ -522,6 +526,8 @@ fn persist_fresh_context(prep: &mut ChildPrep, parent_session_id: &str) -> Resul
     let meta = child_meta(
         &prep.agent_id,
         parent_session_id,
+        &prep.parent_agent_id,
+        &prep.run_id,
         &prep.cwd,
         &prep.description,
         &prep.policy,

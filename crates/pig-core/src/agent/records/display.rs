@@ -21,7 +21,7 @@ pub fn display_items(
 }
 
 /// The stored variant used by the history loader: it keeps the record's display
-/// metadata (timestamps, reasoning duration, tool edits).
+/// metadata (timestamps, reasoning duration, tool edits and nested-agent cards).
 pub(crate) fn display_stored_items(
     meta: &AgentMeta,
     stored: &[StoredAgentMsg],
@@ -46,22 +46,41 @@ pub fn project_display_items(msgs: &[pig_provider::ChatMsg]) -> Vec<Conversation
     project_display_items_with_edits(msgs, &HashMap::new(), 0)
 }
 
-/// The live path's variant: tool edits are not in the message yet, so they come
-/// from the drive's call-id map.
+/// The live path's variant: tool edits and nested-agent cards are carried by
+/// the drive's call-id maps until their durable result record is projected.
 pub(crate) fn project_display_items_with_edits(
     msgs: &[pig_provider::ChatMsg],
     edits: &HashMap<String, pig_protocol::EditDiff>,
     base: usize,
 ) -> Vec<ConversationItem> {
+    project_display_items_with_metadata(msgs, edits, &HashMap::new(), base)
+}
+
+pub(crate) fn project_display_items_with_metadata(
+    msgs: &[pig_provider::ChatMsg],
+    edits: &HashMap<String, pig_protocol::EditDiff>,
+    agent_cards: &HashMap<String, Vec<crate::rollout::AgentCardRecord>>,
+    base: usize,
+) -> Vec<ConversationItem> {
     let stored: Vec<StoredAgentMsg> = msgs
         .iter()
-        .map(|msg| StoredAgentMsg {
-            msg: msg.clone(),
-            images: Vec::new(),
-            documents: Vec::new(),
-            ts_ms: 0,
-            reasoning_ms: None,
-            edit: None,
+        .map(|msg| {
+            let agent_cards = msg
+                .tool_call_id
+                .as_ref()
+                .and_then(|id| agent_cards.get(id))
+                .cloned()
+                .unwrap_or_default();
+            StoredAgentMsg {
+                msg: msg.clone(),
+                images: Vec::new(),
+                documents: Vec::new(),
+                ts_ms: 0,
+                reasoning_ms: None,
+                edit: None,
+                agent_card: None,
+                agent_cards,
+            }
         })
         .collect();
     project_stored_items(&stored, edits, base)
@@ -154,6 +173,7 @@ fn project_stored_items(
                         output: current,
                         status,
                         edit,
+                        agents,
                         ..
                     } = &mut items[*ix]
                     {
@@ -171,6 +191,22 @@ fn project_stored_items(
                                 .and_then(|id| edits.get(id))
                                 .cloned()
                         });
+                        *agents = entry
+                            .agent_card
+                            .iter()
+                            .chain(entry.agent_cards.iter())
+                            .enumerate()
+                            .map(|(index, card)| pig_protocol::ConversationAgentCard {
+                                agent_id: card.agent_id.clone(),
+                                profile: card.profile.clone(),
+                                description: card.description.clone(),
+                                model: card.model.clone(),
+                                background: card.background,
+                                finished: true,
+                                finished_seq: Some(index as u64 + 1),
+                                live_note: None,
+                            })
+                            .collect();
                     }
                 }
                 // No matching call (truncated/out-of-order history): drop the result

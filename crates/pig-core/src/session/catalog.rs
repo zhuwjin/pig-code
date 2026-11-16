@@ -156,8 +156,8 @@ impl Session {
                 format!("Subagent {}: {}", meta.profile, meta.description),
                 crate::task::AgentRunMetadata {
                     agent_id: agent_id.clone(),
-                    run_id: format!("recovered-{agent_id}-{}", meta.created_at),
-                    parent_agent_id: None,
+                    run_id: meta.run_id.clone(),
+                    parent_agent_id: Some(meta.parent_agent_id.clone()),
                     delegation_depth: meta.delegation_depth,
                     profile: meta.profile,
                     usage: (0, 0, 0),

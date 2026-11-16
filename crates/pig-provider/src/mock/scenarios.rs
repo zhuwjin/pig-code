@@ -811,6 +811,9 @@ pub const SUBAGENT_PARENT_DONE: &str = "MOCK_SUBAGENT_PARENT_DONE";
 /// Marker in the subagent's final conclusion text (should be carried back in the parent-side Agent result)
 pub const SUBAGENT_CHILD_DONE: &str = "MOCK_SUBAGENT_CHILD_DONE";
 
+pub const SUBAGENT_NESTED_CHILD_DONE: &str = "MOCK_SUBAGENT_NESTED_CHILD_DONE";
+pub const SUBAGENT_GRANDCHILD_DONE: &str = "MOCK_SUBAGENT_GRANDCHILD_DONE";
+
 /// Marker in the subagent's new conclusion after a resume run
 pub const SUBAGENT_RESUMED_DONE: &str = "MOCK_SUBAGENT_RESUMED_DONE";
 
@@ -1587,7 +1590,7 @@ pub(super) fn subagent_parent_response(body: &str) -> Vec<String> {
                 return subagent_parent_done();
             }
             let default_type = match behavior {
-                "BASH" | "LOOP" | "LONG" => "general-purpose",
+                "BASH" | "LOOP" | "LONG" | "NESTED" | "NESTED_SWARM" => "general-purpose",
                 _ => "explore",
             };
             subagent_agent_call(
@@ -1622,6 +1625,32 @@ pub(super) fn subagent_child_response(body: &str, tool_results: usize) -> Vec<St
         ]
     };
     match behavior {
+        "NESTED_SWARM" if !tool_answered(body, "call_nested_swarm") => tool_call_chunks(
+            "call_nested_swarm",
+            "AgentSwarm",
+            &serde_json::json!({
+                "prompt_template": format!("{SUBAGENT_CHILD_PREFIX}GRANDCHILD handle {{{{item}}}}"),
+                "items": ["nested-a", "nested-b"],
+                "subagent_type": "general-purpose",
+            })
+            .to_string(),
+            None,
+        ),
+        "NESTED_SWARM" => done_text(format!(
+            "Nested swarm done. {SUBAGENT_NESTED_CHILD_DONE} {SUBAGENT_GRANDCHILD_DONE}"
+        )),
+        "NESTED" if !tool_answered(body, "call_nested_agent") => subagent_agent_call(
+            "call_nested_agent",
+            serde_json::json!({
+                "description": "nested grandchild delegation",
+                "prompt": format!("{SUBAGENT_CHILD_PREFIX}GRANDCHILD finish the nested task"),
+                "subagent_type": "general-purpose",
+            }),
+        ),
+        "NESTED" => done_text(format!(
+            "Nested child done. {SUBAGENT_NESTED_CHILD_DONE} {SUBAGENT_GRANDCHILD_DONE}"
+        )),
+        "GRANDCHILD" => done_text(format!("Grandchild done. {SUBAGENT_GRANDCHILD_DONE}")),
         "RESUMED" => done_text(format!(
             "Subagent resumed: task done. {SUBAGENT_RESUMED_DONE}"
         )),

@@ -15,7 +15,7 @@ mod tests;
 
 pub(crate) use conversation::AgentConversationStore;
 pub(crate) use display::display_stored_items;
-pub(crate) use display::project_display_items_with_edits;
+pub(crate) use display::project_display_items_with_metadata;
 #[allow(unused_imports)]
 pub use display::{display_items, project_display_items};
 pub use jsonl::append_agent_conversation_record;
@@ -30,13 +30,15 @@ pub(crate) use store::reconcile_tool_results;
 pub(crate) use store::recover_agent_context;
 pub use store::{AgentMeta, read_agent};
 
-/// Canonical message metadata: display timing/edit fields and the assistant's
-/// tool execution ids.
+/// Canonical message metadata: display timing/edit fields, nested-agent cards,
+/// and the assistant's tool execution ids.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentMsgMeta {
     pub(crate) reasoning_ms: Option<u64>,
     pub(crate) edit: Option<pig_protocol::EditDiff>,
     pub(crate) tool_execution_ids: Vec<String>,
+    pub(crate) agent_card: Option<crate::rollout::AgentCardRecord>,
+    pub(crate) agent_cards: Vec<crate::rollout::AgentCardRecord>,
 }
 
 /// One canonical message before media rehydration. Compaction boundaries
@@ -49,6 +51,8 @@ pub(crate) struct StoredAgentMsg {
     pub(crate) ts_ms: u64,
     pub(crate) reasoning_ms: Option<u64>,
     pub(crate) edit: Option<pig_protocol::EditDiff>,
+    pub(crate) agent_card: Option<crate::rollout::AgentCardRecord>,
+    pub(crate) agent_cards: Vec<crate::rollout::AgentCardRecord>,
 }
 
 /// Subagent context directory: {sessions_dir}/{session_id}.agents/ (one {agent_id}.jsonl per subagent)

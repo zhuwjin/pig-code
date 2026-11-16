@@ -120,6 +120,32 @@ pub(super) fn persist_child_tool_starts(
     Ok(())
 }
 
+pub(super) fn child_agent_result_meta(
+    session: &mut Session,
+    call_id: &str,
+    agent_card: Option<crate::rollout::AgentCardRecord>,
+    agent_cards: Vec<crate::rollout::AgentCardRecord>,
+) -> crate::agent::AgentMsgMeta {
+    let cards: Vec<_> = agent_card
+        .iter()
+        .chain(agent_cards.iter())
+        .cloned()
+        .collect();
+    if !cards.is_empty() {
+        session
+            .subagent
+            .as_mut()
+            .expect("child session")
+            .tool_agents
+            .insert(call_id.to_string(), cards);
+    }
+    crate::agent::AgentMsgMeta {
+        agent_card,
+        agent_cards,
+        ..Default::default()
+    }
+}
+
 /// Persist one tool result with the call that produced it.
 pub(super) fn persist_child_tool_result(
     session: &mut Session,

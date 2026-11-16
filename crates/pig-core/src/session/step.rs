@@ -74,6 +74,10 @@ impl Session {
         false
     }
 
+    pub(super) fn root_prompt_cache_key(&self) -> String {
+        pig_provider::session_prompt_cache_key(&self.agent.id)
+    }
+
     pub(crate) async fn begin_step_attempt(
         &mut self,
         rt: &mut StepRuntime,
@@ -87,8 +91,7 @@ impl Session {
         if self.is_subagent() {
             return self.begin_child_attempt(rt, cancel);
         }
-        let (turn_id, config, control, _, _) = rt.root_parts();
-        let turn_id = turn_id.to_string();
+        let (_, config, control, _, _) = rt.root_parts();
         let config = config.clone();
         let control = control.clone();
         let breakdown =
@@ -102,8 +105,7 @@ impl Session {
         );
         let mut request_config = config;
         if pig_provider::prompt_cache_key_supported(&request_config.base_url) {
-            request_config.prompt_cache_key =
-                Some(pig_provider::session_prompt_cache_key(&turn_id));
+            request_config.prompt_cache_key = Some(self.root_prompt_cache_key());
         }
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(pig_provider::stream_chat(

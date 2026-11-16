@@ -137,6 +137,7 @@ pub(super) fn make_child_session(
             overflow_recoveries: 0,
             emitted_up_to,
             tool_edits: HashMap::new(),
+            tool_agents: HashMap::new(),
         })),
         user_ixs: Vec::new(),
         io_last_input: Vec::new(),

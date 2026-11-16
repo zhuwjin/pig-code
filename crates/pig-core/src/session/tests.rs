@@ -705,3 +705,18 @@ fn a_revoked_prompt_snapshot_is_not_restored_on_resume() {
         "the snapshot's trusted skills state is not adopted"
     );
 }
+
+#[test]
+fn root_prompt_cache_key_is_stable_per_session() {
+    let fixture = TrustFixture::new("root-cache-key");
+    let session = fixture.create(None);
+    assert_eq!(session.root_prompt_cache_key(), "pig:s1");
+    drop(session);
+    let mut resumed = fixture.load(None);
+    assert_eq!(resumed.root_prompt_cache_key(), "pig:s1");
+    resumed.turn_counter = 9;
+    assert_eq!(resumed.root_prompt_cache_key(), "pig:s1");
+    resumed.agent.id = "s2".into();
+    assert_eq!(resumed.root_prompt_cache_key(), "pig:s2");
+    let _ = std::fs::remove_dir_all(&fixture.dir);
+}
