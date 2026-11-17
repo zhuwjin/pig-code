@@ -89,11 +89,6 @@ impl Manager {
                 notification,
             } => {
                 if self.deleted_sessions.contains(&session_id) {
-                    super::operations::delete_session_artifacts(
-                        &self.sessions_dir,
-                        &session_id,
-                        true,
-                    );
                     return;
                 }
                 let detached = task.detached;
@@ -103,14 +98,8 @@ impl Manager {
                     let wait_delivered = entry.is_some_and(|entry| {
                         crate::task::task_wait_delivered(&entry.state, &owner, &task.summary.id)
                     });
-                    let owner_running = entry.is_some_and(|entry| {
-                        entry
-                            .state
-                            .agent_steers
-                            .lock()
-                            .expect("agent steers lock")
-                            .contains_key(&owner)
-                    });
+                    let owner_running =
+                        entry.is_some_and(|entry| entry.state.agents.is_active(&owner));
                     if !detached || suppressed || wait_delivered || owner_running {
                         // A live direct parent consumes the terminal fact as a
                         // steer at its next step. TaskWait and foreground runs
@@ -135,15 +124,14 @@ impl Manager {
                         let mut routed = true;
                         if detached && !suppressed && !wait_delivered && owner_running {
                             if let Some(entry) = self.sessions.get(&session_id) {
-                                let steer =
-                                    crate::task::AgentSteer::notification(notification.clone());
-                                let mut steers =
-                                    entry.state.agent_steers.lock().expect("agent steers lock");
-                                if let Some(queue) = steers.get_mut(&owner) {
-                                    queue.push_back(steer);
-                                } else {
-                                    routed = false;
-                                }
+                                let text = crate::task::notification::render_notification_batch(
+                                    std::slice::from_ref(&notification),
+                                );
+                                let steer = crate::agent::AgentSteer::notification(
+                                    notification.clone(),
+                                    text,
+                                );
+                                routed = entry.state.agents.push_steer(&owner, steer).is_ok();
                             } else {
                                 routed = false;
                             }

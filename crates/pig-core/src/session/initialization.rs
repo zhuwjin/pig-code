@@ -139,11 +139,10 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         subagent: None,
         user_ixs: parts.user_ixs,
         io_last_input: Vec::new(),
-        turn_counter: 0,
-        run_turns: 0,
         tracker: parts.tracker,
         always_allowed: Arc::new(Mutex::new(HashSet::new())),
         plan_enabled: false,
+        reviewer: Arc::new(UserApprovalReviewer::new(parts.pending.clone())),
         pending: parts.pending,
         pending_questions: parts.pending_questions,
         permissions: PermissionSettings::default(),
@@ -171,25 +170,7 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         projected_input_image: None,
         projected_input_pdf: None,
         recorded_prompt: None,
-        last_total_tokens: None,
-        usage_turn_id: None,
-        usage_anchor: None,
-        overflow_recovered: false,
-        turn_input: 0,
-        turn_cache_read: 0,
-        turn_output: 0,
-        turn_reasoning_output: 0,
-        turn_api_ms: 0,
-        turn_ttft_ms: 0,
-        turn_ttft_steps: 0,
-        turn_api_steps: 0,
-        turn_tool_ms: 0,
-        stats_turns: Vec::new(),
-        turn_active: false,
-        rate_started_at: None,
-        rate_characters: 0,
-        input_total: 0,
-        cache_read_total: 0,
+        run_state: Default::default(),
         agent_seq: 0,
         tool_item_seq: 0,
         runtime: parts.runtime,
@@ -201,6 +182,7 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         session_start_hook_ran: false,
         session_start_source: parts.session_start_source,
     };
+    session.state.agents.register_root(session.agent.id.clone());
     session.refresh_project_sandbox();
     session
 }
@@ -458,6 +440,7 @@ impl Session {
         session.restore_root_run(&records);
         session.state.restore_tasks(tasks);
         session.restore_agent_catalog();
+        session.state.agents.restore_mailbox()?;
         if let Some(snapshot) = prompt_snapshot {
             let trusted = session.trust.admits(&session.agent.cwd);
             let same_trust = snapshot_trusted(&snapshot.skills_state) == Some(trusted);

@@ -5,7 +5,7 @@ use super::*;
 /// from the child JSONL instead of the omitted work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_resume_compacts_a_long_child_and_restart_replays_it() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root, log, runtime) =
         compaction_test_session("foreground", 30_000, 2_000);
     let mut history = long_child_messages(
@@ -165,7 +165,7 @@ async fn foreground_resume_compacts_a_long_child_and_restart_replays_it() {
 /// and exactly one canonical compact marker is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_resume_compaction_streams_on_all_api_formats() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     for (format, tag) in [
         (pig_protocol::ApiFormat::OpenAiResponses, "responses"),
         (pig_protocol::ApiFormat::AnthropicMessages, "anthropic"),
@@ -233,7 +233,7 @@ async fn foreground_resume_compaction_streams_on_all_api_formats() {
 /// compaction; the child settles normally and its marker is durable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_resume_compacts_a_long_child() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root, log, _runtime) =
         compaction_test_session("background", 30_000, 2_000);
     let mut history = long_child_messages(
@@ -283,7 +283,7 @@ async fn background_resume_compacts_a_long_child() {
 /// resumed child's long context.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn swarm_resume_compacts_a_long_child() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root, log, _runtime) =
         compaction_test_session("swarm", 30_000, 2_000);
     let mut history = long_child_messages(
@@ -345,7 +345,7 @@ async fn swarm_resume_compacts_a_long_child() {
 /// sidecar's own typed overflow deliberately falls back to truncation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reactive_overflow_compacts_and_retries_the_child_step_once() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root, log, _runtime) =
         compaction_test_session("reactive", 100_000, 2_000);
     let mut history = long_child_messages(
@@ -404,7 +404,7 @@ async fn reactive_overflow_compacts_and_retries_the_child_step_once() {
 /// concrete resume path; it never retries forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unrecoverable_child_overflow_keeps_agent_id_and_resume_guidance() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root, log, _runtime) =
         compaction_test_session("unrecoverable", 100_000, 2_000);
     let mut history = long_child_messages(

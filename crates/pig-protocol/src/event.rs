@@ -892,6 +892,101 @@ pub enum Event {
     },
 }
 
+impl Event {
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::SessionConfigured { session_id, .. }
+            | Self::SessionTitleChanged { session_id, .. }
+            | Self::McpServerList { session_id, .. }
+            | Self::FileSearchResults { session_id, .. }
+            | Self::QueueChanged { session_id, .. }
+            | Self::QueueDrainChanged { session_id, .. }
+            | Self::HeldQueuePrompt { session_id, .. }
+            | Self::HeldQueueResolved { session_id, .. }
+            | Self::SteerChanged { session_id, .. }
+            | Self::UserMessage { session_id, .. }
+            | Self::MessageRecalled { session_id, .. }
+            | Self::TurnStarted { session_id, .. }
+            | Self::ReasoningDelta { session_id, .. }
+            | Self::TextDelta { session_id, .. }
+            | Self::TextDone { session_id, .. }
+            | Self::Sources { session_id, .. }
+            | Self::ToolCallBegin { session_id, .. }
+            | Self::ToolCallEnd { session_id, .. }
+            | Self::ToolInputStart { session_id, .. }
+            | Self::ToolInputDelta { session_id, .. }
+            | Self::ToolInputDiscard { session_id, .. }
+            | Self::SubagentProgress { session_id, .. }
+            | Self::SubagentCard { session_id, .. }
+            | Self::ContextUsage { session_id, .. }
+            | Self::ContextBreakdownChanged { session_id, .. }
+            | Self::CompactStarted { session_id, .. }
+            | Self::ContextCompacted { session_id, .. }
+            | Self::ApprovalRequested { session_id, .. }
+            | Self::PermissionsChanged { session_id, .. }
+            | Self::PlanModeChanged { session_id, .. }
+            | Self::QuestionRequested { session_id, .. }
+            | Self::FileChanged { session_id, .. }
+            | Self::FileReverted { session_id, .. }
+            | Self::TodoListChanged { session_id, .. }
+            | Self::TaskListChanged { session_id, .. }
+            | Self::AgentCatalogChanged { session_id, .. }
+            | Self::AgentOutput { session_id, .. }
+            | Self::TaskNotificationBatch { session_id, .. }
+            | Self::TaskNotificationQueueChanged { session_id, .. }
+            | Self::TurnComplete { session_id, .. }
+            | Self::TurnAborted { session_id, .. }
+            | Self::TurnFileChanges { session_id, .. }
+            | Self::ConversationSnapshot { session_id, .. }
+            | Self::ConversationUpdate { session_id, .. }
+            | Self::ConversationRemove { session_id, .. }
+            | Self::ConversationStatus { session_id, .. }
+            | Self::RetryStatus { session_id, .. }
+            | Self::HookStatus { session_id, .. }
+            | Self::HookRunFinished { session_id, .. }
+            | Self::ProjectHooksPending { session_id, .. }
+            | Self::ProjectHooksTrusted { session_id, .. }
+            | Self::PluginToolCancel { session_id, .. } => Some(session_id),
+            Self::Error { session_id, .. } => session_id.as_deref(),
+            Self::SessionList { .. }
+            | Self::WorkspaceList { .. }
+            | Self::ConfigSnapshot { .. }
+            | Self::ProviderCredentials { .. }
+            | Self::TestResult { .. }
+            | Self::ModelInfo { .. }
+            | Self::GitInfo { .. }
+            | Self::BranchChanged { .. }
+            | Self::GitStatus { .. }
+            | Self::GitDiff { .. }
+            | Self::PluginSnapshot { .. }
+            | Self::PluginRuntimeContributionCommitted { .. }
+            | Self::PluginMarketplaceCatalog { .. }
+            | Self::PluginMarketplaceInstall { .. }
+            | Self::PluginServices { .. }
+            | Self::PluginServiceValue { .. }
+            | Self::PluginActionResult { .. }
+            | Self::PluginToolCall { .. }
+            | Self::PluginToolsQuery { .. }
+            | Self::PluginSessionResult { .. }
+            | Self::PluginHttpResponse { .. }
+            | Self::PluginSecretResult { .. } => None,
+        }
+    }
+}
+
+/// One event-journal entry. The existing Event payload stays unchanged for
+/// local consumers; identity and ordering live in this outer envelope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub sequence: u64,
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub event: Event,
+}
+
 /// Why a model call is retrying (mirror of pig-provider's RetryReason; the UI
 /// localizes at render time, the string fields stay English detail)
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

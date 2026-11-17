@@ -133,6 +133,23 @@ impl Session {
         if let Err(note) = self.check_delegation_entry() {
             return fail(note);
         }
+        let requirement = if background {
+            Some((
+                crate::agent::AgentExecutionCapability::Background,
+                "background execution",
+            ))
+        } else if !resume.is_empty() {
+            Some((crate::agent::AgentExecutionCapability::Resume, "resume"))
+        } else {
+            None
+        };
+        if let Some((capability, operation)) = requirement
+            && !crate::agent::LocalAgentExecutionBackend::capabilities().contains(&capability)
+        {
+            return fail(format!(
+                "The current Agent execution backend does not support {operation}"
+            ));
+        }
 
         // ---- one shared child preparation pipeline for single Agent and
         // swarm: trust, profile/model resolution, tool narrowing, MCP
@@ -230,6 +247,11 @@ impl Session {
         };
         let mut prep = prep;
         prep.policy.output_schema = output_schema;
+        let activation = if resume.is_empty() {
+            crate::agent::AgentExecutionActivation::Start
+        } else {
+            crate::agent::AgentExecutionActivation::Resume
+        };
         // ---- background: register a task first (its id is the child's
         // progress/ownership prefix), then spawn the detached child ----
         if background {
@@ -250,11 +272,11 @@ impl Session {
             };
             let child = Session::new_subagent(prep, self, progress, SubagentMode::Background);
             let card_record = self.emit_child_card(&child, parent_item_id, tx, true);
-            let queue_hint = if crate::task::subagent_slots_available() == 0 {
+            let queue_hint = if crate::agent::scheduler().available() == 0 {
                 format!(
                     "\nThe global subagent concurrency limit ({}) is reached; this task is queued \
                      for a free slot and will notify as usual when done.",
-                    crate::task::MAX_CONCURRENT_SUBAGENTS
+                    crate::agent::MAX_CONCURRENT_AGENT_RUNS
                 )
             } else {
                 String::new()
@@ -262,7 +284,7 @@ impl Session {
             let running_note = format!(
                 "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\nThe subagent is running in the background; its terminal notification is delivered automatically.\nUse TaskWait to wait, TaskOutput for progress, TaskStop to stop it, and Agent(resume=\"{agent_id}\", prompt=\"...\") to resume it.{queue_hint}"
             );
-            spawn_detached_child(child, task_id, bg_cancel, tx.clone(), None);
+            spawn_detached_child(child, task_id, bg_cancel, tx.clone(), None, activation);
             return SubagentOutcome::Finished {
                 note: running_note,
                 is_error: false,
@@ -305,7 +327,7 @@ impl Session {
             .expect("child session")
             .take_writer()
             .expect("foreground subagent writer was claimed");
-        let life = ChildLifecycle::new(
+        let life = AgentRunSupervisor::new(
             &child.state,
             &child.pending,
             child.event_session_id(),
@@ -315,20 +337,14 @@ impl Session {
             Some(task_id),
         );
         let run_cancel = child_cancel.clone();
-        let child_task: std::pin::Pin<
-            Box<dyn std::future::Future<Output = SubagentResult> + Send + '_>,
-        > = Box::pin(async move { child.run_subagent_task(tx, &run_cancel).await });
-        let managed = drive_managed(
-            life,
-            &child_cancel,
-            async {
-                crate::task::acquire_subagent_slot(&child_cancel)
-                    .await
-                    .map(SubagentSlot::Global)
-            },
-            child_task,
-        )
-        .await;
+        let child_task = crate::agent::execute_local(child, tx.clone(), run_cancel, activation);
+        let managed = life
+            .drive(
+                &child_cancel,
+                crate::agent::scheduler().acquire(&child_cancel),
+                child_task,
+            )
+            .await;
         let result = managed.result;
         if result.is_cancelled() {
             return SubagentOutcome::Cancelled {
@@ -338,9 +354,9 @@ impl Session {
         }
         // Subagent cost goes into the parent turn stats (no StepUsage
         // recorded / watermark untouched)
-        self.turn_input += result.usage.0;
-        self.turn_cache_read += result.usage.1;
-        self.turn_output += result.usage.2;
+        self.run_state.input += result.usage.0;
+        self.run_state.cache_read += result.usage.1;
+        self.run_state.output += result.usage.2;
         let note = subagent_receipt(&agent_id, &profile, &result);
         SubagentOutcome::Finished {
             note,

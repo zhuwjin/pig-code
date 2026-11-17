@@ -263,6 +263,7 @@ pub(super) fn start_queued_head(
 /// (token cancellation for subagents, process-tree kill for shells). Used by
 /// session deletion so a removed session leaves no background executor behind.
 pub(super) fn stop_session_tasks(entry: &SessionEntry) {
+    entry.state.agents.close_all();
     let running: Vec<String> = entry
         .state
         .tasks

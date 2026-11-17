@@ -16,6 +16,7 @@ use crate::rollout::now_secs;
 
 mod execution;
 pub use execution::ExecutionClaim;
+mod mailbox;
 mod tasks;
 pub use tasks::BackgroundTask;
 
@@ -175,6 +176,20 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_task_notifications_pending
                 ON task_notifications(session_id, delivery_state, created_at_ms);
+            CREATE TABLE IF NOT EXISTS agent_mailbox (
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                notification TEXT,
+                state TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                consumed_at_ms INTEGER,
+                PRIMARY KEY (session_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_mailbox_pending
+                ON agent_mailbox(session_id, agent_id, state, created_at_ms);
             CREATE TABLE IF NOT EXISTS file_originals (
                 session_id TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -290,6 +305,7 @@ impl Store {
                 params![id],
             );
         }
+        let _ = self.delete_agent_mailbox(id);
         let _ = self.delete_session_tasks(id);
     }
 

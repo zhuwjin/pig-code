@@ -39,7 +39,7 @@ impl Session {
             tracker: &mut self.tracker,
             state: &self.state,
             owns_todo_state: true,
-            pending: &self.pending,
+            reviewer: self.reviewer.as_ref(),
             permission_rules: &self.permission_rules,
             always_allowed: &self.always_allowed,
             session_id: &event_session_id,

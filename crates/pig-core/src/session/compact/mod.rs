@@ -105,9 +105,9 @@ impl Session {
         tools_tokens: u64,
     ) -> u64 {
         project_context_tokens(
-            self.usage_anchor.as_ref(),
+            self.run_state.usage_anchor.as_ref(),
             &self.agent.history,
-            self.last_total_tokens,
+            self.run_state.last_total_tokens,
             config,
             tools_tokens,
         )
@@ -236,7 +236,7 @@ impl Session {
             // automatic preflight that cannot shrink stays silent so repeated
             // steps do not stack "nothing to compact" dividers.
             if trigger == CompactTrigger::Manual {
-                let used_before = self.last_total_tokens;
+                let used_before = self.run_state.last_total_tokens;
                 let run = self.run_envelope();
                 self.emit(
                     |session_id| Event::ContextCompacted {
@@ -344,7 +344,7 @@ impl Session {
                 tracing::warn!(
                     "compaction plan does not match the live history: {error}; skipping"
                 );
-                let used_before = self.last_total_tokens;
+                let used_before = self.run_state.last_total_tokens;
                 let run = self.run_envelope();
                 self.emit(
                     |session_id| Event::ContextCompacted {
@@ -388,7 +388,7 @@ impl Session {
             .collect();
         // The watermark estimate describes the candidate context; tool
         // schemas are part of the next request but not of the history.
-        let used_before = self.last_total_tokens;
+        let used_before = self.run_state.last_total_tokens;
         self.record(&RolloutRecord::Compact {
             note: note.clone(),
             omitted,
@@ -423,9 +423,9 @@ impl Session {
         // (corrected by the next real sample): without the reset the watermark
         // check would see the pre-compaction high value and immediately trigger
         // another automatic compaction, compacting the fresh summary again.
-        self.last_total_tokens = Some(used_after);
+        self.run_state.last_total_tokens = Some(used_after);
         // The anchor describes a request shape that no longer exists.
-        self.usage_anchor = None;
+        self.run_state.usage_anchor = None;
         // Composition of the rewritten surface (tools stay priced separately)
         let breakdown = context_breakdown_with_tools(&self.agent.history, tools_tokens);
         self.emit(
@@ -437,7 +437,8 @@ impl Session {
         );
         // Refresh the capacity chip immediately (skipped when no model is configured; no window to report)
         if let Some(config) = config {
-            let (cache_read_total, input_total) = (self.cache_read_total, self.input_total);
+            let (cache_read_total, input_total) =
+                (self.run_state.cache_read_total, self.run_state.input_total);
             let total = config.context_window;
             self.emit(
                 |session_id| Event::ContextUsage {

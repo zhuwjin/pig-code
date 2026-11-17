@@ -9,7 +9,9 @@
 
 use std::collections::HashMap;
 
-use pig_protocol::{ConversationAgentCard, ConversationItem, ConversationToolStatus, Event};
+use pig_protocol::{
+    ConversationAgentCard, ConversationItem, ConversationToolStatus, Event, EventEnvelope,
+};
 
 #[derive(Default)]
 struct ConversationState {
@@ -50,6 +52,39 @@ pub(crate) struct ConversationProjection {
     subagents: HashMap<String, HashMap<String, ConversationState>>,
     run_status: HashMap<(String, String), RunStatus>,
     finish_seq: u64,
+}
+
+/// Entry point for journal-driven projections. Cursor state is delivery
+/// deduplication only; domain state remains in the individual projection.
+pub(crate) struct ProjectionRegistry {
+    conversation: ConversationProjection,
+    cursors: HashMap<(Option<String>, Option<String>, Option<String>), u64>,
+}
+
+impl ProjectionRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            conversation: ConversationProjection::new(),
+            cursors: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn project(&mut self, envelope: &EventEnvelope) -> Projected {
+        let stream = (
+            envelope.session_id.clone(),
+            envelope.agent_id.clone(),
+            envelope.run_id.clone(),
+        );
+        if self
+            .cursors
+            .get(&stream)
+            .is_some_and(|cursor| envelope.sequence <= *cursor)
+        {
+            return Projected::only(Vec::new());
+        }
+        self.cursors.insert(stream, envelope.sequence);
+        self.conversation.project(&envelope.event)
+    }
 }
 
 impl ConversationProjection {
@@ -1125,5 +1160,26 @@ mod tests {
         assert_eq!(value["agents"][0]["agent_id"], "a1");
         assert_eq!(value["agents"][0]["finishedSeq"], 1);
         assert_eq!(value["agents"][0]["live_note"], "note");
+    }
+
+    #[test]
+    fn projection_registry_deduplicates_journal_envelopes() {
+        let mut registry = ProjectionRegistry::new();
+        let event = Event::TaskListChanged {
+            session_id: "s1".into(),
+            tasks: Vec::new(),
+        };
+        let envelope = |sequence| EventEnvelope {
+            sequence,
+            session_id: Some("s1".into()),
+            agent_id: None,
+            run_id: None,
+            event: event.clone(),
+        };
+        assert!(registry.project(&envelope(1)).pass);
+        let duplicate = registry.project(&envelope(1));
+        assert!(!duplicate.pass);
+        assert!(duplicate.events.is_empty());
+        assert!(registry.project(&envelope(2)).pass);
     }
 }

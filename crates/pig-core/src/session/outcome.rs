@@ -148,12 +148,15 @@ pub(crate) fn new_agent_run_id() -> String {
 
 impl Session {
     pub(crate) fn begin_root_run(&mut self, turn_kind: pig_protocol::TurnKind) {
-        self.run_turns = 0;
+        self.run_state.turns = 0;
         let agent_id = self.agent.id.clone();
+        let run_id = new_agent_run_id();
         self.agent.run = Some(
             AgentRunResult::root(AgentRunStatus::Running, turn_kind)
-                .with_identity(&agent_id, new_agent_run_id()),
+                .with_identity(&agent_id, run_id.clone()),
         );
+        self.state.agents.register_root(agent_id.clone());
+        self.state.agents.begin_run(&agent_id, run_id);
     }
 
     pub(crate) fn run_envelope(&self) -> Option<pig_protocol::AgentRunEnvelope> {
@@ -184,9 +187,14 @@ impl Session {
             .as_ref()
             .and_then(|run| run.run_id.clone().map(|run_id| (run_id, run.turn_kind)))
             .expect("root run identity");
-        let mut result = AgentRunResult::root(status, turn_kind).with_identity(&agent_id, run_id);
-        result.turns = self.run_turns;
-        result.usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+        let mut result =
+            AgentRunResult::root(status, turn_kind).with_identity(&agent_id, run_id.clone());
+        result.turns = self.run_state.turns;
+        result.usage = (
+            self.run_state.input,
+            self.run_state.cache_read,
+            self.run_state.output,
+        );
         let run = self.run_envelope().expect("root run envelope");
         self.record(&RolloutRecord::AgentRun {
             run,
@@ -196,6 +204,9 @@ impl Session {
         });
         self.sync_rollout();
         self.agent.run = Some(result.clone());
+        self.state
+            .agents
+            .settle_run(&agent_id, &run_id, result.status);
         result
     }
 
@@ -218,7 +229,24 @@ impl Session {
             .with_identity(&self.agent.id, run.run_id.clone());
         result.turns = turns;
         result.usage = usage;
-        self.agent.run = Some(result);
+        self.agent.run = Some(result.clone());
+        self.state.agents.register_root(self.agent.id.clone());
+        self.state.agents.restore(crate::agent::AgentNode::restored(
+            self.agent.id.clone(),
+            None,
+            0,
+            if result.status == AgentRunStatus::Lost {
+                crate::agent::AgentLifecycle::Lost
+            } else {
+                crate::agent::AgentLifecycle::Idle
+            },
+            Some(crate::agent::AgentRunState::new(
+                run.run_id.clone(),
+                result.status,
+                None,
+                0,
+            )),
+        ));
     }
 }
 

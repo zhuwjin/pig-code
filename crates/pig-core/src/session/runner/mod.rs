@@ -20,6 +20,12 @@ use trust::persist_workspace_trust;
 /// One agent-manager instance: the sessions it owns and the shared stores they
 /// use. Turn futures live next to the loop (`turns`) rather than in here so the
 /// select loop can poll them without borrowing the manager.
+#[derive(Default)]
+pub(super) struct PendingDeletion {
+    executions_idle: bool,
+    turn_finished: bool,
+}
+
 pub(super) struct Manager {
     config_path: PathBuf,
     sessions_dir: PathBuf,
@@ -33,6 +39,9 @@ pub(super) struct Manager {
     plugins: crate::plugins::SharedPluginRegistry,
     sessions: HashMap<String, SessionEntry>,
     deleted_sessions: std::collections::HashSet<String>,
+    pending_deletions: HashMap<String, PendingDeletion>,
+    deletion_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    deletion_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     pending_terminal: Vec<(
         String,
         crate::store::BackgroundTask,
@@ -103,6 +112,7 @@ impl Manager {
         }
         let (task_notify_tx, task_notify_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::task::TaskChange>();
+        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             config_path,
             sessions_dir,
@@ -116,6 +126,9 @@ impl Manager {
             plugins: crate::plugins::PluginRegistry::shared(data_dir.clone()),
             sessions: HashMap::new(),
             deleted_sessions: std::collections::HashSet::new(),
+            pending_deletions: HashMap::new(),
+            deletion_tx,
+            deletion_rx,
             pending_terminal: Vec::new(),
             id_counter: 0,
             task_notify_tx,
@@ -420,12 +433,13 @@ impl Manager {
         outcome: TurnOutcome,
         turns: &mut FuturesUnordered<TurnFuture>,
     ) {
-        let deleted_sessions = &self.deleted_sessions;
         let store = self.store.clone();
-        let sessions_dir = self.sessions_dir.clone();
-        if deleted_sessions.contains(&session_id) {
+        if self.deleted_sessions.contains(&session_id) {
             drop(session);
-            operations::delete_session_artifacts(&sessions_dir, &session_id, true);
+            if let Some(deletion) = self.pending_deletions.get_mut(&session_id) {
+                deletion.turn_finished = true;
+            }
+            self.finish_delete_if_idle(event_tx, session_id);
             return;
         }
         self.refresh_notification_queue(&event_tx, &session_id);
@@ -593,6 +607,7 @@ pub async fn agent_loop(
             Op(Op),
             TaskNotify(crate::task::TaskChange),
             Turn(String, Session, TurnOutcome),
+            DeletionIdle(String),
             RetryTerminal,
             Tick,
         }
@@ -601,6 +616,7 @@ pub async fn agent_loop(
             let Manager {
                 op_rx,
                 task_notify_rx,
+                deletion_rx,
                 ..
             } = &mut manager;
             tokio::select! {
@@ -609,6 +625,7 @@ pub async fn agent_loop(
                     Err(_) => break,
                 },
                 Some(change) = task_notify_rx.recv() => Incoming::TaskNotify(change),
+                Some(session_id) = deletion_rx.recv() => Incoming::DeletionIdle(session_id),
                 Some((session_id, session, outcome)) = turns.next(), if !turns.is_empty() => {
                     Incoming::Turn(session_id, session, outcome)
                 }
@@ -629,6 +646,12 @@ pub async fn agent_loop(
             }
             Incoming::Turn(session_id, session, outcome) => {
                 manager.turn_finished(event_tx.clone(), session_id, session, outcome, &mut turns)
+            }
+            Incoming::DeletionIdle(session_id) => {
+                if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
+                    deletion.executions_idle = true;
+                }
+                manager.finish_delete_if_idle(event_tx.clone(), session_id);
             }
             Incoming::RetryTerminal => {
                 manager.retry_terminal_notifications(&event_tx);

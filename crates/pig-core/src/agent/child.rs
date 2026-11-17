@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 use pig_provider::{ChatMsg, ResolvedModel};
 
+use super::AgentWriterGuard;
 use super::*;
 use crate::config::{RuntimeConfig, WorkspaceTrust};
-use crate::task::{AgentWriterGuard, SessionToolState};
+use crate::task::SessionToolState;
 
 /// Immutable session-level inputs for child preparation.
 pub(crate) struct ChildPrepCtx<'a> {
@@ -222,28 +223,11 @@ fn validate_child_profile(ctx: &ChildPrepCtx<'_>, profile: &AgentProfile) -> Res
 }
 
 fn check_agent_budget(ctx: &ChildPrepCtx<'_>) -> Result<(), String> {
-    let tasks = ctx
-        .state
-        .tasks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut agents: std::collections::HashSet<String> = tasks
-        .iter()
-        .filter_map(|task| task.run.as_ref().map(|run| run.agent_id.clone()))
-        .collect();
-    agents.extend(
-        ctx.state
-            .agent_writers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .cloned(),
-    );
+    let agents = ctx.state.agents.child_count();
     let max = ctx.max_agents_per_session;
-    if agents.len() >= max {
+    if agents >= max {
         return Err(format!(
-            "The session already has {} child agents, reaching [agents].max_agents_per_session={max}. Resume an existing agent instead of creating another one.",
-            agents.len()
+            "The session already has {agents} child agents, reaching [agents].max_agents_per_session={max}. Resume an existing agent instead of creating another one."
         ));
     }
     Ok(())
@@ -623,6 +607,8 @@ fn prepare_child(
                 .map_err(ChildPrepError::CallLevel)
         })?;
     check_agent_budget(ctx).map_err(ChildPrepError::CallLevel)?;
+    // Registry reservations include this batch's exclusive writers before any
+    // execution node is activated.
     let agents_dir = agents_directory(ctx).map_err(ChildPrepError::CallLevel)?;
     let (agent_id, writer) =
         allocate_agent_id(ctx.state, &agents_dir, agent_seq).map_err(ChildPrepError::CallLevel)?;

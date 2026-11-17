@@ -714,7 +714,7 @@ fn root_prompt_cache_key_is_stable_per_session() {
     drop(session);
     let mut resumed = fixture.load(None);
     assert_eq!(resumed.root_prompt_cache_key(), "pig:s1");
-    resumed.turn_counter = 9;
+    resumed.run_state.turn_counter = 9;
     assert_eq!(resumed.root_prompt_cache_key(), "pig:s1");
     resumed.agent.id = "s2".into();
     assert_eq!(resumed.root_prompt_cache_key(), "pig:s2");

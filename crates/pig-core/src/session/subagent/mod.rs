@@ -21,10 +21,11 @@ mod turn;
 mod tests;
 
 pub(crate) use control::DelegatedAgentStarted;
-use lifecycle::ChildLifecycle;
+pub use lifecycle::AgentRunSupervisor;
+use lifecycle::ManagedOutcome;
 use managed::{
-    DelegatedUi, SubagentSlot, SwarmChildIdentity, aborted_swarm_child, drive_managed,
-    spawn_detached_child, subagent_receipt, swarm_child_result,
+    DelegatedUi, SwarmChildIdentity, aborted_swarm_child, spawn_detached_child, subagent_receipt,
+    swarm_child_result,
 };
 pub(super) use state::SubagentState;
 use state::{ProgressSink, SubagentMode, agent_card_model};

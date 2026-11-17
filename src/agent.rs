@@ -423,9 +423,9 @@ default_reasoning_level = "low"
 
     /// Streams ordered JSON arrays of core events until the agent stops.
     pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
-        let events = this.with(|agent| agent.handle.events.clone());
+        let events = this.with(|agent| agent.handle.journal.clone());
         let plugins = this.with(|agent| agent.plugins.clone());
-        let mut projection = crate::conversation_projection::ConversationProjection::new();
+        let mut projection = crate::conversation_projection::ProjectionRegistry::new();
         while let Ok(first) = events.recv().await {
             let mut batch = vec![first];
             while batch.len() < 128 {
@@ -434,15 +434,15 @@ default_reasoning_level = "low"
                     Err(_) => break,
                 }
             }
-            for event in &batch {
-                plugins.handle_core_event(event);
+            for envelope in &batch {
+                plugins.handle_core_event(&envelope.event);
             }
             let mut ui_batch = Vec::with_capacity(batch.len());
-            for event in &batch {
-                let projected = projection.project(event);
+            for envelope in &batch {
+                let projected = projection.project(envelope);
                 ui_batch.extend(projected.events);
                 if projected.pass {
-                    ui_batch.push(event.clone());
+                    ui_batch.push(envelope.event.clone());
                 }
             }
             if !ui_batch.is_empty() {

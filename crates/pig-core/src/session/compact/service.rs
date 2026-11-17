@@ -7,6 +7,7 @@
 //! JSONL sticky marker) and the pure selector stays in [`super::select`].
 
 use super::*;
+use std::time::Instant;
 
 /// A summary sidecar's output is capped independently of the model's normal
 /// generation budget.

@@ -698,11 +698,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
         // request_id. The full action (tool, arguments, workdir, requested
         // roots and danger class) is already carried by the event; a reply for
         // one request can never approve another — in this session or another.
-        let (reply_tx, reply_rx) = oneshot::channel();
-        ctx.pending
-            .lock()
-            .expect("pending lock")
-            .insert(request_id.clone(), reply_tx);
+
         let danger_key = danger_reason.map(|reason| reason.key.to_string());
         // The dialog tiers, in display order.
         //
@@ -768,21 +764,29 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
                     .collect()
             })
             .unwrap_or_default();
-        emit_bg(ctx.session_id, tx, |session_id| Event::ApprovalRequested {
-            session_id,
-            request_id: request_id.clone(),
-            tool: call.name.clone(),
-            detail: detail_text.clone(),
-            danger_key,
-            requested_write_roots,
-            available_decisions,
-        });
-        let (decision, _feedback) = tokio::select! {
-            reply = reply_rx => reply.unwrap_or((ApprovalDecision::Reject, None)),
-            _ = cancel.cancelled() => {
-                ctx.pending.lock().expect("pending lock").remove(&request_id);
-                return GatedToolOutcome::Cancelled;
-            }
+        let review = ctx.reviewer.review(
+            ApprovalRequest {
+                session_id: ctx.session_id.to_string(),
+                request_id,
+                tool: call.name.clone(),
+                detail: detail_text,
+                danger_key,
+                requested_write_roots,
+                available_decisions,
+            },
+            tx.clone(),
+        );
+        let ApprovalReply {
+            decision,
+            feedback: _,
+        } = tokio::select! {
+            result = review => match result {
+                Ok(reply) => reply,
+                Err(error) => return GatedToolOutcome::Rejected {
+                    note: format!("Approval review failed: {}. The action was not executed.", error.detail),
+                },
+            },
+            _ = cancel.cancelled() => return GatedToolOutcome::Cancelled,
         };
         match decision {
             ApprovalDecision::Allow => {}

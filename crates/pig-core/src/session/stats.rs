@@ -1,20 +1,21 @@
 use super::*;
+use std::time::Instant;
 
 impl Session {
     pub(crate) fn record_output_delta(&mut self, delta: &str) {
-        if self.rate_started_at.is_none() {
-            self.rate_started_at = Some(Instant::now());
-            self.rate_characters = 0;
+        if self.run_state.rate_started_at.is_none() {
+            self.run_state.rate_started_at = Some(Instant::now());
+            self.run_state.rate_characters = 0;
         }
-        self.rate_characters += delta.encode_utf16().count() as u64;
+        self.run_state.rate_characters += delta.encode_utf16().count() as u64;
     }
 
     fn output_rate(&self) -> u64 {
-        let Some(started) = self.rate_started_at else {
+        let Some(started) = self.run_state.rate_started_at else {
             return 0;
         };
         let elapsed = started.elapsed().as_secs_f64().max(0.05);
-        (self.rate_characters as f64 / 4.0 / elapsed)
+        (self.run_state.rate_characters as f64 / 4.0 / elapsed)
             .round()
             .max(0.0) as u64
     }
@@ -25,35 +26,36 @@ impl Session {
         pig_protocol::PluginSessionStats,
         Vec<pig_protocol::PluginTurnStats>,
     ) {
-        let mut turns = self.stats_turns.clone();
-        if self.turn_active {
+        let mut turns = self.run_state.history.clone();
+        if self.run_state.active {
             turns.push(pig_protocol::PluginTurnStats {
-                id: self.usage_turn_id.clone(),
+                id: self.run_state.usage_turn_id.clone(),
                 index: turns.len() as u64,
-                duration_ms: self.turn_api_ms,
+                duration_ms: self.run_state.api_ms,
                 stats: Some(pig_protocol::TurnUsageStats {
-                    input: self.turn_input,
-                    cache_read: self.turn_cache_read,
-                    output: self.turn_output,
-                    duration_ms: self.turn_api_ms,
-                    api_ms: self.turn_api_ms,
-                    ttft_ms: self.turn_ttft_ms,
-                    ttft_steps: self.turn_ttft_steps,
-                    api_steps: self.turn_api_steps,
-                    tool_ms: self.turn_tool_ms,
+                    input: self.run_state.input,
+                    cache_read: self.run_state.cache_read,
+                    output: self.run_state.output,
+                    duration_ms: self.run_state.api_ms,
+                    api_ms: self.run_state.api_ms,
+                    ttft_ms: self.run_state.ttft_ms,
+                    ttft_steps: self.run_state.ttft_steps,
+                    api_steps: self.run_state.api_steps,
+                    tool_ms: self.run_state.tool_ms,
                     ended_at_ms: 0,
                 }),
             });
         }
         let mut stats = pig_protocol::PluginSessionStats {
-            running: self.turn_active,
+            running: self.run_state.active,
             output_rate: self.output_rate(),
             turns: self
-                .stats_turns
+                .run_state
+                .history
                 .iter()
                 .filter(|turn| turn.duration_ms > 0 || turn.stats.is_some())
                 .count() as u64,
-            usage: self.last_total_tokens.map(|used| {
+            usage: self.run_state.last_total_tokens.map(|used| {
                 let config = self.runtime.as_deref().map(|runtime| runtime.config());
                 let provider = self
                     .model_override
@@ -83,8 +85,8 @@ impl Session {
                 pig_protocol::PluginContextUsage {
                     used,
                     total,
-                    cache_read_total: self.cache_read_total,
-                    input_total: self.input_total,
+                    cache_read_total: self.run_state.cache_read_total,
+                    input_total: self.run_state.input_total,
                 }
             }),
             breakdown: Some(super::estimate::context_breakdown(
@@ -93,7 +95,7 @@ impl Session {
             )),
             ..Default::default()
         };
-        for turn in &self.stats_turns {
+        for turn in &self.run_state.history {
             let Some(value) = turn.stats else {
                 continue;
             };

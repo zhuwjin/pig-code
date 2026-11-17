@@ -128,13 +128,7 @@ impl Manager {
         let Some(entry) = self.sessions.get(&session_id) else {
             return;
         };
-        let partial = entry
-            .state
-            .agent_partials
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&agent_id)
-            .cloned();
+        let partial = entry.state.agents.partial(&agent_id);
         emit(
             &event_tx,
             Event::AgentOutput {
@@ -206,16 +200,11 @@ impl Manager {
         // a non-symlink context file and meta-id equality. A UI-provided id
         // therefore cannot name a path outside its owning directory.
         let tx = event_tx.clone();
-        // An active driver holds a steer-registry entry for its whole run
-        // (foreground and background alike); a task still occupying or awaiting
-        // a driver slot has not finished either. A session absent from memory is
-        // not active.
+        // AgentRegistry tracks live foreground and background drivers; a task
+        // still occupying or awaiting a driver slot has not finished either.
+        // A session absent from memory is not active.
         let running = sessions.get(&session_id).is_some_and(|entry| {
-            let steering = {
-                let steers = entry.state.agent_steers.lock().expect("agent steers lock");
-                steers.contains_key(&agent_id)
-            };
-            steering
+            entry.state.agents.is_active(&agent_id)
                 || entry
                     .state
                     .tasks

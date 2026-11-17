@@ -285,7 +285,7 @@ impl Manager {
                     }
                     // Re-emit the usage watermark/totals (the composer's capacity chip would otherwise keep stale values after switching sessions)
                     if let Some(session) = &entry.session
-                        && let Some(used) = session.last_total_tokens
+                        && let Some(used) = session.run_state.last_total_tokens
                         && let Ok(resolved) = resolve_entry(entry)
                     {
                         emit(
@@ -294,8 +294,8 @@ impl Manager {
                                 session_id: session_id.clone(),
                                 used,
                                 total: resolved.context_window,
-                                cache_read_total: session.cache_read_total,
-                                input_total: session.input_total,
+                                cache_read_total: session.run_state.cache_read_total,
+                                input_total: session.run_state.input_total,
                             },
                         );
                         // The composition panel's rows belong to the
@@ -534,7 +534,7 @@ impl Manager {
                 // reopening the app shows it without waiting for the next message (skipped when no model is configured; no window to report)
                 if let Some(entry) = sessions.get(&session_id)
                     && let Some(session) = &entry.session
-                    && let Some(used) = session.last_total_tokens
+                    && let Some(used) = session.run_state.last_total_tokens
                     && let Ok(resolved) = resolve_entry(entry)
                 {
                     emit(
@@ -543,8 +543,8 @@ impl Manager {
                             session_id: session_id.clone(),
                             used,
                             total: resolved.context_window,
-                            cache_read_total: session.cache_read_total,
-                            input_total: session.input_total,
+                            cache_read_total: session.run_state.cache_read_total,
+                            input_total: session.run_state.input_total,
                         },
                     );
                     let breakdown = estimate::context_breakdown(
@@ -671,39 +671,64 @@ impl Manager {
         event_tx: async_channel::Sender<Event>,
         session_id: String,
     ) {
-        let sessions = &mut self.sessions;
-        let deleted_sessions = &mut self.deleted_sessions;
         let pending = self.pending.clone();
         let pending_questions = self.pending_questions.clone();
-        let store = self.store.clone();
-        let sessions_dir = self.sessions_dir.clone();
-        // Single cleanup path: stop background tasks, cancel the
-        // in-flight turn (its rollout file is deleted at
-        // wrap-up), reject this session's pending approvals and
-        // questions, then remove the session rows.
-        let turn_in_flight = sessions
+        let turn_in_flight = self
+            .sessions
             .get(&session_id)
-            .is_some_and(|e| e.session.is_none());
-        if let Some(entry) = sessions.remove(&session_id) {
+            .is_some_and(|entry| entry.session.is_none());
+        let registry = self.sessions.remove(&session_id).map(|entry| {
             stop_session_tasks(&entry);
             if let Some(cancel) = &entry.cancel {
                 cancel.cancel();
             }
-        }
+            entry.state.agents.clone()
+        });
         super::reject_session_approvals(&pending, &session_id);
         super::drop_session_questions(&pending_questions, &session_id);
-        // Idle: the Session drops with the removed entry; the handle is already closed
-        deleted_sessions.insert(session_id.clone());
-        {
-            let store_guard = store.lock().expect("store lock");
-            store_guard.delete_session(&session_id);
-            store_guard.delete_pending(&session_id);
+        self.deleted_sessions.insert(session_id.clone());
+        self.pending_deletions
+            .entry(session_id.clone())
+            .or_insert(super::PendingDeletion {
+                executions_idle: false,
+                turn_finished: !turn_in_flight,
+            });
+        if let Some(registry) = registry {
+            let deletion_tx = self.deletion_tx.clone();
+            let id = session_id.clone();
+            tokio::spawn(async move {
+                registry.wait_for_idle().await;
+                let _ = deletion_tx.send(id);
+            });
+        } else if let Some(deletion) = self.pending_deletions.get_mut(&session_id) {
+            deletion.executions_idle = true;
         }
-        delete_session_artifacts(&sessions_dir, &session_id, !turn_in_flight);
+        self.finish_delete_if_idle(event_tx, session_id);
+    }
+
+    pub(super) fn finish_delete_if_idle(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        session_id: String,
+    ) {
+        let ready = self
+            .pending_deletions
+            .get(&session_id)
+            .is_some_and(|deletion| deletion.executions_idle && deletion.turn_finished);
+        if !ready {
+            return;
+        }
+        self.pending_deletions.remove(&session_id);
+        {
+            let store = self.store.lock().expect("store lock");
+            store.delete_session(&session_id);
+            store.delete_pending(&session_id);
+        }
+        delete_session_artifacts(&self.sessions_dir, &session_id, true);
         emit(
             &event_tx,
             Event::SessionList {
-                sessions: store.lock().expect("store lock").sorted_sessions(),
+                sessions: self.store.lock().expect("store lock").sorted_sessions(),
             },
         );
     }

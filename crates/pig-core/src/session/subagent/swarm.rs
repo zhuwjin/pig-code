@@ -171,7 +171,7 @@ impl Session {
             // Construct the lifecycle before spawning: if the runtime drops the
             // task before its first poll, the captured lifecycle's Drop still
             // releases the writer and settles the registry entry.
-            let life = ChildLifecycle::new(
+            let life = AgentRunSupervisor::new(
                 &child.state,
                 &child.pending,
                 child.event_session_id(),
@@ -185,20 +185,19 @@ impl Session {
             let tx_bg = tx.clone();
             let task_cancel = child_cancel.clone();
             handles.push(tokio::spawn(async move {
-                let child_task: std::pin::Pin<
-                    Box<dyn std::future::Future<Output = SubagentResult> + Send + 'static>,
-                > = Box::pin(async move { child.run_subagent_task(&tx_bg, &task_cancel).await });
-                let managed = drive_managed(
-                    life,
-                    &child_cancel,
-                    async {
-                        crate::task::acquire_subagent_slot(&child_cancel)
-                            .await
-                            .map(SubagentSlot::Global)
-                    },
-                    child_task,
-                )
-                .await;
+                let child_task = crate::agent::execute_local(
+                    child,
+                    tx_bg,
+                    task_cancel,
+                    crate::agent::AgentExecutionActivation::Start,
+                );
+                let managed = life
+                    .drive(
+                        &child_cancel,
+                        crate::agent::scheduler().acquire(&child_cancel),
+                        child_task,
+                    )
+                    .await;
                 (ix, managed)
             }));
         }
@@ -273,9 +272,9 @@ impl Session {
         // Subagent cost goes into the parent turn stats (foreground policy; no
         // StepUsage recorded / watermark untouched)
         for child in &children {
-            self.turn_input += child.usage.0;
-            self.turn_cache_read += child.usage.1;
-            self.turn_output += child.usage.2;
+            self.run_state.input += child.usage.0;
+            self.run_state.cache_read += child.usage.1;
+            self.run_state.output += child.usage.2;
         }
         let is_error = children
             .iter()
@@ -315,7 +314,7 @@ impl Session {
         // assembly time (a transient value; the real queue state is the
         // TaskStatus::Queued in TaskList/panel, moved to Running by
         // mark_agent_task_started once a slot lands)
-        let slots_available = crate::task::subagent_slots_available();
+        let slots_available = crate::agent::scheduler().available();
         for prep in preps {
             let prep = match prep {
                 crate::agent::SwarmPrep::Ready(prep) => prep,
@@ -354,7 +353,14 @@ impl Session {
             // background=true)
             let card = self.emit_child_card(&child, parent_item_id, tx, true);
             let queued = cards.len() >= slots_available;
-            spawn_detached_child(child, task_id.clone(), child_cancel, tx.clone(), None);
+            spawn_detached_child(
+                child,
+                task_id.clone(),
+                child_cancel,
+                tx.clone(),
+                None,
+                crate::agent::AgentExecutionActivation::Start,
+            );
             cards.push(card);
             receipt.push(crate::agent::SwarmReceiptChild {
                 description,

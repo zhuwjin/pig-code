@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 use super::super::managed::*;
 
@@ -347,7 +348,7 @@ async fn managed_driver_catches_panic_and_settles_registry() {
     let writer = state
         .try_claim_agent_writer(&drive.agent.id)
         .expect("writer");
-    let life = ChildLifecycle::new(
+    let life = AgentRunSupervisor::new(
         &state,
         &pending,
         "s-test",
@@ -357,13 +358,13 @@ async fn managed_driver_catches_panic_and_settles_registry() {
         Some(task_id.clone()),
     );
     let cancel = CancellationToken::new();
-    let outcome = drive_managed(
-        life,
-        &cancel,
-        std::future::ready(Some(SubagentSlot::Test)),
-        async { panic!("driver boom") },
-    )
-    .await;
+    let outcome = life
+        .drive(
+            &cancel,
+            std::future::ready(Some(SubagentSlot::Test)),
+            async { panic!("driver boom") },
+        )
+        .await;
     assert!(outcome.result.is_error() && !outcome.result.is_cancelled());
     assert_eq!(outcome.result.agent_id.as_deref(), Some("a1-1"));
     assert!(outcome.result.run_id.is_some());
@@ -416,7 +417,7 @@ async fn background_driver_panic_before_run_notifies_once() {
         .try_claim_agent_writer(&drive.agent.id)
         .expect("writer");
     let (tx, _rx) = async_channel::unbounded();
-    let life = ChildLifecycle::new(
+    let life = AgentRunSupervisor::new(
         &state,
         &pending,
         "s-test",
@@ -426,19 +427,19 @@ async fn background_driver_panic_before_run_notifies_once() {
         Some(task_id.clone()),
     );
     let cancel = CancellationToken::new();
-    let outcome = drive_managed(
-        life,
-        &cancel,
-        async { panic!("acquire boom") },
-        std::future::ready(SubagentResult::child(
-            crate::session::AgentRunStatus::Completed,
-            "completed".into(),
-            "done".into(),
-            1,
-            (0, 0, 0),
-        )),
-    )
-    .await;
+    let outcome = life
+        .drive(
+            &cancel,
+            async { panic!("acquire boom") },
+            std::future::ready(SubagentResult::child(
+                crate::session::AgentRunStatus::Completed,
+                "completed".into(),
+                "done".into(),
+                1,
+                (0, 0, 0),
+            )),
+        )
+        .await;
     assert!(
         outcome.result.text().contains("panicked: acquire boom"),
         "{}",
@@ -491,13 +492,13 @@ async fn queued_cancellation_settles_as_killed_not_running() {
     );
     let life = test_lifecycle(&state, &pending, &mut drive, Some(task_id.clone()));
     let cancel = CancellationToken::new();
-    let outcome = drive_managed(
-        life,
-        &cancel,
-        std::future::ready(None),
-        std::future::ready(cancelled_subagent_result()),
-    )
-    .await;
+    let outcome = life
+        .drive(
+            &cancel,
+            std::future::ready(None),
+            std::future::ready(cancelled_subagent_result()),
+        )
+        .await;
     assert!(outcome.result.is_cancelled());
     let (status, ended_at) = {
         let tasks = state.tasks.lock().expect("task registry lock");
@@ -522,7 +523,7 @@ async fn queued_cancellation_settles_as_killed_not_running() {
 async fn swarm_beyond_slot_count_cancellation_settles_every_child() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let limit = crate::task::MAX_CONCURRENT_SUBAGENTS;
+    let limit = crate::agent::MAX_CONCURRENT_AGENT_RUNS;
     let state = crate::task::SessionToolState::for_test();
     let pending = test_pending();
     let semaphore: &'static Arc<tokio::sync::Semaphore> =
@@ -554,12 +555,13 @@ async fn swarm_beyond_slot_count_cancellation_settles_every_child() {
                     }
                 }
             };
-            let outcome = drive_managed(life, &drive_cancel, acquire, async move {
-                started.fetch_add(1, Ordering::SeqCst);
-                run_cancel.cancelled().await;
-                cancelled_subagent_result()
-            })
-            .await;
+            let outcome = life
+                .drive(&drive_cancel, acquire, async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    run_cancel.cancelled().await;
+                    cancelled_subagent_result()
+                })
+                .await;
             (outcome, task_id)
         }));
     }
@@ -616,19 +618,19 @@ async fn child_termination_drops_only_its_approvals() {
     }
     let life = test_lifecycle(&state, &pending, &mut drive, Some(task_id));
     let cancel = CancellationToken::new();
-    let outcome = drive_managed(
-        life,
-        &cancel,
-        std::future::ready(Some(SubagentSlot::Test)),
-        std::future::ready(SubagentResult::child(
-            crate::session::AgentRunStatus::Failed,
-            "test".into(),
-            "test".into(),
-            1,
-            (0, 0, 0),
-        )),
-    )
-    .await;
+    let outcome = life
+        .drive(
+            &cancel,
+            std::future::ready(Some(SubagentSlot::Test)),
+            std::future::ready(SubagentResult::child(
+                crate::session::AgentRunStatus::Failed,
+                "test".into(),
+                "test".into(),
+                1,
+                (0, 0, 0),
+            )),
+        )
+        .await;
     assert!(outcome.result.is_error());
     let pending = pending.lock().expect("pending lock");
     assert!(
@@ -639,6 +641,36 @@ async fn child_termination_drops_only_its_approvals() {
         pending.contains_key(&other_id),
         "another child/session approval must stay"
     );
+}
+
+#[tokio::test]
+async fn local_backend_rejects_external_reconnect_before_running() {
+    use crate::agent::AgentExecutionBackend as _;
+
+    let child = test_child_session("a-reconnect-1");
+    let identity = crate::agent::AgentRunIdentity {
+        session_id: child.event_session_id().to_string(),
+        agent_id: child.agent.id.clone(),
+        run_id: child.agent.run_id().expect("child run"),
+    };
+    let (events, _receiver) = async_channel::unbounded();
+    let mut request = crate::agent::AgentExecutionRequest::new(
+        identity.clone(),
+        events,
+        CancellationToken::new(),
+        crate::agent::AgentExecutionActivation::Reconnect,
+    );
+    request.cursor = Some(crate::agent::AgentEventCursor {
+        run: identity.clone(),
+        sequence: 1,
+    });
+    let result = Box::new(crate::agent::LocalAgentExecutionBackend::new(child))
+        .execute(request)
+        .await;
+    assert_eq!(result.status, crate::session::AgentRunStatus::Failed);
+    assert_eq!(result.agent_id.as_deref(), Some(identity.agent_id.as_str()));
+    assert_eq!(result.run_id.as_deref(), Some(identity.run_id.as_str()));
+    assert!(result.stop_reason.contains("cannot reconnect"));
 }
 
 #[test]
@@ -760,7 +792,7 @@ async fn child_parallel_tools_preserve_call_order() {
         .take_writer()
         .expect("writer");
     let (tx, _rx) = async_channel::unbounded();
-    let mut life = ChildLifecycle::new(
+    let mut life = AgentRunSupervisor::new(
         &child.state,
         &test_pending(),
         child.event_session_id(),
@@ -864,7 +896,7 @@ async fn child_structured_output_uses_the_native_schema_and_current_run() {
         .take_writer()
         .expect("writer");
     let (tx, _rx) = async_channel::unbounded();
-    let mut life = ChildLifecycle::new(
+    let mut life = AgentRunSupervisor::new(
         &child.state,
         &test_pending(),
         child.event_session_id(),
@@ -886,11 +918,8 @@ async fn child_structured_output_uses_the_native_schema_and_current_run() {
     );
     let partial = child
         .state
-        .agent_partials
-        .lock()
-        .expect("partials")
-        .get(&child.agent.id)
-        .cloned()
+        .agents
+        .partial(&child.agent.id)
         .expect("partial output");
     assert_eq!(partial.run_id, result.run_id.as_deref().expect("run id"));
     assert_eq!(partial.text, "{\"answer\":\"ok\"}");
@@ -906,9 +935,9 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
     let (mut session, parent_model, root, _log, runtime) =
         compaction_test_session("catalog", 128_000, 8_192);
     session.begin_root_run(pig_protocol::TurnKind::Regular);
-    session.run_turns = 2;
-    session.turn_input = 7;
-    session.turn_output = 3;
+    session.run_state.turns = 2;
+    session.run_state.input = 7;
+    session.run_state.output = 3;
     let first_root = session.root_result(crate::session::AgentRunStatus::Completed);
     assert_eq!(
         first_root.agent_id.as_deref(),
@@ -992,7 +1021,7 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
         .take_writer()
         .expect("writer");
     let (tx, rx) = async_channel::unbounded();
-    let mut life = ChildLifecycle::new(
+    let mut life = AgentRunSupervisor::new(
         &session.state,
         &test_pending(),
         &session.agent.id,
@@ -1070,7 +1099,7 @@ async fn catalog_preserves_root_and_child_run_identities_across_resume() {
         .expect("child")
         .take_writer()
         .expect("writer");
-    let mut life = ChildLifecycle::new(
+    let mut life = AgentRunSupervisor::new(
         &session.state,
         &test_pending(),
         &session.agent.id,

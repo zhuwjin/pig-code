@@ -114,7 +114,7 @@ impl Session {
         self.agent.history = history;
         self.user_ixs = user_ixs;
         self.io_last_input = Vec::new();
-        self.usage_anchor = None;
+        self.run_state.usage_anchor = None;
         self.projected_input_image = Some(media.input_image);
         self.projected_input_pdf = Some(media.input_pdf);
         Ok(())
@@ -226,12 +226,12 @@ impl Session {
             // history; keeping the old high sample would let the next
             // preflight compact solely because of the recalled turn. The
             // next real Usage replaces this estimate.
-            self.last_total_tokens = Some(crate::session::estimate::estimate_history_tokens(
-                &self.agent.history,
-            ));
+            self.run_state.last_total_tokens = Some(
+                crate::session::estimate::estimate_history_tokens(&self.agent.history),
+            );
         }
         // The anchor measured a history that no longer exists.
-        self.usage_anchor = None;
+        self.run_state.usage_anchor = None;
         // The recalled message carried the last reminder injection (date,
         // AGENTS.md, memory, permission boundary). It is gone from the model
         // context now, so forget the "already reminded" state and let the next

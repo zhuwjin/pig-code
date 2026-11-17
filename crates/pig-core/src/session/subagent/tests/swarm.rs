@@ -1,14 +1,15 @@
 use super::*;
+use std::time::Instant;
 
 /// Full foreground swarm path: 10 items (> the 8-slot cap) through the
 /// mock provider; every child gets a task entry and settles Completed, and
 /// all JSONL writer claims are released before run_swarm returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_swarm_above_slot_cap_completes_and_releases_children() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let started = Instant::now();
     let (mut session, parent, root) = swarm_test_session("swarm-complete");
-    let items: Vec<String> = (0..(crate::task::MAX_CONCURRENT_SUBAGENTS + 2))
+    let items: Vec<String> = (0..(crate::agent::MAX_CONCURRENT_AGENT_RUNS + 2))
         .map(|index| format!("item-{index}"))
         .collect();
     let call = ToolCall {
@@ -70,9 +71,9 @@ async fn foreground_swarm_above_slot_cap_completes_and_releases_children() {
 /// registry entry is left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_swarm_cancel_settles_every_child() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root) = swarm_test_session("swarm-cancel");
-    let items: Vec<String> = (0..(crate::task::MAX_CONCURRENT_SUBAGENTS + 2))
+    let items: Vec<String> = (0..(crate::agent::MAX_CONCURRENT_AGENT_RUNS + 2))
         .map(|index| format!("item-{index}"))
         .collect();
     let call = ToolCall {
@@ -105,14 +106,15 @@ async fn foreground_swarm_cancel_settles_every_child() {
         );
         assert!(task.ended_at.is_some());
     }
+    let agent_ids: Vec<String> = tasks
+        .iter()
+        .filter_map(|task| task.agent_id.clone())
+        .collect();
     drop(tasks);
     assert!(
-        session
-            .state
-            .agent_writers
-            .lock()
-            .expect("writers")
-            .is_empty(),
+        agent_ids
+            .iter()
+            .all(|agent_id| !session.state.agent_writer_active(agent_id)),
         "no child may keep its context writer after cancellation"
     );
     let _ = std::fs::remove_dir_all(root);
@@ -123,7 +125,7 @@ async fn foreground_swarm_cancel_settles_every_child() {
 /// stays "created" (NULL), with one durable TurnChanges record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_swarm_writes_enter_parent_turn_changes_once() {
-    let _test_lock = crate::task::SUBAGENT_SLOT_TEST_LOCK.lock().await;
+    let _test_lock = crate::agent::AGENT_SCHEDULER_TEST_LOCK.lock().await;
     let (mut session, parent, root) = swarm_test_session("swarm-turn-changes");
     let call = ToolCall {
         id: "call_swarm_writes".into(),

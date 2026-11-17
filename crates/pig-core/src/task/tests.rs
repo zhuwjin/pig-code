@@ -2,6 +2,11 @@ use super::*;
 use pig_protocol::TaskStatus;
 use std::path::{Path, PathBuf};
 
+fn notification_steer(notification: pig_protocol::TaskNotification) -> crate::agent::AgentSteer {
+    let text = super::notification::render_notification_batch(std::slice::from_ref(&notification));
+    crate::agent::AgentSteer::notification(notification, text)
+}
+
 /// Queued is structured state; acquiring a slot only changes that state.
 #[test]
 fn queued_registration_marks_pending() {
@@ -67,13 +72,21 @@ fn nested_notification_is_handed_off_only_when_the_parent_did_not_consume_it() {
     while task_rx.try_recv().is_ok() {}
 
     state
-        .agent_steers
-        .lock()
-        .expect("agent steers lock")
-        .entry("parent".into())
-        .or_default()
-        .push_back(AgentSteer::notification(notification.clone()));
-    unregister_agent_steers(&state, "parent");
+        .agents
+        .activate_child(crate::agent::AgentNode::child(
+            "parent".into(),
+            "root".into(),
+            1,
+            "run-parent".into(),
+        ))
+        .expect("activate parent");
+    assert!(
+        state
+            .agents
+            .push_steer("parent", notification_steer(notification.clone()))
+            .is_ok()
+    );
+    release_agent_mailbox(&state, "parent");
     let Some(super::notification::TaskChange::Terminal {
         owner_agent_id,
         task,
@@ -85,16 +98,15 @@ fn nested_notification_is_handed_off_only_when_the_parent_did_not_consume_it() {
     assert_eq!(owner_agent_id.as_deref(), Some("parent"));
     assert_eq!(task.summary.id, task_id);
 
-    state
-        .agent_steers
-        .lock()
-        .expect("agent steers lock")
-        .entry("parent".into())
-        .or_default()
-        .push_back(AgentSteer::notification(notification));
+    assert!(
+        state
+            .agents
+            .push_steer("parent", notification_steer(notification))
+            .is_ok()
+    );
     mark_agent_notification_delivered(&state, &task_id);
     while task_rx.try_recv().is_ok() {}
-    unregister_agent_steers(&state, "parent");
+    release_agent_mailbox(&state, "parent");
     assert!(
         task_rx.try_recv().is_err(),
         "a notification persisted in the parent's context must not be repeated"
@@ -272,38 +284,6 @@ fn running_agent_task_is_reported() {
             .status = TaskStatus::Killed;
     }
     assert!(state.running_agent_task("a3-3").is_none());
-}
-
-/// Concurrency slots: a free slot is acquired immediately and drop returns
-/// it; when full, an already-cancelled token gives up the queue without
-/// taking a slot. (The static semaphore is process-wide; this is the only
-/// test in the whole suite that touches it, so there is no concurrent
-/// interference)
-#[tokio::test]
-async fn subagent_slot_acquire_and_cancel() {
-    let _test_lock = SUBAGENT_SLOT_TEST_LOCK.lock().await;
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let permit = acquire_subagent_slot(&cancel)
-        .await
-        .expect("a free slot should be available immediately");
-    assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS - 1);
-    drop(permit);
-    assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS);
-    // Fill up: acquire with an already-cancelled token immediately returns None
-    let mut held = Vec::new();
-    for _ in 0..MAX_CONCURRENT_SUBAGENTS {
-        held.push(
-            acquire_subagent_slot(&cancel)
-                .await
-                .expect("all slots acquirable before filling up"),
-        );
-    }
-    assert_eq!(subagent_slots_available(), 0);
-    let cancelled = tokio_util::sync::CancellationToken::new();
-    cancelled.cancel();
-    assert!(acquire_subagent_slot(&cancelled).await.is_none());
-    drop(held);
-    assert_eq!(subagent_slots_available(), MAX_CONCURRENT_SUBAGENTS);
 }
 
 /// `git --exec-path` output → install root: MINGW segment lookup (git

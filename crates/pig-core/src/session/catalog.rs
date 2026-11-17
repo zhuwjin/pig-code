@@ -1,19 +1,12 @@
 use super::*;
 
-fn run_status(status: pig_protocol::TaskStatus) -> AgentRunStatus {
-    match status {
-        pig_protocol::TaskStatus::Queued => AgentRunStatus::Queued,
-        pig_protocol::TaskStatus::Running => AgentRunStatus::Running,
-        pig_protocol::TaskStatus::Completed => AgentRunStatus::Completed,
-        pig_protocol::TaskStatus::Killed => AgentRunStatus::Cancelled,
-        pig_protocol::TaskStatus::Failed | pig_protocol::TaskStatus::TimedOut => {
-            AgentRunStatus::Failed
-        }
-        pig_protocol::TaskStatus::Lost => AgentRunStatus::Lost,
-    }
-}
-
 pub(crate) fn task_catalog(state: &crate::task::SessionToolState) -> Vec<AgentCatalogEntry> {
+    let nodes: std::collections::HashMap<String, crate::agent::AgentNode> = state
+        .agents
+        .snapshot()
+        .into_iter()
+        .map(|node| (node.agent_id.clone(), node))
+        .collect();
     let tasks = state
         .tasks
         .lock()
@@ -22,15 +15,17 @@ pub(crate) fn task_catalog(state: &crate::task::SessionToolState) -> Vec<AgentCa
         .iter()
         .filter_map(|task| {
             let run = task.run.as_ref()?;
+            let node = nodes.get(&run.agent_id)?;
+            let run_state = node.run(&run.run_id)?;
             Some(AgentCatalogEntry {
                 agent_id: run.agent_id.clone(),
                 run_id: Some(run.run_id.clone()),
                 turn_kind: Some(pig_protocol::TurnKind::Regular),
-                parent_id: run.parent_agent_id.clone(),
-                depth: run.delegation_depth,
+                parent_id: run_state.parent_agent_id.clone(),
+                depth: run_state.depth,
                 profile: run.profile.clone(),
                 model: task.model.clone().unwrap_or_default(),
-                status: Some(run_status(task.status)),
+                status: Some(run_state.status),
                 turns: task.turns.unwrap_or(0) as usize,
                 usage: run.usage,
                 record_path: task.record_path.clone(),
@@ -75,7 +70,11 @@ impl Session {
                 "main".to_string()
             },
             model: root_model,
-            status: root_run.map(|run| run.status),
+            status: root_run.and_then(|run| {
+                run.run_id
+                    .as_deref()
+                    .and_then(|run_id| self.state.agents.run_status(&self.agent.id, run_id))
+            }),
             turns: root_run.map_or(0, |run| run.turns),
             usage: root_run.map_or((0, 0, 0), |run| run.usage),
             record_path: self.rollout.as_ref().map_or_else(
@@ -151,6 +150,18 @@ impl Session {
                     + 1
             );
             let result_path = path.with_file_name(format!("{agent_id}.result.md"));
+            self.state.agents.restore(crate::agent::AgentNode::restored(
+                agent_id.clone(),
+                Some(meta.parent_agent_id.clone()),
+                meta.delegation_depth,
+                crate::agent::AgentLifecycle::Lost,
+                Some(crate::agent::AgentRunState::new(
+                    meta.run_id.clone(),
+                    pig_protocol::AgentRunStatus::Lost,
+                    Some(meta.parent_agent_id.clone()),
+                    meta.delegation_depth,
+                )),
+            ));
             tasks.push(crate::task::TaskEntry::recovered_agent(
                 task_id.clone(),
                 format!("Subagent {}: {}", meta.profile, meta.description),

@@ -4,7 +4,7 @@
 //! aggregated result and background receipt formatting. Argument expansion/
 //! validation lives in tool::parse_swarm_args (a pure function at the schema
 //! layer); concurrent driving goes through the session layer's one managed
-//! child driver; the global concurrency slots live in task.rs.
+//! child driver; the global concurrency slots live in agent::scheduler.
 
 use super::*;
 
@@ -67,7 +67,7 @@ pub fn format_swarm_result(children: &[SwarmChildResult]) -> String {
     let queue_note = if queued > 0 {
         format!(
             "; global concurrency limit {}, {queued} waited in queue for a free slot",
-            crate::task::MAX_CONCURRENT_SUBAGENTS
+            crate::agent::MAX_CONCURRENT_AGENT_RUNS
         )
     } else {
         String::new()
@@ -196,7 +196,7 @@ pub fn format_swarm_receipt(children: &[SwarmReceiptChild]) -> String {
     if queued > 0 {
         notes.push_str(&format!(
             "; global concurrency limit {}, {queued} will queue for a free slot first",
-            crate::task::MAX_CONCURRENT_SUBAGENTS
+            crate::agent::MAX_CONCURRENT_AGENT_RUNS
         ));
     }
     if failed > 0 {
@@ -822,7 +822,7 @@ mod tests {
             );
         }
         assert!(
-            state.agent_writers.lock().expect("writers").is_empty(),
+            state.agents.child_count() == 0,
             "every failed prep must release its writer claim"
         );
     }

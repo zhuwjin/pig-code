@@ -7,6 +7,7 @@
 //! parent conversation.
 
 use super::*;
+use std::time::Instant;
 
 use pig_provider::ProviderEvent;
 
@@ -158,13 +159,13 @@ impl Session {
                 total,
                 reasoning_output,
             } = usage;
-            self.turn_input += input;
-            self.turn_cache_read += cache_read;
-            self.turn_output += output;
-            self.turn_reasoning_output += reasoning_output;
-            self.input_total += input;
-            self.cache_read_total += cache_read;
-            self.last_total_tokens = Some(used);
+            self.run_state.input += input;
+            self.run_state.cache_read += cache_read;
+            self.run_state.output += output;
+            self.run_state.reasoning_output += reasoning_output;
+            self.run_state.input_total += input;
+            self.run_state.cache_read_total += cache_read;
+            self.run_state.last_total_tokens = Some(used);
             step_usage = crate::model_io::ModelIoUsage {
                 input,
                 cache_read,
@@ -178,9 +179,10 @@ impl Session {
                 cache_read,
                 output,
                 used,
-                turn_id: self.usage_turn_id.clone(),
+                turn_id: self.run_state.usage_turn_id.clone(),
             });
-            let (input_total, cache_read_total) = (self.input_total, self.cache_read_total);
+            let (input_total, cache_read_total) =
+                (self.run_state.input_total, self.run_state.cache_read_total);
             self.emit(
                 |session_id| Event::ContextUsage {
                     session_id,
@@ -200,7 +202,7 @@ impl Session {
         let failure_present = attempt.failure.is_some();
         let step_error = attempt.failure.as_ref().map(pig_provider::core_error_en);
         let api_elapsed = api_started.elapsed();
-        self.turn_api_steps += 1;
+        self.run_state.api_steps += 1;
         let request_ttft_ms = first_token_at
             .map(|at| at.duration_since(api_started).as_millis() as u64)
             .unwrap_or(0)
@@ -302,7 +304,7 @@ impl Session {
 
         if let Some(error) = attempt.failure.as_ref() {
             let overflow = matches!(error, CoreError::ContextWindowExceeded { .. });
-            if overflow && !forwarded_content && !self.overflow_recovered {
+            if overflow && !forwarded_content && !self.run_state.overflow_recovered {
                 tracing::warn!(
                     step,
                     "context window exceeded before any content was forwarded; compacting and retrying this step once"
@@ -322,9 +324,9 @@ impl Session {
                     .await
                 {
                     CompactOutcome::Completed => {
-                        let used_after = self.last_total_tokens.unwrap_or(u64::MAX);
+                        let used_after = self.run_state.last_total_tokens.unwrap_or(u64::MAX);
                         if used_after < used_before {
-                            self.overflow_recovered = true;
+                            self.run_state.overflow_recovered = true;
                             rt.recovery_attempted = true;
                             return AttemptAction::Retry;
                         }
@@ -442,7 +444,7 @@ impl Session {
         let attempt_usage = provider_usage
             .map(|usage| usage.used)
             .filter(|used| *used > 0);
-        self.usage_anchor = attempt_usage.map(|used| UsageAnchor {
+        self.run_state.usage_anchor = attempt_usage.map(|used| UsageAnchor {
             model_key: model_key(&config),
             history_len: self.agent.history.len(),
             tools_tokens: rt.tools_tokens,

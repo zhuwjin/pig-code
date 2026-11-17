@@ -268,7 +268,7 @@ impl Session {
                     // Replay restores the compaction point's usage watermark (used_after is the estimate of the
                     // compacted history) and re-emits the event: the UI rebuilds the "context compacted" divider at the same spot in the message stream
                     if let Some(used) = used_after {
-                        self.last_total_tokens = Some(*used);
+                        self.run_state.last_total_tokens = Some(*used);
                     }
                     let (note, omitted, automatic, used_before, used_after, summary) = (
                         note.clone(),
@@ -321,8 +321,8 @@ impl Session {
                         in_assistant = true;
                     }
                     // Replay restore: session totals + historical turns' footer stats (the usage watermark is restored by StepUsage)
-                    self.input_total += input;
-                    self.cache_read_total += cache_read;
+                    self.run_state.input_total += input;
+                    self.run_state.cache_read_total += cache_read;
                     let stats = has_usage.then_some(pig_protocol::TurnUsageStats {
                         input: *input,
                         cache_read: *cache_read,
@@ -335,9 +335,9 @@ impl Session {
                         tool_ms: *tool_ms,
                         ended_at_ms: *ended_at_ms,
                     });
-                    self.stats_turns.push(pig_protocol::PluginTurnStats {
+                    self.run_state.history.push(pig_protocol::PluginTurnStats {
                         id: turn_id.clone(),
-                        index: self.stats_turns.len() as u64,
+                        index: self.run_state.history.len() as u64,
                         duration_ms: *duration_ms,
                         stats: stats.clone(),
                     });
@@ -363,7 +363,7 @@ impl Session {
                 }
                 RolloutRecord::StepUsage { used, .. } => {
                     // Usage watermark = total tokens of a single request; overwritten per record, the last one wins
-                    self.last_total_tokens = Some(*used);
+                    self.run_state.last_total_tokens = Some(*used);
                 }
                 // Stop-hook continuation context: model-visible only, no UI event
                 RolloutRecord::HookContext { .. } => {}

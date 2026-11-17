@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use pig_protocol::{TaskKind, TaskNotification, TaskStatus, TaskSummary};
+use pig_protocol::{TaskKind, TaskStatus, TaskSummary};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rollout::now_secs;
@@ -34,12 +34,6 @@ pub struct ReadState {
 const MAX_TASK_OUTPUT: usize = 64 * 1024;
 /// Number of tail characters for output_tail in panel snapshots.
 const SNAPSHOT_TAIL_CHARS: usize = 4000;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentPartial {
-    pub run_id: String,
-    pub text: String,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentRunMetadata {
@@ -223,67 +217,11 @@ impl std::ops::DerefMut for RegistryGuard<'_> {
     }
 }
 
-/// Exclusive ownership of one subagent context JSONL for the lifetime of its
-/// driver. The guard is released on drop, so normal completion, cancellation
-/// and panic all clear the claim before another resume can append.
-#[derive(Debug)]
-pub struct AgentWriterGuard {
-    registry: Arc<Mutex<HashSet<String>>>,
-    agent_id: String,
-    released: bool,
-}
-
-impl AgentWriterGuard {
-    /// Release the claim early (terminal cleanup); dropping the guard also
-    /// releases it, so this is idempotent.
-    pub fn release(&mut self) {
-        if self.released {
-            return;
-        }
-        self.released = true;
-        self.registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.agent_id);
-    }
-}
-
-impl Drop for AgentWriterGuard {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AgentSteer {
-    pub text: String,
-    pub notification: Option<TaskNotification>,
-}
-
-impl AgentSteer {
-    pub(crate) fn message(text: String) -> Self {
-        Self {
-            text,
-            notification: None,
-        }
-    }
-
-    pub(crate) fn notification(notification: TaskNotification) -> Self {
-        let text =
-            super::notification::render_notification_batch(std::slice::from_ref(&notification));
-        Self {
-            text,
-            notification: Some(notification),
-        }
-    }
-}
-
 /// Registration of one subagent's explicit TaskWait interest. The ids stay in
 /// the shared set after a successful wait so the runner does not queue the
 /// same terminal notification as a steer; timeout/error drops the registration.
 pub(crate) struct TaskWaitInterest {
     waits: Arc<Mutex<HashMap<String, HashSet<String>>>>,
-    steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<AgentSteer>>>>,
     state: SessionToolState,
     owner: String,
     task_ids: Vec<String>,
@@ -308,7 +246,6 @@ impl TaskWaitInterest {
         }
         Self {
             waits: state.agent_task_waits.clone(),
-            steers: state.agent_steers.clone(),
             state: state.clone(),
             owner: owner.to_string(),
             task_ids,
@@ -336,14 +273,11 @@ impl TaskWaitInterest {
         // wait registered. It is the same fact the TaskWait result now
         // carries, so remove that queued steer instead of delivering twice.
         if !notifications.is_empty() {
-            let mut steers = self.steers.lock().expect("agent steers lock");
-            if let Some(queue) = steers.get_mut(&self.owner) {
-                queue.retain(|steer| {
-                    !notifications
-                        .iter()
-                        .any(|notification| steer.text.contains(&notification.id))
-                });
-            }
+            self.state.agents.retain_mailbox(&self.owner, |steer| {
+                !notifications
+                    .iter()
+                    .any(|notification| steer.text.contains(&notification.id))
+            });
         }
         for notification in notifications {
             mark_agent_notification_delivered(&self.state, &notification.task_id);
@@ -396,18 +330,13 @@ pub(crate) fn mark_agent_notification_delivered(state: &SessionToolState, task_i
     }
 }
 
-/// Remove a finished agent's steer queue. Notifications that never reached its
-/// durable context are re-emitted after unregistering, so the manager routes
-/// them to the root fallback instead of dropping them with the queue.
-pub(crate) fn unregister_agent_steers(state: &SessionToolState, owner: &str) {
-    let pending = state
-        .agent_steers
-        .lock()
-        .expect("agent steers lock")
-        .remove(owner);
+/// Drain a settled agent's mailbox. Notifications that never reached its
+/// durable context are re-emitted after the lifecycle transition, so the
+/// manager routes them to the root fallback instead of dropping them.
+pub(crate) fn release_agent_mailbox(state: &SessionToolState, owner: &str) {
+    let pending = state.agents.drain_notifications(owner);
     let task_ids: HashSet<String> = pending
         .into_iter()
-        .flatten()
         .filter_map(|steer| steer.notification.map(|notification| notification.task_id))
         .collect();
     if task_ids.is_empty() {
@@ -439,6 +368,8 @@ pub struct SessionToolState {
     /// The subagent that owns tasks spawned through this state; None for the
     /// root session (its background tasks notify it directly).
     pub owner_agent_id: Option<String>,
+    /// Live and recovered agents in this root conversation.
+    pub(crate) agents: crate::agent::AgentRegistry,
     /// Only the root session may acknowledge delivery into its own rollout.
     pub task_store: Option<Arc<Mutex<crate::store::Store>>>,
     pub delivery_receipts: Arc<Mutex<HashMap<String, super::notification::DeliveryReceipt>>>,
@@ -461,19 +392,9 @@ pub struct SessionToolState {
     /// workspace files); effective only for absolute-path requests, same as
     /// the read-only roots
     pub extra_rw_roots: Vec<PathBuf>,
-    /// Subagent steer registry: agent_id → queued coordinator messages. A
-    /// drive loop registers its key at start (presence = running) and drains
-    /// the queue at its step boundaries; the SendMessage tool pushes here
-    /// (shared Arc — tools and drives both reach it through the state)
-    pub(crate) agent_steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<AgentSteer>>>>,
-    /// Exclusive subagent JSONL writers: agent_id → claimed by one live
-    /// driver. Claimed before any context write and released on every exit
-    /// path (including panic), so a resume cannot open a second writer while
-    /// a stopped driver is still closing.
-    pub agent_writers: Arc<Mutex<HashSet<String>>>,
     /// Serializes admission with ID/writer reservation, including swarm prep.
+    /// Exclusive writer guards and budget reservations live in AgentRegistry.
     pub agent_spawn_lock: Arc<Mutex<()>>,
-    pub agent_partials: Arc<Mutex<HashMap<String, AgentPartial>>>,
     /// Tasks a subagent is waiting for, keyed by owner agent id. A successful
     /// TaskWait keeps the id so the terminal notification is not also queued
     /// as a steer; a timeout or error removes it.
@@ -493,15 +414,13 @@ impl Clone for SessionToolState {
             task_notify: self.task_notify.clone(),
             session_id: self.session_id.clone(),
             owner_agent_id: self.owner_agent_id.clone(),
+            agents: self.agents.clone(),
             task_store: self.task_store.clone(),
             delivery_receipts: self.delivery_receipts.clone(),
             data_dir: self.data_dir.clone(),
             task_seq: self.task_seq.clone(),
             read_states: self.read_states.clone(),
-            agent_steers: self.agent_steers.clone(),
-            agent_writers: self.agent_writers.clone(),
             agent_spawn_lock: self.agent_spawn_lock.clone(),
-            agent_partials: self.agent_partials.clone(),
             agent_task_waits: self.agent_task_waits.clone(),
             extra_read_roots: self.extra_read_roots.clone(),
             extra_rw_roots: self.extra_rw_roots.clone(),
@@ -528,16 +447,14 @@ impl SessionToolState {
             todos: TodoHandle::default(),
             tasks: TaskRegistry::default(),
             task_notify,
-            session_id,
+            session_id: session_id.clone(),
             owner_agent_id: None,
+            agents: crate::agent::AgentRegistry::new(session_id),
             task_store: None,
             delivery_receipts: Arc::new(Mutex::new(HashMap::new())),
             data_dir: None,
             task_seq: Arc::new(AtomicUsize::new(0)),
-            agent_steers: Arc::new(Mutex::new(HashMap::new())),
-            agent_writers: Arc::new(Mutex::new(HashSet::new())),
             agent_spawn_lock: Arc::new(Mutex::new(())),
-            agent_partials: Arc::new(Mutex::new(HashMap::new())),
             agent_task_waits: Arc::new(Mutex::new(HashMap::new())),
             read_states: Arc::new(Mutex::new(HashMap::new())),
             extra_read_roots: canon(extra_read_roots),
@@ -565,12 +482,42 @@ impl SessionToolState {
                 })
                 .collect(),
         ));
+        self.agents.attach_store(store.clone());
         self.task_store = Some(store);
         self
     }
 
     pub fn restore_tasks(&self, tasks: Vec<BackgroundTask>) {
         for task in &tasks {
+            if let Some(run) = &task.run {
+                let status = match task.summary.status {
+                    TaskStatus::Queued | TaskStatus::Running => pig_protocol::AgentRunStatus::Lost,
+                    TaskStatus::Completed => pig_protocol::AgentRunStatus::Completed,
+                    TaskStatus::Killed => pig_protocol::AgentRunStatus::Cancelled,
+                    TaskStatus::Failed | TaskStatus::TimedOut => {
+                        pig_protocol::AgentRunStatus::Failed
+                    }
+                    TaskStatus::Lost => pig_protocol::AgentRunStatus::Lost,
+                };
+                let lifecycle = match task.summary.status {
+                    TaskStatus::Lost | TaskStatus::Queued | TaskStatus::Running => {
+                        crate::agent::AgentLifecycle::Lost
+                    }
+                    _ => crate::agent::AgentLifecycle::Idle,
+                };
+                self.agents.restore(crate::agent::AgentNode::restored(
+                    run.agent_id.clone(),
+                    run.parent_agent_id.clone(),
+                    run.delegation_depth,
+                    lifecycle,
+                    Some(crate::agent::AgentRunState::new(
+                        run.run_id.clone(),
+                        status,
+                        run.parent_agent_id.clone(),
+                        run.delegation_depth,
+                    )),
+                ));
+            }
             if let Some(sequence) = task
                 .summary
                 .id
@@ -651,26 +598,15 @@ impl SessionToolState {
 
     /// Claim exclusive write access to one subagent context. `None` means
     /// another driver still owns it (running or shutting down).
-    pub fn try_claim_agent_writer(&self, agent_id: &str) -> Option<AgentWriterGuard> {
-        let mut active = self
-            .agent_writers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !active.insert(agent_id.to_string()) {
-            return None;
-        }
-        Some(AgentWriterGuard {
-            registry: self.agent_writers.clone(),
-            agent_id: agent_id.to_string(),
-            released: false,
-        })
+    pub(crate) fn try_claim_agent_writer(
+        &self,
+        agent_id: &str,
+    ) -> Option<crate::agent::AgentWriterGuard> {
+        self.agents.claim_writer(agent_id)
     }
 
     pub fn agent_writer_active(&self, agent_id: &str) -> bool {
-        self.agent_writers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(agent_id)
+        self.agents.writer_active(agent_id)
     }
 
     /// task_id of a still-running registry entry for this subagent, if any.
@@ -852,42 +788,6 @@ fn register_agent_task_with_status(
     };
     state.notify_task(&id);
     id
-}
-
-/// Global subagent concurrency cap (semaphore slots shared between background
-/// Agent and the subagents fanned out by AgentSwarm). Making it configurable
-/// would require touching pig-protocol's AppConfig (cross-crate); a constant
-/// for v1.
-pub const MAX_CONCURRENT_SUBAGENTS: usize = 8;
-
-/// Global subagent concurrency slots: a process-level static (shared across sessions); over-limit requests queue at acquire.
-static SUBAGENT_SLOTS: tokio::sync::Semaphore =
-    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_SUBAGENTS);
-
-/// Serializes tests that observe the process-wide slot count, so one test's
-/// held permits cannot make another's exact-count assertion fail.
-#[cfg(test)]
-pub(crate) static SUBAGENT_SLOT_TEST_LOCK: tokio::sync::Mutex<()> =
-    tokio::sync::Mutex::const_new(());
-
-/// Number of currently free concurrency slots (for queueing hints; a transient value that may differ from the subsequent acquire result)
-pub fn subagent_slots_available() -> usize {
-    SUBAGENT_SLOTS.available_permits()
-}
-
-/// Acquire one subagent concurrency slot: over-limit requests queue; cancel
-/// firing while waiting returns None (giving up the queue without taking a
-/// slot). The permit is an RAII guard: dropping it returns the slot.
-pub async fn acquire_subagent_slot(
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Option<tokio::sync::SemaphorePermit<'static>> {
-    tokio::select! {
-        // Cancellation wins over a freshly freed slot: a stopped queued child
-        // must not briefly occupy the global permit on its way out.
-        biased;
-        _ = cancel.cancelled() => None,
-        permit = SUBAGENT_SLOTS.acquire() => permit.ok(),
-    }
 }
 
 /// Register a subagent task in the queued state and move it to Running once a

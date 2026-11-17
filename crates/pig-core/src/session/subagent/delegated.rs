@@ -125,6 +125,7 @@ impl Session {
             bg_cancel,
             tx.clone(),
             Some(DelegatedUi { item_id }),
+            crate::agent::AgentExecutionActivation::Start,
         );
         Ok(crate::session::DelegatedAgentStarted {
             agent_id,

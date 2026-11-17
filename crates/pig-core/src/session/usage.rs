@@ -55,8 +55,9 @@ impl Session {
         duration_ms: u64,
         finish_reason: Option<pig_protocol::FinishReason>,
     ) -> Option<pig_protocol::TurnUsageStats> {
-        self.turn_active = false;
-        let has_usage = self.turn_input + self.turn_cache_read + self.turn_output > 0;
+        self.run_state.active = false;
+        let has_usage =
+            self.run_state.input + self.run_state.cache_read + self.run_state.output > 0;
         if !has_usage && finish_reason.is_none() {
             return None;
         }
@@ -70,44 +71,44 @@ impl Session {
                 &self.agent.id,
                 &config.provider_name,
                 &config.model,
-                self.turn_input,
-                self.turn_cache_read,
-                self.turn_output,
-                self.turn_reasoning_output,
-                self.usage_turn_id.as_deref(),
+                self.run_state.input,
+                self.run_state.cache_read,
+                self.run_state.output,
+                self.run_state.reasoning_output,
+                self.run_state.usage_turn_id.as_deref(),
             );
         }
         // An incomplete finish is durable even when the provider omitted usage.
         self.record(&RolloutRecord::TurnStats {
-            input: self.turn_input,
-            cache_read: self.turn_cache_read,
-            output: self.turn_output,
+            input: self.run_state.input,
+            cache_read: self.run_state.cache_read,
+            output: self.run_state.output,
             duration_ms,
             ended_at_ms,
-            api_ms: self.turn_api_ms,
-            ttft_ms: self.turn_ttft_ms,
-            ttft_steps: self.turn_ttft_steps,
-            api_steps: self.turn_api_steps,
-            tool_ms: self.turn_tool_ms,
+            api_ms: self.run_state.api_ms,
+            ttft_ms: self.run_state.ttft_ms,
+            ttft_steps: self.run_state.ttft_steps,
+            api_steps: self.run_state.api_steps,
+            tool_ms: self.run_state.tool_ms,
             has_usage,
             finish_reason,
-            turn_id: self.usage_turn_id.clone(),
+            turn_id: self.run_state.usage_turn_id.clone(),
         });
         let stats = has_usage.then_some(pig_protocol::TurnUsageStats {
-            input: self.turn_input,
-            cache_read: self.turn_cache_read,
-            output: self.turn_output,
+            input: self.run_state.input,
+            cache_read: self.run_state.cache_read,
+            output: self.run_state.output,
             duration_ms,
-            api_ms: self.turn_api_ms,
-            ttft_ms: self.turn_ttft_ms,
-            ttft_steps: self.turn_ttft_steps,
-            api_steps: self.turn_api_steps,
-            tool_ms: self.turn_tool_ms,
+            api_ms: self.run_state.api_ms,
+            ttft_ms: self.run_state.ttft_ms,
+            ttft_steps: self.run_state.ttft_steps,
+            api_steps: self.run_state.api_steps,
+            tool_ms: self.run_state.tool_ms,
             ended_at_ms,
         });
-        self.stats_turns.push(pig_protocol::PluginTurnStats {
-            id: self.usage_turn_id.clone(),
-            index: self.stats_turns.len() as u64,
+        self.run_state.history.push(pig_protocol::PluginTurnStats {
+            id: self.run_state.usage_turn_id.clone(),
+            index: self.run_state.history.len() as u64,
             duration_ms,
             stats: stats.clone(),
         });

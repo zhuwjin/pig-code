@@ -693,15 +693,16 @@ impl Tool for SendMessageTool {
         Box::pin(async move {
             let agent_id = args["agent_id"].as_str().ok_or("agent_id is required")?;
             let message = args["message"].as_str().ok_or("message is required")?;
-            let mut registry = ctx.state.agent_steers.lock().map_err(|e| e.to_string())?;
-            match registry.get_mut(agent_id) {
-                Some(queue) => {
-                    queue.push_back(crate::task::AgentSteer::message(message.to_string()));
-                    Ok(ToolEffect::plain(format!(
-                        "Delivered to {agent_id}: the subagent sees the message at its next step boundary."
-                    )))
-                }
-                None => Err(format!(
+            let result = ctx.state.agents.push_steer(
+                agent_id,
+                crate::agent::AgentSteer::message(message.to_string()),
+            );
+            match result {
+                Ok(()) => Ok(ToolEffect::plain(format!(
+                    "Delivered to {agent_id}: the subagent sees the message at its next step boundary."
+                ))),
+                Err(error) if ctx.state.agents.is_active(agent_id) => Err(error),
+                Err(_) => Err(format!(
                     "No running subagent with agent_id \"{agent_id}\" (it may have finished; resume it with Agent(resume=...))"
                 )),
             }
@@ -1552,12 +1553,20 @@ mod task_wait_tests {
         finish(&state, &task_id);
         let queued = "<notification id=\"task:test:b1:completed\">done</notification>".to_string();
         state
-            .agent_steers
-            .lock()
-            .expect("steers")
-            .entry("a1".into())
-            .or_default()
-            .push_back(crate::task::AgentSteer::message(queued));
+            .agents
+            .activate_child(crate::agent::AgentNode::child(
+                "a1".into(),
+                "root".into(),
+                1,
+                "run-a1".into(),
+            ))
+            .expect("activate child");
+        assert!(
+            state
+                .agents
+                .push_steer("a1", crate::agent::AgentSteer::message(queued))
+                .is_ok()
+        );
         let mut tracker = ChangeTracker::default();
         let effect = TaskWait
             .execute(
@@ -1568,12 +1577,7 @@ mod task_wait_tests {
             .expect("wait");
         assert!(effect.output.contains("task:test:b1:completed"));
         assert!(
-            state
-                .agent_steers
-                .lock()
-                .expect("steers")
-                .get("a1")
-                .is_none_or(|queue| queue.is_empty()),
+            state.agents.drain_mailbox("a1").is_empty(),
             "the queued duplicate steer is removed"
         );
         let _ = std::fs::remove_dir_all(root);

@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 use crate::config::RuntimeConfig;
 
@@ -141,13 +142,12 @@ pub(super) fn make_child_session(
         })),
         user_ixs: Vec::new(),
         io_last_input: Vec::new(),
-        turn_counter: 0,
-        run_turns: 0,
         tracker: crate::tool::ChangeTracker::default(),
         state,
         always_allowed: Arc::new(Mutex::new(HashSet::new())),
         permission_rules: Arc::new(Mutex::new(crate::permissions::PermissionRules::default())),
         plan_enabled: false,
+        reviewer: Arc::new(UserApprovalReviewer::new(test_pending())),
         pending: test_pending(),
         pending_questions: Arc::new(Mutex::new(HashMap::new())),
         permissions: pig_protocol::PermissionSettings::default(),
@@ -177,25 +177,7 @@ pub(super) fn make_child_session(
         projected_input_image: None,
         projected_input_pdf: None,
         recorded_prompt: None,
-        last_total_tokens: None,
-        usage_turn_id: None,
-        usage_anchor: None,
-        overflow_recovered: false,
-        turn_input: 0,
-        turn_cache_read: 0,
-        turn_output: 0,
-        turn_reasoning_output: 0,
-        turn_api_ms: 0,
-        turn_ttft_ms: 0,
-        turn_ttft_steps: 0,
-        turn_api_steps: 0,
-        turn_tool_ms: 0,
-        stats_turns: Vec::new(),
-        turn_active: false,
-        rate_started_at: None,
-        rate_characters: 0,
-        input_total: 0,
-        cache_read_total: 0,
+        run_state: Default::default(),
         agent_seq: 0,
         tool_item_seq: 0,
         runtime: None,
@@ -219,7 +201,7 @@ fn test_lifecycle(
     pending: &PendingApprovals,
     child: &mut Session,
     task_id: Option<String>,
-) -> ChildLifecycle {
+) -> AgentRunSupervisor {
     child.subagent.as_mut().expect("child session").progress = match &task_id {
         Some(task_id) => ProgressSink::Background {
             task_id: task_id.clone(),
@@ -231,7 +213,7 @@ fn test_lifecycle(
     let writer = state
         .try_claim_agent_writer(&child.agent.id)
         .expect("test writer claim");
-    ChildLifecycle::new(
+    AgentRunSupervisor::new(
         state,
         pending,
         "s-test",
@@ -599,7 +581,7 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
         .find(|tool| tool.name() == "TodoList")
         .expect("TodoList tool");
     let mut tracker = crate::tool::ChangeTracker::default();
-    let pending = test_pending();
+    let reviewer = UserApprovalReviewer::new(test_pending());
     let rules = Arc::new(Mutex::new(crate::permissions::PermissionRules::default()));
     let always_allowed = Arc::new(Mutex::new(HashSet::new()));
     let hooks = crate::hooks::HookSet::load(&root, None);
@@ -621,7 +603,7 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
         tracker: &mut tracker,
         state: &child_state,
         owns_todo_state: false,
-        pending: &pending,
+        reviewer: &reviewer,
         permission_rules: &rules,
         always_allowed: &always_allowed,
         session_id: "s-child-todo",
@@ -684,7 +666,7 @@ async fn child_gate_refuses_new_scope_widening() {
         .find(|tool| tool.name() == "ExecCommand")
         .expect("ExecCommand tool");
     let mut tracker = crate::tool::ChangeTracker::default();
-    let pending = test_pending();
+    let reviewer = UserApprovalReviewer::new(test_pending());
     let rules = Arc::new(Mutex::new(crate::permissions::PermissionRules::default()));
     let always_allowed = Arc::new(Mutex::new(HashSet::new()));
     let hooks = crate::hooks::HookSet::load(&root, None);
@@ -710,7 +692,7 @@ async fn child_gate_refuses_new_scope_widening() {
         tracker: &mut tracker,
         state: &state,
         owns_todo_state: false,
-        pending: &pending,
+        reviewer: &reviewer,
         permission_rules: &rules,
         always_allowed: &always_allowed,
         session_id: "s-child-fixed-scope",

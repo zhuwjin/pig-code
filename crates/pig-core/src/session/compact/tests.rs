@@ -1332,7 +1332,7 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
         user("new request"),
     ];
     session.user_ixs = vec![Some(1), Some(3)];
-    session.last_total_tokens = Some(42);
+    session.run_state.last_total_tokens = Some(42);
     let before: Vec<Option<String>> = session
         .agent
         .history
@@ -1373,7 +1373,7 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
     assert_eq!(after, before, "live history stays pre-compaction");
     assert_eq!(session.user_ixs, before_ixs, "recall stack is unchanged");
     assert_eq!(
-        session.last_total_tokens,
+        session.run_state.last_total_tokens,
         Some(42),
         "the watermark is not rewritten without a durable marker"
     );

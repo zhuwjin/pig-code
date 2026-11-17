@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use futures_util::StreamExt as _;
 use futures_util::stream::FuturesUnordered;
@@ -43,8 +42,11 @@ mod outcome;
 mod pending;
 mod persistence;
 mod replay;
+mod reviewer;
+mod run_state;
 mod runner;
 mod subagent;
+pub use subagent::AgentRunSupervisor;
 pub(crate) use subagent::DelegatedAgentStarted;
 mod stats;
 mod step;
@@ -53,6 +55,9 @@ mod tests;
 mod title;
 mod turn;
 mod usage;
+
+pub(crate) use reviewer::{ApprovalReply, ApprovalRequest, ApprovalReviewer, UserApprovalReviewer};
+use run_state::SessionRunState;
 
 pub use approval::approval_detail;
 pub use compact::COMPACTION_MARKER;
@@ -113,8 +118,7 @@ pub struct Session {
     /// baseline for delta persistence; empty after resume — the first entry
     /// automatically falls back to full, self-healing)
     io_last_input: Vec<crate::model_io::ModelIoMessage>,
-    turn_counter: u64,
-    run_turns: usize,
+    run_state: SessionRunState,
     tracker: ChangeTracker,
     state: crate::task::SessionToolState,
     /// Memory of "always allowed in this session": (tool name, subject) —
@@ -135,6 +139,7 @@ pub struct Session {
     /// EnterPlanMode/ExitPlanMode tools and Op::SetPlanMode, persisted
     /// write-through to the store)
     plan_enabled: bool,
+    reviewer: Arc<dyn ApprovalReviewer>,
     pending: PendingApprovals,
     pending_questions: PendingQuestions,
     /// Canonical permission state (sandbox / approval policy / reviewer)
@@ -202,49 +207,6 @@ pub struct Session {
     projected_input_image: Option<bool>,
     projected_input_pdf: Option<bool>,
     recorded_prompt: Option<crate::rollout::PromptSnapshot>,
-    last_total_tokens: Option<u64>,
-    /// Durable identity of the turn currently running (shared by StepUsage and
-    /// TurnStats). None outside a turn.
-    usage_turn_id: Option<String>,
-    /// Request/usage baseline refreshed after each persisted assistant step.
-    /// Preflight projects the next request from it so tool results appended
-    /// after the previous response are counted before sampling.
-    usage_anchor: Option<UsageAnchor>,
-    /// The reactive context-overflow recovery budget for the current turn
-    /// (one durable compaction + retry at most).
-    overflow_recovered: bool,
-    /// Token usage accumulated in the current turn (written to the turn_usage
-    /// table at turn end)
-    turn_input: u64,
-    turn_cache_read: u64,
-    turn_output: u64,
-    /// Reasoning/thinking slice of turn_output (ProviderEvent::Usage's
-    /// reasoning_output accumulated; subagent usage tuples don't carry the
-    /// split, so child runs contribute 0)
-    turn_reasoning_output: u64,
-    /// Model time accumulated in the current turn: each step from its start to
-    /// the stream's end (the harness's `step/start` → message basis). The decode
-    /// window is `turn_api_ms - turn_ttft_ms`.
-    turn_api_ms: u64,
-    /// Time spent waiting for the first output token within turn_api_ms (time
-    /// to first token; accumulated across multi-step calls)
-    turn_ttft_ms: u64,
-    /// Steps that recorded a first token (the average TTFT divisor)
-    turn_ttft_steps: u64,
-    /// Provider request count within the turn (failed attempts included)
-    turn_api_steps: u64,
-    /// Summed per-call tool spans in the current turn: permission gate +
-    /// approval wait + execution (concurrent read-only calls overlap, so this
-    /// is a sum of spans, not the segment's wall time)
-    turn_tool_ms: u64,
-    stats_turns: Vec<pig_protocol::PluginTurnStats>,
-    turn_active: bool,
-    rate_started_at: Option<Instant>,
-    rate_characters: u64,
-    /// Session totals (restored on replay): uncached input / cache-hit input,
-    /// used for the average cache hit rate
-    input_total: u64,
-    cache_read_total: u64,
     /// Subagent sequence number (agent_id = a{timestamp}-{agent_seq+1}; the
     /// timestamp keeps it from colliding with persisted subagent files across
     /// restarts)
@@ -291,7 +253,7 @@ impl Session {
     /// The session id events, approvals and durable session rows belong to.
     /// A child agent identifies itself by `agent.id` but reports into its
     /// parent conversation.
-    pub(super) fn event_session_id(&self) -> &str {
+    pub(crate) fn event_session_id(&self) -> &str {
         self.subagent
             .as_ref()
             .map_or(self.agent.id.as_str(), |subagent| {

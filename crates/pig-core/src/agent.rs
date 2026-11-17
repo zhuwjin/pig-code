@@ -73,16 +73,24 @@ impl AgentSource {
 }
 
 mod child;
+mod execution;
+mod mailbox;
 mod parse;
 mod profiles;
 mod records;
+mod registry;
+mod scheduler;
 mod store;
 mod swarm;
 
 pub(crate) use child::*;
+pub(crate) use execution::*;
+pub(crate) use mailbox::*;
 pub(crate) use parse::*;
 pub(crate) use profiles::*;
 pub(crate) use records::*;
+pub(crate) use registry::*;
+pub(crate) use scheduler::*;
 pub use store::set_model_override;
 pub(crate) use store::*;
 pub(crate) use swarm::*;

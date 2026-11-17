@@ -16,6 +16,8 @@ pub mod files;
 pub mod fonts;
 pub mod git;
 pub mod hooks;
+mod journal;
+pub use journal::{EventJournal, JournalReplayError};
 pub mod mcp;
 pub mod memory;
 pub mod model_io;
@@ -92,6 +94,7 @@ pub fn windows_sandbox_helper_main() -> i32 {
 pub struct AgentHandle {
     pub ops: async_channel::Sender<Op>,
     pub events: async_channel::Receiver<Event>,
+    pub journal: EventJournal,
     pub credentials: std::sync::Arc<crate::credentials::CredentialManager>,
     _thread: std::thread::JoinHandle<()>,
 }
@@ -250,7 +253,7 @@ pub fn spawn_agent_with_data_dir_and_credentials(
     credentials: std::sync::Arc<crate::credentials::CredentialManager>,
 ) -> AgentHandle {
     let (op_tx, op_rx) = async_channel::unbounded::<Op>();
-    let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+    let (event_tx, event_rx, journal, publisher) = EventJournal::channel();
     let agent_credentials = credentials.clone();
     let thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -258,18 +261,24 @@ pub fn spawn_agent_with_data_dir_and_credentials(
             .worker_threads(2)
             .build()
             .expect("agent runtime");
-        runtime.block_on(session::agent_loop(
-            op_rx,
-            event_tx,
-            config_path,
-            cwd,
-            data_dir,
-            agent_credentials,
-        ));
+        runtime.block_on(async {
+            tokio::join!(
+                session::agent_loop(
+                    op_rx,
+                    event_tx,
+                    config_path,
+                    cwd,
+                    data_dir,
+                    agent_credentials,
+                ),
+                publisher.run(),
+            );
+        });
     });
     AgentHandle {
         ops: op_tx,
         events: event_rx,
+        journal,
         credentials,
         _thread: thread,
     }

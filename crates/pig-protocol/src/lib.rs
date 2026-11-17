@@ -3,7 +3,7 @@
 //!
 //! Principle: delta events (streaming fragments, live-only) are separated from done
 //! events (full final values, replayable); session events carry session_id. Ordering
-//! is channel order — there is no sequence cursor.
+//! is channel order. EventEnvelope adds journal identity and a replay cursor.
 
 use std::path::PathBuf;
 

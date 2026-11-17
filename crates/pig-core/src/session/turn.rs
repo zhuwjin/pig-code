@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 /// Title seed from the first message: the first non-empty line, trimmed,
 /// capped at 30 chars. Multi-line/tabbed content must not leak `\n`/`\t` into
@@ -193,40 +194,41 @@ impl Session {
             }
             self.hook_context_stash.extend(effects.additional_contexts);
         }
-        self.turn_counter += 1;
+        self.run_state.turn_counter += 1;
         // Unique across restarts (wall-clock nanos + counter): StepUsage and
         // TurnStats carry it so SQLite usage insertion is idempotent and crash
         // recovery reuses the same identity.
-        self.usage_turn_id = Some(format!(
+        self.run_state.usage_turn_id = Some(format!(
             "t{}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0),
-            self.turn_counter
+            self.run_state.turn_counter
         ));
-        self.turn_input = 0;
-        self.turn_cache_read = 0;
-        self.turn_output = 0;
-        self.turn_api_ms = 0;
-        self.turn_ttft_ms = 0;
-        self.turn_ttft_steps = 0;
-        self.turn_api_steps = 0;
-        self.turn_tool_ms = 0;
-        self.turn_active = true;
-        self.rate_started_at = None;
-        self.rate_characters = 0;
-        self.overflow_recovered = false;
+        self.run_state.input = 0;
+        self.run_state.cache_read = 0;
+        self.run_state.output = 0;
+        self.run_state.api_ms = 0;
+        self.run_state.ttft_ms = 0;
+        self.run_state.ttft_steps = 0;
+        self.run_state.api_steps = 0;
+        self.run_state.tool_ms = 0;
+        self.run_state.active = true;
+        self.run_state.rate_started_at = None;
+        self.run_state.rate_characters = 0;
+        self.run_state.overflow_recovered = false;
         // A model switch invalidates the request-shape baseline; compact,
         // media reprojection and recall clear it at their own sites.
         if self
+            .run_state
             .usage_anchor
             .as_ref()
             .is_some_and(|anchor| anchor.model_key != model_key(config))
         {
-            self.usage_anchor = None;
+            self.run_state.usage_anchor = None;
         }
-        let turn_id = format!("turn-{}", self.turn_counter);
+        let turn_id = format!("turn-{}", self.run_state.turn_counter);
         let started = Instant::now();
         let run = self.run_envelope();
         self.emit(
@@ -308,7 +310,7 @@ impl Session {
         if system_changed {
             // The old usage baseline described the previous rendered system
             // prompt; do not project it onto the new one.
-            self.usage_anchor = None;
+            self.run_state.usage_anchor = None;
         }
         // Turn-boundary reminder (exec mode/plan toggle on first turn or on
         // switch, date rollover, AGENTS.md/memory changes): prepended to the
@@ -521,7 +523,7 @@ impl Session {
         // steer alone.
         let mut pause_pin: Option<usize> = None;
         loop {
-            self.run_turns = step + 1;
+            self.run_state.turns = step + 1;
             // ---- Steer boundary: inject everything the pending list
             // collected during the previous step. The previous step's tool
             // results are all settled here, so a user message can never land
@@ -729,13 +731,13 @@ impl Session {
     /// still shows up in the turn's model time, TTFT and speed.
     pub(super) fn charge_step_time(&mut self, started: Instant, first_token: Option<Instant>) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        self.turn_api_ms += elapsed_ms;
-        self.turn_ttft_ms += first_token
+        self.run_state.api_ms += elapsed_ms;
+        self.run_state.ttft_ms += first_token
             .map(|at| at.duration_since(started).as_millis() as u64)
             .unwrap_or(0)
             .min(elapsed_ms);
         if first_token.is_some() {
-            self.turn_ttft_steps += 1;
+            self.run_state.ttft_steps += 1;
         }
     }
 
@@ -940,13 +942,8 @@ impl Session {
                     is_error = true;
                 } else {
                     let request_id = format!("{}-{turn_id}-exitplan-{item_id}", self.agent.id);
-                    let (reply_tx, reply_rx) = oneshot::channel();
                     // Plan confirmation is a one-shot per-request popup; it is
-                    // never coalesced with another approval
-                    self.pending
-                        .lock()
-                        .expect("pending lock")
-                        .insert(request_id.clone(), reply_tx);
+                    // never coalesced with another approval.
                     // kimi semantics: persist the plan before requesting
                     // approval (rewriting the same content on approval is
                     // idempotent; after rejection the file stays, and the next
@@ -956,10 +953,10 @@ impl Session {
                     // panel has its own title; detail = the plain plan full
                     // text — truncation would hide the full text from the user
                     // before approval)
-                    self.emit(
-                        |session_id| Event::ApprovalRequested {
-                            session_id,
-                            request_id: request_id.clone(),
+                    let review = self.reviewer.review(
+                        ApprovalRequest {
+                            session_id: self.agent.id.clone(),
+                            request_id,
                             tool: call.name.clone(),
                             detail: plan.to_string(),
                             danger_key: None,
@@ -969,12 +966,17 @@ impl Session {
                                 ApprovalDecision::Reject,
                             ],
                         },
-                        tx,
+                        tx.clone(),
                     );
-                    let (decision, feedback) = tokio::select! {
-                            reply = reply_rx => reply.unwrap_or((ApprovalDecision::Reject, None)),
+                    let ApprovalReply { decision, feedback } = tokio::select! {
+                            result = review => match result {
+                                Ok(reply) => reply,
+                                Err(error) => ApprovalReply {
+                                    decision: ApprovalDecision::Reject,
+                                    feedback: Some(format!("Approval review failed: {}", error.detail)),
+                                },
+                            },
                             _ = cancel.cancelled() => {
-                                self.pending.lock().expect("pending lock").remove(&request_id);
                                 self.settle_cancelled_tool(
                                     CancelledTool {
                                         call,
@@ -1525,7 +1527,7 @@ impl Session {
                     cancel,
                 )
                 .await;
-            self.turn_tool_ms += tool_started.elapsed().as_millis() as u64;
+            self.run_state.tool_ms += tool_started.elapsed().as_millis() as u64;
             match gated {
                 GatedToolOutcome::Rejected { note } => {
                     self.agent
@@ -1796,7 +1798,7 @@ impl Session {
         for (index, card) in cards.iter().enumerate() {
             match slots[index].take() {
                 Some(out) => {
-                    self.turn_tool_ms += out.elapsed_ms;
+                    self.run_state.tool_ms += out.elapsed_ms;
                     let ParallelOutput {
                         output,
                         is_error,

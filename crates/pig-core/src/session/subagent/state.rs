@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::task::AgentWriterGuard;
+use crate::agent::AgentWriterGuard;
 
 /// Whether the child is driven inside the parent turn (foreground) or spawned
 /// as a detached task (background). The only difference the child Session sees

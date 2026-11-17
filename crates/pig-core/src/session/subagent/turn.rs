@@ -7,6 +7,7 @@
 //! settlement).
 
 use super::*;
+use std::time::Instant;
 
 use std::collections::HashMap;
 
@@ -42,6 +43,15 @@ impl Session {
         )
         .with_identity(&agent_id, prep.run_id.clone());
         let state = Session::child_local_state(&parent.state, &agent_id);
+        state
+            .agents
+            .activate_child(crate::agent::AgentNode::child(
+                agent_id.clone(),
+                prep.parent_agent_id.clone(),
+                prep.policy.delegation_depth,
+                prep.run_id.clone(),
+            ))
+            .expect("a prepared child must not have an active conflicting run");
         let delivery_receipts = state.delivery_receipts.clone();
         let tracker = match mode {
             SubagentMode::Foreground => parent.tracker.foreground_child(),
@@ -82,13 +92,12 @@ impl Session {
             })),
             user_ixs: Vec::new(),
             io_last_input: Vec::new(),
-            turn_counter: 0,
-            run_turns: 0,
             tracker,
             state,
             always_allowed: parent.always_allowed.clone(),
             permission_rules: parent.permission_rules.clone(),
             plan_enabled: false,
+            reviewer: parent.reviewer.clone(),
             pending: parent.pending.clone(),
             pending_questions: parent.pending_questions.clone(),
             permissions: prep.policy.permissions,
@@ -118,25 +127,7 @@ impl Session {
             projected_input_image: None,
             projected_input_pdf: None,
             recorded_prompt: None,
-            last_total_tokens: None,
-            usage_turn_id: None,
-            usage_anchor: None,
-            overflow_recovered: false,
-            turn_input: 0,
-            turn_cache_read: 0,
-            turn_output: 0,
-            turn_reasoning_output: 0,
-            turn_api_ms: 0,
-            turn_ttft_ms: 0,
-            turn_ttft_steps: 0,
-            turn_api_steps: 0,
-            turn_tool_ms: 0,
-            stats_turns: Vec::new(),
-            turn_active: false,
-            rate_started_at: None,
-            rate_characters: 0,
-            input_total: 0,
-            cache_read_total: 0,
+            run_state: Default::default(),
             agent_seq: 0,
             tool_item_seq: 0,
             runtime: parent.runtime.clone(),
@@ -156,16 +147,8 @@ impl Session {
             return;
         };
         self.state
-            .agent_partials
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                self.agent.id.clone(),
-                crate::task::AgentPartial {
-                    run_id,
-                    text: text.to_string(),
-                },
-            );
+            .agents
+            .record_partial(&self.agent.id, &run_id, text.to_string());
     }
 
     /// Subagent progress reporting (routed per sink).
@@ -263,9 +246,9 @@ impl Session {
             )
         };
         let projected = crate::session::compact::project_context_tokens(
-            self.usage_anchor.as_ref(),
+            self.run_state.usage_anchor.as_ref(),
             &self.agent.history,
-            self.last_total_tokens,
+            self.run_state.last_total_tokens,
             self.agent.config(),
             rt.tools_tokens,
         );
@@ -287,7 +270,7 @@ impl Session {
                     return true;
                 }
                 CompactOutcome::Completed => {
-                    self.last_total_tokens = report.used_after;
+                    self.run_state.last_total_tokens = report.used_after;
                     let sub = self.subagent.as_mut().expect("child session");
                     sub.pause_pin = report.pin_after;
                     sub.emitted_up_to = sub.emitted_up_to.min(self.agent.history.len());
@@ -390,10 +373,10 @@ impl Session {
                 used,
                 ..
             } = reported;
-            self.turn_input += input;
-            self.turn_cache_read += cache_read;
-            self.turn_output += output;
-            self.last_total_tokens = Some(used);
+            self.run_state.input += input;
+            self.run_state.cache_read += cache_read;
+            self.run_state.output += output;
+            self.run_state.last_total_tokens = Some(used);
         }
         if attempt.finish_reason.is_incomplete() {
             attempt.tool_calls.clear();
@@ -446,8 +429,8 @@ impl Session {
                             let sub = self.subagent.as_mut().expect("child session");
                             sub.overflow_recoveries += 1;
                             rt.recovery_attempted = true;
-                            self.usage_anchor = None;
-                            self.last_total_tokens = Some(used_after);
+                            self.run_state.usage_anchor = None;
+                            self.run_state.last_total_tokens = Some(used_after);
                             sub.pause_pin = report.pin_after;
                             sub.emitted_up_to = sub.emitted_up_to.min(self.agent.history.len());
                             self.emit_child_conversation(rt, tx, attempt.reasoning_ms);
@@ -536,7 +519,7 @@ impl Session {
             return CommitAction::Terminal(crate::session::engine::StepOutcome::Failed);
         }
         self.agent.history.push(assistant);
-        self.usage_anchor = provider_usage.map(|usage| UsageAnchor {
+        self.run_state.usage_anchor = provider_usage.map(|usage| UsageAnchor {
             model_key: model_key(self.agent.config()),
             history_len: self.agent.history.len(),
             tools_tokens: rt.tools_tokens,
@@ -575,7 +558,7 @@ impl Session {
             config: self.agent.config().clone(),
             permissions: self.permissions,
             state: self.state.clone(),
-            pending: self.pending.clone(),
+            reviewer: self.reviewer.clone(),
             permission_rules: self.permission_rules.clone(),
             always_allowed: self.always_allowed.clone(),
             store: self.store.clone(),
@@ -888,7 +871,7 @@ impl Session {
                 tracker: &mut self.tracker,
                 state: &self.state,
                 owns_todo_state: false,
-                pending: &self.pending,
+                reviewer: self.reviewer.as_ref(),
                 permission_rules: &self.permission_rules,
                 always_allowed: &self.always_allowed,
                 session_id: &event_session_id,
@@ -1158,7 +1141,7 @@ impl Session {
     /// {agents_dir}/{agent_id}.result.md (success and failure alike), then
     /// truncate `result_text` to the 32K budget. Cancel/kill writes no
     /// artifact.
-    pub(super) async fn run_subagent_task(
+    pub(crate) async fn run_subagent_task(
         &mut self,
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
@@ -1169,6 +1152,7 @@ impl Session {
         // cancel/panic).
         let agent_id = self.agent.id.clone();
         let run_id = self.agent.run_id().expect("subagent run identity");
+        self.state.agents.begin_run(&agent_id, run_id.clone());
         self.record_child_partial("");
         if self
             .subagent
@@ -1255,19 +1239,6 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> SubagentResult {
-        struct SteerUnregister(crate::task::SessionToolState, String);
-        impl Drop for SteerUnregister {
-            fn drop(&mut self) {
-                crate::task::unregister_agent_steers(&self.0, &self.1);
-            }
-        }
-        self.state
-            .agent_steers
-            .lock()
-            .expect("agent steers lock")
-            .insert(self.agent.id.clone(), Default::default());
-        let _steer_guard = SteerUnregister(self.state.clone(), self.agent.id.clone());
-
         let mut steps_run = 0usize;
         let mut completed = false;
         let mut incomplete_reason = None;
@@ -1283,16 +1254,15 @@ impl Session {
                 .persist_failure
                 .clone()
             {
-                let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                let usage = (
+                    self.run_state.input,
+                    self.run_state.cache_read,
+                    self.run_state.output,
+                );
                 return child_persist_stop(self, &error, steps_run, usage);
             }
-            let steered: Vec<crate::task::AgentSteer> = {
-                let mut registry = self.state.agent_steers.lock().expect("agent steers lock");
-                registry
-                    .get_mut(&self.agent.id)
-                    .map(|queue| queue.drain(..).collect())
-                    .unwrap_or_default()
-            };
+            let steered: Vec<crate::agent::AgentSteer> =
+                self.state.agents.drain_mailbox(&self.agent.id);
             for steer in steered {
                 let wrapped = format!(
                     "New message from the coordinating agent (delivered while you were working):\n\n{}",
@@ -1300,21 +1270,21 @@ impl Session {
                 );
                 let mut message = ChatMsg::user(wrapped);
                 if let Err(error) = persist_child_message(self, &mut message) {
-                    if steer.notification.is_some()
-                        && let Some(queue) = self
-                            .state
-                            .agent_steers
-                            .lock()
-                            .expect("agent steers lock")
-                            .get_mut(&self.agent.id)
-                    {
-                        queue.push_front(steer);
-                    }
-                    let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                    self.state.agents.prepend_steer(&self.agent.id, steer);
+                    let usage = (
+                        self.run_state.input,
+                        self.run_state.cache_read,
+                        self.run_state.output,
+                    );
                     return child_persist_stop(self, &error, steps_run, usage);
                 }
                 self.agent.history.push(message);
                 self.emit_child_history_since(tx, None);
+                if steer.notification.is_none()
+                    && let Err(error) = self.state.agents.consume_steer(&steer.id)
+                {
+                    tracing::warn!(agent_id = %self.agent.id, %error, "mailbox consumption was not persisted");
+                }
                 if let Some(notification) = steer.notification {
                     crate::task::mark_agent_notification_delivered(
                         &self.state,
@@ -1334,7 +1304,11 @@ impl Session {
                     let sub = self.subagent.as_mut().expect("child session");
                     if paused {
                         if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
-                            let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                            let usage = (
+                                self.run_state.input,
+                                self.run_state.cache_read,
+                                self.run_state.output,
+                            );
                             return subagent_pause_limit(usage, steps_run);
                         }
                         pause_continuations += 1;
@@ -1353,7 +1327,11 @@ impl Session {
                 crate::session::engine::StepOutcome::Paused => {
                     let sub = self.subagent.as_mut().expect("child session");
                     if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
-                        let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                        let usage = (
+                            self.run_state.input,
+                            self.run_state.cache_read,
+                            self.run_state.output,
+                        );
                         return subagent_pause_limit(usage, steps_run);
                     }
                     pause_continuations += 1;
@@ -1361,7 +1339,11 @@ impl Session {
                     sub.pause_pin = Some(self.agent.history.len().saturating_sub(1));
                 }
                 crate::session::engine::StepOutcome::Cancelled => {
-                    let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                    let usage = (
+                        self.run_state.input,
+                        self.run_state.cache_read,
+                        self.run_state.output,
+                    );
                     return SubagentResult::child(
                         crate::session::AgentRunStatus::Cancelled,
                         "cancelled".to_string(),
@@ -1371,7 +1353,11 @@ impl Session {
                     );
                 }
                 crate::session::engine::StepOutcome::Failed => {
-                    let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+                    let usage = (
+                        self.run_state.input,
+                        self.run_state.cache_read,
+                        self.run_state.output,
+                    );
                     if let Some(error) = self
                         .subagent
                         .as_ref()
@@ -1413,7 +1399,11 @@ impl Session {
                 }
             }
         }
-        let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
+        let usage = (
+            self.run_state.input,
+            self.run_state.cache_read,
+            self.run_state.output,
+        );
         if completed {
             if last_text.is_empty() {
                 SubagentResult::child(
@@ -1473,7 +1463,7 @@ struct ChildBatchContext {
     config: ResolvedModel,
     permissions: pig_protocol::PermissionSettings,
     state: crate::task::SessionToolState,
-    pending: PendingApprovals,
+    reviewer: Arc<dyn ApprovalReviewer>,
     permission_rules: Arc<Mutex<crate::permissions::PermissionRules>>,
     always_allowed: Arc<Mutex<HashSet<(String, String)>>>,
     store: Arc<Mutex<crate::store::Store>>,
@@ -1538,7 +1528,7 @@ async fn execute_child_batch_tool(
         tracker: &mut tracker,
         state: &context.state,
         owns_todo_state: false,
-        pending: &context.pending,
+        reviewer: context.reviewer.as_ref(),
         permission_rules: &context.permission_rules,
         always_allowed: &context.always_allowed,
         session_id: &context.session_id,

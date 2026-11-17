@@ -2,7 +2,7 @@ use super::*;
 
 /// Context for gated execution (the argument bundle of exec_tool_gated_ctx):
 /// a root or child Session assembles it from its own fields. Policy state that
-/// must be shared across agents (pending approvals, permission rules, the
+/// must be shared across agents (approval reviewer, permission rules, the
 /// always-allowed set) is Arc-backed in the Session.
 pub(crate) struct GateCtx<'a> {
     pub cwd: &'a Path,
@@ -21,7 +21,7 @@ pub(crate) struct GateCtx<'a> {
     /// TodoListChanged events. Child gates point `state` at a child-local
     /// clone (its own TodoHandle) and set this false.
     pub owns_todo_state: bool,
-    pub pending: &'a PendingApprovals,
+    pub reviewer: &'a dyn super::ApprovalReviewer,
     /// User/project allow+deny rules (Codex's execpolicy analogue), separate
     /// from the permission state above. Shared through the session so a rule
     /// learned by one agent governs the root and every other child.

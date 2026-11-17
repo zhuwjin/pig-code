@@ -597,13 +597,16 @@ impl Manager {
                 "an agent steering message must be non-empty and within 64 KiB",
             ));
         }
-        let mut steers = entry.state.agent_steers.lock().expect("agent steer lock");
-        match steers.get_mut(&agent_id) {
-            Some(queue) => {
-                queue.push_back(crate::task::AgentSteer::message(message));
-                Ok(serde_json::Value::Null)
+        match entry
+            .state
+            .agents
+            .push_steer(&agent_id, crate::agent::AgentSteer::message(message))
+        {
+            Ok(()) => Ok(serde_json::Value::Null),
+            Err(error) if entry.state.agents.is_active(&agent_id) => {
+                Err(CoreError::TaskStore { detail: error })
             }
-            None => Err(CoreError::PluginPermission {
+            Err(_) => Err(CoreError::PluginPermission {
                 detail: format!("no running subagent `{agent_id}` in this session"),
             }),
         }
