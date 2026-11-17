@@ -9,6 +9,11 @@ use crate::agent::AgentWriterGuard;
 use super::state::agent_card_model;
 use super::turn::{agent_result_path, unexpected_subagent_result};
 
+#[cfg(not(test))]
+const LOCAL_RUN_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const LOCAL_RUN_STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub(super) struct ManagedOutcome {
     pub(super) result: SubagentResult,
     pub(super) queued: bool,
@@ -205,9 +210,14 @@ impl AgentRunSupervisor {
         self.settle_registry(result);
         self.note_output(result);
         if let Some(run_id) = self.run_id.as_deref() {
-            self.state
-                .agents
-                .settle_run(&self.agent_id, run_id, result.status);
+            self.state.agents.settle_run_with_outcome(
+                &self.agent_id,
+                run_id,
+                result.status,
+                Some(result.stop_reason.clone()),
+                result.usage,
+                result.turns,
+            );
         }
         crate::task::release_agent_mailbox(&self.state, &self.agent_id);
         self.emit_finished();
@@ -246,19 +256,27 @@ impl AgentRunSupervisor {
 
     async fn drive_inner<F>(
         mut self,
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
         acquire: impl Future<Output = Option<crate::agent::AgentRunPermit>>,
         run: F,
     ) -> ManagedOutcome
     where
         F: Future<Output = SubagentResult>,
     {
-        let queued = self.task_id.is_some() && crate::agent::scheduler().available() == 0;
+        if let Some(run_id) = &self.run_id
+            && let Err(error) = self
+                .state
+                .agents
+                .register_run_cancel(run_id.clone(), cancel.clone())
+        {
+            tracing::warn!(%run_id, %error, "failed to register child run cancellation");
+        }
+        let queued = self.task_id.is_some() && self.state.scheduler.available() == 0;
         if queued && let Some(task_id) = &self.task_id {
             crate::task::note_output(
                 &self.state.tasks,
                 task_id,
-                "Queued: the global subagent concurrency limit is reached; waiting for a free slot…\n",
+                "Queued: the session-tree subagent concurrency limit is reached; waiting for a free slot…\n",
             );
         }
         let Some(_slot) = acquire.await else {
@@ -269,9 +287,19 @@ impl AgentRunSupervisor {
         if let Some(task_id) = &self.task_id {
             crate::task::mark_agent_task_started(&self.state, task_id);
         }
-        let result = match std::panic::AssertUnwindSafe(run).catch_unwind().await {
-            Ok(result) => result,
-            Err(payload) => panic_subagent_result(payload),
+        let execution = std::panic::AssertUnwindSafe(run).catch_unwind();
+        tokio::pin!(execution);
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tokio::time::timeout(LOCAL_RUN_STOP_GRACE, &mut execution).await.ok()
+            }
+            result = &mut execution => Some(result),
+        };
+        let result = match outcome {
+            Some(Ok(result)) => result,
+            Some(Err(payload)) => panic_subagent_result(payload),
+            None => forced_stop_subagent_result(),
         };
         let result = self.identify_result(result);
         self.settle(&result);
@@ -289,14 +317,29 @@ impl Drop for AgentRunSupervisor {
         let result = unexpected_subagent_result();
         self.settle_registry(&result);
         if let Some(run_id) = self.run_id.as_deref() {
-            self.state
-                .agents
-                .settle_run(&self.agent_id, run_id, result.status);
+            self.state.agents.settle_run_with_outcome(
+                &self.agent_id,
+                run_id,
+                result.status,
+                Some(result.stop_reason.clone()),
+                result.usage,
+                result.turns,
+            );
         }
         crate::task::release_agent_mailbox(&self.state, &self.agent_id);
         self.emit_finished();
         self.task_changed();
     }
+}
+
+fn forced_stop_subagent_result() -> SubagentResult {
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Cancelled,
+        "cancellation grace period elapsed; local execution was dropped".to_string(),
+        String::new(),
+        0,
+        (0, 0, 0),
+    )
 }
 
 pub(super) fn cancelled_subagent_result() -> SubagentResult {

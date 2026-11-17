@@ -1,0 +1,34 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install NSH
+        run: cargo install nsh-cli --version 0.5.1 --locked
+      - name: Install Linux test fonts
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fonts-dejavu-core
+      - name: Check all Rust targets
+        run: cargo check --all-targets
+      - name: Run Rust tests
+        run: cargo test --workspace
+      - name: Check NSH app
+        run: nsh check
+      - name: Run NSH tests
+        run: nsh test

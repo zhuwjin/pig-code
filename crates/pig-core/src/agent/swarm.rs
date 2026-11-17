@@ -4,7 +4,7 @@
 //! aggregated result and background receipt formatting. Argument expansion/
 //! validation lives in tool::parse_swarm_args (a pure function at the schema
 //! layer); concurrent driving goes through the session layer's one managed
-//! child driver; the global concurrency slots live in agent::scheduler.
+//! child driver; the session-tree concurrency slots live in agent::scheduler.
 
 use super::*;
 
@@ -42,7 +42,7 @@ pub struct SwarmChildResult {
     pub result_path: Option<PathBuf>,
     /// Result text (already truncated to 32K by the driver; aggregation adds the SWARM_CHILD_PREVIEW cap)
     pub result_text: String,
-    /// Whether it waited in the global concurrency-slot queue (for the queue note in the aggregation header)
+    /// Whether it waited in the session-tree concurrency-slot queue (for the queue note in the aggregation header)
     pub queued: bool,
     /// Token usage (input, cache_read, output): foreground swarms accumulate into the parent turn's stats
     pub usage: (u64, u64, u64),
@@ -66,7 +66,7 @@ pub fn format_swarm_result(children: &[SwarmChildResult]) -> String {
     let queued = children.iter().filter(|c| c.queued).count();
     let queue_note = if queued > 0 {
         format!(
-            "; global concurrency limit {}, {queued} waited in queue for a free slot",
+            "; session-tree concurrency limit {}, {queued} waited in queue for a free slot",
             crate::agent::MAX_CONCURRENT_AGENT_RUNS
         )
     } else {
@@ -195,7 +195,7 @@ pub fn format_swarm_receipt(children: &[SwarmReceiptChild]) -> String {
     let mut notes = String::new();
     if queued > 0 {
         notes.push_str(&format!(
-            "; global concurrency limit {}, {queued} will queue for a free slot first",
+            "; session-tree concurrency limit {}, {queued} will queue for a free slot first",
             crate::agent::MAX_CONCURRENT_AGENT_RUNS
         ));
     }
@@ -451,7 +451,7 @@ mod tests {
         };
         assert!(
             !prep.tools.iter().any(|tool| tool.name() == "Agent"),
-            "a read-only profile cannot acquire delegation through the global depth setting"
+            "a read-only profile cannot acquire delegation through the session-tree depth setting"
         );
     }
 

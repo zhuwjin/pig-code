@@ -2,12 +2,14 @@ use std::collections::BTreeSet;
 
 use futures_util::future::BoxFuture;
 use pig_protocol::Event;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::session::{AgentRunResult, Session};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum AgentExecutionCapability {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionCapability {
     Background,
     Steer,
     Resume,
@@ -20,35 +22,36 @@ pub(crate) enum AgentExecutionCapability {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AgentRunIdentity {
-    pub(crate) session_id: String,
-    pub(crate) agent_id: String,
-    pub(crate) run_id: String,
+pub struct AgentRunIdentity {
+    pub session_id: String,
+    pub agent_id: String,
+    pub run_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AgentEventCursor {
-    pub(crate) run: AgentRunIdentity,
-    pub(crate) sequence: u64,
+pub struct AgentEventCursor {
+    pub run: AgentRunIdentity,
+    pub sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgentExecutionActivation {
+pub enum AgentExecutionActivation {
     Start,
     Resume,
     Reconnect,
 }
 
-pub(crate) struct AgentExecutionRequest {
-    pub(crate) identity: AgentRunIdentity,
-    pub(crate) events: async_channel::Sender<Event>,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) activation: AgentExecutionActivation,
-    pub(crate) cursor: Option<AgentEventCursor>,
+pub struct AgentExecutionRequest {
+    pub identity: AgentRunIdentity,
+    pub events: async_channel::Sender<Event>,
+    pub cancel: CancellationToken,
+    pub activation: AgentExecutionActivation,
+    pub cursor: Option<AgentEventCursor>,
+    pub required_capabilities: BTreeSet<AgentExecutionCapability>,
 }
 
 impl AgentExecutionRequest {
-    pub(crate) fn new(
+    pub fn new(
         identity: AgentRunIdentity,
         events: async_channel::Sender<Event>,
         cancel: CancellationToken,
@@ -60,6 +63,7 @@ impl AgentExecutionRequest {
             cancel,
             activation,
             cursor: None,
+            required_capabilities: BTreeSet::new(),
         }
     }
 }
@@ -68,7 +72,7 @@ impl AgentExecutionRequest {
 /// connection). The request carries only identity, activation, control and
 /// output; a dropped future and its cancellation token share the same stop
 /// boundary.
-pub(crate) trait AgentExecutionBackend: Send {
+pub trait AgentExecutionBackend: Send {
     fn capabilities(&self) -> BTreeSet<AgentExecutionCapability>;
     fn supports(&self, capability: AgentExecutionCapability) -> bool {
         self.capabilities().contains(&capability)
@@ -76,7 +80,27 @@ pub(crate) trait AgentExecutionBackend: Send {
     fn execute(
         self: Box<Self>,
         request: AgentExecutionRequest,
-    ) -> BoxFuture<'static, AgentRunResult>;
+    ) -> BoxFuture<'static, Result<super::AgentBackendResult, super::AgentBackendError>>;
+}
+
+pub(crate) struct LocalAgentBackendFactory;
+
+impl super::AgentBackendFactory for LocalAgentBackendFactory {
+    type Context = Session;
+
+    fn capabilities(&self) -> BTreeSet<AgentExecutionCapability> {
+        LocalAgentExecutionBackend::capabilities()
+    }
+
+    fn create(
+        &self,
+        context: Self::Context,
+    ) -> BoxFuture<'static, Result<Box<dyn AgentExecutionBackend>, super::AgentBackendError>> {
+        Box::pin(async move {
+            Ok(Box::new(LocalAgentExecutionBackend::new(context))
+                as Box<dyn AgentExecutionBackend>)
+        })
+    }
 }
 
 pub(crate) struct LocalAgentExecutionBackend {
@@ -131,7 +155,7 @@ impl AgentExecutionBackend for LocalAgentExecutionBackend {
     fn execute(
         self: Box<Self>,
         request: AgentExecutionRequest,
-    ) -> BoxFuture<'static, AgentRunResult> {
+    ) -> BoxFuture<'static, Result<super::AgentBackendResult, super::AgentBackendError>> {
         let identity = self.identity();
         if request.identity != identity
             || request
@@ -140,42 +164,64 @@ impl AgentExecutionBackend for LocalAgentExecutionBackend {
                 .is_some_and(|cursor| cursor.run != identity)
         {
             return Box::pin(async move {
-                execution_failure(
-                    identity,
-                    "execution identity mismatch",
-                    "The execution request does not match the selected Agent run",
-                )
+                Err(super::AgentBackendError::Failed(format!(
+                    "execution identity mismatch for {}:{}",
+                    identity.agent_id, identity.run_id
+                )))
             });
         }
         if (request.activation == AgentExecutionActivation::Reconnect || request.cursor.is_some())
             && !self.supports(AgentExecutionCapability::Reconnect)
         {
             return Box::pin(async move {
-                execution_failure(
-                    identity,
-                    "local execution cannot reconnect an event cursor",
-                    "Local execution does not support reconnecting an external event cursor",
-                )
+                Err(super::AgentBackendError::UnsupportedCapability {
+                    backend_id: "local".to_string(),
+                    capability: AgentExecutionCapability::Reconnect,
+                })
             });
         }
         Box::pin(async move {
             let mut session = self.session;
-            session
-                .run_subagent_task(&request.events, &request.cancel)
-                .await
+            Ok(super::AgentBackendResult::from_run(
+                session
+                    .run_subagent_task(&request.events, &request.cancel)
+                    .await,
+            ))
         })
     }
 }
 
 pub(crate) fn execute_local(
+    backends: std::sync::Arc<super::AgentBackendRegistry>,
     session: Session,
     events: async_channel::Sender<Event>,
     cancel: CancellationToken,
     activation: AgentExecutionActivation,
 ) -> BoxFuture<'static, AgentRunResult> {
-    let backend = LocalAgentExecutionBackend::new(session);
-    let request = AgentExecutionRequest::new(backend.identity(), events, cancel, activation);
-    Box::new(backend).execute(request)
+    let identity = AgentRunIdentity {
+        session_id: session.event_session_id().to_string(),
+        agent_id: session.agent.id.clone(),
+        run_id: session.agent.run_id().expect("child run identity"),
+    };
+    let request = AgentExecutionRequest::new(identity.clone(), events, cancel, activation);
+    Box::pin(async move {
+        match backends.execute_reserved("local", session, request).await {
+            Ok(result) => result.into_run(&identity),
+            Err(super::AgentBackendError::Cancelled) => AgentRunResult::child(
+                pig_protocol::AgentRunStatus::Cancelled,
+                "cancelled".to_string(),
+                String::new(),
+                0,
+                (0, 0, 0),
+            )
+            .with_identity(&identity.agent_id, identity.run_id),
+            Err(error) => execution_failure(
+                identity,
+                "local backend execution failed",
+                &error.to_string(),
+            ),
+        }
+    })
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! A foreground Agent call, a background Agent, and each AgentSwarm item all
 //! resolve the same trust decision, profile, model, narrowed tool set, MCP
 //! inheritance, media projection and JSONL context here. The managed
-//! lifecycle (writer claim, global slot, registry settlement, panic cleanup)
+//! lifecycle (writer claim, session-tree slot, registry settlement, panic cleanup)
 //! stays in `session::subagent`; this module never starts a driver.
 
 use std::path::{Path, PathBuf};

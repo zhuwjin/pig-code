@@ -48,14 +48,44 @@ pub(super) fn persist_agent_tool(jsonl: &Path, call: &pig_provider::ToolCall, ms
     }
 }
 
-/// Persist one child message with sticky failure semantics: the first append
-/// failure is remembered and every later append fails fast, so the driver
-/// never advances live history the JSONL cannot reproduce.
+#[cfg(test)]
 pub(super) fn persist_child_message(
     session: &mut Session,
     msg: &mut ChatMsg,
 ) -> Result<(), String> {
     persist_child_message_meta(session, msg, crate::agent::AgentMsgMeta::default())
+}
+
+pub(super) fn persist_child_mailbox_message(
+    session: &mut Session,
+    steer: &crate::agent::AgentSteer,
+    msg: &ChatMsg,
+) -> Result<(), String> {
+    let (jsonl, previous) = {
+        let sub = session.subagent.as_ref().expect("child session");
+        (sub.jsonl.clone(), sub.persist_failure.clone())
+    };
+    if let Some(error) = previous {
+        return Err(error);
+    }
+    let notification_id = steer
+        .notification
+        .as_ref()
+        .map(|notification| notification.id.clone());
+    if let Err(error) = crate::agent::append_agent_mailbox_message(
+        &jsonl,
+        steer.id.clone(),
+        notification_id,
+        msg.content.clone().unwrap_or_default(),
+    ) {
+        session
+            .subagent
+            .as_mut()
+            .expect("child session")
+            .persist_failure = Some(error.clone());
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Persist a child message with display metadata and assistant execution ids.

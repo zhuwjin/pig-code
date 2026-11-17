@@ -72,24 +72,34 @@ impl AgentSource {
     }
 }
 
+mod backend;
 mod child;
 mod execution;
+mod execution_registry;
+pub mod ipc;
 mod mailbox;
 mod parse;
 mod profiles;
 mod records;
-mod registry;
+pub mod runtime;
 mod scheduler;
 mod store;
 mod swarm;
 
+pub use backend::{
+    AgentBackendError, AgentBackendFactory, AgentBackendRegistry, AgentBackendResult,
+};
 pub(crate) use child::*;
-pub(crate) use execution::*;
+pub use execution::{
+    AgentEventCursor, AgentExecutionActivation, AgentExecutionBackend, AgentExecutionCapability,
+    AgentExecutionRequest, AgentRunIdentity,
+};
+pub(crate) use execution::{LocalAgentExecutionBackend, execute_local};
+pub(crate) use execution_registry::*;
 pub(crate) use mailbox::*;
 pub(crate) use parse::*;
 pub(crate) use profiles::*;
 pub(crate) use records::*;
-pub(crate) use registry::*;
 pub(crate) use scheduler::*;
 pub use store::set_model_override;
 pub(crate) use store::*;

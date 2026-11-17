@@ -33,7 +33,7 @@ impl Session {
     /// Agent tool entry: argument gating → the shared child preparation
     /// builder (profile/model/tool/MCP/media/JSONL, identical to every swarm
     /// item) → a child `Session` driven by the shared engine under the managed
-    /// lifecycle (global slot, exclusive context writer, panic/cancel
+    /// lifecycle (session-tree slot, exclusive context writer, panic/cancel
     /// settlement). Foreground, background, resume, swarm and plugin
     /// delegation all take this path.
     pub(crate) fn run_subagent<'a>(
@@ -272,9 +272,9 @@ impl Session {
             };
             let child = Session::new_subagent(prep, self, progress, SubagentMode::Background);
             let card_record = self.emit_child_card(&child, parent_item_id, tx, true);
-            let queue_hint = if crate::agent::scheduler().available() == 0 {
+            let queue_hint = if self.state.scheduler.available() == 0 {
                 format!(
-                    "\nThe global subagent concurrency limit ({}) is reached; this task is queued \
+                    "\nThe session-tree subagent concurrency limit ({}) is reached; this task is queued \
                      for a free slot and will notify as usual when done.",
                     crate::agent::MAX_CONCURRENT_AGENT_RUNS
                 )
@@ -294,7 +294,7 @@ impl Session {
         }
 
         // ---- foreground: the same managed driver as every other child
-        // (global slot, panic/cancel settlement). The child tracker shares the
+        // (session-tree slot, panic/cancel settlement). The child tracker shares the
         // session originals and this turn's summary, so its writes contribute
         // to the parent's TurnChanges exactly once. ----
         let child_cancel = cancel.child_token();
@@ -337,13 +337,12 @@ impl Session {
             Some(task_id),
         );
         let run_cancel = child_cancel.clone();
-        let child_task = crate::agent::execute_local(child, tx.clone(), run_cancel, activation);
+        let scheduler = child.state.scheduler.clone();
+        let backends = child.state.backends.clone();
+        let child_task =
+            crate::agent::execute_local(backends, child, tx.clone(), run_cancel, activation);
         let managed = life
-            .drive(
-                &child_cancel,
-                crate::agent::scheduler().acquire(&child_cancel),
-                child_task,
-            )
+            .drive(&child_cancel, scheduler.acquire(&child_cancel), child_task)
             .await;
         let result = managed.result;
         if result.is_cancelled() {

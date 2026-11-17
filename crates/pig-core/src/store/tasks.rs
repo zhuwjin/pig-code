@@ -29,7 +29,7 @@ fn json<T: serde::Serialize>(value: &T) -> Result<String, CoreError> {
     serde_json::to_string(value).map_err(task_error)
 }
 
-fn schedule_notification_on(
+pub(super) fn schedule_notification_on(
     conn: &rusqlite::Connection,
     session_id: &str,
     notification: &TaskNotification,
@@ -52,7 +52,7 @@ fn schedule_notification_on(
     Ok(())
 }
 
-fn write_background_task(
+pub(super) fn write_background_task(
     conn: &rusqlite::Connection,
     session_id: &str,
     task: &BackgroundTask,
@@ -240,6 +240,17 @@ impl Store {
         notification: &TaskNotification,
     ) -> Result<(), CoreError> {
         schedule_notification_on(&self.conn, session_id, notification)
+    }
+
+    pub fn task_notification_exists(&self, notification_id: &str) -> Result<bool, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_notifications WHERE notification_id = ?1)",
+                params![notification_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .map_err(task_error)
     }
 
     pub fn pending_notifications(

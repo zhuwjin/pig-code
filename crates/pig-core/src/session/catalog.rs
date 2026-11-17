@@ -1,6 +1,67 @@
 use super::*;
 
+fn runtime_task_catalog(state: &crate::task::SessionToolState) -> Option<Vec<AgentCatalogEntry>> {
+    let snapshot = state.agents.runtime_snapshot()?;
+    let agents: std::collections::HashMap<String, crate::agent::runtime::RuntimeAgent> = snapshot
+        .agents
+        .into_iter()
+        .map(|agent| (agent.agent_id.clone(), agent))
+        .collect();
+    let tasks = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut entries = Vec::new();
+    for run in snapshot.runs {
+        if run.agent_id == state.session_id {
+            continue;
+        }
+        let Some(agent) = agents.get(&run.agent_id) else {
+            continue;
+        };
+        let task = tasks.iter().find(|task| {
+            task.run
+                .as_ref()
+                .is_some_and(|meta| meta.run_id == run.run_id)
+        });
+        let status = match run.status {
+            crate::agent::runtime::RuntimeRunStatus::Queued => pig_protocol::AgentRunStatus::Queued,
+            crate::agent::runtime::RuntimeRunStatus::Running
+            | crate::agent::runtime::RuntimeRunStatus::Stopping => {
+                pig_protocol::AgentRunStatus::Running
+            }
+            crate::agent::runtime::RuntimeRunStatus::Completed => {
+                pig_protocol::AgentRunStatus::Completed
+            }
+            crate::agent::runtime::RuntimeRunStatus::Cancelled => {
+                pig_protocol::AgentRunStatus::Cancelled
+            }
+            crate::agent::runtime::RuntimeRunStatus::Failed => pig_protocol::AgentRunStatus::Failed,
+            crate::agent::runtime::RuntimeRunStatus::Lost => pig_protocol::AgentRunStatus::Lost,
+        };
+        entries.push(AgentCatalogEntry {
+            agent_id: run.agent_id.clone(),
+            run_id: Some(run.run_id.clone()),
+            turn_kind: Some(pig_protocol::TurnKind::Regular),
+            parent_id: agent.parent_agent_id.clone(),
+            depth: agent.depth,
+            profile: agent.profile.clone(),
+            model: task.and_then(|task| task.model.clone()).unwrap_or_default(),
+            status: Some(status),
+            turns: run.turns,
+            usage: run.usage,
+            record_path: agent.conversation_path.clone(),
+            result_path: task.and_then(|task| task.result_path.clone()),
+        });
+    }
+    entries.sort_by_key(|entry| (entry.agent_id.clone(), entry.run_id.clone()));
+    Some(entries)
+}
+
 pub(crate) fn task_catalog(state: &crate::task::SessionToolState) -> Vec<AgentCatalogEntry> {
+    if let Some(entries) = runtime_task_catalog(state) {
+        return entries;
+    }
     let nodes: std::collections::HashMap<String, crate::agent::AgentNode> = state
         .agents
         .snapshot()
@@ -103,6 +164,7 @@ impl Session {
         let Ok(entries) = std::fs::read_dir(agents_dir) else {
             return;
         };
+        let mut recovered = Vec::new();
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
@@ -128,18 +190,38 @@ impl Session {
                     continue;
                 }
             };
-            if meta.parent_session_id != self.agent.id {
-                continue;
+            if meta.parent_session_id == self.agent.id {
+                recovered.push((path, agent_id, meta));
             }
-            let mut tasks = self
+        }
+        recovered.sort_by(|(_, left_id, left), (_, right_id, right)| {
+            (left.delegation_depth, left_id).cmp(&(right.delegation_depth, right_id))
+        });
+        for (path, agent_id, meta) in recovered {
+            if self
                 .state
                 .tasks
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if tasks
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .iter()
                 .any(|task| task.agent_id.as_deref() == Some(agent_id.as_str()))
             {
+                continue;
+            }
+            if let Err(error) = self.state.agents.recover_lost_child(
+                crate::agent::runtime::RuntimeAgent {
+                    session_id: self.agent.id.clone(),
+                    agent_id: agent_id.clone(),
+                    parent_agent_id: Some(meta.parent_agent_id.clone()),
+                    depth: meta.delegation_depth,
+                    profile: meta.profile.clone(),
+                    conversation_path: Some(path.clone()),
+                    created_at_ms: meta.created_at.saturating_mul(1_000),
+                    closed_at_ms: None,
+                },
+                meta.run_id.clone(),
+            ) {
+                tracing::warn!(%agent_id, %error, "cannot recover child runtime entry");
                 continue;
             }
             let task_id = format!(
@@ -162,23 +244,26 @@ impl Session {
                     meta.delegation_depth,
                 )),
             ));
-            tasks.push(crate::task::TaskEntry::recovered_agent(
-                task_id.clone(),
-                format!("Subagent {}: {}", meta.profile, meta.description),
-                crate::task::AgentRunMetadata {
-                    agent_id: agent_id.clone(),
-                    run_id: meta.run_id.clone(),
-                    parent_agent_id: Some(meta.parent_agent_id.clone()),
-                    delegation_depth: meta.delegation_depth,
-                    profile: meta.profile,
-                    usage: (0, 0, 0),
-                },
-                path,
-                result_path.is_file().then_some(result_path),
-                meta.model,
-                meta.created_at,
-            ));
-            drop(tasks);
+            self.state
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(crate::task::TaskEntry::recovered_agent(
+                    task_id.clone(),
+                    format!("Subagent {}: {}", meta.profile, meta.description),
+                    crate::task::AgentRunMetadata {
+                        agent_id: agent_id.clone(),
+                        run_id: meta.run_id.clone(),
+                        parent_agent_id: Some(meta.parent_agent_id.clone()),
+                        delegation_depth: meta.delegation_depth,
+                        profile: meta.profile,
+                        usage: (0, 0, 0),
+                    },
+                    path,
+                    result_path.is_file().then_some(result_path),
+                    meta.model,
+                    meta.created_at,
+                ));
             self.state.notify_terminal(&task_id);
         }
     }

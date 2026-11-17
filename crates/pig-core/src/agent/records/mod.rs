@@ -25,7 +25,11 @@ pub(crate) use jsonl::append_agent_record;
 pub(crate) use jsonl::sync_agent_context;
 pub(crate) use media::fill_document_token_estimates;
 pub(crate) use media::project_history_media;
-pub use media::{append_agent_message, append_agent_message_meta, append_agent_tool_result};
+pub use media::{
+    append_agent_mailbox_message, append_agent_message, append_agent_message_meta,
+    append_agent_tool_result,
+};
+pub(crate) use store::agent_mailbox_deliveries;
 pub(crate) use store::read_agent_stored;
 pub(crate) use store::reconcile_tool_results;
 pub(crate) use store::recover_agent_context;

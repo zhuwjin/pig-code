@@ -56,7 +56,10 @@ mod title;
 mod turn;
 mod usage;
 
-pub(crate) use reviewer::{ApprovalReply, ApprovalRequest, ApprovalReviewer, UserApprovalReviewer};
+pub(crate) use reviewer::{
+    ApprovalReply, ApprovalRequest, ApprovalReviewer, FallbackApprovalReviewer,
+    PolicyApprovalReviewer, UserApprovalReviewer,
+};
 use run_state::SessionRunState;
 
 pub use approval::approval_detail;

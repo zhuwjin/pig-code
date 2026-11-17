@@ -427,9 +427,32 @@ pub fn stop_task(
     notify: &UnboundedSender<TaskChange>,
     session_id: &str,
 ) -> Result<String, String> {
+    stop_task_with_agents(registry, task_id, notify, session_id, None)
+}
+
+pub(crate) fn stop_task_with_agents(
+    registry: &TaskRegistry,
+    task_id: &str,
+    notify: &UnboundedSender<TaskChange>,
+    session_id: &str,
+    agents: Option<&crate::agent::AgentExecutionRegistry>,
+) -> Result<String, String> {
+    let run_id = {
+        let tasks = registry.lock().expect("task registry lock");
+        let Some(entry) = tasks.iter().find(|task| task.id == task_id) else {
+            return Err(format!("Task not found: {task_id}"));
+        };
+        if !matches!(entry.status, TaskStatus::Running | TaskStatus::Queued) {
+            return Err(format!("Task already finished: {task_id}"));
+        }
+        entry.run.as_ref().map(|run| run.run_id.clone())
+    };
+    if let (Some(agents), Some(run_id)) = (agents, run_id) {
+        agents.request_run_stop(&run_id, "Stopped by user")?;
+    }
     let (pid, cancel, change) = {
         let mut tasks = registry.lock().expect("task registry lock");
-        let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
+        let Some(entry) = tasks.iter_mut().find(|task| task.id == task_id) else {
             return Err(format!("Task not found: {task_id}"));
         };
         if !matches!(entry.status, TaskStatus::Running | TaskStatus::Queued) {

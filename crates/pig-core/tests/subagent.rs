@@ -510,6 +510,46 @@ async fn subagent_happy_path() {
         assert_eq!(row.5, 0, "this mock child does not report usage");
         assert_eq!(row.6.as_deref(), Some(mock::MOCK_REQUEST_ID));
     }
+    let runtime_rows: Vec<(String, String, String, String)> = db
+        .prepare(
+            "SELECT runtime_runs.agent_id, runtime_runs.status, runtime_agents.profile,
+                    runtime_agents.conversation_path
+             FROM runtime_runs
+             JOIN runtime_agents USING (session_id, agent_id)
+             WHERE runtime_runs.session_id = ?1
+             ORDER BY runtime_runs.started_at_ms, runtime_runs.run_id",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![sid], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(
+        runtime_rows.len(),
+        2,
+        "root and child both use AgentRuntime"
+    );
+    assert!(runtime_rows.iter().all(|row| row.1 == "completed"));
+    let child = runtime_rows
+        .iter()
+        .find(|row| row.0 == agent_id)
+        .expect("child runtime run");
+    assert_eq!(child.2, "explore");
+    assert_eq!(
+        std::fs::canonicalize(&child.3).unwrap(),
+        std::fs::canonicalize(&log_path).unwrap()
+    );
+    let root = runtime_rows
+        .iter()
+        .find(|row| row.0 == sid)
+        .expect("root runtime run");
+    assert_eq!(root.2, "main");
+    assert_eq!(
+        std::fs::canonicalize(&root.3).unwrap(),
+        std::fs::canonicalize(data_dir.join("sessions").join(format!("{sid}.jsonl")),).unwrap()
+    );
     agent.shutdown();
 }
 
@@ -2458,7 +2498,7 @@ async fn nested_subagent_executes_and_restores_direct_lineage() {
         .expect("child catalog entry");
     assert_eq!(child.parent_id.as_deref(), Some(sid.as_str()));
     assert_eq!(child.run_id.as_deref(), Some(child_run_id.as_str()));
-    assert_eq!(child.status, Some(pig_protocol::AgentRunStatus::Lost));
+    assert_eq!(child.status, Some(pig_protocol::AgentRunStatus::Completed));
     let grandchild = entries
         .iter()
         .find(|entry| entry.agent_id == grandchild_id)
@@ -2468,7 +2508,10 @@ async fn nested_subagent_executes_and_restores_direct_lineage() {
         grandchild.run_id.as_deref(),
         Some(grandchild_run_id.as_str())
     );
-    assert_eq!(grandchild.status, Some(pig_protocol::AgentRunStatus::Lost));
+    assert_eq!(
+        grandchild.status,
+        Some(pig_protocol::AgentRunStatus::Completed)
+    );
     agent.shutdown();
 }
 

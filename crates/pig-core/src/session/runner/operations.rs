@@ -100,6 +100,7 @@ impl Manager {
             session_runtime.clone(),
         ) {
             Ok(mut session) => {
+                session.state.agents.attach_event_journal(event_tx.clone());
                 session.set_permissions(meta.permissions);
                 session.set_plan_mode(meta.plan_enabled);
                 // Untrusted project surfaces: banner once per session
@@ -247,7 +248,7 @@ impl Manager {
                 // Switching back to an already-open session: re-emit panel snapshots so the UI resets its panels
                 if let Some(entry) = sessions.get(&session_id) {
                     let items = entry.state.todos.lock().expect("todos lock").clone();
-                    let tasks = crate::task::snapshot(&entry.state.tasks);
+                    let tasks = entry.state.task_snapshot();
                     emit(
                         &event_tx,
                         Event::TodoListChanged {
@@ -342,6 +343,7 @@ impl Manager {
             session_runtime.clone(),
         ) {
             Ok((mut session, records)) => {
+                session.state.agents.attach_event_journal(event_tx.clone());
                 // Restore persisted mode/model overrides (meta stays current via Set* write-through)
                 let meta = store.lock().expect("store lock").get_session(&session_id);
                 let selection = meta.as_ref().and_then(meta_to_selection);
@@ -429,7 +431,7 @@ impl Manager {
                         session_id: session_id.clone(),
                         tasks: sessions
                             .get(&session_id)
-                            .map(|entry| crate::task::snapshot(&entry.state.tasks))
+                            .map(|entry| entry.state.task_snapshot())
                             .unwrap_or_default(),
                     },
                 );
@@ -687,6 +689,7 @@ impl Manager {
         super::reject_session_approvals(&pending, &session_id);
         super::drop_session_questions(&pending_questions, &session_id);
         self.deleted_sessions.insert(session_id.clone());
+        let pending_already = self.pending_deletions.contains_key(&session_id);
         self.pending_deletions
             .entry(session_id.clone())
             .or_insert(super::PendingDeletion {
@@ -695,12 +698,30 @@ impl Manager {
             });
         if let Some(registry) = registry {
             let deletion_tx = self.deletion_tx.clone();
+            let deletion_events = event_tx.clone();
             let id = session_id.clone();
             tokio::spawn(async move {
+                if tokio::time::timeout(super::SESSION_DELETE_GRACE, registry.wait_for_idle())
+                    .await
+                    .is_err()
+                {
+                    super::emit(
+                        &deletion_events,
+                        Event::Error {
+                            session_id: Some(id.clone()),
+                            error: CoreError::TaskStore {
+                                detail: "Timed out waiting for Agent executions to stop; deletion remains pending and no data was removed".to_string(),
+                            },
+                            fatal: false,
+                        },
+                    );
+                }
                 registry.wait_for_idle().await;
                 let _ = deletion_tx.send(id);
             });
-        } else if let Some(deletion) = self.pending_deletions.get_mut(&session_id) {
+        } else if !pending_already
+            && let Some(deletion) = self.pending_deletions.get_mut(&session_id)
+        {
             deletion.executions_idle = true;
         }
         self.finish_delete_if_idle(event_tx, session_id);
@@ -718,13 +739,34 @@ impl Manager {
         if !ready {
             return;
         }
-        self.pending_deletions.remove(&session_id);
-        {
-            let store = self.store.lock().expect("store lock");
-            store.delete_session(&session_id);
-            store.delete_pending(&session_id);
+        let store_result = self
+            .store
+            .lock()
+            .expect("store lock")
+            .delete_session_checked(&session_id);
+        if let Err(error) = store_result {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: false,
+                },
+            );
+            return;
         }
-        delete_session_artifacts(&self.sessions_dir, &session_id, true);
+        if let Err(detail) = delete_session_artifacts(&self.sessions_dir, &session_id, true) {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error: CoreError::TaskStore { detail },
+                    fatal: false,
+                },
+            );
+            return;
+        }
+        self.pending_deletions.remove(&session_id);
         emit(
             &event_tx,
             Event::SessionList {
@@ -738,20 +780,66 @@ pub(super) fn delete_session_artifacts(
     sessions_dir: &std::path::Path,
     session_id: &str,
     include_rollout: bool,
-) {
+) -> Result<(), String> {
     let mut components = std::path::Path::new(session_id).components();
     let plain_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none();
     if !plain_id {
-        return;
+        return Err(format!(
+            "Invalid session id for artifact cleanup: {session_id}"
+        ));
     }
-    let _ = std::fs::remove_dir_all(sessions_dir.join(session_id).join("tool-results"));
-    let _ = std::fs::remove_dir_all(pig_utils::paths::media_dir(sessions_dir, session_id));
-    let _ = std::fs::remove_dir_all(crate::agent::agents_dir(sessions_dir, session_id));
+    let mut directories = vec![
+        sessions_dir.join(session_id).join("tool-results"),
+        pig_utils::paths::media_dir(sessions_dir, session_id),
+        crate::agent::agents_dir(sessions_dir, session_id),
+    ];
     if let Some(data_dir) = sessions_dir.parent() {
-        let _ = std::fs::remove_dir_all(data_dir.join("worktrees").join(session_id));
+        directories.push(data_dir.join("worktrees").join(session_id));
+    }
+    let mut failures = Vec::new();
+    for path in directories {
+        if let Err(error) = std::fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            failures.push(format!("Failed to remove {}: {error}", path.display()));
+        }
     }
     if include_rollout {
-        let _ = std::fs::remove_file(sessions_dir.join(format!("{session_id}.jsonl")));
+        let path = sessions_dir.join(format!("{session_id}.jsonl"));
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            failures.push(format!("Failed to remove {}: {error}", path.display()));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_cleanup_reports_failures_and_can_be_retried() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-delete-artifacts-{}-{}",
+            std::process::id(),
+            crate::model_io::now_ms()
+        ));
+        let sessions = root.join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        let media = pig_utils::paths::media_dir(&sessions, "s1");
+        std::fs::write(&media, "not a directory").expect("blocking file");
+        let error = delete_session_artifacts(&sessions, "s1", false).expect_err("cleanup error");
+        assert!(error.contains("Failed to remove"), "{error}");
+        std::fs::remove_file(&media).expect("remove blocker");
+        delete_session_artifacts(&sessions, "s1", false).expect("retry cleanup");
+        assert!(delete_session_artifacts(&sessions, "../s1", false).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -376,6 +376,19 @@ impl Session {
 
     pub fn set_permissions(&mut self, permissions: PermissionSettings) {
         self.permissions = permissions;
+        self.reviewer = match permissions.reviewer {
+            pig_protocol::ApprovalsReviewer::User => {
+                Arc::new(UserApprovalReviewer::new(self.pending.clone()))
+            }
+            pig_protocol::ApprovalsReviewer::Policy => {
+                let user = Arc::new(UserApprovalReviewer::new(self.pending.clone()));
+                Arc::new(FallbackApprovalReviewer::new(
+                    Arc::new(PolicyApprovalReviewer::workspace_policy()),
+                    user,
+                    std::time::Duration::from_secs(30),
+                ))
+            }
+        };
     }
 
     /// Canonical permission state (sandbox / approval policy / reviewer).

@@ -115,6 +115,7 @@ pub(crate) fn tool_execution_recoveries(
                 }
             }
             RolloutRecord::User { .. }
+            | RolloutRecord::MailboxMessage { .. }
             | RolloutRecord::TaskNotificationBatch { .. }
             | RolloutRecord::Compact { .. }
             | RolloutRecord::HookContext { .. }

@@ -569,12 +569,42 @@ impl ConversationProjection {
                 }
                 projected
             }
+            Event::AgentControl { event } => {
+                let Some(agent_id) = event.agent_id.clone() else {
+                    return Projected::only(Vec::new());
+                };
+                if agent_id == event.session_id {
+                    return Projected::only(Vec::new());
+                }
+                let running = match event.kind.as_str() {
+                    "run_started" | "run_stopping" => true,
+                    "run_settled" => false,
+                    _ => return Projected::only(Vec::new()),
+                };
+                let status = Event::ConversationStatus {
+                    session_id: event.session_id.clone(),
+                    agent_id,
+                    running,
+                    run_id: event.run_id.clone(),
+                };
+                let mut projected = self.project(&status);
+                let include_status = projected.pass;
+                projected.pass = false;
+                if include_status {
+                    projected.events.insert(0, status);
+                }
+                projected
+            }
             Event::ConversationStatus {
                 session_id,
                 agent_id,
                 running,
                 run_id,
             } => {
+                let duplicate = self
+                    .run_status
+                    .get(&(session_id.clone(), agent_id.clone()))
+                    .is_some_and(|status| status.run_id == *run_id && status.running == *running);
                 self.run_status.insert(
                     (session_id.clone(), agent_id.clone()),
                     RunStatus {
@@ -582,7 +612,11 @@ impl ConversationProjection {
                         running: *running,
                     },
                 );
-                let mut projected = Projected::pass(event);
+                let mut projected = if duplicate {
+                    Projected::only(Vec::new())
+                } else {
+                    Projected::pass(event)
+                };
                 projected.events = self.update_root_parent_agents(
                     session_id,
                     agent_id,
@@ -1163,6 +1197,41 @@ mod tests {
     }
 
     #[test]
+    fn runtime_control_and_legacy_status_project_once() {
+        let mut projection = ConversationProjection::new();
+        let status = Event::ConversationStatus {
+            session_id: "s1".into(),
+            agent_id: "a1".into(),
+            running: false,
+            run_id: Some("run-1".into()),
+        };
+        let control = Event::AgentControl {
+            event: pig_protocol::AgentControlEvent {
+                session_id: "s1".into(),
+                sequence: 4,
+                event_id: "event-4".into(),
+                kind: "run_settled".into(),
+                agent_id: Some("a1".into()),
+                run_id: Some("run-1".into()),
+                attempt: Some(1),
+                backend_epoch: Some("epoch-1".into()),
+                payload: serde_json::json!({}),
+                created_at_ms: 0,
+            },
+        };
+        let projected = projection.project(&control);
+        assert!(!projected.pass);
+        assert_eq!(projected.events.len(), 1);
+        assert!(matches!(
+            projected.events[0],
+            Event::ConversationStatus { .. }
+        ));
+        let legacy = projection.project(&status);
+        assert!(!legacy.pass);
+        assert!(legacy.events.is_empty());
+    }
+
+    #[test]
     fn projection_registry_deduplicates_journal_envelopes() {
         let mut registry = ProjectionRegistry::new();
         let event = Event::TaskListChanged {
@@ -1174,6 +1243,7 @@ mod tests {
             session_id: Some("s1".into()),
             agent_id: None,
             run_id: None,
+            epoch: "journal-test".into(),
             event: event.clone(),
         };
         assert!(registry.project(&envelope(1)).pass);

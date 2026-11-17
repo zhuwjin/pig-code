@@ -6,9 +6,15 @@ mod agent_flow;
 mod background_tasks;
 #[path = "duplicate_tool_ids.rs"]
 mod duplicate_tool_ids;
+#[path = "ipc.rs"]
+mod ipc;
 #[path = "pause_turn.rs"]
 mod pause_turn;
 #[path = "queue.rs"]
 mod queue;
+#[path = "runtime_extensions.rs"]
+mod runtime_extensions;
+#[path = "runtime_stress.rs"]
+mod runtime_stress;
 #[path = "subagent.rs"]
 mod subagent;

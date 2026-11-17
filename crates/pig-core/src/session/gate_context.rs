@@ -6,6 +6,8 @@ use super::*;
 /// always-allowed set) is Arc-backed in the Session.
 pub(crate) struct GateCtx<'a> {
     pub cwd: &'a Path,
+    pub agent_id: &'a str,
+    pub run_id: Option<String>,
     /// Canonical permission state for this turn (sandbox + approval + reviewer)
     pub permissions: PermissionSettings,
     /// Root sessions may ask the user for a wider sandbox or credential grant.

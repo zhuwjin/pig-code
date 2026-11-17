@@ -15,8 +15,8 @@ use pig_provider::ProviderEvent;
 
 use super::compact::{MAX_CHILD_OVERFLOW_RECOVERIES, child_overflow_failure};
 use super::persist::{
-    child_agent_result_meta, child_persist_stop, persist_child_message, persist_child_message_meta,
-    persist_child_tool_result, persist_child_tool_starts,
+    child_agent_result_meta, child_persist_stop, persist_child_mailbox_message,
+    persist_child_message_meta, persist_child_tool_result, persist_child_tool_starts,
 };
 use super::state::{ProgressSink, SubagentMode};
 use crate::session::engine::{
@@ -33,6 +33,8 @@ impl Session {
         progress: ProgressSink,
         mode: SubagentMode,
     ) -> Session {
+        let runtime_profile = prep.policy.profile.name.clone();
+        let runtime_conversation_path = prep.jsonl.clone();
         let agent_id = prep.agent_id;
         let run = SubagentResult::child(
             crate::session::AgentRunStatus::Queued,
@@ -52,6 +54,9 @@ impl Session {
                 prep.run_id.clone(),
             ))
             .expect("a prepared child must not have an active conflicting run");
+        state
+            .agents
+            .update_agent_context(&agent_id, runtime_profile, runtime_conversation_path);
         let delivery_receipts = state.delivery_receipts.clone();
         let tracker = match mode {
             SubagentMode::Foreground => parent.tracker.foreground_child(),
@@ -555,6 +560,8 @@ impl Session {
         let sub = self.subagent.as_ref().expect("child session");
         let context = ChildBatchContext {
             cwd: self.agent.cwd.clone(),
+            agent_id: self.agent.id.clone(),
+            run_id: self.agent.run_id(),
             config: self.agent.config().clone(),
             permissions: self.permissions,
             state: self.state.clone(),
@@ -865,6 +872,8 @@ impl Session {
             let event_session_id = self.event_session_id().to_string();
             let mut gate = GateCtx {
                 cwd: &self.agent.cwd,
+                agent_id: &self.agent.id,
+                run_id: self.agent.run_id(),
                 permissions: self.permissions,
                 allow_scope_widening: false,
                 media,
@@ -1268,8 +1277,8 @@ impl Session {
                     "New message from the coordinating agent (delivered while you were working):\n\n{}",
                     steer.text
                 );
-                let mut message = ChatMsg::user(wrapped);
-                if let Err(error) = persist_child_message(self, &mut message) {
+                let message = ChatMsg::user(wrapped);
+                if let Err(error) = persist_child_mailbox_message(self, &steer, &message) {
                     self.state.agents.prepend_steer(&self.agent.id, steer);
                     let usage = (
                         self.run_state.input,
@@ -1280,15 +1289,14 @@ impl Session {
                 }
                 self.agent.history.push(message);
                 self.emit_child_history_since(tx, None);
-                if steer.notification.is_none()
-                    && let Err(error) = self.state.agents.consume_steer(&steer.id)
-                {
+                if let Err(error) = self.state.agents.consume_steer(&steer.id) {
                     tracing::warn!(agent_id = %self.agent.id, %error, "mailbox consumption was not persisted");
                 }
                 if let Some(notification) = steer.notification {
                     crate::task::mark_agent_notification_delivered(
                         &self.state,
                         &notification.task_id,
+                        Some(&notification.id),
                     );
                 }
             }
@@ -1460,6 +1468,8 @@ impl Session {
 #[derive(Clone)]
 struct ChildBatchContext {
     cwd: PathBuf,
+    agent_id: String,
+    run_id: Option<String>,
     config: ResolvedModel,
     permissions: pig_protocol::PermissionSettings,
     state: crate::task::SessionToolState,
@@ -1522,6 +1532,8 @@ async fn execute_child_batch_tool(
     let media = tool::MediaCapabilities::new(context.config.input_image, context.config.input_pdf);
     let mut gate = GateCtx {
         cwd: &context.cwd,
+        agent_id: &context.agent_id,
+        run_id: context.run_id.clone(),
         permissions: context.permissions,
         allow_scope_widening: false,
         media,

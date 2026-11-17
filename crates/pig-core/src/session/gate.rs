@@ -767,8 +767,15 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
         let review = ctx.reviewer.review(
             ApprovalRequest {
                 session_id: ctx.session_id.to_string(),
+                agent_id: ctx.agent_id.to_string(),
+                run_id: ctx.run_id.clone(),
+                turn_id: Some(turn_id.to_string()),
+                call_id: call.id.clone(),
                 request_id,
+                cwd: ctx.cwd.to_path_buf(),
                 tool: call.name.clone(),
+                action: serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone())),
                 detail: detail_text,
                 danger_key,
                 requested_write_roots,

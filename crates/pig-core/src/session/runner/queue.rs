@@ -279,11 +279,12 @@ pub(super) fn stop_session_tasks(entry: &SessionEntry) {
         .map(|task| task.id.clone())
         .collect();
     for id in running {
-        let _ = crate::task::stop_task(
+        let _ = crate::task::stop_task_with_agents(
             &entry.state.tasks,
             &id,
             &entry.state.task_notify,
             &entry.state.session_id,
+            Some(&entry.state.agents),
         );
     }
 }

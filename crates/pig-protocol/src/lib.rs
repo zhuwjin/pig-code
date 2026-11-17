@@ -72,6 +72,7 @@ pub enum ApprovalPolicy {
 pub enum ApprovalsReviewer {
     #[default]
     User,
+    Policy,
 }
 
 /// Canonical permission state: Codex's three orthogonal axes.

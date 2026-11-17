@@ -4,7 +4,7 @@ impl Session {
     /// AgentSwarm tool entry: parse_swarm_args validation →
     /// prepare_swarm_children batch preparation through the shared child
     /// builder (identical to a single Agent) → drive all concurrently
-    /// (global concurrency slot cap;
+    /// (session-tree concurrency slot cap;
     /// queue when exceeded). Default foreground: blocks until all finish, with
     /// the aggregated result as a single tool result; turn cancel → cancel all
     /// subagents. run_in_background=true: register background tasks one by one
@@ -184,19 +184,18 @@ impl Session {
             handle_ixs.push(ix);
             let tx_bg = tx.clone();
             let task_cancel = child_cancel.clone();
+            let backends = child.state.backends.clone();
+            let scheduler = child.state.scheduler.clone();
             handles.push(tokio::spawn(async move {
                 let child_task = crate::agent::execute_local(
+                    backends,
                     child,
                     tx_bg,
                     task_cancel,
                     crate::agent::AgentExecutionActivation::Start,
                 );
                 let managed = life
-                    .drive(
-                        &child_cancel,
-                        crate::agent::scheduler().acquire(&child_cancel),
-                        child_task,
-                    )
+                    .drive(&child_cancel, scheduler.acquire(&child_cancel), child_task)
                     .await;
                 (ix, managed)
             }));
@@ -314,7 +313,7 @@ impl Session {
         // assembly time (a transient value; the real queue state is the
         // TaskStatus::Queued in TaskList/panel, moved to Running by
         // mark_agent_task_started once a slot lands)
-        let slots_available = crate::agent::scheduler().available();
+        let slots_available = self.state.scheduler.available();
         for prep in preps {
             let prep = match prep {
                 crate::agent::SwarmPrep::Ready(prep) => prep,

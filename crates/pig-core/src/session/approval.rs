@@ -30,6 +30,8 @@ impl Session {
         let event_session_id = self.event_session_id().to_string();
         let mut gate = GateCtx {
             cwd: &self.agent.cwd,
+            agent_id: &self.agent.id,
+            run_id: self.agent.run_id(),
             permissions: self.permissions,
             allow_scope_widening: true,
             media: tool::MediaCapabilities::new(

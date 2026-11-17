@@ -346,7 +346,7 @@ export type MessageDelivery = "queue" | "steer";
 export interface PermissionSettings {
   sandbox: { mode: SandboxMode };
   approval: ApprovalPolicy;
-  reviewer: "user";
+  reviewer: "user" | "policy";
 }
 
 export interface SessionConfiguration {

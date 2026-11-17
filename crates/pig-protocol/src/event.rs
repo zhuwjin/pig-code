@@ -45,6 +45,20 @@ pub struct AgentRunEnvelope {
     pub turn_kind: TurnKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentControlEvent {
+    pub session_id: String,
+    pub sequence: u64,
+    pub event_id: String,
+    pub kind: String,
+    pub agent_id: Option<String>,
+    pub run_id: Option<String>,
+    pub attempt: Option<u64>,
+    pub backend_epoch: Option<String>,
+    pub payload: serde_json::Value,
+    pub created_at_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
@@ -305,6 +319,9 @@ pub struct ConversationAgentCard {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    AgentControl {
+        event: AgentControlEvent,
+    },
     SessionConfigured {
         session_id: String,
         cwd: PathBuf,
@@ -947,6 +964,7 @@ impl Event {
             | Self::ProjectHooksPending { session_id, .. }
             | Self::ProjectHooksTrusted { session_id, .. }
             | Self::PluginToolCancel { session_id, .. } => Some(session_id),
+            Self::AgentControl { event } => Some(&event.session_id),
             Self::Error { session_id, .. } => session_id.as_deref(),
             Self::SessionList { .. }
             | Self::WorkspaceList { .. }
@@ -978,6 +996,7 @@ impl Event {
 /// local consumers; identity and ordering live in this outer envelope.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    pub epoch: String,
     pub sequence: u64,
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

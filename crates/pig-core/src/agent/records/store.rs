@@ -164,6 +164,16 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
                 None,
                 None,
             )),
+            RolloutRecord::MailboxMessage {
+                text, sent_at_ms, ..
+            } => stored.push(message(
+                ChatMsg::user(text),
+                Vec::new(),
+                Vec::new(),
+                sent_at_ms,
+                None,
+                None,
+            )),
             RolloutRecord::TaskNotificationBatch {
                 model_text,
                 sent_at_ms,
@@ -276,6 +286,37 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
         }
     }
     Ok((meta, stored))
+}
+
+pub(crate) fn agent_mailbox_deliveries(
+    path: &Path,
+) -> Result<crate::agent::runtime::RuntimeMailboxDeliveryReceipt, String> {
+    let records = AgentConversationStore::new(path)
+        .load()
+        .map_err(|error| pig_provider::core_error_en(&error))?;
+    let mut delivered = crate::agent::runtime::RuntimeMailboxDeliveryReceipt::default();
+    for record in records {
+        match record {
+            RolloutRecord::MailboxMessage { message_id, .. } => {
+                delivered.message_ids.insert(message_id);
+            }
+            RolloutRecord::ToolCall {
+                delivered_notification_ids,
+                ..
+            } => delivered
+                .notification_ids
+                .extend(delivered_notification_ids),
+            RolloutRecord::TaskNotificationBatch { notifications, .. } => {
+                delivered.notification_ids.extend(
+                    notifications
+                        .into_iter()
+                        .map(|notification| notification.id),
+                )
+            }
+            _ => {}
+        }
+    }
+    Ok(delivered)
 }
 
 fn message(

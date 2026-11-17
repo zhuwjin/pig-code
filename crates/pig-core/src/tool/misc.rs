@@ -466,11 +466,12 @@ impl Tool for TaskStop {
             let task_id = args["task_id"]
                 .as_str()
                 .ok_or("Missing required parameter: task_id")?;
-            let result = crate::task::stop_task(
+            let result = crate::task::stop_task_with_agents(
                 &ctx.state.tasks,
                 task_id,
                 &ctx.state.task_notify,
                 &ctx.state.session_id,
+                Some(&ctx.state.agents),
             )?;
             Ok(ToolEffect::plain(result))
         })
@@ -712,7 +713,7 @@ impl Tool for SendMessageTool {
 
 /// AgentSwarm: bulk parallel subagents (one prompt template × N items). Schema-only;
 /// the session layer intercepts it in the tool loop and runs the swarm concurrently (agent/swarm.rs preparation + task.rs
-/// global concurrency slots); the tool implementation only registers the schema and description.
+/// session-tree concurrency slots); the tool implementation only registers the schema and description.
 pub struct AgentSwarmTool {
     /// Available subagent type list (agent_description_list result), spliced into the description
     profiles_summary: String,
@@ -746,7 +747,7 @@ impl Tool for AgentSwarmTool {
 
     fn schema(&self) -> serde_json::Value {
         let description = format!(
-            "Parallel subagents in bulk: one prompt template x N items — the {{{{item}}}} placeholder in the template is replaced by each item and launches one subagent apiece, all running concurrently (a global concurrency cap queues the overflow).\n\
+            "Parallel subagents in bulk: one prompt template x N items — the {{{{item}}}} placeholder in the template is replaced by each item and launches one subagent apiece, all running concurrently (a session-tree concurrency cap queues the overflow).\n\
              - Best for applying the same task to many objects (review these files one by one / migrate these modules one by one); items carry only what varies (path/name/argument), with the shared background and requirements spelled out in the template (subagents cannot see this session — prompts must be self-contained).\n\
              - For one or two dissimilar tasks, use Agent instead; expanded prompts must be pairwise distinct; items are capped at {MAX_SWARM_ITEMS}.\n\
              - resume_agent_ids continues existing subagents (existing agent_id -> appended prompt) and can be combined with items; subagent_type is meaningless for resume-only calls.\n\
@@ -1552,11 +1553,20 @@ mod task_wait_tests {
         let task_id = register(&state, false);
         finish(&state, &task_id);
         let queued = "<notification id=\"task:test:b1:completed\">done</notification>".to_string();
+        let notification = {
+            let tasks = state.tasks.lock().expect("task registry");
+            let entry = tasks
+                .iter()
+                .find(|entry| entry.id == task_id)
+                .expect("finished task");
+            crate::task::notification::terminal_notification(&state.session_id, entry)
+        };
+        assert_eq!(notification.id, "task:test:b1:completed");
         state
             .agents
             .activate_child(crate::agent::AgentNode::child(
                 "a1".into(),
-                "root".into(),
+                "test".into(),
                 1,
                 "run-a1".into(),
             ))
@@ -1564,7 +1574,10 @@ mod task_wait_tests {
         assert!(
             state
                 .agents
-                .push_steer("a1", crate::agent::AgentSteer::message(queued))
+                .push_steer(
+                    "a1",
+                    crate::agent::AgentSteer::notification(notification, queued),
+                )
                 .is_ok()
         );
         let mut tracker = ChangeTracker::default();

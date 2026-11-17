@@ -17,7 +17,7 @@ pub mod fonts;
 pub mod git;
 pub mod hooks;
 mod journal;
-pub use journal::{EventJournal, JournalReplayError};
+pub use journal::{EventJournal, JournalReplayError, JournalResyncReason, JournalResyncRequired};
 pub mod mcp;
 pub mod memory;
 pub mod model_io;

@@ -34,11 +34,18 @@ impl Manager {
             if self.deleted_sessions.contains(&session_id) {
                 continue;
             }
-            let result = self.store.lock().expect("store lock").record_terminal_task(
-                &session_id,
-                &task,
-                &notification,
-            );
+            let result = if let Some(entry) = self.sessions.get(&session_id) {
+                entry
+                    .state
+                    .agents
+                    .record_root_terminal(&task, &notification)
+            } else {
+                self.store.lock().expect("store lock").record_terminal_task(
+                    &session_id,
+                    &task,
+                    &notification,
+                )
+            };
             if let Err(error) = result {
                 tracing::warn!(
                     session_id = %session_id,
@@ -100,10 +107,30 @@ impl Manager {
                     });
                     let owner_running =
                         entry.is_some_and(|entry| entry.state.agents.is_active(&owner));
-                    if !detached || suppressed || wait_delivered || owner_running {
-                        // A live direct parent consumes the terminal fact as a
-                        // steer at its next step. TaskWait and foreground runs
-                        // persist the task row without another notification.
+                    let direct_notification =
+                        detached && !suppressed && !wait_delivered && owner_running;
+                    if direct_notification {
+                        if let Some(entry) = self.sessions.get(&session_id) {
+                            let text = crate::task::notification::render_notification_batch(
+                                std::slice::from_ref(&notification),
+                            );
+                            let steer =
+                                crate::agent::AgentSteer::notification(notification.clone(), text);
+                            match entry
+                                .state
+                                .agents
+                                .push_terminal_notification(&owner, &task, steer)
+                            {
+                                Ok(()) => {
+                                    self.emit_task_list(&event_tx, &session_id);
+                                    return;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(session_id = %session_id, agent_id = %owner, %error, "direct-parent notification commit failed; using root fallback");
+                                }
+                            }
+                        }
+                    } else if !detached || suppressed || wait_delivered || owner_running {
                         let result = self
                             .store
                             .lock()
@@ -121,36 +148,21 @@ impl Manager {
                             return;
                         }
                         self.emit_task_list(&event_tx, &session_id);
-                        let mut routed = true;
-                        if detached && !suppressed && !wait_delivered && owner_running {
-                            if let Some(entry) = self.sessions.get(&session_id) {
-                                let text = crate::task::notification::render_notification_batch(
-                                    std::slice::from_ref(&notification),
-                                );
-                                let steer = crate::agent::AgentSteer::notification(
-                                    notification.clone(),
-                                    text,
-                                );
-                                routed = entry.state.agents.push_steer(&owner, steer).is_ok();
-                            } else {
-                                routed = false;
-                            }
-                        }
-                        if routed {
-                            return;
-                        }
-                        // The owner finished between the active check and the
-                        // queue write. Use the same durable root fallback.
+                        return;
                     }
-                    // The direct parent has already settled. The root owns the
-                    // durable fallback notification below, so the result is not
-                    // lost with the parent's unregistered steer queue.
                 }
-                let result = self.store.lock().expect("store lock").record_terminal_task(
-                    &session_id,
-                    &task,
-                    &notification,
-                );
+                let result = if let Some(entry) = self.sessions.get(&session_id) {
+                    entry
+                        .state
+                        .agents
+                        .record_root_terminal(&task, &notification)
+                } else {
+                    self.store.lock().expect("store lock").record_terminal_task(
+                        &session_id,
+                        &task,
+                        &notification,
+                    )
+                };
                 if let Err(error) = result {
                     emit(
                         &event_tx,
@@ -178,7 +190,7 @@ impl Manager {
         let Some(entry) = self.sessions.get(session_id) else {
             return;
         };
-        let tasks = crate::task::snapshot(&entry.state.tasks);
+        let tasks = entry.state.task_snapshot();
         emit(
             event_tx,
             Event::TaskListChanged {

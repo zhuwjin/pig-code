@@ -200,7 +200,7 @@ impl Manager {
         // a non-symlink context file and meta-id equality. A UI-provided id
         // therefore cannot name a path outside its owning directory.
         let tx = event_tx.clone();
-        // AgentRegistry tracks live foreground and background drivers; a task
+        // AgentExecutionRegistry tracks live foreground and background drivers; a task
         // still occupying or awaiting a driver slot has not finished either.
         // A session absent from memory is not active.
         let running = sessions.get(&session_id).is_some_and(|entry| {
@@ -582,6 +582,7 @@ impl Manager {
                 session.begin_root_run(pig_protocol::TurnKind::Compact);
                 entry.active_run = session.run_envelope();
                 let cancel = entry.cancel.clone().expect("cancel");
+                session.register_run_cancel(&cancel);
                 turns.push(Box::pin(async move {
                     // A manual /compact can arrive after a
                     // model switch without an intervening turn;

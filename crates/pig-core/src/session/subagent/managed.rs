@@ -7,7 +7,7 @@ pub(super) struct DelegatedUi {
 }
 
 /// Spawn one background child through the same managed driver as foreground
-/// children (global slot, writer claim, panic/cancel settlement, one
+/// children (session-tree slot, writer claim, panic/cancel settlement, one
 /// completion notification). The parent turn is not blocked.
 pub(super) fn spawn_detached_child(
     mut child: Session,
@@ -82,15 +82,14 @@ fn spawn_with_writer(
     );
     let session_id = child.event_session_id().to_string();
     let child_cancel = cancel.clone();
+    let scheduler = child.state.scheduler.clone();
     let child_tx = tx.clone();
-    let child_task = crate::agent::execute_local(child, child_tx, child_cancel, activation);
+    let backends = child.state.backends.clone();
+    let child_task =
+        crate::agent::execute_local(backends, child, child_tx, child_cancel, activation);
     tokio::spawn(async move {
         let managed = life
-            .drive(
-                &cancel,
-                crate::agent::scheduler().acquire(&cancel),
-                child_task,
-            )
+            .drive(&cancel, scheduler.acquire(&cancel), child_task)
             .await;
         if let Some(ui) = ui {
             let result = &managed.result;

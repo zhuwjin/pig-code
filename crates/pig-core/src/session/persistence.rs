@@ -6,6 +6,7 @@ impl Session {
         build: impl FnOnce(String) -> Event,
         tx: &async_channel::Sender<Event>,
     ) {
+        self.state.agents.touch_activity(&self.agent.id);
         emit_bg(self.event_session_id(), tx, build);
     }
 

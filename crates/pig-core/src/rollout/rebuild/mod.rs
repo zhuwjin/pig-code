@@ -178,6 +178,13 @@ fn rebuild_records(
                         .or_insert((Some(index), pig_protocol::DeliveryChannel::Automatic));
                 }
             }
+            RolloutRecord::MailboxMessage { text, .. } => {
+                finalize_active_replay(&mut history, &mut active_replay);
+                pending_reasoning = None;
+                pending_replay = None;
+                history.push(ChatMsg::user(text.clone()));
+                provenance.push(None);
+            }
             RolloutRecord::User {
                 text,
                 files,

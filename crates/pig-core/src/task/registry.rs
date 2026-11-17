@@ -46,6 +46,8 @@ pub struct AgentRunMetadata {
 }
 
 pub struct TaskEntry {
+    // Agent-run fields are live/durable projections of AgentRuntime. This entry
+    // owns task output, cancellation and artifact paths, not Agent run authority.
     pub id: String,
     pub kind: TaskKind,
     pub command: String,
@@ -280,7 +282,11 @@ impl TaskWaitInterest {
             });
         }
         for notification in notifications {
-            mark_agent_notification_delivered(&self.state, &notification.task_id);
+            mark_agent_notification_delivered(
+                &self.state,
+                &notification.task_id,
+                Some(&notification.id),
+            );
         }
         self.delivered = true;
     }
@@ -314,7 +320,11 @@ pub(crate) fn task_wait_delivered(state: &SessionToolState, owner: &str, task_id
         .is_some_and(|ids| ids.contains(task_id))
 }
 
-pub(crate) fn mark_agent_notification_delivered(state: &SessionToolState, task_id: &str) {
+pub(crate) fn mark_agent_notification_delivered(
+    state: &SessionToolState,
+    task_id: &str,
+    notification_id: Option<&str>,
+) {
     let changed = {
         let mut tasks = state.tasks.lock().expect("task registry lock");
         if let Some(entry) = tasks.iter_mut().find(|entry| entry.id == task_id) {
@@ -327,6 +337,11 @@ pub(crate) fn mark_agent_notification_delivered(state: &SessionToolState, task_i
     };
     if changed {
         state.notify_task(task_id);
+    }
+    if let Some(notification_id) = notification_id
+        && let Err(error) = state.agents.consume_notification(notification_id)
+    {
+        tracing::warn!(%task_id, %notification_id, %error, "notification mailbox consumption failed");
     }
 }
 
@@ -369,7 +384,9 @@ pub struct SessionToolState {
     /// root session (its background tasks notify it directly).
     pub owner_agent_id: Option<String>,
     /// Live and recovered agents in this root conversation.
-    pub(crate) agents: crate::agent::AgentRegistry,
+    pub(crate) agents: crate::agent::AgentExecutionRegistry,
+    pub(crate) scheduler: Arc<crate::agent::AgentScheduler>,
+    pub(crate) backends: Arc<crate::agent::AgentBackendRegistry>,
     /// Only the root session may acknowledge delivery into its own rollout.
     pub task_store: Option<Arc<Mutex<crate::store::Store>>>,
     pub delivery_receipts: Arc<Mutex<HashMap<String, super::notification::DeliveryReceipt>>>,
@@ -393,7 +410,7 @@ pub struct SessionToolState {
     /// the read-only roots
     pub extra_rw_roots: Vec<PathBuf>,
     /// Serializes admission with ID/writer reservation, including swarm prep.
-    /// Exclusive writer guards and budget reservations live in AgentRegistry.
+    /// Exclusive writer guards and budget reservations live in AgentExecutionRegistry.
     pub agent_spawn_lock: Arc<Mutex<()>>,
     /// Tasks a subagent is waiting for, keyed by owner agent id. A successful
     /// TaskWait keeps the id so the terminal notification is not also queued
@@ -415,6 +432,8 @@ impl Clone for SessionToolState {
             session_id: self.session_id.clone(),
             owner_agent_id: self.owner_agent_id.clone(),
             agents: self.agents.clone(),
+            scheduler: self.scheduler.clone(),
+            backends: self.backends.clone(),
             task_store: self.task_store.clone(),
             delivery_receipts: self.delivery_receipts.clone(),
             data_dir: self.data_dir.clone(),
@@ -443,13 +462,23 @@ impl SessionToolState {
                 .map(|root| root.canonicalize().unwrap_or(root))
                 .collect()
         };
+        let scheduler = Arc::new(crate::agent::AgentScheduler::new(
+            crate::agent::MAX_CONCURRENT_AGENT_RUNS,
+        ));
+        let backends = Arc::new(crate::agent::AgentBackendRegistry::with_local());
+        backends.attach_scheduler(scheduler.clone());
         Self {
             todos: TodoHandle::default(),
             tasks: TaskRegistry::default(),
             task_notify,
             session_id: session_id.clone(),
             owner_agent_id: None,
-            agents: crate::agent::AgentRegistry::new(session_id),
+            agents: crate::agent::AgentExecutionRegistry::with_backends(
+                session_id.clone(),
+                backends.clone(),
+            ),
+            scheduler,
+            backends,
             task_store: None,
             delivery_receipts: Arc::new(Mutex::new(HashMap::new())),
             data_dir: None,
@@ -528,6 +557,65 @@ impl SessionToolState {
             }
         }
         self.tasks.restore(tasks);
+    }
+
+    pub fn task_snapshot(&self) -> Vec<pig_protocol::TaskSummary> {
+        let mut summaries = crate::task::snapshot(&self.tasks);
+        let Some(runtime) = self.agents.runtime_snapshot() else {
+            return summaries;
+        };
+        let runs: std::collections::HashMap<String, crate::agent::runtime::RuntimeRun> = runtime
+            .runs
+            .into_iter()
+            .map(|run| (run.run_id.clone(), run))
+            .collect();
+        let task_runs: std::collections::HashMap<String, String> = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter_map(|task| {
+                task.run
+                    .as_ref()
+                    .map(|run| (task.id.clone(), run.run_id.clone()))
+            })
+            .collect();
+        for summary in &mut summaries {
+            let Some(run) = task_runs
+                .get(&summary.id)
+                .and_then(|run_id| runs.get(run_id))
+            else {
+                continue;
+            };
+            match run.status {
+                crate::agent::runtime::RuntimeRunStatus::Queued => {
+                    summary.status = pig_protocol::TaskStatus::Queued
+                }
+                crate::agent::runtime::RuntimeRunStatus::Running => {
+                    summary.status = pig_protocol::TaskStatus::Running
+                }
+                crate::agent::runtime::RuntimeRunStatus::Stopping => {}
+                crate::agent::runtime::RuntimeRunStatus::Completed => {
+                    summary.status = pig_protocol::TaskStatus::Completed
+                }
+                crate::agent::runtime::RuntimeRunStatus::Cancelled => {
+                    summary.status = pig_protocol::TaskStatus::Killed
+                }
+                crate::agent::runtime::RuntimeRunStatus::Failed => {
+                    summary.status = pig_protocol::TaskStatus::Failed
+                }
+                crate::agent::runtime::RuntimeRunStatus::Lost => {
+                    summary.status = pig_protocol::TaskStatus::Lost
+                }
+            }
+            if let Some(reason) = &run.stop_reason {
+                summary.reason = Some(reason.clone());
+            }
+            if let Some(ended_at_ms) = run.ended_at_ms {
+                summary.ended_at_ms = Some(ended_at_ms);
+            }
+        }
+        summaries
     }
 
     pub fn notify_task(&self, task_id: &str) {
@@ -791,7 +879,7 @@ fn register_agent_task_with_status(
 }
 
 /// Register a subagent task in the queued state and move it to Running once a
-/// global concurrency slot has been acquired.
+/// session-tree concurrency slot has been acquired.
 pub fn register_agent_task_queued(
     state: &SessionToolState,
     command: String,

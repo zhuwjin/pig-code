@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures_util::future::BoxFuture;
 use pig_protocol::{ApprovalDecision, Event};
 
@@ -6,8 +8,14 @@ use super::{PendingApprovals, emit_bg};
 #[derive(Clone, Debug)]
 pub(crate) struct ApprovalRequest {
     pub session_id: String,
+    pub agent_id: String,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub call_id: String,
     pub request_id: String,
+    pub cwd: std::path::PathBuf,
     pub tool: String,
+    pub action: serde_json::Value,
     pub detail: String,
     pub danger_key: Option<String>,
     pub requested_write_roots: Vec<String>,
@@ -92,6 +100,98 @@ impl ApprovalReviewer for UserApprovalReviewer {
     }
 }
 
+pub(crate) struct PolicyApprovalReviewer {
+    evaluate:
+        Arc<dyn Fn(&ApprovalRequest) -> Result<ApprovalReply, ApprovalReviewError> + Send + Sync>,
+}
+
+impl PolicyApprovalReviewer {
+    pub(crate) fn new(
+        evaluate: impl Fn(&ApprovalRequest) -> Result<ApprovalReply, ApprovalReviewError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            evaluate: Arc::new(evaluate),
+        }
+    }
+
+    pub(crate) fn workspace_policy() -> Self {
+        Self::new(|request| {
+            let structured_identity = (
+                &request.agent_id,
+                &request.run_id,
+                &request.turn_id,
+                &request.call_id,
+                &request.action,
+            );
+            let deny = !request.cwd.is_absolute()
+                || request.danger_key.is_some()
+                || !request.requested_write_roots.is_empty()
+                || !structured_identity.0.is_empty() && structured_identity.4.is_null();
+            Ok(ApprovalReply {
+                decision: if deny {
+                    ApprovalDecision::Reject
+                } else {
+                    ApprovalDecision::Allow
+                },
+                feedback: None,
+            })
+        })
+    }
+}
+
+impl ApprovalReviewer for PolicyApprovalReviewer {
+    fn review(
+        &self,
+        request: ApprovalRequest,
+        _events: async_channel::Sender<Event>,
+    ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
+        Box::pin(async move { (self.evaluate)(&request) })
+    }
+}
+
+pub(crate) struct FallbackApprovalReviewer {
+    primary: Arc<dyn ApprovalReviewer>,
+    fallback: Arc<dyn ApprovalReviewer>,
+    timeout: std::time::Duration,
+}
+
+impl FallbackApprovalReviewer {
+    pub(crate) fn new(
+        primary: Arc<dyn ApprovalReviewer>,
+        fallback: Arc<dyn ApprovalReviewer>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            primary,
+            fallback,
+            timeout,
+        }
+    }
+}
+
+impl ApprovalReviewer for FallbackApprovalReviewer {
+    fn review(
+        &self,
+        request: ApprovalRequest,
+        events: async_channel::Sender<Event>,
+    ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
+        let primary = self.primary.clone();
+        let fallback = self.fallback.clone();
+        let timeout = self.timeout;
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, primary.review(request.clone(), events.clone()))
+                .await
+            {
+                Ok(Ok(reply)) => Ok(reply),
+                Ok(Err(_)) | Err(_) => fallback.review(request, events).await,
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,8 +199,14 @@ mod tests {
     fn request() -> ApprovalRequest {
         ApprovalRequest {
             session_id: "s1".into(),
+            agent_id: "a1".into(),
+            run_id: Some("run-1".into()),
+            turn_id: Some("turn-1".into()),
+            call_id: "call-1".into(),
             request_id: "s1-approval-1".into(),
+            cwd: std::env::temp_dir(),
             tool: "Write".into(),
+            action: serde_json::json!({ "path": "file.txt" }),
             detail: "write file".into(),
             danger_key: None,
             requested_write_roots: vec![],
@@ -133,5 +239,60 @@ mod tests {
         review.abort();
         let _ = review.await;
         assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn policy_reviewer_receives_structured_identity_and_action() {
+        let reviewer = PolicyApprovalReviewer::new(|request| {
+            assert_eq!(request.agent_id, "a1");
+            assert_eq!(request.run_id.as_deref(), Some("run-1"));
+            assert_eq!(request.turn_id.as_deref(), Some("turn-1"));
+            assert_eq!(request.call_id, "call-1");
+            assert_eq!(request.action["path"], "file.txt");
+            Ok(ApprovalReply {
+                decision: ApprovalDecision::Reject,
+                feedback: Some("policy denied".to_string()),
+            })
+        });
+        let (events, _receiver) = async_channel::unbounded();
+        let reply = reviewer
+            .review(request(), events)
+            .await
+            .expect("policy reply");
+        assert_eq!(reply.decision, ApprovalDecision::Reject);
+    }
+
+    #[tokio::test]
+    async fn stuck_primary_reviewer_times_out_to_user_fallback() {
+        struct StuckReviewer;
+        impl ApprovalReviewer for StuckReviewer {
+            fn review(
+                &self,
+                _request: ApprovalRequest,
+                _events: async_channel::Sender<Event>,
+            ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
+                Box::pin(async move {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                })
+            }
+        }
+
+        let pending = PendingApprovals::default();
+        let reviewer = FallbackApprovalReviewer::new(
+            Arc::new(StuckReviewer),
+            Arc::new(UserApprovalReviewer::new(pending.clone())),
+            std::time::Duration::from_millis(20),
+        );
+        let (events, receiver) = async_channel::unbounded();
+        let review = tokio::spawn(async move { reviewer.review(request(), events).await });
+        let Event::ApprovalRequested { request_id, .. } =
+            receiver.recv().await.expect("fallback event")
+        else {
+            panic!("expected user fallback approval");
+        };
+        super::super::resolve_approval(&pending, &request_id, ApprovalDecision::Allow, None);
+        let reply = review.await.expect("review task").expect("fallback reply");
+        assert_eq!(reply.decision, ApprovalDecision::Allow);
     }
 }

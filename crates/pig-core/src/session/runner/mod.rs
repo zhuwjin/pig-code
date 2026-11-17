@@ -26,6 +26,8 @@ pub(super) struct PendingDeletion {
     turn_finished: bool,
 }
 
+const SESSION_DELETE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(super) struct Manager {
     config_path: PathBuf,
     sessions_dir: PathBuf,

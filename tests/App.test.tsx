@@ -341,14 +341,18 @@ test("switches language and applies fonts from appearance settings", async () =>
   expect(app.texts()).toContain("Language & fonts");
 
   await app.press("id:ui-font-select");
-  // The headless app may simulate another OS, while the native font catalog
-  // still comes from the host. Prefer the Windows system font when present.
-  await app.type("id:ui-font-select-search", "Consolas");
-  const systemFont = app.count("id:ui-font-select-option-Consolas") > 0 ? "Consolas" : "Menlo";
-  if (systemFont === "Menlo") {
+  // The headless app simulates macOS while the native catalog comes from the
+  // host. Probe the standard font available on each supported CI host.
+  let systemFont: string | undefined;
+  for (const candidate of ["Consolas", "Menlo", "DejaVu Sans"]) {
     await app.clear("id:ui-font-select-search");
-    await app.type("id:ui-font-select-search", systemFont);
+    await app.type("id:ui-font-select-search", candidate);
+    if (app.count(`id:ui-font-select-option-${candidate}`) > 0) {
+      systemFont = candidate;
+      break;
+    }
   }
+  if (systemFont === undefined) throw new Error("No supported font found on the test host");
   await app.press(`id:ui-font-select-option-${systemFont}`);
   expect(app.texts()).toContain(systemFont);
 

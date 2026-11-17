@@ -393,6 +393,69 @@ async fn managed_driver_catches_panic_and_settles_registry() {
     assert!(finished, "the live panel must settle on panic");
 }
 
+#[tokio::test]
+async fn uncooperative_local_run_is_dropped_after_stop_grace() {
+    struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let state = crate::task::SessionToolState::for_test();
+    let pending = test_pending();
+    let drive = test_child_session("a-stuck");
+    let task_id = crate::task::register_agent_task(
+        &state,
+        "subagent explore: stuck".into(),
+        CancellationToken::new(),
+        drive.agent.id.clone(),
+    );
+    let (tx, _rx) = async_channel::unbounded();
+    let writer = state
+        .try_claim_agent_writer(&drive.agent.id)
+        .expect("writer");
+    let life = AgentRunSupervisor::new(
+        &state,
+        &pending,
+        "s-test",
+        tx,
+        &drive,
+        writer,
+        Some(task_id.clone()),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mark_drop = SetOnDrop(dropped.clone());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        life.drive(
+            &cancel,
+            std::future::ready(Some(SubagentSlot::Test)),
+            async move {
+                let _mark_drop = mark_drop;
+                std::future::pending::<SubagentResult>().await
+            },
+        ),
+    )
+    .await
+    .expect("forced stop must settle");
+    assert!(outcome.result.is_cancelled());
+    assert!(outcome.result.stop_reason.contains("grace period"));
+    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!state.agent_writer_active(&drive.agent.id));
+    let status = state
+        .tasks
+        .lock()
+        .expect("task registry lock")
+        .iter()
+        .find(|entry| entry.id == task_id)
+        .expect("entry")
+        .status;
+    assert_eq!(status, pig_protocol::TaskStatus::Killed);
+}
+
 /// A panic outside the run future (here: while waiting for a slot) still
 /// settles the registry and sends exactly one background failure
 /// notification through the Drop fallback.
@@ -667,10 +730,13 @@ async fn local_backend_rejects_external_reconnect_before_running() {
     let result = Box::new(crate::agent::LocalAgentExecutionBackend::new(child))
         .execute(request)
         .await;
-    assert_eq!(result.status, crate::session::AgentRunStatus::Failed);
-    assert_eq!(result.agent_id.as_deref(), Some(identity.agent_id.as_str()));
-    assert_eq!(result.run_id.as_deref(), Some(identity.run_id.as_str()));
-    assert!(result.stop_reason.contains("cannot reconnect"));
+    assert!(matches!(
+        result,
+        Err(crate::agent::AgentBackendError::UnsupportedCapability {
+            capability: crate::agent::AgentExecutionCapability::Reconnect,
+            ..
+        })
+    ));
 }
 
 #[test]

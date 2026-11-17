@@ -89,6 +89,24 @@ fn persist_message_media(
     (images, documents)
 }
 
+pub fn append_agent_mailbox_message(
+    path: &Path,
+    message_id: String,
+    notification_id: Option<String>,
+    text: String,
+) -> Result<(), String> {
+    super::append_agent_conversation_record(
+        path,
+        &RolloutRecord::MailboxMessage {
+            message_id,
+            notification_id,
+            text,
+            sent_at_ms: crate::model_io::now_ms(),
+        },
+    )?;
+    super::sync_agent_context(path)
+}
+
 /// Append one message with its display metadata and, for an assistant, the
 /// execution ids parallel to its tool calls.
 pub fn append_agent_message_meta(

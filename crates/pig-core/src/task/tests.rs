@@ -104,7 +104,7 @@ fn nested_notification_is_handed_off_only_when_the_parent_did_not_consume_it() {
             .push_steer("parent", notification_steer(notification))
             .is_ok()
     );
-    mark_agent_notification_delivered(&state, &task_id);
+    mark_agent_notification_delivered(&state, &task_id, None);
     while task_rx.try_recv().is_ok() {}
     release_agent_mailbox(&state, "parent");
     assert!(

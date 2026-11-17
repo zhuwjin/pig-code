@@ -597,6 +597,8 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
     };
     let mut gate = GateCtx {
         cwd: &root,
+        agent_id: "test-child",
+        run_id: None,
         permissions: pig_protocol::PermissionSettings::default(),
         allow_scope_widening: false,
         media: crate::tool::MediaCapabilities::new(true, false),
@@ -686,6 +688,8 @@ async fn child_gate_refuses_new_scope_widening() {
     };
     let mut gate = GateCtx {
         cwd: &root,
+        agent_id: "test-child",
+        run_id: None,
         permissions: pig_protocol::PermissionSettings::default(),
         allow_scope_widening: false,
         media: crate::tool::MediaCapabilities::new(false, false),

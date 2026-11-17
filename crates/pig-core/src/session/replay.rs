@@ -13,6 +13,7 @@ impl Session {
                 | RolloutRecord::System { .. }
                 | RolloutRecord::PromptSnapshot { .. }
                 | RolloutRecord::ToolExecutionStart { .. }
+                | RolloutRecord::MailboxMessage { .. }
                 | RolloutRecord::AgentRun { .. } => {}
                 RolloutRecord::Assistant {
                     text,

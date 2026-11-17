@@ -91,6 +91,7 @@ struct SessionParts {
 }
 
 fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
+    let root_conversation_path = parts.rollout.path().to_path_buf();
     let app_config = parts.runtime.as_ref().map(|runtime| runtime.config());
     let SessionFrozen {
         trust,
@@ -183,6 +184,11 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         session_start_source: parts.session_start_source,
     };
     session.state.agents.register_root(session.agent.id.clone());
+    session.state.agents.update_agent_context(
+        &session.agent.id,
+        "main".to_string(),
+        root_conversation_path,
+    );
     session.refresh_project_sandbox();
     session
 }

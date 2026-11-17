@@ -27,6 +27,7 @@ pub use access::{
     metadata_carve_outs, sandbox_read_denial,
 };
 pub use notification::TaskChange;
+pub(crate) use process::stop_task_with_agents;
 pub use process::{ForegroundOutcome, run_foreground, spawn_background, stop_task};
 pub use registry::{
     AgentRunMetadata, ReadState, SessionToolState, TaskEntry, TaskRegistry,

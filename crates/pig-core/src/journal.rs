@@ -25,6 +25,33 @@ impl std::fmt::Display for JournalReplayError {
 
 impl std::error::Error for JournalReplayError {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalResyncReason {
+    EpochMismatch,
+    CursorOutOfRange,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalResyncRequired {
+    pub epoch: String,
+    pub cursor: u64,
+    pub oldest: u64,
+    pub latest: u64,
+    pub reason: JournalResyncReason,
+}
+
+impl std::fmt::Display for JournalResyncRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "journal snapshot resync required for cursor {} in epoch {} ({:?})",
+            self.cursor, self.epoch, self.reason
+        )
+    }
+}
+
+impl std::error::Error for JournalResyncRequired {}
+
 /// The single ordered event journal between the core and its consumers.
 /// Existing local receivers keep their raw Event stream; projections receive
 /// the same facts with stable identity and sequence metadata.
@@ -33,6 +60,7 @@ pub struct EventJournal {
     events: async_channel::Receiver<EventEnvelope>,
     history: Arc<Mutex<VecDeque<EventEnvelope>>>,
     next_sequence: Arc<AtomicU64>,
+    epoch: String,
 }
 
 impl EventJournal {
@@ -49,6 +77,7 @@ impl EventJournal {
             events,
             history: Arc::new(Mutex::new(VecDeque::with_capacity(JOURNAL_HISTORY))),
             next_sequence: Arc::new(AtomicU64::new(0)),
+            epoch: crate::agent::runtime::new_runtime_id("journal"),
         };
         let publisher = EventPublisher {
             input: input_events,
@@ -65,6 +94,42 @@ impl EventJournal {
 
     pub fn try_recv(&self) -> Result<EventEnvelope, async_channel::TryRecvError> {
         self.events.try_recv()
+    }
+
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    pub fn replay_after_epoch(
+        &self,
+        epoch: &str,
+        cursor: u64,
+    ) -> Result<Vec<EventEnvelope>, JournalResyncRequired> {
+        if epoch != self.epoch {
+            let history = self
+                .history
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let latest = self.next_sequence.load(Ordering::Acquire);
+            let oldest = history
+                .front()
+                .map_or(latest.saturating_add(1), |event| event.sequence);
+            return Err(JournalResyncRequired {
+                epoch: self.epoch.clone(),
+                cursor,
+                oldest,
+                latest,
+                reason: JournalResyncReason::EpochMismatch,
+            });
+        }
+        self.replay_after(cursor)
+            .map_err(|error| JournalResyncRequired {
+                epoch: self.epoch.clone(),
+                cursor,
+                oldest: error.oldest,
+                latest: error.latest,
+                reason: JournalResyncReason::CursorOutOfRange,
+            })
     }
 
     pub fn replay_after(&self, cursor: u64) -> Result<Vec<EventEnvelope>, JournalReplayError> {
@@ -94,6 +159,7 @@ impl EventJournal {
         let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let (agent_id, run_id) = run_identity(&event);
         let envelope = EventEnvelope {
+            epoch: self.epoch.clone(),
             sequence,
             session_id: event.session_id().map(str::to_string),
             agent_id,
@@ -139,6 +205,7 @@ fn run_identity(event: &Event) -> (Option<String>, Option<String>) {
         })
     }
     match event {
+        Event::AgentControl { event } => (event.agent_id.clone(), event.run_id.clone()),
         Event::TurnStarted { run, .. }
         | Event::TurnComplete { run, .. }
         | Event::TurnAborted { run, .. }
@@ -218,7 +285,56 @@ mod tests {
         let replay = journal.replay_after(1).unwrap();
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].sequence, 2);
+        assert_eq!(replay[0].epoch, journal.epoch());
         assert!(journal.replay_after(2).unwrap().is_empty());
         assert!(journal.replay_after(3).is_err());
+        assert_eq!(
+            journal
+                .replay_after_epoch(journal.epoch(), 1)
+                .expect("same-epoch replay")
+                .len(),
+            1
+        );
+        let stale = journal
+            .replay_after_epoch("old-epoch", 1)
+            .expect_err("stale epoch");
+        assert_eq!(stale.reason, JournalResyncReason::EpochMismatch);
+    }
+
+    #[tokio::test]
+    async fn journal_bounds_its_replay_window_and_requires_resync() {
+        let (input, _raw, journal, publisher) = EventJournal::channel();
+        let publish = tokio::spawn(publisher.run());
+        for _ in 0..1_100 {
+            input
+                .send(Event::SessionList {
+                    sessions: Vec::new(),
+                })
+                .await
+                .expect("publish event");
+        }
+        drop(input);
+        publish.await.expect("publisher");
+
+        let latest = 1_100;
+        let oldest_retained_cursor = latest - JOURNAL_HISTORY as u64;
+        let replay = journal
+            .replay_after(oldest_retained_cursor)
+            .expect("retained replay");
+        assert_eq!(replay.len(), JOURNAL_HISTORY);
+        assert_eq!(replay[0].sequence, oldest_retained_cursor + 1);
+        assert!(journal.replay_after(0).is_err());
+        assert!(
+            journal
+                .replay_after(latest)
+                .expect("current cursor")
+                .is_empty()
+        );
+        let stale = journal
+            .replay_after_epoch("old-epoch", oldest_retained_cursor)
+            .expect_err("stale epoch");
+        assert_eq!(stale.reason, JournalResyncReason::EpochMismatch);
+        assert_eq!(stale.oldest, oldest_retained_cursor + 1);
+        assert_eq!(stale.latest, latest);
     }
 }

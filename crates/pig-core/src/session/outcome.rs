@@ -159,6 +159,17 @@ impl Session {
         self.state.agents.begin_run(&agent_id, run_id);
     }
 
+    pub(crate) fn register_run_cancel(&self, cancel: &tokio_util::sync::CancellationToken) {
+        if let Some(run_id) = self.agent.run.as_ref().and_then(|run| run.run_id.clone())
+            && let Err(error) = self
+                .state
+                .agents
+                .register_run_cancel(run_id, cancel.clone())
+        {
+            tracing::warn!(%error, "failed to register root run cancellation");
+        }
+    }
+
     pub(crate) fn run_envelope(&self) -> Option<pig_protocol::AgentRunEnvelope> {
         let run = self.agent.run.as_ref()?;
         Some(pig_protocol::AgentRunEnvelope {
@@ -204,9 +215,14 @@ impl Session {
         });
         self.sync_rollout();
         self.agent.run = Some(result.clone());
-        self.state
-            .agents
-            .settle_run(&agent_id, &run_id, result.status);
+        self.state.agents.settle_run_with_outcome(
+            &agent_id,
+            &run_id,
+            result.status,
+            Some(result.stop_reason.clone()),
+            result.usage,
+            result.turns,
+        );
         result
     }
 

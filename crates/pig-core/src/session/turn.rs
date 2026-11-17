@@ -131,6 +131,7 @@ impl Session {
             });
         }
         let cancel = control.cancel_token();
+        self.register_run_cancel(cancel);
         // ---- SessionStart hooks (once per Session instance, at the first
         // turn; the turn's cancel token covers the run). Nothing to block at
         // session start — a block decision is logged; contexts stash for the
@@ -956,8 +957,16 @@ impl Session {
                     let review = self.reviewer.review(
                         ApprovalRequest {
                             session_id: self.agent.id.clone(),
+                            agent_id: self.agent.id.clone(),
+                            run_id: self.agent.run_id(),
+                            turn_id: Some(turn_id.to_string()),
+                            call_id: call.id.clone(),
                             request_id,
+                            cwd: self.agent.cwd.clone(),
                             tool: call.name.clone(),
+                            action: serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+                                serde_json::Value::String(call.arguments.clone())
+                            }),
                             detail: plan.to_string(),
                             danger_key: None,
                             requested_write_roots: Vec::new(),

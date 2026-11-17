@@ -432,6 +432,12 @@ pub enum RolloutRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger: Option<String>,
     },
+    MailboxMessage {
+        message_id: String,
+        notification_id: Option<String>,
+        text: String,
+        sent_at_ms: u64,
+    },
     AgentRun {
         run: pig_protocol::AgentRunEnvelope,
         status: pig_protocol::AgentRunStatus,
