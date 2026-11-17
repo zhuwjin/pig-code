@@ -82,6 +82,7 @@ function FontSelect(props: {
       searchable
       searchPlaceholder={t("settings.appearance.fonts.search")}
       searchAccessibilityLabel={t("settings.appearance.fonts.search")}
+      searchTestID={`${props.testID}-search`}
       searchClass="mx-1 mb-1 rounded-(--radius) border border-border bg-background px-3 py-2 text-sm"
       empty={<Text class="px-2 py-3 text-center text-xs text-muted-foreground">{t("settings.appearance.fonts.no_matches")}</Text>}
       itemClass="group rounded-(--radius) px-2 py-1.5 hover:bg-accent selected:bg-accent/60"

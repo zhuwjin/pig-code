@@ -343,10 +343,11 @@ test("switches language and applies fonts from appearance settings", async () =>
   await app.press("id:ui-font-select");
   // The headless app may simulate another OS, while the native font catalog
   // still comes from the host. Prefer the Windows system font when present.
-  await app.type("text:Search...", "Consolas");
+  await app.type("id:ui-font-select-search", "Consolas");
   const systemFont = app.count("id:ui-font-select-option-Consolas") > 0 ? "Consolas" : "Menlo";
   if (systemFont === "Menlo") {
-    await app.type("text:Search...", systemFont);
+    await app.clear("id:ui-font-select-search");
+    await app.type("id:ui-font-select-search", systemFont);
   }
   await app.press(`id:ui-font-select-option-${systemFont}`);
   expect(app.texts()).toContain(systemFont);
