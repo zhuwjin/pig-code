@@ -39,8 +39,16 @@ impl Projected {
     }
 }
 
+#[derive(Clone)]
+struct RunStatus {
+    run_id: Option<String>,
+    running: bool,
+}
+
 pub(crate) struct ConversationProjection {
     sessions: HashMap<String, ConversationState>,
+    subagents: HashMap<String, HashMap<String, ConversationState>>,
+    run_status: HashMap<(String, String), RunStatus>,
     finish_seq: u64,
 }
 
@@ -48,6 +56,8 @@ impl ConversationProjection {
     pub(crate) fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            subagents: HashMap::new(),
+            run_status: HashMap::new(),
             finish_seq: 0,
         }
     }
@@ -56,6 +66,9 @@ impl ConversationProjection {
         match event {
             Event::SessionConfigured { session_id, .. } => {
                 self.sessions.remove(session_id);
+                self.subagents.remove(session_id);
+                self.run_status
+                    .retain(|(session, _), _| session != session_id);
                 Projected::pass(event)
             }
             Event::TurnStarted {
@@ -338,30 +351,57 @@ impl ConversationProjection {
                 session_id,
                 item_id,
                 agent_id,
+                run_id,
                 profile,
                 description,
                 model,
                 background,
-                ..
             } => {
-                let state = self.state(session_id);
+                let mut card = ConversationAgentCard {
+                    agent_id: agent_id.clone(),
+                    run_id: run_id.clone(),
+                    profile: profile.clone(),
+                    description: description.clone(),
+                    model: model.clone(),
+                    background: *background,
+                    finished: false,
+                    finished_seq: None,
+                    live_note: None,
+                };
+                self.apply_known_status_to_card(session_id, &mut card);
+                if let Some(state) = self.sessions.get_mut(session_id)
+                    && let Some(item) = state.items.iter_mut().find(|item| item.id() == item_id)
+                {
+                    if let ConversationItem::Tool { agents, .. } = item {
+                        agents.push(card);
+                    }
+                    let item = item.clone();
+                    return Projected::only(vec![update(session_id, None, state, item)]);
+                }
+                let parent_agent_id = self.subagents.get(session_id).and_then(|states| {
+                    states
+                        .iter()
+                        .find(|(_, state)| state.items.iter().any(|item| item.id() == item_id))
+                        .map(|(agent_id, _)| agent_id.clone())
+                });
+                let Some(parent_agent_id) = parent_agent_id else {
+                    return Projected::only(Vec::new());
+                };
+                let state = self.nested_state(session_id, &parent_agent_id);
                 let Some(item) = state.items.iter_mut().find(|item| item.id() == item_id) else {
                     return Projected::only(Vec::new());
                 };
                 if let ConversationItem::Tool { agents, .. } = item {
-                    agents.push(ConversationAgentCard {
-                        agent_id: agent_id.clone(),
-                        profile: profile.clone(),
-                        description: description.clone(),
-                        model: model.clone(),
-                        background: *background,
-                        finished: false,
-                        finished_seq: None,
-                        live_note: None,
-                    });
+                    agents.push(card);
                 }
                 let item = item.clone();
-                Projected::only(vec![update(session_id, None, state, item)])
+                Projected::only(vec![update_for_agent(
+                    session_id,
+                    Some(&parent_agent_id),
+                    None,
+                    state,
+                    item,
+                )])
             }
             Event::TaskNotificationBatch {
                 session_id,
@@ -377,6 +417,58 @@ impl ConversationProjection {
                     sent_at_ms: *sent_at_ms,
                 };
                 Projected::only(vec![update(session_id, None, state, item)])
+            }
+            Event::ConversationSnapshot {
+                session_id,
+                agent_id: Some(agent_id),
+                title,
+                subtitle,
+                items,
+                running,
+                run_id,
+            } => {
+                let mut items = items.clone();
+                for item in &mut items {
+                    self.apply_known_status_to_item(session_id, item);
+                }
+                self.nested_state(session_id, agent_id).items = items.clone();
+                Projected::only(vec![Event::ConversationSnapshot {
+                    session_id: session_id.clone(),
+                    agent_id: Some(agent_id.clone()),
+                    title: title.clone(),
+                    subtitle: subtitle.clone(),
+                    items,
+                    running: *running,
+                    run_id: run_id.clone(),
+                }])
+            }
+            Event::ConversationUpdate {
+                session_id,
+                agent_id: Some(agent_id),
+                run_id,
+                item,
+            } => {
+                let mut item = item.clone();
+                self.apply_known_status_to_item(session_id, &mut item);
+                let state = self.nested_state(session_id, agent_id);
+                Projected::only(vec![update_for_agent(
+                    session_id,
+                    Some(agent_id),
+                    run_id.clone(),
+                    state,
+                    item,
+                )])
+            }
+            Event::ConversationRemove {
+                session_id,
+                agent_id: Some(agent_id),
+                item_ids,
+                ..
+            } => {
+                self.nested_state(session_id, agent_id)
+                    .items
+                    .retain(|item| !item_ids.iter().any(|id| id == item.id()));
+                Projected::pass(event)
             }
             Event::CompactStarted { session_id, .. } => {
                 let state = self.state(session_id);
@@ -446,14 +538,28 @@ impl ConversationProjection {
                 session_id,
                 agent_id,
                 running,
-                ..
+                run_id,
             } => {
+                self.run_status.insert(
+                    (session_id.clone(), agent_id.clone()),
+                    RunStatus {
+                        run_id: run_id.clone(),
+                        running: *running,
+                    },
+                );
                 let mut projected = Projected::pass(event);
-                projected.events = if *running {
-                    self.resume_parent_agent(session_id, agent_id)
-                } else {
-                    self.finish_parent_agent(session_id, agent_id)
-                };
+                projected.events = self.update_root_parent_agents(
+                    session_id,
+                    agent_id,
+                    run_id.as_deref(),
+                    *running,
+                );
+                projected.events.extend(self.update_nested_parent_agents(
+                    session_id,
+                    agent_id,
+                    run_id.as_deref(),
+                    *running,
+                ));
                 projected
             }
             _ => Projected::pass(event),
@@ -464,53 +570,76 @@ impl ConversationProjection {
         self.sessions.entry(session_id.to_string()).or_default()
     }
 
-    fn resume_parent_agent(&mut self, session_id: &str, agent_id: &str) -> Vec<Event> {
-        let Some(state) = self.sessions.get_mut(session_id) else {
+    fn nested_state(&mut self, session_id: &str, agent_id: &str) -> &mut ConversationState {
+        self.subagents
+            .entry(session_id.to_string())
+            .or_default()
+            .entry(agent_id.to_string())
+            .or_default()
+    }
+
+    fn apply_known_status_to_card(&mut self, session_id: &str, card: &mut ConversationAgentCard) {
+        let key = (session_id.to_string(), card.agent_id.clone());
+        let Some(status) = self.run_status.get(&key).cloned() else {
+            return;
+        };
+        if !run_matches(card.run_id.as_deref(), status.run_id.as_deref()) {
+            return;
+        }
+        set_agent_card_running(&mut self.finish_seq, card, status.running);
+    }
+
+    fn apply_known_status_to_item(&mut self, session_id: &str, item: &mut ConversationItem) {
+        let ConversationItem::Tool { agents, .. } = item else {
+            return;
+        };
+        for card in agents {
+            self.apply_known_status_to_card(session_id, card);
+        }
+    }
+
+    fn update_nested_parent_agents(
+        &mut self,
+        session_id: &str,
+        agent_id: &str,
+        run_id: Option<&str>,
+        running: bool,
+    ) -> Vec<Event> {
+        let Some(states) = self.subagents.get_mut(session_id) else {
             return Vec::new();
         };
         let mut events = Vec::new();
-        for row in &mut state.items {
-            let ConversationItem::Tool { agents, .. } = row else {
-                continue;
-            };
-            let Some(agent) = agents.iter_mut().find(|agent| agent.agent_id == agent_id) else {
-                continue;
-            };
-            if agent.finished || agent.live_note.is_some() {
-                agent.finished = false;
-                agent.finished_seq = None;
-                agent.live_note = None;
-                let row = row.clone();
-                events.push(update(session_id, None, state, row));
-            }
-            break;
+        for (parent_agent_id, state) in states {
+            let changed = update_conversation_agent_cards(
+                &mut self.finish_seq,
+                state,
+                agent_id,
+                run_id,
+                running,
+            );
+            events.extend(
+                changed.into_iter().map(|row| {
+                    update_for_agent(session_id, Some(parent_agent_id), None, state, row)
+                }),
+            );
         }
         events
     }
 
-    fn finish_parent_agent(&mut self, session_id: &str, agent_id: &str) -> Vec<Event> {
+    fn update_root_parent_agents(
+        &mut self,
+        session_id: &str,
+        agent_id: &str,
+        run_id: Option<&str>,
+        running: bool,
+    ) -> Vec<Event> {
         let Some(state) = self.sessions.get_mut(session_id) else {
             return Vec::new();
         };
-        let mut events = Vec::new();
-        for row in &mut state.items {
-            let ConversationItem::Tool { agents, .. } = row else {
-                continue;
-            };
-            let Some(agent) = agents.iter_mut().find(|agent| agent.agent_id == agent_id) else {
-                continue;
-            };
-            if !agent.finished {
-                agent.finished = true;
-                self.finish_seq += 1;
-                agent.finished_seq = Some(self.finish_seq);
-            }
-            agent.live_note = None;
-            let row = row.clone();
-            events.push(update(session_id, None, state, row));
-            break;
-        }
-        events
+        update_conversation_agent_cards(&mut self.finish_seq, state, agent_id, run_id, running)
+            .into_iter()
+            .map(|row| update(session_id, None, state, row))
+            .collect()
     }
 }
 
@@ -521,9 +650,73 @@ impl ConversationState {
     }
 }
 
+fn run_matches(card_run: Option<&str>, status_run: Option<&str>) -> bool {
+    status_run.is_none() || card_run == status_run
+}
+
+fn update_conversation_agent_cards(
+    finish_seq: &mut u64,
+    state: &mut ConversationState,
+    agent_id: &str,
+    run_id: Option<&str>,
+    running: bool,
+) -> Vec<ConversationItem> {
+    let mut changed = Vec::new();
+    for row in &mut state.items {
+        let ConversationItem::Tool { agents, .. } = row else {
+            continue;
+        };
+        let mut row_changed = false;
+        for card in agents
+            .iter_mut()
+            .filter(|card| card.agent_id == agent_id && run_matches(card.run_id.as_deref(), run_id))
+        {
+            row_changed |= set_agent_card_running(finish_seq, card, running);
+        }
+        if row_changed {
+            changed.push(row.clone());
+        }
+    }
+    changed
+}
+
+fn set_agent_card_running(
+    finish_seq: &mut u64,
+    card: &mut ConversationAgentCard,
+    running: bool,
+) -> bool {
+    if running {
+        if !card.finished && card.live_note.is_none() {
+            return false;
+        }
+        card.finished = false;
+        card.finished_seq = None;
+        card.live_note = None;
+        return true;
+    }
+    let changed = !card.finished || card.live_note.is_some();
+    if !card.finished {
+        card.finished = true;
+        *finish_seq += 1;
+        card.finished_seq = Some(*finish_seq);
+    }
+    card.live_note = None;
+    changed
+}
+
 fn update(
     session_id: &str,
     agent_id: Option<&str>,
+    state: &mut ConversationState,
+    item: ConversationItem,
+) -> Event {
+    update_for_agent(session_id, agent_id, None, state, item)
+}
+
+fn update_for_agent(
+    session_id: &str,
+    agent_id: Option<&str>,
+    run_id: Option<String>,
     state: &mut ConversationState,
     item: ConversationItem,
 ) -> Event {
@@ -539,7 +732,7 @@ fn update(
     Event::ConversationUpdate {
         session_id: session_id.to_string(),
         agent_id: agent_id.map(str::to_string),
-        run_id: None,
+        run_id,
         item,
     }
 }
@@ -643,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_conversation_events_pass_through() {
+    fn subagent_conversation_events_are_reemitted_and_tracked() {
         let mut projection = ConversationProjection::new();
         let item = ConversationItem::Tool {
             id: "t1-0".into(),
@@ -667,8 +860,11 @@ mod tests {
             running: true,
             run_id: None,
         });
-        assert!(snapshot.pass);
-        assert!(snapshot.events.is_empty());
+        assert!(!snapshot.pass);
+        assert!(matches!(
+            snapshot.events.as_slice(),
+            [Event::ConversationSnapshot { .. }]
+        ));
 
         let update = projection.project(&Event::ConversationUpdate {
             session_id: "s1".into(),
@@ -676,8 +872,161 @@ mod tests {
             run_id: None,
             item,
         });
-        assert!(update.pass);
-        assert!(update.events.is_empty());
+        assert!(!update.pass);
+        assert!(matches!(
+            update.events.as_slice(),
+            [Event::ConversationUpdate { .. }]
+        ));
+    }
+
+    #[test]
+    fn nested_background_cards_follow_their_own_run() {
+        let mut projection = ConversationProjection::new();
+        let row = ConversationItem::Tool {
+            id: "nested-call".into(),
+            tool: "Agent".into(),
+            summary: "delegate".into(),
+            detail: "{}".into(),
+            output: String::new(),
+            status: ConversationToolStatus::Running,
+            turn_id: None,
+            edit: None,
+            live_note: None,
+            agents: Vec::new(),
+            approval_pending: false,
+        };
+        projection.project(&Event::ConversationUpdate {
+            session_id: "s1".into(),
+            agent_id: Some("parent".into()),
+            run_id: Some("parent-run".into()),
+            item: row,
+        });
+        let added = projection.project(&Event::SubagentCard {
+            session_id: "s1".into(),
+            item_id: "nested-call".into(),
+            agent_id: "grandchild".into(),
+            run_id: Some("run-1".into()),
+            profile: "coder".into(),
+            description: "nested background".into(),
+            model: "m".into(),
+            background: true,
+        });
+        assert!(!added.pass);
+        let Event::ConversationUpdate {
+            agent_id: Some(parent),
+            item: ConversationItem::Tool { agents, .. },
+            ..
+        } = &added.events[0]
+        else {
+            panic!("nested card update")
+        };
+        assert_eq!(parent, "parent");
+        assert!(!agents[0].finished);
+
+        let finished = projection.project(&Event::ConversationStatus {
+            session_id: "s1".into(),
+            agent_id: "grandchild".into(),
+            running: false,
+            run_id: Some("run-1".into()),
+        });
+        let Event::ConversationUpdate {
+            item: ConversationItem::Tool { agents, .. },
+            ..
+        } = &finished.events[0]
+        else {
+            panic!("nested finish update")
+        };
+        assert!(agents[0].finished);
+
+        let resumed = projection.project(&Event::SubagentCard {
+            session_id: "s1".into(),
+            item_id: "nested-call".into(),
+            agent_id: "grandchild".into(),
+            run_id: Some("run-2".into()),
+            profile: "coder".into(),
+            description: "nested background resumed".into(),
+            model: "m".into(),
+            background: true,
+        });
+        let Event::ConversationUpdate {
+            item: ConversationItem::Tool { agents, .. },
+            ..
+        } = &resumed.events[0]
+        else {
+            panic!("nested resume card")
+        };
+        assert!(agents[0].finished);
+        assert!(!agents[1].finished);
+
+        let stale = projection.project(&Event::ConversationStatus {
+            session_id: "s1".into(),
+            agent_id: "grandchild".into(),
+            running: false,
+            run_id: Some("run-1".into()),
+        });
+        assert!(stale.events.is_empty());
+        let finished = projection.project(&Event::ConversationStatus {
+            session_id: "s1".into(),
+            agent_id: "grandchild".into(),
+            running: false,
+            run_id: Some("run-2".into()),
+        });
+        let Event::ConversationUpdate {
+            item: ConversationItem::Tool { agents, .. },
+            ..
+        } = &finished.events[0]
+        else {
+            panic!("second run finish update")
+        };
+        assert!(agents.iter().all(|agent| agent.finished));
+    }
+
+    #[test]
+    fn a_nested_card_observes_a_terminal_status_that_arrived_first() {
+        let mut projection = ConversationProjection::new();
+        projection.project(&Event::ConversationStatus {
+            session_id: "s1".into(),
+            agent_id: "grandchild".into(),
+            running: false,
+            run_id: Some("run-1".into()),
+        });
+        projection.project(&Event::ConversationUpdate {
+            session_id: "s1".into(),
+            agent_id: Some("parent".into()),
+            run_id: None,
+            item: ConversationItem::Tool {
+                id: "nested-call".into(),
+                tool: "Agent".into(),
+                summary: "delegate".into(),
+                detail: "{}".into(),
+                output: String::new(),
+                status: ConversationToolStatus::Running,
+                turn_id: None,
+                edit: None,
+                live_note: None,
+                agents: Vec::new(),
+                approval_pending: false,
+            },
+        });
+        let added = projection.project(&Event::SubagentCard {
+            session_id: "s1".into(),
+            item_id: "nested-call".into(),
+            agent_id: "grandchild".into(),
+            run_id: Some("run-1".into()),
+            profile: "coder".into(),
+            description: "nested background".into(),
+            model: "m".into(),
+            background: true,
+        });
+        let Event::ConversationUpdate {
+            item: ConversationItem::Tool { agents, .. },
+            ..
+        } = &added.events[0]
+        else {
+            panic!("late nested card update")
+        };
+        assert!(agents[0].finished);
+        assert!(agents[0].finished_seq.is_some());
     }
 
     #[test]
@@ -757,6 +1106,7 @@ mod tests {
             live_note: Some("working".into()),
             agents: vec![ConversationAgentCard {
                 agent_id: "a1".into(),
+                run_id: None,
                 profile: "coder".into(),
                 description: "child".into(),
                 model: "m".into(),

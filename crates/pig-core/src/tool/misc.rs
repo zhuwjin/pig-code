@@ -696,7 +696,7 @@ impl Tool for SendMessageTool {
             let mut registry = ctx.state.agent_steers.lock().map_err(|e| e.to_string())?;
             match registry.get_mut(agent_id) {
                 Some(queue) => {
-                    queue.push_back(message.to_string());
+                    queue.push_back(crate::task::AgentSteer::message(message.to_string()));
                     Ok(ToolEffect::plain(format!(
                         "Delivered to {agent_id}: the subagent sees the message at its next step boundary."
                     )))
@@ -1557,7 +1557,7 @@ mod task_wait_tests {
             .expect("steers")
             .entry("a1".into())
             .or_default()
-            .push_back(queued);
+            .push_back(crate::task::AgentSteer::message(queued));
         let mut tracker = ChangeTracker::default();
         let effect = TaskWait
             .execute(

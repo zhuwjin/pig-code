@@ -89,52 +89,74 @@ impl Manager {
                 notification,
             } => {
                 if self.deleted_sessions.contains(&session_id) {
+                    super::operations::delete_session_artifacts(
+                        &self.sessions_dir,
+                        &session_id,
+                        true,
+                    );
                     return;
                 }
                 let detached = task.detached;
                 let suppressed = task.terminal_notification_suppressed;
                 if let Some(owner) = owner_agent_id {
-                    // A background task spawned by a subagent belongs to that
-                    // child: keep the task row for the panel, but never queue a
-                    // parent notification or start a parent turn. A running
-                    // child gets the completion as a steer at its next step.
-                    let result = self
-                        .store
-                        .lock()
-                        .expect("store lock")
-                        .upsert_background_task(&session_id, task.as_ref());
-                    if let Err(error) = result {
-                        emit(
-                            &event_tx,
-                            Event::Error {
-                                session_id: Some(session_id),
-                                error,
-                                fatal: false,
-                            },
-                        );
-                        return;
-                    }
-                    self.emit_task_list(&event_tx, &session_id);
-                    let wait_delivered = self.sessions.get(&session_id).is_some_and(|entry| {
+                    let entry = self.sessions.get(&session_id);
+                    let wait_delivered = entry.is_some_and(|entry| {
                         crate::task::task_wait_delivered(&entry.state, &owner, &task.summary.id)
                     });
-                    if detached && !suppressed && !wait_delivered {
-                        if let Some(entry) = self.sessions.get(&session_id) {
-                            let text = crate::task::notification::render_notification_batch(
-                                std::slice::from_ref(&notification),
+                    let owner_running = entry.is_some_and(|entry| {
+                        entry
+                            .state
+                            .agent_steers
+                            .lock()
+                            .expect("agent steers lock")
+                            .contains_key(&owner)
+                    });
+                    if !detached || suppressed || wait_delivered || owner_running {
+                        // A live direct parent consumes the terminal fact as a
+                        // steer at its next step. TaskWait and foreground runs
+                        // persist the task row without another notification.
+                        let result = self
+                            .store
+                            .lock()
+                            .expect("store lock")
+                            .upsert_background_task(&session_id, task.as_ref());
+                        if let Err(error) = result {
+                            emit(
+                                &event_tx,
+                                Event::Error {
+                                    session_id: Some(session_id),
+                                    error,
+                                    fatal: false,
+                                },
                             );
-                            if let Some(queue) = entry
-                                .state
-                                .agent_steers
-                                .lock()
-                                .expect("agent steers lock")
-                                .get_mut(&owner)
-                            {
-                                queue.push_back(text);
+                            return;
+                        }
+                        self.emit_task_list(&event_tx, &session_id);
+                        let mut routed = true;
+                        if detached && !suppressed && !wait_delivered && owner_running {
+                            if let Some(entry) = self.sessions.get(&session_id) {
+                                let steer =
+                                    crate::task::AgentSteer::notification(notification.clone());
+                                let mut steers =
+                                    entry.state.agent_steers.lock().expect("agent steers lock");
+                                if let Some(queue) = steers.get_mut(&owner) {
+                                    queue.push_back(steer);
+                                } else {
+                                    routed = false;
+                                }
+                            } else {
+                                routed = false;
                             }
                         }
+                        if routed {
+                            return;
+                        }
+                        // The owner finished between the active check and the
+                        // queue write. Use the same durable root fallback.
                     }
-                    return;
+                    // The direct parent has already settled. The root owns the
+                    // durable fallback notification below, so the result is not
+                    // lost with the parent's unregistered steer queue.
                 }
                 let result = self.store.lock().expect("store lock").record_terminal_task(
                     &session_id,
@@ -361,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn a_subagent_owned_task_never_queues_a_parent_notification() {
+    fn an_inactive_subagent_owner_falls_back_to_the_root_notification() {
         let dir = std::env::temp_dir().join(format!(
             "pig-terminal-owner-{}-{}",
             std::process::id(),
@@ -401,13 +423,9 @@ mod tests {
             1,
             "the panel still sees the child's completed task"
         );
-        assert!(
-            store
-                .pending_notifications("s1")
-                .expect("notifications")
-                .is_empty(),
-            "the parent must not be woken by a child-owned task"
-        );
+        let pending = store.pending_notifications("s1").expect("notifications");
+        assert_eq!(pending.len(), 1, "the root receives the orphan's result");
+        assert_eq!(pending[0].id, "task:s1:b1:completed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

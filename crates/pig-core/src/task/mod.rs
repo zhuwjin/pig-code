@@ -39,7 +39,10 @@ pub use registry::{
 
 pub(crate) use output::kill_process_tree;
 pub(crate) use process::{run_foreground_with_profile, spawn_background_with_profile};
-pub(crate) use registry::{TaskWaitInterest, task_wait_delivered};
+pub(crate) use registry::{
+    AgentSteer, TaskWaitInterest, mark_agent_notification_delivered, task_wait_delivered,
+    unregister_agent_steers,
+};
 
 pub use sandbox::AdditionalPermissions;
 pub use sandbox::MissingPathBehavior;

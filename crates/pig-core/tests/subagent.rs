@@ -2519,3 +2519,626 @@ async fn nested_swarm_executes_and_persists_all_cards() {
     assert!(cards.iter().all(|card| card["agent_id"].as_str().is_some()));
     agent.shutdown();
 }
+
+fn nested_tool_record(
+    data_dir: &Path,
+    sid: &str,
+    parent_agent_id: &str,
+    tool: &str,
+) -> serde_json::Value {
+    let path = agent_log_path(data_dir, sid, parent_agent_id);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["type"] == "tool_call" && record["tool"] == tool)
+        .unwrap_or_else(|| panic!("missing nested {tool} record in {}", path.display()))
+}
+
+async fn collect_notifications_after_initial_turn(
+    agent: &pig_core::AgentHandle,
+    initial: &[Event],
+    expected: usize,
+) -> Vec<pig_protocol::TaskNotification> {
+    let mut notifications: Vec<_> = initial
+        .iter()
+        .filter_map(|event| match event {
+            Event::TaskNotificationBatch { notifications, .. } => Some(notifications.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if notifications.len() >= expected {
+        return notifications;
+    }
+    let mut turn_complete = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} nested notifications: {notifications:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), agent.events.recv()).await
+        else {
+            continue;
+        };
+        match event {
+            Event::TaskNotificationBatch {
+                notifications: batch,
+                ..
+            } => {
+                notifications.extend(batch);
+                turn_complete = false;
+            }
+            Event::TurnComplete { .. } if notifications.len() >= expected => {
+                turn_complete = true;
+            }
+            Event::Error { error, .. } => panic!("nested notification turn failed: {error:?}"),
+            _ => {}
+        }
+        if notifications.len() >= expected && turn_complete {
+            return notifications;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_background_agent_continues_child_and_falls_back_to_root() {
+    let (config_path, cwd, data_dir, requests) = setup_with_log("nested-background-agent");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_BG", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested background delegation failed: {output}");
+    assert!(
+        output.contains(mock::SUBAGENT_NESTED_CHILD_DONE),
+        "{output}"
+    );
+    let child_id = parse_agent_id(output).to_string();
+    let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");
+    assert!(
+        nested["output"]
+            .as_str()
+            .expect("receipt")
+            .contains("status: running")
+    );
+    let card = &nested["agent_card"];
+    assert_eq!(card["background"], serde_json::json!(true));
+    let grandchild_id = card["agent_id"]
+        .as_str()
+        .expect("grandchild id")
+        .to_string();
+    let grandchild_run_id = card["run_id"].as_str().expect("grandchild run").to_string();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ConversationUpdate {
+            agent_id: Some(agent_id),
+            item: pig_protocol::ConversationItem::Tool { agents, .. },
+            ..
+        } if agent_id == &child_id && agents.iter().any(|card| {
+            card.agent_id == grandchild_id
+                && card.run_id.as_deref() == Some(grandchild_run_id.as_str())
+                && !card.finished
+        })
+    )));
+
+    let notifications = collect_notifications_after_initial_turn(&agent, &events, 1).await;
+    assert_eq!(
+        notifications.len(),
+        1,
+        "the grandchild must notify exactly once"
+    );
+    let notification = &notifications[0];
+    assert_eq!(
+        notification.agent_id.as_deref(),
+        Some(grandchild_id.as_str())
+    );
+    assert_eq!(notification.status, pig_protocol::TaskStatus::Completed);
+    let Some(pig_protocol::TaskNotificationOutput::File { path, .. }) = &notification.output else {
+        panic!("grandchild notification should point to its result")
+    };
+    assert!(
+        std::fs::read_to_string(path)
+            .expect("grandchild result")
+            .contains(mock::SUBAGENT_GRANDCHILD_DONE)
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .expect("request log")
+            .iter()
+            .filter(|request| request.contains(&notification.id))
+            .count(),
+        1,
+        "the root model receives the fallback notification once"
+    );
+
+    let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let (parent, run, state): (String, String, String) = db
+        .query_row(
+            "SELECT parent_agent_id, run_id, state FROM background_tasks
+             WHERE session_id = ?1 AND agent_id = ?2",
+            rusqlite::params![sid, grandchild_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("grandchild task row");
+    assert_eq!(parent, child_id);
+    assert_eq!(run, grandchild_run_id);
+    assert_eq!(state, "completed");
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_background_swarm_settles_each_grandchild_independently() {
+    let (config_path, cwd, data_dir) = setup("nested-background-swarm");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_SWARM_BG", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested background swarm failed: {output}");
+    assert!(
+        output.contains(mock::SUBAGENT_NESTED_CHILD_DONE),
+        "{output}"
+    );
+    let child_id = parse_agent_id(output).to_string();
+    let nested = nested_tool_record(&data_dir, &sid, &child_id, "AgentSwarm");
+    assert_eq!(nested["agent_card"], serde_json::Value::Null);
+    let cards = nested["agent_cards"].as_array().expect("swarm cards");
+    assert_eq!(cards.len(), 2);
+    assert!(cards.iter().all(|card| card["background"] == true));
+    let expected: std::collections::HashMap<String, String> = cards
+        .iter()
+        .map(|card| {
+            (
+                card["agent_id"].as_str().expect("agent id").to_string(),
+                card["run_id"].as_str().expect("run id").to_string(),
+            )
+        })
+        .collect();
+
+    let notifications = collect_notifications_after_initial_turn(&agent, &events, 2).await;
+    assert_eq!(
+        notifications.len(),
+        2,
+        "no duplicate or aggregate notification"
+    );
+    let notified: std::collections::HashSet<String> = notifications
+        .iter()
+        .map(|notification| notification.agent_id.clone().expect("grandchild id"))
+        .collect();
+    assert_eq!(notified, expected.keys().cloned().collect());
+    for notification in &notifications {
+        assert_eq!(notification.status, pig_protocol::TaskStatus::Completed);
+        let Some(pig_protocol::TaskNotificationOutput::File { path, .. }) = &notification.output
+        else {
+            panic!("each grandchild needs its own result file")
+        };
+        assert!(
+            std::fs::read_to_string(path)
+                .expect("grandchild result")
+                .contains(mock::SUBAGENT_GRANDCHILD_DONE)
+        );
+    }
+
+    let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let mut statement = db
+        .prepare(
+            "SELECT agent_id, parent_agent_id, run_id, state FROM background_tasks
+             WHERE session_id = ?1 AND agent_id IS NOT NULL",
+        )
+        .expect("task query");
+    let rows = statement
+        .query_map(rusqlite::params![sid], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .expect("task rows")
+        .map(|row| row.expect("task row"))
+        .collect::<Vec<_>>();
+    for (agent_id, run_id) in expected {
+        let row = rows
+            .iter()
+            .find(|row| row.0 == agent_id)
+            .expect("grandchild row");
+        assert_eq!(row.1, child_id);
+        assert_eq!(row.2, run_id);
+        assert_eq!(row.3, "completed");
+    }
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_background_wait_delivers_to_direct_parent_without_root_duplicate() {
+    let (config_path, cwd, data_dir) = setup("nested-background-wait");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_BG_WAIT", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TaskNotificationBatch { .. }))
+    );
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested TaskWait scenario failed: {output}");
+    let child_id = parse_agent_id(output).to_string();
+    let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");
+    let task_id = nested["output"]
+        .as_str()
+        .expect("nested receipt")
+        .lines()
+        .find_map(|line| line.strip_prefix("task_id: "))
+        .expect("nested task id")
+        .to_string();
+    let waited = nested_tool_record(&data_dir, &sid, &child_id, "TaskWait");
+    assert!(
+        waited["output"]
+            .as_str()
+            .expect("TaskWait output")
+            .contains(&format!("task:{sid}:{task_id}:completed"))
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(100), agent.events.recv()).await
+        else {
+            continue;
+        };
+        assert!(!matches!(event, Event::TaskNotificationBatch { .. }));
+    }
+    let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let pending: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM task_notifications WHERE session_id = ?1 AND delivery_state = 'scheduled'",
+            rusqlite::params![sid],
+            |row| row.get(0),
+        )
+        .expect("pending notifications");
+    assert_eq!(pending, 0, "TaskWait consumption must not wake the root");
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_background_restart_recovers_lost_run_with_direct_lineage() {
+    let (config_path, cwd, data_dir) = setup("nested-background-restart");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let sid = new_session(&agent, cwd.clone()).await;
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_BG_LOOP", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested running grandchild failed: {output}");
+    let child_id = parse_agent_id(output).to_string();
+    let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");
+    let grandchild_id = nested["agent_card"]["agent_id"]
+        .as_str()
+        .expect("grandchild id")
+        .to_string();
+    let grandchild_run_id = nested["agent_card"]["run_id"]
+        .as_str()
+        .expect("grandchild run")
+        .to_string();
+    agent.shutdown();
+    drop(agent);
+
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir);
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    agent
+        .ops
+        .send(Op::ListAgents {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    let events = recv_until(&agent.events, Duration::from_secs(20), |event| {
+        matches!(
+            event,
+            Event::AgentCatalogChanged { agents, .. }
+                if agents.iter().any(|entry| {
+                    entry.agent_id == grandchild_id
+                        && entry.status == Some(pig_protocol::AgentRunStatus::Lost)
+                })
+        )
+    })
+    .await;
+    let agents = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentCatalogChanged { agents, .. } => Some(agents),
+            _ => None,
+        })
+        .expect("agent catalog");
+    let grandchild = agents
+        .iter()
+        .find(|entry| entry.agent_id == grandchild_id)
+        .expect("grandchild catalog entry");
+    assert_eq!(grandchild.parent_id.as_deref(), Some(child_id.as_str()));
+    assert_eq!(
+        grandchild.run_id.as_deref(),
+        Some(grandchild_run_id.as_str())
+    );
+    assert_eq!(grandchild.status, Some(pig_protocol::AgentRunStatus::Lost));
+    assert!(
+        grandchild.record_path.is_some(),
+        "Lost child remains resumable"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_a_session_cleans_up_a_running_nested_background_agent() {
+    let (config_path, cwd, data_dir) = setup("nested-background-delete");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_BG_LOOP", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested background setup failed: {output}");
+    let child_id = parse_agent_id(output).to_string();
+    let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");
+    let grandchild_id = nested["agent_card"]["agent_id"]
+        .as_str()
+        .expect("grandchild id")
+        .to_string();
+    let agents_dir = data_dir.join("sessions").join(format!("{sid}.agents"));
+    assert!(agent_log_path(&data_dir, &sid, &grandchild_id).is_file());
+
+    agent
+        .ops
+        .send(Op::DeleteSession {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap();
+    recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::SessionList { sessions, .. }
+                if !sessions.iter().any(|session| session.id == sid)
+        )
+    })
+    .await;
+    let cleanup_deadline = Instant::now() + Duration::from_secs(10);
+    while agents_dir.exists() {
+        assert!(
+            Instant::now() < cleanup_deadline,
+            "nested contexts remained after the background driver settled"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let remaining: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM background_tasks WHERE session_id = ?1",
+            rusqlite::params![sid],
+            |row| row.get(0),
+        )
+        .expect("deleted task rows");
+    assert_eq!(remaining, 0);
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(100), agent.events.recv()).await
+        else {
+            continue;
+        };
+        assert!(!matches!(
+            event,
+            Event::TaskNotificationBatch { session_id, .. } if session_id == sid
+        ));
+    }
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_background_stop_then_resume_releases_writer_and_preserves_run_lineage() {
+    let (config_path, cwd, data_dir) = setup("nested-background-stop-resume");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+    let first = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_BG_STOP", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&first).expect("root Agent result");
+    assert!(!is_error, "nested TaskStop scenario failed: {output}");
+    let notifications = collect_notifications_after_initial_turn(&agent, &first, 1).await;
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].status, pig_protocol::TaskStatus::Killed);
+    let grandchild_id = notifications[0]
+        .agent_id
+        .clone()
+        .expect("stopped grandchild id");
+
+    let second = run_turn(
+        &agent,
+        &sid,
+        &format!("{} RESUME_NESTED {grandchild_id}", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (resumed, is_error) =
+        agent_end_with(&second, "call_agent_2").expect("resumed grandchild result");
+    assert!(!is_error, "the stopped writer must be released: {resumed}");
+    assert!(resumed.contains(mock::SUBAGENT_RESUMED_DONE), "{resumed}");
+    assert!(
+        resumed.contains(&format!("agent_id: {grandchild_id}")),
+        "{resumed}"
+    );
+
+    let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let mut statement = db
+        .prepare(
+            "SELECT parent_agent_id, run_id, state FROM background_tasks
+             WHERE session_id = ?1 AND agent_id = ?2 ORDER BY task_id",
+        )
+        .expect("task query");
+    let rows = statement
+        .query_map(rusqlite::params![sid, grandchild_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("task rows")
+        .map(|row| row.expect("task row"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "stop and resume create distinct run records");
+    assert_eq!(rows[0].2, "killed");
+    assert_eq!(
+        rows[1].0, sid,
+        "the root is the resumed run's direct parent"
+    );
+    assert_eq!(rows[1].2, "completed");
+    assert_ne!(rows[0].1, rows[1].1, "resume creates a new run id");
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_nested_parent_consumes_automatic_notification_without_waking_root() {
+    let (config_path, cwd, data_dir) = setup("nested-background-steer");
+    let mut config = std::fs::read_to_string(&config_path).expect("config");
+    config.push_str("\n[agents]\nmax_delegation_depth = 2\n");
+    std::fs::write(&config_path, config).expect("nested depth config");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let sid = new_session(&agent, cwd).await;
+    let events = run_turn(
+        &agent,
+        &sid,
+        &format!("{} NESTED_BG_STEER", mock::SUBAGENT_TRIGGER),
+        ExecMode::Auto,
+        None,
+    )
+    .await;
+    let (output, is_error) = agent_end(&events).expect("root Agent result");
+    assert!(!is_error, "nested automatic notification failed: {output}");
+    assert!(
+        output.contains(mock::SUBAGENT_NESTED_CHILD_DONE),
+        "{output}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TaskNotificationBatch { .. }))
+    );
+    let child_id = parse_agent_id(output).to_string();
+    let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");
+    let task_id = nested["output"]
+        .as_str()
+        .expect("nested receipt")
+        .lines()
+        .find_map(|line| line.strip_prefix("task_id: "))
+        .expect("nested task id")
+        .to_string();
+    let notification_id = format!("task:{sid}:{task_id}:completed");
+    let child_context =
+        std::fs::read_to_string(agent_log_path(&data_dir, &sid, &child_id)).expect("child context");
+    assert!(
+        child_context.contains("New message from the coordinating agent")
+            && child_context.contains(&notification_id),
+        "the running direct parent receives the terminal notification"
+    );
+
+    let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("SQLite");
+    let suppressed: bool = db
+        .query_row(
+            "SELECT terminal_notification_suppressed FROM background_tasks
+             WHERE session_id = ?1 AND task_id = ?2",
+            rusqlite::params![sid, task_id],
+            |row| row.get(0),
+        )
+        .expect("nested task suppression");
+    assert!(
+        suppressed,
+        "a consumed steer must not later fall back to root"
+    );
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(100), agent.events.recv()).await
+        else {
+            continue;
+        };
+        assert!(!matches!(event, Event::TaskNotificationBatch { .. }));
+    }
+    agent.shutdown();
+}

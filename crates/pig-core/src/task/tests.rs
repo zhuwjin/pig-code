@@ -34,6 +34,81 @@ fn queued_registration_marks_pending() {
     mark_agent_task_started(&state, "b999");
 }
 
+#[test]
+fn nested_notification_is_handed_off_only_when_the_parent_did_not_consume_it() {
+    let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = SessionToolState::new("s-nested".into(), task_tx, vec![], vec![]);
+    state.owner_agent_id = Some("parent".into());
+    let task_id = register_agent_run_queued(
+        &state,
+        "nested child".into(),
+        tokio_util::sync::CancellationToken::new(),
+        AgentRunMetadata {
+            agent_id: "grandchild".into(),
+            run_id: "run-grandchild".into(),
+            parent_agent_id: Some("parent".into()),
+            delegation_depth: 2,
+            profile: "general-purpose".into(),
+            usage: (0, 0, 0),
+        },
+        true,
+    );
+    mark_agent_task_started(&state, &task_id);
+    let notification = {
+        let mut tasks = state.tasks.lock().expect("task registry lock");
+        let entry = tasks
+            .iter_mut()
+            .find(|entry| entry.id == task_id)
+            .expect("nested task");
+        entry.status = TaskStatus::Completed;
+        entry.ended_at = Some(crate::rollout::now_secs());
+        super::notification::terminal_notification(&state.session_id, entry)
+    };
+    while task_rx.try_recv().is_ok() {}
+
+    state
+        .agent_steers
+        .lock()
+        .expect("agent steers lock")
+        .entry("parent".into())
+        .or_default()
+        .push_back(AgentSteer::notification(notification.clone()));
+    unregister_agent_steers(&state, "parent");
+    let Some(super::notification::TaskChange::Terminal {
+        owner_agent_id,
+        task,
+        ..
+    }) = task_rx.try_recv().ok()
+    else {
+        panic!("an unconsumed notification must be handed off to the manager")
+    };
+    assert_eq!(owner_agent_id.as_deref(), Some("parent"));
+    assert_eq!(task.summary.id, task_id);
+
+    state
+        .agent_steers
+        .lock()
+        .expect("agent steers lock")
+        .entry("parent".into())
+        .or_default()
+        .push_back(AgentSteer::notification(notification));
+    mark_agent_notification_delivered(&state, &task_id);
+    while task_rx.try_recv().is_ok() {}
+    unregister_agent_steers(&state, "parent");
+    assert!(
+        task_rx.try_recv().is_err(),
+        "a notification persisted in the parent's context must not be repeated"
+    );
+    assert!(
+        state
+            .tasks
+            .lock()
+            .expect("task registry lock")
+            .iter()
+            .any(|entry| entry.id == task_id && entry.terminal_notification_suppressed)
+    );
+}
+
 /// The panel gets the exact spill path from the registry snapshot (it must not
 /// reconstruct it from the workspace) and shell tasks point under the session
 /// data directory.

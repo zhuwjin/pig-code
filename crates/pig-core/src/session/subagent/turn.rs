@@ -1258,11 +1258,7 @@ impl Session {
         struct SteerUnregister(crate::task::SessionToolState, String);
         impl Drop for SteerUnregister {
             fn drop(&mut self) {
-                self.0
-                    .agent_steers
-                    .lock()
-                    .expect("agent steers lock")
-                    .remove(&self.1);
+                crate::task::unregister_agent_steers(&self.0, &self.1);
             }
         }
         self.state
@@ -1290,24 +1286,41 @@ impl Session {
                 let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
                 return child_persist_stop(self, &error, steps_run, usage);
             }
-            let steered: Vec<String> = {
+            let steered: Vec<crate::task::AgentSteer> = {
                 let mut registry = self.state.agent_steers.lock().expect("agent steers lock");
                 registry
                     .get_mut(&self.agent.id)
                     .map(|queue| queue.drain(..).collect())
                     .unwrap_or_default()
             };
-            for message in steered {
+            for steer in steered {
                 let wrapped = format!(
-                    "New message from the coordinating agent (delivered while you were working):\n\n{message}"
+                    "New message from the coordinating agent (delivered while you were working):\n\n{}",
+                    steer.text
                 );
                 let mut message = ChatMsg::user(wrapped);
                 if let Err(error) = persist_child_message(self, &mut message) {
+                    if steer.notification.is_some()
+                        && let Some(queue) = self
+                            .state
+                            .agent_steers
+                            .lock()
+                            .expect("agent steers lock")
+                            .get_mut(&self.agent.id)
+                    {
+                        queue.push_front(steer);
+                    }
                     let usage = (self.turn_input, self.turn_cache_read, self.turn_output);
                     return child_persist_stop(self, &error, steps_run, usage);
                 }
                 self.agent.history.push(message);
                 self.emit_child_history_since(tx, None);
+                if let Some(notification) = steer.notification {
+                    crate::task::mark_agent_notification_delivered(
+                        &self.state,
+                        &notification.task_id,
+                    );
+                }
             }
             self.report_child_progress(tx, format!("Step {step} · thinking…"));
             let mut rt = StepRuntime::child();

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use pig_protocol::{TaskKind, TaskStatus, TaskSummary};
+use pig_protocol::{TaskKind, TaskNotification, TaskStatus, TaskSummary};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rollout::now_secs;
@@ -69,8 +69,9 @@ pub struct TaskEntry {
     /// agent_id of subagent tasks (always None for shell commands); used for resume-while-running conflict detection
     pub agent_id: Option<String>,
     pub run: Option<AgentRunMetadata>,
-    /// The agent that spawned this task; None for the root session. A child's
-    /// background task must not wake the parent.
+    /// The direct agent that spawned this task; None for the root session.
+    /// A running owner receives a steer; an inactive owner falls back to the
+    /// root session's durable notification queue.
     pub owner_agent_id: Option<String>,
     pub record_path: Option<PathBuf>,
     pub result_path: Option<PathBuf>,
@@ -253,12 +254,37 @@ impl Drop for AgentWriterGuard {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AgentSteer {
+    pub text: String,
+    pub notification: Option<TaskNotification>,
+}
+
+impl AgentSteer {
+    pub(crate) fn message(text: String) -> Self {
+        Self {
+            text,
+            notification: None,
+        }
+    }
+
+    pub(crate) fn notification(notification: TaskNotification) -> Self {
+        let text =
+            super::notification::render_notification_batch(std::slice::from_ref(&notification));
+        Self {
+            text,
+            notification: Some(notification),
+        }
+    }
+}
+
 /// Registration of one subagent's explicit TaskWait interest. The ids stay in
 /// the shared set after a successful wait so the runner does not queue the
 /// same terminal notification as a steer; timeout/error drops the registration.
 pub(crate) struct TaskWaitInterest {
     waits: Arc<Mutex<HashMap<String, HashSet<String>>>>,
-    steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
+    steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<AgentSteer>>>>,
+    state: SessionToolState,
     owner: String,
     task_ids: Vec<String>,
     delivered: bool,
@@ -283,6 +309,7 @@ impl TaskWaitInterest {
         Self {
             waits: state.agent_task_waits.clone(),
             steers: state.agent_steers.clone(),
+            state: state.clone(),
             owner: owner.to_string(),
             task_ids,
             delivered: false,
@@ -311,12 +338,15 @@ impl TaskWaitInterest {
         if !notifications.is_empty() {
             let mut steers = self.steers.lock().expect("agent steers lock");
             if let Some(queue) = steers.get_mut(&self.owner) {
-                queue.retain(|text| {
+                queue.retain(|steer| {
                     !notifications
                         .iter()
-                        .any(|notification| text.contains(&notification.id))
+                        .any(|notification| steer.text.contains(&notification.id))
                 });
             }
+        }
+        for notification in notifications {
+            mark_agent_notification_delivered(&self.state, &notification.task_id);
         }
         self.delivered = true;
     }
@@ -348,6 +378,52 @@ pub(crate) fn task_wait_delivered(state: &SessionToolState, owner: &str, task_id
         .expect("agent task waits lock")
         .get(owner)
         .is_some_and(|ids| ids.contains(task_id))
+}
+
+pub(crate) fn mark_agent_notification_delivered(state: &SessionToolState, task_id: &str) {
+    let changed = {
+        let mut tasks = state.tasks.lock().expect("task registry lock");
+        if let Some(entry) = tasks.iter_mut().find(|entry| entry.id == task_id) {
+            let changed = !entry.terminal_notification_suppressed;
+            entry.terminal_notification_suppressed = true;
+            changed
+        } else {
+            false
+        }
+    };
+    if changed {
+        state.notify_task(task_id);
+    }
+}
+
+/// Remove a finished agent's steer queue. Notifications that never reached its
+/// durable context are re-emitted after unregistering, so the manager routes
+/// them to the root fallback instead of dropping them with the queue.
+pub(crate) fn unregister_agent_steers(state: &SessionToolState, owner: &str) {
+    let pending = state
+        .agent_steers
+        .lock()
+        .expect("agent steers lock")
+        .remove(owner);
+    let task_ids: HashSet<String> = pending
+        .into_iter()
+        .flatten()
+        .filter_map(|steer| steer.notification.map(|notification| notification.task_id))
+        .collect();
+    if task_ids.is_empty() {
+        return;
+    }
+    let changes: Vec<super::notification::TaskChange> = {
+        let tasks = state.tasks.lock().expect("task registry lock");
+        tasks
+            .iter()
+            .filter(|entry| task_ids.contains(&entry.id) && !entry.terminal_notification_suppressed)
+            .map(|entry| super::notification::terminal_change(&state.session_id, entry))
+            .collect()
+    };
+    for change in changes {
+        let _ = state.task_notify.send(change);
+    }
 }
 
 /// Session-scoped shared tool state: todo list + task registry + TaskChange
@@ -389,7 +465,7 @@ pub struct SessionToolState {
     /// drive loop registers its key at start (presence = running) and drains
     /// the queue at its step boundaries; the SendMessage tool pushes here
     /// (shared Arc — tools and drives both reach it through the state)
-    pub agent_steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
+    pub(crate) agent_steers: Arc<Mutex<HashMap<String, std::collections::VecDeque<AgentSteer>>>>,
     /// Exclusive subagent JSONL writers: agent_id → claimed by one live
     /// driver. Claimed before any context write and released on every exit
     /// path (including panic), so a resume cannot open a second writer while

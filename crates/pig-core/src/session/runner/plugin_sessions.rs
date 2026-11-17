@@ -600,7 +600,7 @@ impl Manager {
         let mut steers = entry.state.agent_steers.lock().expect("agent steer lock");
         match steers.get_mut(&agent_id) {
             Some(queue) => {
-                queue.push_back(message);
+                queue.push_back(crate::task::AgentSteer::message(message));
                 Ok(serde_json::Value::Null)
             }
             None => Err(CoreError::PluginPermission {

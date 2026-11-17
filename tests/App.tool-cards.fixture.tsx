@@ -12,6 +12,7 @@ const themeStore = new ThemeStore();
 function agent(id: string, description: string, finished: boolean, finishedSeq?: number): AgentCard {
   return {
     agent_id: id,
+    run_id: `run-${id}`,
     profile: "coder",
     description,
     model: "mock-model",

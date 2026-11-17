@@ -100,6 +100,7 @@ export interface HookRun {
 
 export interface AgentCard {
   agent_id: string;
+  run_id: string | null;
   profile: string;
   description: string;
   model: string;

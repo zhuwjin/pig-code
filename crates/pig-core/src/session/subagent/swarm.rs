@@ -55,11 +55,6 @@ impl Session {
             return fail(note);
         }
         let background = args["run_in_background"].as_bool().unwrap_or(false);
-        if background && self.is_subagent() {
-            return fail(
-                "Background delegation from a subagent is not supported; use a foreground AgentSwarm call or delegate the background tasks from the root session.".to_string(),
-            );
-        }
         let runtime = self.runtime_config_cloned();
         let session_id = self.event_session_id().to_string();
         let preps = match crate::agent::prepare_swarm_children(

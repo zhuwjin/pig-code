@@ -83,13 +83,22 @@ pub(crate) fn project_display_items_with_metadata(
             }
         })
         .collect();
-    project_stored_items(&stored, edits, base)
+    project_stored_items_with_background(&stored, edits, base, false)
 }
 
 fn project_stored_items(
     stored: &[StoredAgentMsg],
     edits: &HashMap<String, pig_protocol::EditDiff>,
     base: usize,
+) -> Vec<ConversationItem> {
+    project_stored_items_with_background(stored, edits, base, true)
+}
+
+fn project_stored_items_with_background(
+    stored: &[StoredAgentMsg],
+    edits: &HashMap<String, pig_protocol::EditDiff>,
+    base: usize,
+    background_finished: bool,
 ) -> Vec<ConversationItem> {
     let mut items: Vec<ConversationItem> = Vec::new();
     // Tool-row indexes indexed by call id: for backfilling output from tool result messages
@@ -198,12 +207,14 @@ fn project_stored_items(
                             .enumerate()
                             .map(|(index, card)| pig_protocol::ConversationAgentCard {
                                 agent_id: card.agent_id.clone(),
+                                run_id: Some(card.run_id.clone()),
                                 profile: card.profile.clone(),
                                 description: card.description.clone(),
                                 model: card.model.clone(),
                                 background: card.background,
-                                finished: true,
-                                finished_seq: Some(index as u64 + 1),
+                                finished: !card.background || background_finished,
+                                finished_seq: (!card.background || background_finished)
+                                    .then_some(index as u64 + 1),
                                 live_note: None,
                             })
                             .collect();

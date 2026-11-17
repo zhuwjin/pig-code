@@ -94,11 +94,6 @@ impl Session {
             );
         }
         let background = args["run_in_background"].as_bool().unwrap_or(false);
-        if background && self.is_subagent() {
-            return fail(
-                "Background delegation from a subagent is not supported; use a foreground Agent call or delegate the background task from the root session.".to_string(),
-            );
-        }
         let fork = args["fork"].as_bool().unwrap_or(false);
         let resume = args["resume"].as_str().unwrap_or("").trim();
         let subagent_type = args["subagent_type"].as_str().unwrap_or("").trim();

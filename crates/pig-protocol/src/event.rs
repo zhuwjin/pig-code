@@ -285,6 +285,7 @@ pub enum ConversationToolStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConversationAgentCard {
     pub agent_id: String,
+    pub run_id: Option<String>,
     pub profile: String,
     pub description: String,
     pub model: String,

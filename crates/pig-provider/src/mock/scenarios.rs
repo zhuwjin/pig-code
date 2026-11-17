@@ -1585,12 +1585,27 @@ pub(super) fn subagent_parent_response(body: &str) -> Vec<String> {
                 }),
             )
         }
+        "RESUME_NESTED" => {
+            if tool_answered(body, "call_agent_2") {
+                return subagent_parent_done();
+            }
+            subagent_agent_call(
+                "call_agent_2",
+                serde_json::json!({
+                    "description": "resume stopped nested grandchild",
+                    "prompt": child_prompt("RESUMED"),
+                    "resume": profile_arg.expect("RESUME_NESTED needs the grandchild agent_id"),
+                }),
+            )
+        }
         _ => {
             if tool_answered(body, "call_agent_1") {
                 return subagent_parent_done();
             }
             let default_type = match behavior {
-                "BASH" | "LOOP" | "LONG" | "NESTED" | "NESTED_SWARM" => "general-purpose",
+                "BASH" | "LOOP" | "LONG" | "NESTED" | "NESTED_SWARM" | "NESTED_BG"
+                | "NESTED_SWARM_BG" | "NESTED_BG_LOOP" | "NESTED_BG_WAIT" | "NESTED_BG_STOP"
+                | "NESTED_BG_STEER" => "general-purpose",
                 _ => "explore",
             };
             subagent_agent_call(
@@ -1613,7 +1628,12 @@ pub(super) fn subagent_parent_response(body: &str) -> Vec<String> {
 /// conclusion text.
 pub(super) fn subagent_child_response(body: &str, tool_results: usize) -> Vec<String> {
     let user_text = last_user_text(body);
-    let behavior = user_text
+    let behavior_source = if user_text.contains(SUBAGENT_CHILD_PREFIX) {
+        &user_text
+    } else {
+        body
+    };
+    let behavior = behavior_source
         .split(SUBAGENT_CHILD_PREFIX)
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
@@ -1625,6 +1645,70 @@ pub(super) fn subagent_child_response(body: &str, tool_results: usize) -> Vec<St
         ]
     };
     match behavior {
+        "NESTED_SWARM_BG" if !tool_answered(body, "call_nested_swarm_bg") => tool_call_chunks(
+            "call_nested_swarm_bg",
+            "AgentSwarm",
+            &serde_json::json!({
+                "prompt_template": format!("{SUBAGENT_CHILD_PREFIX}GRANDCHILD handle {{{{item}}}}"),
+                "items": ["nested-bg-a", "nested-bg-b"],
+                "subagent_type": "general-purpose",
+                "run_in_background": true,
+            })
+            .to_string(),
+            None,
+        ),
+        "NESTED_SWARM_BG" => done_text(format!(
+            "Nested background swarm dispatched. {SUBAGENT_NESTED_CHILD_DONE}"
+        )),
+        "NESTED_BG" | "NESTED_BG_LOOP" | "NESTED_BG_WAIT" | "NESTED_BG_STOP"
+        | "NESTED_BG_STEER"
+            if !tool_answered(body, "call_nested_agent_bg") =>
+        {
+            let child_behavior = if matches!(behavior, "NESTED_BG_LOOP" | "NESTED_BG_STOP") {
+                "LOOP"
+            } else {
+                "GRANDCHILD"
+            };
+            subagent_agent_call(
+                "call_nested_agent_bg",
+                serde_json::json!({
+                    "description": "nested background grandchild",
+                    "prompt": format!("{SUBAGENT_CHILD_PREFIX}{child_behavior} finish the nested background task"),
+                    "subagent_type": "general-purpose",
+                    "run_in_background": true,
+                }),
+            )
+        }
+        "NESTED_BG_STEER" if !tool_answered(body, "call_nested_pause") => tool_call_chunks(
+            "call_nested_pause",
+            "ExecCommand",
+            &serde_json::json!({"command": "sleep 0.2"}).to_string(),
+            None,
+        ),
+        "NESTED_BG_STOP" if !tool_answered(body, "call_nested_stop") => {
+            let task_id = extract_marker_id(body, "task_id: ")
+                .expect("nested background receipt should contain task_id");
+            tool_call_chunks(
+                "call_nested_stop",
+                "TaskStop",
+                &serde_json::json!({"task_id": task_id}).to_string(),
+                None,
+            )
+        }
+        "NESTED_BG_WAIT" if !tool_answered(body, "call_nested_wait") => {
+            let task_id = extract_marker_id(body, "task_id: ")
+                .expect("nested background receipt should contain task_id");
+            tool_call_chunks(
+                "call_nested_wait",
+                "TaskWait",
+                &serde_json::json!({"task_ids": [task_id], "timeout_ms": 10_000}).to_string(),
+                None,
+            )
+        }
+        "NESTED_BG" | "NESTED_BG_LOOP" | "NESTED_BG_WAIT" | "NESTED_BG_STOP"
+        | "NESTED_BG_STEER" => done_text(format!(
+            "Nested background child continued. {SUBAGENT_NESTED_CHILD_DONE}"
+        )),
         "NESTED_SWARM" if !tool_answered(body, "call_nested_swarm") => tool_call_chunks(
             "call_nested_swarm",
             "AgentSwarm",
