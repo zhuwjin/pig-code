@@ -254,3 +254,27 @@ fn verified_status_requires_complete_delivery_evidence() {
         "issue evidence is required"
     );
 }
+
+#[test]
+fn legacy_execute_control_plane_stays_removed() {
+    let (workspace, _) = load_matrix();
+    for path in [
+        "crates/pig-core/src/agent/execution.rs",
+        "crates/pig-core/src/agent/backend.rs",
+        "crates/pig-core/src/agent/ipc.rs",
+    ] {
+        let source =
+            fs::read_to_string(workspace.join(path)).expect("read execution control source");
+        for forbidden in [
+            "fn execute(",
+            ".execute(",
+            "execute_reserved",
+            "execute_inner",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "legacy execute-only control returned in {path}: {forbidden}"
+            );
+        }
+    }
+}

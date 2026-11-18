@@ -741,7 +741,7 @@ async fn child_termination_drops_only_its_approvals() {
 async fn local_backend_rejects_external_reconnect_before_running() {
     use crate::agent::AgentExecutionBackend as _;
 
-    let child = test_child_session("a-reconnect-1");
+    let mut child = test_child_session("a-reconnect-1");
     let identity = crate::agent::AgentRunIdentity {
         session_id: child.event_session_id().to_string(),
         agent_id: child.agent.id.clone(),
@@ -758,9 +758,13 @@ async fn local_backend_rejects_external_reconnect_before_running() {
         run: identity.clone(),
         sequence: 1,
     });
-    let result = Box::new(crate::agent::LocalAgentExecutionBackend::new(child))
-        .execute(request)
-        .await;
+    let state = child.state.clone();
+    let life = test_lifecycle(&state, &test_pending(), &mut child, None);
+    let result = Box::new(crate::agent::LocalAgentExecutionBackend::with_supervisor((
+        child, life,
+    )))
+    .start(request)
+    .await;
     assert!(matches!(
         result,
         Err(crate::agent::AgentBackendError::UnsupportedCapability {

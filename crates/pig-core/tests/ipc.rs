@@ -356,9 +356,18 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
         pig_core::agent::AgentExecutionActivation::Start,
     );
     execution.required_capabilities = required_capabilities;
-    let result = timeout(
-        Duration::from_secs(30),
-        parent.backends().execute(
+    execution = execution.with_execution_identity(AgentExecutionIdentity {
+        run: AgentRunIdentity {
+            session_id: "ipc-parent".into(),
+            agent_id: "ipc-parent".into(),
+            run_id: run.run_id.clone(),
+        },
+        attempt: attempt.attempt,
+        backend_epoch: attempt.backend_epoch.clone(),
+    });
+    let mut handle = parent
+        .backends()
+        .start(
             "ipc",
             IpcRunSpec {
                 config_path: Some(config_path),
@@ -367,8 +376,20 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
                 prompt: "read the mock file and summarize".to_string(),
             },
             execution,
-        ),
-    )
+        )
+        .await
+        .expect("start registry IPC handle");
+    let result = timeout(Duration::from_secs(30), async {
+        loop {
+            match handle.next().await? {
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { result, .. } => break Ok(result),
+                AgentExecutionUpdate::Disconnected { detail, .. } => {
+                    return Err(pig_core::agent::AgentBackendError::Disconnected(detail));
+                }
+            }
+        }
+    })
     .await
     .expect("registry IPC execution timeout")
     .expect("registry IPC execution");
@@ -385,12 +406,8 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
         )
         .await
         .expect("settle registered run");
-    ipc_release(address, &run.run_id, false)
-        .await
-        .expect("first release");
-    ipc_release(address, &run.run_id, false)
-        .await
-        .expect("idempotent release");
+    handle.release().await.expect("first release");
+    handle.release().await.expect("idempotent release");
     assert!(
         parent
             .release_execution_blocking(run.run_id, attempt.attempt, attempt.backend_epoch,)

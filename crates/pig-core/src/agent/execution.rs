@@ -95,10 +95,6 @@ pub trait AgentExecutionBackend: Send {
         self: Box<Self>,
         request: AgentExecutionRequest,
     ) -> BoxFuture<'static, Result<Box<dyn super::AgentExecutionHandle>, super::AgentBackendError>>;
-    fn execute(
-        self: Box<Self>,
-        request: AgentExecutionRequest,
-    ) -> BoxFuture<'static, Result<super::AgentBackendResult, super::AgentBackendError>>;
 }
 
 pub(crate) struct LocalAgentBackendFactory;
@@ -129,15 +125,7 @@ pub(crate) struct LocalAgentExecutionBackend {
 }
 
 impl LocalAgentExecutionBackend {
-    #[cfg(test)]
-    pub(crate) fn new(session: Session) -> Self {
-        Self {
-            session,
-            supervisor: None,
-        }
-    }
-
-    fn with_supervisor(
+    pub(crate) fn with_supervisor(
         context: <LocalAgentBackendFactory as super::AgentBackendFactory>::Context,
     ) -> Self {
         Self {
@@ -160,14 +148,6 @@ impl LocalAgentExecutionBackend {
         ]
         .into_iter()
         .collect()
-    }
-
-    fn identity(&self) -> AgentRunIdentity {
-        AgentRunIdentity {
-            session_id: self.session.event_session_id().to_string(),
-            agent_id: self.session.agent.id.clone(),
-            run_id: self.session.agent.run_id().expect("child run identity"),
-        }
     }
 }
 
@@ -202,44 +182,6 @@ impl AgentExecutionBackend for LocalAgentExecutionBackend {
             let handle =
                 crate::session::LocalAgentExecutionHandle::new(this.session, supervisor, request)?;
             Ok(Box::new(handle) as Box<dyn super::AgentExecutionHandle>)
-        })
-    }
-
-    fn execute(
-        self: Box<Self>,
-        request: AgentExecutionRequest,
-    ) -> BoxFuture<'static, Result<super::AgentBackendResult, super::AgentBackendError>> {
-        let identity = self.identity();
-        if request.identity != identity
-            || request
-                .cursor
-                .as_ref()
-                .is_some_and(|cursor| cursor.run != identity)
-        {
-            return Box::pin(async move {
-                Err(super::AgentBackendError::Failed(format!(
-                    "execution identity mismatch for {}:{}",
-                    identity.agent_id, identity.run_id
-                )))
-            });
-        }
-        if (request.activation == AgentExecutionActivation::Reconnect || request.cursor.is_some())
-            && !self.supports(AgentExecutionCapability::Reconnect)
-        {
-            return Box::pin(async move {
-                Err(super::AgentBackendError::UnsupportedCapability {
-                    backend_id: "local".to_string(),
-                    capability: AgentExecutionCapability::Reconnect,
-                })
-            });
-        }
-        Box::pin(async move {
-            let mut session = self.session;
-            Ok(super::AgentBackendResult::from_run(
-                session
-                    .run_subagent_task(&request.events, &request.cancel)
-                    .await,
-            ))
         })
     }
 }

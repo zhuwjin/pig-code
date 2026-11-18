@@ -267,22 +267,13 @@ impl AgentBackendRegistry {
         Ok(())
     }
 
-    pub async fn execute<C: Send + 'static>(
-        &self,
-        backend_id: &str,
-        context: C,
-        request: AgentExecutionRequest,
-    ) -> Result<AgentBackendResult, AgentBackendError> {
-        self.execute_inner(backend_id, context, request, true).await
-    }
-
     pub async fn start<C: Send + 'static>(
         &self,
         backend_id: &str,
         context: C,
         request: AgentExecutionRequest,
     ) -> Result<Box<dyn AgentExecutionHandle>, AgentBackendError> {
-        self.start_inner(backend_id, context, request, true).await
+        self.start_inner(backend_id, context, request).await
     }
 
     pub(crate) async fn start_reserved<C: Send + 'static>(
@@ -308,47 +299,20 @@ impl AgentBackendRegistry {
         backend_id: &str,
         context: C,
         request: AgentExecutionRequest,
-        reserve_tree: bool,
     ) -> Result<Box<dyn AgentExecutionHandle>, AgentBackendError> {
         let factory = self.factory(backend_id)?;
         self.preflight(backend_id, &request.required_capabilities)?;
         let scheduler = self.ensure_scheduler();
-        let permit = if reserve_tree {
-            scheduler.acquire_backend(backend_id, &request.cancel).await
-        } else {
-            scheduler
-                .acquire_reserved_backend(backend_id, &request.cancel)
-                .await
-        }
-        .ok_or(AgentBackendError::Cancelled)?;
+        let permit = scheduler
+            .acquire_backend(backend_id, &request.cancel)
+            .await
+            .ok_or(AgentBackendError::Cancelled)?;
         let backend = factory.create(Box::new(context)).await?;
         let inner = backend.start(request).await?;
         Ok(Box::new(ReservedAgentExecutionHandle {
             inner,
             permit: Some(permit),
         }))
-    }
-
-    async fn execute_inner<C: Send + 'static>(
-        &self,
-        backend_id: &str,
-        context: C,
-        request: AgentExecutionRequest,
-        reserve_tree: bool,
-    ) -> Result<AgentBackendResult, AgentBackendError> {
-        let factory = self.factory(backend_id)?;
-        self.preflight(backend_id, &request.required_capabilities)?;
-        let scheduler = self.ensure_scheduler();
-        let _permit = if reserve_tree {
-            scheduler.acquire_backend(backend_id, &request.cancel).await
-        } else {
-            scheduler
-                .acquire_reserved_backend(backend_id, &request.cancel)
-                .await
-        }
-        .ok_or(AgentBackendError::Cancelled)?;
-        let backend = factory.create(Box::new(context)).await?;
-        backend.execute(request).await
     }
 }
 
@@ -381,28 +345,12 @@ mod tests {
             request: AgentExecutionRequest,
         ) -> BoxFuture<'static, Result<Box<dyn AgentExecutionHandle>, AgentBackendError>> {
             Box::pin(async move {
-                Ok(Box::new(PermitHandle::new(request)) as Box<dyn AgentExecutionHandle>)
-            })
-        }
-
-        fn execute(
-            self: Box<Self>,
-            request: AgentExecutionRequest,
-        ) -> BoxFuture<'static, Result<AgentBackendResult, AgentBackendError>> {
-            Box::pin(async move {
                 if request.identity.run_id == "disconnect" {
                     return Err(AgentBackendError::Disconnected(
                         "injected disconnect".into(),
                     ));
                 }
-                Ok(AgentBackendResult {
-                    status: pig_protocol::AgentRunStatus::Completed,
-                    stop_reason: "completed".into(),
-                    text: "fake".into(),
-                    turns: 1,
-                    queued: false,
-                    usage: (1, 2, 3),
-                })
+                Ok(Box::new(PermitHandle::new(request)) as Box<dyn AgentExecutionHandle>)
             })
         }
     }
@@ -453,7 +401,24 @@ mod tests {
         }
 
         fn next(&mut self) -> BoxFuture<'_, Result<AgentExecutionUpdate, AgentBackendError>> {
-            Self::unsupported()
+            Box::pin(async move {
+                let cursor = crate::agent::AgentExecutionCursor {
+                    attempt: self.identity.attempt,
+                    backend_epoch: self.identity.backend_epoch.clone(),
+                    sequence: 1,
+                };
+                Ok(AgentExecutionUpdate::Settled {
+                    cursor,
+                    result: AgentBackendResult {
+                        status: pig_protocol::AgentRunStatus::Completed,
+                        stop_reason: "completed".into(),
+                        text: "fake".into(),
+                        turns: 1,
+                        queued: false,
+                        usage: (1, 2, 3),
+                    },
+                })
+            })
         }
 
         fn release(&mut self) -> BoxFuture<'_, Result<AgentExecutionRelease, AgentBackendError>> {
@@ -512,6 +477,27 @@ mod tests {
         )
     }
 
+    async fn execute_handle<C: Send + 'static>(
+        registry: &AgentBackendRegistry,
+        backend_id: &str,
+        context: C,
+        request: AgentExecutionRequest,
+    ) -> Result<AgentBackendResult, AgentBackendError> {
+        let mut handle = registry.start(backend_id, context, request).await?;
+        loop {
+            match handle.next().await? {
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { result, .. } => {
+                    handle.release().await?;
+                    return Ok(result);
+                }
+                AgentExecutionUpdate::Disconnected { detail, .. } => {
+                    return Err(AgentBackendError::Disconnected(detail));
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn backend_contract_preflights_contexts_and_preserves_disconnects() {
         let registry = AgentBackendRegistry::default();
@@ -530,7 +516,7 @@ mod tests {
             .required_capabilities
             .insert(AgentExecutionCapability::Media);
         assert!(matches!(
-            registry.execute("fake", "fake-context", unsupported).await,
+            execute_handle(&registry, "fake", "fake-context", unsupported).await,
             Err(AgentBackendError::UnsupportedCapability {
                 capability: AgentExecutionCapability::Media,
                 ..
@@ -538,24 +524,19 @@ mod tests {
         ));
         assert_eq!(creates.load(Ordering::SeqCst), 0);
         assert!(matches!(
-            registry
-                .execute("fake", 42_u32, request("wrong-context"))
-                .await,
+            execute_handle(&registry, "fake", 42_u32, request("wrong-context")).await,
             Err(AgentBackendError::InvalidContext(_))
         ));
         assert_eq!(creates.load(Ordering::SeqCst), 0);
         assert_eq!(
-            registry
-                .execute("fake", "fake-context", request("complete"))
+            execute_handle(&registry, "fake", "fake-context", request("complete"))
                 .await
                 .expect("completed fake")
                 .usage,
             (1, 2, 3)
         );
         assert!(matches!(
-            registry
-                .execute("fake", "fake-context", request("disconnect"))
-                .await,
+            execute_handle(&registry, "fake", "fake-context", request("disconnect")).await,
             Err(AgentBackendError::Disconnected(_))
         ));
         assert_eq!(creates.load(Ordering::SeqCst), 2);
