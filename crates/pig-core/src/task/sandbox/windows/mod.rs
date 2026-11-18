@@ -124,17 +124,36 @@ fn normalized_working_directory(cwd: &Path) -> PathBuf {
     dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
 }
 
-pub(crate) fn helper_path() -> io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(directory) = exe.parent() {
-        candidates.push(directory.join(HELPER_BIN));
-        // `cargo test` runs from `target/<profile>/deps`, one level below the
-        // directory that holds the sibling helper binary.
-        if let Some(parent) = directory.parent() {
-            candidates.push(parent.join(HELPER_BIN));
+fn helper_candidates(exe: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let Some(directory) = exe.parent() else {
+        return candidates;
+    };
+    candidates.push(directory.join(HELPER_BIN));
+    if let Some(parent) = directory.parent() {
+        candidates.push(parent.join(HELPER_BIN));
+    }
+    let components: Vec<_> = exe.components().collect();
+    let cargo_output = components.iter().any(|part| part.as_os_str() == "target")
+        && components
+            .iter()
+            .any(|part| matches!(part.as_os_str().to_str(), Some("debug" | "release")));
+    if cargo_output {
+        // Build-script and doctest executables may live several levels below
+        // the shared target profile rather than in its `deps` directory.
+        for ancestor in directory.ancestors().skip(1).take(5) {
+            let candidate = ancestor.join(HELPER_BIN);
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
         }
     }
+    candidates
+}
+
+pub(crate) fn helper_path() -> io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let candidates = helper_candidates(&exe);
     for candidate in &candidates {
         if candidate.is_file() {
             return Ok(candidate.clone());
@@ -384,6 +403,24 @@ fn run_helper() -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_build_script_output_finds_the_shared_helper() {
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\work\target")
+        } else {
+            PathBuf::from("/work/target")
+        };
+        let executable = root.join("debug/build/pig-core/hash/out/pig_core-test.exe");
+        let expected = root.join("debug").join(HELPER_BIN);
+        assert!(helper_candidates(&executable).contains(&expected));
+        let installed = PathBuf::from(if cfg!(windows) {
+            r"C:\Program Files\Pig\pig-code.exe"
+        } else {
+            "/opt/pig/pig-code"
+        });
+        assert_eq!(helper_candidates(&installed).len(), 2);
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

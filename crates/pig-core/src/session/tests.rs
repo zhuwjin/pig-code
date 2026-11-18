@@ -793,3 +793,36 @@ async fn exhausted_history_stops_before_model_execution_and_preserves_the_rollou
     assert_eq!(Rollout::load(&path).expect("replay old history").len(), 1);
     let _ = std::fs::remove_dir_all(&fixture.dir);
 }
+
+#[test]
+fn cancelled_run_commits_execution_receipt_before_returning() {
+    let fixture = TrustFixture::new("cancel-claim-order");
+    let mut session = fixture.create(None);
+    let store = fixture.store();
+    store
+        .lock()
+        .expect("store lock")
+        .claim_execution("s1", "request-1", "{}")
+        .expect("claim input");
+    session.run_state.execution_claim = Some("request-1".into());
+    let outcome = session.root_result(AgentRunStatus::Cancelled);
+    assert_eq!(outcome.status, AgentRunStatus::Cancelled);
+    assert!(session.run_state.execution_claim.is_none());
+    assert!(
+        store
+            .lock()
+            .expect("store lock")
+            .execution_claim("s1")
+            .expect("claim lookup")
+            .is_none()
+    );
+    assert!(
+        store
+            .lock()
+            .expect("store lock")
+            .execution_receipt("s1", "request-1")
+            .expect("receipt lookup")
+    );
+    drop(session);
+    let _ = std::fs::remove_dir_all(&fixture.dir);
+}

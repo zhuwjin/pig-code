@@ -60,7 +60,7 @@ impl Spill {
             Ok(()) => None,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => Some(format!(
-                "Failed to replace the previous spill {}: {error}",
+                "Failed to persist task spill {}: failed to replace previous output: {error}",
                 path.display()
             )),
         };

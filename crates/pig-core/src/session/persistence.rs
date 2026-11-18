@@ -208,6 +208,29 @@ impl Session {
         self.recorded_prompt = Some(snapshot);
     }
 
+    pub(super) fn settle_execution_claim(&mut self) {
+        let Some(request_id) = self.run_state.execution_claim.clone() else {
+            return;
+        };
+        let Some(store) = self.state.task_store.clone() else {
+            self.run_state.execution_claim = None;
+            return;
+        };
+        let result = store
+            .lock()
+            .expect("store lock")
+            .clear_execution_claim(&self.event_session_id().to_string(), &request_id);
+        match result {
+            Ok(()) => self.run_state.execution_claim = None,
+            Err(error) => {
+                tracing::error!(%request_id, error = ?error, "failed to settle the execution claim");
+                if self.rollout_failure.is_none() {
+                    self.rollout_failure = Some(error);
+                }
+            }
+        }
+    }
+
     pub(super) fn touch_index(&mut self) {
         let id = self.agent.id.clone();
         self.store

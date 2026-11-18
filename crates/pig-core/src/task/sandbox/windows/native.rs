@@ -162,81 +162,19 @@ fn normalize_policy(policy: ContainerPolicy) -> Result<ContainerPolicy, String> 
 }
 
 fn launch_with_process_security_environment(request: &ExecutionRequest) -> Result<i32, String> {
-    const MAX_CREATE_ATTEMPTS: usize = 3;
-    for attempt in 0..MAX_CREATE_ATTEMPTS {
-        let mut logger = Logger::new(Mode::Buffer);
-        let mut runner = BaseContainerRunner::new();
-        let _launch_guard = psec_launch_guard()?;
-        match runner.spawn(request, &mut logger, StdioMode::Inherit) {
-            Ok(mut child) => {
-                drop(_launch_guard);
-                return child
-                    .wait()
-                    .map_err(|error| format!("the sandboxed command could not be run: {error}"));
-            }
-            Err(response) => {
-                let retryable = transient_psec_creation_error(&response.error_message);
-                if !retryable || attempt + 1 == MAX_CREATE_ATTEMPTS {
-                    return Err(format!(
-                        "the Windows sandbox refused to launch: {}",
-                        response.error_message
-                    ));
-                }
-                // This SDK error is returned by PSEC creation, before the
-                // workload is launched, so retrying cannot repeat a side effect.
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    "transient PSEC creation failure; retrying"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)));
-            }
-        }
-    }
-    unreachable!("the final PSEC attempt either returns a child or an error")
-}
-
-struct PsecLaunchGuard(windows::Win32::Foundation::HANDLE);
-
-impl Drop for PsecLaunchGuard {
-    fn drop(&mut self) {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::ReleaseMutex;
-        unsafe {
-            let _ = ReleaseMutex(self.0);
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
-fn psec_launch_guard() -> Result<PsecLaunchGuard, String> {
-    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
-    use windows::core::PCWSTR;
-
-    let name: Vec<u16> = "Local\\pig-code-psec-launch-v1"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-        .map_err(|error| format!("cannot create the PSEC launch mutex: {error}"))?;
-    let result = unsafe { WaitForSingleObject(handle, 10_000) };
-    if result == WAIT_OBJECT_0 || result == WAIT_ABANDONED {
-        return Ok(PsecLaunchGuard(handle));
-    }
-    unsafe {
-        let _ = windows::Win32::Foundation::CloseHandle(handle);
-    }
-    if result == WAIT_TIMEOUT {
-        Err("timed out waiting for another PSEC launch".to_string())
-    } else {
-        Err(format!(
-            "failed to acquire the PSEC launch mutex: {result:?}"
-        ))
-    }
-}
-
-fn transient_psec_creation_error(error_message: &str) -> bool {
-    error_message.contains("CreateProcessSecurityEnvironment failed (HRESULT = 0x80070003)")
+    let mut logger = Logger::new(Mode::Buffer);
+    let mut runner = BaseContainerRunner::new();
+    let mut child = runner
+        .spawn(request, &mut logger, StdioMode::Inherit)
+        .map_err(|response| {
+            format!(
+                "the Windows sandbox refused to launch: {}",
+                response.error_message
+            )
+        })?;
+    child
+        .wait()
+        .map_err(|error| format!("the sandboxed command could not be run: {error}"))
 }
 
 /// Whether this very process can write `directory`, for `--probe`: a process
@@ -283,17 +221,6 @@ mod tests {
             "{first}"
         );
         assert!(first.len() < 64);
-    }
-
-    #[test]
-    fn psec_retry_is_limited_to_the_pre_launch_transient_error() {
-        assert!(transient_psec_creation_error(
-            "failed to create the process security environment: CreateProcessSecurityEnvironment failed (HRESULT = 0x80070003)"
-        ));
-        assert!(!transient_psec_creation_error("permission denied"));
-        assert!(!transient_psec_creation_error(
-            "the sandboxed command could not be run: HRESULT = 0x80070003"
-        ));
     }
 
     #[test]

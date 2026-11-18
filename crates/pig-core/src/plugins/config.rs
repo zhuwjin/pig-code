@@ -834,7 +834,8 @@ mod tests {
             write(&registry, None, "caller", "mode", "c".into()).is_err(),
             "the schema rejects a value outside its enum"
         );
-        assert!(write(&registry, None, "caller", "mode", "b".into()).is_ok());
+        write(&registry, None, "caller", "mode", "b".into())
+            .expect("a schema-valid value must persist");
         contributions.config.items[0].default = "c".into();
         assert!(
             validate_declaration(&contributions).is_err(),

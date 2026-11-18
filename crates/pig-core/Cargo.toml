@@ -119,6 +119,10 @@ name = "context_overflow"
 path = "tests/context_overflow/main.rs"
 
 [[test]]
+name = "credentials"
+path = "tests/credentials.rs"
+
+[[test]]
 name = "fs_access"
 path = "tests/fs_access.rs"
 

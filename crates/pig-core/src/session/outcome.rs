@@ -214,6 +214,7 @@ impl Session {
             usage: result.usage,
         });
         self.sync_rollout();
+        self.settle_execution_claim();
         self.agent.run = Some(result.clone());
         self.state.agents.settle_run_with_outcome(
             &agent_id,

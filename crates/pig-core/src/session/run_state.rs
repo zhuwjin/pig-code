@@ -21,4 +21,5 @@ pub(crate) struct SessionRunState {
     pub(crate) usage_turn_id: Option<String>,
     pub(crate) usage_anchor: Option<super::UsageAnchor>,
     pub(crate) overflow_recovered: bool,
+    pub(crate) execution_claim: Option<String>,
 }

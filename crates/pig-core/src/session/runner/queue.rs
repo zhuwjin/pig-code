@@ -161,6 +161,7 @@ pub(super) fn start_turn_inner(
         }
         entry.active_claim = Some(message.id.clone());
     }
+    session.run_state.execution_claim = (!notification_only).then(|| message.id.clone());
     // Enforce the single-source invariant before any resolution: the Session
     // and the entry share one `Arc<RuntimeConfig>`, so a refresh that happened
     // mid-turn is installed here (a trust change still goes through the one
