@@ -96,12 +96,27 @@ pub struct AgentHandle {
     pub events: async_channel::Receiver<Event>,
     pub journal: EventJournal,
     pub credentials: std::sync::Arc<crate::credentials::CredentialManager>,
-    _thread: std::thread::JoinHandle<()>,
+    thread: tokio::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl AgentHandle {
     pub fn shutdown(&self) {
         let _ = self.ops.send_blocking(Op::Shutdown);
+    }
+
+    /// Stops the runtime and waits for its thread. Repeated and concurrent
+    /// callers share the same close boundary.
+    pub async fn close(&self) -> Result<(), String> {
+        let _ = self.ops.send(Op::Shutdown).await;
+        let mut current = self.thread.lock().await;
+        let Some(thread) = current.take() else {
+            return Ok(());
+        };
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err("agent runtime thread panicked".to_string()),
+            Err(error) => Err(format!("agent runtime close task failed: {error}")),
+        }
     }
 }
 
@@ -280,6 +295,6 @@ pub fn spawn_agent_with_data_dir_and_credentials(
         events: event_rx,
         journal,
         credentials,
-        _thread: thread,
+        thread: tokio::sync::Mutex::new(Some(thread)),
     }
 }

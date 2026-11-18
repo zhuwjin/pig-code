@@ -1949,3 +1949,16 @@ async fn started_tool_without_result_recovers_as_model_visible_unknown() {
     assert_eq!(table_count, 0);
     agent.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_handle_close_waits_for_runtime_and_is_idempotent() {
+    let (config_path, cwd, data_dir) = setup("agent-handle-close");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let _session_id = new_session(&agent, cwd).await;
+    tokio::try_join!(agent.close(), agent.close()).expect("concurrent close");
+    agent.close().await.expect("repeated close");
+    assert!(agent.ops.send(Op::Shutdown).await.is_err());
+    agent.shutdown();
+    let _ = std::fs::remove_dir_all(data_dir);
+}

@@ -91,7 +91,7 @@ struct IpcResponse {
 }
 
 struct WorkerRun {
-    _agent: AgentHandle,
+    agent: tokio::sync::Mutex<Option<AgentHandle>>,
     session_id: String,
     ops: async_channel::Sender<Op>,
     events: Mutex<Vec<IpcRunEvent>>,
@@ -181,7 +181,7 @@ impl WorkerState {
         .map_err(|_| "timed out waiting for IPC worker session".to_string())??;
         let run = Arc::new(WorkerRun {
             ops: agent.ops.clone(),
-            _agent: agent,
+            agent: tokio::sync::Mutex::new(Some(agent)),
             session_id: session_id.clone(),
             events: Mutex::new(Vec::new()),
             latest_sequence: AtomicU64::new(0),
@@ -192,7 +192,7 @@ impl WorkerState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(run_id.clone(), run.clone());
-        tokio::spawn(collect_events(run.clone()));
+        tokio::spawn(collect_events(events, run.clone()));
         run.ops
             .send(Op::SendMessage {
                 session_id,
@@ -262,7 +262,7 @@ impl WorkerState {
         self.info(run_id)
     }
 
-    fn release(&self, run_id: &str, force: bool) -> Result<(), String> {
+    async fn release(&self, run_id: &str, force: bool) -> Result<(), String> {
         let run = self
             .runs
             .lock()
@@ -286,7 +286,12 @@ impl WorkerState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(run_id);
-        drop(removed);
+        if let Some(removed) = removed {
+            let agent = removed.agent.lock().await.take();
+            if let Some(agent) = agent {
+                agent.close().await?;
+            }
+        }
         Ok(())
     }
 
@@ -336,7 +341,7 @@ impl WorkerState {
             "release" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
                 let force = params["force"].as_bool().unwrap_or(false);
-                self.release(run_id, force)?;
+                self.release(run_id, force).await?;
                 Ok(serde_json::json!({ "released": true }))
             }
             other => Err(format!("unknown IPC method: {other}")),
@@ -344,8 +349,7 @@ impl WorkerState {
     }
 }
 
-async fn collect_events(run: Arc<WorkerRun>) {
-    let receiver = run._agent.events.clone();
+async fn collect_events(receiver: async_channel::Receiver<Event>, run: Arc<WorkerRun>) {
     while let Ok(event) = receiver.recv().await {
         match &event {
             Event::TextDelta { delta, .. } => run

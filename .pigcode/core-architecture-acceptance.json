@@ -69,7 +69,7 @@
     "lib.rs": {
       "paths": ["crates/pig-core/src/lib.rs"],
       "acceptance": ["R17", "R18", "R19"],
-      "public_surface": ["AgentHandle", "spawn_agent", "spawn_agent_with_data_dir", "spawn_agent_with_data_dir_and_credentials", "net_test_full_turn", "windows_sandbox_helper_main"]
+      "public_surface": ["AgentHandle", "AgentHandle.ops", "AgentHandle.events", "AgentHandle.journal", "AgentHandle.shutdown", "AgentHandle.close", "spawn_agent", "spawn_agent_with_data_dir", "spawn_agent_with_data_dir_and_credentials", "net_test_full_turn", "windows_sandbox_helper_main"]
     },
     "mcp": {
       "paths": ["crates/pig-core/src/mcp/"],
@@ -171,8 +171,8 @@
       "id": "R04",
       "area": "Stop, delete, quiescence and bounded cleanup",
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
-      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/tests/runtime_stress.rs"],
-      "missing_proof": ["Tie release to backend resource quiescence", "Persist pending deletion and retryable cleanup", "Pass ten repeated mixed stress runs without unbounded residue"],
+      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/tests/runtime_stress.rs"],
+      "missing_proof": ["Tie every backend release to resource quiescence; IPC worker close is covered and Local remains", "Persist pending deletion and retryable cleanup", "Pass ten repeated mixed stress runs without unbounded residue"],
       "status": "implemented"
     },
     {
@@ -188,7 +188,7 @@
       "area": "Real production cross-process backend",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent-dsh-sdk/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/remote/client/remoteEnvironmentProvider.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
-      "missing_proof": ["Register IPC in the production execution path", "Exercise real disconnect and root/worker restart", "Prove send/steer, duplicate delivery, stale attempts, explicit stop and actual release"],
+      "missing_proof": ["Register IPC in the production execution path", "Exercise real disconnect and root/worker restart", "Prove send/steer, duplicate delivery and stale attempts through the production handle"],
       "status": "implemented"
     },
     {
@@ -284,7 +284,7 @@
       "area": "Crate host API and public lifecycle surface",
       "references": [{"project": "codex", "path": "codex-rs/core/src/thread_manager.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/"}],
       "existing_evidence": ["crates/pig-core/src/lib.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/tests/workspaces.rs"],
-      "missing_proof": ["Define explicit host-handle close and quiescence semantics", "Classify every public core interface in the acceptance matrix", "Prove spawn, shutdown, journal and credential ownership across restart"],
+      "missing_proof": ["Apply explicit close/quiescence semantics to every public host lifecycle surface", "Classify every public core interface in the acceptance matrix", "Prove spawn, shutdown, journal and credential ownership across restart"],
       "status": "implemented"
     },
     {
