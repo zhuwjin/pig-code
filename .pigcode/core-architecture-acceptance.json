@@ -243,17 +243,17 @@
       "id": "R13",
       "area": "Plugin, MCP and SDK capability seams",
       "references": [{"project": "kimi-code", "path": "packages/klient/src/"}, {"project": "deepseek-harness", "path": "packages/sdk/"}],
-      "existing_evidence": ["crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/hooks.rs", "tests/App.plugin-sdk.test.tsx"],
-      "missing_proof": ["Version and scope every public capability contract", "Prove idempotent disposal and isolated replayable storage", "Remove side-channel Agent and notification authorities"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/hooks.rs", "tests/App.plugin-sdk.test.tsx", "crates/pig-core/src/mcp/client.rs", "crates/pig-core/src/plugins/config.rs", "crates/pig-core/tests/architecture.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R14",
       "area": "Configuration, credentials and persistence safety",
       "references": [{"project": "deepseek-harness", "path": "packages/settings/"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/app/config/configService.ts"}],
-      "existing_evidence": ["crates/pig-core/tests/config.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/tests/config_seeding.rs", "crates/pig-core/src/credentials.rs"],
-      "missing_proof": ["Validate every durable boundary at the earliest point", "Prove atomic writes, scoped credentials and redaction", "Replace development formats without destructive user-data handling"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/config.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/tests/config_seeding.rs", "crates/pig-core/src/credentials.rs", "crates/pig-core/src/config/persistence.rs", "crates/pig-core/src/plugins/config.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R15",

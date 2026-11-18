@@ -577,6 +577,33 @@ mod tests {
             read(&registry, None, "caller", "mode").expect("stored value"),
             "brave"
         );
+        write(&registry, None, "caller", "mode", "brave".into()).expect("idempotent write");
+        let path = config_path(&temp.0);
+        let first = std::fs::read(&path).expect("first persisted state");
+        write(&registry, None, "caller", "mode", "brave".into()).expect("replayed write");
+        assert_eq!(
+            std::fs::read(&path).expect("replayed persisted state"),
+            first,
+            "replaying the same value is byte-for-byte idempotent"
+        );
+        assert!(
+            load(&temp.0)
+                .expect("reload plugin state")
+                .get("caller")
+                .and_then(|values| values.get("mode"))
+                == Some(&serde_json::Value::String("brave".into())),
+            "the scoped value survives reload"
+        );
+        assert!(
+            std::fs::read_dir(&temp.0)
+                .expect("plugin data dir")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp-")),
+            "atomic persistence leaves no temporary files"
+        );
         assert!(
             write(&registry, None, "caller", "mode", 1.into()).is_err(),
             "a different JSON type must be rejected"
