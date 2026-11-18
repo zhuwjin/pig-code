@@ -195,9 +195,9 @@
       "id": "R07",
       "area": "Provider and model capability contracts",
       "references": [{"project": "kimi-code", "path": "packages/core/src/llm/"}, {"project": "codex", "path": "codex-rs/core/src/client.rs"}],
-      "existing_evidence": ["crates/pig-core/tests/provider.rs", "crates/pig-core/tests/provider_compat.rs", "crates/pig-core/tests/provider_reliability.rs", "crates/pig-core/tests/model_lookup.rs", "crates/pig-core/tests/model_io.rs"],
-      "missing_proof": ["Run one complete contract suite for every registered provider", "Prove cancellation, timeout, capability and retry classification", "Add a representative provider through registration only"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/provider.rs", "crates/pig-core/tests/provider_compat.rs", "crates/pig-core/tests/provider_reliability.rs", "crates/pig-core/tests/model_lookup.rs", "crates/pig-core/tests/model_io.rs", "crates/pig-provider/src/contract.rs", "crates/pig-core/tests/config_providers.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R08",

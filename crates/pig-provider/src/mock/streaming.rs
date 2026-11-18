@@ -1004,6 +1004,18 @@ pub(super) fn responses_chunks(body: &str, tool_results: usize) -> Vec<String> {
     }
     let mut out = vec![r_ev(responses_created())];
     let user_text = last_user_text(body);
+    if user_text.contains(BUSINESS_ERROR_TRIGGER) {
+        out.push(r_ev(serde_json::json!({
+            "type": "error",
+            "error": {"message": BUSINESS_ERROR_MARKER, "code": "1005"},
+        })));
+        return out;
+    }
+    if user_text.contains(STRUCTURED_OUTPUT_TRIGGER) {
+        responses_text(&mut out, "{\"answer\":\"ok\"}");
+        out.push(r_ev(responses_completed(100, 20)));
+        return out;
+    }
     if user_text.contains(SCENARIO_BACKGROUND_FAILURE_TRIGGER) {
         if tool_answered(body, "call_background_failure") {
             responses_text(&mut out, "Background command exited with code 7.");
@@ -1733,6 +1745,18 @@ pub(super) fn anthropic_pause_response(body: &str) -> Option<Vec<String>> {
 pub(super) fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
     if let Some(chunks) = anthropic_pause_response(body) {
         return chunks;
+    }
+    if body.contains(BUSINESS_ERROR_TRIGGER) {
+        return vec![a_sse(
+            "error",
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": BUSINESS_ERROR_MARKER},
+            }),
+        )];
+    }
+    if body.contains(STRUCTURED_OUTPUT_TRIGGER) {
+        return anthropic_text_stop_chunks("{\"answer\":\"ok\"}", "end_turn");
     }
     if body.contains(SUBAGENT_RESUMED_PROMPT) {
         return anthropic_text_stop_chunks(

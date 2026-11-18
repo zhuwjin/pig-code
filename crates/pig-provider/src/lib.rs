@@ -16,6 +16,9 @@
 pub mod api_log;
 pub mod mock;
 
+#[cfg(test)]
+mod contract;
+
 mod anthropic;
 mod chat;
 mod chat_tool_stream;

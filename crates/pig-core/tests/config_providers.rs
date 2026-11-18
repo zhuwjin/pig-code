@@ -1069,3 +1069,70 @@ async fn save_config_refreshes_the_stored_session_runtime() {
     );
     agent.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatible_provider_registration_executes_without_runtime_special_cases() {
+    let (config_path, cwd, data_dir, _original_log) = setup_with_log("registered-provider");
+    let (port, requests) = mock::start_mock_server_with_log();
+    let mut config: AppConfig = toml::from_str(
+        &std::fs::read_to_string(&config_path).expect("read initial provider config"),
+    )
+    .expect("decode initial provider config");
+    config.providers.push(ProviderConfig {
+        id: "registered-compatible".into(),
+        name: "Registered Compatible".into(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        requires_api_key: false,
+        api_format: ApiFormat::OpenAiChat,
+        enabled: true,
+        models: vec![ModelConfig::new("registered-model", 128_000, 8_192)],
+        icon: None,
+        key_url: None,
+    });
+    config.default_provider = "registered-compatible".into();
+    config.default_model = "registered-model".into();
+    std::fs::write(
+        &config_path,
+        toml::to_string_pretty(&config).expect("serialize registered provider"),
+    )
+    .expect("register compatible provider");
+
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id,
+            content: "say something".into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send through registered provider");
+    let events = recv_until(&agent.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnComplete { .. })
+    })
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER)
+    )));
+    assert!(
+        requests
+            .lock()
+            .expect("provider requests")
+            .iter()
+            .any(|body| { body.contains("registered-model") })
+    );
+    agent
+        .close()
+        .await
+        .expect("close registered provider agent");
+}
