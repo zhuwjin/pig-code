@@ -66,7 +66,8 @@ pub enum ApprovalPolicy {
 
 /// Who reviews an eligible approval request (Codex's `ApprovalsReviewer`).
 ///
-/// Only `User` exists today; an automatic reviewer is an additional variant.
+/// `Policy` uses the deterministic gate policy and falls back to `User` when it
+/// cannot decide, is unavailable, or exceeds the configured review deadline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalsReviewer {
@@ -177,7 +178,12 @@ pub enum ApprovalDecision {
     /// of the same command/path is approved silently. Never offered for a
     /// sandbox widening (a boundary move is approved one command at a time).
     ApprovedForSession,
+    /// Deny this call without cancelling the surrounding turn.
     Reject,
+    /// The policy cannot decide; the configured user reviewer must decide.
+    DeferToUser,
+    /// Cancel this call and abort the surrounding turn instead of denying it.
+    Abort,
 }
 
 impl ApprovalDecision {
@@ -188,6 +194,8 @@ impl ApprovalDecision {
             Self::ApprovedForProject => "approved_for_project",
             Self::ApprovedForSession => "approved_for_session",
             Self::Reject => "reject",
+            Self::DeferToUser => "defer_to_user",
+            Self::Abort => "abort",
         }
     }
 }

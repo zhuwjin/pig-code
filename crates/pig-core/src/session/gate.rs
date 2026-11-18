@@ -773,6 +773,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
                 call_id: call.id.clone(),
                 request_id,
                 cwd: ctx.cwd.to_path_buf(),
+                permissions: ctx.permissions,
                 tool: call.name.clone(),
                 action: serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone())),
@@ -796,6 +797,12 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             _ = cancel.cancelled() => return GatedToolOutcome::Cancelled,
         };
         match decision {
+            ApprovalDecision::Abort => return GatedToolOutcome::Cancelled,
+            ApprovalDecision::DeferToUser => {
+                return GatedToolOutcome::Rejected {
+                    note: "Approval review deferred to a user, but no user fallback returned a decision. The action was not executed.".to_string(),
+                };
+            }
             ApprovalDecision::Allow => {}
             ApprovalDecision::ApprovedForSession => {
                 // A widening never offers the session tier (the dialog lists

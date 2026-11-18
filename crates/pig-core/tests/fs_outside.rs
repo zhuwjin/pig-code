@@ -1,30 +1,21 @@
 use crate::common;
 
-use common::{new_session, setup};
+use common::{new_session, outside_dir, setup};
 use pig_protocol::{ApprovalDecision, Event, ExecMode, Op};
 use std::path::{Path, PathBuf};
 
-/// An outside-workspace sibling directory with one readable file; forward
-/// slashes in the returned message path keep the raw mock request body
-/// escape-free
+/// An isolated, writable directory outside the workspace and system tmp.
+/// Forward slashes keep the raw mock request body escape-free.
 fn outside_target(name: &str) -> (PathBuf, String) {
     // The workspace sits under the system tmp (as everywhere in the test
     // suite); the "outside" dir must escape BOTH the workspace and tmp
     // itself — tmp is a permanent exemption, so a sibling under %TEMP% would
     // never pop. Its parent (AppData/Local) is outside every exemption.
-    let marker = format!("pig-core-fsout-{name}-{}", std::process::id());
-    let ws = std::env::temp_dir().join(format!("ws-{marker}"));
-    let _ = std::fs::remove_dir_all(&ws);
-    std::fs::create_dir_all(&ws).unwrap();
-    let outside = std::env::temp_dir()
-        .parent()
-        .unwrap()
-        .join(format!("outside-{marker}"));
-    let _ = std::fs::remove_dir_all(&outside);
+    let outside = outside_dir(name);
     std::fs::create_dir_all(&outside).unwrap();
     let file = outside.join("target.txt");
     std::fs::write(&file, "OUTSIDE_MARKER_42\n").unwrap();
-    (ws, file.display().to_string().replace('\\', "/"))
+    (outside, file.display().to_string().replace('\\', "/"))
 }
 
 struct Run {
@@ -118,8 +109,7 @@ async fn outside_read_needs_no_approval() {
         let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
         let session_id = new_session(&agent, dir.clone()).await;
 
-        let (ws, outside) = outside_target("read");
-        let _ = ws;
+        let (outside_root, outside) = outside_target("read");
         let msg = format!(
             "{} {outside}",
             pig_provider::mock::SCENARIO_OUTSIDE_READ_TRIGGER
@@ -142,6 +132,7 @@ async fn outside_read_needs_no_approval() {
             "no boundary error for reads under {mode:?}: {outs:?}"
         );
         agent.shutdown();
+        let _ = std::fs::remove_dir_all(&outside_root);
     }
 }
 
@@ -153,8 +144,7 @@ async fn outside_write_pops_per_call() {
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
     let session_id = new_session(&agent, dir.clone()).await;
 
-    let (ws, outside_file) = outside_target("write");
-    let _ = ws;
+    let (outside_root, outside_file) = outside_target("write");
     let outside_dir = outside_file.rsplit_once('/').unwrap().0.to_string();
     let file = format!("{outside_dir}/written.txt");
     let msg = format!(
@@ -209,6 +199,7 @@ async fn outside_write_pops_per_call() {
         "reject note expected, got {outs:?}"
     );
     agent.shutdown();
+    let _ = std::fs::remove_dir_all(&outside_root);
 }
 
 /// Rejecting an outside write returns the boundary note as the tool error and
@@ -219,8 +210,7 @@ async fn outside_write_reject_leaves_no_file() {
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
     let session_id = new_session(&agent, dir.clone()).await;
 
-    let (ws, outside_file) = outside_target("write-reject");
-    let _ = ws;
+    let (outside_root, outside_file) = outside_target("write-reject");
     let outside_dir = outside_file.rsplit_once('/').unwrap().0.to_string();
     let file = format!("{outside_dir}/never-written.txt");
     let msg = format!(
@@ -248,6 +238,7 @@ async fn outside_write_reject_leaves_no_file() {
         "a rejected outside write must not create the file"
     );
     agent.shutdown();
+    let _ = std::fs::remove_dir_all(&outside_root);
 }
 
 /// Full has no sandbox and no workspace boundary: an outside write runs
@@ -258,8 +249,7 @@ async fn full_outside_write_needs_no_approval() {
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
     let session_id = new_session(&agent, dir.clone()).await;
 
-    let (ws, outside_file) = outside_target("full-write");
-    let _ = ws;
+    let (outside_root, outside_file) = outside_target("full-write");
     let outside_dir = outside_file.rsplit_once('/').unwrap().0.to_string();
     let file = format!("{outside_dir}/full-written.txt");
     let msg = format!(
@@ -286,6 +276,7 @@ async fn full_outside_write_needs_no_approval() {
         tool_outputs(&run.events)
     );
     agent.shutdown();
+    let _ = std::fs::remove_dir_all(&outside_root);
 }
 
 /// A doomed outside write: the target matches the seeded `.env` deny group (and
@@ -298,8 +289,7 @@ async fn outside_write_to_a_sensitive_name_never_pops() {
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), dir.clone(), data_dir);
     let session_id = new_session(&agent, dir.clone()).await;
 
-    let (ws, outside_file) = outside_target("write-sensitive");
-    let _ = ws;
+    let (outside_root, outside_file) = outside_target("write-sensitive");
     let outside_dir = outside_file.rsplit_once('/').unwrap().0.to_string();
     let file = format!("{outside_dir}/.env");
     let msg = format!(
@@ -331,4 +321,5 @@ async fn outside_write_to_a_sensitive_name_never_pops() {
         "the write never happened"
     );
     agent.shutdown();
+    let _ = std::fs::remove_dir_all(&outside_root);
 }

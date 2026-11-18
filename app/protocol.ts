@@ -293,7 +293,13 @@ export interface SubagentView {
   running: boolean;
 }
 
-export type ApprovalDecision = "Allow" | "ApprovedForSession" | "approved_for_project" | "Reject";
+export type ApprovalDecision =
+  | "Allow"
+  | "ApprovedForSession"
+  | "approved_for_project"
+  | "Reject"
+  | "DeferToUser"
+  | "Abort";
 
 export interface PendingApproval {
   requestId: string;

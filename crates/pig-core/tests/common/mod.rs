@@ -31,10 +31,38 @@ pub fn junction(link: &std::path::Path, target: &std::path::Path) {
     assert!(link.exists(), "junction {} is missing", link.display());
 }
 
+fn test_dir(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test clock")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "pig-core-{name}-{}-{nanos}-{sequence}",
+        std::process::id()
+    ))
+}
+
+#[allow(dead_code)]
+pub fn outside_dir(name: &str) -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .expect("home for outside-workspace test fixture");
+    home.join(".pigcode-test-tmp").join(
+        test_dir(name)
+            .file_name()
+            .expect("test directory name")
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 #[allow(dead_code)]
 pub fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let port = mock::start_mock_server();
-    let dir = std::env::temp_dir().join(format!("pig-core-{name}-{}", std::process::id()));
+    let dir = test_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
@@ -76,7 +104,7 @@ pub fn setup_with_log(
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     let (port, log) = mock::start_mock_server_with_log();
-    let dir = std::env::temp_dir().join(format!("pig-core-{name}-{}", std::process::id()));
+    let dir = test_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();

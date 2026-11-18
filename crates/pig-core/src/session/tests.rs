@@ -4,6 +4,7 @@ use super::compact::{
 use super::estimate::estimate_leading_system_tokens;
 use super::*;
 
+mod approval;
 mod notifications;
 
 fn user() -> RolloutRecord {

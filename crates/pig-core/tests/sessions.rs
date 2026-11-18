@@ -1,6 +1,6 @@
 use crate::common;
 
-use common::{new_session, recv_until, setup};
+use common::{new_session, recv_until, setup, setup_with_log};
 use pig_protocol::{CoreError, Event, ExecMode, Op};
 use pig_provider::mock;
 use std::time::Duration;
@@ -2319,4 +2319,106 @@ async fn deletion_request_failure_does_not_stop_a_live_session() {
     })
     .await;
     agent.close().await.expect("close deleted agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_write_outcome_is_visible_without_replaying_the_side_effect() {
+    let (config_path, cwd, data_dir, requests) = setup_with_log("unknown-write-outcome");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.close().await.expect("close before crash fixture");
+
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let call = pig_provider::ToolCall {
+        id: "call-unknown-write".into(),
+        name: "Write".into(),
+        arguments: serde_json::json!({
+            "path": "side-effect.txt",
+            "content": "externally completed write"
+        })
+        .to_string(),
+    };
+    let records = [
+        pig_core::rollout::RolloutRecord::Assistant {
+            text: String::new(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![call.to_wire()],
+            tool_execution_ids: vec!["run-unknown-write".into()],
+            ts_ms: 0,
+            reasoning_ms: None,
+        },
+        pig_core::rollout::RolloutRecord::ToolExecutionStart {
+            execution_id: "run-unknown-write".into(),
+            call_id: call.id,
+            call_index: 0,
+            tool: call.name,
+            started_at_ms: 1,
+        },
+    ];
+    let mut raw = std::fs::read_to_string(&rollout_path).expect("existing rollout");
+    for record in records {
+        raw.push_str(&serde_json::to_string(&record).expect("serialize interrupted write"));
+        raw.push('\n');
+    }
+    std::fs::write(&rollout_path, raw).expect("append interrupted write");
+    let side_effect = cwd.join("side-effect.txt");
+    std::fs::write(&side_effect, "externally completed write").expect("external side effect");
+
+    let recovered = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    recovered
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("open interrupted write history");
+    let replay = recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionReplayComplete { .. })
+    })
+    .await;
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::ToolCallEnd { output, is_error: true, .. } if output.contains("outcome is unknown")
+    )));
+    recovered
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "continue after the unknown write".into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("continue after unknown outcome");
+    recv_until(&recovered.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnComplete { stats: Some(_), .. })
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&side_effect).expect("side effect content"),
+        "externally completed write"
+    );
+    let raw = std::fs::read_to_string(&rollout_path).expect("recovered rollout");
+    assert_eq!(
+        raw.matches("\"type\":\"tool_execution_start\",\"execution_id\":\"run-unknown-write\"")
+            .count(),
+        1
+    );
+    assert!(
+        requests
+            .lock()
+            .expect("request log")
+            .iter()
+            .any(|body| { body.contains("outcome is unknown") })
+    );
+    recovered.close().await.expect("close recovered agent");
 }

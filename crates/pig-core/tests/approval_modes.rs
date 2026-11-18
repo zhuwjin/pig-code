@@ -1,6 +1,6 @@
 mod common;
 
-use common::{new_session, recv_until, setup};
+use common::{new_session, outside_dir, recv_until, setup};
 use pig_protocol::{ApprovalDecision, CoreError, Event, ExecMode, Op};
 use pig_provider::mock;
 use std::path::PathBuf;
@@ -995,6 +995,8 @@ fn approval_decision_wire_names() {
             "\"approved_for_project\"",
         ),
         (ApprovalDecision::Reject, "\"Reject\""),
+        (ApprovalDecision::DeferToUser, "\"DeferToUser\""),
+        (ApprovalDecision::Abort, "\"Abort\""),
     ];
     for (decision, wire) in cases {
         assert_eq!(serde_json::to_string(&decision).unwrap(), wire);
@@ -1362,11 +1364,7 @@ async fn credential_env_lock() -> tokio::sync::OwnedSemaphorePermit {
 /// tmp is exempt from the outside-write gate, so a profile under it would not
 /// exercise the production outside-write dialog.
 fn outside_credential_profile(tag: &str) -> PathBuf {
-    let base = std::env::temp_dir()
-        .parent()
-        .expect("tmp has a parent")
-        .to_path_buf();
-    let profile = base.join(format!("pig-core-credential-{tag}-{}", std::process::id()));
+    let profile = outside_dir(&format!("credential-{tag}"));
     let _ = std::fs::remove_dir_all(&profile);
     std::fs::create_dir_all(profile.join(".ssh")).expect("create outside profile");
     profile
@@ -3080,9 +3078,13 @@ async fn require_escalated_prompts_and_runs_with_restrictions() {
             .1
             .contains("writes a report outside the workspace")
     );
-    assert!(tool_ends(&events).iter().any(|(id, output, is_error)| {
-        id.contains("call_require_escalated") && output.contains("[exit code: 0]") && !is_error
-    }));
+    assert!(
+        tool_ends(&events).iter().any(|(id, output, is_error)| {
+            id.contains("call_require_escalated") && output.contains("[exit code: 0]") && !is_error
+        }),
+        "escalated command did not complete: {:?}",
+        tool_ends(&events)
+    );
     assert_eq!(
         std::fs::read_to_string(&target).unwrap().trim(),
         "escalated"

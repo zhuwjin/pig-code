@@ -963,6 +963,7 @@ impl Session {
                             call_id: call.id.clone(),
                             request_id,
                             cwd: self.agent.cwd.clone(),
+                            permissions: self.permissions,
                             tool: call.name.clone(),
                             action: serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
                                 serde_json::Value::String(call.arguments.clone())
@@ -1003,7 +1004,25 @@ impl Session {
                     return engine::StepOutcome::Cancelled;
                             }
                         };
+                    if decision == ApprovalDecision::Abort {
+                        self.settle_cancelled_tool(
+                            CancelledTool {
+                                call,
+                                summary,
+                                item_id: &item_id,
+                                turn_id,
+                                rest: &tool_calls[call_ix + 1..],
+                                rest_item_ids: &item_ids[call_ix + 1..],
+                                card: None,
+                                cards: vec![],
+                            },
+                            tx,
+                        );
+                        self.emit_turn_aborted(tx);
+                        return engine::StepOutcome::Cancelled;
+                    }
                     match decision {
+                        ApprovalDecision::Abort => unreachable!("abort returned above"),
                         ApprovalDecision::Allow
                         | ApprovalDecision::ApprovedForProject
                         | ApprovalDecision::ApprovedForSession => {
@@ -1032,6 +1051,10 @@ impl Session {
                             note = "Plan approved; plan mode is now off. Start executing the plan."
                                 .to_string();
                             is_error = false;
+                        }
+                        ApprovalDecision::DeferToUser => {
+                            note = "Approval review deferred to a user, but no user fallback returned a decision.".to_string();
+                            is_error = true;
                         }
                         ApprovalDecision::Reject => {
                             // kimi Revise: a rejection may carry feedback the

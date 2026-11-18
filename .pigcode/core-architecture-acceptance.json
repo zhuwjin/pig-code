@@ -203,17 +203,17 @@
       "id": "R08",
       "area": "Tool, side-effect and unknown-outcome contracts",
       "references": [{"project": "deepseek-harness", "path": "packages/core/tools/"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/out-of-process.ts"}],
-      "existing_evidence": ["crates/pig-core/tests/tools.rs", "crates/pig-core/tests/tooling.rs", "crates/pig-core/tests/tool_stream.rs", "crates/pig-core/tests/tool_semantics.rs", "crates/pig-core/tests/duplicate_tool_ids.rs"],
-      "missing_proof": ["Prove completed/failed/unknown outcomes for side-effect faults", "Prevent silent side-effect retries", "Add a representative tool through the public contract only"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/tools.rs", "crates/pig-core/tests/tooling.rs", "crates/pig-core/tests/tool_stream.rs", "crates/pig-core/tests/tool_semantics.rs", "crates/pig-core/tests/duplicate_tool_ids.rs", "crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/plugins/tools.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R09",
       "area": "Permissions, approval and sandbox enforcement",
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/permissionPolicy/"}, {"project": "deepseek-harness", "path": "packages/sandbox/"}],
-      "existing_evidence": ["crates/pig-core/tests/permissions.rs", "crates/pig-core/tests/approval_modes.rs", "crates/pig-core/tests/access.rs", "crates/pig-core/tests/fs_access.rs", "crates/pig-core/tests/fs_outside.rs", "crates/pig-core/src/session/reviewer.rs"],
-      "missing_proof": ["Complete reviewer decisions and permission snapshots", "Prove executor enforcement and fail-closed behavior on all platforms", "Add a representative policy without core switches"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/permissions.rs", "crates/pig-core/tests/approval_modes.rs", "crates/pig-core/tests/access.rs", "crates/pig-core/tests/fs_access.rs", "crates/pig-core/tests/fs_outside.rs", "crates/pig-core/src/session/reviewer.rs", "crates/pig-core/src/session/tests/approval.rs"],
+      "missing_proof": ["Complete three-platform executor and sandbox CI verification"],
+      "status": "tested"
     },
     {
       "id": "R10",
