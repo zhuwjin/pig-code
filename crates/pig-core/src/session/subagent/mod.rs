@@ -22,7 +22,7 @@ mod tests;
 
 pub(crate) use control::DelegatedAgentStarted;
 pub use lifecycle::AgentRunSupervisor;
-use lifecycle::ManagedOutcome;
+pub(crate) use lifecycle::{LocalAgentExecutionHandle, ManagedOutcome};
 use managed::{
     DelegatedUi, SwarmChildIdentity, aborted_swarm_child, spawn_detached_child, subagent_receipt,
     swarm_child_result,

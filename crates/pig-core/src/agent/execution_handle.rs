@@ -177,6 +177,7 @@ mod tests {
             [
                 AgentExecutionCapability::Steer,
                 AgentExecutionCapability::Stop,
+                AgentExecutionCapability::Detach,
             ]
             .into_iter()
             .collect()
@@ -377,6 +378,7 @@ mod tests {
                 stop_reason: "completed".into(),
                 text: "done".into(),
                 turns: 1,
+                queued: false,
                 usage: (1, 2, 3),
             },
         });

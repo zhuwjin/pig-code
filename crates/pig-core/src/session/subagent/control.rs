@@ -337,13 +337,10 @@ impl Session {
             Some(task_id),
         );
         let run_cancel = child_cancel.clone();
-        let scheduler = child.state.scheduler.clone();
         let backends = child.state.backends.clone();
-        let child_task =
-            crate::agent::execute_local(backends, child, tx.clone(), run_cancel, activation);
-        let managed = life
-            .drive(&child_cancel, scheduler.acquire(&child_cancel), child_task)
-            .await;
+        let managed =
+            crate::agent::execute_local(backends, child, tx.clone(), run_cancel, activation, life)
+                .await;
         let result = managed.result;
         if result.is_cancelled() {
             return SubagentOutcome::Cancelled {

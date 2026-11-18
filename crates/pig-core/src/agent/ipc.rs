@@ -639,6 +639,7 @@ fn ipc_handle_result(result: IpcRunResult) -> Result<AgentBackendResult, AgentBa
         stop_reason: result.stop_reason,
         text: result.text,
         turns: result.turns,
+        queued: false,
         usage: result.usage,
     })
 }
@@ -753,6 +754,7 @@ impl AgentExecutionHandle for IpcAgentExecutionHandle {
             AgentExecutionCapability::Steer,
             AgentExecutionCapability::Reconnect,
             AgentExecutionCapability::Stop,
+            AgentExecutionCapability::Detach,
         ]
         .into_iter()
         .collect()
@@ -922,6 +924,7 @@ impl super::AgentBackendFactory for IpcAgentBackendFactory {
             super::AgentExecutionCapability::Resume,
             super::AgentExecutionCapability::Reconnect,
             super::AgentExecutionCapability::Stop,
+            super::AgentExecutionCapability::Detach,
         ]
         .into_iter()
         .collect()
@@ -953,6 +956,7 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
             super::AgentExecutionCapability::Resume,
             super::AgentExecutionCapability::Reconnect,
             super::AgentExecutionCapability::Stop,
+            super::AgentExecutionCapability::Detach,
         ]
         .into_iter()
         .collect()
@@ -1089,6 +1093,7 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
                         stop_reason: result.stop_reason,
                         text: result.text,
                         turns: result.turns,
+                        queued: false,
                         usage: result.usage,
                     });
                 }

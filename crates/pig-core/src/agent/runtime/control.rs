@@ -52,6 +52,7 @@ struct RuntimeState {
     closed: bool,
     events: broadcast::Sender<RuntimeControlEvent>,
     stop_hooks: BTreeMap<String, tokio_util::sync::CancellationToken>,
+    watchdog_ticks: bool,
     projections: super::RuntimeProjectionRegistry,
 }
 
@@ -103,6 +104,7 @@ impl AgentRuntime {
             closed: false,
             events: events.clone(),
             stop_hooks: BTreeMap::new(),
+            watchdog_ticks: true,
             projections: Default::default(),
         };
         state.recover_interrupted_local_runs()?;
@@ -466,6 +468,15 @@ impl AgentRuntime {
             .await
     }
 
+    #[cfg(test)]
+    fn disable_watchdog_ticks_blocking(&self) {
+        self.dispatch_blocking(|state| {
+            state.watchdog_ticks = false;
+            Ok(())
+        })
+        .expect("disable watchdog ticks");
+    }
+
     pub fn check_watchdogs_blocking(&self) -> Result<(), RuntimeError> {
         self.dispatch_blocking(|state| {
             state.check_watchdogs(crate::model_io::now_ms());
@@ -553,7 +564,11 @@ async fn run_commands(mut state: RuntimeState, mut commands: mpsc::UnboundedRece
                     break;
                 }
             }
-            _ = watchdog.tick() => state.check_watchdogs(crate::model_io::now_ms()),
+            _ = watchdog.tick() => {
+                if state.watchdog_ticks {
+                    state.check_watchdogs(crate::model_io::now_ms());
+                }
+            }
         }
     }
 }
@@ -2082,6 +2097,7 @@ mod tests {
     async fn watchdog_activity_delays_idle_and_survives_restart() {
         let (root, store) = store("watchdog-heartbeat");
         let runtime = AgentRuntime::spawn("s8".to_string(), store.clone()).expect("runtime");
+        runtime.disable_watchdog_ticks_blocking();
         runtime
             .register_agent(agent("s8", "s8", None))
             .await

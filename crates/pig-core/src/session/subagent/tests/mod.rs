@@ -37,9 +37,8 @@ fn test_model() -> ResolvedModel {
 
 fn test_child_session(agent_id: &str) -> Session {
     let jsonl = std::env::temp_dir().join(format!(
-        "pig-managed-{agent_id}-{}-{}.jsonl",
-        std::process::id(),
-        crate::rollout::now_secs()
+        "{}.jsonl",
+        crate::agent::runtime::new_runtime_id(&format!("pig-managed-{agent_id}"))
     ));
     make_child_session(
         agent_id,
@@ -86,11 +85,9 @@ pub(super) fn make_child_session(
 ) -> Session {
     let state = crate::task::SessionToolState::for_test();
     let delivery_receipts = state.delivery_receipts.clone();
-    let store_dir = std::env::temp_dir().join(format!(
-        "pig-managed-store-{agent_id}-{}-{}",
-        std::process::id(),
-        crate::rollout::now_secs()
-    ));
+    let store_dir = std::env::temp_dir().join(crate::agent::runtime::new_runtime_id(&format!(
+        "pig-managed-store-{agent_id}"
+    )));
     std::fs::create_dir_all(&store_dir).expect("test store dir");
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&store_dir).expect("test store"),

@@ -5,7 +5,7 @@ use pig_protocol::Event;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{AgentRunResult, Session};
+use crate::session::{AgentRunResult, AgentRunSupervisor, Session};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,6 +16,7 @@ pub enum AgentExecutionCapability {
     Reconnect,
     Stop,
     ForceStop,
+    Detach,
     StructuredOutput,
     Approval,
     Media,
@@ -103,7 +104,7 @@ pub trait AgentExecutionBackend: Send {
 pub(crate) struct LocalAgentBackendFactory;
 
 impl super::AgentBackendFactory for LocalAgentBackendFactory {
-    type Context = Session;
+    type Context = (Session, AgentRunSupervisor);
 
     fn capabilities(&self) -> BTreeSet<AgentExecutionCapability> {
         LocalAgentExecutionBackend::capabilities()
@@ -114,19 +115,35 @@ impl super::AgentBackendFactory for LocalAgentBackendFactory {
         context: Self::Context,
     ) -> BoxFuture<'static, Result<Box<dyn AgentExecutionBackend>, super::AgentBackendError>> {
         Box::pin(async move {
-            Ok(Box::new(LocalAgentExecutionBackend::new(context))
-                as Box<dyn AgentExecutionBackend>)
+            Ok(
+                Box::new(LocalAgentExecutionBackend::with_supervisor(context))
+                    as Box<dyn AgentExecutionBackend>,
+            )
         })
     }
 }
 
 pub(crate) struct LocalAgentExecutionBackend {
     session: Session,
+    supervisor: Option<AgentRunSupervisor>,
 }
 
 impl LocalAgentExecutionBackend {
+    #[cfg(test)]
     pub(crate) fn new(session: Session) -> Self {
-        Self { session }
+        Self {
+            session,
+            supervisor: None,
+        }
+    }
+
+    fn with_supervisor(
+        context: <LocalAgentBackendFactory as super::AgentBackendFactory>::Context,
+    ) -> Self {
+        Self {
+            session: context.0,
+            supervisor: Some(context.1),
+        }
     }
 
     pub(crate) fn capabilities() -> BTreeSet<AgentExecutionCapability> {
@@ -135,6 +152,7 @@ impl LocalAgentExecutionBackend {
             AgentExecutionCapability::Steer,
             AgentExecutionCapability::Resume,
             AgentExecutionCapability::Stop,
+            AgentExecutionCapability::ForceStop,
             AgentExecutionCapability::StructuredOutput,
             AgentExecutionCapability::Approval,
             AgentExecutionCapability::Media,
@@ -171,13 +189,19 @@ impl AgentExecutionBackend for LocalAgentExecutionBackend {
 
     fn start(
         self: Box<Self>,
-        _request: AgentExecutionRequest,
+        request: AgentExecutionRequest,
     ) -> BoxFuture<'static, Result<Box<dyn super::AgentExecutionHandle>, super::AgentBackendError>>
     {
         Box::pin(async move {
-            Err(super::AgentBackendError::InvalidContext(
-                "Local managed execution is awaiting handle migration".to_string(),
-            ))
+            let mut this = self;
+            let supervisor = this.supervisor.take().ok_or_else(|| {
+                super::AgentBackendError::InvalidContext(
+                    "Local execution requires its Supervisor".to_string(),
+                )
+            })?;
+            let handle =
+                crate::session::LocalAgentExecutionHandle::new(this.session, supervisor, request)?;
+            Ok(Box::new(handle) as Box<dyn super::AgentExecutionHandle>)
         })
     }
 
@@ -226,29 +250,79 @@ pub(crate) fn execute_local(
     events: async_channel::Sender<Event>,
     cancel: CancellationToken,
     activation: AgentExecutionActivation,
-) -> BoxFuture<'static, AgentRunResult> {
+    supervisor: AgentRunSupervisor,
+) -> BoxFuture<'static, crate::session::ManagedOutcome> {
     let identity = AgentRunIdentity {
         session_id: session.event_session_id().to_string(),
         agent_id: session.agent.id.clone(),
         run_id: session.agent.run_id().expect("child run identity"),
     };
     let request = AgentExecutionRequest::new(identity.clone(), events, cancel, activation);
+    let output = request.events.clone();
     Box::pin(async move {
-        match backends.execute_reserved("local", session, request).await {
-            Ok(result) => result.into_run(&identity),
-            Err(super::AgentBackendError::Cancelled) => AgentRunResult::child(
-                pig_protocol::AgentRunStatus::Cancelled,
-                "cancelled".to_string(),
-                String::new(),
-                0,
-                (0, 0, 0),
-            )
-            .with_identity(&identity.agent_id, identity.run_id),
-            Err(error) => execution_failure(
-                identity,
-                "local backend execution failed",
-                &error.to_string(),
-            ),
+        let failed = |result| crate::session::ManagedOutcome {
+            result,
+            queued: false,
+        };
+        let mut handle = match backends
+            .start_reserved("local", (session, supervisor), request)
+            .await
+        {
+            Ok(handle) => handle,
+            Err(super::AgentBackendError::Cancelled) => {
+                return failed(
+                    AgentRunResult::child(
+                        pig_protocol::AgentRunStatus::Cancelled,
+                        "cancelled".to_string(),
+                        String::new(),
+                        0,
+                        (0, 0, 0),
+                    )
+                    .with_identity(&identity.agent_id, identity.run_id.clone()),
+                );
+            }
+            Err(error) => {
+                return failed(execution_failure(
+                    identity,
+                    "local backend execution failed",
+                    &error.to_string(),
+                ));
+            }
+        };
+        loop {
+            match handle.next().await {
+                Ok(super::AgentExecutionUpdate::Output { event, .. }) => {
+                    let _ = output.send(event).await;
+                }
+                Ok(super::AgentExecutionUpdate::Settled { result, .. }) => {
+                    if let Err(error) = handle.release().await {
+                        return failed(execution_failure(
+                            identity,
+                            "local backend release failed",
+                            &error.to_string(),
+                        ));
+                    }
+                    let queued = result.queued;
+                    return crate::session::ManagedOutcome {
+                        result: result.into_run(&identity),
+                        queued,
+                    };
+                }
+                Ok(super::AgentExecutionUpdate::Disconnected { detail, .. }) => {
+                    return failed(execution_failure(
+                        identity,
+                        "local backend disconnected",
+                        &detail,
+                    ));
+                }
+                Err(error) => {
+                    return failed(execution_failure(
+                        identity,
+                        "local backend execution failed",
+                        &error.to_string(),
+                    ));
+                }
+            }
         }
     })
 }

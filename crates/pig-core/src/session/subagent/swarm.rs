@@ -185,18 +185,16 @@ impl Session {
             let tx_bg = tx.clone();
             let task_cancel = child_cancel.clone();
             let backends = child.state.backends.clone();
-            let scheduler = child.state.scheduler.clone();
             handles.push(tokio::spawn(async move {
-                let child_task = crate::agent::execute_local(
+                let managed = crate::agent::execute_local(
                     backends,
                     child,
                     tx_bg,
                     task_cancel,
                     crate::agent::AgentExecutionActivation::Start,
-                );
-                let managed = life
-                    .drive(&child_cancel, scheduler.acquire(&child_cancel), child_task)
-                    .await;
+                    life,
+                )
+                .await;
                 (ix, managed)
             }));
         }

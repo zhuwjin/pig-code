@@ -2,7 +2,7 @@ use super::*;
 
 use std::future::Future;
 
-use futures_util::FutureExt as _;
+use futures_util::{FutureExt as _, future::BoxFuture};
 
 use crate::agent::AgentWriterGuard;
 
@@ -14,9 +14,9 @@ const LOCAL_RUN_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs
 #[cfg(test)]
 const LOCAL_RUN_STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
-pub(super) struct ManagedOutcome {
-    pub(super) result: SubagentResult,
-    pub(super) queued: bool,
+pub(crate) struct ManagedOutcome {
+    pub(crate) result: SubagentResult,
+    pub(crate) queued: bool,
 }
 
 /// One child's terminal lifecycle: exclusive JSONL writer, registry entry,
@@ -331,6 +331,259 @@ impl Drop for AgentRunSupervisor {
         crate::task::release_agent_mailbox(&self.state, &self.agent_id);
         self.emit_finished();
         self.task_changed();
+    }
+}
+
+pub(crate) struct LocalAgentExecutionHandle {
+    identity: crate::agent::AgentExecutionIdentity,
+    state: crate::task::SessionToolState,
+    cancel: CancellationToken,
+    events: async_channel::Receiver<Event>,
+    drive: Option<BoxFuture<'static, ManagedOutcome>>,
+    cursor: crate::agent::AgentExecutionCursor,
+    terminal: Option<(
+        crate::agent::AgentExecutionCursor,
+        crate::agent::AgentBackendResult,
+    )>,
+    released: Option<crate::agent::AgentExecutionRelease>,
+    stop_requested: bool,
+}
+
+impl LocalAgentExecutionHandle {
+    pub(crate) fn new(
+        mut session: Session,
+        supervisor: AgentRunSupervisor,
+        mut request: crate::agent::AgentExecutionRequest,
+    ) -> Result<Self, crate::agent::AgentBackendError> {
+        let identity = request.execution.clone();
+        if request.identity != identity.run
+            || identity.run.agent_id != session.agent.id
+            || session.agent.run_id().as_deref() != Some(identity.run.run_id.as_str())
+        {
+            return Err(crate::agent::AgentBackendError::InvalidContext(
+                "Local execution identity mismatch".to_string(),
+            ));
+        }
+        if request.activation == crate::agent::AgentExecutionActivation::Reconnect {
+            return Err(crate::agent::AgentBackendError::UnsupportedCapability {
+                backend_id: "local".to_string(),
+                capability: crate::agent::AgentExecutionCapability::Reconnect,
+            });
+        }
+        let state = session.state.clone();
+        let cancel = request.cancel.clone();
+        let (events, output) = async_channel::unbounded();
+        request.events = events.clone();
+        let scheduler = state.scheduler.clone();
+        let run = Box::pin(async move { session.run_subagent_task(&events, &cancel).await });
+        let drive_cancel = request.cancel.clone();
+        let drive = Box::pin(async move {
+            supervisor
+                .drive(&drive_cancel, scheduler.acquire(&drive_cancel), run)
+                .await
+        }) as BoxFuture<'static, ManagedOutcome>;
+        let cursor = crate::agent::AgentExecutionCursor {
+            attempt: identity.attempt,
+            backend_epoch: identity.backend_epoch.clone(),
+            sequence: 0,
+        };
+        Ok(Self {
+            identity,
+            state,
+            cancel: request.cancel.clone(),
+            events: output,
+            drive: Some(drive),
+            cursor,
+            terminal: None,
+            released: None,
+            stop_requested: false,
+        })
+    }
+
+    fn receipt(&self) -> crate::agent::AgentExecutionReceipt {
+        crate::agent::AgentExecutionReceipt {
+            cursor: self.cursor.clone(),
+        }
+    }
+
+    fn settle(&mut self, outcome: ManagedOutcome) -> crate::agent::AgentExecutionUpdate {
+        let queued = outcome.queued;
+        let mut result = crate::agent::AgentBackendResult::from_run(outcome.result);
+        result.queued = queued;
+        self.cursor.sequence += 1;
+        let cursor = self.cursor.clone();
+        self.terminal = Some((cursor.clone(), result.clone()));
+        self.drive = None;
+        crate::agent::AgentExecutionUpdate::Settled { cursor, result }
+    }
+
+    fn capabilities(&self) -> std::collections::BTreeSet<crate::agent::AgentExecutionCapability> {
+        [
+            crate::agent::AgentExecutionCapability::Background,
+            crate::agent::AgentExecutionCapability::Steer,
+            crate::agent::AgentExecutionCapability::Resume,
+            crate::agent::AgentExecutionCapability::Stop,
+            crate::agent::AgentExecutionCapability::ForceStop,
+            crate::agent::AgentExecutionCapability::StructuredOutput,
+            crate::agent::AgentExecutionCapability::Approval,
+            crate::agent::AgentExecutionCapability::Media,
+            crate::agent::AgentExecutionCapability::Worktree,
+        ]
+        .into_iter()
+        .collect()
+    }
+}
+
+impl crate::agent::AgentExecutionHandle for LocalAgentExecutionHandle {
+    fn identity(&self) -> &crate::agent::AgentExecutionIdentity {
+        &self.identity
+    }
+
+    fn capabilities(&self) -> std::collections::BTreeSet<crate::agent::AgentExecutionCapability> {
+        Self::capabilities(self)
+    }
+
+    fn send(
+        &mut self,
+        input: crate::agent::AgentExecutionInput,
+    ) -> BoxFuture<'_, Result<crate::agent::AgentExecutionReceipt, crate::agent::AgentBackendError>>
+    {
+        Box::pin(async move {
+            if self.terminal.is_some() || self.stop_requested {
+                return Err(crate::agent::AgentBackendError::InvalidContext(
+                    "Local execution is not accepting input".to_string(),
+                ));
+            }
+            let text = input
+                .payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    crate::agent::AgentBackendError::InvalidContext(
+                        "Local execution input requires a text field".to_string(),
+                    )
+                })?
+                .to_string();
+            self.state
+                .agents
+                .push_steer(
+                    &self.identity.run.agent_id,
+                    crate::agent::AgentSteer::restored(input.message_id, text, None),
+                )
+                .map_err(crate::agent::AgentBackendError::Failed)?;
+            Ok(self.receipt())
+        })
+    }
+
+    fn stop(
+        &mut self,
+        stop: crate::agent::AgentExecutionStop,
+    ) -> BoxFuture<'_, Result<crate::agent::AgentExecutionReceipt, crate::agent::AgentBackendError>>
+    {
+        Box::pin(async move {
+            if self.terminal.is_some() {
+                return Err(crate::agent::AgentBackendError::InvalidContext(
+                    "Local execution has already settled".to_string(),
+                ));
+            }
+            if self.stop_requested {
+                return Ok(self.receipt());
+            }
+            let reason = match stop {
+                crate::agent::AgentExecutionStop::Graceful { reason }
+                | crate::agent::AgentExecutionStop::Force { reason } => reason,
+            };
+            self.state
+                .agents
+                .request_run_stop(&self.identity.run.run_id, &reason)
+                .map_err(crate::agent::AgentBackendError::InvalidContext)?;
+            self.cancel.cancel();
+            self.stop_requested = true;
+            Ok(self.receipt())
+        })
+    }
+
+    fn detach(
+        &mut self,
+    ) -> BoxFuture<'_, Result<crate::agent::AgentExecutionReceipt, crate::agent::AgentBackendError>>
+    {
+        Box::pin(async move {
+            Err(crate::agent::AgentBackendError::UnsupportedCapability {
+                backend_id: "local".to_string(),
+                capability: crate::agent::AgentExecutionCapability::Detach,
+            })
+        })
+    }
+
+    fn next(
+        &mut self,
+    ) -> BoxFuture<'_, Result<crate::agent::AgentExecutionUpdate, crate::agent::AgentBackendError>>
+    {
+        Box::pin(async move {
+            if let Some((cursor, result)) = &self.terminal {
+                return Ok(crate::agent::AgentExecutionUpdate::Settled {
+                    cursor: cursor.clone(),
+                    result: result.clone(),
+                });
+            }
+            let drive = self.drive.as_mut().ok_or_else(|| {
+                crate::agent::AgentBackendError::InvalidContext(
+                    "Local execution has no active drive".to_string(),
+                )
+            })?;
+            tokio::select! {
+                biased;
+                event = self.events.recv() => {
+                    match event {
+                        Ok(event) => {
+                            self.cursor.sequence += 1;
+                            Ok(crate::agent::AgentExecutionUpdate::Output {
+                                sequence: self.cursor.sequence,
+                                event,
+                            })
+                        }
+                        Err(_) => {
+                            let outcome = drive.await;
+                            Ok(self.settle(outcome))
+                        }
+                    }
+                }
+                outcome = &mut *drive => Ok(self.settle(outcome)),
+            }
+        })
+    }
+
+    fn release(
+        &mut self,
+    ) -> BoxFuture<'_, Result<crate::agent::AgentExecutionRelease, crate::agent::AgentBackendError>>
+    {
+        Box::pin(async move {
+            if let Some(released) = &self.released {
+                return Ok(released.clone());
+            }
+            while self.terminal.is_none() {
+                if !self.stop_requested {
+                    return Err(crate::agent::AgentBackendError::InvalidContext(
+                        "Local execution must settle before release".to_string(),
+                    ));
+                }
+                let _ = self.next().await?;
+            }
+            self.drive = None;
+            let cursor = self
+                .terminal
+                .as_ref()
+                .map(|(cursor, _)| cursor.clone())
+                .unwrap_or_else(|| self.cursor.clone());
+            self.cursor = cursor.clone();
+            let released = crate::agent::AgentExecutionRelease {
+                identity: self.identity.clone(),
+                cursor,
+                released_at_ms: crate::model_io::now_ms(),
+            };
+            self.released = Some(released.clone());
+            Ok(released)
+        })
     }
 }
 

@@ -82,15 +82,12 @@ fn spawn_with_writer(
     );
     let session_id = child.event_session_id().to_string();
     let child_cancel = cancel.clone();
-    let scheduler = child.state.scheduler.clone();
     let child_tx = tx.clone();
     let backends = child.state.backends.clone();
-    let child_task =
-        crate::agent::execute_local(backends, child, child_tx, child_cancel, activation);
     tokio::spawn(async move {
-        let managed = life
-            .drive(&cancel, scheduler.acquire(&cancel), child_task)
-            .await;
+        let managed =
+            crate::agent::execute_local(backends, child, child_tx, child_cancel, activation, life)
+                .await;
         if let Some(ui) = ui {
             let result = &managed.result;
             crate::session::emit_bg(&session_id, &tx, |session_id| Event::ToolCallEnd {

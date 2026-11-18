@@ -17,6 +17,7 @@ pub struct AgentBackendResult {
     pub stop_reason: String,
     pub text: String,
     pub turns: usize,
+    pub queued: bool,
     pub usage: (u64, u64, u64),
 }
 
@@ -28,6 +29,7 @@ impl AgentBackendResult {
             stop_reason: result.stop_reason,
             text,
             turns: result.turns,
+            queued: false,
             usage: result.usage,
         }
     }
@@ -274,16 +276,6 @@ impl AgentBackendRegistry {
         self.execute_inner(backend_id, context, request, true).await
     }
 
-    pub(crate) async fn execute_reserved<C: Send + 'static>(
-        &self,
-        backend_id: &str,
-        context: C,
-        request: AgentExecutionRequest,
-    ) -> Result<AgentBackendResult, AgentBackendError> {
-        self.execute_inner(backend_id, context, request, false)
-            .await
-    }
-
     pub async fn start<C: Send + 'static>(
         &self,
         backend_id: &str,
@@ -291,6 +283,24 @@ impl AgentBackendRegistry {
         request: AgentExecutionRequest,
     ) -> Result<Box<dyn AgentExecutionHandle>, AgentBackendError> {
         self.start_inner(backend_id, context, request, true).await
+    }
+
+    pub(crate) async fn start_reserved<C: Send + 'static>(
+        &self,
+        backend_id: &str,
+        context: C,
+        request: AgentExecutionRequest,
+    ) -> Result<Box<dyn AgentExecutionHandle>, AgentBackendError> {
+        let factory = self.factory(backend_id)?;
+        self.preflight(backend_id, &request.required_capabilities)?;
+        let scheduler = self.ensure_scheduler();
+        let backend = factory.create(Box::new(context)).await?;
+        let cancel = request.cancel.clone();
+        let inner = backend.start(request).await?;
+        let permit = scheduler
+            .acquire_reserved_backend(backend_id, &cancel)
+            .await;
+        Ok(Box::new(ReservedAgentExecutionHandle { inner, permit }))
     }
 
     async fn start_inner<C: Send + 'static>(
@@ -390,6 +400,7 @@ mod tests {
                     stop_reason: "completed".into(),
                     text: "fake".into(),
                     turns: 1,
+                    queued: false,
                     usage: (1, 2, 3),
                 })
             })
