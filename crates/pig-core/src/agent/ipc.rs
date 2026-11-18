@@ -107,6 +107,10 @@ struct WorkerRunOutput {
     events: Vec<IpcRunEvent>,
     terminal: Option<IpcRunResult>,
     text: String,
+    queued: usize,
+    steering: usize,
+    turns: usize,
+    usage: (u64, u64, u64),
 }
 
 impl WorkerRun {
@@ -153,21 +157,30 @@ impl WorkerRunOutput {
     fn fold_event(&mut self, event: &Event) {
         match event {
             Event::TextDelta { delta, .. } => self.text.push_str(delta),
+            Event::QueueChanged { items, .. } => self.queued = items.len(),
+            Event::SteerChanged { items, .. } => self.steering = items.len(),
+            Event::TurnStarted { .. } => self.terminal = None,
             Event::TurnComplete {
                 stats,
                 finish_reason,
                 ..
             } => {
                 let stats = stats.clone().unwrap_or_default();
-                let stop_reason = finish_reason
-                    .as_ref()
-                    .map_or_else(|| "completed".to_string(), |reason| format!("{reason:?}"));
-                self.terminal = Some(IpcRunResult {
-                    status: "completed".to_string(),
-                    stop_reason,
-                    text: self.text.clone(),
-                    turns: stats.api_steps as usize,
-                    usage: (stats.input, stats.cache_read, stats.output),
+                self.turns = self.turns.saturating_add(stats.api_steps as usize);
+                self.usage.0 = self.usage.0.saturating_add(stats.input);
+                self.usage.1 = self.usage.1.saturating_add(stats.cache_read);
+                self.usage.2 = self.usage.2.saturating_add(stats.output);
+                self.terminal = (self.queued == 0 && self.steering == 0).then(|| {
+                    let stop_reason = finish_reason
+                        .as_ref()
+                        .map_or_else(|| "completed".to_string(), |reason| format!("{reason:?}"));
+                    IpcRunResult {
+                        status: "completed".to_string(),
+                        stop_reason,
+                        text: self.text.clone(),
+                        turns: self.turns,
+                        usage: self.usage,
+                    }
                 });
             }
             Event::TurnAborted { .. } => {
@@ -175,8 +188,8 @@ impl WorkerRunOutput {
                     status: "cancelled".to_string(),
                     stop_reason: "cancelled".to_string(),
                     text: self.text.clone(),
-                    turns: 0,
-                    usage: (0, 0, 0),
+                    turns: self.turns,
+                    usage: self.usage,
                 });
             }
             Event::Error {
@@ -186,8 +199,8 @@ impl WorkerRunOutput {
                     status: "failed".to_string(),
                     stop_reason: pig_provider::core_error_en(error),
                     text: self.text.clone(),
-                    turns: 0,
-                    usage: (0, 0, 0),
+                    turns: self.turns,
+                    usage: self.usage,
                 });
             }
             _ => {}

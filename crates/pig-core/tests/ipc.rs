@@ -637,7 +637,12 @@ async fn worker_restart_replays_a_completed_run_without_duplicates() {
     .await
     .expect("recover completed run after worker restart");
     let (replayed_events, recovered_result) = collect_handle_events(&mut recovered).await;
-    assert_eq!(replayed_events, original_events);
+    assert!(replayed_events.len() >= original_events.len());
+    assert_eq!(&replayed_events[..original_events.len()], original_events);
+    assert_eq!(
+        replayed_events,
+        (1..=replayed_events.len() as u64).collect::<Vec<_>>()
+    );
     assert_eq!(recovered_result, original_result);
     recovered.release().await.expect("release recovered run");
     assert!(ipc_events(address, run_id, 0).await.is_err());
@@ -890,6 +895,96 @@ async fn execution_handle_steers_and_reconnects_after_a_real_transport_disconnec
         .await
         .expect("release reconnected run");
     proxy.stop().await;
+    worker.kill().await.expect("stop worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-consumed-input");
+    let (address, mut worker) = start_worker(&root.join("worker-state")).await;
+    let run_id = "ipc-consumed-input";
+    let mut handle = IpcAgentExecutionHandle::start(
+        address,
+        worker_identity(run_id, 1),
+        IpcRunSpec {
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-data"),
+            prompt: "read the mock file and summarize".to_string(),
+        },
+    )
+    .await
+    .expect("start worker run");
+    let input = AgentExecutionInput {
+        message_id: "ipc-queued-input-1".into(),
+        payload: serde_json::json!({
+            "text": "IPC queued input",
+            "delivery": "queue",
+        }),
+    };
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.next().await.expect("initial worker update") {
+                AgentExecutionUpdate::Output {
+                    event: pig_protocol::Event::ToolCallBegin { .. },
+                    ..
+                } => break,
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { .. } => panic!("settled before queue input"),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("initial tool call");
+    handle
+        .send(input.clone())
+        .await
+        .expect("queue input through production handle");
+
+    let mut completions = 0;
+    let mut visible_inputs = 0;
+    let result = timeout(Duration::from_secs(30), async {
+        loop {
+            match handle.next().await.expect("queued worker update") {
+                AgentExecutionUpdate::Output { event, .. } => {
+                    if matches!(event, pig_protocol::Event::TurnComplete { .. }) {
+                        completions += 1;
+                    }
+                    if matches!(
+                        event,
+                        pig_protocol::Event::UserMessage { ref text, .. }
+                            if text == "IPC queued input"
+                    ) {
+                        visible_inputs += 1;
+                        handle
+                            .send(input.clone())
+                            .await
+                            .expect("consumed duplicate receipt");
+                        handle
+                            .send(input.clone())
+                            .await
+                            .expect("repeated duplicate receipt");
+                    }
+                }
+                AgentExecutionUpdate::Settled { result, .. } => break result,
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("queued turn settlement");
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Completed);
+    assert_eq!(
+        completions, 2,
+        "the queued turn must finish before settlement"
+    );
+    assert_eq!(
+        visible_inputs, 1,
+        "consumed input must reach the model once"
+    );
+    handle.release().await.expect("release queued run");
     worker.kill().await.expect("stop worker");
     let _ = std::fs::remove_dir_all(root);
 }

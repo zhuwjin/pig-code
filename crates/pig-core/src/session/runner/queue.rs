@@ -319,6 +319,28 @@ impl Manager {
         // Record the latest permissions: notification-only turns use them (queued case included)
         entry.last_permissions = permissions;
         if let Some(id) = &message_id {
+            if entry.active_claim.as_deref() == Some(id.as_str()) {
+                return;
+            }
+            match store
+                .lock()
+                .expect("store lock")
+                .execution_receipt(&session_id, id)
+            {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    emit(
+                        &event_tx,
+                        Event::Error {
+                            session_id: Some(session_id.clone()),
+                            error,
+                            fatal: true,
+                        },
+                    );
+                    return;
+                }
+            }
             if entry
                 .pending
                 .lock()

@@ -120,6 +120,12 @@ impl Store {
                 payload TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS execution_receipts (
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (session_id, request_id)
+            );
             CREATE TABLE IF NOT EXISTS todos (
                 session_id TEXT PRIMARY KEY,
                 items TEXT NOT NULL
@@ -292,6 +298,7 @@ impl Store {
             "file_originals",
             "pending_queue",
             "execution_claims",
+            "execution_receipts",
             "background_tasks",
             "task_notifications",
             "runtime_agents",
@@ -331,6 +338,7 @@ impl Store {
             "file_originals",
             "pending_queue",
             "execution_claims",
+            "execution_receipts",
         ] {
             let _ = self.conn.execute(
                 &format!("DELETE FROM {table} WHERE session_id = ?1"),
