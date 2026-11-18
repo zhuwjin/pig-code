@@ -287,21 +287,23 @@ impl AgentRunSupervisor {
         if let Some(task_id) = &self.task_id {
             crate::task::mark_agent_task_started(&self.state, task_id);
         }
-        let execution = std::panic::AssertUnwindSafe(run).catch_unwind();
-        tokio::pin!(execution);
-        let outcome = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                tokio::time::timeout(LOCAL_RUN_STOP_GRACE, &mut execution).await.ok()
-            }
-            result = &mut execution => Some(result),
+        let result = {
+            let execution = std::panic::AssertUnwindSafe(run).catch_unwind();
+            tokio::pin!(execution);
+            let outcome = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tokio::time::timeout(LOCAL_RUN_STOP_GRACE, &mut execution).await.ok()
+                }
+                result = &mut execution => Some(result),
+            };
+            let result = match outcome {
+                Some(Ok(result)) => result,
+                Some(Err(payload)) => panic_subagent_result(payload),
+                None => forced_stop_subagent_result(),
+            };
+            self.identify_result(result)
         };
-        let result = match outcome {
-            Some(Ok(result)) => result,
-            Some(Err(payload)) => panic_subagent_result(payload),
-            None => forced_stop_subagent_result(),
-        };
-        let result = self.identify_result(result);
         self.settle(&result);
         ManagedOutcome { result, queued }
     }

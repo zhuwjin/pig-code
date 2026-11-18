@@ -395,10 +395,28 @@ async fn managed_driver_catches_panic_and_settles_registry() {
 
 #[tokio::test]
 async fn uncooperative_local_run_is_dropped_after_stop_grace() {
-    struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for SetOnDrop {
+    struct ObserveExecutionDrop {
+        state: crate::task::SessionToolState,
+        task_id: String,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        status_at_drop: std::sync::Arc<std::sync::Mutex<Option<pig_protocol::TaskStatus>>>,
+    }
+    impl Drop for ObserveExecutionDrop {
         fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::Release);
+            let status = self
+                .state
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .find(|entry| entry.id == self.task_id)
+                .map(|entry| entry.status);
+            *self
+                .status_at_drop
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -427,7 +445,13 @@ async fn uncooperative_local_run_is_dropped_after_stop_grace() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mark_drop = SetOnDrop(dropped.clone());
+    let status_at_drop = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mark_drop = ObserveExecutionDrop {
+        state: state.clone(),
+        task_id: task_id.clone(),
+        dropped: dropped.clone(),
+        status_at_drop: status_at_drop.clone(),
+    };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         life.drive(
@@ -444,6 +468,13 @@ async fn uncooperative_local_run_is_dropped_after_stop_grace() {
     assert!(outcome.result.is_cancelled());
     assert!(outcome.result.stop_reason.contains("grace period"));
     assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        *status_at_drop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        Some(pig_protocol::TaskStatus::Running),
+        "execution resources must drop before settlement and release"
+    );
     assert!(!state.agent_writer_active(&drive.agent.id));
     let status = state
         .tasks
