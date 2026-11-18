@@ -270,6 +270,7 @@ fn legacy_execute_control_plane_stays_removed() {
             ".execute(",
             "execute_reserved",
             "execute_inner",
+            "AgentExecutionActivation::Resume",
         ] {
             assert!(
                 !source.contains(forbidden),

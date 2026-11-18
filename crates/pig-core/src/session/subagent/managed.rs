@@ -15,7 +15,6 @@ pub(super) fn spawn_detached_child(
     cancel: CancellationToken,
     tx: async_channel::Sender<Event>,
     ui: Option<DelegatedUi>,
-    activation: crate::agent::AgentExecutionActivation,
 ) {
     let Some(writer) = child
         .subagent
@@ -28,7 +27,7 @@ pub(super) fn spawn_detached_child(
         settle_unclaimed(&child, &task_id);
         return;
     };
-    spawn_with_writer(child, writer, task_id, cancel, tx, ui, activation);
+    spawn_with_writer(child, writer, task_id, cancel, tx, ui);
 }
 
 fn settle_unclaimed(child: &Session, task_id: &str) {
@@ -67,7 +66,6 @@ fn spawn_with_writer(
     cancel: CancellationToken,
     tx: async_channel::Sender<Event>,
     ui: Option<DelegatedUi>,
-    activation: crate::agent::AgentExecutionActivation,
 ) {
     // Build the lifecycle before spawning: an unpolled/dropped task still
     // releases the writer and settles the registry entry via Drop.
@@ -86,8 +84,7 @@ fn spawn_with_writer(
     let backends = child.state.backends.clone();
     tokio::spawn(async move {
         let managed =
-            crate::agent::execute_local(backends, child, child_tx, child_cancel, activation, life)
-                .await;
+            crate::agent::execute_local(backends, child, child_tx, child_cancel, life).await;
         if let Some(ui) = ui {
             let result = &managed.result;
             crate::session::emit_bg(&session_id, &tx, |session_id| Event::ToolCallEnd {

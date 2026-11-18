@@ -156,7 +156,7 @@
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
       "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
-      "missing_proof": ["Separate resume, reconnect, detach and stop in every Runtime control path", "Replace activation-based resume with an explicit new-Run Runtime command; legacy execute is removed", "Prove settlement and release independence with attempt fencing"],
+      "missing_proof": ["Store and fence ExecutionHandle ownership in AgentRuntime; registry and both backends are migrated", "Prove settlement and release independence with attempt fencing"],
       "status": "implemented"
     },
     {

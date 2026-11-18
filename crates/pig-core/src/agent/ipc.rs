@@ -979,9 +979,6 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
                         IpcAgentExecutionHandle::start(self.address, execution, self.spec).await?;
                     Ok(Box::new(handle) as Box<dyn AgentExecutionHandle>)
                 }
-                super::AgentExecutionActivation::Resume => Err(AgentBackendError::InvalidContext(
-                    "Agent resume requires a new Run, not an IPC execution resume".to_string(),
-                )),
                 super::AgentExecutionActivation::Reconnect => {
                     let cursor = request.cursor.ok_or_else(|| {
                         AgentBackendError::InvalidContext(

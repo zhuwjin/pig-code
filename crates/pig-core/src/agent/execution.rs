@@ -39,7 +39,6 @@ pub struct AgentEventCursor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentExecutionActivation {
     Start,
-    Resume,
     Reconnect,
 }
 
@@ -191,7 +190,6 @@ pub(crate) fn execute_local(
     session: Session,
     events: async_channel::Sender<Event>,
     cancel: CancellationToken,
-    activation: AgentExecutionActivation,
     supervisor: AgentRunSupervisor,
 ) -> BoxFuture<'static, crate::session::ManagedOutcome> {
     let identity = AgentRunIdentity {
@@ -199,7 +197,12 @@ pub(crate) fn execute_local(
         agent_id: session.agent.id.clone(),
         run_id: session.agent.run_id().expect("child run identity"),
     };
-    let request = AgentExecutionRequest::new(identity.clone(), events, cancel, activation);
+    let request = AgentExecutionRequest::new(
+        identity.clone(),
+        events,
+        cancel,
+        AgentExecutionActivation::Start,
+    );
     let output = request.events.clone();
     Box::pin(async move {
         let failed = |result| crate::session::ManagedOutcome {
