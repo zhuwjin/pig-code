@@ -155,8 +155,8 @@
       "id": "R02",
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
-      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/runtime/model.rs"],
-      "missing_proof": ["Separate resume, reconnect, detach and stop", "Introduce a long-lived execution handle", "Prove settlement and release independence with attempt fencing"],
+      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/runtime/model.rs"],
+      "missing_proof": ["Separate resume, reconnect, detach and stop in every production control path", "Integrate the long-lived execution handle into Local and IPC backends", "Prove settlement and release independence with attempt fencing"],
       "status": "implemented"
     },
     {

@@ -75,6 +75,7 @@ impl AgentSource {
 mod backend;
 mod child;
 mod execution;
+mod execution_handle;
 mod execution_registry;
 pub mod ipc;
 mod mailbox;
@@ -95,6 +96,7 @@ pub use execution::{
     AgentExecutionRequest, AgentRunIdentity,
 };
 pub(crate) use execution::{LocalAgentExecutionBackend, execute_local};
+pub use execution_handle::*;
 pub(crate) use execution_registry::*;
 pub(crate) use mailbox::*;
 pub(crate) use parse::*;
