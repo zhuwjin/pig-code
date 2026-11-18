@@ -275,9 +275,9 @@
       "id": "R17",
       "area": "Automated architecture conformance gates",
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
-      "existing_evidence": [],
-      "missing_proof": ["Create executable dependency and ownership gates", "Reject dual control planes and backend/provider Session special cases", "Reject permission bypasses, unregistered projections, unbounded queues and ignored core errors in CI"],
-      "status": "unimplemented"
+      "existing_evidence": ["crates/pig-core/tests/architecture.rs"],
+      "missing_proof": ["Extend ownership gates beyond module inventory to runtime authority and dependency boundaries", "Reject dual control planes and backend/provider Session special cases", "Reject permission bypasses, unregistered projections, unbounded queues and ignored core errors in CI"],
+      "status": "implemented"
     },
     {
       "id": "R18",

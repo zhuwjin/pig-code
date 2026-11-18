@@ -99,6 +99,10 @@ name = "approval_modes"
 path = "tests/approval_modes.rs"
 
 [[test]]
+name = "architecture"
+path = "tests/architecture.rs"
+
+[[test]]
 name = "bash"
 path = "tests/bash.rs"
 
