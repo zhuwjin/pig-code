@@ -365,7 +365,7 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
         attempt: attempt.attempt,
         backend_epoch: attempt.backend_epoch.clone(),
     });
-    let mut handle = parent
+    let handle = parent
         .backends()
         .start(
             "ipc",
@@ -379,13 +379,17 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
         )
         .await
         .expect("start registry IPC handle");
+    parent
+        .register_execution(handle)
+        .await
+        .expect("register handle in the parent runtime");
     let result = timeout(Duration::from_secs(30), async {
         loop {
-            match handle.next().await? {
+            match parent.next_execution(run.run_id.clone()).await? {
                 AgentExecutionUpdate::Output { .. } => {}
                 AgentExecutionUpdate::Settled { result, .. } => break Ok(result),
                 AgentExecutionUpdate::Disconnected { detail, .. } => {
-                    return Err(pig_core::agent::AgentBackendError::Disconnected(detail));
+                    return Err(RuntimeError::Backend(detail));
                 }
             }
         }
@@ -395,26 +399,19 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
     .expect("registry IPC execution");
     assert_eq!(result.status, pig_protocol::AgentRunStatus::Completed);
     assert!(result.text.contains(mock::MOCK_REPLY_MARKER));
-    parent
-        .settle_run(
-            run.run_id.clone(),
-            attempt.attempt,
-            attempt.backend_epoch.clone(),
-            RuntimeRunStatus::Completed,
-            Some(result.stop_reason),
-            result.usage,
-        )
+    let first = parent
+        .release_execution_handle(run.run_id.clone())
         .await
-        .expect("settle registered run");
-    handle.release().await.expect("first release");
-    handle.release().await.expect("idempotent release");
-    assert!(
-        parent
-            .release_execution_blocking(run.run_id, attempt.attempt, attempt.backend_epoch,)
-            .expect("runtime release")
-            .released_at_ms
-            .is_some()
-    );
+        .expect("first release");
+    let repeated = parent
+        .release_execution_handle(run.run_id.clone())
+        .await
+        .expect("idempotent release");
+    assert_eq!(repeated, first);
+    let snapshot = parent.snapshot().await.expect("runtime snapshot");
+    assert_eq!(snapshot.runs[0].status, RuntimeRunStatus::Completed);
+    assert_eq!(snapshot.attempts[0].last_event_seq, first.cursor.sequence);
+    assert!(snapshot.attempts[0].released_at_ms.is_some());
     parent.shutdown().await.expect("shutdown");
     worker.kill().await.expect("stop worker");
     let _ = std::fs::remove_dir_all(root);

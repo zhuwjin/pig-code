@@ -5,6 +5,7 @@ use pig_protocol::Event;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use super::{AgentBackendError, AgentExecutionHandle, AgentExecutionRelease, AgentExecutionUpdate};
 use crate::session::{AgentRunResult, AgentRunSupervisor, Session};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -185,6 +186,33 @@ impl AgentExecutionBackend for LocalAgentExecutionBackend {
     }
 }
 
+enum LocalExecutionDriver {
+    Direct(Box<dyn AgentExecutionHandle>),
+    Runtime(super::runtime::AgentRuntime),
+}
+
+impl LocalExecutionDriver {
+    async fn next(&mut self, run_id: &str) -> Result<AgentExecutionUpdate, AgentBackendError> {
+        match self {
+            Self::Direct(handle) => handle.next().await,
+            Self::Runtime(runtime) => runtime
+                .next_execution(run_id.to_string())
+                .await
+                .map_err(|error| AgentBackendError::Failed(error.to_string())),
+        }
+    }
+
+    async fn release(&mut self, run_id: &str) -> Result<AgentExecutionRelease, AgentBackendError> {
+        match self {
+            Self::Direct(handle) => handle.release().await,
+            Self::Runtime(runtime) => runtime
+                .release_execution_handle(run_id.to_string())
+                .await
+                .map_err(|error| AgentBackendError::Failed(error.to_string())),
+        }
+    }
+}
+
 pub(crate) fn execute_local(
     backends: std::sync::Arc<super::AgentBackendRegistry>,
     session: Session,
@@ -197,7 +225,8 @@ pub(crate) fn execute_local(
         agent_id: session.agent.id.clone(),
         run_id: session.agent.run_id().expect("child run identity"),
     };
-    let request = AgentExecutionRequest::new(
+    let runtime = session.execution_runtime();
+    let mut request = AgentExecutionRequest::new(
         identity.clone(),
         events,
         cancel,
@@ -209,7 +238,32 @@ pub(crate) fn execute_local(
             result,
             queued: false,
         };
-        let mut handle = match backends
+        if runtime.is_some()
+            && !session.begin_agent_execution(&identity.agent_id, identity.run_id.clone())
+        {
+            return failed(execution_failure(
+                identity,
+                "local backend admission failed",
+                "AgentRuntime rejected the current Local run",
+            ));
+        }
+        if let Some(runtime) = &runtime {
+            let execution = match runtime
+                .current_execution_identity(identity.run_id.clone())
+                .await
+            {
+                Ok(execution) => execution,
+                Err(error) => {
+                    return failed(execution_failure(
+                        identity,
+                        "local execution identity lookup failed",
+                        &error.to_string(),
+                    ));
+                }
+            };
+            request = request.with_execution_identity(execution);
+        }
+        let handle = match backends
             .start_reserved("local", (session, supervisor), request)
             .await
         {
@@ -234,13 +288,27 @@ pub(crate) fn execute_local(
                 ));
             }
         };
+        let mut driver = if let Some(runtime) = runtime {
+            match runtime.register_execution(handle).await {
+                Ok(_) => LocalExecutionDriver::Runtime(runtime),
+                Err(error) => {
+                    return failed(execution_failure(
+                        identity,
+                        "local execution registration failed",
+                        &error.to_string(),
+                    ));
+                }
+            }
+        } else {
+            LocalExecutionDriver::Direct(handle)
+        };
         loop {
-            match handle.next().await {
+            match driver.next(&identity.run_id).await {
                 Ok(super::AgentExecutionUpdate::Output { event, .. }) => {
                     let _ = output.send(event).await;
                 }
                 Ok(super::AgentExecutionUpdate::Settled { result, .. }) => {
-                    if let Err(error) = handle.release().await {
+                    if let Err(error) = driver.release(&identity.run_id).await {
                         return failed(execution_failure(
                             identity,
                             "local backend release failed",

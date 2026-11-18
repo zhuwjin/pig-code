@@ -334,6 +334,16 @@ impl Drop for AgentRunSupervisor {
     }
 }
 
+impl Session {
+    pub(crate) fn execution_runtime(&self) -> Option<crate::agent::runtime::AgentRuntime> {
+        self.state.agents.execution_runtime()
+    }
+
+    pub(crate) fn begin_agent_execution(&self, agent_id: &str, run_id: String) -> bool {
+        self.state.agents.begin_run(agent_id, run_id)
+    }
+}
+
 pub(crate) struct LocalAgentExecutionHandle {
     identity: crate::agent::AgentExecutionIdentity,
     state: crate::task::SessionToolState,

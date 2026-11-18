@@ -35,32 +35,45 @@ impl ExecutionTable {
         &self,
         state: &super::control::RuntimeState,
         handle: Box<dyn AgentExecutionHandle>,
-    ) -> Result<AgentExecutionIdentity, RuntimeError> {
+    ) -> Result<AgentExecutionIdentity, (RuntimeError, Box<dyn AgentExecutionHandle>)> {
         let identity = handle.identity().clone();
         let run_id = identity.run.run_id.clone();
-        let current = state.execution_identity(&run_id)?;
-        fence(&current, &identity)?;
+        let current = match state.execution_identity(&run_id) {
+            Ok(current) => current,
+            Err(error) => return Err((error, handle)),
+        };
+        if let Err(error) = fence(&current, &identity) {
+            return Err((error, handle));
+        }
         if !state.run_is_active(&run_id) {
-            return Err(RuntimeError::InvalidTransition(format!(
-                "Run {run_id} is not active"
-            )));
+            return Err((
+                RuntimeError::InvalidTransition(format!("Run {run_id} is not active")),
+                handle,
+            ));
         }
         let mut table = self.lock();
         if table.busy.contains(&run_id) {
-            return Err(RuntimeError::Conflict(format!(
-                "Run {run_id} has an in-flight execution operation"
-            )));
+            return Err((
+                RuntimeError::Conflict(format!(
+                    "Run {run_id} has an in-flight execution operation"
+                )),
+                handle,
+            ));
         }
         if let Some(existing) = table.entries.get(&run_id) {
             if existing.handle.identity() == &identity {
-                return Err(RuntimeError::Conflict(format!(
-                    "Run {run_id} already has an execution handle"
-                )));
+                return Err((
+                    RuntimeError::Conflict(format!("Run {run_id} already has an execution handle")),
+                    handle,
+                ));
             }
             if !existing.detached {
-                return Err(RuntimeError::Conflict(format!(
-                    "Run {run_id} must detach its old Attempt before replacement"
-                )));
+                return Err((
+                    RuntimeError::Conflict(format!(
+                        "Run {run_id} must detach its old Attempt before replacement"
+                    )),
+                    handle,
+                ));
             }
         }
         table.entries.insert(
@@ -120,6 +133,11 @@ impl ExecutionTable {
         self.lock().busy.remove(run_id);
     }
 
+    fn has_resources(&self, run_id: &str) -> bool {
+        let table = self.lock();
+        table.entries.contains_key(run_id) || table.busy.contains(run_id)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.lock().entries.len()
@@ -159,13 +177,29 @@ fn terminal_status(status: pig_protocol::AgentRunStatus) -> Result<RuntimeRunSta
 }
 
 impl super::AgentRuntime {
+    pub async fn current_execution_identity(
+        &self,
+        run_id: String,
+    ) -> Result<AgentExecutionIdentity, RuntimeError> {
+        self.dispatch(move |state| state.execution_identity(&run_id))
+            .await
+    }
+
     pub async fn register_execution(
         &self,
         handle: Box<dyn AgentExecutionHandle>,
     ) -> Result<AgentExecutionIdentity, RuntimeError> {
         let executions = self.executions.clone();
-        self.dispatch(move |state| executions.register(state, handle))
-            .await
+        let result = self
+            .dispatch(move |state| Ok(executions.register(state, handle)))
+            .await?;
+        match result {
+            Ok(identity) => Ok(identity),
+            Err((error, handle)) => {
+                drop(handle);
+                Err(error)
+            }
+        }
     }
 
     async fn take_execution(
@@ -309,26 +343,81 @@ impl super::AgentRuntime {
         }
     }
 
+    async fn persisted_release(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<AgentExecutionRelease>, RuntimeError> {
+        let snapshot = self.snapshot().await?;
+        let run = snapshot
+            .runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .ok_or_else(|| RuntimeError::NotFound(format!("Run {run_id} is not registered")))?;
+        let attempt = snapshot
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_id)
+            .ok_or_else(|| {
+                RuntimeError::NotFound(format!("Run {run_id} has no execution attempt"))
+            })?;
+        let Some(released_at_ms) = attempt.released_at_ms else {
+            return Ok(None);
+        };
+        Ok(Some(AgentExecutionRelease {
+            identity: AgentExecutionIdentity {
+                run: crate::agent::AgentRunIdentity {
+                    session_id: run.session_id.clone(),
+                    agent_id: run.agent_id.clone(),
+                    run_id: run.run_id.clone(),
+                },
+                attempt: attempt.attempt,
+                backend_epoch: attempt.backend_epoch.clone(),
+            },
+            cursor: crate::agent::AgentExecutionCursor {
+                attempt: attempt.attempt,
+                backend_epoch: attempt.backend_epoch.clone(),
+                sequence: attempt.last_event_seq,
+            },
+            released_at_ms,
+        }))
+    }
+
     pub async fn release_execution_handle(
         &self,
         run_id: String,
     ) -> Result<AgentExecutionRelease, RuntimeError> {
+        let persisted = self.persisted_release(&run_id).await?;
+        if persisted.is_some() && !self.executions.has_resources(&run_id) {
+            return persisted.ok_or_else(|| {
+                RuntimeError::NotFound(format!("Run {run_id} has no release proof"))
+            });
+        }
         let (mut entry, identity) = self.take_execution(&run_id).await?;
         match entry.handle.release().await {
             Ok(release) => {
+                if let Some(persisted) = persisted {
+                    self.executions.finish(&run_id);
+                    return Ok(persisted);
+                }
                 let release_run_id = run_id.clone();
+                let cursor = release.cursor.sequence;
                 let result = self
                     .dispatch(move |state| {
-                        state.release_execution(
+                        state.release_execution_at(
                             &release_run_id,
                             identity.attempt,
                             &identity.backend_epoch,
+                            cursor,
                         )
                     })
                     .await;
                 self.executions.finish(&run_id);
-                result?;
-                Ok(release)
+                let attempt = result?;
+                Ok(AgentExecutionRelease {
+                    identity: release.identity,
+                    cursor: release.cursor,
+                    released_at_ms: attempt.released_at_ms.expect("released attempt timestamp"),
+                })
             }
             Err(error) => {
                 self.put_execution(&run_id, entry).await?;
@@ -627,10 +716,19 @@ mod tests {
         {}
         assert_eq!(second_state.lock().expect("release state").releases, 1);
         assert_eq!(runtime.execution_count().await, 0);
+        let repeated = runtime
+            .release_execution_handle(run.run_id.clone())
+            .await
+            .expect("read idempotent release proof");
+        assert_eq!(repeated, released);
         let snapshot = runtime.snapshot().await.expect("final snapshot");
         assert_eq!(snapshot.runs[0].status, RuntimeRunStatus::Cancelled);
         assert_eq!(snapshot.runs[0].stop_reason.as_deref(), Some("test stop"));
         assert!(snapshot.attempts[0].released_at_ms.is_some());
+        assert_eq!(
+            snapshot.attempts[0].last_event_seq,
+            released.cursor.sequence
+        );
         runtime.shutdown().await.expect("shutdown");
         let _ = std::fs::remove_dir_all(root);
     }

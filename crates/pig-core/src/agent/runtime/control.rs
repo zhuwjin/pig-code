@@ -1417,6 +1417,26 @@ impl RuntimeState {
         attempt: u64,
         backend_epoch: &str,
     ) -> Result<ExecutionAttempt, RuntimeError> {
+        self.release_execution_inner(run_id, attempt, backend_epoch, None)
+    }
+
+    pub(super) fn release_execution_at(
+        &mut self,
+        run_id: &str,
+        attempt: u64,
+        backend_epoch: &str,
+        cursor: u64,
+    ) -> Result<ExecutionAttempt, RuntimeError> {
+        self.release_execution_inner(run_id, attempt, backend_epoch, Some(cursor))
+    }
+
+    fn release_execution_inner(
+        &mut self,
+        run_id: &str,
+        attempt: u64,
+        backend_epoch: &str,
+        cursor: Option<u64>,
+    ) -> Result<ExecutionAttempt, RuntimeError> {
         let execution = self.current_attempt(run_id, attempt, backend_epoch)?;
         let run = self
             .runs
@@ -1431,6 +1451,9 @@ impl RuntimeState {
             return Ok(execution);
         }
         let mut released = execution;
+        if let Some(cursor) = cursor {
+            released.last_event_seq = cursor;
+        }
         released.released_at_ms = Some(crate::model_io::now_ms());
         self.commit_execution_attempt(released, RuntimeEventKind::ExecutionReleased)
     }

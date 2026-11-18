@@ -415,6 +415,10 @@ impl AgentExecutionRegistry {
         }
     }
 
+    pub(crate) fn execution_runtime(&self) -> Option<super::runtime::AgentRuntime> {
+        self.runtime.clone()
+    }
+
     pub(crate) fn update_agent_context(
         &self,
         agent_id: &str,
@@ -660,10 +664,6 @@ impl AgentExecutionRegistry {
                 turns,
             ) {
                 tracing::warn!(%agent_id, %run_id, %error, "runtime run settlement failed");
-                return false;
-            }
-            if let Err(error) = runtime.release_current_execution_blocking(run_id.to_string()) {
-                tracing::warn!(%agent_id, %run_id, %error, "runtime execution release failed");
                 return false;
             }
         }

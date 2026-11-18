@@ -155,8 +155,8 @@
       "id": "R02",
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
-      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
-      "missing_proof": ["Route production Local/IPC handles through Runtime's fenced execution table; ownership and fencing are covered by control tests", "Prove fencing and release ordering across real Local/IPC restarts"],
+      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
+      "missing_proof": ["Prove fencing and release ordering across real Local/IPC restart and worker-failure injection"],
       "status": "implemented"
     },
     {
@@ -171,8 +171,8 @@
       "id": "R04",
       "area": "Stop, delete, quiescence and bounded cleanup",
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
-      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
-      "missing_proof": ["Aggregate backend release, Runtime ExecutionReleased and deletion quiescence into one proof for every path", "Persist pending deletion and retryable cleanup", "Pass ten repeated mixed stress runs without unbounded residue"],
+      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
+      "missing_proof": ["Exercise backend release failure and control-fact failure injection across Local and IPC", "Persist pending deletion and retryable cleanup", "Pass ten repeated mixed stress runs without unbounded residue"],
       "status": "implemented"
     },
     {
