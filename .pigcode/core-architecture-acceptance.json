@@ -171,9 +171,9 @@
       "id": "R04",
       "area": "Stop, delete, quiescence and bounded cleanup",
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
-      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
-      "missing_proof": ["Exercise backend release failure and control-fact failure injection across Local and IPC", "Persist pending deletion and retryable cleanup", "Pass ten repeated mixed stress runs without unbounded residue"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/store/deletion.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
+      "missing_proof": ["Exercise backend release failure and control-fact failure injection across Local and IPC", "Pass ten repeated mixed stress runs without unbounded residue"],
+      "status": "tested"
     },
     {
       "id": "R05",

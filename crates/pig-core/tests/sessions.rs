@@ -2083,3 +2083,240 @@ async fn replay_of_a_busy_session_waits_for_the_turn_to_settle() {
     )));
     agent.close().await.expect("close agent");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_deletion_survives_restart_and_retries_failed_artifacts() {
+    let (config_path, cwd, data_dir) = setup("pending-deletion-restart");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.close().await.expect("close original agent");
+    let database = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("open store");
+    database
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_deletions (
+                session_id TEXT PRIMARY KEY,
+                requested_at_ms INTEGER NOT NULL
+            );",
+        )
+        .expect("deletion schema fixture");
+    database
+        .execute(
+            "INSERT INTO session_deletions (session_id, requested_at_ms) VALUES (?1, 1)",
+            rusqlite::params![session_id],
+        )
+        .expect("persist deletion request");
+    drop(database);
+    let media = pig_utils::paths::media_dir(&data_dir.join("sessions"), &session_id);
+    std::fs::write(&media, "block directory cleanup").expect("inject artifact failure");
+
+    let recovered = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::Error {
+                error: CoreError::TaskStore { detail },
+                ..
+            } if detail.contains("Failed to remove")
+        )
+    })
+    .await;
+    let store = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("inspect store");
+    assert!(
+        store
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("session remains after cleanup failure")
+    );
+    assert!(
+        store
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("deletion marker remains")
+    );
+    drop(store);
+    std::fs::remove_file(&media).expect("remove artifact failure");
+    let sessions = recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionList { .. })
+    })
+    .await;
+    let Some(Event::SessionList { sessions: listed }) = sessions.last() else {
+        panic!("expected final session list");
+    };
+    assert!(listed.iter().all(|session| session.id != session_id));
+    assert!(
+        !data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl"))
+            .exists()
+    );
+    let store = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("final store");
+    assert!(
+        !store
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("deletion marker cleared")
+    );
+    recovered.close().await.expect("close recovered agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_deletion_retries_a_failed_store_commit() {
+    let (config_path, cwd, data_dir) = setup("pending-deletion-store-failure");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.close().await.expect("close original agent");
+    let store = pig_core::store::Store::open(&data_dir).expect("open store");
+    store
+        .request_session_deletion(&session_id)
+        .expect("request deletion");
+    drop(store);
+    let faults = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("fault store");
+    faults
+        .execute_batch(
+            "CREATE TRIGGER fail_session_delete
+             BEFORE DELETE ON sessions
+             BEGIN SELECT RAISE(FAIL, 'injected session commit failure'); END;",
+        )
+        .expect("inject final commit failure");
+
+    let recovered = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::Error {
+                error: CoreError::TaskStore { detail },
+                ..
+            } if detail.contains("injected session commit failure")
+        )
+    })
+    .await;
+    assert!(
+        faults
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("session survives rolled-back deletion")
+    );
+    assert!(
+        faults
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("deletion marker survives rollback")
+    );
+    faults
+        .execute("DROP TRIGGER fail_session_delete", [])
+        .expect("remove commit failure");
+    let events = recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionList { .. })
+    })
+    .await;
+    let Some(Event::SessionList { sessions }) = events.last() else {
+        panic!("expected committed session list");
+    };
+    assert!(sessions.iter().all(|session| session.id != session_id));
+    assert!(
+        !faults
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("marker cleared")
+    );
+    recovered.close().await.expect("close recovered agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deletion_request_failure_does_not_stop_a_live_session() {
+    let (config_path, cwd, data_dir) = setup("deletion-request-failure");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::SCENARIO_SLOW_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("start live turn");
+    recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::ToolCallBegin { .. })
+    })
+    .await;
+    let faults = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("fault store");
+    faults
+        .execute_batch(
+            "CREATE TRIGGER fail_deletion_request
+             BEFORE INSERT ON session_deletions
+             BEGIN SELECT RAISE(FAIL, 'injected deletion request failure'); END;",
+        )
+        .expect("inject deletion request failure");
+    agent
+        .ops
+        .send(Op::DeleteSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("request deletion");
+    let events = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::Error {
+                error: CoreError::TaskStore { detail },
+                ..
+            } if detail.contains("injected deletion request failure")
+        )
+    })
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TurnAborted { .. }))
+    );
+    faults
+        .execute("DROP TRIGGER fail_deletion_request", [])
+        .expect("remove request failure");
+    agent
+        .ops
+        .send(Op::DeleteSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("retry deletion");
+    recv_until(&agent.events, Duration::from_secs(15), |event| {
+        matches!(
+            event,
+            Event::SessionList { sessions }
+                if sessions.iter().all(|session| session.id != session_id)
+        )
+    })
+    .await;
+    agent.close().await.expect("close deleted agent");
+}

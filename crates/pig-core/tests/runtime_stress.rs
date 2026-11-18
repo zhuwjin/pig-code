@@ -251,6 +251,11 @@ async fn mixed_runtime_operations_remain_bounded_across_restarts() {
             store
                 .lock()
                 .expect("store lock")
+                .request_session_deletion("stress-session")
+                .expect("request quiescent deletion");
+            store
+                .lock()
+                .expect("store lock")
                 .delete_session_checked("stress-session")
                 .expect("delete quiescent session");
             let _ = std::fs::remove_file(&conversation_path);

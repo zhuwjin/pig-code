@@ -626,6 +626,34 @@ pub async fn agent_loop(
             .refresh_providers(&config.providers)
             .await;
     }
+    let deletion_requests = manager
+        .store
+        .lock()
+        .expect("store lock")
+        .pending_session_deletions();
+    match deletion_requests {
+        Ok(requests) => {
+            for session_id in requests {
+                manager.deleted_sessions.insert(session_id.clone());
+                manager.pending_deletions.insert(
+                    session_id.clone(),
+                    PendingDeletion {
+                        executions_idle: true,
+                        turn_finished: true,
+                    },
+                );
+                manager.finish_delete_if_idle(event_tx.clone(), session_id);
+            }
+        }
+        Err(error) => emit(
+            &event_tx,
+            Event::Error {
+                session_id: None,
+                error,
+                fatal: false,
+            },
+        ),
+    }
     let mut turns: FuturesUnordered<TurnFuture> = FuturesUnordered::new();
     loop {
         #[allow(clippy::large_enum_variant)] // one event at a time; a turn owns a full Session
@@ -686,7 +714,17 @@ pub async fn agent_loop(
                     manager.start_notification_turn_if_ready(&event_tx, &session_id, &mut turns);
                 }
             }
-            Incoming::Tick => manager.expire_plugin_waiters(&event_tx),
+            Incoming::Tick => {
+                manager.expire_plugin_waiters(&event_tx);
+                let pending = manager
+                    .pending_deletions
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for session_id in pending {
+                    manager.finish_delete_if_idle(event_tx.clone(), session_id);
+                }
+            }
         }
     }
 }

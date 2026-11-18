@@ -249,6 +249,17 @@ impl Manager {
         event_tx: async_channel::Sender<Event>,
         session_id: String,
     ) {
+        if self.deleted_sessions.contains(&session_id) {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error: CoreError::SessionNotFoundOpen,
+                    fatal: false,
+                },
+            );
+            return;
+        }
         self.retry_terminal_notifications(&event_tx);
         let config_path = self.config_path.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -716,6 +727,22 @@ impl Manager {
         event_tx: async_channel::Sender<Event>,
         session_id: String,
     ) {
+        if let Err(error) = self
+            .store
+            .lock()
+            .expect("store lock")
+            .request_session_deletion(&session_id)
+        {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: false,
+                },
+            );
+            return;
+        }
         let pending = self.pending.clone();
         let pending_questions = self.pending_questions.clone();
         let turn_in_flight = self
@@ -783,28 +810,28 @@ impl Manager {
         if !ready {
             return;
         }
-        let store_result = self
-            .store
-            .lock()
-            .expect("store lock")
-            .delete_session_checked(&session_id);
-        if let Err(error) = store_result {
-            emit(
-                &event_tx,
-                Event::Error {
-                    session_id: Some(session_id),
-                    error,
-                    fatal: false,
-                },
-            );
-            return;
-        }
         if let Err(detail) = delete_session_artifacts(&self.sessions_dir, &session_id, true) {
             emit(
                 &event_tx,
                 Event::Error {
                     session_id: Some(session_id),
                     error: CoreError::TaskStore { detail },
+                    fatal: false,
+                },
+            );
+            return;
+        }
+        if let Err(error) = self
+            .store
+            .lock()
+            .expect("store lock")
+            .delete_session_checked(&session_id)
+        {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error,
                     fatal: false,
                 },
             );
