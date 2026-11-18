@@ -398,3 +398,14 @@ fn runtime_command_capacity_is_bounded() {
         "the runtime must have an explicit command capacity"
     );
 }
+
+#[test]
+fn catalog_recovery_uses_the_runtime_authority() {
+    let (workspace, _) = load_matrix();
+    let source = fs::read_to_string(workspace.join("crates/pig-core/src/session/catalog.rs"))
+        .expect("catalog source");
+    assert!(source.contains("runtime_snapshot()"));
+    assert!(!source.contains("std::fs::read_dir"));
+    assert!(!source.contains("read_agent("));
+    assert!(!source.contains("recover_lost_child("));
+}

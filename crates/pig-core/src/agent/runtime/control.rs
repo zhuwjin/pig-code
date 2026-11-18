@@ -282,18 +282,6 @@ impl AgentRuntime {
         })
     }
 
-    pub(crate) fn release_current_execution_blocking(
-        &self,
-        run_id: String,
-    ) -> Result<ExecutionAttempt, RuntimeError> {
-        self.dispatch_blocking(move |state| {
-            let attempt = state.attempts.get(&run_id).cloned().ok_or_else(|| {
-                RuntimeError::NotFound(format!("Run {run_id} has no execution attempt"))
-            })?;
-            state.release_execution(&run_id, attempt.attempt, &attempt.backend_epoch)
-        })
-    }
-
     pub fn request_stop_current_blocking(
         &self,
         run_id: String,

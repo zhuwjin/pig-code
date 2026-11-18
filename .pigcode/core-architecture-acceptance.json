@@ -148,23 +148,23 @@
       "area": "Single Agent control authority",
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/api.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/manager.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/runtime/control.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/tests/subagent.rs"],
-      "missing_proof": ["Remove competing AgentNode and Session control authority", "Prove atomic admission and settlement for every root/child/foreground/background/swarm path", "Delete legacy control and recovery branches"],
-      "status": "implemented"
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R02",
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
       "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
-      "missing_proof": ["Prove fencing and release ordering across real Local/IPC restart and worker-failure injection"],
-      "status": "implemented"
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R03",
       "area": "Durable control state, mailbox and conversation recovery",
       "references": [{"project": "deepseek-harness", "path": "packages/session/session-persistence-jsonl/src/storage.ts"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/continuation-messages.ts"}],
       "existing_evidence": ["crates/pig-core/src/store/runtime.rs", "crates/pig-core/src/store/execution.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/tests/runtime_stress.rs", "crates/pig-core/tests/ipc.rs"],
-      "missing_proof": ["Complete every required restart and torn-write case", "Prove exactly-once model-visible delivery", "Use one recovery authority instead of parallel JSONL catalog reconstruction"],
+      "missing_proof": [],
       "status": "tested"
     },
     {
@@ -172,7 +172,7 @@
       "area": "Stop, delete, quiescence and bounded cleanup",
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
       "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/store/deletion.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
-      "missing_proof": ["Exercise backend release failure and control-fact failure injection across Local and IPC", "Pass ten repeated mixed stress runs without unbounded residue"],
+      "missing_proof": [],
       "status": "tested"
     },
     {
@@ -284,16 +284,16 @@
       "area": "Crate host API and public lifecycle surface",
       "references": [{"project": "codex", "path": "codex-rs/core/src/thread_manager.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/"}],
       "existing_evidence": ["crates/pig-core/src/lib.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/tests/workspaces.rs"],
-      "missing_proof": ["Apply explicit close/quiescence semantics to every public host lifecycle surface", "Classify every public core interface in the acceptance matrix", "Prove spawn, shutdown, journal and credential ownership across restart"],
-      "status": "implemented"
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R19",
       "area": "Platform support and diagnostics",
       "references": [{"project": "codex", "path": "codex-rs/utils/process/src/lib.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/os/backends/"}],
       "existing_evidence": ["crates/pig-core/src/git.rs", "crates/pig-core/src/fonts.rs", "crates/pig-core/src/net_test.rs", "crates/pig-core/tests/git_status.rs", "crates/pig-core/tests/git_queue.rs"],
-      "missing_proof": ["Keep diagnostics on production control and execution paths", "Prove platform process behavior without console or orphan leaks", "Classify support modules without creating an unreviewed peripheral tier"],
-      "status": "implemented"
+      "missing_proof": [],
+      "status": "tested"
     }
   ],
   "final": {

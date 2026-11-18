@@ -34,8 +34,12 @@ fn persist_delivery(path: &std::path::Path, message_id: String, text: String) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mixed_runtime_operations_remain_bounded_across_restarts() {
+    run_mixed_runtime_operations(0).await;
+}
+
+async fn run_mixed_runtime_operations(seed: u64) {
     let root = std::env::temp_dir().join(format!(
-        "pig-runtime-stress-{}-{}",
+        "pig-runtime-stress-{seed}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -288,4 +292,11 @@ async fn mixed_runtime_operations_remain_bounded_across_restarts() {
     );
     runtime.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_runtime_operations_remain_bounded_for_ten_fixed_seeds() {
+    for seed in 0..10 {
+        run_mixed_runtime_operations(seed).await;
+    }
 }

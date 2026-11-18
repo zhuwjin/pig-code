@@ -403,7 +403,7 @@ async fn pause_limit_fails_with_english_error() {
             _ => None,
         })
         .expect("pause limit error");
-    let detail = match error {
+    let detail = match error.semantic_error() {
         pig_protocol::CoreError::Internal { detail } => detail,
         other => panic!("unexpected error kind: {other:?}"),
     };

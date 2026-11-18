@@ -884,10 +884,10 @@ async fn stale_send_queued_now_keeps_the_queue_paused() {
     let events = collect(&agent, Duration::from_secs(10), |e| {
         matches!(
             e,
-            Event::Error {
-                error: pig_protocol::CoreError::Internal { detail },
-                ..
-            } if detail.contains("no longer pending")
+            Event::Error { error, .. } if matches!(
+                error.semantic_error(),
+                pig_protocol::CoreError::Internal { detail } if detail.contains("no longer pending")
+            )
         )
     })
     .await;
@@ -896,9 +896,12 @@ async fn stale_send_queued_now_keeps_the_queue_paused() {
             e,
             Event::Error {
                 fatal: false,
-                error: pig_protocol::CoreError::Internal { detail },
+                error,
                 ..
-            } if detail.contains("no longer pending")
+            } if matches!(
+                error.semantic_error(),
+                pig_protocol::CoreError::Internal { detail } if detail.contains("no longer pending")
+            )
         )),
         "the stale id is rejected nonfatally: {events:#?}"
     );
@@ -1637,11 +1640,10 @@ async fn no_model_send_keeps_the_message_for_restart() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            Event::Error {
-                error: pig_protocol::CoreError::NoModelConfigured,
-                fatal: false,
-                ..
-            }
+            Event::Error { error, fatal: false, .. } if matches!(
+                error.semantic_error(),
+                pig_protocol::CoreError::NoModelConfigured
+            )
         )),
         "the failure must be typed and nonfatal: {events:#?}"
     );

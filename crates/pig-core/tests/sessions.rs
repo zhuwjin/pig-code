@@ -1566,7 +1566,70 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
         .join(format!("{session_id}.agents"));
     write_agent_context(&agents.join("a1-1.jsonl"), "a1-1", "contained context");
 
-    agent.shutdown();
+    agent.close().await.expect("close before recovery fixture");
+    let store = std::sync::Arc::new(std::sync::Mutex::new(
+        pig_core::store::Store::open(&data_dir).expect("recovery store"),
+    ));
+    let runtime =
+        pig_core::agent::runtime::AgentRuntime::spawn_root(session_id.clone(), store.clone())
+            .expect("recovery runtime");
+    runtime
+        .register_agent_blocking(pig_core::agent::runtime::RuntimeAgent {
+            session_id: session_id.clone(),
+            agent_id: "a1-1".into(),
+            parent_agent_id: Some(session_id.clone()),
+            depth: 1,
+            profile: "explore".into(),
+            conversation_path: Some(agents.join("a1-1.jsonl")),
+            created_at_ms: 1,
+            closed_at_ms: None,
+        })
+        .expect("register orphan control fact");
+    let (completed, completed_attempt) = runtime
+        .start_run_blocking(pig_core::agent::runtime::StartRun {
+            run_id: Some("run-a1-1-completed".into()),
+            agent_id: "a1-1".into(),
+            backend_id: "local".into(),
+            required_capabilities: Default::default(),
+            initiator: pig_core::agent::runtime::AgentInitiator::System,
+            idempotency_key: Some("run-a1-1-completed".into()),
+            causation_id: None,
+            correlation_id: Some(session_id.clone()),
+            queued: false,
+            watchdog: Default::default(),
+        })
+        .expect("start completed history run");
+    runtime
+        .settle_current_run_blocking(
+            completed.run_id.clone(),
+            pig_core::agent::runtime::RuntimeRunStatus::Completed,
+            None,
+            (2, 3, 4),
+        )
+        .expect("settle history run");
+    runtime
+        .release_execution_blocking(
+            completed.run_id,
+            completed_attempt.attempt,
+            completed_attempt.backend_epoch,
+        )
+        .expect("release history execution");
+    runtime
+        .start_run_blocking(pig_core::agent::runtime::StartRun {
+            run_id: Some("run-a1-1-orphan".into()),
+            agent_id: "a1-1".into(),
+            backend_id: "local".into(),
+            required_capabilities: Default::default(),
+            initiator: pig_core::agent::runtime::AgentInitiator::System,
+            idempotency_key: Some("run-a1-1-orphan".into()),
+            causation_id: None,
+            correlation_id: Some(session_id.clone()),
+            queued: true,
+            watchdog: Default::default(),
+        })
+        .expect("start orphan run");
+    runtime.shutdown().await.expect("close recovery runtime");
+    drop(store);
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
     let events = agent.events.clone();
     agent
@@ -1595,11 +1658,25 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
     };
     let recovered = entries
         .iter()
-        .find(|agent| agent.agent_id == "a1-1")
+        .find(|agent| {
+            agent.agent_id == "a1-1" && agent.run_id.as_deref() == Some("run-a1-1-orphan")
+        })
         .expect("orphan child recovered into the catalog");
     assert_eq!(recovered.status, Some(pig_protocol::AgentRunStatus::Lost));
     assert_eq!(recovered.parent_id, Some(session_id.clone()));
     assert!(recovered.record_path.is_some());
+    let completed = entries
+        .iter()
+        .find(|agent| {
+            agent.agent_id == "a1-1" && agent.run_id.as_deref() == Some("run-a1-1-completed")
+        })
+        .expect("completed history run recovered");
+    assert_eq!(
+        completed.status,
+        Some(pig_protocol::AgentRunStatus::Completed)
+    );
+    assert_eq!(completed.parent_id, Some(session_id.clone()));
+    assert_eq!(completed.usage, (2, 3, 4));
 
     // The valid generated id still serves the right-side history.
     agent

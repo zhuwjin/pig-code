@@ -394,10 +394,10 @@ async fn missing_config_is_empty_not_error() {
     assert!(
         collected.iter().any(|e| matches!(
             e,
-            Event::Error {
-                error: pig_protocol::CoreError::NoModelConfigured,
-                ..
-            }
+            Event::Error { error, .. } if matches!(
+                error.semantic_error(),
+                pig_protocol::CoreError::NoModelConfigured
+            )
         )),
         "sending should report the structured no-model-configured error: {collected:#?}"
     );
